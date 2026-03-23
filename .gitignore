@@ -1,0 +1,24 @@
+# Build output
+build/
+
+# Go workspace sum
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# Secrets
+*.pem
+*.key

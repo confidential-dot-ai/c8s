@@ -1,0 +1,52 @@
+services:
+  mock-attestation:
+    build:
+      context: ../mock-attestation
+    environment:
+      PORT: "8400"
+
+  mock-assam:
+    build:
+      context: ../mock-assam
+    environment:
+      PORT: "8080"
+    depends_on:
+      - mock-attestation
+
+  # A simple backend that the nginx proxy forwards to.
+  backend:
+    image: nginx:1.27-alpine
+    # Default nginx serves a welcome page on port 80.
+
+  get-cert:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.get-cert
+    command:
+      - --assam-url=http://mock-assam:8080
+      - --attestation-service-url=http://mock-attestation:8400
+      - --san=nginx-lb
+      - --out=/tls/cert.pem
+      - --key-out=/tls/key.pem
+      - --verbose
+    volumes:
+      - tls-certs:/tls
+    depends_on:
+      - mock-assam
+      - mock-attestation
+
+  nginx-lb:
+    image: nginx:1.27-alpine
+    ports:
+      - "8443:443"
+    volumes:
+      - tls-certs:/tls:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      get-cert:
+        condition: service_completed_successfully
+      backend:
+        condition: service_started
+
+volumes:
+  tls-certs:

@@ -1,0 +1,595 @@
+package ratls
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha512"
+	"crypto/x509"
+	"encoding/asn1"
+	"encoding/binary"
+	"errors"
+	"math/big"
+	"testing"
+	"time"
+)
+
+// fakeSNPReport creates a minimal fake SEV-SNP attestation report (1184 bytes)
+// with the given reportData at the correct offset. This is for testing only —
+// real reports are signed by AMD hardware.
+func fakeSNPReport(reportData [64]byte) []byte {
+	// AMD SEV-SNP report is exactly 0x4A0 (1184) bytes.
+	// REPORT_DATA is at offset 0x50, 64 bytes.
+	// MEASUREMENT is at offset 0x90, 48 bytes.
+	// See: AMD SEV-SNP ABI Specification, Table 21.
+	report := make([]byte, SNPReportSize)
+
+	// Version (offset 0x00): must be >= 2 for SNP
+	report[0] = 0x02
+
+	// POLICY (offset 0x08): 8 bytes, little-endian
+	// Bit 17 = SMT allowed. Minimum: 0x30000 (ABI major=0, minor=0, SMT=1)
+	report[0x08] = 0x00
+	report[0x09] = 0x00
+	report[0x0A] = 0x03 // SMT bit set
+
+	// REPORT_DATA (offset 0x50): 64 bytes
+	copy(report[0x50:0x90], reportData[:])
+
+	// MEASUREMENT (offset 0x90): 48 bytes
+	for i := 0; i < 48; i++ {
+		report[0x90+i] = byte(i) // deterministic fake measurement
+	}
+
+	return report
+}
+
+// testKeyAndAttestation generates a keypair and matching attestation for tests.
+func testKeyAndAttestation(t *testing.T) (*ecdsa.PrivateKey, *Attestation) {
+	t.Helper()
+	key, reportData, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	att := &Attestation{
+		TEEType: TEETypeSEVSNP,
+		Report:  fakeSNPReport(reportData),
+	}
+	return key, att
+}
+
+// testAttestedCert generates a keypair, attestation, and parsed certificate.
+func testAttestedCert(t *testing.T, opts *CertOptions) (*ecdsa.PrivateKey, *Attestation, *x509.Certificate) {
+	t.Helper()
+	key, att := testKeyAndAttestation(t)
+	certDER, err := CreateAttestedCert(key, att, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key, att, cert
+}
+
+// requireRATLSExtension asserts that the certificate contains the RA-TLS
+// attestation extension.
+func requireRATLSExtension(t *testing.T, cert *x509.Certificate) {
+	t.Helper()
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(OIDRATLSAttestation) {
+			return
+		}
+	}
+	t.Error("RA-TLS attestation extension not found in certificate")
+}
+
+func TestExtensionMarshalUnmarshal(t *testing.T) {
+	reportData := [64]byte{1, 2, 3, 4}
+	report := fakeSNPReport(reportData)
+	certChain := []byte("fake-cert-chain")
+
+	att := &Attestation{
+		TEEType:   TEETypeSEVSNP,
+		Report:    report,
+		CertChain: certChain,
+	}
+
+	ext, err := att.MarshalExtension()
+	if err != nil {
+		t.Fatalf("MarshalExtension: %v", err)
+	}
+
+	if !ext.Id.Equal(OIDRATLSAttestation) {
+		t.Errorf("OID = %v, want %v", ext.Id, OIDRATLSAttestation)
+	}
+	if ext.Critical {
+		t.Error("extension should not be critical")
+	}
+
+	got, err := UnmarshalExtension(ext.Value)
+	if err != nil {
+		t.Fatalf("UnmarshalExtension: %v", err)
+	}
+
+	if got.TEEType != TEETypeSEVSNP {
+		t.Errorf("TEEType = %d, want %d", got.TEEType, TEETypeSEVSNP)
+	}
+	if !bytes.Equal(got.Report, report) {
+		t.Error("Report mismatch")
+	}
+	if !bytes.Equal(got.CertChain, certChain) {
+		t.Error("CertChain mismatch")
+	}
+}
+
+func TestUnmarshalExtensionInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"garbage", []byte{0xFF, 0xFF}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := UnmarshalExtension(tt.data)
+			if err == nil {
+				t.Error("expected error for invalid data")
+			}
+		})
+	}
+}
+
+func TestUnmarshalUnknownTEEType(t *testing.T) {
+	att := &attestationASN1{
+		TEEType:   99,
+		Report:    []byte("report"),
+		CertChain: []byte("chain"),
+	}
+	data, err := marshalASN1(att)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = UnmarshalExtension(data)
+	if err == nil {
+		t.Error("expected error for unknown TEE type")
+	}
+}
+
+func TestReportDataForKey(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rd1, err := ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should be deterministic.
+	rd2, err := ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rd1 != rd2 {
+		t.Error("ReportDataForKey not deterministic")
+	}
+
+	// First 48 bytes should be SHA-384, rest should be zero.
+	keyBytes, _ := marshalPublicKey(&key.PublicKey)
+	expected := sha512.Sum384(keyBytes)
+	if !bytes.Equal(rd1[:48], expected[:]) {
+		t.Error("REPORTDATA does not match SHA-384 of public key")
+	}
+	for i := 48; i < 64; i++ {
+		if rd1[i] != 0 {
+			t.Errorf("REPORTDATA[%d] = %d, want 0 (padding)", i, rd1[i])
+		}
+	}
+}
+
+func TestReportDataForKeyWithNonce(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonce := []byte("test-nonce-32-bytes-of-randomnes")
+
+	rdWithNonce, err := ReportDataForKey(&key.PublicKey, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rdWithoutNonce, err := ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rdWithNonce == rdWithoutNonce {
+		t.Error("nonce did not change REPORTDATA")
+	}
+
+	// Same nonce should produce same result.
+	rdWithNonce2, err := ReportDataForKey(&key.PublicKey, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rdWithNonce != rdWithNonce2 {
+		t.Error("same nonce produced different REPORTDATA")
+	}
+
+	// Different nonce should produce different result.
+	rdDiffNonce, err := ReportDataForKey(&key.PublicKey, []byte("different-nonce-32bytes-of-rand!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rdWithNonce == rdDiffNonce {
+		t.Error("different nonces produced same REPORTDATA")
+	}
+}
+
+func TestKeyBindingWithNonce(t *testing.T) {
+	key, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonce := []byte("fresh-nonce")
+	reportData, err := ReportDataForKey(&key.PublicKey, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	att := &Attestation{
+		TEEType: TEETypeSEVSNP,
+		Report:  fakeSNPReport(reportData),
+	}
+
+	// Correct nonce: should pass.
+	if err := CheckKeyBinding(&key.PublicKey, att, nonce); err != nil {
+		t.Errorf("CheckKeyBinding with correct nonce: %v", err)
+	}
+
+	// Wrong nonce: should fail.
+	if err := CheckKeyBinding(&key.PublicKey, att, []byte("wrong-nonce")); err == nil {
+		t.Error("CheckKeyBinding should fail with wrong nonce")
+	}
+
+	// No nonce: should fail (report was made with nonce).
+	if err := CheckKeyBinding(&key.PublicKey, att, nil); err == nil {
+		t.Error("CheckKeyBinding should fail without nonce when report used one")
+	}
+}
+
+func TestGenerateKeyPair(t *testing.T) {
+	key, reportData, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if key == nil {
+		t.Fatal("key is nil")
+	}
+
+	expected, err := ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reportData != expected {
+		t.Error("reportData does not match key")
+	}
+}
+
+func TestCreateAttestedCert(t *testing.T) {
+	_, _, cert := testAttestedCert(t, &CertOptions{
+		TTL:      1 * time.Hour,
+		DNSNames: []string{"test.local"},
+	})
+
+	requireRATLSExtension(t, cert)
+
+	if cert.Subject.CommonName != "RA-TLS Workload" {
+		t.Errorf("CN = %q, want %q", cert.Subject.CommonName, "RA-TLS Workload")
+	}
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "test.local" {
+		t.Errorf("DNSNames = %v, want [test.local]", cert.DNSNames)
+	}
+}
+
+func TestCreateAttestedCertDefaultOpts(t *testing.T) {
+	_, _, cert := testAttestedCert(t, nil)
+
+	actualDuration := cert.NotAfter.Sub(cert.NotBefore)
+	if actualDuration < DefaultCertTTL-time.Minute || actualDuration > DefaultCertTTL+time.Minute {
+		t.Errorf("cert duration = %v, want ~%v", actualDuration, DefaultCertTTL)
+	}
+}
+
+func TestKeyBinding(t *testing.T) {
+	key, att, _ := testAttestedCert(t, nil)
+
+	// Correct key: should pass.
+	if err := CheckKeyBinding(&key.PublicKey, att, nil); err != nil {
+		t.Errorf("CheckKeyBinding with correct key: %v", err)
+	}
+
+	// Mismatched key/attestation: should fail.
+	wrongKey, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckKeyBinding(&wrongKey.PublicKey, att, nil); err == nil {
+		t.Error("CheckKeyBinding should fail with wrong key")
+	}
+}
+
+func TestTEETypeString(t *testing.T) {
+	tests := []struct {
+		t    TEEType
+		want string
+	}{
+		{TEETypeSEVSNP, "AMD SEV-SNP"},
+		{TEETypeTDX, "Intel TDX"},
+		{TEEType(99), "unknown(99)"},
+	}
+	for _, tt := range tests {
+		if got := tt.t.String(); got != tt.want {
+			t.Errorf("TEEType(%d).String() = %q, want %q", tt.t, got, tt.want)
+		}
+	}
+}
+
+func TestSentinelErrors(t *testing.T) {
+	t.Run("ErrKeyBinding", func(t *testing.T) {
+		key, att, _ := testAttestedCert(t, nil)
+		wrongKey, _, err := GenerateKeyPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = key // original key, unused here
+
+		err = CheckKeyBinding(&wrongKey.PublicKey, att, nil)
+		if !errors.Is(err, ErrKeyBinding) {
+			t.Errorf("got %v, want errors.Is ErrKeyBinding", err)
+		}
+	})
+
+	t.Run("ErrNotAttested", func(t *testing.T) {
+		// Certificate without RA-TLS extension.
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(1),
+		}
+		certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(certDER)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = VerifyCert(cert, nil, nil)
+		if !errors.Is(err, ErrNotAttested) {
+			t.Errorf("got %v, want errors.Is ErrNotAttested", err)
+		}
+	})
+
+	t.Run("ErrUnsupportedTEE", func(t *testing.T) {
+		att := &attestationASN1{
+			TEEType:   99,
+			Report:    []byte("report"),
+			CertChain: []byte("chain"),
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = UnmarshalExtension(data)
+		if !errors.Is(err, ErrUnsupportedTEE) {
+			t.Errorf("got %v, want errors.Is ErrUnsupportedTEE", err)
+		}
+	})
+
+	t.Run("ErrUnsupportedTEE_parseTEEType", func(t *testing.T) {
+		_, err := parseTEEType("unknown-platform")
+		if !errors.Is(err, ErrUnsupportedTEE) {
+			t.Errorf("got %v, want errors.Is ErrUnsupportedTEE", err)
+		}
+	})
+}
+
+// fakeSNPReportWithTCB creates a fake SNP report with a specific TCB version.
+// TCB is a packed uint64 at offset 0x38, little-endian.
+func fakeSNPReportWithTCB(reportData [64]byte, tcb uint64) []byte {
+	report := fakeSNPReport(reportData)
+	binary.LittleEndian.PutUint64(report[0x38:0x40], tcb)
+	return report
+}
+
+func TestTCBAtLeast(t *testing.T) {
+	tests := []struct {
+		name    string
+		current uint64
+		minimum uint64
+		want    bool
+	}{
+		{"equal", 0x0302010003020100, 0x0302010003020100, true},
+		{"all above", 0x0503020004030201, 0x0302010003020100, true},
+		{"all below", 0x0201000002010000, 0x0302010003020100, false},
+		{"one byte below", 0x0302010003020100, 0x0302010003020101, false},
+		{"zero minimum accepts all", 0x0102030401020304, 0x0000000000000000, true},
+		{"zero current fails nonzero min", 0x0000000000000000, 0x0000000000000001, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tcbAtLeast(tt.current, tt.minimum); got != tt.want {
+				t.Errorf("tcbAtLeast(0x%016x, 0x%016x) = %v, want %v", tt.current, tt.minimum, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMinTCBVersionEnforcement(t *testing.T) {
+	key, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reportData, err := ReportDataForKey(&key.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a report with TCB version 0x0302010003020100.
+	currentTCB := uint64(0x0302010003020100)
+	att := &Attestation{
+		TEEType: TEETypeSEVSNP,
+		Report:  fakeSNPReportWithTCB(reportData, currentTCB),
+	}
+
+	t.Run("passes when MinTCBVersion is zero", func(t *testing.T) {
+		// CheckKeyBinding doesn't check TCB, so use it to verify the report is valid.
+		if err := CheckKeyBinding(&key.PublicKey, att, nil); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("passes when TCB meets minimum", func(t *testing.T) {
+		// Can't do full VerifyAttestation without AMD hardware, but we can
+		// test the tcbAtLeast logic directly and the verifySEVSNP path
+		// indirectly via the unit test above.
+		if !tcbAtLeast(currentTCB, 0x0201000002010000) {
+			t.Error("expected TCB to meet lower minimum")
+		}
+		if !tcbAtLeast(currentTCB, currentTCB) {
+			t.Error("expected TCB to meet equal minimum")
+		}
+	})
+
+	t.Run("fails when TCB below minimum", func(t *testing.T) {
+		higherTCB := uint64(0x0403020104030201)
+		if tcbAtLeast(currentTCB, higherTCB) {
+			t.Error("expected TCB to fail against higher minimum")
+		}
+	})
+}
+
+// marshalASN1 helper for tests.
+func marshalASN1(v *attestationASN1) ([]byte, error) {
+	return asn1.Marshal(*v)
+}
+
+func TestUnmarshalExtensionReportSize(t *testing.T) {
+	t.Run("truncated SNP report", func(t *testing.T) {
+		att := &attestationASN1{
+			TEEType: int(TEETypeSEVSNP),
+			Report:  make([]byte, 100), // way too short
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = UnmarshalExtension(data)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
+		}
+	})
+
+	t.Run("oversized SNP report", func(t *testing.T) {
+		att := &attestationASN1{
+			TEEType: int(TEETypeSEVSNP),
+			Report:  make([]byte, SNPReportSize+1),
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = UnmarshalExtension(data)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
+		}
+	})
+
+	t.Run("correct size SNP report", func(t *testing.T) {
+		reportData := [64]byte{1, 2, 3}
+		att := &attestationASN1{
+			TEEType: int(TEETypeSEVSNP),
+			Report:  fakeSNPReport(reportData),
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := UnmarshalExtension(data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(result.Report) != SNPReportSize {
+			t.Errorf("report size = %d, want %d", len(result.Report), SNPReportSize)
+		}
+	})
+
+	t.Run("TDX report skips size check", func(t *testing.T) {
+		// TDX reports are variable-length, so no size check.
+		att := &attestationASN1{
+			TEEType: int(TEETypeTDX),
+			Report:  []byte("variable-length-tdx-quote"),
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := UnmarshalExtension(data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.TEEType != TEETypeTDX {
+			t.Errorf("TEEType = %v, want TDX", result.TEEType)
+		}
+	})
+}
+
+func TestCheckSEVSNPBindingReportSize(t *testing.T) {
+	var expected [64]byte
+
+	t.Run("truncated report", func(t *testing.T) {
+		_, err := checkSEVSNPBinding(make([]byte, 100), expected)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
+		}
+	})
+
+	t.Run("empty report", func(t *testing.T) {
+		_, err := checkSEVSNPBinding(nil, expected)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
+		}
+	})
+}
+
+func TestSNPReportSizeConstant(t *testing.T) {
+	if SNPReportSize != 0x4A0 {
+		t.Errorf("SNPReportSize = 0x%X, want 0x4A0", SNPReportSize)
+	}
+	if SNPReportSize != 1184 {
+		t.Errorf("SNPReportSize = %d, want 1184", SNPReportSize)
+	}
+}
+
+func TestSNPMeasurementSizeConstant(t *testing.T) {
+	if SNPMeasurementSize != 48 {
+		t.Errorf("SNPMeasurementSize = %d, want 48", SNPMeasurementSize)
+	}
+}

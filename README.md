@@ -1,0 +1,108 @@
+# c8s
+
+Confidential computing infrastructure for Kubernetes. Provides TEE attestation, certificate management, RA-TLS mesh networking, and container image policy enforcement.
+
+## Components
+
+| Component | Description | Docs |
+|---|---|---|
+| [`cmd/assam`](cmd/assam/) | Key Broker Service - verifies TEE attestation evidence and issues signed X.509 certificates | [README](cmd/assam/README.md) |
+| [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
+| [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
+| [`cmd/kbs-cert-issuer`](cmd/kbs-cert-issuer/) | Certificate issuer sidecar for KBS | [README](cmd/kbs-cert-issuer/README.md) |
+| [`cmd/cert-rotator`](cmd/cert-rotator/) | Kubernetes cert rotation controller | [README](cmd/cert-rotator/README.md) |
+| [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing container image digest whitelists | - |
+| [`cmd/node-container-whitelist`](cmd/node-container-whitelist/) | HTTP server fetching and serving the container whitelist | - |
+
+## Libraries
+
+| Package | Description |
+|---|---|
+| [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) |
+| [`pkg/ratls/kbsclient`](pkg/ratls/kbsclient/) | RCAR protocol client for Trustee KBS attestation + cert provisioning |
+| [`pkg/attestclient`](pkg/attestclient/) | High-level client for the assam attestation flow |
+| [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation service |
+| [`pkg/whitelistclient`](pkg/whitelistclient/) | CRUD client for the assam whitelist API |
+| [`pkg/whitelist`](pkg/whitelist/) | Whitelist types and JSON parsing |
+| [`pkg/types`](pkg/types/) | Shared request/response types |
+| [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
+| [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
+
+## Project structure
+
+```
+cmd/
+  assam/                   KBS server binary
+  get-cert/                TEE-attested cert provisioning CLI/init-container
+  ratls-mesh/              Transparent L4 RA-TLS proxy (DaemonSet)
+  kbs-cert-issuer/         Certificate issuer sidecar
+  cert-rotator/            Kubernetes cert rotation controller
+  nri-image-policy/        NRI container image policy plugin
+  node-container-whitelist/ Whitelist HTTP server
+internal/
+  attestation/             Attestation handlers and challenge store
+  certissuer/              HTTP client for kbs-cert-issuer
+  ear/                     EAR JWT token issuer (ES256)
+  readiness/               Background health checker
+  server/                  Chi router and middleware
+  whitelist/               Whitelist handlers and SQLite store
+  audit/                   NRI policy audit logging
+  cache/                   NRI policy whitelist cache
+  containerd/              Containerd tag-to-digest resolver
+pkg/
+  ratls/                   RA-TLS library (AMD SEV-SNP, Intel TDX)
+    kbsclient/             RCAR protocol KBS client
+  attestclient/            High-level attestation flow client
+  attestationclient/       Attestation service HTTP client
+  whitelistclient/         Whitelist CRUD + fetch client
+  whitelist/               Whitelist types
+  types/                   Shared request/response types
+  issuerapi/               Cert issuer API types
+  certutil/                Certificate utilities
+test/
+  integration/             Docker-compose integration tests
+```
+
+## Build
+
+Requires Go 1.26.1+.
+
+```bash
+# Build all binaries
+make build
+
+# Build individual binary
+make build-assam
+make build-ratls-mesh
+make build-nri-image-policy
+# ... etc
+
+# Run tests
+make test
+
+# Lint (format check + vet)
+make lint
+
+# Clean build artifacts
+make clean
+```
+
+## Docker images
+
+All images are published to GHCR on push to `main` and `feat/**` branches:
+
+| Image | Base | Notes |
+|---|---|---|
+| `ghcr.io/lunal-dev/assam` | distroless | |
+| `ghcr.io/lunal-dev/get-cert` | distroless | |
+| `ghcr.io/lunal-dev/kbs-cert-issuer` | distroless | |
+| `ghcr.io/lunal-dev/ratls-mesh` | debian-slim | Needs iptables + attestation binaries |
+| `ghcr.io/lunal-dev/cert-rotator` | distroless | Includes attestation binaries |
+| `ghcr.io/lunal-dev/nri-image-policy` | debian-slim | Needs TSS2 libs + attestation binaries |
+| `ghcr.io/lunal-dev/node-container-whitelist` | debian-slim | Needs TSS2 libs + attestation binaries |
+
+## Related repos
+
+- [`lunal-dev/deployment-scripts`](https://github.com/lunal-dev/deployment-scripts) - Ansible roles for deploying these components
+- [`lunal-dev/attestation-rs`](https://github.com/lunal-dev/attestation-rs) - Rust attestation binaries (attest-sev-snp, attest-tdx)
+- [`lunal-dev/attestation-service`](https://github.com/lunal-dev/attestation-service) - TEE attestation evidence verification service

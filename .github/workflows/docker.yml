@@ -1,0 +1,146 @@
+name: Docker
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  GO_VERSION: "1.26.1"
+
+jobs:
+  # Build Rust attestation binaries from lunal-dev/attestation-rs.
+  # These get bundled into Docker images that need to perform hardware
+  # attestation at runtime (talking to the TPM/vTPM via TSS2).
+  attestation-binaries:
+    name: Attestation binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache attestation binaries
+        id: cache-attestation
+        uses: actions/cache@v4
+        with:
+          path: attestation-rs/bin
+          key: attestation-binaries-${{ hashFiles('.github/workflows/docker.yml') }}
+
+      - name: Install system dependencies
+        if: steps.cache-attestation.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtss2-dev pkg-config libssl-dev
+
+      - name: Install Rust nightly
+        if: steps.cache-attestation.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Clone attestation-rs
+        if: steps.cache-attestation.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/lunal-dev/attestation-rs.git
+
+      - name: Build attestation binaries
+        if: steps.cache-attestation.outputs.cache-hit != 'true'
+        run: cd attestation-rs/lunal-attestation && make build-release
+
+      - name: Upload attestation binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestation-binaries
+          path: |
+            attestation-rs/bin/attest-sev-snp
+            attestation-rs/bin/attest-tdx
+          retention-days: 1
+
+  images:
+    name: Docker (${{ matrix.binary }})
+    runs-on: ubuntu-latest
+    needs: [attestation-binaries]
+    strategy:
+      matrix:
+        include:
+          - binary: assam
+            image: ghcr.io/lunal-dev/assam
+            dockerfile: cmd/assam/Dockerfile
+            needs-attestation: false
+          - binary: get-cert
+            image: ghcr.io/lunal-dev/get-cert
+            dockerfile: cmd/get-cert/Dockerfile
+            needs-attestation: false
+          - binary: ratls-mesh
+            image: ghcr.io/lunal-dev/ratls-mesh
+            dockerfile: cmd/ratls-mesh/Dockerfile
+            needs-attestation: true
+          - binary: kbs-cert-issuer
+            image: ghcr.io/lunal-dev/kbs-cert-issuer
+            dockerfile: cmd/kbs-cert-issuer/Dockerfile
+            needs-attestation: false
+          - binary: cert-rotator
+            image: ghcr.io/lunal-dev/cert-rotator
+            dockerfile: cmd/cert-rotator/Dockerfile
+            needs-attestation: true
+          - binary: nri-image-policy
+            image: ghcr.io/lunal-dev/nri-image-policy
+            dockerfile: cmd/nri-image-policy/Dockerfile
+            needs-attestation: true
+          - binary: node-container-whitelist
+            image: ghcr.io/lunal-dev/node-container-whitelist
+            dockerfile: cmd/node-container-whitelist/Dockerfile
+            needs-attestation: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build Go binary
+        run: make build-${{ matrix.binary }}
+
+      - name: Download attestation binaries
+        if: matrix.needs-attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: attestation-binaries
+          path: build
+
+      - name: Make attestation binaries executable
+        if: matrix.needs-attestation
+        run: chmod +x build/attest-*
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        if: github.event_name == 'push'
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags || format('{0}:ci', matrix.image) }}
+          labels: ${{ steps.meta.outputs.labels }}
