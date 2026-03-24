@@ -14,6 +14,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   GO_VERSION: "1.26.1"
+  ATTESTATION_RS_VERSION: "v0.1.0"
 
 jobs:
   # Build Rust attestation binaries from lunal-dev/attestation-rs.
@@ -30,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: attestation-rs/bin
-          key: attestation-binaries-${{ hashFiles('.github/workflows/docker.yml') }}
+          key: attestation-binaries-${{ env.ATTESTATION_RS_VERSION }}
 
       - name: Install system dependencies
         if: steps.cache-attestation.outputs.cache-hit != 'true'
@@ -44,7 +45,7 @@ jobs:
 
       - name: Clone attestation-rs
         if: steps.cache-attestation.outputs.cache-hit != 'true'
-        run: git clone --depth 1 --branch v0.1.0 https://github.com/lunal-dev/attestation-rs.git
+        run: git clone --depth 1 --branch ${{ env.ATTESTATION_RS_VERSION }} https://github.com/lunal-dev/attestation-rs.git
 
       - name: Build attestation binaries
         if: steps.cache-attestation.outputs.cache-hit != 'true'
@@ -100,6 +101,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
 
       - name: Build Go binary
         run: make build-${{ matrix.binary }}
