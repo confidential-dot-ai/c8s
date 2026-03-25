@@ -145,7 +145,12 @@ func main() {
 			logger.Error("whitelist fetch failed", "attempt", attempt, "error", err)
 			if attempt < whitelistApiMaxRetries {
 				logger.Info("retrying whitelist fetch", "delay", delay)
-				time.Sleep(delay)
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					logger.Info("shutdown requested during whitelist init")
+					os.Exit(0)
+				}
 				delay *= 2
 				continue
 			}
