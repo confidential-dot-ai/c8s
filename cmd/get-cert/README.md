@@ -28,6 +28,18 @@ get-cert \
   --key-out /tls/key.pem
 ```
 
+Authenticate with the attestation service using a Bearer token:
+
+```bash
+get-cert \
+  --assam-url http://assam:8080 \
+  --attestation-service-url http://localhost:8400 \
+  --attestation-service-api-key "$ATTESTATION_API_KEY" \
+  --san api.example.com \
+  --out /tls/cert.pem \
+  --key-out /tls/key.pem
+```
+
 Use an existing private key:
 
 ```bash
@@ -45,6 +57,7 @@ get-cert \
 |------|-------|---------|-------------|
 | `--assam-url` | | *(required)* | URL of the running assam service |
 | `--attestation-service-url` | | *(required)* | URL of the local attestation service |
+| `--attestation-service-api-key` | | | Bearer token for authenticating with the attestation service |
 | `--san` | | *(required)* | Subject Alternative Name — IP address or hostname |
 | `--out` | `-o` | *(stdout)* | Path to write the signed certificate PEM |
 | `--key` | | *(ephemeral)* | Path to an existing PEM private key for the CSR |
