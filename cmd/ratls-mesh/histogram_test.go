@@ -152,11 +152,11 @@ func TestLabeledHistogramObserve(t *testing.T) {
 func TestLabeledHistogramWritePrometheus(t *testing.T) {
 	lh := newLabeledHistogram([]string{
 		`direction="inbound",cert_mode="self-signed"`,
-		`direction="outbound",cert_mode="kbs"`,
+		`direction="outbound",cert_mode="assam"`,
 	}, []float64{0.1})
 
 	lh.Observe(`direction="inbound",cert_mode="self-signed"`, 0.05)
-	lh.Observe(`direction="outbound",cert_mode="kbs"`, 0.5)
+	lh.Observe(`direction="outbound",cert_mode="assam"`, 0.5)
 
 	var buf bytes.Buffer
 	lh.writePrometheus(&buf, "test_hist", "test help")
@@ -174,7 +174,7 @@ func TestLabeledHistogramWritePrometheus(t *testing.T) {
 	if !strings.Contains(text, `direction="inbound",cert_mode="self-signed",le="0.1"`) {
 		t.Errorf("missing inbound bucket\n\ngot:\n%s", text)
 	}
-	if !strings.Contains(text, `direction="outbound",cert_mode="kbs",le="+Inf"`) {
+	if !strings.Contains(text, `direction="outbound",cert_mode="assam",le="+Inf"`) {
 		t.Errorf("missing outbound +Inf bucket\n\ngot:\n%s", text)
 	}
 }

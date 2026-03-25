@@ -19,7 +19,7 @@ Confidential computing infrastructure for Kubernetes. Provides TEE attestation, 
 | Package | Description |
 |---|---|
 | [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) |
-| [`pkg/ratls/kbsclient`](pkg/ratls/kbsclient/) | RCAR protocol client for Trustee KBS attestation + cert provisioning |
+| [`pkg/ratls/assamclient`](pkg/ratls/assamclient/) | Assam attestation client for certificate provisioning |
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the assam attestation flow |
 | [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation service |
 | [`pkg/whitelistclient`](pkg/whitelistclient/) | CRUD client for the assam whitelist API |
@@ -51,7 +51,7 @@ internal/
   containerd/              Containerd tag-to-digest resolver
 pkg/
   ratls/                   RA-TLS library (AMD SEV-SNP, Intel TDX)
-    kbsclient/             RCAR protocol KBS client
+    assamclient/           Assam attestation client
   attestclient/            High-level attestation flow client
   attestationclient/       Attestation service HTTP client
   whitelistclient/         Whitelist CRUD + fetch client

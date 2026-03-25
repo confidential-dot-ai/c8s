@@ -55,7 +55,7 @@ func (h *histogram) Observe(v float64) {
 
 // writePrometheus writes this histogram in standard Prometheus text format
 // with the given metric name, help string, and optional label string (e.g.
-// `direction="outbound",cert_mode="kbs"`). The label string must NOT include
+// `direction="outbound",cert_mode="assam"`). The label string must NOT include
 // surrounding braces.
 func (h *histogram) writePrometheus(w io.Writer, name, help, labels string) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
@@ -85,7 +85,7 @@ type labeledHistogram struct {
 }
 
 type labeledEntry struct {
-	labels string // pre-formatted, e.g. `direction="outbound",cert_mode="kbs"`
+	labels string // pre-formatted, e.g. `direction="outbound",cert_mode="assam"`
 	hist   *histogram
 }
 
@@ -141,11 +141,11 @@ func (lh *labeledHistogram) writePrometheus(w io.Writer, name, help string) {
 func dirCertLabels() []string {
 	return []string{
 		`direction="inbound",cert_mode="self-signed"`,
-		`direction="inbound",cert_mode="kbs"`,
+		`direction="inbound",cert_mode="assam"`,
 		`direction="outbound",cert_mode="self-signed"`,
-		`direction="outbound",cert_mode="kbs"`,
+		`direction="outbound",cert_mode="assam"`,
 		`direction="outbound_local",cert_mode="self-signed"`,
-		`direction="outbound_local",cert_mode="kbs"`,
+		`direction="outbound_local",cert_mode="assam"`,
 	}
 }
 
@@ -186,8 +186,8 @@ type metrics struct {
 	certRotationFailures  atomic.Int64
 	attestationFailures   atomic.Int64
 	acceptErrors          atomic.Int64
-	certMode              atomic.Int64 // 0 = self-signed, 1 = kbs
-	certModeExpected      atomic.Int64 // 0 = self-signed, 1 = kbs (configured via --cert-mode)
+	certMode              atomic.Int64 // 0 = self-signed, 1 = assam
+	certModeExpected      atomic.Int64 // 0 = self-signed, 1 = assam (configured via --cert-mode)
 	certExpiryServer      atomic.Int64 // Unix timestamp of server cert NotAfter
 	certExpiryClient      atomic.Int64 // Unix timestamp of client cert NotAfter (0 = no mTLS)
 	certPipelineHealthy   atomic.Int64 // 1 = cert-issuer reachable, 0 = unreachable (-1 = not configured)
@@ -328,10 +328,10 @@ func (m *metrics) writePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "ratls_mesh_cert_expiry_timestamp_seconds{role=\"server\"} %d\n", serverExpiry)
 	fmt.Fprintf(w, "ratls_mesh_cert_expiry_timestamp_seconds{role=\"client\"} %d\n", clientExpiry)
 
-	// Certificate mode gauge: 0=self-signed, 1=kbs.
+	// Certificate mode gauge: 0=self-signed, 1=assam.
 	mode := "self-signed"
 	if m.certMode.Load() == 1 {
-		mode = "kbs"
+		mode = "assam"
 	}
 	gauge("ratls_mesh_cert_mode", "Active certificate mode (1=active)",
 		lv(fmt.Sprintf(`mode="%s"`, mode), 1),
@@ -340,7 +340,7 @@ func (m *metrics) writePrometheus(w io.Writer) {
 	// Configured cert mode (what --cert-mode was set to).
 	configuredMode := "self-signed"
 	if m.certModeExpected.Load() == 1 {
-		configuredMode = "kbs"
+		configuredMode = "assam"
 	}
 	gauge("ratls_mesh_cert_mode_configured", "Configured certificate mode (1=active)",
 		lv(fmt.Sprintf(`mode="%s"`, configuredMode), 1),

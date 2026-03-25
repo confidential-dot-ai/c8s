@@ -88,7 +88,7 @@ type accessLogEntry struct {
 	dur          time.Duration
 	tlsHandshake time.Duration
 	ttfb         time.Duration // time to first byte (accept → pipe start)
-	certMode     string        // "self-signed" or "kbs"
+	certMode     string        // "self-signed" or "assam"
 	result       string        // success, route_error, dial_error, tls_error, header_error, dest_rejected
 	err          string
 }
@@ -130,7 +130,7 @@ func (e *accessLogEntry) logTo(log *slog.Logger, enabled bool) {
 // certModeStr returns the current certificate mode as a string.
 func (p *Proxy) certModeStr() string {
 	if p.metrics.certMode.Load() == 1 {
-		return "kbs"
+		return "assam"
 	}
 	return "self-signed"
 }

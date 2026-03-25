@@ -1,16 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -19,9 +19,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/lunal-dev/c8s/pkg/attestationclient"
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/ratls/kbsclient"
+	"github.com/lunal-dev/c8s/pkg/ratls/assamclient"
+	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 func main() {
@@ -38,40 +40,39 @@ func main() {
 	}
 
 	var (
-		platform          = flag.String("platform", "sev-snp", "TEE platform: sev-snp, tdx")
-		attestCmd         = flag.String("attest-cmd", "", "path to attestation binary (e.g. /opt/lunal-services/attest-sev-snp)")
-		outboundPort      = flag.Int("outbound-port", 15001, "outbound listener port (intercepted app traffic)")
-		inboundPort       = flag.Int("inbound-port", 15006, "inbound listener port (RA-TLS from remote nodes)")
-		nodeIP            = flag.String("node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
-		logLevel          = flag.String("log-level", "info", "log level: debug, info, warn, error")
-		dialTimeout       = flag.Duration("dial-timeout", 5*time.Second, "plain TCP dial timeout")
-		tlsDialTimeout    = flag.Duration("tls-dial-timeout", 10*time.Second, "RA-TLS dial timeout")
-		destHeaderTimeout = flag.Duration("dest-header-timeout", 5*time.Second, "inbound destination header read timeout")
-		drainTimeout      = flag.Duration("drain-timeout", 30*time.Second, "graceful shutdown drain timeout")
-		keepAlive         = flag.Duration("keepalive", 30*time.Second, "TCP keepalive interval (0 to disable)")
-		idleTimeout       = flag.Duration("idle-timeout", 0, "close connections idle longer than this (0=disabled)")
-		maxConns          = flag.Int("max-conns", 0, "max concurrent connections (0=unlimited)")
-		maxConnsPerSource = flag.Int("max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
-		healthPort        = flag.Int("health-port", 15021, "health/metrics HTTP port")
-		measurements      = flag.String("measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
-		certTTL           = flag.Duration("cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
-		rotationTimeout   = flag.Duration("rotation-timeout", 30*time.Second, "max time for background certificate rotation")
+		platform              = flag.String("platform", "sev-snp", "TEE platform: sev-snp, tdx")
+		attestationServiceURL = flag.String("attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
+		outboundPort          = flag.Int("outbound-port", 15001, "outbound listener port (intercepted app traffic)")
+		inboundPort           = flag.Int("inbound-port", 15006, "inbound listener port (RA-TLS from remote nodes)")
+		nodeIP                = flag.String("node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
+		logLevel              = flag.String("log-level", "info", "log level: debug, info, warn, error")
+		dialTimeout           = flag.Duration("dial-timeout", 5*time.Second, "plain TCP dial timeout")
+		tlsDialTimeout        = flag.Duration("tls-dial-timeout", 10*time.Second, "RA-TLS dial timeout")
+		destHeaderTimeout     = flag.Duration("dest-header-timeout", 5*time.Second, "inbound destination header read timeout")
+		drainTimeout          = flag.Duration("drain-timeout", 30*time.Second, "graceful shutdown drain timeout")
+		keepAlive             = flag.Duration("keepalive", 30*time.Second, "TCP keepalive interval (0 to disable)")
+		idleTimeout           = flag.Duration("idle-timeout", 0, "close connections idle longer than this (0=disabled)")
+		maxConns              = flag.Int("max-conns", 0, "max concurrent connections (0=unlimited)")
+		maxConnsPerSource     = flag.Int("max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
+		healthPort            = flag.Int("health-port", 15021, "health/metrics HTTP port")
+		measurements          = flag.String("measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
+		certTTL               = flag.Duration("cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
+		rotationTimeout       = flag.Duration("rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 
-		// KBS certificate issuance flags.
-		certMode       = flag.String("cert-mode", "self-signed", "certificate mode: self-signed (default), kbs (boots self-signed, upgrades to KBS-issued in background)")
-		kbsURL         = flag.String("kbs-url", "", "KBS URL for attestation (required for kbs mode)")
-		certIssuerURL  = flag.String("cert-issuer-url", "", "KBS cert issuer URL (required for kbs mode)")
-		kbsTEEType     = flag.String("kbs-tee-type", "az-snp-vtpm", "KBS TEE type for RCAR auth (az-snp-vtpm, snp, tdx)")
+		// Assam certificate issuance flags.
+		certMode       = flag.String("cert-mode", "self-signed", "certificate mode: self-signed (default), assam (boots self-signed, upgrades to assam-issued in background)")
+		assamURL       = flag.String("assam-url", "", "assam service URL for attestation (required for assam mode)")
+		certIssuerURL  = flag.String("cert-issuer-url", "", "cert-issuer URL for CA bundle retrieval (required for assam mode)")
 		caCertPath     = flag.String("ca-cert", "", "path to CA certificate file for peer verification")
-		caURL          = flag.String("ca-url", "", "cert-issuer /v1/ca URL for periodic CA bundle refresh (KBS mode, replaces ConfigMap)")
+		caURL          = flag.String("ca-url", "", "cert-issuer /v1/ca URL for periodic CA bundle refresh (assam mode)")
 		caPollInterval = flag.Duration("ca-poll-interval", 5*time.Minute, "interval to poll cert-issuer /v1/ca for CA bundle updates")
 
 		sessionCacheSize     = flag.Int("session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 		accessLog            = flag.Bool("access-log", true, "emit per-connection structured access log")
 		certPipelineProbeURL = flag.String("cert-pipeline-probe-url", "", "cert-issuer /ready URL for pipeline health probing (empty = disabled)")
 
-		kbsRetryBackoff    = flag.Duration("kbs-retry-backoff", 2*time.Second, "initial backoff duration for KBS certificate upgrade retries")
-		kbsRetryMaxBackoff = flag.Duration("kbs-retry-max-backoff", 60*time.Second, "maximum backoff duration for KBS certificate upgrade retries")
+		assamRetryBackoff    = flag.Duration("assam-retry-backoff", 2*time.Second, "initial backoff duration for assam certificate upgrade retries")
+		assamRetryMaxBackoff = flag.Duration("assam-retry-max-backoff", 60*time.Second, "maximum backoff duration for assam certificate upgrade retries")
 
 		maxDestHeaderSize  = flag.Int("max-dest-header-size", 256, "maximum destination header size in bytes")
 		pipeBufferSize     = flag.Int("pipe-buffer-size", 32768, "buffer size for TCP pipe forwarding")
@@ -81,7 +82,7 @@ func main() {
 
 		// Background task intervals and timeouts.
 		metricsUpdateInterval     = flag.Duration("metrics-update-interval", 10*time.Second, "interval for resolver cache and cert expiry metric updates")
-		kbsOpTimeout              = flag.Duration("kbs-op-timeout", 30*time.Second, "per-operation timeout for KBS certificate upgrade and CA bundle refresh")
+		assamOpTimeout            = flag.Duration("assam-op-timeout", 30*time.Second, "per-operation timeout for assam certificate upgrade and CA bundle refresh")
 		certPipelineProbeTimeout  = flag.Duration("cert-pipeline-probe-timeout", 5*time.Second, "HTTP client timeout for cert pipeline health probe requests")
 		certPipelineProbeInterval = flag.Duration("cert-pipeline-probe-interval", 60*time.Second, "interval between cert pipeline health probe requests")
 	)
@@ -98,7 +99,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := validateConfig(*attestCmd, *outboundPort, *inboundPort, *certTTL); err != nil {
+	if err := validateConfig(*attestationServiceURL, *outboundPort, *inboundPort, *certTTL); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
@@ -123,7 +124,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	attestFunc := makeAttestFunc(*attestCmd)
+	asClient := attestationclient.NewClientWithHTTP(*attestationServiceURL, &http.Client{
+		Timeout: durOrDefault(*rotationTimeout, 30*time.Second),
+	})
+	attestFunc := makeAttestFunc(asClient)
 
 	meshPolicy := &ratls.VerifyPolicy{}
 	if *measurements != "" {
@@ -149,7 +153,7 @@ func main() {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
 	}
 
-	// Load CA certificate(s) for dual-mode verification (kbs mode).
+	// Load CA certificate(s) for dual-mode verification (assam mode).
 	// Supports multi-PEM bundles for safe CA rotation.
 	var caCerts []*x509.Certificate
 	if *caCertPath != "" {
@@ -167,12 +171,12 @@ func main() {
 	}
 
 	// Validate cert-mode specific flags.
-	if *certMode != "self-signed" && *certMode != "kbs" {
-		logger.Error("invalid --cert-mode", "mode", *certMode, "valid", "self-signed, kbs")
+	if *certMode != "self-signed" && *certMode != "assam" {
+		logger.Error("invalid --cert-mode", "mode", *certMode, "valid", "self-signed, assam")
 		os.Exit(1)
 	}
-	if *certMode == "kbs" && (*kbsURL == "" || *certIssuerURL == "") {
-		logger.Error("--kbs-url and --cert-issuer-url are required for --cert-mode kbs")
+	if *certMode == "assam" && (*assamURL == "" || *attestationServiceURL == "" || *certIssuerURL == "") {
+		logger.Error("--assam-url, --attestation-service-url, and --cert-issuer-url are required for --cert-mode assam")
 		os.Exit(1)
 	}
 
@@ -212,7 +216,7 @@ func main() {
 	}
 
 	m := newMetrics()
-	if *certMode == "kbs" {
+	if *certMode == "assam" {
 		m.certModeExpected.Store(1)
 	}
 	if len(meshPolicy.Measurements) > 0 {
@@ -323,33 +327,28 @@ func main() {
 		}
 	}()
 
-	// Shared KBS config for both certificate upgrade and CA bundle refresh.
-	var kbsCfg *kbsclient.Config
-	if *certMode == "kbs" {
-		kbsCfg = &kbsclient.Config{
-			KBSURL:     *kbsURL,
-			IssuerURL:  *certIssuerURL,
-			TEEType:    *kbsTEEType,
-			AttestFunc: makeKBSAttestFunc(*attestCmd),
-			CertTTL:    *certTTL,
-			NodeIP:     *nodeIP,
+	// Assam certificate upgrade: after self-signed RA-TLS boot, a background
+	// goroutine contacts assam, gets CA-signed certs, and hot-swaps them via
+	// CertManager.SwapProvider. The assamCfg is shared with the CA bundle
+	// refresh goroutine below.
+	var assamCfg *assamclient.Config
+	if *certMode == "assam" {
+		assamCfg = &assamclient.Config{
+			AssamURL:              *assamURL,
+			AttestationServiceURL: *attestationServiceURL,
+			CertIssuerURL:         *certIssuerURL,
+			NodeIP:                *nodeIP,
 		}
-	}
-
-	// KBS certificate upgrade: after self-signed RA-TLS
-	// boot, a background goroutine contacts KBS, gets CA-signed certs, and
-	// hot-swaps them via CertManager.SwapProvider.
-	if *certMode == "kbs" {
 		go func() {
-			kbsProvider, err := kbsclient.NewProvider(kbsCfg, logger)
+			assamProvider, err := assamclient.NewProvider(assamCfg, logger)
 			if err != nil {
-				logger.Error("kbs provider creation failed", "error", err)
+				logger.Error("assam provider creation failed", "error", err)
 				return
 			}
 
-			// Wait for KBS to become reachable. Retry with backoff.
-			backoff := *kbsRetryBackoff
-			maxBackoff := *kbsRetryMaxBackoff
+			// Wait for assam to become reachable. Retry with backoff.
+			backoff := *assamRetryBackoff
+			maxBackoff := *assamRetryMaxBackoff
 			for {
 				select {
 				case <-ctx.Done():
@@ -357,37 +356,36 @@ func main() {
 				case <-time.After(backoff):
 				}
 
-				upgradeCtx, cancel := context.WithTimeout(ctx, *kbsOpTimeout)
-				err := serverCertMgr.SwapProvider(upgradeCtx, kbsProvider)
+				upgradeCtx, cancel := context.WithTimeout(ctx, *assamOpTimeout)
+				err := serverCertMgr.SwapProvider(upgradeCtx, assamProvider)
 				cancel()
 				if err == nil {
-					logger.Info("certificate upgraded from self-signed to KBS-issued (server)")
+					logger.Info("certificate upgraded from self-signed to assam-issued (server)")
 					break
 				}
-				logger.Warn("KBS certificate upgrade attempt failed (will retry)", "error", err, "backoff", backoff)
+				logger.Warn("assam certificate upgrade attempt failed (will retry)", "error", err, "backoff", backoff)
 				backoff = min(backoff*2, maxBackoff)
 			}
 
 			// Upgrade client cert too.
 			if clientCertMgr != nil {
-				upgradeCtx, cancel := context.WithTimeout(ctx, *kbsOpTimeout)
-				if err := clientCertMgr.SwapProvider(upgradeCtx, kbsProvider); err != nil {
-					logger.Warn("KBS client certificate upgrade failed", "error", err)
+				upgradeCtx, cancel := context.WithTimeout(ctx, *assamOpTimeout)
+				if err := clientCertMgr.SwapProvider(upgradeCtx, assamProvider); err != nil {
+					logger.Warn("assam client certificate upgrade failed", "error", err)
 				} else {
-					logger.Info("certificate upgraded from self-signed to KBS-issued (client)")
+					logger.Info("certificate upgraded from self-signed to assam-issued (client)")
 				}
 				cancel()
 			}
 
-			m.certMode.Store(1) // 1 = kbs mode active
+			m.certMode.Store(1) // 1 = assam mode active
 		}()
 	}
 
 	// CA bundle refresh: periodically poll cert-issuer /v1/ca for updated CA bundle.
-	// In KBS key mode, the ConfigMap is not used; the cert-issuer serves the bundle.
-	if *caURL != "" && *certMode == "kbs" {
+	if *caURL != "" && *certMode == "assam" {
 		go func() {
-			kbsClient := kbsclient.NewClient(kbsCfg)
+			assamClient := assamclient.NewClient(assamCfg)
 
 			ticker := time.NewTicker(*caPollInterval)
 			defer ticker.Stop()
@@ -397,14 +395,13 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					refreshCtx, cancel := context.WithTimeout(ctx, *kbsOpTimeout)
-					newCerts, err := kbsClient.RefreshCABundle(refreshCtx)
+					refreshCtx, cancel := context.WithTimeout(ctx, *assamOpTimeout)
+					newCerts, err := assamClient.RefreshCABundle(refreshCtx)
 					cancel()
 					if err != nil {
 						logger.Warn("CA bundle refresh failed", "url", *caURL, "error", err)
 						continue
 					}
-					// Update the server and client TLS configs with the new CA bundle.
 					serverCertMgr.UpdateCACerts(newCerts)
 					if clientCertMgr != nil {
 						clientCertMgr.UpdateCACerts(newCerts)
@@ -479,12 +476,12 @@ func main() {
 
 // validateConfig checks for misconfigurations that would cause cryptic runtime
 // failures. Called once at startup before any goroutine.
-func validateConfig(attestCmd string, outboundPort, inboundPort int, certTTL time.Duration) error {
-	if attestCmd == "" {
-		return fmt.Errorf("--attest-cmd is required (path to attestation binary)")
+func validateConfig(attestationServiceURL string, outboundPort, inboundPort int, certTTL time.Duration) error {
+	if attestationServiceURL == "" {
+		return fmt.Errorf("--attestation-service-url is required")
 	}
-	if _, err := exec.LookPath(attestCmd); err != nil {
-		return fmt.Errorf("--attest-cmd %q not found in PATH: %w", attestCmd, err)
+	if !strings.HasPrefix(attestationServiceURL, "http://") && !strings.HasPrefix(attestationServiceURL, "https://") {
+		return fmt.Errorf("--attestation-service-url %q must start with http:// or https://", attestationServiceURL)
 	}
 	if outboundPort == inboundPort {
 		return fmt.Errorf("--outbound-port and --inbound-port must differ (both are %d)", outboundPort)
@@ -495,47 +492,51 @@ func validateConfig(attestCmd string, outboundPort, inboundPort int, certTTL tim
 	return nil
 }
 
-// makeAttestFunc returns an AttestFunc that shells out to the attestation binary.
-// Uses --report-data for RA-TLS self-signed certificates.
-func makeAttestFunc(cmd string) func(context.Context, string) (string, error) {
-	return func(ctx context.Context, customData string) (string, error) {
-		if cmd == "" {
-			return "", fmt.Errorf("no attestation command configured (set --attest-cmd)")
-		}
-		c := exec.CommandContext(ctx, cmd, "--report-data", customData)
-		out, err := c.CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("attestation command failed: %w\noutput: %s", err, out)
-		}
-		return string(out), nil
-	}
+// snpEvidence is the inner evidence structure returned by the attestation
+// service for SEV-SNP. The attestation_report field is a base64-encoded
+// raw 1184-byte SNP report.
+type snpEvidence struct {
+	AttestationReport string `json:"attestation_report"`
 }
 
-// makeKBSAttestFunc returns an AttestFunc for KBS RCAR attestation.
-// Uses "attest --kbs <runtime_data>" subcommand which outputs JSON format
-// compatible with Trustee KBS (unlike --report-data which is for RA-TLS self-signed).
-// The binary may exit non-zero due to non-critical errors (e.g. read-only filesystem)
-// while still producing valid evidence on stdout, so we accept the output if it
-// starts with '{' (valid JSON evidence).
-func makeKBSAttestFunc(cmd string) func(context.Context, string) (string, error) {
-	return func(ctx context.Context, runtimeDataB64 string) (string, error) {
-		if cmd == "" {
-			return "", fmt.Errorf("no attestation command configured (set --attest-cmd)")
-		}
-		c := exec.CommandContext(ctx, cmd, "attest", "--kbs", runtimeDataB64)
-		var stdout, stderr bytes.Buffer
-		c.Stdout = &stdout
-		c.Stderr = &stderr
-		err := c.Run()
-		out := strings.TrimSpace(stdout.String())
+// makeAttestFunc returns an AttestFunc that calls the attestation service
+// HTTP API. Used for RA-TLS self-signed certificates.
+//
+// The attestation service POST /attest returns structured JSON evidence.
+// For SEV-SNP, the inner evidence contains attestation_report (base64-encoded
+// raw 1184-byte SNP report). This function extracts and decodes it to match
+// the raw-bytes contract expected by SelfSignedProvider.
+func makeAttestFunc(client attestationclient.Client) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, customData string) (string, error) {
+		// customData is hex-encoded REPORTDATA (e.g. SHA-384 of pubkey).
+		reportDataBytes, err := hex.DecodeString(customData)
 		if err != nil {
-			// The binary may produce valid evidence on stdout but exit non-zero
-			// due to non-critical filesystem errors. Accept if stdout has JSON.
-			if out != "" && out[0] == '{' {
-				return out, nil
-			}
-			return "", fmt.Errorf("attestation command (kbs) failed: %w\nstderr: %s\nstdout: %s", err, stderr.String(), out)
+			return "", fmt.Errorf("decode report data hex: %w", err)
 		}
-		return out, nil
+
+		resp, err := client.Attest(ctx, types.AttestRequest{
+			ReportData: types.NewBase64Bytes(reportDataBytes),
+			Platform:   types.PlatformAuto,
+		})
+		if err != nil {
+			return "", fmt.Errorf("attestation service: %w", err)
+		}
+
+		// The inner evidence for SNP contains {"attestation_report": "<base64>", ...}.
+		// Extract the raw report bytes.
+		var evidence snpEvidence
+		if err := json.Unmarshal(resp.Evidence.Evidence, &evidence); err != nil {
+			return "", fmt.Errorf("parse attestation evidence: %w", err)
+		}
+		if evidence.AttestationReport == "" {
+			return "", fmt.Errorf("attestation service returned empty attestation_report")
+		}
+
+		rawReport, err := base64.StdEncoding.DecodeString(evidence.AttestationReport)
+		if err != nil {
+			return "", fmt.Errorf("decode attestation_report base64: %w", err)
+		}
+
+		return string(rawReport), nil
 	}
 }

@@ -1,6 +1,6 @@
 // Package issuerapi defines the wire types for the cert-issuer HTTP API.
-// Both kbs-cert-issuer (server) and kbsclient (client) import this package
-// to ensure the JSON contract stays in sync.
+// Both kbs-cert-issuer (server) and its clients import this package to
+// ensure the JSON contract stays in sync.
 package issuerapi
 
 import (

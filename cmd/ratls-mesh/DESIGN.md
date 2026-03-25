@@ -132,32 +132,39 @@ After reading the destination header with `bufio.Reader`, any bytes already buff
 | Dual-stack iptables | Both `iptables` (IPv4) and `ip6tables` (IPv6) rules are installed. Prevents IPv6 traffic from bypassing the mesh on dual-stack clusters. | Requires `ip6tables` binary in container image. |
 | Measurement pinning | `--measurements` flag accepts expected SHA-384 launch digests. Without it, any valid TEE is accepted (logged as warning). | Requires redeployment when binary changes. |
 
-## KBS Certificate Issuance
+## Assam Certificate Issuance
 
 ### Architecture
 
-When `--cert-mode kbs` is used, the mesh obtains CA-signed certificates from a KBS cert-issuer sidecar instead of self-signing:
+When `--cert-mode assam` is used, the mesh obtains CA-signed certificates via assam attestation instead of self-signing:
 
 ```
-                     ratls-mesh node                          KBS Pod
-                ┌──────────────────────┐          ┌───────────────────────┐
-                │                      │          │                       │
-                │  1. Boot with        │          │  ┌─────┐  ┌────────┐ │
-                │     self-signed      │          │  │ KBS  │  │ cert-  │ │
-                │     RA-TLS cert      │          │  │      │  │ issuer │ │
-                │                      │          │  └──┬───┘  └───┬────┘ │
-                │  2. Background:      │          │     │          │      │
-                │     POST /auth ──────┼──────────┼────►│          │      │
-                │     ◄── challenge    │          │     │          │      │
-                │                      │          │     │          │      │
-                │  3. attest(nonce) ───┼──────────┼────►│          │      │
-                │     ◄── EAR JWT      │          │     │          │      │
-                │                      │          │     │          │      │
-                │  4. POST /sign-csr ──┼──────────┼─────┼─────────►│      │
-                │     ◄── CA-signed    │          │     │          │      │
-                │        certificate   │          │     │          │      │
-                │                      │          │                       │
-                │  5. SwapProvider()   │          └───────────────────────┘
+                     ratls-mesh node                    Assam Pod              Attestation
+                ┌──────────────────────┐     ┌───────────────────────┐       Service
+                │                      │     │                       │     ┌──────────┐
+                │  1. Boot with        │     │  ┌───────┐ ┌────────┐ │     │          │
+                │     self-signed      │     │  │ assam  │ │ cert-  │ │     │          │
+                │     RA-TLS cert      │     │  │       │ │ issuer │ │     │          │
+                │                      │     │  └──┬────┘ └───┬────┘ │     └────┬─────┘
+                │  2. Background:      │     │     │          │      │          │
+                │     POST             │     │     │          │      │          │
+                │     /authenticate ───┼─────┼────►│          │      │          │
+                │     ◄── challenge    │     │     │          │      │          │
+                │                      │     │     │          │      │          │
+                │  3. POST /attest ────┼─────┼─────┼──────────┼──────┼─────────►│
+                │     (attestation svc)│     │     │          │      │          │
+                │     ◄── evidence     │     │     │          │      │          │
+                │                      │     │     │          │      │          │
+                │  4. POST /attest ────┼─────┼────►│          │      │          │
+                │     (evidence + CSR) │     │     │──────────┼──────┼─────────►│
+                │     ◄── CA-signed    │     │     │◄─────────┼──────┼──────────│
+                │        certificate   │     │     │──sign───►│      │          │
+                │                      │     │     │◄─cert────│      │          │
+                │                      │     │                       │
+                │  5. GET /v1/ca ──────┼─────┼────────────────►│      │
+                │     ◄── CA bundle    │     │                       │
+                │                      │     └───────────────────────┘
+                │  6. SwapProvider()   │
                 │     hot-swap to      │
                 │     CA-signed cert   │
                 │                      │
@@ -176,7 +183,7 @@ type CertProvider interface {
 
 Two implementations:
 - `SelfSignedProvider`: generates key, obtains hardware attestation, creates self-signed cert with attestation extension
-- `kbsclient.Provider`: generates key, performs KBS auth/attest flow, submits CSR to cert-issuer, returns CA-signed cert
+- `assamclient.Provider`: generates key, performs assam attestation flow, obtains CA-signed cert, fetches CA bundle from cert-issuer
 
 The abstraction enables runtime provider swapping via `CertManager.SwapProvider()` — the old cert continues serving while the new one provisions.
 
@@ -196,11 +203,11 @@ If both verification paths fail, the error includes both failure reasons for dia
 
 ### Bootstrap Design Decision
 
-The mesh boots with self-signed RA-TLS first, then upgrades to KBS-issued certificates in the background. This design was chosen because:
+The mesh boots with self-signed RA-TLS first, then upgrades to assam-issued certificates in the background. This design was chosen because:
 
-1. **Zero startup dependency on KBS** — the mesh is immediately functional even if KBS is down or not yet deployed
+1. **Zero startup dependency on assam** — the mesh is immediately functional even if assam is down or not yet deployed
 2. **Rolling upgrade safety** — mixed clusters (some self-signed, some CA-signed) work correctly via dual verification
-3. **Failure resilience** — if KBS upgrade fails, the mesh continues operating with self-signed RA-TLS
+3. **Failure resilience** — if assam upgrade fails, the mesh continues operating with self-signed RA-TLS
 4. **No coordination needed** — each node upgrades independently on its own schedule
 
 ## iptables Rules
@@ -409,36 +416,37 @@ Certificates are provisioned lazily on the first TLS handshake and cached in mem
 
 1. Generate ECDSA P-256 key pair
 2. Compute `REPORTDATA = SHA-384(pubkey || nonce)`
-3. Shell out to attestation binary: `attest-sev-snp --report-data <hex>`
-4. Embed attestation report in X.509 certificate extension
-5. Cache certificate in `certState` (RWMutex-protected)
-6. Rotate at 50% of TTL (default 12h → rotate at 6h)
+3. Request attestation evidence from the attestation service (`POST /attest` with REPORTDATA)
+4. Extract raw attestation report from the structured evidence response
+5. Embed attestation report in X.509 certificate extension
+6. Cache certificate in `certState` (RWMutex-protected)
+7. Rotate at 50% of TTL (default 12h → rotate at 6h)
 
 The `certState.mu` mutex serializes certificate provisioning — at most one attestation process runs at a time per cert type (server/client). After the first provisioning, the cached cert is returned for all subsequent handshakes until rotation.
 
-### KBS-Issued Certificates
+### Assam-Issued Certificates
 
-When using `--cert-mode kbs`, the lifecycle changes:
+When using `--cert-mode assam`, the lifecycle changes:
 
 1. Initial boot: self-signed RA-TLS certificate (same flow as above)
-2. Background goroutine contacts KBS: auth → attest → sign-csr
+2. Background goroutine contacts assam: authenticate → attest → obtain cert, fetch CA from cert-issuer
 3. `CertManager.SwapProvider()` atomically swaps the provider:
    - Acquires lock, replaces provider, clears cert cache and rotation timer
    - Releases lock, provisions new cert synchronously
    - On success: new CA-signed cert served to all subsequent handshakes
    - On failure: old self-signed cert continues serving (error logged)
-4. Rotation continues at 50% of TTL, now using the KBS provider
+4. Rotation continues at 50% of TTL, now using the assam provider
 5. Peer verification uses `dualVerifyPeerCallback`: CA chain (fast) or RA-TLS (fallback)
 
 ## Comparison to Alternatives
 
-| | Istio ambient | ratls-mesh | **KBS-mode ratls-mesh** |
-|--|--------------|------------|------------------------|
+| | Istio ambient | ratls-mesh | **assam-mode ratls-mesh** |
+|--|--------------|------------|--------------------------|
 | **Trust root** | istiod CA (software) | AMD SEV-SNP (hardware) | Mesh CA (issued after hardware attestation) |
 | **Control plane compromise** | Full mTLS bypass | DoS only (can't forge attestation) | DoS only (CA is in-TEE sidecar) |
-| **Certificate issuance** | Centralized CA | Per-node self-signed with attestation | Per-node CA-signed after KBS attestation |
+| **Certificate issuance** | Centralized CA | Per-node self-signed with attestation | Per-node CA-signed after assam attestation |
 | **Protocol** | L4/L7 (ztunnel + waypoint) | L4 only | L4 only |
-| **Dependencies** | istiod, ztunnel, CNI plugin | Single binary + iptables | Single binary + iptables + KBS + cert-issuer |
+| **Dependencies** | istiod, ztunnel, CNI plugin | Single binary + iptables | Single binary + iptables + assam + cert-issuer |
 | **Node-to-node encryption** | HBONE (HTTP/2 tunnel) | TLS 1.3 direct | TLS 1.3 direct |
 | **Per-pod identity** | SPIFFE identity per pod | Node-level TEE identity | Node-level TEE identity |
-| **Hardware requirement** | None | AMD SEV-SNP CVM | AMD SEV-SNP CVM + KBS infrastructure |
+| **Hardware requirement** | None | AMD SEV-SNP CVM | AMD SEV-SNP CVM + assam infrastructure |
