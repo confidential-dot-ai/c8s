@@ -33,6 +33,10 @@ type Config struct {
 	// (e.g., "http://localhost:8400").
 	AttestationServiceURL string
 
+	// AttestationServiceAPIKey is the bearer token for authenticating
+	// with the attestation service. Empty means no authentication.
+	AttestationServiceAPIKey string
+
 	// CertIssuerURL is the base URL of the cert-issuer sidecar for CA
 	// bundle retrieval (e.g., "http://assam.tee-attestation.svc:8090").
 	CertIssuerURL string
@@ -79,7 +83,7 @@ func NewClient(cfg *Config) *Client {
 	return &Client{
 		cfg:         cfg,
 		httpClient:  httpClient,
-		assamClient: attestclient.NewClientWithHTTP(cfg.AssamURL, httpClient),
+		assamClient: attestclient.NewClientWithHTTPAndAPIKey(cfg.AssamURL, httpClient, cfg.AttestationServiceAPIKey),
 	}
 }
 

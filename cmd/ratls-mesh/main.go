@@ -40,24 +40,25 @@ func main() {
 	}
 
 	var (
-		platform              = flag.String("platform", "sev-snp", "TEE platform: sev-snp, tdx")
-		attestationServiceURL = flag.String("attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
-		outboundPort          = flag.Int("outbound-port", 15001, "outbound listener port (intercepted app traffic)")
-		inboundPort           = flag.Int("inbound-port", 15006, "inbound listener port (RA-TLS from remote nodes)")
-		nodeIP                = flag.String("node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
-		logLevel              = flag.String("log-level", "info", "log level: debug, info, warn, error")
-		dialTimeout           = flag.Duration("dial-timeout", 5*time.Second, "plain TCP dial timeout")
-		tlsDialTimeout        = flag.Duration("tls-dial-timeout", 10*time.Second, "RA-TLS dial timeout")
-		destHeaderTimeout     = flag.Duration("dest-header-timeout", 5*time.Second, "inbound destination header read timeout")
-		drainTimeout          = flag.Duration("drain-timeout", 30*time.Second, "graceful shutdown drain timeout")
-		keepAlive             = flag.Duration("keepalive", 30*time.Second, "TCP keepalive interval (0 to disable)")
-		idleTimeout           = flag.Duration("idle-timeout", 0, "close connections idle longer than this (0=disabled)")
-		maxConns              = flag.Int("max-conns", 0, "max concurrent connections (0=unlimited)")
-		maxConnsPerSource     = flag.Int("max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
-		healthPort            = flag.Int("health-port", 15021, "health/metrics HTTP port")
-		measurements          = flag.String("measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
-		certTTL               = flag.Duration("cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
-		rotationTimeout       = flag.Duration("rotation-timeout", 30*time.Second, "max time for background certificate rotation")
+		platform                 = flag.String("platform", "sev-snp", "TEE platform: sev-snp, tdx")
+		attestationServiceURL    = flag.String("attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
+		attestationServiceAPIKey = flag.String("attestation-service-api-key", "", "API key for the attestation service (required when running in remote mode)")
+		outboundPort             = flag.Int("outbound-port", 15001, "outbound listener port (intercepted app traffic)")
+		inboundPort              = flag.Int("inbound-port", 15006, "inbound listener port (RA-TLS from remote nodes)")
+		nodeIP                   = flag.String("node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
+		logLevel                 = flag.String("log-level", "info", "log level: debug, info, warn, error")
+		dialTimeout              = flag.Duration("dial-timeout", 5*time.Second, "plain TCP dial timeout")
+		tlsDialTimeout           = flag.Duration("tls-dial-timeout", 10*time.Second, "RA-TLS dial timeout")
+		destHeaderTimeout        = flag.Duration("dest-header-timeout", 5*time.Second, "inbound destination header read timeout")
+		drainTimeout             = flag.Duration("drain-timeout", 30*time.Second, "graceful shutdown drain timeout")
+		keepAlive                = flag.Duration("keepalive", 30*time.Second, "TCP keepalive interval (0 to disable)")
+		idleTimeout              = flag.Duration("idle-timeout", 0, "close connections idle longer than this (0=disabled)")
+		maxConns                 = flag.Int("max-conns", 0, "max concurrent connections (0=unlimited)")
+		maxConnsPerSource        = flag.Int("max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
+		healthPort               = flag.Int("health-port", 15021, "health/metrics HTTP port")
+		measurements             = flag.String("measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
+		certTTL                  = flag.Duration("cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
+		rotationTimeout          = flag.Duration("rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 
 		// Assam certificate issuance flags.
 		certMode       = flag.String("cert-mode", "self-signed", "certificate mode: self-signed (default), assam (boots self-signed, upgrades to assam-issued in background)")
@@ -124,9 +125,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	asClient := attestationclient.NewClientWithHTTP(*attestationServiceURL, &http.Client{
+	asClient := attestationclient.NewClientWithHTTPAndAPIKey(*attestationServiceURL, &http.Client{
 		Timeout: durOrDefault(*rotationTimeout, 30*time.Second),
-	})
+	}, *attestationServiceAPIKey)
 	attestFunc := makeAttestFunc(asClient)
 
 	meshPolicy := &ratls.VerifyPolicy{}
@@ -334,10 +335,11 @@ func main() {
 	var assamCfg *assamclient.Config
 	if *certMode == "assam" {
 		assamCfg = &assamclient.Config{
-			AssamURL:              *assamURL,
-			AttestationServiceURL: *attestationServiceURL,
-			CertIssuerURL:         *certIssuerURL,
-			NodeIP:                *nodeIP,
+			AssamURL:                 *assamURL,
+			AttestationServiceURL:    *attestationServiceURL,
+			AttestationServiceAPIKey: *attestationServiceAPIKey,
+			CertIssuerURL:            *certIssuerURL,
+			NodeIP:                   *nodeIP,
 		}
 		go func() {
 			assamProvider, err := assamclient.NewProvider(assamCfg, logger)

@@ -42,6 +42,7 @@ ratls-mesh iptables-cleanup --outbound-port 15001 --inbound-port 15006 --uid 133
 |------|---------|-------------|
 | `--platform` | `sev-snp` | TEE platform: `sev-snp` or `tdx` |
 | `--attestation-service-url` | (required) | URL of the local attestation service (e.g. `http://localhost:8400`) |
+| `--attestation-service-api-key` | `""` | Bearer token for authenticating with the attestation service |
 | `--outbound-port` | `15001` | Outbound listener port (iptables redirect target) |
 | `--inbound-port` | `15006` | Inbound listener port (RA-TLS from remote nodes) |
 | `--node-ip` | `$NODE_IP` | This node's IP address |
@@ -116,6 +117,7 @@ Key Ansible variables (in `defaults/main.yml`):
 | `ratls_mesh_cert_mode` | `self-signed` | Certificate mode |
 | `ratls_mesh_assam_url` | `""` | Assam URL for attestation |
 | `ratls_mesh_attestation_service_url` | `""` | Attestation service URL |
+| `ratls_mesh_attestation_service_api_key` | `""` | Attestation service API key |
 | `ratls_mesh_cert_issuer_url` | `""` | Cert-issuer URL |
 
 ## Observability
