@@ -30,13 +30,13 @@ import (
 	"github.com/lunal-dev/c8s/pkg/issuerapi"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 func main() {
 	var (
-		namespace      = flag.String("namespace", "tee-attestation", "trustee namespace")
-		meshNamespace  = flag.String("mesh-namespace", "ratls-mesh-system", "ratls-mesh namespace for CA ConfigMap")
+		namespace      = flag.String("namespace", "tee-attestation", "namespace holding the kbs-mesh-ca Secret and mesh-ca-cert ConfigMap")
 		components     = flag.String("components", "token-signer,mesh-ca", "comma-separated components to rotate")
 		tokenValidity  = flag.Int("token-validity-days", 365, "token-signer certificate validity in days")
 		meshCAValidity = flag.Int("mesh-ca-validity-days", 365, "mesh CA certificate validity in days")
@@ -112,7 +112,7 @@ func main() {
 				}
 				expectedFingerprint = fp
 			} else {
-				fp, err := rotateMeshCA(ctx, clientset, *namespace, *meshNamespace, *meshCAValidity, *maxTTL, logger)
+				fp, err := rotateMeshCA(ctx, clientset, *namespace, *meshCAValidity, *maxTTL, logger)
 				if err != nil {
 					logger.Error("mesh-ca rotation failed", "error", err)
 					os.Exit(1)
@@ -202,7 +202,7 @@ func rotateTokenSigner(ctx context.Context, client kubernetes.Interface, namespa
 	return nil
 }
 
-func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace, meshNamespace string, validityDays int, maxTTL time.Duration, logger *slog.Logger) (string, error) {
+func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace string, validityDays int, maxTTL time.Duration, logger *slog.Logger) (string, error) {
 	logger.Info("rotating mesh CA keypair")
 
 	// Read existing CA cert for bundle and rollback (2.3, 3.2).
@@ -253,16 +253,13 @@ func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace, m
 		return "", fmt.Errorf("update mesh CA secret: %w", err)
 	}
 
-	// Read existing ConfigMap for bundle.
-	cmClient := client.CoreV1().ConfigMaps(meshNamespace)
+	// Read existing ConfigMap for bundle (lives in the same namespace as the Secret).
+	cmClient := client.CoreV1().ConfigMaps(namespace)
 	cm, err := cmClient.Get(ctx, "mesh-ca-cert", metav1.GetOptions{})
 	if err != nil {
 		// Rollback Secret (2.3).
 		logger.Error("get mesh-ca-cert ConfigMap failed, rolling back Secret", "error", err)
-		existingSecret.Data = originalSecretData
-		if _, rbErr := secretsClient.Update(ctx, existingSecret, metav1.UpdateOptions{}); rbErr != nil {
-			logger.Error("CRITICAL: Secret rollback also failed", "error", rbErr)
-		}
+		rollbackSecret(ctx, secretsClient, originalSecretData, logger)
 		return "", fmt.Errorf("get mesh-ca-cert ConfigMap: %w", err)
 	}
 
@@ -279,10 +276,7 @@ func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace, m
 	if _, err := cmClient.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		// Rollback Secret (2.3).
 		logger.Error("update mesh-ca-cert ConfigMap failed, rolling back Secret", "error", err)
-		existingSecret.Data = originalSecretData
-		if _, rbErr := secretsClient.Update(ctx, existingSecret, metav1.UpdateOptions{}); rbErr != nil {
-			logger.Error("CRITICAL: Secret rollback also failed", "error", rbErr)
-		}
+		rollbackSecret(ctx, secretsClient, originalSecretData, logger)
 		return "", fmt.Errorf("update mesh-ca-cert ConfigMap: %w", err)
 	}
 
@@ -429,6 +423,21 @@ func copySecretData(data map[string][]byte) map[string][]byte {
 		cp[k] = bytes.Clone(v)
 	}
 	return cp
+}
+
+// rollbackSecret restores Secret data from a snapshot. Re-fetches the
+// current Secret first so the rollback uses a fresh resourceVersion and
+// doesn't fail with optimistic-concurrency errors.
+func rollbackSecret(ctx context.Context, client typedcorev1.SecretInterface, original map[string][]byte, logger *slog.Logger) {
+	current, err := client.Get(ctx, "kbs-mesh-ca", metav1.GetOptions{})
+	if err != nil {
+		logger.Error("CRITICAL: Secret rollback re-get failed", "error", err)
+		return
+	}
+	current.Data = original
+	if _, err := client.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
+		logger.Error("CRITICAL: Secret rollback also failed", "error", err)
+	}
 }
 
 // rotateMeshCAViaKBS performs mesh CA rotation via KBS attestation:

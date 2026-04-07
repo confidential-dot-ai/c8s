@@ -160,7 +160,7 @@ func TestRotateMeshCA_NewKeypairAndBundle(t *testing.T) {
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "mesh-ca-cert",
-				Namespace: "ratls-mesh-system",
+				Namespace: "tee-attestation",
 			},
 			Data: map[string]string{
 				"ca.pem": string(oldCertPEM),
@@ -168,7 +168,7 @@ func TestRotateMeshCA_NewKeypairAndBundle(t *testing.T) {
 		},
 	)
 
-	fingerprint, err := rotateMeshCA(ctx, client, "tee-attestation", "ratls-mesh-system", 365, 4*time.Hour, logger)
+	fingerprint, err := rotateMeshCA(ctx, client, "tee-attestation", 365, 4*time.Hour, logger)
 	if err != nil {
 		t.Fatalf("rotateMeshCA failed: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRotateMeshCA_NewKeypairAndBundle(t *testing.T) {
 	}
 
 	// Verify ConfigMap bundle contains new + old certs.
-	cm, err := client.CoreV1().ConfigMaps("ratls-mesh-system").Get(ctx, "mesh-ca-cert", metav1.GetOptions{})
+	cm, err := client.CoreV1().ConfigMaps("tee-attestation").Get(ctx, "mesh-ca-cert", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestRotateMeshCA_ConfigMapNotFound(t *testing.T) {
 		},
 	)
 
-	_, err := rotateMeshCA(ctx, client, "tee-attestation", "ratls-mesh-system", 365, 4*time.Hour, logger)
+	_, err := rotateMeshCA(ctx, client, "tee-attestation", 365, 4*time.Hour, logger)
 	if err == nil {
 		t.Fatal("expected error for missing ConfigMap")
 	}
