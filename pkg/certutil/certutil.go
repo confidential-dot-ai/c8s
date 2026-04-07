@@ -37,13 +37,15 @@ func EncodeCertPEM(certDER []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 }
 
-// MarshalECKeyPEM marshals an EC private key to PEM format.
+// MarshalECKeyPEM marshals an EC private key to PKCS#8 PEM format.
+// PKCS#8 ("PRIVATE KEY" header) is what assam and the rest of the stack
+// expect; SEC 1 ("EC PRIVATE KEY") fails to parse with x509.ParsePKCS8PrivateKey.
 func MarshalECKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
-	keyDER, err := x509.MarshalECPrivateKey(key)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("marshal key: %w", err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
 }
 
 // ParseECPrivateKey parses a PEM-encoded EC private key, trying PKCS8 first
