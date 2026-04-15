@@ -1,8 +1,10 @@
-// cert-rotator rotates mesh CA and token-signer certificates in Kubernetes.
+// cert-rotator rotates mesh CA certificates in Kubernetes.
 //
 // Designed to run as a CronJob. Reads existing Secrets, generates new keypairs,
 // updates Secrets and ConfigMaps with CA bundles (new + old), and verifies
 // cert-issuer hot-reload via metrics polling.
+//
+// Token-signer rotation is handled by assam in-process (see pkg/ktoken).
 package main
 
 import (
@@ -12,7 +14,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -37,8 +38,7 @@ import (
 func main() {
 	var (
 		namespace      = flag.String("namespace", "tee-attestation", "namespace holding the kbs-mesh-ca Secret and mesh-ca-cert ConfigMap")
-		components     = flag.String("components", "token-signer,mesh-ca", "comma-separated components to rotate")
-		tokenValidity  = flag.Int("token-validity-days", 365, "token-signer certificate validity in days")
+		components     = flag.String("components", "mesh-ca", "comma-separated components to rotate")
 		meshCAValidity = flag.Int("mesh-ca-validity-days", 365, "mesh CA certificate validity in days")
 		certIssuerURL  = flag.String("cert-issuer-url", "", "cert-issuer metrics URL for reload verification")
 		verifyTimeout  = flag.Duration("verify-timeout", 120*time.Second, "timeout for reload verification")
@@ -92,15 +92,6 @@ func main() {
 	for _, comp := range componentList {
 		comp = strings.TrimSpace(comp)
 		switch comp {
-		case "token-signer":
-			if kbsMode {
-				logger.Info("skipping token-signer rotation in KBS mode (key stored in KBS repository, rotate via playbook re-run)")
-				continue
-			}
-			if err := rotateTokenSigner(ctx, clientset, *namespace, *tokenValidity, logger); err != nil {
-				logger.Error("token-signer rotation failed", "error", err)
-				os.Exit(1)
-			}
 		case "mesh-ca":
 			if kbsMode {
 				// In KBS mode: attest to KBS → trigger rotation on cert-issuer.
@@ -134,72 +125,6 @@ func main() {
 	}
 
 	logger.Info("cert-rotator completed successfully")
-}
-
-func rotateTokenSigner(ctx context.Context, client kubernetes.Interface, namespace string, validityDays int, logger *slog.Logger) error {
-	logger.Info("rotating token-signer keypair")
-
-	// Read existing Secret for rollback and audit (2.3, 3.2).
-	secretsClient := client.CoreV1().Secrets(namespace)
-	secret, err := secretsClient.Get(ctx, "kbs-token-signing-keys", metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get secret: %w", err)
-	}
-
-	// Parse old certificate for audit fingerprint (3.2).
-	var oldFingerprint string
-	if oldCertPEM, ok := secret.Data["token-signer.crt"]; ok {
-		if cert, err := certutil.ParseCertificatePEM(oldCertPEM); err == nil {
-			oldFingerprint = certutil.CertFingerprint(cert.Raw)
-		}
-	}
-	// Generate new P-256 key for token signing.
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate key: %w", err)
-	}
-
-	serial, err := certutil.GenerateSerial()
-	if err != nil {
-		return fmt.Errorf("generate serial: %w", err)
-	}
-
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "KBS Token Signer"},
-		NotBefore:    now,
-		NotAfter:     now.AddDate(0, 0, validityDays),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return fmt.Errorf("create certificate: %w", err)
-	}
-
-	keyPEM, err := certutil.MarshalECKeyPEM(key)
-	if err != nil {
-		return err
-	}
-
-	certPEM := certutil.EncodeCertPEM(certDER)
-
-	// Update K8s Secret.
-	secret.Data["token-signer.key"] = keyPEM
-	secret.Data["token-signer.crt"] = certPEM
-	if _, err := secretsClient.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update secret: %w", err)
-	}
-
-	newFingerprint := certutil.CertFingerprint(certDER)
-	logger.Info("token-signer rotated",
-		"old_fingerprint", oldFingerprint,
-		"new_fingerprint", newFingerprint,
-		"not_after", template.NotAfter.Format(time.RFC3339),
-	)
-
-	return nil
 }
 
 func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace string, validityDays int, maxTTL time.Duration, logger *slog.Logger) (string, error) {
