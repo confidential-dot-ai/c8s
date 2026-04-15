@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -21,23 +22,51 @@ const earProfile = "tag:ietf.org,2026:rats/ear#03"
 // "recognised and not compromised" (draft-ietf-rats-ear).
 const statusAffirming = 2
 
-// Issuer produces signed EAR (Entity Attestation Result) JWT tokens
-// conforming to draft-ietf-rats-ear.
-type Issuer struct {
-	signingKey *ecdsa.PrivateKey
-	kid        string
-	issuer     string
-	lifetime   time.Duration
+// keyMat holds the signing material for atomic swap during rotation.
+type keyMat struct {
+	key *ecdsa.PrivateKey
+	kid string
 }
 
-// PublicKey returns a copy of the public half of the signing key, or nil if
-// no key is set.
+// Issuer produces signed EAR (Entity Attestation Result) JWT tokens
+// conforming to draft-ietf-rats-ear. The signing key can be swapped
+// atomically via SwapKey; all value copies of an Issuer share the
+// same key material through the embedded pointer.
+type Issuer struct {
+	mat      *atomic.Pointer[keyMat]
+	issuer   string
+	lifetime time.Duration
+}
+
+// PublicKey returns a copy of the active signing public key, or nil if unset.
 func (iss Issuer) PublicKey() *ecdsa.PublicKey {
-	if iss.signingKey == nil {
+	if iss.mat == nil {
 		return nil
 	}
-	pub := iss.signingKey.PublicKey
+	m := iss.mat.Load()
+	if m == nil {
+		return nil
+	}
+	pub := m.key.PublicKey
 	return &pub
+}
+
+// Kid returns the RFC 7638 JWK thumbprint of the active signing key.
+func (iss Issuer) Kid() string {
+	if iss.mat == nil {
+		return ""
+	}
+	m := iss.mat.Load()
+	if m == nil {
+		return ""
+	}
+	return m.kid
+}
+
+// SwapKey atomically replaces the signing key. All value copies of this
+// Issuer see the new key immediately.
+func (iss Issuer) SwapKey(key *ecdsa.PrivateKey, kid string) {
+	iss.mat.Store(&keyMat{key: key, kid: kid})
 }
 
 // NewIssuer creates an EAR issuer from a PEM-encoded EC private key (P-256/ES256).
@@ -52,17 +81,23 @@ func NewIssuer(keyPEM []byte, issuer string, lifetime time.Duration) (Issuer, er
 		return Issuer{}, fmt.Errorf("compute EAR key thumbprint: %w", err)
 	}
 
+	mat := &atomic.Pointer[keyMat]{}
+	mat.Store(&keyMat{key: ecKey, kid: kid})
+
 	return Issuer{
-		signingKey: ecKey,
-		kid:        kid,
-		issuer:     issuer,
-		lifetime:   lifetime,
+		mat:      mat,
+		issuer:   issuer,
+		lifetime: lifetime,
 	}, nil
 }
 
 // Issue produces a signed EAR JWT for a successful attestation verification.
-// submodsEvidence is the raw attestation evidence to embed for audit purposes.
 func (iss Issuer) Issue(submodsEvidence json.RawMessage) (string, error) {
+	m := iss.mat.Load()
+	if m == nil {
+		return "", fmt.Errorf("no signing key configured")
+	}
+
 	now := time.Now().Unix()
 
 	claims := jwt.MapClaims{
@@ -86,8 +121,8 @@ func (iss Issuer) Issue(submodsEvidence json.RawMessage) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
-	token.Header["kid"] = iss.kid
-	signed, err := token.SignedString(iss.signingKey)
+	token.Header["kid"] = m.kid
+	signed, err := token.SignedString(m.key)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign EAR token: %w", err)
 	}

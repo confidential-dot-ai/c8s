@@ -42,6 +42,9 @@ func main() {
 		whitelistAdminPass   string
 		tokenSignerSecret    string
 		tokenSignerNamespace string
+		rotationInterval     time.Duration
+		rotationOverlap      time.Duration
+		rotationJitter       float64
 	)
 
 	rootCmd := &cobra.Command{
@@ -63,6 +66,9 @@ func main() {
 				whitelistAdminPass:   whitelistAdminPass,
 				tokenSignerSecret:    tokenSignerSecret,
 				tokenSignerNamespace: tokenSignerNamespace,
+				rotationInterval:     rotationInterval,
+				rotationOverlap:      rotationOverlap,
+				rotationJitter:       rotationJitter,
 			})
 		},
 	}
@@ -82,6 +88,9 @@ func main() {
 	flags.StringVar(&whitelistAdminPass, "whitelist-admin-password", "", "Admin password for whitelist mutation endpoints")
 	flags.StringVar(&tokenSignerSecret, "token-signer-secret", "kbs-token-signing-keys", "Kubernetes Secret holding the EAR signing key (set empty to use --ear-key file instead)")
 	flags.StringVar(&tokenSignerNamespace, "token-signer-namespace", envOrDefault("POD_NAMESPACE", "tee-attestation"), "Namespace of the token-signer Secret")
+	flags.DurationVar(&rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "How often to rotate the EAR signing key (0 = disable rotation)")
+	flags.DurationVar(&rotationOverlap, "token-signer-overlap", 25*time.Hour, "How long a retired key stays in JWKS after rotation")
+	flags.Float64Var(&rotationJitter, "token-signer-rotation-jitter", 0.1, "Fraction of rotation interval to jitter the first tick")
 
 	rootCmd.MarkFlagRequired("attestation-service-url")
 	rootCmd.MarkFlagRequired("cert-issuer-url")
@@ -108,6 +117,9 @@ type config struct {
 	whitelistAdminPass   string
 	tokenSignerSecret    string
 	tokenSignerNamespace string
+	rotationInterval     time.Duration
+	rotationOverlap      time.Duration
+	rotationJitter       float64
 }
 
 func run(cfg config) error {
@@ -133,6 +145,27 @@ func run(cfg config) error {
 	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
 	if err != nil {
 		return err
+	}
+
+	// Set up key rotation if running in Secret mode with rotation enabled.
+	var rotator *ktoken.Rotator
+	if cfg.tokenSignerSecret != "" && cfg.rotationInterval > 0 {
+		k8sClient, err := buildK8sClient()
+		if err != nil {
+			return fmt.Errorf("k8s client for rotation: %w", err)
+		}
+		rotator, err = ktoken.NewRotator(ktoken.RotatorConfig{
+			Client:    k8sClient,
+			Namespace: cfg.tokenSignerNamespace,
+			Secret:    cfg.tokenSignerSecret,
+			Interval:  cfg.rotationInterval,
+			Overlap:   cfg.rotationOverlap,
+			Jitter:    cfg.rotationJitter,
+			Logger:    slog.Default(),
+		}, earKeyPEM, earIssuer.SwapKey)
+		if err != nil {
+			return fmt.Errorf("create key rotator: %w", err)
+		}
 	}
 
 	asClient := attestationclient.NewClientWithAPIKey(cfg.attestationSvcURL, cfg.attestationSvcAPIKey)
@@ -170,11 +203,18 @@ func run(cfg config) error {
 		ReadyFn:   checker.Ready,
 		EarIssuer: earIssuer,
 	}
+	if rotator != nil {
+		deps.JWKSFunc = rotator.JWKSetJSON
+	}
 
 	router := server.NewRouter(deps)
 
 	// Start readiness checker in background
 	go checker.Run(ctx)
+
+	if rotator != nil {
+		go rotator.Run(ctx)
+	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.host, cfg.port)
 	srv := &http.Server{
@@ -239,11 +279,7 @@ func loadEARKey(ctx context.Context, cfg config) ([]byte, error) {
 		if cfg.earKeyPath != "" {
 			slog.Warn("--ear-key is ignored when --token-signer-secret is set")
 		}
-		rc, err := rest.InClusterConfig()
-		if err != nil {
-			return nil, fmt.Errorf("k8s in-cluster config: %w", err)
-		}
-		client, err := kubernetes.NewForConfig(rc)
+		client, err := buildK8sClient()
 		if err != nil {
 			return nil, fmt.Errorf("k8s client: %w", err)
 		}
@@ -262,6 +298,14 @@ func loadEARKey(ctx context.Context, cfg config) ([]byte, error) {
 		return nil, fmt.Errorf("read EAR key at %s: %w", cfg.earKeyPath, err)
 	}
 	return keyPEM, nil
+}
+
+func buildK8sClient() (kubernetes.Interface, error) {
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	return kubernetes.NewForConfig(rc)
 }
 
 func envOrDefault(key, fallback string) string {

@@ -16,6 +16,7 @@ type Dependencies struct {
 	WhitelistHandler   whitelist.Handler
 	ReadyFn            attestation.ReadinessFunc
 	EarIssuer          ear.Issuer
+	JWKSFunc           func() []byte // optional dynamic JWKS provider (rotation mode)
 }
 
 // NewRouter builds the chi router with all routes wired up.
@@ -28,7 +29,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 
 	r.Get("/readyz", attestation.HandleReadyz(deps.ReadyFn))
-	r.Get("/.well-known/jwks.json", HandleJWKS(deps.EarIssuer))
+	r.Get("/.well-known/jwks.json", HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
 
 	r.Post("/authenticate", deps.AttestationHandler.HandleAuthenticate)
 	r.Post("/attest", deps.AttestationHandler.HandleAttest)
