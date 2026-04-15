@@ -29,6 +29,7 @@ import (
 
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/issuerapi"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -178,11 +179,22 @@ func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace st
 		return "", fmt.Errorf("update mesh CA secret: %w", err)
 	}
 
-	// Read existing ConfigMap for bundle (lives in the same namespace as the Secret).
+	// Update CA bundle ConfigMap if it exists. When using dynamic CA URL
+	// (ratls-mesh polls cert-issuer /v1/ca), the ConfigMap may not exist
+	// and the Secret update alone is sufficient — cert-issuer hot-reloads
+	// and serves the new cert.
 	cmClient := client.CoreV1().ConfigMaps(namespace)
 	cm, err := cmClient.Get(ctx, "mesh-ca-cert", metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		newFingerprint := certutil.CertFingerprint(certDER)
+		logger.Info("mesh CA rotated (no mesh-ca-cert ConfigMap, skipping bundle update)",
+			"old_fingerprint", oldFingerprint,
+			"new_fingerprint", newFingerprint,
+			"not_after", template.NotAfter.Format(time.RFC3339),
+		)
+		return newFingerprint, nil
+	}
 	if err != nil {
-		// Rollback Secret (2.3).
 		logger.Error("get mesh-ca-cert ConfigMap failed, rolling back Secret", "error", err)
 		rollbackSecret(ctx, secretsClient, originalSecretData, logger)
 		return "", fmt.Errorf("get mesh-ca-cert ConfigMap: %w", err)

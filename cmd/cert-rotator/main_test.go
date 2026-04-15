@@ -135,11 +135,12 @@ func TestRotateMeshCA_NewKeypairAndBundle(t *testing.T) {
 	}
 }
 
-func TestRotateMeshCA_ConfigMapNotFound(t *testing.T) {
+func TestRotateMeshCA_ConfigMapNotFound_SucceedsWithSecretOnly(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 
-	// Secret exists but no ConfigMap.
+	// Secret exists but no ConfigMap — rotation should still succeed
+	// (dynamic CA URL mode: cert-issuer serves the cert via /v1/ca).
 	oldKey, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	oldCertPEM := selfSignedCertPEM(t, oldKey, "Old Mesh CA", true)
 	oldKeyPEM := ecKeyPEM(t, oldKey)
@@ -157,21 +158,21 @@ func TestRotateMeshCA_ConfigMapNotFound(t *testing.T) {
 		},
 	)
 
-	_, err := rotateMeshCA(ctx, client, "tee-attestation", 365, 4*time.Hour, logger)
-	if err == nil {
-		t.Fatal("expected error for missing ConfigMap")
+	fp, err := rotateMeshCA(ctx, client, "tee-attestation", 365, 4*time.Hour, logger)
+	if err != nil {
+		t.Fatalf("rotateMeshCA should succeed without ConfigMap: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ConfigMap") {
-		t.Errorf("unexpected error: %v", err)
+	if fp == "" {
+		t.Error("expected non-empty fingerprint")
 	}
 
-	// Verify Secret was rolled back (2.3).
+	// Verify Secret WAS updated (not rolled back).
 	secret, err := client.CoreV1().Secrets("tee-attestation").Get(ctx, "kbs-mesh-ca", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(secret.Data["mesh-ca.crt"]) != string(oldCertPEM) {
-		t.Error("Secret should have been rolled back to original cert")
+	if string(secret.Data["mesh-ca.crt"]) == string(oldCertPEM) {
+		t.Error("Secret should have been updated with new cert")
 	}
 }
 
