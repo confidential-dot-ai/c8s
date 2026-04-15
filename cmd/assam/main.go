@@ -21,6 +21,9 @@ import (
 	"github.com/lunal-dev/c8s/internal/server"
 	"github.com/lunal-dev/c8s/internal/whitelist"
 	"github.com/lunal-dev/c8s/pkg/attestationclient"
+	"github.com/lunal-dev/c8s/pkg/ktoken"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func main() {
@@ -37,6 +40,8 @@ func main() {
 		readinessInterval    time.Duration
 		whitelistDB          string
 		whitelistAdminPass   string
+		tokenSignerSecret    string
+		tokenSignerNamespace string
 	)
 
 	rootCmd := &cobra.Command{
@@ -56,6 +61,8 @@ func main() {
 				readinessInterval:    readinessInterval,
 				whitelistDB:          whitelistDB,
 				whitelistAdminPass:   whitelistAdminPass,
+				tokenSignerSecret:    tokenSignerSecret,
+				tokenSignerNamespace: tokenSignerNamespace,
 			})
 		},
 	}
@@ -73,10 +80,11 @@ func main() {
 	flags.DurationVar(&readinessInterval, "readiness-interval", 10*time.Second, "Interval between readiness health checks")
 	flags.StringVar(&whitelistDB, "whitelist-db", "", "Path to the whitelist SQLite database file")
 	flags.StringVar(&whitelistAdminPass, "whitelist-admin-password", "", "Admin password for whitelist mutation endpoints")
+	flags.StringVar(&tokenSignerSecret, "token-signer-secret", "kbs-token-signing-keys", "Kubernetes Secret holding the EAR signing key (set empty to use --ear-key file instead)")
+	flags.StringVar(&tokenSignerNamespace, "token-signer-namespace", envOrDefault("POD_NAMESPACE", "tee-attestation"), "Namespace of the token-signer Secret")
 
 	rootCmd.MarkFlagRequired("attestation-service-url")
 	rootCmd.MarkFlagRequired("cert-issuer-url")
-	rootCmd.MarkFlagRequired("ear-key")
 	rootCmd.MarkFlagRequired("whitelist-db")
 	rootCmd.MarkFlagRequired("whitelist-admin-password")
 
@@ -98,12 +106,17 @@ type config struct {
 	readinessInterval    time.Duration
 	whitelistDB          string
 	whitelistAdminPass   string
+	tokenSignerSecret    string
+	tokenSignerNamespace string
 }
 
 func run(cfg config) error {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	if err := validateURL(cfg.attestationSvcURL); err != nil {
 		return fmt.Errorf("--attestation-service-url: %w", err)
@@ -112,9 +125,9 @@ func run(cfg config) error {
 		return fmt.Errorf("--cert-issuer-url: %w", err)
 	}
 
-	earKeyPEM, err := os.ReadFile(cfg.earKeyPath)
+	earKeyPEM, err := loadEARKey(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to read EAR key at %s: %w", cfg.earKeyPath, err)
+		return err
 	}
 
 	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
@@ -159,9 +172,6 @@ func run(cfg config) error {
 	}
 
 	router := server.NewRouter(deps)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// Start readiness checker in background
 	go checker.Run(ctx)
@@ -218,4 +228,45 @@ func formatDuration(d time.Duration) string {
 		s += fmt.Sprintf("%ds", totalSecs)
 	}
 	return s
+}
+
+// loadEARKey loads the EAR signing key either from a Kubernetes Secret
+// (default) or from a file (--ear-key, legacy mode). The two modes are
+// mutually exclusive: if --token-signer-secret is non-empty, --ear-key
+// is ignored.
+func loadEARKey(ctx context.Context, cfg config) ([]byte, error) {
+	if cfg.tokenSignerSecret != "" {
+		if cfg.earKeyPath != "" {
+			slog.Warn("--ear-key is ignored when --token-signer-secret is set")
+		}
+		rc, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("k8s in-cluster config: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(rc)
+		if err != nil {
+			return nil, fmt.Errorf("k8s client: %w", err)
+		}
+		return ktoken.Load(
+			ctx, client,
+			cfg.tokenSignerNamespace, cfg.tokenSignerSecret,
+			slog.Default(),
+		)
+	}
+
+	if cfg.earKeyPath == "" {
+		return nil, fmt.Errorf("either --token-signer-secret or --ear-key must be set")
+	}
+	keyPEM, err := os.ReadFile(cfg.earKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read EAR key at %s: %w", cfg.earKeyPath, err)
+	}
+	return keyPEM, nil
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
