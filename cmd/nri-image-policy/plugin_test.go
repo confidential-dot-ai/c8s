@@ -8,13 +8,15 @@ import (
 	"github.com/containerd/nri/pkg/api"
 	"github.com/lunal-dev/c8s/internal/audit"
 	"github.com/lunal-dev/c8s/internal/cache"
+	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
 )
 
 func newTestPlugin(cfg *Config) *Plugin {
 	return &Plugin{
-		cfg:    cfg,
-		audit:  audit.NewLogger(),
-		logger: slog.Default(),
+		cfg:      cfg,
+		resolver: &ctrdresolver.Resolver{},
+		audit:    audit.NewLogger(),
+		logger:   slog.Default(),
 	}
 }
 
@@ -217,15 +219,17 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	policyCache := cache.NewPolicyCache()
 	p := &Plugin{
 		cfg: &Config{
+			Whitelist: WhitelistConfig{URL: "http://wl.local:8080", Timeout: 30},
 			Policy: PolicyConfig{
 				Mode:                  "fail-closed",
 				DenyMissingAnnotation: true,
 				ExemptNamespaces:      []string{"kube-system"},
 			},
 		},
-		audit:  audit.NewLogger(),
-		logger: slog.Default(),
-		cache:  policyCache,
+		resolver: &ctrdresolver.Resolver{},
+		audit:    audit.NewLogger(),
+		logger:   slog.Default(),
+		cache:    policyCache,
 	}
 	p.SetReady()
 
@@ -245,5 +249,291 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	expected := "container has no image annotation"
 	if err.Error() != expected {
 		t.Fatalf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+// --- Label expression evaluation tests ---
+
+func makePodWithLabels(namespace, name string, labels map[string]string) *api.PodSandbox {
+	return &api.PodSandbox{
+		Id:        name + "-id",
+		Name:      name,
+		Namespace: namespace,
+		Labels:    labels,
+	}
+}
+
+func TestEvaluateExpression_In_Match(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}}
+	if !evaluateExpression(expr, map[string]string{"tenant": "acme"}) {
+		t.Fatal("expected In to match")
+	}
+}
+
+func TestEvaluateExpression_In_NoMatch(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}}
+	if evaluateExpression(expr, map[string]string{"tenant": "gamma"}) {
+		t.Fatal("expected In not to match")
+	}
+}
+
+func TestEvaluateExpression_In_KeyMissing(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "In", Values: []string{"acme"}}
+	if evaluateExpression(expr, map[string]string{"other": "acme"}) {
+		t.Fatal("expected In not to match when key missing")
+	}
+}
+
+func TestEvaluateExpression_NotIn_Match(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
+	if !evaluateExpression(expr, map[string]string{"tenant": "acme"}) {
+		t.Fatal("expected NotIn to match when value not in list")
+	}
+}
+
+func TestEvaluateExpression_NotIn_Blocked(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
+	if evaluateExpression(expr, map[string]string{"tenant": "untrusted"}) {
+		t.Fatal("expected NotIn not to match when value in list")
+	}
+}
+
+func TestEvaluateExpression_NotIn_KeyMissing(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
+	if !evaluateExpression(expr, map[string]string{}) {
+		t.Fatal("expected NotIn to match when key missing")
+	}
+}
+
+func TestEvaluateExpression_Exists_Present(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "Exists"}
+	if !evaluateExpression(expr, map[string]string{"tenant": "anything"}) {
+		t.Fatal("expected Exists to match")
+	}
+}
+
+func TestEvaluateExpression_Exists_Missing(t *testing.T) {
+	expr := LabelExpression{Key: "tenant", Operator: "Exists"}
+	if evaluateExpression(expr, map[string]string{"other": "value"}) {
+		t.Fatal("expected Exists not to match when key missing")
+	}
+}
+
+func TestEvaluateExpression_DoesNotExist_Missing(t *testing.T) {
+	expr := LabelExpression{Key: "privileged", Operator: "DoesNotExist"}
+	if !evaluateExpression(expr, map[string]string{"other": "value"}) {
+		t.Fatal("expected DoesNotExist to match")
+	}
+}
+
+func TestEvaluateExpression_DoesNotExist_Present(t *testing.T) {
+	expr := LabelExpression{Key: "privileged", Operator: "DoesNotExist"}
+	if evaluateExpression(expr, map[string]string{"privileged": "true"}) {
+		t.Fatal("expected DoesNotExist not to match when key present")
+	}
+}
+
+// --- evaluateRule tests ---
+
+func TestEvaluateRule_AllExpressionsMustMatch(t *testing.T) {
+	rule := LabelRule{
+		Name: "test",
+		MatchExpressions: []LabelExpression{
+			{Key: "tenant", Operator: "In", Values: []string{"acme"}},
+			{Key: "team", Operator: "Exists"},
+		},
+	}
+	// Both match
+	if !evaluateRule(rule, map[string]string{"tenant": "acme", "team": "backend"}) {
+		t.Fatal("expected rule to pass when all expressions match")
+	}
+	// Only first matches
+	if evaluateRule(rule, map[string]string{"tenant": "acme"}) {
+		t.Fatal("expected rule to fail when not all expressions match")
+	}
+}
+
+func TestEvaluateRule_NilLabels(t *testing.T) {
+	rule := LabelRule{
+		Name: "test",
+		MatchExpressions: []LabelExpression{
+			{Key: "tenant", Operator: "Exists"},
+		},
+	}
+	if evaluateRule(rule, nil) {
+		t.Fatal("expected rule to fail with nil labels")
+	}
+}
+
+func TestEvaluateRule_DoesNotExist_NilLabels(t *testing.T) {
+	rule := LabelRule{
+		Name: "test",
+		MatchExpressions: []LabelExpression{
+			{Key: "privileged", Operator: "DoesNotExist"},
+		},
+	}
+	if !evaluateRule(rule, nil) {
+		t.Fatal("expected DoesNotExist to pass with nil labels")
+	}
+}
+
+// --- checkLabels tests ---
+
+func TestCheckLabels_ExemptNamespace(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			ExemptNamespaces: []string{"kube-system"},
+			LabelRules: []LabelRule{
+				{Name: "require-tenant", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "Exists"},
+				}},
+			},
+		},
+	})
+
+	verdict, _ := p.checkLabels(p.cfg, "kube-system", "pod", "ctr", nil)
+	if verdict != verdictSkip {
+		t.Fatalf("expected verdictSkip for exempt namespace, got %d", verdict)
+	}
+}
+
+func TestCheckLabels_RuleViolation(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			LabelRules: []LabelRule{
+				{Name: "allowed-tenants", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}},
+				}},
+			},
+		},
+	})
+
+	// Pod with wrong tenant value
+	verdict, reason := p.checkLabels(p.cfg, "default", "pod", "ctr",
+		map[string]string{"tenant": "gamma"})
+	if verdict != verdictDeny {
+		t.Fatalf("expected verdictDeny, got %d", verdict)
+	}
+	if reason != `label rule "allowed-tenants" denied workload` {
+		t.Fatalf("unexpected reason: %s", reason)
+	}
+}
+
+func TestCheckLabels_AllRulesPass(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			LabelRules: []LabelRule{
+				{Name: "allowed-tenants", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}},
+				}},
+				{Name: "no-privileged", MatchExpressions: []LabelExpression{
+					{Key: "privileged", Operator: "DoesNotExist"},
+				}},
+			},
+		},
+	})
+
+	verdict, _ := p.checkLabels(p.cfg, "default", "pod", "ctr",
+		map[string]string{"tenant": "acme"})
+	if verdict != verdictAllow {
+		t.Fatalf("expected verdictAllow, got %d", verdict)
+	}
+}
+
+func TestCheckLabels_FirstViolationWins(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			LabelRules: []LabelRule{
+				{Name: "first-rule", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "Exists"},
+				}},
+				{Name: "second-rule", MatchExpressions: []LabelExpression{
+					{Key: "team", Operator: "Exists"},
+				}},
+			},
+		},
+	})
+
+	// Both rules violated — first should be reported
+	verdict, reason := p.checkLabels(p.cfg, "default", "pod", "ctr", map[string]string{})
+	if verdict != verdictDeny {
+		t.Fatalf("expected verdictDeny, got %d", verdict)
+	}
+	if reason != `label rule "first-rule" denied workload` {
+		t.Fatalf("expected first rule to be reported, got: %s", reason)
+	}
+}
+
+// --- CreateContainer with label rules ---
+
+func TestCreateContainer_LabelRuleDeny_FailClosed(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			Mode: "fail-closed",
+			LabelRules: []LabelRule{
+				{Name: "allowed-tenants", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "In", Values: []string{"acme"}},
+				}},
+			},
+		},
+	})
+	p.SetReady()
+
+	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "evil"})
+	ctr := makeCtr(pod.Id, "myctr")
+
+	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	if err == nil {
+		t.Fatal("expected error from label rule denial")
+	}
+	if err.Error() != `label rule "allowed-tenants" denied workload` {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
+func TestCreateContainer_LabelRuleDeny_AuditMode(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			Mode: "audit",
+			LabelRules: []LabelRule{
+				{Name: "allowed-tenants", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "In", Values: []string{"acme"}},
+				}},
+			},
+		},
+	})
+	p.SetReady()
+
+	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "evil"})
+	ctr := makeCtr(pod.Id, "myctr")
+
+	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	if err != nil {
+		t.Fatalf("expected audit mode to allow, got error: %v", err)
+	}
+}
+
+func TestCreateContainer_WhitelistDisabled_SkipsImageCheck(t *testing.T) {
+	p := newTestPlugin(&Config{
+		Policy: PolicyConfig{
+			Mode:                  "fail-closed",
+			DenyMissingAnnotation: true,
+			LabelRules: []LabelRule{
+				{Name: "require-tenant", MatchExpressions: []LabelExpression{
+					{Key: "tenant", Operator: "Exists"},
+				}},
+			},
+		},
+	})
+	p.SetReady()
+
+	// Pod has tenant label, no image annotation — should pass because
+	// whitelist is disabled (no URL), image check is skipped.
+	pod := makePodWithLabels("default", "mypod", map[string]string{"tenant": "acme"})
+	ctr := makeCtr(pod.Id, "myctr")
+
+	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	if err != nil {
+		t.Fatalf("expected no error with whitelist disabled, got: %v", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 	containerdclient "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/distribution/reference"
 )
 
 // Resolver resolves image tags to digests using containerd's image store.
@@ -34,9 +35,18 @@ func NewResolver(socket, namespace string) (*Resolver, error) {
 func (r *Resolver) Resolve(ctx context.Context, imageRef string) (string, error) {
 	nsCtx := namespaces.WithNamespace(ctx, r.namespace)
 
-	img, err := r.client.GetImage(nsCtx, imageRef)
+	// containerd stores images under their fully-qualified names
+	// (e.g. docker.io/library/nginx:1.27); kubelet may pass short
+	// forms (nginx:1.27, rancher/local-path-provisioner:v0.0.30).
+	// Normalize before looking up.
+	normalized := imageRef
+	if named, err := reference.ParseDockerRef(imageRef); err == nil {
+		normalized = named.String()
+	}
+
+	img, err := r.client.GetImage(nsCtx, normalized)
 	if err != nil {
-		return "", fmt.Errorf("image not found in containerd store: %s: %w", imageRef, err)
+		return "", fmt.Errorf("image not found in containerd store: %s: %w", normalized, err)
 	}
 
 	return img.Target().Digest.String(), nil

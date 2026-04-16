@@ -7,6 +7,7 @@ import "log/slog"
 type Event struct {
 	Action    string // allow, deny
 	Reason    string
+	Rule      string // label rule name, if any
 	Namespace string
 	Pod       string
 	Container string
@@ -31,6 +32,9 @@ func (l *Logger) Log(event Event) {
 		"pod", event.Pod,
 		"container", event.Container,
 		"image", event.Image,
+	}
+	if event.Rule != "" {
+		attrs = append(attrs, "rule", event.Rule)
 	}
 	if event.Error != "" {
 		attrs = append(attrs, "error", event.Error)

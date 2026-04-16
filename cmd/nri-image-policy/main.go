@@ -69,17 +69,22 @@ func main() {
 	policyCache := cache.NewPolicyCache()
 	auditLogger := audit.NewLogger()
 
-	// Initialize whitelist client
-	wlCfg := cfg.Whitelist
-	logger.Info("initializing whitelist client", "url", wlCfg.URL)
+	var wlClient whitelistclient.Client
+	if cfg.WhitelistEnabled() {
+		wlCfg := cfg.Whitelist
+		logger.Info("initializing whitelist client", "url", wlCfg.URL)
+		wlClient = whitelistclient.NewClientWithHTTP(wlCfg.URL, &http.Client{
+			Timeout: wlCfg.Timeout,
+		})
+	} else {
+		logger.Info("whitelist disabled, running with label rules only")
+	}
 
-	wlClient := whitelistclient.NewClientWithHTTP(wlCfg.URL, &http.Client{
-		Timeout: wlCfg.Timeout,
-	})
-
-	// Create plugin (not ready yet — will deny non-exempt containers until
-	// whitelist is loaded, closing the startup security gap).
-	logger.Info("creating NRI plugin (not ready, fail-closed until whitelist loaded)")
+	if cfg.WhitelistEnabled() {
+		logger.Info("creating NRI plugin (not ready, fail-closed until whitelist loaded)")
+	} else {
+		logger.Info("creating NRI plugin (label rules only)")
+	}
 	plugin, err := NewPlugin(cfg, resolver, policyCache, auditLogger, logger, wlClient)
 	if err != nil {
 		logger.Error("failed to create plugin", "error", err)
@@ -120,54 +125,54 @@ func main() {
 		pluginErrCh <- plugin.Run(ctx)
 	}()
 
-	// Fetch initial whitelist with retries.
-	// Non-blocking checks on pluginErrCh and ctx.Done so we exit if NRI
-	// dies or a signal is received during init.
-	var initialWhitelist *whitelist.Whitelist
-	delay := whitelistApiInitialDelay
-	for attempt := 1; attempt <= whitelistApiMaxRetries; attempt++ {
-		select {
-		case err := <-pluginErrCh:
-			logger.Error("NRI plugin died during whitelist init", "error", err)
-			os.Exit(1)
-		case <-ctx.Done():
-			logger.Info("shutdown requested during whitelist init")
-			os.Exit(0)
-		default:
-		}
-
-		reqCtx, reqCancel := context.WithTimeout(ctx, wlCfg.Timeout)
-
-		logger.Info("fetching whitelist", "attempt", attempt)
-		wl, err := wlClient.FetchWhitelist(reqCtx)
-		reqCancel()
-		if err != nil {
-			logger.Error("whitelist fetch failed", "attempt", attempt, "error", err)
-			if attempt < whitelistApiMaxRetries {
-				logger.Info("retrying whitelist fetch", "delay", delay)
-				select {
-				case <-time.After(delay):
-				case <-ctx.Done():
-					logger.Info("shutdown requested during whitelist init")
-					os.Exit(0)
-				}
-				delay *= 2
-				continue
+	if cfg.WhitelistEnabled() {
+		// Fetch initial whitelist with retries.
+		wlCfg := cfg.Whitelist
+		var initialWhitelist *whitelist.Whitelist
+		delay := whitelistApiInitialDelay
+		for attempt := 1; attempt <= whitelistApiMaxRetries; attempt++ {
+			select {
+			case err := <-pluginErrCh:
+				logger.Error("NRI plugin died during whitelist init", "error", err)
+				os.Exit(1)
+			case <-ctx.Done():
+				logger.Info("shutdown requested during whitelist init")
+				os.Exit(0)
+			default:
 			}
-			logger.Error("whitelist fetch failed after all retries, exiting")
-			os.Exit(1)
+
+			reqCtx, reqCancel := context.WithTimeout(ctx, wlCfg.Timeout)
+
+			logger.Info("fetching whitelist", "attempt", attempt)
+			wl, err := wlClient.FetchWhitelist(reqCtx)
+			reqCancel()
+			if err != nil {
+				logger.Error("whitelist fetch failed", "attempt", attempt, "error", err)
+				if attempt < whitelistApiMaxRetries {
+					logger.Info("retrying whitelist fetch", "delay", delay)
+					select {
+					case <-time.After(delay):
+					case <-ctx.Done():
+						logger.Info("shutdown requested during whitelist init")
+						os.Exit(0)
+					}
+					delay *= 2
+					continue
+				}
+				logger.Error("whitelist fetch failed after all retries, exiting")
+				os.Exit(1)
+			}
+
+			initialWhitelist = wl
+			logger.Info("whitelist loaded", "digests", len(initialWhitelist.Digests))
+			break
 		}
 
-		initialWhitelist = wl
-		logger.Info("whitelist loaded", "digests", len(initialWhitelist.Digests))
-		break
+		policyCache.SetWhitelist(initialWhitelist)
 	}
 
-	// Seed the cache and mark ready — new CreateContainer calls will now
-	// proceed through the normal whitelist check path.
-	policyCache.SetWhitelist(initialWhitelist)
 	plugin.SetReady()
-	logger.Info("plugin ready, fail-closed startup window closed")
+	logger.Info("plugin ready")
 
 	// Run deferred sweep on containers that were present when Synchronize
 	// was called before the plugin was ready.

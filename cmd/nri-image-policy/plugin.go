@@ -172,6 +172,64 @@ func (p *Plugin) fetchWhitelistDeduplicated(ctx context.Context) (*whitelist.Whi
 	return v.(*whitelist.Whitelist), nil
 }
 
+// evaluateExpression checks a single label selector expression against a labels map.
+func evaluateExpression(expr LabelExpression, labels map[string]string) bool {
+	value, exists := labels[expr.Key]
+	switch expr.Operator {
+	case OpIn:
+		return exists && slices.Contains(expr.Values, value)
+	case OpNotIn:
+		return !exists || !slices.Contains(expr.Values, value)
+	case OpExists:
+		return exists
+	case OpDoesNotExist:
+		return !exists
+	}
+	return false
+}
+
+// evaluateRule checks whether a pod satisfies all expressions in a label rule.
+// Returns true if the pod satisfies the rule (i.e. should be allowed).
+func evaluateRule(rule LabelRule, podLabels map[string]string) bool {
+	for _, expr := range rule.MatchExpressions {
+		if !evaluateExpression(expr, podLabels) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkLabels evaluates all label rules against a pod's labels.
+// Returns verdictSkip for exempt namespaces, verdictDeny if any rule is violated,
+// or verdictAllow if all rules pass.
+func (p *Plugin) checkLabels(cfg *Config, namespace, podName, containerName string, podLabels map[string]string) (imageVerdict, string) {
+	if slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
+		return verdictSkip, ""
+	}
+
+	for _, rule := range cfg.Policy.LabelRules {
+		if !evaluateRule(rule, podLabels) {
+			reason := fmt.Sprintf("label rule %q denied workload", rule.Name)
+			p.logger.Warn("label rule violated",
+				"rule", rule.Name,
+				"namespace", namespace,
+				"pod", podName,
+				"container", containerName,
+			)
+			p.audit.Log(audit.Event{
+				Action:    "deny",
+				Reason:    "label_rule",
+				Rule:      rule.Name,
+				Namespace: namespace,
+				Pod:       podName,
+				Container: containerName,
+			})
+			return verdictDeny, reason
+		}
+	}
+	return verdictAllow, ""
+}
+
 // checkImage validates a container's image against the whitelist.
 // Returns the verdict and an error string (empty if none).
 func (p *Plugin) checkImage(ctx context.Context, cfg *Config, namespace, podName, containerName, imageRef string) (imageVerdict, string) {
@@ -337,14 +395,29 @@ func (p *Plugin) runSweep(ctx context.Context, cfg *Config, pods []*api.PodSandb
 			continue
 		}
 
-		imageRef := ctr.GetAnnotations()[annotationImageName]
-		verdict, _ := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef)
+		denied := false
 
-		if verdict != verdictDeny {
+		labelVerdict, _ := p.checkLabels(cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), pod.GetLabels())
+		if labelVerdict == verdictSkip {
+			continue
+		}
+		if labelVerdict == verdictDeny {
+			denied = true
+		}
+
+		if !denied && cfg.WhitelistEnabled() {
+			imageRef := ctr.GetAnnotations()[annotationImageName]
+			imgVerdict, _ := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef)
+			if imgVerdict == verdictDeny {
+				denied = true
+			}
+		}
+
+		if !denied {
 			continue
 		}
 
-		if cfg.Policy.Mode == "audit" {
+		if cfg.Policy.Mode == ModeAudit {
 			continue
 		}
 
@@ -405,7 +478,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			return nil, nil, nil
 		}
 
-		if cfg.Policy.Mode == "audit" {
+		if cfg.Policy.Mode == ModeAudit {
 			p.logger.Warn("plugin initializing: would deny container creation (audit mode)",
 				"namespace", pod.GetNamespace(),
 				"pod", pod.GetName(),
@@ -422,25 +495,37 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, fmt.Errorf("image policy plugin initializing, container creation denied")
 	}
 
-	// Get image reference from annotations
-	annotations := ctr.GetAnnotations()
-	imageRef := annotations[annotationImageName]
-	if imageRef == "" {
-		podAnnotations := pod.GetAnnotations()
-		imageRef = podAnnotations[annotationImageName]
-	}
-
-	verdict, reason := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef)
-
-	switch verdict {
-	case verdictDeny:
-		if cfg.Policy.Mode == "audit" {
+	// Label-based policy check (fast, no I/O — runs before image check)
+	labelVerdict, labelReason := p.checkLabels(cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), pod.GetLabels())
+	if labelVerdict == verdictDeny {
+		if cfg.Policy.Mode == ModeAudit {
 			return nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("%s", reason)
-	default:
+		return nil, nil, fmt.Errorf("%s", labelReason)
+	}
+	if labelVerdict == verdictSkip {
 		return nil, nil, nil
 	}
+
+	// Image whitelist check (only when configured)
+	if cfg.WhitelistEnabled() {
+		annotations := ctr.GetAnnotations()
+		imageRef := annotations[annotationImageName]
+		if imageRef == "" {
+			podAnnotations := pod.GetAnnotations()
+			imageRef = podAnnotations[annotationImageName]
+		}
+
+		verdict, reason := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef)
+		if verdict == verdictDeny {
+			if cfg.Policy.Mode == ModeAudit {
+				return nil, nil, nil
+			}
+			return nil, nil, fmt.Errorf("%s", reason)
+		}
+	}
+
+	return nil, nil, nil
 }
 
 // extractDigest extracts the digest from an image reference.
