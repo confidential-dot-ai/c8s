@@ -1,6 +1,6 @@
 # cert-rotator
 
-Rotates token-signer and mesh CA keypairs for the cert-issuer. Generates new certificates, updates Kubernetes Secrets and ConfigMaps with CA bundles, and verifies cert-issuer hot-reload via metrics polling.
+Rotates mesh CA keypairs for the cert-issuer. Generates new certificates, updates Kubernetes Secrets and ConfigMaps with CA bundles, and verifies cert-issuer hot-reload via metrics polling. Token-signer rotation is handled by assam in-process (see `pkg/earsigner`).
 
 Deployed as a Kubernetes CronJob via the `trustee_kbs` Ansible role.
 
@@ -14,22 +14,24 @@ make build-cert-rotator
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--namespace` | `tee-attestation` | Trustee namespace (KBS Secrets location) |
-| `--mesh-namespace` | `ratls-mesh-system` | ratls-mesh namespace (CA ConfigMap location) |
-| `--components` | `token-signer,mesh-ca` | Comma-separated components to rotate |
-| `--token-validity-days` | `365` | Token-signer certificate validity (days) |
+| `--namespace` | `tee-attestation` | Namespace holding the kbs-mesh-ca Secret and mesh-ca-cert ConfigMap |
+| `--components` | `mesh-ca` | Comma-separated components to rotate |
 | `--mesh-ca-validity-days` | `365` | Mesh CA certificate validity (days) |
 | `--cert-issuer-url` | *(empty)* | cert-issuer metrics URL for hot-reload verification |
 | `--verify-timeout` | `120s` | Timeout for reload verification polling |
+| `--verify-poll-interval` | `5s` | Polling interval for cert-issuer reload verification |
+| `--http-timeout` | `30s` | HTTP client timeout for KBS and cert-issuer requests |
 | `--max-ttl` | `4h` | Max leaf cert TTL for CA bundle trimming cutoff |
 | `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `--kbs-url` | *(empty)* | KBS base URL (enables attested rotation via cert-issuer /v1/rotate-ca) |
+| `--attest-cmd` | `/attest-sev-snp` | Path to attestation binary |
+| `--cert-issuer-rotate-url` | *(empty)* | cert-issuer /v1/rotate-ca endpoint URL |
 
 ## Rotation Flow
 
 1. Capture baseline cert-issuer metrics (if `--cert-issuer-url` set)
 2. For each component in `--components`:
-   - **token-signer**: Generate P-256 keypair, create self-signed certificate, update `kbs-token-signing-keys` Secret
-   - **mesh-ca**: Generate P-384 keypair, create self-signed CA certificate, update `kbs-mesh-ca` Secret, build CA bundle (new cert + trimmed old certs), update `mesh-ca-cert` ConfigMap
+   - **mesh-ca**: Generate P-384 keypair, create self-signed CA certificate, update `kbs-mesh-ca` Secret, build CA bundle (new cert + trimmed old certs), update `mesh-ca-cert` ConfigMap. In KBS mode (`--kbs-url`), attests to KBS and triggers rotation via cert-issuer `/v1/rotate-ca` instead.
 3. Verify cert-issuer hot-reload via metrics polling (5s interval until reload counter increments AND CA fingerprint matches)
 
 ## CA Bundle Trimming
@@ -54,7 +56,7 @@ Each rotation logs SHA-256 fingerprints for old and new certificates:
 }
 ```
 
-Token-signer rotations are logged with the same structure.
+KBS-mode rotations log the new fingerprint returned by cert-issuer.
 
 ## Deployment
 

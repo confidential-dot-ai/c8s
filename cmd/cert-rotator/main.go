@@ -4,7 +4,7 @@
 // updates Secrets and ConfigMaps with CA bundles (new + old), and verifies
 // cert-issuer hot-reload via metrics polling.
 //
-// Token-signer rotation is handled by assam in-process (see pkg/ktoken).
+// Token-signer rotation is handled by assam in-process (see pkg/earsigner).
 package main
 
 import (

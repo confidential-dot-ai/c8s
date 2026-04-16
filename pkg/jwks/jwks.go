@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4"
 )
 
 // FromPublicKey builds a go-jose JSONWebKey with kid set to the RFC 7638

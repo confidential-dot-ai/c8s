@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )

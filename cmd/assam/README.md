@@ -8,7 +8,6 @@ The main key broker service binary. Assam verifies TEE attestation evidence via 
 assam \
   --attestation-service-url http://attestation-service:8400 \
   --cert-issuer-url http://cert-issuer:8090 \
-  --ear-key /secrets/ear-signing-key.pem \
   --whitelist-db /data/whitelist.db \
   --whitelist-admin-password secret
 ```
@@ -21,13 +20,15 @@ assam \
 | `--port` | `-p` | `8080` | Port to listen on |
 | `--attestation-service-url` | | *(required)* | URL of the attestation service |
 | `--cert-issuer-url` | | *(required)* | URL of the cert-issuer service |
-| `--ear-key` | | *(required)* | Path to EC private key PEM for signing EAR tokens |
 | `--ear-issuer` | | `assam` | Issuer name for EAR tokens |
 | `--cert-ttl` | | `24h` | TTL for issued certificates |
 | `--challenge-ttl` | | `1m` | Challenge validity period |
 | `--readiness-interval` | | `10s` | Interval between readiness health checks |
 | `--whitelist-db` | | *(required)* | Path to the whitelist SQLite database file |
 | `--whitelist-admin-password` | | *(required)* | Admin password for whitelist mutation endpoints |
+| `--token-signer-rotation-interval` | | `720h` | How often to rotate the EAR signing key (0 = disable) |
+| `--token-signer-overlap` | | `25h` | How long a retired key stays in JWKS after rotation |
+| `--token-signer-rotation-jitter` | | `0.1` | Fraction of rotation interval to jitter the first tick |
 
 ## Graceful shutdown
 

@@ -26,6 +26,7 @@ Confidential computing infrastructure for Kubernetes. Provides TEE attestation, 
 | [`pkg/whitelist`](pkg/whitelist/) | Whitelist types and JSON parsing |
 | [`pkg/types`](pkg/types/) | Shared request/response types |
 | [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
+| [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Project structure
@@ -58,6 +59,7 @@ pkg/
   whitelist/               Whitelist types
   types/                   Shared request/response types
   issuerapi/               Cert issuer API types
+  earsigner/               EAR token-signing key rotation and JWKS
   certutil/                Certificate utilities
 test/
   integration/             Docker-compose integration tests

@@ -21,9 +21,7 @@ import (
 	"github.com/lunal-dev/c8s/internal/server"
 	"github.com/lunal-dev/c8s/internal/whitelist"
 	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/ktoken"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"github.com/lunal-dev/c8s/pkg/earsigner"
 )
 
 func main() {
@@ -33,15 +31,12 @@ func main() {
 		attestationSvcURL    string
 		attestationSvcAPIKey string
 		certIssuerURL        string
-		earKeyPath           string
 		earIssuerName        string
 		certTTL              time.Duration
 		challengeTTL         time.Duration
 		readinessInterval    time.Duration
 		whitelistDB          string
 		whitelistAdminPass   string
-		tokenSignerSecret    string
-		tokenSignerNamespace string
 		rotationInterval     time.Duration
 		rotationOverlap      time.Duration
 		rotationJitter       float64
@@ -57,15 +52,12 @@ func main() {
 				attestationSvcURL:    attestationSvcURL,
 				attestationSvcAPIKey: attestationSvcAPIKey,
 				certIssuerURL:        certIssuerURL,
-				earKeyPath:           earKeyPath,
 				earIssuerName:        earIssuerName,
 				certTTL:              certTTL,
 				challengeTTL:         challengeTTL,
 				readinessInterval:    readinessInterval,
 				whitelistDB:          whitelistDB,
 				whitelistAdminPass:   whitelistAdminPass,
-				tokenSignerSecret:    tokenSignerSecret,
-				tokenSignerNamespace: tokenSignerNamespace,
 				rotationInterval:     rotationInterval,
 				rotationOverlap:      rotationOverlap,
 				rotationJitter:       rotationJitter,
@@ -79,15 +71,12 @@ func main() {
 	flags.StringVar(&attestationSvcURL, "attestation-service-url", "", "URL of the attestation service")
 	flags.StringVar(&attestationSvcAPIKey, "attestation-service-api-key", "", "API key for the attestation service (required when running in remote mode)")
 	flags.StringVar(&certIssuerURL, "cert-issuer-url", "", "URL of the cert-issuer service")
-	flags.StringVar(&earKeyPath, "ear-key", "", "Path to the EC private key PEM for EAR tokens")
 	flags.StringVar(&earIssuerName, "ear-issuer", "assam", "Issuer name for EAR tokens")
 	flags.DurationVar(&certTTL, "cert-ttl", 24*time.Hour, "TTL for issued certificates")
 	flags.DurationVar(&challengeTTL, "challenge-ttl", 60*time.Second, "Challenge validity period")
 	flags.DurationVar(&readinessInterval, "readiness-interval", 10*time.Second, "Interval between readiness health checks")
 	flags.StringVar(&whitelistDB, "whitelist-db", "", "Path to the whitelist SQLite database file")
 	flags.StringVar(&whitelistAdminPass, "whitelist-admin-password", "", "Admin password for whitelist mutation endpoints")
-	flags.StringVar(&tokenSignerSecret, "token-signer-secret", "kbs-token-signing-keys", "Kubernetes Secret holding the EAR signing key (set empty to use --ear-key file instead)")
-	flags.StringVar(&tokenSignerNamespace, "token-signer-namespace", envOrDefault("POD_NAMESPACE", "tee-attestation"), "Namespace of the token-signer Secret")
 	flags.DurationVar(&rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "How often to rotate the EAR signing key (0 = disable rotation)")
 	flags.DurationVar(&rotationOverlap, "token-signer-overlap", 25*time.Hour, "How long a retired key stays in JWKS after rotation")
 	flags.Float64Var(&rotationJitter, "token-signer-rotation-jitter", 0.1, "Fraction of rotation interval to jitter the first tick")
@@ -108,15 +97,12 @@ type config struct {
 	attestationSvcURL    string
 	attestationSvcAPIKey string
 	certIssuerURL        string
-	earKeyPath           string
 	earIssuerName        string
 	certTTL              time.Duration
 	challengeTTL         time.Duration
 	readinessInterval    time.Duration
 	whitelistDB          string
 	whitelistAdminPass   string
-	tokenSignerSecret    string
-	tokenSignerNamespace string
 	rotationInterval     time.Duration
 	rotationOverlap      time.Duration
 	rotationJitter       float64
@@ -137,31 +123,26 @@ func run(cfg config) error {
 		return fmt.Errorf("--cert-issuer-url: %w", err)
 	}
 
-	earKeyPEM, err := loadEARKey(ctx, cfg)
+	// Generate an ephemeral token-signing key in memory.
+	earKeyPEM, err := earsigner.Generate()
 	if err != nil {
-		return err
+		return fmt.Errorf("generate token-signing key: %w", err)
 	}
+	slog.Debug("generated ephemeral token-signing key")
 
 	earIssuer, err := ear.NewIssuer(earKeyPEM, cfg.earIssuerName, cfg.certTTL)
 	if err != nil {
 		return err
 	}
 
-	// Set up key rotation if running in Secret mode with rotation enabled.
-	var rotator *ktoken.Rotator
-	if cfg.tokenSignerSecret != "" && cfg.rotationInterval > 0 {
-		k8sClient, err := buildK8sClient()
-		if err != nil {
-			return fmt.Errorf("k8s client for rotation: %w", err)
-		}
-		rotator, err = ktoken.NewRotator(ktoken.RotatorConfig{
-			Client:    k8sClient,
-			Namespace: cfg.tokenSignerNamespace,
-			Secret:    cfg.tokenSignerSecret,
-			Interval:  cfg.rotationInterval,
-			Overlap:   cfg.rotationOverlap,
-			Jitter:    cfg.rotationJitter,
-			Logger:    slog.Default(),
+	// Set up in-memory key rotation.
+	var rotator *earsigner.Rotator
+	if cfg.rotationInterval > 0 {
+		rotator, err = earsigner.NewRotator(earsigner.RotatorConfig{
+			Interval: cfg.rotationInterval,
+			Overlap:  cfg.rotationOverlap,
+			Jitter:   cfg.rotationJitter,
+			Logger:   slog.Default(),
 		}, earKeyPEM, earIssuer.SwapKey)
 		if err != nil {
 			return fmt.Errorf("create key rotator: %w", err)
@@ -268,49 +249,4 @@ func formatDuration(d time.Duration) string {
 		s += fmt.Sprintf("%ds", totalSecs)
 	}
 	return s
-}
-
-// loadEARKey loads the EAR signing key either from a Kubernetes Secret
-// (default) or from a file (--ear-key, legacy mode). The two modes are
-// mutually exclusive: if --token-signer-secret is non-empty, --ear-key
-// is ignored.
-func loadEARKey(ctx context.Context, cfg config) ([]byte, error) {
-	if cfg.tokenSignerSecret != "" {
-		if cfg.earKeyPath != "" {
-			slog.Warn("--ear-key is ignored when --token-signer-secret is set")
-		}
-		client, err := buildK8sClient()
-		if err != nil {
-			return nil, fmt.Errorf("k8s client: %w", err)
-		}
-		return ktoken.Load(
-			ctx, client,
-			cfg.tokenSignerNamespace, cfg.tokenSignerSecret,
-			slog.Default(),
-		)
-	}
-
-	if cfg.earKeyPath == "" {
-		return nil, fmt.Errorf("either --token-signer-secret or --ear-key must be set")
-	}
-	keyPEM, err := os.ReadFile(cfg.earKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("read EAR key at %s: %w", cfg.earKeyPath, err)
-	}
-	return keyPEM, nil
-}
-
-func buildK8sClient() (kubernetes.Interface, error) {
-	rc, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, fmt.Errorf("in-cluster config: %w", err)
-	}
-	return kubernetes.NewForConfig(rc)
-}
-
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
