@@ -165,9 +165,6 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// contextKey is unexported to avoid collisions.
-type contextKey string
-
 // ReadinessFunc is a function that returns whether the service is ready.
 type ReadinessFunc func() bool
 

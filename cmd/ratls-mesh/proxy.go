@@ -608,14 +608,14 @@ type idleConn struct {
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	if err := c.Conn.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+	if err := c.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
-	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.idle)); err != nil {
+	if err := c.SetWriteDeadline(time.Now().Add(c.idle)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(b)

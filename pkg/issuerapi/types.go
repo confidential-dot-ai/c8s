@@ -149,7 +149,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	if d.Duration == 0 {
 		return json.Marshal("")
 	}
-	return json.Marshal(d.Duration.String())
+	return json.Marshal(d.String())
 }
 
 // UnmarshalJSON decodes a JSON string as a Go duration.

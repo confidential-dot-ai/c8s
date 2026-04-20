@@ -71,9 +71,9 @@ load balancer (e.g. nginx) that terminates TLS with the obtained certificate.`,
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval and SIGHUP nginx (0 = run once and exit)")
 
-	rootCmd.MarkFlagRequired("assam-url")
-	rootCmd.MarkFlagRequired("attestation-service-url")
-	rootCmd.MarkFlagRequired("san")
+	_ = rootCmd.MarkFlagRequired("assam-url")
+	_ = rootCmd.MarkFlagRequired("attestation-service-url")
+	_ = rootCmd.MarkFlagRequired("san")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

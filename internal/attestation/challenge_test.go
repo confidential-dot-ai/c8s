@@ -8,8 +8,8 @@ import (
 func TestCreateReturns32Bytes(t *testing.T) {
 	store := NewChallengeStore(5 * time.Minute)
 	challenge := store.Create()
-	if len(challenge) != 32 {
-		t.Fatalf("expected 32 bytes, got %d", len(challenge))
+	if got := len(challenge[:]); got != 32 {
+		t.Fatalf("expected 32 bytes, got %d", got)
 	}
 }
 

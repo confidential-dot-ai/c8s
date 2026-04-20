@@ -81,10 +81,10 @@ func main() {
 	flags.DurationVar(&rotationOverlap, "token-signer-overlap", 25*time.Hour, "How long a retired key stays in JWKS after rotation")
 	flags.Float64Var(&rotationJitter, "token-signer-rotation-jitter", 0.1, "Fraction of rotation interval to jitter the first tick")
 
-	rootCmd.MarkFlagRequired("attestation-service-url")
-	rootCmd.MarkFlagRequired("cert-issuer-url")
-	rootCmd.MarkFlagRequired("whitelist-db")
-	rootCmd.MarkFlagRequired("whitelist-admin-password")
+	_ = rootCmd.MarkFlagRequired("attestation-service-url")
+	_ = rootCmd.MarkFlagRequired("cert-issuer-url")
+	_ = rootCmd.MarkFlagRequired("whitelist-db")
+	_ = rootCmd.MarkFlagRequired("whitelist-admin-password")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

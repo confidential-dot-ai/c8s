@@ -95,7 +95,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("initializing whitelist client", "url", *whitelistURL)
+	slog.Info("initializing whitelist client", "url", *whitelistURL, "version", version)
 
 	client := whitelistclient.NewClientWithHTTP(*whitelistURL, &http.Client{
 		Timeout: *fetchTimeout,

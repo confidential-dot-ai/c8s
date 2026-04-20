@@ -47,11 +47,13 @@ func newK8sResolver(ctx context.Context, clientset kubernetes.Interface, nodeIP 
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { r.onPod(obj) },
 		UpdateFunc: func(_, obj interface{}) { r.onPod(obj) },
 		DeleteFunc: func(obj interface{}) { r.onDeletePod(obj) },
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("k8s resolver: add event handler: %w", err)
+	}
 
 	factory.Start(ctx.Done())
 

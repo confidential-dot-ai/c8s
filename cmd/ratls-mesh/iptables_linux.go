@@ -19,7 +19,7 @@ func parseIptablesFlags(name string) ([]iptablesRule, iptablesRule) {
 	inboundPort := fs.Int("inbound-port", 15006, "inbound listener port")
 	uid := fs.Int("uid", defaultProxyUID, "UID to exclude from redirect")
 	excludeUIDsStr := fs.String("exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 
 	var excludeUIDs []int
 	for _, s := range strings.Split(*excludeUIDsStr, ",") {
