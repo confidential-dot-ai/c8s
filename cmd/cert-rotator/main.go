@@ -158,7 +158,7 @@ func rotateMeshCA(ctx context.Context, client kubernetes.Interface, namespace st
 		return "", fmt.Errorf("generate serial: %w", err)
 	}
 
-	template := certutil.NewCATemplate(serial, time.Now().AddDate(0, 0, validityDays))
+	template := certutil.NewCATemplate(serial, "Mesh CA", time.Now().AddDate(0, 0, validityDays))
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {

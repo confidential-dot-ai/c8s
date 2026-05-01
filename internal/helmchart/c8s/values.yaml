@@ -1,0 +1,141 @@
+## Operator container image. The same image runs every c8s mode that
+## doesn't need extra OS bins: controller manager and c8s-init-cert/get-cert.
+## `tag` and `digest` are consumer-supplied — the chart fails to render if
+## neither is set. TEE measurements depend on the exact binary running,
+## so floating tags break attestation semantics; prefer `digest`.
+image:
+  repository: ghcr.io/lunal-dev/c8s-operator
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+## Operator Deployment. The operator is intentionally singleton because the
+## webhook path mints pod-local serving PKI and patches one shared
+## MutatingWebhookConfiguration caBundle.
+operator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  podAnnotations: {}
+  extraArgs: []
+
+## Mutating admission webhook that injects the init-container into pods
+## annotated with confidential.ai/cw. Disabled by default because injection
+## requires an Assam endpoint.
+webhook:
+  enabled: false
+  caBundle: ""
+  service:
+    port: 443
+  failurePolicy: Fail
+  extraExcluded: []
+  ## SecretRef injected into workload pods for attestation-service auth.
+  ## The Secret must exist in each workload namespace. Set
+  ## createInNamespaces to have the chart create per-namespace API keys and
+  ## register those keys with the chart-managed attestation-service.
+  apiKeySecret:
+    name: ""
+    key: apiKey
+    createInNamespaces: []
+  certVolume:
+    fsGroup: 65532
+    keyMode: "0640"
+  initContainer:
+    ## Defaults match distroless nonroot. Kata deployments that need UID 0
+    ## inside the guest can set runAsUser/runAsGroup to 0 and runAsNonRoot=false.
+    runAsUser: 65532
+    runAsGroup: 65532
+    runAsNonRoot: true
+
+## Assam is the key broker / certificate broker that the c8s-init-cert
+## container talks to through its get-cert subcommand.
+##
+## Chart-managed Assam is disabled by default. Enabling it is useful for
+## bootstrap/dev and for platforms that deliberately operate Assam inside the
+## same trust boundary as the rest of c8s. For the whitepaper production
+## security model, Assam/CDS must run inside the attested trust boundary and
+## its state/secrets must not rely only on Kubernetes control-plane secrecy.
+assam:
+  enabled: false
+  ## External Assam URL. If empty and assam.enabled=true, the webhook uses the
+  ## chart-managed Assam Service URL. Required for webhook.enabled=true when
+  ## assam.enabled=false.
+  url: ""
+  image:
+    repository: ghcr.io/lunal-dev/assam
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 8080
+  ## Required when assam.enabled=true. This chart does not install cert-issuer.
+  certIssuerURL: ""
+  whitelistDB: /data/whitelist.db
+  ## Optional explicit admin password. Empty means the chart creates/reuses a
+  ## Secret in the release namespace; this is bootstrap convenience, not a
+  ## production trust-boundary secret model by itself.
+  whitelistAdminPassword: ""
+  earIssuer: assam
+  certTTL: 24h
+  challengeTTL: 60s
+  readinessInterval: 10s
+  tokenSignerRotationInterval: 720h
+  tokenSignerOverlap: 25h
+  tokenSignerRotationJitter: 0.1
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+## DaemonSet running github.com/lunal-dev/attestation-service.
+attestationService:
+  enabled: true
+  image:
+    repository: ghcr.io/lunal-dev/attestation-service
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 8400
+  ## Per-device hostPath mounts. hostPath.type=CharDevice fails the pod if
+  ## the device node doesn't exist on the host, so disable for nodes that
+  ## lack the corresponding hardware.
+  ##
+  ## On Azure CVM nodes, SEV-SNP attestation goes through /dev/tpm0 (vTPM)
+  ## rather than the native /dev/sev-guest ioctl, so `tpm: true` is the
+  ## right default and `sevGuest`/`tdxGuest` should be left disabled
+  ## unless you're on a bare-metal CVM with the direct device node.
+  teeDevices:
+    sevGuest: false
+    tdxGuest: false
+    tpm: true
+  apiKey: ""
+  platforms:
+    - snp
+    - tdx
+    - az-snp
+    - az-tdx
+    - gcp-snp
+    - gcp-tdx
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+## Common pod-level security knobs.
+podSecurityContext:
+  fsGroup: 65532
+  runAsNonRoot: true
+  runAsUser: 65532

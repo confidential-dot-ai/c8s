@@ -1,0 +1,188 @@
+// Package controller hosts the controller-runtime manager, the slim
+// ConfidentialWorkload status-mirror reconciler, and the admission webhook.
+package controller
+
+import (
+	"context"
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	v1alpha2 "github.com/lunal-dev/c8s/api/v1alpha2"
+	"github.com/lunal-dev/c8s/internal/issuer"
+	"github.com/lunal-dev/c8s/internal/webhook"
+	"github.com/lunal-dev/c8s/pkg/certutil"
+)
+
+// Options configures the controller-manager runtime.
+type Options struct {
+	MetricsAddr      string
+	HealthAddr       string
+	LeaderElection   bool
+	LeaderElectionID string
+	LeaderElectionNS string
+
+	// OperatorImage is the c8s multi-mode binary image the admission
+	// webhook injects as the init-cert container. Empty disables pod
+	// injection. Pod-to-pod mTLS is the node-level ratls-mesh DaemonSet's
+	// job, so no mesh sidecar is injected.
+	OperatorImage string
+
+	// AssamURL points at the assam Service in-cluster (the URL the
+	// injected init container POSTs evidence + CSR to).
+	AssamURL string
+
+	// AttestationServiceURL points at the attestation-service.
+	AttestationServiceURL string
+
+	// AttestationServiceAPIKeySecretName/Key identifies the workload-namespace
+	// Secret the injected init container reads for attestation-service auth.
+	AttestationServiceAPIKeySecretName string
+	AttestationServiceAPIKeySecretKey  string
+
+	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
+	WebhookConfigName string
+
+	WebhookServiceName      string
+	WebhookServiceNamespace string
+
+	CertFSGroup      int64
+	CertKeyMode      string
+	InitRunAsUser    int64
+	InitRunAsGroup   int64
+	InitRunAsNonRoot bool
+}
+
+var scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha2.AddToScheme(scheme))
+}
+
+// Run boots the manager and blocks until ctx is cancelled or the manager exits.
+func Run(ctx context.Context, opts Options) error {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+	logger := ctrl.Log.WithName("c8s-operator")
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: opts.MetricsAddr},
+		HealthProbeBindAddress:  opts.HealthAddr,
+		LeaderElection:          opts.LeaderElection,
+		LeaderElectionID:        opts.LeaderElectionID,
+		LeaderElectionNamespace: opts.LeaderElectionNS,
+	})
+	if err != nil {
+		return fmt.Errorf("create manager: %w", err)
+	}
+
+	// ConfidentialWorkload status-mirror controller.
+	if err := (&ConfidentialWorkloadReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ConfidentialWorkload reconciler: %w", err)
+	}
+
+	// Admission webhook — injects init-container into annotated pods.
+	if opts.OperatorImage != "" {
+		if err := bootstrapWebhookPKI(ctx, mgr, opts); err != nil {
+			return fmt.Errorf("bootstrap webhook PKI: %w", err)
+		}
+		if err := webhook.Register(mgr, webhook.Config{
+			OperatorImage:                      opts.OperatorImage,
+			AssamURL:                           opts.AssamURL,
+			AttestationServiceURL:              opts.AttestationServiceURL,
+			AttestationServiceAPIKeySecretName: opts.AttestationServiceAPIKeySecretName,
+			AttestationServiceAPIKeySecretKey:  opts.AttestationServiceAPIKeySecretKey,
+			CertFSGroup:                        int64Ptr(opts.CertFSGroup),
+			CertKeyMode:                        opts.CertKeyMode,
+			InitRunAsUser:                      int64Ptr(opts.InitRunAsUser),
+			InitRunAsGroup:                     int64Ptr(opts.InitRunAsGroup),
+			InitRunAsNonRoot:                   boolPtr(opts.InitRunAsNonRoot),
+		}); err != nil {
+			return fmt.Errorf("register webhook: %w", err)
+		}
+		logger.Info("pod-injection webhook enabled",
+			"image", opts.OperatorImage,
+			"assam", opts.AssamURL)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("add healthz: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("add readyz: %w", err)
+	}
+
+	logger.Info("starting manager",
+		"metrics", opts.MetricsAddr,
+		"health", opts.HealthAddr,
+		"leaderElection", opts.LeaderElection)
+
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("manager exited: %w", err)
+	}
+	return nil
+}
+
+// bootstrapWebhookPKI mints a fresh CA + serving cert for the admission
+// webhook and patches the CA bundle onto the MutatingWebhookConfiguration
+// so the API server trusts the webhook.
+//
+// The CA is ephemeral — re-minted on every operator restart. That's fine
+// for the admission webhook (a request path, not a durable trust anchor):
+// the restart re-patches the bundle and the API server starts trusting the
+// new cert.
+func bootstrapWebhookPKI(ctx context.Context, mgr ctrl.Manager, opts Options) error {
+	if opts.WebhookConfigName == "" {
+		return nil
+	}
+
+	svcName := opts.WebhookServiceName
+	svcNS := opts.WebhookServiceNamespace
+	if svcNS == "" {
+		svcNS = opts.LeaderElectionNS
+	}
+	if svcName == "" {
+		return fmt.Errorf("webhook-service-name is required when webhook-config-name is set")
+	}
+
+	hostnames := []string{
+		fmt.Sprintf("%s.%s.svc", svcName, svcNS),
+		fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNS),
+	}
+
+	ca, err := issuer.NewCA(fmt.Sprintf("%s webhook", svcName), webhook.ServingTLSTTL)
+	if err != nil {
+		return fmt.Errorf("mint webhook CA: %w", err)
+	}
+	if err := webhook.BootstrapServingCert(ca, hostnames, webhook.DefaultCertDir); err != nil {
+		return err
+	}
+
+	// Manager's cache hasn't started yet, so we can't use mgr.GetClient().
+	// A direct client tied to the manager's REST config + scheme is the
+	// right primitive here — one Update, no informers needed.
+	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return fmt.Errorf("build bootstrap client: %w", err)
+	}
+	caPEM := certutil.EncodeCertPEM(ca.Cert.Raw)
+	return webhook.PatchCABundle(ctx, c, opts.WebhookConfigName, caPEM)
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}

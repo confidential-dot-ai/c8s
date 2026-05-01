@@ -1,0 +1,166 @@
+{{- if .Values.assam.enabled -}}
+{{- if not .Values.attestationService.enabled -}}
+{{- fail "assam.enabled requires attestationService.enabled=true so Assam can verify evidence" -}}
+{{- end -}}
+{{- $certIssuerURL := required "assam.certIssuerURL must be set when assam.enabled=true" .Values.assam.certIssuerURL -}}
+{{- $adminSecretName := printf "%s-admin" (include "c8s.assamName" .) -}}
+{{- $existing := (lookup "v1" "Secret" .Release.Namespace $adminSecretName) -}}
+{{- $adminPassword := .Values.assam.whitelistAdminPassword -}}
+{{- if and (not $adminPassword) $existing $existing.data.whitelistAdminPassword -}}
+  {{- $adminPassword = (b64dec $existing.data.whitelistAdminPassword) -}}
+{{- end -}}
+{{- if not $adminPassword -}}
+  {{- $adminPassword = randAlphaNum 32 -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "c8s.assamName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: assam
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $adminSecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: assam
+  annotations:
+    confidential.ai/trust-boundary-warning: "chart-managed Assam is bootstrap convenience unless deployed as attested trust-boundary infrastructure"
+type: Opaque
+stringData:
+  whitelistAdminPassword: {{ $adminPassword | quote }}
+---
+{{- if .Values.assam.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "c8s.assamName" . }}-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: assam
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.assam.persistence.size }}
+  {{- if .Values.assam.persistence.storageClassName }}
+  storageClassName: {{ .Values.assam.persistence.storageClassName | quote }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "c8s.assamName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: assam
+  annotations:
+    confidential.ai/trust-boundary-warning: "chart-managed Assam is bootstrap convenience unless deployed as attested trust-boundary infrastructure"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: assam
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: assam
+      annotations:
+        confidential.ai/trust-boundary-warning: "chart-managed Assam is bootstrap convenience unless deployed as attested trust-boundary infrastructure"
+    spec:
+      serviceAccountName: {{ include "c8s.assamName" . }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
+      containers:
+        - name: assam
+          image: {{ include "c8s.assamImage" . }}
+          imagePullPolicy: {{ .Values.assam.image.pullPolicy }}
+          args:
+            - --port={{ .Values.assam.port }}
+            - --attestation-service-url={{ include "c8s.attestationServiceURL" . }}
+            - --cert-issuer-url={{ $certIssuerURL }}
+            - --whitelist-db={{ .Values.assam.whitelistDB }}
+            - --ear-issuer={{ .Values.assam.earIssuer }}
+            - --cert-ttl={{ .Values.assam.certTTL }}
+            - --challenge-ttl={{ .Values.assam.challengeTTL }}
+            - --readiness-interval={{ .Values.assam.readinessInterval }}
+            - --token-signer-rotation-interval={{ .Values.assam.tokenSignerRotationInterval }}
+            - --token-signer-overlap={{ .Values.assam.tokenSignerOverlap }}
+            - --token-signer-rotation-jitter={{ .Values.assam.tokenSignerRotationJitter }}
+          env:
+            - name: C8S_ATTESTATION_SERVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "c8s.attestationServiceName" . }}-api-key
+                  key: apiKey
+            - name: C8S_ASSAM_WHITELIST_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecretName }}
+                  key: whitelistAdminPassword
+          ports:
+            - name: http
+              containerPort: {{ .Values.assam.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          resources:
+{{ toYaml .Values.assam.resources | indent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          {{- if .Values.assam.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "c8s.assamName" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "c8s.assamName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: assam
+spec:
+  selector:
+    app.kubernetes.io/name: c8s-operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: assam
+  ports:
+    - name: http
+      port: {{ .Values.assam.port }}
+      targetPort: http
+{{- end }}

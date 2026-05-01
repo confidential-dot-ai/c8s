@@ -30,8 +30,9 @@ type WorkloadRef struct {
 	Name string `json:"name"`
 }
 
-// MeshSpec is informational. The mutating webhook decides pod injection from
-// the workload annotation `confidential.ai/cw`, not this field.
+// MeshSpec is informational. Certificate injection is driven by the workload
+// annotation `confidential.ai/cw`; pod-to-pod mTLS is handled by the node-level
+// ratls-mesh DaemonSet.
 type MeshSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 }

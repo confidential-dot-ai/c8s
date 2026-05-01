@@ -8,8 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -32,10 +30,6 @@ import (
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/issuerapi"
 )
-
-// OID for the attestation digest extension.
-// 1.3.6.1.4.1.59888.1.2 — SHA-256 of the attestation evidence (audit trail).
-var OIDAttestationDigest = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 2}
 
 // certBundle holds the loaded certificate material for atomic hot-swap.
 type certBundle struct {
@@ -312,35 +306,15 @@ func (iss *Issuer) signCSR(csr *x509.CertificateRequest, claims *EARClaims, ttl 
 		return nil, nil, fmt.Errorf("no certificate bundle loaded")
 	}
 
-	serialNumber, err := certutil.GenerateSerial()
+	template, err := certutil.NewLeafTemplate(csr.Subject.CommonName, ttl)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate serial: %w", err)
+		return nil, nil, err
 	}
-
-	// Compute attestation digest for audit trail.
+	template.DNSNames = csr.DNSNames
+	template.IPAddresses = csr.IPAddresses
 	attDigest := sha256.Sum256(claims.RawEvidence)
-	attDigestExt, err := asn1.Marshal(attDigest[:])
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal attestation digest: %w", err)
-	}
-
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject:      pkix.Name{CommonName: csr.Subject.CommonName},
-		NotBefore:    now,
-		NotAfter:     now.Add(ttl),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		DNSNames:     csr.DNSNames,
-		IPAddresses:  csr.IPAddresses,
-		ExtraExtensions: []pkix.Extension{
-			{
-				Id:       OIDAttestationDigest,
-				Critical: false,
-				Value:    attDigestExt,
-			},
-		},
+	if err := certutil.AppendAttestationDigest(template, attDigest[:]); err != nil {
+		return nil, nil, err
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, b.caCert, csr.PublicKey, b.caKey)
@@ -349,7 +323,7 @@ func (iss *Issuer) signCSR(csr *x509.CertificateRequest, claims *EARClaims, ttl 
 	}
 
 	certPEM := certutil.EncodeCertPEM(certDER)
-	return certPEM, serialNumber, nil
+	return certPEM, template.SerialNumber, nil
 }
 
 // EARClaims represents the relevant claims from an EAR (Entity Attestation

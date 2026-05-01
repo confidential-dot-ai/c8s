@@ -33,6 +33,7 @@ type Config struct {
 	OutPath                  string
 	KeyPath                  string
 	KeyOutPath               string
+	KeyMode                  string
 	SAN                      string
 	Verbose                  bool
 	RenewInterval            time.Duration
@@ -67,6 +68,7 @@ load balancer (e.g. nginx) that terminates TLS with the obtained certificate.`,
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
 	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys)")
+	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval and SIGHUP nginx (0 = run once and exit)")
@@ -91,6 +93,9 @@ func setupLogging(verbose bool) {
 
 func run(cfg Config) error {
 	slog.Info("starting get-cert", "san", cfg.SAN)
+	if cfg.AttestationServiceAPIKey == "" {
+		cfg.AttestationServiceAPIKey = os.Getenv("C8S_ATTESTATION_SERVICE_API_KEY")
+	}
 
 	if err := validateConfig(cfg); err != nil {
 		return err
@@ -377,7 +382,11 @@ func createCSR(key *ecdsa.PrivateKey, san string) ([]byte, error) {
 // writeOutputs writes the certificate and key to their respective paths.
 func writeOutputs(cfg Config, keyPEM []byte, certPEM string) error {
 	if cfg.KeyOutPath != "" {
-		if err := os.WriteFile(cfg.KeyOutPath, keyPEM, 0600); err != nil {
+		keyMode, err := parseFileMode(cfg.KeyMode)
+		if err != nil {
+			return fmt.Errorf("--key-mode: %w", err)
+		}
+		if err := os.WriteFile(cfg.KeyOutPath, keyPEM, keyMode); err != nil {
 			return fmt.Errorf("failed to write key to %s: %w", cfg.KeyOutPath, err)
 		}
 		slog.Info("private key written", "path", cfg.KeyOutPath)
@@ -395,4 +404,18 @@ func writeOutputs(cfg Config, keyPEM []byte, certPEM string) error {
 	}
 
 	return nil
+}
+
+func parseFileMode(mode string) (os.FileMode, error) {
+	if mode == "" {
+		return 0, fmt.Errorf("must not be empty")
+	}
+	parsed, err := strconv.ParseUint(mode, 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not an octal mode: %w", mode, err)
+	}
+	if parsed&^uint64(0777) != 0 {
+		return 0, fmt.Errorf("%q sets bits outside file permissions", mode)
+	}
+	return os.FileMode(parsed), nil
 }

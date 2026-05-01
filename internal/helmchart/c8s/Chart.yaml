@@ -1,0 +1,18 @@
+apiVersion: v2
+name: c8s
+description: |
+  Confidential Kubernetes platform. Installs the c8s Deployment
+  (admission webhook + status-mirror controllers), CRDs, node-labeler
+  DaemonSet, the attestation-service DaemonSet, and optional Assam.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - confidential
+  - tee
+  - attestation
+  - ratls
+maintainers:
+  - name: lunal-dev
+home: https://github.com/lunal-dev

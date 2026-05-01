@@ -104,7 +104,7 @@ func (rh *rotateHandler) HandleRotateCA(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	template := certutil.NewCATemplate(serial, time.Now().Add(rh.caCertValidity))
+	template := certutil.NewCATemplate(serial, "Mesh CA", time.Now().Add(rh.caCertValidity))
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &newKey.PublicKey, newKey)
 	if err != nil {

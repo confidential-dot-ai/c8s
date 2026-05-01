@@ -7,6 +7,7 @@ Confidential computing infrastructure for Kubernetes. Provides TEE attestation, 
 | Component | Description | Docs |
 |---|---|---|
 | [`cmd/assam`](cmd/assam/) | Key Broker Service - verifies TEE attestation evidence and issues signed X.509 certificates | [README](cmd/assam/README.md) |
+| [`cmd/c8s`](cmd/c8s/) | Operator and install CLI for CRDs, status mirroring, webhook injection, and the embedded Helm chart | [operator docs](docs/operator.md) |
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
 | [`cmd/cert-issuer`](cmd/cert-issuer/) | Certificate issuer sidecar | [README](cmd/cert-issuer/README.md) |
@@ -34,6 +35,7 @@ Confidential computing infrastructure for Kubernetes. Provides TEE attestation, 
 ```
 cmd/
   assam/                   KBS server binary
+  c8s/                     Operator and Helm install CLI
   get-cert/                TEE-attested cert provisioning CLI/init-container
   ratls-mesh/              Transparent L4 RA-TLS proxy (DaemonSet)
   cert-issuer/             Certificate issuer sidecar
@@ -43,9 +45,12 @@ cmd/
 internal/
   attestation/             Attestation handlers and challenge store
   certissuer/              HTTP client for cert-issuer
+  controller/              Operator manager and ConfidentialWorkload reconciler
   ear/                     EAR JWT token issuer (ES256)
+  helmchart/               Embedded c8s Helm chart
   readiness/               Background health checker
   server/                  Chi router and middleware
+  webhook/                 Pod injection admission webhook
   whitelist/               Whitelist handlers and SQLite store
   audit/                   NRI policy audit logging
   cache/                   NRI policy whitelist cache

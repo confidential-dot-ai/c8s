@@ -46,6 +46,12 @@ func main() {
 		Use:   "assam",
 		Short: "A key broker service for confidential computing",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if attestationSvcAPIKey == "" {
+				attestationSvcAPIKey = os.Getenv("C8S_ATTESTATION_SERVICE_API_KEY")
+			}
+			if whitelistAdminPass == "" {
+				whitelistAdminPass = os.Getenv("C8S_ASSAM_WHITELIST_ADMIN_PASSWORD")
+			}
 			return run(config{
 				host:                 host,
 				port:                 port,
@@ -84,7 +90,6 @@ func main() {
 	_ = rootCmd.MarkFlagRequired("attestation-service-url")
 	_ = rootCmd.MarkFlagRequired("cert-issuer-url")
 	_ = rootCmd.MarkFlagRequired("whitelist-db")
-	_ = rootCmd.MarkFlagRequired("whitelist-admin-password")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -121,6 +126,9 @@ func run(cfg config) error {
 	}
 	if err := validateURL(cfg.certIssuerURL); err != nil {
 		return fmt.Errorf("--cert-issuer-url: %w", err)
+	}
+	if strings.TrimSpace(cfg.whitelistAdminPass) == "" {
+		return fmt.Errorf("--whitelist-admin-password or $C8S_ASSAM_WHITELIST_ADMIN_PASSWORD is required")
 	}
 
 	// Generate an ephemeral token-signing key in memory.

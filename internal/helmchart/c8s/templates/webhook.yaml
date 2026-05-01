@@ -1,0 +1,42 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "c8s.fullname" . }}-pod-injector
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+webhooks:
+  - name: pods.c8s.confidential.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: 5
+    reinvocationPolicy: IfNeeded
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - {{ .Release.Namespace }}
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            {{- range .Values.webhook.extraExcluded }}
+            - {{ . }}
+            {{- end }}
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+    clientConfig:
+      service:
+        namespace: {{ .Release.Namespace }}
+        name: {{ include "c8s.operatorName" . }}
+        path: /mutate-pods
+        port: {{ .Values.webhook.service.port }}
+      {{- if .Values.webhook.caBundle }}
+      caBundle: {{ .Values.webhook.caBundle }}
+      {{- end }}
+{{- end }}

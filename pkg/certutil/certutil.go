@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,11 @@ import (
 
 // serialNumberLimit is 2^128, the upper bound for X.509 serial numbers.
 var serialNumberLimit = new(big.Int).Lsh(big.NewInt(1), 128)
+
+// OIDAttestationDigest marks issued certificates with a SHA-256 of the
+// attestation evidence that authorized issuance — an audit-trail extension
+// shared between cert-issuer (HTTP signer) and the in-process issuer.
+var OIDAttestationDigest = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 2}
 
 // GenerateSerial returns a cryptographically random 128-bit serial number
 // suitable for X.509 certificates.
@@ -158,11 +164,11 @@ func LoadPEMCertificatesFile(path string) ([]*x509.Certificate, error) {
 }
 
 // NewCATemplate returns an x509.Certificate template for a self-signed CA
-// with the given serial number and expiry time.
-func NewCATemplate(serial *big.Int, notAfter time.Time) *x509.Certificate {
+// with the given serial number, subject common name, and expiry time.
+func NewCATemplate(serial *big.Int, commonName string, notAfter time.Time) *x509.Certificate {
 	return &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "Mesh CA"},
+		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             time.Now(),
 		NotAfter:              notAfter,
 		IsCA:                  true,
@@ -171,4 +177,45 @@ func NewCATemplate(serial *big.Int, notAfter time.Time) *x509.Certificate {
 		MaxPathLenZero:        true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 	}
+}
+
+// NewLeafTemplate returns the canonical x509 leaf-certificate template used
+// by the c8s issuers: digital-signature key usage and Server+Client
+// extended key usage, anchored at time.Now() with the given TTL. Callers
+// populate DNSNames / IPAddresses on the returned template themselves so
+// SAN policy stays at the call site.
+func NewLeafTemplate(commonName string, ttl time.Duration) (*x509.Certificate, error) {
+	serial, err := GenerateSerial()
+	if err != nil {
+		return nil, fmt.Errorf("generate leaf serial: %w", err)
+	}
+	now := time.Now()
+	return &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    now,
+		NotAfter:     now.Add(ttl),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+	}, nil
+}
+
+// AppendAttestationDigest stamps an OIDAttestationDigest extension carrying
+// the given digest onto tmpl. No-op when digest is empty.
+func AppendAttestationDigest(tmpl *x509.Certificate, digest []byte) error {
+	if len(digest) == 0 {
+		return nil
+	}
+	ext, err := asn1.Marshal(digest)
+	if err != nil {
+		return fmt.Errorf("marshal attestation digest: %w", err)
+	}
+	tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, pkix.Extension{
+		Id:    OIDAttestationDigest,
+		Value: ext,
+	})
+	return nil
 }

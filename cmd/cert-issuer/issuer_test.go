@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/issuerapi"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/time/rate"
@@ -677,7 +678,7 @@ func TestHandleSignCSR_AttestationDigestExtension(t *testing.T) {
 	// Find the attestation digest extension.
 	var attDigestExt *pkix.Extension
 	for i := range issuedCert.Extensions {
-		if issuedCert.Extensions[i].Id.Equal(OIDAttestationDigest) {
+		if issuedCert.Extensions[i].Id.Equal(certutil.OIDAttestationDigest) {
 			attDigestExt = &issuedCert.Extensions[i]
 			break
 		}
