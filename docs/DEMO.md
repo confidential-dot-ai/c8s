@@ -16,12 +16,11 @@ c8s install \
 
 Equivalent Helm values are in `samples/values-demo.yaml`.
 
-## 2. Apply optional CRD objects
+## 2. Apply optional CRD object
 
-CRDs are advisory. These objects are useful for status display and review:
+CRDs are advisory. This object is useful for status display and review:
 
 ```sh
-kubectl apply -f samples/trustdomain.yaml
 kubectl apply -f samples/confidentialworkload.yaml
 ```
 
@@ -54,6 +53,5 @@ Expected injected pieces:
 ```sh
 kubectl delete -f samples/nginx-confidential-pod.yaml
 kubectl delete -f samples/confidentialworkload.yaml
-kubectl delete -f samples/trustdomain.yaml
 helm uninstall c8s -n c8s-system
 ```

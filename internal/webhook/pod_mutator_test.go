@@ -15,7 +15,7 @@ func TestMutatePodUsesSecretRefForAttestationAPIKey(t *testing.T) {
 		},
 	}
 
-	mutatePod(pod, &injection{WorkloadID: "api", TrustDomain: "default"}, Config{
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		OperatorImage:                      "ghcr.io/lunal-dev/c8s-operator:test",
 		AssamURL:                           "http://assam.c8s-system.svc:8080",
 		AttestationServiceURL:              "http://attestation-service.c8s-system.svc:8400",
@@ -85,7 +85,7 @@ func TestMutatePodPreservesExistingFSGroupAndOmitsAPIKeyEnvWithoutSecretName(t *
 		},
 	}
 
-	mutatePod(pod, &injection{WorkloadID: "api", TrustDomain: "default"}, Config{
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		OperatorImage:         "image",
 		AssamURL:              "http://assam",
 		AttestationServiceURL: "http://attestation-service",
@@ -108,7 +108,7 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		},
 	}
 
-	mutatePod(pod, &injection{WorkloadID: "api", TrustDomain: "default"}, Config{
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		OperatorImage:         "image",
 		AssamURL:              "http://assam",
 		AttestationServiceURL: "http://attestation-service",

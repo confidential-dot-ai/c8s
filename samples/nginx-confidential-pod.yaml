@@ -14,7 +14,6 @@ spec:
         app: demo-nginx
       annotations:
         confidential.ai/cw: demo-nginx
-        confidential.ai/td: default
     spec:
       containers:
         - name: nginx

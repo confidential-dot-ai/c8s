@@ -4,12 +4,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TrustDomainReference is a reference to a cluster-scoped TrustDomain by name.
-type TrustDomainReference struct {
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-}
-
 // WorkloadKind is the Kubernetes Kind of the workload mirrored by a
 // ConfidentialWorkload.
 // +kubebuilder:validation:Enum=Deployment;StatefulSet;DaemonSet
@@ -43,8 +37,6 @@ type MeshSpec struct {
 // for any cluster behavior. When present, the operator aggregates per-pod
 // attestation state into .status.
 type ConfidentialWorkloadSpec struct {
-	TrustDomainRef TrustDomainReference `json:"trustDomainRef,omitempty"`
-
 	WorkloadRef WorkloadRef `json:"workloadRef"`
 
 	Mesh MeshSpec `json:"mesh,omitempty"`

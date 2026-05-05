@@ -12,8 +12,8 @@ The current milestone enforces these gates:
 | Mesh peer cert chains to the mesh CA | ratls-mesh | mesh CA bundle |
 | Workload is injection candidate | admission webhook | pod annotation `confidential.ai/cw` |
 
-CRDs are not security inputs. `TrustDomain` and `ConfidentialWorkload` are
-operator UX/status surfaces. A workload can be injected without a CR.
+CRDs are not security inputs. `ConfidentialWorkload` is an operator UX/status
+surface. A workload can be injected without a CR.
 
 ## Chart-managed bootstrap mode
 

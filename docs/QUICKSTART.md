@@ -70,7 +70,6 @@ Application teams opt in by annotating their pod templates:
 metadata:
   annotations:
     confidential.ai/cw: api
-    confidential.ai/td: default
 ```
 
 The webhook injects `c8s get-cert` as an init container. It writes

@@ -4,8 +4,6 @@ metadata:
   name: demo-nginx
   namespace: default
 spec:
-  trustDomainRef:
-    name: default
   workloadRef:
     kind: Deployment
     name: demo-nginx

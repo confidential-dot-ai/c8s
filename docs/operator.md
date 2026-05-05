@@ -47,8 +47,7 @@ prerequisites:
   before rendering the chart.
 
 After the platform installs those pieces, workload opt-in is self-service:
-application teams annotate their pod templates with `confidential.ai/cw` and,
-optionally, `confidential.ai/td`. The `td` suffix means trust domain.
+application teams annotate their pod templates with `confidential.ai/cw`.
 
 ## Code layout
 
@@ -201,14 +200,10 @@ Opt a pod template in with:
 metadata:
   annotations:
     confidential.ai/cw: api
-    confidential.ai/td: default
 ```
 
-`confidential.ai/cw` is required and becomes the certificate SAN. The
-`confidential.ai/td` annotation is optional, defaults to `default`, and is the
-trust-domain selector passed to the init container as `C8S_TRUST_DOMAIN`.
-Injection does not require a `TrustDomain` CR lookup; it only copies the
-selected trust-domain name from pod metadata.
+`confidential.ai/cw` is required and becomes the certificate SAN. Injection
+does not require a CR lookup.
 
 For opted-in pods, the webhook:
 

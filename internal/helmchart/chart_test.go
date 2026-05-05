@@ -208,8 +208,6 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 		}
 	}
 	for _, unexpected := range []string{
-		"resources: [trustdomains]",
-		"resources: [trustdomains/status]",
 		"resources: [confidentialworkloads/finalizers]",
 		"resources: [deployments, statefulsets, daemonsets, replicasets]",
 		"resources: [secrets, configmaps]",

@@ -1,11 +1,10 @@
 // Package webhook contains the mutating admission webhook that injects
 // the c8s init-cert container into pods opted in by annotation.
 //
-// The webhook reads three annotations on the pod (not its owning workload,
+// The webhook reads one annotation on the pod (not its owning workload,
 // not any CR — pod metadata only):
 //
 //	confidential.ai/cw=<workload-id>     required to opt in
-//	confidential.ai/td=<trust-domain>    optional, default "default"
 //
 // Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet
 // (cmd/ratls-mesh/), so the webhook does not inject any mesh sidecar.
@@ -14,7 +13,7 @@
 //
 // Pods without confidential.ai/cw pass through unchanged. The webhook does
 // not GET any CR — sidecar injection runs whether or not a ConfidentialWorkload
-// or TrustDomain CR exists.
+// CR exists.
 package webhook
 
 import (
@@ -34,17 +33,10 @@ const (
 	// AnnotationWorkload opts a pod in to c8s injection. Required.
 	AnnotationWorkload = "confidential.ai/cw"
 
-	// AnnotationTrustDomain selects a trust domain. Optional; defaults to
-	// DefaultTrustDomain.
-	AnnotationTrustDomain = "confidential.ai/td"
-
 	// AnnotationInjected is stamped on pods after a successful mutation
 	// so re-invocations of the webhook are no-ops.
 	AnnotationInjected = "confidential.ai/c8s-injected"
 )
-
-// DefaultTrustDomain is used when AnnotationTrustDomain is absent or empty.
-const DefaultTrustDomain = "default"
 
 // defaultCertFSGroup is the shared group used for the injected EmptyDir
 // when the pod does not already specify an fsGroup. The c8s image runs as
@@ -107,8 +99,7 @@ type podMutator struct {
 
 // injection captures everything the mutator decides from pod annotations.
 type injection struct {
-	WorkloadID  string
-	TrustDomain string
+	WorkloadID string
 }
 
 // parseAnnotations returns nil if the pod isn't opted in.
@@ -117,11 +108,7 @@ func parseAnnotations(pod *corev1.Pod) *injection {
 	if id == "" {
 		return nil
 	}
-	td := pod.Annotations[AnnotationTrustDomain]
-	if td == "" {
-		td = DefaultTrustDomain
-	}
-	return &injection{WorkloadID: id, TrustDomain: td}
+	return &injection{WorkloadID: id}
 }
 
 func (m *podMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -140,7 +127,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("already injected")
 	}
 
-	l.Info("injecting c8s-init-cert", "workload", inj.WorkloadID, "td", inj.TrustDomain)
+	l.Info("injecting c8s-init-cert", "workload", inj.WorkloadID)
 	mutatePod(pod, inj, m.cfg)
 
 	raw, err := json.Marshal(pod)
@@ -191,7 +178,6 @@ func initCertContainer(inj *injection, cfg Config) corev1.Container {
 		},
 		Env: []corev1.EnvVar{
 			{Name: "C8S_WORKLOAD_ID", Value: inj.WorkloadID},
-			{Name: "C8S_TRUST_DOMAIN", Value: inj.TrustDomain},
 			{Name: "C8S_POD_NAME", ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 			}},

@@ -48,7 +48,7 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 		{
 			name: "resource missing from group version",
 			resources: &metav1.APIResourceList{APIResources: []metav1.APIResource{
-				{Name: "trustdomains", Kind: "TrustDomain"},
+				{Name: "pods", Kind: "Pod"},
 			}},
 			want: false,
 		},

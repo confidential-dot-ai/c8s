@@ -45,7 +45,7 @@ var installCmd = &cobra.Command{
 'helm upgrade --install' against the current kubeconfig context. Deploys:
 
   - the c8s Deployment + Service (admission webhook + status-mirror controllers)
-  - the TrustDomain and ConfidentialWorkload CRDs
+  - the ConfidentialWorkload CRD
   - the mutating admission webhook configuration
   - the attestation-service DaemonSet (per-node /attest + /verify)
   - chart-managed Assam, cert-issuer, and bootstrap mesh CA
@@ -170,25 +170,20 @@ func appendInstallCRDArgs(helmArgs []string, installCRDs bool) []string {
 
 const installNextSteps = `Next steps:
 
-  1. CRDs are optional demo/status UX. If installed, create a TrustDomain
-     only when you need to override chart defaults:
-
-       kubectl apply -f samples/trustdomain.yaml
-
-  2. Enable pod injection only after Assam and cert-issuer are reachable.
+  1. Enable pod injection only after Assam and cert-issuer are reachable.
      Use an external assam.url/cert issuer pair, or enable chart-managed
      Assam and cert-issuer together. Chart-managed Assam/cert-issuer are
      bootstrap/dev convenience unless deployed as attested trust-boundary
      infrastructure.
 
-  3. (Optional) Mirror status with a ConfidentialWorkload CR:
+  2. (Optional) Mirror status with a ConfidentialWorkload CR:
 
        kubectl apply -f samples/confidentialworkload.yaml
 
      When injection is enabled, annotate your workload's pod template:
        confidential.ai/cw: <workload-id>
 
-  4. Inspect mirrored workloads:
+  3. Inspect mirrored workloads:
 
        kubectl get cwl -A
 `

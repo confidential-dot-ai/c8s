@@ -71,16 +71,6 @@ spec:
                   enabled:
                     type: boolean
                 type: object
-              trustDomainRef:
-                description: TrustDomainReference is a reference to a cluster-scoped
-                  TrustDomain by name.
-                properties:
-                  name:
-                    minLength: 1
-                    type: string
-                required:
-                - name
-                type: object
               workloadRef:
                 description: |-
                   WorkloadRef references a workload in the same namespace as the
