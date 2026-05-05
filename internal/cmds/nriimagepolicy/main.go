@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -107,13 +109,21 @@ func Run(args []string) error {
 		}
 	}()
 
-	startHealthServer(ctx, healthServerConfig{
+	// plugin.health_addr from the config file wins over the flag default;
+	// containerd-launched NRI plugins don't get CLI args.
+	addr := *healthAddr
+	if cfg.Plugin.HealthAddr != "" {
+		addr = cfg.Plugin.HealthAddr
+	}
+	if err := startHealthServer(ctx, healthServerConfig{
 		logger:       logger,
 		plugin:       plugin,
-		addr:         *healthAddr,
+		addr:         addr,
 		readTimeout:  *readTimeout,
 		writeTimeout: *writeTimeout,
-	})
+	}); err != nil {
+		return fmt.Errorf("start health server on %q: %w", addr, err)
+	}
 
 	pluginErrCh := make(chan error, 1)
 	go func() {
@@ -191,8 +201,9 @@ type healthServerConfig struct {
 }
 
 // startHealthServer starts an HTTP server for readiness/liveness probes.
-// It shuts down gracefully when ctx is cancelled.
-func startHealthServer(ctx context.Context, cfg healthServerConfig) {
+// addr accepts plain `host:port` for TCP or `unix:///path/to.sock` for a
+// Unix socket. It shuts down gracefully when ctx is cancelled.
+func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if cfg.plugin.Ready() {
@@ -204,10 +215,15 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 		}
 	})
 
-	server := &http.Server{Addr: cfg.addr, Handler: mux, ReadTimeout: cfg.readTimeout, WriteTimeout: cfg.writeTimeout}
+	listener, err := healthListener(cfg.addr)
+	if err != nil {
+		return err
+	}
+
+	server := &http.Server{Handler: mux, ReadTimeout: cfg.readTimeout, WriteTimeout: cfg.writeTimeout}
 	go func() {
 		cfg.logger.Info("starting health server", "addr", cfg.addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			cfg.logger.Error("health server error", "error", err)
 		}
 	}()
@@ -219,4 +235,30 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 			cfg.logger.Error("health server shutdown error", "error", err)
 		}
 	}()
+	return nil
+}
+
+// healthListener returns a TCP listener for `host:port` or a Unix socket
+// listener for `unix:///abs/path`. Stale socket files are removed before
+// bind so plugin restarts don't fail with EADDRINUSE; the file is chmod'd
+// to 0660 so probers in the install-DaemonSet (which mounts the parent
+// directory via hostPath) can connect.
+func healthListener(addr string) (net.Listener, error) {
+	if path, ok := strings.CutPrefix(addr, "unix://"); ok {
+		_ = os.Remove(path)
+		l, err := net.Listen("unix", path)
+		if err != nil {
+			return nil, fmt.Errorf("listen unix %s: %w", path, err)
+		}
+		if err := os.Chmod(path, 0o660); err != nil {
+			_ = l.Close()
+			return nil, fmt.Errorf("chmod unix socket %s: %w", path, err)
+		}
+		return l, nil
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
+	}
+	return l, nil
 }

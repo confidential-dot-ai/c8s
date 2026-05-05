@@ -10,10 +10,20 @@ import (
 
 // config represents the plugin configuration.
 type config struct {
+	Plugin     pluginConfig     `yaml:"plugin"`
 	Whitelist  whitelistConfig  `yaml:"whitelist"`
 	Containerd containerdConfig `yaml:"containerd"`
 	Policy     policyConfig     `yaml:"policy"`
 	Logging    loggingConfig    `yaml:"logging"`
+}
+
+// pluginConfig contains plugin runtime settings.
+type pluginConfig struct {
+	// HealthAddr is the listen address for the readiness/liveness HTTP
+	// server. Plain `host:port` listens on TCP; `unix:///path/to.sock`
+	// listens on a Unix socket so probers with a hostPath mount can reach
+	// it without exposing health on the host network.
+	HealthAddr string `yaml:"health_addr"`
 }
 
 // whitelistConfig contains KBS connection settings for whitelist retrieval.

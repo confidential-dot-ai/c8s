@@ -10,15 +10,11 @@ data:
   # The host plugin reads it at startup; it does not contain whitelist data.
   image-policy.yaml: |
     plugin:
-      name: {{ .Values.pluginName | quote }}
       health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" .) | quote }}
 
     whitelist:
-      bootstrap_path: {{ include "nri-image-policy.hostBootstrapPath" . | quote }}
-      cache_path: {{ printf "%s/whitelist.json" .Values.hostPaths.cacheDir | quote }}
-      assam_url: {{ printf "http://127.0.0.1:%d" (int .Values.assam.nodePort) | quote }}
-      refresh_interval: {{ .Values.refresh.interval | quote }}
-      stale_ttl: {{ .Values.refresh.staleTTL | quote }}
+      url: {{ printf "http://127.0.0.1:%d" (int .Values.assam.nodePort) | quote }}
+      timeout: {{ .Values.refresh.interval | quote }}
 
     containerd:
       socket: {{ .Values.containerd.socket | quote }}
