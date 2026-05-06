@@ -1,5 +1,20 @@
 {{- include "tls-lb.validateSan" (required "san is required - set it to the domain name for the TLS certificate" .Values.san) -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.upstream.protocol) -}}
+{{- include "tls-lb.validateUpstreamAddress" .Values.upstream -}}
+{{- $publicCertPath := printf "%s/cert.pem" .Values.tlsMountPath -}}
+{{- $publicKeyPath := printf "%s/key.pem" .Values.tlsMountPath -}}
+{{- if .Values.publicTLS.secretName -}}
+{{- $publicCertPath = printf "%s/%s" .Values.publicTLS.mountPath .Values.publicTLS.certKey -}}
+{{- $publicKeyPath = printf "%s/%s" .Values.publicTLS.mountPath .Values.publicTLS.keyKey -}}
+{{- end -}}
+{{- $discoveryFilePath := printf "%s/%s" .Values.discovery.mountPath .Values.discovery.fileName -}}
+{{- $defaultMeshCAPath := printf "%s/%s" .Values.meshCA.mountPath .Values.meshCA.key -}}
+{{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.upstream.tls.trustedCAPath -}}
+{{- $upstreamServerName := .Values.upstream.tls.serverName -}}
+{{- if not $upstreamServerName -}}
+{{- $upstreamServerName = regexReplaceAll `^\[([^\]]+)\](?::[0-9]+)?$` .Values.upstream.address "${1}" -}}
+{{- $upstreamServerName = regexReplaceAll `^([^:]+)(?::[0-9]+)?$` $upstreamServerName "${1}" -}}
+{{- end -}}
 
 apiVersion: v1
 kind: ConfigMap
@@ -37,11 +52,11 @@ data:
             listen {{ .Values.nginx.httpsPort }} ssl;
             server_name "{{ .Values.san }}";
 
-            ssl_certificate     {{ .Values.tlsMountPath }}/cert.pem;
-            ssl_certificate_key {{ .Values.tlsMountPath }}/key.pem;
+            ssl_certificate     {{ $publicCertPath }};
+            ssl_certificate_key {{ $publicKeyPath }};
 
             ssl_protocols TLSv1.2 TLSv1.3;
-            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
+            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
             ssl_prefer_server_ciphers on;
             ssl_session_cache shared:SSL:10m;
             ssl_session_timeout 1d;
@@ -50,7 +65,47 @@ data:
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
+            {{- if .Values.discovery.enabled }}
+            location = {{ .Values.discovery.path }} {
+                access_log off;
+                default_type application/json;
+                add_header Cache-Control "no-store" always;
+                alias {{ $discoveryFilePath }};
+            }
+
+            location = {{ .Values.discovery.cdsCertPath }} {
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias {{ .Values.tlsMountPath }}/cert.pem;
+            }
+
+            {{- if .Values.meshCA.expose }}
+            location = {{ .Values.discovery.meshCAPath }} {
+                access_log off;
+                default_type application/x-pem-file;
+                add_header Cache-Control "no-store" always;
+                alias {{ .Values.meshCA.mountPath }}/{{ .Values.meshCA.key }};
+            }
+            {{- end }}
+
+            {{- end }}
             location / {
+                {{- if eq .Values.upstream.protocol "https" }}
+                {{- if .Values.upstream.tls.useCDSClientCert }}
+                proxy_ssl_certificate {{ .Values.tlsMountPath }}/cert.pem;
+                proxy_ssl_certificate_key {{ .Values.tlsMountPath }}/key.pem;
+                {{- end }}
+                proxy_ssl_server_name on;
+                proxy_ssl_name {{ $upstreamServerName }};
+                {{- if .Values.upstream.tls.verify }}
+                proxy_ssl_verify on;
+                proxy_ssl_verify_depth {{ .Values.upstream.tls.verifyDepth }};
+                proxy_ssl_trusted_certificate {{ $upstreamTrustedCAPath }};
+                {{- else }}
+                proxy_ssl_verify off;
+                {{- end }}
+                {{- end }}
                 proxy_pass {{ .Values.upstream.protocol }}://backend;
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;

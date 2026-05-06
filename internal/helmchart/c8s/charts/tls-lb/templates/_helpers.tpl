@@ -50,6 +50,16 @@ Validate that the protocol used for an upstream is only http or https
 {{- end -}}
 
 {{/*
+Catch the umbrella chart's default tee-proxy HTTP service port when callers
+switch tls-lb to HTTPS upstream mode without also moving the backend port.
+*/}}
+{{- define "tls-lb.validateUpstreamAddress" -}}
+{{- if and (eq .protocol "https") (eq .address "c8s-tee-proxy:80") -}}
+{{- fail "tls-lb.upstream.protocol=https requires tls-lb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Selector labels.
 */}}
 {{- define "tls-lb.selectorLabels" -}}

@@ -7,8 +7,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -41,6 +44,38 @@ type config struct {
 	SAN                      string
 	Verbose                  bool
 	RenewInterval            time.Duration
+	ReloadWatchPaths         []string
+	ReloadWatchInterval      time.Duration
+	DiscoveryOutPath         string
+	DiscoveryCDSCertURL      string
+	DiscoveryMeshCAURL       string
+	DiscoveryPublicTLSMode   string
+}
+
+type discoveryDocument struct {
+	Version     string               `json:"version"`
+	GeneratedAt string               `json:"generated_at"`
+	PublicTLS   publicTLSDiscovery   `json:"public_tls"`
+	CDSTLS      cdsTLSDiscovery      `json:"cds_tls"`
+	Attestation attestationDiscovery `json:"attestation"`
+}
+
+type publicTLSDiscovery struct {
+	Hostname string `json:"hostname"`
+	Mode     string `json:"mode"`
+}
+
+type cdsTLSDiscovery struct {
+	CertificatePEM    string `json:"certificate_pem"`
+	CertificateSHA256 string `json:"certificate_sha256"`
+	CertificateURL    string `json:"certificate_url,omitempty"`
+	MeshCAURL         string `json:"mesh_ca_url,omitempty"`
+}
+
+type attestationDiscovery struct {
+	Challenge string          `json:"challenge"`
+	Platform  string          `json:"platform"`
+	Evidence  json.RawMessage `json:"evidence"`
 }
 
 // NewCmd returns the cobra subcommand. It is registered as a child of
@@ -80,6 +115,12 @@ load balancer (e.g. nginx) that terminates TLS with the obtained certificate.`,
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval and SIGHUP nginx (0 = run once and exit)")
+	flags.StringArrayVar(&cfg.ReloadWatchPaths, "reload-watch", nil, "File path to poll for changes and reload nginx when it changes (repeatable)")
+	flags.DurationVar(&cfg.ReloadWatchInterval, "reload-watch-interval", time.Minute, "Poll interval for --reload-watch paths")
+	flags.StringVar(&cfg.DiscoveryOutPath, "discovery-out", "", "Path to write JSON discovery metadata for the issued certificate and attestation evidence")
+	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
+	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
+	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
 
 	_ = cmd.MarkFlagRequired("assam-url")
 	_ = cmd.MarkFlagRequired("attestation-service-url")
@@ -111,7 +152,7 @@ func run(cfg config) error {
 		return err
 	}
 
-	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath); err != nil {
+	if err := validateOutputPaths(cfg.OutPath, cfg.KeyOutPath, cfg.DiscoveryOutPath); err != nil {
 		return err
 	}
 	slog.Debug("output paths validated")
@@ -134,6 +175,21 @@ func run(cfg config) error {
 	ticker := time.NewTicker(cfg.RenewInterval)
 	defer ticker.Stop()
 
+	var watchC <-chan time.Time
+	var watchTicker *time.Ticker
+	var watchState map[string]fileSnapshot
+	if len(cfg.ReloadWatchPaths) > 0 {
+		var err error
+		watchState, err = snapshotReloadWatchPaths(cfg.ReloadWatchPaths)
+		if err != nil {
+			return err
+		}
+		watchTicker = time.NewTicker(cfg.ReloadWatchInterval)
+		defer watchTicker.Stop()
+		watchC = watchTicker.C
+		slog.Info("watching files for nginx reload", "paths", cfg.ReloadWatchPaths, "interval", cfg.ReloadWatchInterval)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,6 +202,20 @@ func run(cfg config) error {
 			}
 			if err := reloadNginx(); err != nil {
 				slog.Warn("certificate renewed but nginx reload failed", "error", err)
+			}
+		case <-watchC:
+			changed, nextState, err := reloadWatchChanged(watchState, cfg.ReloadWatchPaths)
+			if err != nil {
+				slog.Warn("reload watch check failed", "error", err)
+				continue
+			}
+			watchState = nextState
+			if !changed {
+				continue
+			}
+			slog.Info("watched file changed, reloading nginx")
+			if err := reloadNginx(); err != nil {
+				slog.Warn("watched file changed but nginx reload failed", "error", err)
 			}
 		}
 	}
@@ -163,13 +233,13 @@ func obtainCert(cfg config, client attestclient.Client) error {
 	}
 
 	slog.Info("requesting certificate from assam", "assam_url", cfg.AssamURL, "san", cfg.SAN)
-	certPEM, err := client.ObtainCertificate(cfg.AttestationServiceURL, string(csrPEM))
+	result, err := client.ObtainCertificateWithEvidence(cfg.AttestationServiceURL, string(csrPEM))
 	if err != nil {
 		return fmt.Errorf("attestation failed: %w", err)
 	}
 	slog.Info("certificate obtained")
 
-	return writeOutputs(cfg, keyPEM, certPEM)
+	return writeOutputs(cfg, keyPEM, result)
 }
 
 // reloadNginx sends SIGHUP to the nginx master process to reload certs.
@@ -235,6 +305,21 @@ func validateConfig(cfg config) error {
 	if err := validateSAN(cfg.SAN); err != nil {
 		return fmt.Errorf("--san: %w", err)
 	}
+	if cfg.DiscoveryOutPath != "" {
+		switch discoveryPublicTLSMode(cfg.DiscoveryPublicTLSMode) {
+		case "cds", "webpki":
+		default:
+			return fmt.Errorf("--discovery-public-tls-mode must be 'cds' or 'webpki', got %q", cfg.DiscoveryPublicTLSMode)
+		}
+	}
+	if len(cfg.ReloadWatchPaths) > 0 {
+		if cfg.ReloadWatchInterval <= 0 {
+			return fmt.Errorf("--reload-watch-interval must be greater than 0 when --reload-watch is set")
+		}
+		if cfg.RenewInterval <= 0 {
+			return fmt.Errorf("--renew-interval must be greater than 0 when --reload-watch is set")
+		}
+	}
 	return nil
 }
 
@@ -282,8 +367,8 @@ func isIPSAN(san string) bool {
 // validateOutputPaths checks that output file locations are writable before
 // doing any expensive work (key generation, attestation). This prevents
 // requesting certificates that can't be saved.
-func validateOutputPaths(certPath, keyPath string) error {
-	for _, p := range []string{certPath, keyPath} {
+func validateOutputPaths(paths ...string) error {
+	for _, p := range paths {
 		if p == "" {
 			continue
 		}
@@ -369,14 +454,14 @@ func createCSR(key *ecdsa.PrivateKey, san string) ([]byte, error) {
 	return csrPEM, nil
 }
 
-// writeOutputs writes the certificate and key to their respective paths.
-func writeOutputs(cfg config, keyPEM []byte, certPEM string) error {
+// writeOutputs writes the certificate, key, and optional discovery metadata.
+func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult) error {
 	if cfg.KeyOutPath != "" {
 		keyMode, err := parseFileMode(cfg.KeyMode)
 		if err != nil {
 			return fmt.Errorf("--key-mode: %w", err)
 		}
-		if err := os.WriteFile(cfg.KeyOutPath, keyPEM, keyMode); err != nil {
+		if err := writeFileAtomic(cfg.KeyOutPath, keyPEM, keyMode); err != nil {
 			return fmt.Errorf("failed to write key to %s: %w", cfg.KeyOutPath, err)
 		}
 		slog.Info("private key written", "path", cfg.KeyOutPath)
@@ -385,15 +470,141 @@ func writeOutputs(cfg config, keyPEM []byte, certPEM string) error {
 	}
 
 	if cfg.OutPath != "" {
-		if err := os.WriteFile(cfg.OutPath, []byte(certPEM), 0644); err != nil {
+		if err := writeFileAtomic(cfg.OutPath, []byte(result.Certificate), 0644); err != nil {
 			return fmt.Errorf("failed to write cert to %s: %w", cfg.OutPath, err)
 		}
 		slog.Info("certificate written", "path", cfg.OutPath)
 	} else {
-		fmt.Print(certPEM)
+		fmt.Print(result.Certificate)
+	}
+
+	if cfg.DiscoveryOutPath != "" {
+		doc, err := buildDiscoveryDocument(cfg, result)
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal discovery metadata: %w", err)
+		}
+		data = append(data, '\n')
+		if err := writeFileAtomic(cfg.DiscoveryOutPath, data, 0644); err != nil {
+			return fmt.Errorf("failed to write discovery metadata to %s: %w", cfg.DiscoveryOutPath, err)
+		}
+		slog.Info("discovery metadata written", "path", cfg.DiscoveryOutPath)
 	}
 
 	return nil
+}
+
+func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (discoveryDocument, error) {
+	cert, err := certutil.ParseCertificatePEM([]byte(result.Certificate))
+	if err != nil {
+		return discoveryDocument{}, fmt.Errorf("parse issued certificate for discovery: %w", err)
+	}
+	fingerprint := sha256.Sum256(cert.Raw)
+
+	return discoveryDocument{
+		Version:     "v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		PublicTLS: publicTLSDiscovery{
+			Hostname: cfg.SAN,
+			Mode:     discoveryPublicTLSMode(cfg.DiscoveryPublicTLSMode),
+		},
+		CDSTLS: cdsTLSDiscovery{
+			CertificatePEM:    result.Certificate,
+			CertificateSHA256: hex.EncodeToString(fingerprint[:]),
+			CertificateURL:    cfg.DiscoveryCDSCertURL,
+			MeshCAURL:         cfg.DiscoveryMeshCAURL,
+		},
+		Attestation: attestationDiscovery{
+			Challenge: result.Challenge,
+			Platform:  result.Platform,
+			Evidence:  result.Evidence,
+		},
+	}, nil
+}
+
+func discoveryPublicTLSMode(mode string) string {
+	if mode == "" {
+		return "cds"
+	}
+	return mode
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+type fileSnapshot struct {
+	size    int64
+	modTime time.Time
+	sha256  [sha256.Size]byte
+}
+
+func snapshotReloadWatchPaths(paths []string) (map[string]fileSnapshot, error) {
+	snapshots := make(map[string]fileSnapshot, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat reload watch path %s: %w", path, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("reload watch path %s is a directory", path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read reload watch path %s: %w", path, err)
+		}
+		snapshots[path] = fileSnapshot{
+			size:    info.Size(),
+			modTime: info.ModTime(),
+			sha256:  sha256.Sum256(data),
+		}
+	}
+	return snapshots, nil
+}
+
+func reloadWatchChanged(previous map[string]fileSnapshot, paths []string) (bool, map[string]fileSnapshot, error) {
+	next, err := snapshotReloadWatchPaths(paths)
+	if err != nil {
+		return false, nil, err
+	}
+	for _, path := range paths {
+		if previous[path] != next[path] {
+			return true, next, nil
+		}
+	}
+	return false, next, nil
 }
 
 func parseFileMode(mode string) (os.FileMode, error) {

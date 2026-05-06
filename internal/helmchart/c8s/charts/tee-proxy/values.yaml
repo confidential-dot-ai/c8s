@@ -17,6 +17,16 @@ platform: sev-snp
 # Domain for autocert TLS
 domain: ""
 
+# Static TLS certificate Secret. When enabled, tee-proxy starts HTTPS using
+# --tls-dir and expects cert/key files named localhost+2.pem and
+# localhost+2-key.pem inside mountPath.
+tls:
+  enabled: false
+  secretName: ""
+  certKey: tls.crt
+  keyKey: tls.key
+  mountPath: /tls
+
 # Upstream service to proxy to
 upstream: ""
 

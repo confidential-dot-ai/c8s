@@ -2,8 +2,10 @@ package attestclient
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/lunal-dev/c8s/pkg/types"
@@ -38,6 +40,72 @@ func TestAuthenticateSuccess(t *testing.T) {
 	}
 	if resp.Challenge != "dGVzdC1jaGFsbGVuZ2U=" {
 		t.Fatalf("expected challenge 'dGVzdC1jaGFsbGVuZ2U=', got %q", resp.Challenge)
+	}
+}
+
+func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
+	const challenge = "dGVzdC1jaGFsbGVuZ2U="
+	const certPEM = "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n"
+
+	var attestationServiceSawReportData string
+	attestationService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/attest" {
+			t.Fatalf("attestation service path = %s, want /attest", r.URL.Path)
+		}
+		var req types.AttestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode attestation request: %v", err)
+		}
+		attestationServiceSawReportData = string(req.ReportData.Bytes())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"platform":"snp","evidence":{"quote":"abc"}}`)
+	}))
+	defer attestationService.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/authenticate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChallengeResponse{Challenge: challenge})
+	})
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
+		var req attestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode assam attest request: %v", err)
+		}
+		if req.Challenge != challenge {
+			t.Fatalf("challenge = %q, want %q", req.Challenge, challenge)
+		}
+		if req.Evidence.Platform != "snp" {
+			t.Fatalf("platform = %q, want snp", req.Evidence.Platform)
+		}
+		if !strings.Contains(string(req.Evidence.Evidence), `"quote":"abc"`) {
+			t.Fatalf("evidence = %s, want quote", req.Evidence.Evidence)
+		}
+		_, _ = io.WriteString(w, certPEM)
+	})
+	assam := httptest.NewServer(mux)
+	defer assam.Close()
+
+	client := NewClientWithHTTP(assam.URL, assam.Client())
+	result, err := client.ObtainCertificateWithEvidence(attestationService.URL, "csr")
+	if err != nil {
+		t.Fatalf("ObtainCertificateWithEvidence: %v", err)
+	}
+
+	if result.Certificate != certPEM {
+		t.Fatalf("certificate = %q, want %q", result.Certificate, certPEM)
+	}
+	if result.Challenge != challenge {
+		t.Fatalf("challenge = %q, want %q", result.Challenge, challenge)
+	}
+	if result.Platform != "snp" {
+		t.Fatalf("platform = %q, want snp", result.Platform)
+	}
+	if !strings.Contains(string(result.Evidence), `"quote":"abc"`) {
+		t.Fatalf("evidence = %s, want quote", result.Evidence)
+	}
+	if attestationServiceSawReportData != "test-challenge" {
+		t.Fatalf("report_data = %q, want challenge bytes", attestationServiceSawReportData)
 	}
 }
 

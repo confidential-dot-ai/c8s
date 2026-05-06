@@ -1,4 +1,6 @@
 {{- $attestationURL := default (printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace) .Values.attestationURL -}}
+{{- $tlsMode := or .Values.tls.enabled (ne .Values.domain "") -}}
+{{- $probePort := ternary .Values.ports.https .Values.ports.http $tlsMode -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,6 +69,10 @@ spec:
             - --attestation-url
             - {{ $attestationURL | quote }}
             {{- end }}
+            {{- if .Values.tls.enabled }}
+            - --tls-dir
+            - {{ .Values.tls.mountPath | quote }}
+            {{- end }}
           ports:
             - name: https
               containerPort: {{ .Values.ports.https }}
@@ -96,6 +102,11 @@ spec:
           volumeMounts:
             - name: autocert-cache
               mountPath: /app/certs
+            {{- if .Values.tls.enabled }}
+            - name: static-tls
+              mountPath: {{ .Values.tls.mountPath }}
+              readOnly: true
+            {{- end }}
           resources:
             requests:
               {{- toYaml .Values.resources.requests | nindent 14 }}
@@ -106,12 +117,12 @@ spec:
               {{- end }}
           readinessProbe:
             tcpSocket:
-              port: {{ .Values.ports.http }}
+              port: {{ $probePort }}
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           livenessProbe:
             tcpSocket:
-              port: {{ .Values.ports.http }}
+              port: {{ $probePort }}
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
         {{- if .Values.router.enabled }}
@@ -158,6 +169,16 @@ spec:
         - name: autocert-cache
           persistentVolumeClaim:
             claimName: {{ include "tee-proxy.fullname" . }}-certs
+        {{- if .Values.tls.enabled }}
+        - name: static-tls
+          secret:
+            secretName: {{ required "tee-proxy.tls.secretName must be set when tee-proxy.tls.enabled=true" .Values.tls.secretName }}
+            items:
+              - key: {{ .Values.tls.certKey }}
+                path: localhost+2.pem
+              - key: {{ .Values.tls.keyKey }}
+                path: localhost+2-key.pem
+        {{- end }}
         {{- if .Values.router.enabled }}
         - name: router-config
           configMap:

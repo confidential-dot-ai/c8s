@@ -4,16 +4,28 @@ TLS-terminating reverse proxy with TEE-attested certificate provisioning.
 
 ## What it does
 
-This chart deploys an nginx reverse proxy that terminates TLS in front of a backend service. The TLS certificate is provisioned automatically at pod startup via a TEE (Trusted Execution Environment) attestation flow - no manual cert management or cert-manager required.
+This chart deploys an nginx reverse proxy that terminates TLS in front of a backend service. By default, the TLS certificate is provisioned automatically at pod startup via a TEE (Trusted Execution Environment) attestation flow - no manual cert management or cert-manager required.
+
+For public edge deployments, the chart can instead present a normal WebPKI certificate from a Kubernetes TLS Secret while still generating and exposing a CDS-issued certificate for client preflight/discovery.
 
 ### How it works
 
 1. An init container (`get-cert`) contacts the **assam** key broker service, proving the pod is running inside a genuine TEE via a local attestation service.
-2. Assam issues a TLS certificate for the configured SAN (subject alternative name).
-3. The cert and key are written to an in-memory volume shared with the nginx container.
-4. Nginx starts and serves HTTPS, proxying all traffic to the configured upstream backend.
+2. Assam issues a CDS TLS certificate for the configured SAN (subject alternative name).
+3. The CDS cert and key are written to an in-memory volume shared with the nginx container.
+4. If `publicTLS.secretName` is set, nginx presents that Secret's WebPKI cert to clients and the `get-cert` sidecar reloads nginx when Kubernetes rotates the mounted Secret. Otherwise nginx presents the CDS cert for backwards compatibility.
+5. If `discovery.enabled=true`, `get-cert` writes JSON discovery metadata with the issued CDS certificate and attestation evidence, and nginx serves it at `discovery.path`.
+6. Nginx proxies all traffic to the configured upstream backend. If `upstream.protocol=https`, it can present the CDS cert as its upstream client certificate and optionally verify the upstream with the mesh CA bundle.
 
-The cert and key are shared between the init container and nginx via an `emptyDir` volume with `medium: Memory` - backed by tmpfs, so private keys are held in RAM only and never written to disk. Each replica gets a fresh, attested certificate on startup.
+The CDS cert and key are shared between the init container and nginx via an `emptyDir` volume with `medium: Memory` - backed by tmpfs, so private keys are held in RAM only and never written to disk. Each replica gets a fresh, attested certificate on startup.
+
+When switching the chart-managed `tee-proxy` upstream to HTTPS, also set `upstream.address` to its HTTPS service port, for example `c8s-tee-proxy:443`. The default umbrella-chart address uses the HTTP port.
+
+### Trust Notes
+
+`publicTLS.secretName` only controls nginx's public edge cert. It does not replace the CDS cert/key, discovery evidence, or CDS upstream client cert. A swapped WebPKI Secret can affect browser transport identity, but CDS-aware clients must validate the CDS cert and evidence.
+
+`upstream.tls.verifyDepth` maps to nginx `proxy_ssl_verify_depth`: max upstream server certificate chain depth when `upstream.tls.verify=true`.
 
 ## Usage
 ```bash
@@ -33,9 +45,22 @@ helm install my-lb charts/tls-lb \
 | `attestationServiceURL` | `http://attestation-service:8400` | URL of the local attestation service |
 | `upstream.address` | `backend:8080` | Host:port of the upstream service |
 | `upstream.protocol` | `http` | Protocol for upstream connection (`http` or `https`) |
+| `upstream.tls.useCDSClientCert` | `true` | Present the CDS cert to HTTPS upstreams |
+| `upstream.tls.verify` | `false` | Verify HTTPS upstream certificates |
+| `upstream.tls.verifyDepth` | `2` | Maximum upstream server certificate chain depth nginx verifies when `upstream.tls.verify=true` |
+| `upstream.tls.serverName` | `""` | Optional SNI/verification name for HTTPS upstreams |
+| `upstream.tls.trustedCAPath` | `""` | Optional upstream CA path. Empty uses `<meshCA.mountPath>/<meshCA.key>`; custom paths must be provided by the image or another mount. |
+| `publicTLS.secretName` | `""` | Kubernetes TLS Secret for public client TLS. Empty means present the CDS cert. |
+| `publicTLS.certKey` | `tls.crt` | Secret key containing the public certificate chain |
+| `publicTLS.keyKey` | `tls.key` | Secret key containing the public private key |
+| `discovery.enabled` | `false` | Serve preflight discovery JSON and CDS/mesh PEM endpoints |
+| `discovery.path` | `/v1/discovery` | JSON discovery endpoint |
+| `discovery.cdsCertPath` | `/.well-known/cds-cert.pem` | Endpoint serving the CDS-issued cert PEM |
+| `discovery.meshCAPath` | `/.well-known/mesh-ca.pem` | Endpoint serving the mesh CA PEM |
+| `meshCA.expose` | `true` | Serve and advertise the mesh CA PEM when discovery is enabled. The mesh CA ConfigMap is required when this is true. |
+| `meshCA.configMapName` | `""` | Mesh CA ConfigMap name. Empty defaults to `<release>-cert-issuer-mesh-ca`. |
 | `nginx.replicas` | `1` | Number of nginx replicas |
 | `nginx.httpsPort` | `443` | HTTPS listen port |
-| `nginx.extraConfig` | `""` | Extra nginx config injected into the server block |
 | `nginx.resources` | `{}` | Resource requests/limits for the nginx container |
 | `service.type` | `ClusterIP` | Kubernetes service type |
 | `service.port` | `443` | Service port |

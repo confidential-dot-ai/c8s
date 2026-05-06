@@ -13,6 +13,49 @@ upstream:
   address: "vllm:8000"
   # -- Protocol for the upstream connection (http or https).
   protocol: "http"
+  tls:
+    # -- Present the CDS-issued certificate to HTTPS upstreams.
+    useCDSClientCert: true
+    # -- Verify HTTPS upstream certificates with the mounted mesh CA bundle.
+    verify: false
+    # -- Maximum upstream server certificate chain depth nginx will verify when
+    # upstream.tls.verify=true. Increase for private PKI chains with more
+    # intermediates between the upstream leaf and trusted CA bundle.
+    verifyDepth: 2
+    # -- Optional SNI/verification name for the HTTPS upstream.
+    serverName: ""
+    # -- Optional CA file path. Empty defaults to <meshCA.mountPath>/<meshCA.key>.
+    # Custom paths must be provided by the image or another mount.
+    trustedCAPath: ""
+
+# -- Public TLS certificate presented to internet clients. When secretName is
+# empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
+# compatibility.
+publicTLS:
+  secretName: ""
+  certKey: tls.crt
+  keyKey: tls.key
+  mountPath: "/public-tls"
+
+# -- Discovery/preflight metadata served by nginx. Requires a get-cert image
+# that supports --discovery-out.
+discovery:
+  enabled: false
+  path: "/v1/discovery"
+  mountPath: "/discovery"
+  fileName: "discovery.json"
+  cdsCertPath: "/.well-known/cds-cert.pem"
+  meshCAPath: "/.well-known/mesh-ca.pem"
+
+# -- Mesh CA bundle exposed for demo preflight clients. Defaults match the
+# chart-managed c8s cert-issuer ConfigMap name.
+meshCA:
+  # -- Serve and advertise the mesh CA PEM when discovery is enabled. The
+  # ConfigMap is required when the URL is advertised.
+  expose: true
+  configMapName: ""
+  key: ca.pem
+  mountPath: "/mesh-ca"
 
 imagePullSecrets:
   - name: ghcr-secret
@@ -55,5 +98,6 @@ service:
   # -- Optional pre-allocated static load balancer IP. Cloud-provider specific.
   loadBalancerIP: ""
 
-# -- Volume mount path for TLS certificate and key shared between init and nginx.
+# -- Volume mount path for the CDS-issued TLS certificate and key shared
+# between get-cert and nginx.
 tlsMountPath: "/tls"

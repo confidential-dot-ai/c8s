@@ -20,6 +20,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		"app.kubernetes.io/name: ratls-mesh",
 		"app.kubernetes.io/name: nri-image-policy",
 		"app.kubernetes.io/name: tee-proxy",
+		"port: 443\n      targetPort: 443\n      protocol: TCP\n      name: https",
 		"app.kubernetes.io/name: tls-lb",
 	} {
 		if !strings.Contains(out, want) {
@@ -206,6 +207,198 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 	}
 }
 
+func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "tls-lb.publicTLS.secretName=tls-lb-public-tls",
+		"--set-string", "tls-lb.publicTLS.mountPath=/edge-tls",
+		"--set-string", "tls-lb.publicTLS.certKey=public.crt",
+		"--set-string", "tls-lb.publicTLS.keyKey=public.key",
+		"--set", "tls-lb.discovery.enabled=true",
+		"--set-string", "tls-lb.meshCA.configMapName=c8s-cert-issuer-mesh-ca",
+		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tls-lb.upstream.protocol=https",
+		"--set", "tls-lb.upstream.tls.verify=true",
+		"--set-string", "tls-lb.upstream.tls.serverName=tee-proxy.tee-attestation.svc.cluster.local",
+		"--set", "tee-proxy.tls.enabled=true",
+		"--set-string", "tee-proxy.tls.secretName=tee-proxy-internal-tls",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"ssl_certificate     /edge-tls/public.crt;",
+		"ssl_certificate_key /edge-tls/public.key;",
+		"ECDHE-RSA-AES128-GCM-SHA256",
+		"location = /v1/discovery",
+		"alias /discovery/discovery.json;",
+		"location = /.well-known/cds-cert.pem",
+		"alias /tls/cert.pem;",
+		"location = /.well-known/mesh-ca.pem",
+		"alias /mesh-ca/ca.pem;",
+		"proxy_ssl_certificate /tls/cert.pem;",
+		"proxy_ssl_certificate_key /tls/key.pem;",
+		"proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;",
+		"proxy_ssl_verify on;",
+		"proxy_ssl_trusted_certificate /mesh-ca/ca.pem;",
+		"proxy_pass https://backend;",
+		"--discovery-out=/discovery/discovery.json",
+		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
+		"--discovery-public-tls-mode=webpki",
+		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
+		"--reload-watch=/edge-tls/public.crt",
+		"--reload-watch=/edge-tls/public.key",
+		"name: public-tls",
+		"mountPath: /edge-tls",
+		"secretName: tls-lb-public-tls",
+		"key: public.crt",
+		"path: public.key",
+		"name: discovery",
+		"name: mesh-ca",
+		"name: c8s-cert-issuer-mesh-ca",
+		"optional: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestChartRendersTeeProxyStaticTLSSecret(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tee-proxy.tls.enabled=true",
+		"--set-string", "tee-proxy.tls.secretName=tee-proxy-internal-tls",
+		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tls-lb.upstream.protocol=https",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"- --tls-dir",
+		"- \"/tls\"",
+		"mountPath: /tls",
+		"name: static-tls",
+		"secretName: tee-proxy-internal-tls",
+		"key: tls.crt",
+		"path: localhost+2.pem",
+		"key: tls.key",
+		"path: localhost+2-key.pem",
+		"port: 443",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestChartRejectsManagedTeeProxyHTTPSWithoutTLS(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tls-lb.upstream.protocol=https",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want tee-proxy TLS failure\n%s", out)
+	}
+	if !strings.Contains(out, "requires tee-proxy.tls.enabled=true or tee-proxy.domain") {
+		t.Fatalf("missing tee-proxy TLS error, got:\n%s", out)
+	}
+}
+
+func TestChartRejectsTLSLBHTTPSWithDefaultTeeProxyHTTPPort(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tls-lb.upstream.protocol=https",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want tls-lb upstream address failure\n%s", out)
+	}
+	if !strings.Contains(out, "tls-lb.upstream.protocol=https requires tls-lb.upstream.address to point at a TLS port") {
+		t.Fatalf("missing tls-lb upstream address error, got:\n%s", out)
+	}
+}
+
+func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "upstream.address=tee-proxy.tee-attestation.svc.cluster.local:443",
+		"--set", "upstream.protocol=https",
+		"--set", "upstream.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;") {
+		t.Fatalf("render missing derived proxy_ssl_name\n%s", out)
+	}
+}
+
+func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "upstream.protocol=https",
+		"--set", "upstream.tls.verify=true",
+		"--set-string", "upstream.tls.trustedCAPath=/etc/ssl/certs/ca-certificates.crt",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;") {
+		t.Fatalf("render missing custom trusted CA path\n%s", out)
+	}
+	if strings.Contains(out, "- name: mesh-ca") {
+		t.Fatalf("custom trustedCAPath should not mount the chart mesh CA\n%s", out)
+	}
+}
+
+func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "upstream.protocol=https",
+		"--set", "upstream.tls.verify=true",
+		"--set-string", "upstream.tls.trustedCAPath=/mesh-ca/ca.pem",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"proxy_ssl_trusted_certificate /mesh-ca/ca.pem;",
+		"- name: mesh-ca",
+		"optional: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "discovery.enabled=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
+		"alias /mesh-ca/ca.pem;",
+		"- name: mesh-ca",
+		"name: tls-lb-cert-issuer-mesh-ca",
+		"optional: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "discovery.enabled=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "--discovery-public-tls-mode=cds") {
+		t.Fatalf("discovery without public TLS Secret should report CDS mode\n%s", out)
+	}
+}
+
 func TestChartOperatorRBACIsScoped(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "webhook.enabled=false")
 	if err != nil {
@@ -342,4 +535,21 @@ func renderedValue(t *testing.T, manifest, key string) string {
 	}
 	t.Fatalf("rendered manifest missing %q\n%s", key, manifest)
 	return ""
+}
+
+func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm CLI not found")
+	}
+	base := []string{
+		"template", "tls-lb", "c8s/charts/tls-lb",
+		"--namespace", "c8s-system",
+		"--set", "initContainer.image.tag=dev",
+		"--set", "nginx.image.tag=dev",
+	}
+	cmd := exec.Command("helm", append(base, args...)...)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

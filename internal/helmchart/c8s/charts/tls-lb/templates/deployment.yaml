@@ -1,5 +1,21 @@
 {{- $assamURL := default (printf "http://%s-assam.%s.svc:8080" .Release.Name .Release.Namespace) .Values.assamURL -}}
 {{- $attestationServiceURL := default (printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace) .Values.attestationServiceURL -}}
+{{- $discoveryFilePath := printf "%s/%s" .Values.discovery.mountPath .Values.discovery.fileName -}}
+{{- $meshCAConfigMapName := default (printf "%s-cert-issuer-mesh-ca" .Release.Name) .Values.meshCA.configMapName -}}
+{{- $defaultMeshCAPath := printf "%s/%s" .Values.meshCA.mountPath .Values.meshCA.key -}}
+{{- $configuredTrustedCAPath := .Values.upstream.tls.trustedCAPath -}}
+{{- $upstreamTLSVerify := and (eq .Values.upstream.protocol "https") .Values.upstream.tls.verify -}}
+{{- $upstreamUsesMeshCA := and $upstreamTLSVerify (or (not $configuredTrustedCAPath) (eq $configuredTrustedCAPath $defaultMeshCAPath)) -}}
+{{- $discoveryExposesMeshCA := and .Values.discovery.enabled .Values.meshCA.expose -}}
+{{- $mountMeshCA := or $discoveryExposesMeshCA $upstreamUsesMeshCA -}}
+{{- $publicCertPath := printf "%s/cert.pem" .Values.tlsMountPath -}}
+{{- $publicKeyPath := printf "%s/key.pem" .Values.tlsMountPath -}}
+{{- $publicTLSMode := "cds" -}}
+{{- if .Values.publicTLS.secretName -}}
+{{- $publicCertPath = printf "%s/%s" .Values.publicTLS.mountPath .Values.publicTLS.certKey -}}
+{{- $publicKeyPath = printf "%s/%s" .Values.publicTLS.mountPath .Values.publicTLS.keyKey -}}
+{{- $publicTLSMode = "webpki" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +55,14 @@ spec:
             - --san={{ required "san is required - set it to the domain name for the TLS certificate" .Values.san }}
             - --out={{ .Values.tlsMountPath }}/cert.pem
             - --key-out={{ .Values.tlsMountPath }}/key.pem
+            {{- if .Values.discovery.enabled }}
+            - --discovery-out={{ $discoveryFilePath }}
+            - --discovery-cds-cert-url={{ .Values.discovery.cdsCertPath }}
+            - --discovery-public-tls-mode={{ $publicTLSMode }}
+            {{- if .Values.meshCA.expose }}
+            - --discovery-mesh-ca-url={{ .Values.discovery.meshCAPath }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.initContainer.verbose }}
             - --verbose
             {{- end }}
@@ -53,6 +77,10 @@ spec:
           volumeMounts:
             - name: tls-certs
               mountPath: {{ .Values.tlsMountPath }}
+            {{- if .Values.discovery.enabled }}
+            - name: discovery
+              mountPath: {{ .Values.discovery.mountPath }}
+            {{- end }}
         # Native sidecar: keeps running to renew the cert and SIGHUP nginx.
         - name: get-cert
           image: {{ include "c8s-common.image" .Values.initContainer.image }}
@@ -70,6 +98,18 @@ spec:
             - --san={{ required "san is required - set it to the domain name for the TLS certificate" .Values.san }}
             - --out={{ .Values.tlsMountPath }}/cert.pem
             - --key-out={{ .Values.tlsMountPath }}/key.pem
+            {{- if .Values.publicTLS.secretName }}
+            - --reload-watch={{ $publicCertPath }}
+            - --reload-watch={{ $publicKeyPath }}
+            {{- end }}
+            {{- if .Values.discovery.enabled }}
+            - --discovery-out={{ $discoveryFilePath }}
+            - --discovery-cds-cert-url={{ .Values.discovery.cdsCertPath }}
+            - --discovery-public-tls-mode={{ $publicTLSMode }}
+            {{- if .Values.meshCA.expose }}
+            - --discovery-mesh-ca-url={{ .Values.discovery.meshCAPath }}
+            {{- end }}
+            {{- end }}
             - --renew-interval={{ .Values.initContainer.renewInterval }}
             {{- if .Values.initContainer.verbose }}
             - --verbose
@@ -85,6 +125,15 @@ spec:
           volumeMounts:
             - name: tls-certs
               mountPath: {{ .Values.tlsMountPath }}
+            {{- if .Values.publicTLS.secretName }}
+            - name: public-tls
+              mountPath: {{ .Values.publicTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.discovery.enabled }}
+            - name: discovery
+              mountPath: {{ .Values.discovery.mountPath }}
+            {{- end }}
       containers:
         - name: nginx
           image: {{ include "c8s-common.image" .Values.nginx.image }}
@@ -117,6 +166,21 @@ spec:
             - name: tls-certs
               mountPath: {{ .Values.tlsMountPath }}
               readOnly: true
+            {{- if .Values.publicTLS.secretName }}
+            - name: public-tls
+              mountPath: {{ .Values.publicTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.discovery.enabled }}
+            - name: discovery
+              mountPath: {{ .Values.discovery.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if $mountMeshCA }}
+            - name: mesh-ca
+              mountPath: {{ .Values.meshCA.mountPath }}
+              readOnly: true
+            {{- end }}
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
@@ -134,6 +198,31 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        {{- if .Values.publicTLS.secretName }}
+        - name: public-tls
+          secret:
+            secretName: {{ .Values.publicTLS.secretName }}
+            items:
+              - key: {{ .Values.publicTLS.certKey }}
+                path: {{ .Values.publicTLS.certKey }}
+              - key: {{ .Values.publicTLS.keyKey }}
+                path: {{ .Values.publicTLS.keyKey }}
+        {{- end }}
+        {{- if .Values.discovery.enabled }}
+        - name: discovery
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- end }}
+        {{- if $mountMeshCA }}
+        - name: mesh-ca
+          configMap:
+            name: {{ $meshCAConfigMapName }}
+            optional: false
+            items:
+              - key: {{ .Values.meshCA.key }}
+                path: {{ .Values.meshCA.key }}
+        {{- end }}
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-tmp

@@ -22,6 +22,16 @@ type Client struct {
 	attestationServiceAPIKey string
 }
 
+// CertificateResult is the complete assam challenge/attest/certify result.
+// Certificate is the PEM chain issued by assam. Challenge, Platform, and
+// Evidence are the attestation material that authorized issuance.
+type CertificateResult struct {
+	Certificate string
+	Challenge   string
+	Platform    string
+	Evidence    json.RawMessage
+}
+
 // NewClient creates a new attestation flow client.
 func NewClient(baseURL string) Client {
 	return Client{
@@ -76,21 +86,31 @@ func (c Client) GenerateEvidence(attestationServiceURL string, reportData []byte
 //  3. Submits the evidence and caller-provided CSR to assam (POST /attest)
 //     which verifies the evidence and returns a signed certificate
 func (c Client) ObtainCertificate(attestationServiceURL, csrPEM string) (string, error) {
+	result, err := c.ObtainCertificateWithEvidence(attestationServiceURL, csrPEM)
+	if err != nil {
+		return "", err
+	}
+	return result.Certificate, nil
+}
+
+// ObtainCertificateWithEvidence performs the full attestation flow and returns
+// both the issued certificate and the evidence used to obtain it.
+func (c Client) ObtainCertificateWithEvidence(attestationServiceURL, csrPEM string) (CertificateResult, error) {
 	// Step 1: get challenge from assam
 	challengeResp, err := c.Authenticate()
 	if err != nil {
-		return "", fmt.Errorf("authenticate: %w", err)
+		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
 	}
 
 	// Step 2: generate TEE evidence using the challenge as report_data
 	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
 	if err != nil {
-		return "", fmt.Errorf("invalid base64 in challenge: %w", err)
+		return CertificateResult{}, fmt.Errorf("invalid base64 in challenge: %w", err)
 	}
 
 	asResp, err := c.GenerateEvidence(attestationServiceURL, challengeBytes)
 	if err != nil {
-		return "", fmt.Errorf("attestation service: %w", err)
+		return CertificateResult{}, fmt.Errorf("attestation service: %w", err)
 	}
 
 	// Step 3: submit evidence + CSR to assam for verification and cert issuance.
@@ -105,7 +125,17 @@ func (c Client) ObtainCertificate(attestationServiceURL, csrPEM string) (string,
 		},
 		CSR: csrPEM,
 	}
-	return c.Attest(attestReq)
+	certPEM, err := c.Attest(attestReq)
+	if err != nil {
+		return CertificateResult{}, err
+	}
+
+	return CertificateResult{
+		Certificate: certPEM,
+		Challenge:   challengeResp.Challenge,
+		Platform:    asResp.Platform,
+		Evidence:    asResp.Evidence,
+	}, nil
 }
 
 // Authenticate requests an attestation challenge nonce.

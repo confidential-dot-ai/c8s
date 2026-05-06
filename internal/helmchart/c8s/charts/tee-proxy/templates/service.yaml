@@ -12,5 +12,9 @@ spec:
       targetPort: {{ .Values.ports.http }}
       protocol: TCP
       name: http
+    - port: 443
+      targetPort: {{ .Values.ports.https }}
+      protocol: TCP
+      name: https
   selector:
     {{- include "tee-proxy.selectorLabels" . | nindent 4 }}
