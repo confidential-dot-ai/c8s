@@ -188,6 +188,24 @@ func TestChartRejectsOperatorReplicaOverride(t *testing.T) {
 	}
 }
 
+func TestChartRendersManagedClusterKnobs(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "serviceAccount.imagePullSecrets[0].name=ghcr-secret",
+		"--set", "attestationService.privileged=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"imagePullSecrets:\n- name: ghcr-secret",
+		"securityContext:\n            privileged: true\n            readOnlyRootFilesystem: true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestChartOperatorRBACIsScoped(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "webhook.enabled=false")
 	if err != nil {

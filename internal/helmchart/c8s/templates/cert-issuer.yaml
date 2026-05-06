@@ -69,6 +69,7 @@ metadata:
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: cert-issuer
+{{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
 apiVersion: apps/v1
 kind: Deployment

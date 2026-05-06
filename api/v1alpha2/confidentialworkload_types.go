@@ -24,13 +24,6 @@ type WorkloadRef struct {
 	Name string `json:"name"`
 }
 
-// MeshSpec is informational. Certificate injection is driven by the workload
-// annotation `confidential.ai/cw`; pod-to-pod mTLS is handled by the node-level
-// ratls-mesh DaemonSet.
-type MeshSpec struct {
-	Enabled bool `json:"enabled,omitempty"`
-}
-
 // ConfidentialWorkloadSpec is the desired state of a ConfidentialWorkload.
 //
 // Sidecar injection happens on pod annotation alone — a CW CR is not required
@@ -38,8 +31,6 @@ type MeshSpec struct {
 // attestation state into .status.
 type ConfidentialWorkloadSpec struct {
 	WorkloadRef WorkloadRef `json:"workloadRef"`
-
-	Mesh MeshSpec `json:"mesh,omitempty"`
 }
 
 // AttestationSummary aggregates per-pod attestation state for the workload.

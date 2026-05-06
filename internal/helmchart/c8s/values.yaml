@@ -23,6 +23,11 @@ operator:
   podAnnotations: {}
   extraArgs: []
 
+## Common ServiceAccount settings for the chart-managed top-level c8s
+## workloads: operator, attestation-service, Assam, and cert-issuer.
+serviceAccount:
+  imagePullSecrets: []
+
 ## CRD-backed status mirror for `kubectl get cwl` UX. Disable this when CRDs
 ## are intentionally not installed; pod injection does not depend on it.
 statusMirror:
@@ -183,6 +188,17 @@ attestationService:
     - az-tdx
     - gcp-snp
     - gcp-tdx
+  privileged: false
+  ## Default is least-privilege device access for bare-metal TEE devices.
+  ## Some managed-cloud CVM environments gate vTPM access below the LSM/device
+  ## capability layer and need `privileged: true`; set privileged=true for that
+  ## path instead of overriding this map.
+  securityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+      add: [SYS_RAWIO]
   resources:
     requests:
       cpu: 50m

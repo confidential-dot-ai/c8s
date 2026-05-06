@@ -62,15 +62,6 @@ spec:
               for any cluster behavior. When present, the operator aggregates per-pod
               attestation state into .status.
             properties:
-              mesh:
-                description: |-
-                  MeshSpec is informational. Certificate injection is driven by the workload
-                  annotation `confidential.ai/cw`; pod-to-pod mTLS is handled by the node-level
-                  ratls-mesh DaemonSet.
-                properties:
-                  enabled:
-                    type: boolean
-                type: object
               workloadRef:
                 description: |-
                   WorkloadRef references a workload in the same namespace as the

@@ -40,6 +40,7 @@ metadata:
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: attestation-service
+{{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
 apiVersion: v1
 kind: Secret
@@ -159,15 +160,12 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationService.port }}
           securityContext:
-            # Not privileged — only the TEE device nodes are mounted
-            # below, not all of /dev. SYS_RAWIO covers the ioctl access
-            # the attestation crate needs against /dev/sev-guest and
-            # /dev/tdx-guest; everything else is dropped.
+            {{- if .Values.attestationService.privileged }}
+            privileged: true
             readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: [ALL]
-              add: [SYS_RAWIO]
+            {{- else }}
+{{ toYaml .Values.attestationService.securityContext | indent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/attestation-service

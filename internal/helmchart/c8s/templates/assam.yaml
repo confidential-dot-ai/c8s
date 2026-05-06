@@ -20,6 +20,7 @@ metadata:
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: assam
+{{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
 apiVersion: v1
 kind: Secret

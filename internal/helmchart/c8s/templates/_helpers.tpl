@@ -125,3 +125,10 @@ app.kubernetes.io/name: c8s-operator
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: Helm
 {{- end -}}
+
+{{- define "c8s.serviceAccountImagePullSecrets" -}}
+{{- with .Values.serviceAccount.imagePullSecrets }}
+imagePullSecrets:
+{{ toYaml . }}
+{{- end -}}
+{{- end -}}
