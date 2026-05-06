@@ -81,29 +81,7 @@ metadata:
     app.kubernetes.io/component: attestation-service
 data:
   config.toml: |
-    [server]
-    bind = "0.0.0.0:{{ .Values.attestationService.port }}"
-    # hosted mode: loopback guard is off; api_key auth gates protected
-    # endpoints (/attest, /verify, ...). /health remains public so kubelet
-    # probes succeed without an auth header.
-    mode = "hosted"
-
-    [server.tls]
-    enabled = false
-
-    [auth]
-    api_keys = [{{- range $i, $key := $authKeys -}}
-      {{- if $i }}, {{ end -}}{{- $key | quote -}}
-    {{- end -}}]
-
-    [attestation]
-    enabled = true
-    platforms = [{{- range $i, $p := .Values.attestationService.platforms -}}
-      {{- if $i }}, {{ end -}}{{- $p | quote -}}
-    {{- end -}}]
-
-    [certs]
-    cache_max_entries = 1024
+{{ include "c8s.attestationServiceConfig" (dict "root" . "authKeys" $authKeys) | indent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -147,6 +125,8 @@ spec:
         app.kubernetes.io/name: c8s-operator
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: attestation-service
+      annotations:
+        checksum/config: {{ include "c8s.attestationServiceConfig" (dict "root" . "authKeys" $authKeys) | sha256sum }}
     spec:
       serviceAccountName: {{ include "c8s.attestationServiceName" . }}
       tolerations:

@@ -120,6 +120,34 @@ http://{{ include "c8s.assamName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.a
 {{- default (printf "%s-api-key" (include "c8s.attestationServiceName" .)) .Values.webhook.apiKeySecret.name -}}
 {{- end -}}
 
+{{- define "c8s.attestationServiceConfig" -}}
+{{- $root := .root -}}
+{{- $authKeys := .authKeys -}}
+[server]
+bind = "0.0.0.0:{{ $root.Values.attestationService.port }}"
+# hosted mode: loopback guard is off; api_key auth gates protected
+# endpoints (/attest, /verify, ...). /health remains public so kubelet
+# probes succeed without an auth header.
+mode = "hosted"
+
+[server.tls]
+enabled = false
+
+[auth]
+api_keys = [{{- range $i, $key := $authKeys -}}
+  {{- if $i }}, {{ end -}}{{- $key | quote -}}
+{{- end -}}]
+
+[attestation]
+enabled = true
+platforms = [{{- range $i, $p := $root.Values.attestationService.platforms -}}
+  {{- if $i }}, {{ end -}}{{- $p | quote -}}
+{{- end -}}]
+
+[certs]
+cache_max_entries = 1024
+{{- end -}}
+
 {{- define "c8s.commonLabels" -}}
 app.kubernetes.io/name: c8s-operator
 app.kubernetes.io/instance: {{ .Release.Name }}

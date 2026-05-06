@@ -280,6 +280,34 @@ func TestChartCreatesWorkloadNamespaceSecrets(t *testing.T) {
 	}
 }
 
+func TestChartRollsAttestationServiceOnConfigChange(t *testing.T) {
+	defaultOut, err := helmTemplate(t,
+		"--set-string", "attestationService.apiKey=fixed-api-key",
+	)
+	if err != nil {
+		t.Fatalf("helm template default config: %v\n%s", err, defaultOut)
+	}
+	if !strings.Contains(defaultOut, `api_keys = ["fixed-api-key"]`) {
+		t.Fatalf("default attestation-service config missing fixed api key\n%s", defaultOut)
+	}
+	defaultChecksum := renderedValue(t, defaultOut, "checksum/config")
+	if defaultChecksum == "" {
+		t.Fatalf("default checksum/config is empty\n%s", defaultOut)
+	}
+
+	changedOut, err := helmTemplate(t,
+		"--set-string", "attestationService.apiKey=fixed-api-key",
+		"--set", "webhook.apiKeySecret.createInNamespaces={tenant-a}",
+	)
+	if err != nil {
+		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
+	}
+	changedChecksum := renderedValue(t, changedOut, "checksum/config")
+	if changedChecksum == defaultChecksum {
+		t.Fatalf("checksum/config did not change after adding workload namespace key: %s", defaultChecksum)
+	}
+}
+
 func helmTemplate(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
@@ -301,4 +329,17 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func renderedValue(t *testing.T, manifest, key string) string {
+	t.Helper()
+	prefix := key + ": "
+	for _, line := range strings.Split(manifest, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		}
+	}
+	t.Fatalf("rendered manifest missing %q\n%s", key, manifest)
+	return ""
 }
