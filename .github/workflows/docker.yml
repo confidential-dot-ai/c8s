@@ -17,6 +17,20 @@ env:
   ATTESTATION_RS_VERSION: "v0.1.0"
 
 jobs:
+  # job to download modules only once
+  go-modules:
+    name: Cache Go Modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Download Go modules
+        run: go mod download
+
   # Build Rust attestation binaries from lunal-dev/attestation-rs.
   # These get bundled into Docker images that need to perform hardware
   # attestation at runtime (talking to the TPM/vTPM via TSS2).
@@ -24,7 +38,7 @@ jobs:
     name: Attestation binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Cache attestation binaries
         id: cache-attestation
@@ -52,7 +66,7 @@ jobs:
         run: cd attestation-rs/lunal-attestation && make build-release
 
       - name: Upload attestation binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: attestation-binaries
           path: |
@@ -63,7 +77,7 @@ jobs:
   images:
     name: Docker (${{ matrix.binary }})
     runs-on: ubuntu-latest
-    needs: [attestation-binaries]
+    needs: [attestation-binaries, go-modules]
     strategy:
       matrix:
         include:
@@ -96,9 +110,9 @@ jobs:
             dockerfile: cmd/nri-image-policy/Dockerfile
             needs-attestation: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
@@ -108,7 +122,7 @@ jobs:
 
       - name: Download attestation binaries
         if: matrix.needs-attestation
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: attestation-binaries
           path: build
@@ -116,6 +130,9 @@ jobs:
       - name: Make attestation binaries executable
         if: matrix.needs-attestation
         run: chmod +x build/attest-*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
@@ -126,7 +143,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
-        if: github.event_name == 'push'
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -145,5 +161,18 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags || format('{0}:ci', matrix.image) }}
+          load: ${{ github.event_name != 'push' }}
+          tags: ${{ steps.meta.outputs.json != '' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}:ci', matrix.image) }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Enable GHA caching for Docker layers
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Docker image
+        id: container-scan
+        uses: anchore/scan-action@568b89d27fc18c60e56937bff480c91c772cd993 # v7.1.0
+        with:
+          image: ${{ steps.meta.outputs.json != '' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}:ci', matrix.image) }}
+          fail-build: false
+      - name: Inspect action SARIF report
+        run: cat ${{ steps.container-scan.outputs.sarif }}

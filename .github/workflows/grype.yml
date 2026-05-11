@@ -1,0 +1,48 @@
+name: Scan for 
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-grype
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Scan for vulnerabilities
+      id: scan
+      uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+      with:
+        path: "."
+        fail-build: false
+        output-format: table
+        severity-cutoff: critical
+
+    - name: Generate job summary
+      id: job-summary
+      run: |
+        {
+          IFS=$'\n'
+          echo "## Grype Report Summary"
+          echo '```'
+          cat ${{ steps.scan.outputs.table }}
+          echo '```'
+        } >> $GITHUB_STEP_SUMMARY
