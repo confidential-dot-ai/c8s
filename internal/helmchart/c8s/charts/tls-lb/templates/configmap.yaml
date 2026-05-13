@@ -65,6 +65,33 @@ data:
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
+            {{- range $i, $route := .Values.routes }}
+            {{- $path := required (printf "tls-lb.routes[%d].path is required" $i) $route.path }}
+            {{- $upstream := required (printf "tls-lb.routes[%d].upstream is required" $i) $route.upstream }}
+            {{- $match := default "prefix" $route.match }}
+            {{- if not (or (eq $match "exact") (eq $match "prefix")) }}
+            {{- fail (printf "tls-lb.routes[%d].match must be 'exact' or 'prefix', got: %s" $i $match) }}
+            {{- end }}
+            {{- if not (regexMatch `^/[A-Za-z0-9._~!$&()*+,=:@%/-]*$` $path) }}
+            {{- fail (printf "tls-lb.routes[%d].path must start with '/' and contain only URI path characters safe for nginx locations, got: %s" $i $path) }}
+            {{- end }}
+            {{- if not (regexMatch `^http://[^[:space:]{};]+$` $upstream) }}
+            {{- fail (printf "tls-lb.routes[%d].upstream must be an http:// URL without whitespace, semicolons, or braces; route-specific HTTPS upstreams are not supported" $i) }}
+            {{- end }}
+            # Route: {{ $path }} -> {{ $upstream }}
+            {{- if eq $match "exact" }}
+            location = {{ $path }} {
+            {{- else }}
+            location {{ $path }} {
+            {{- end }}
+                proxy_pass {{ $upstream }};
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            {{- end }}
             {{- if .Values.discovery.enabled }}
             location = {{ .Values.discovery.path }} {
                 access_log off;

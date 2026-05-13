@@ -28,6 +28,16 @@ upstream:
     # Custom paths must be provided by the image or another mount.
     trustedCAPath: ""
 
+# -- Additional path routes proxied before the default upstream backend.
+# Useful for preserving control-plane endpoints while the catch-all route
+# points at an inference backend.
+routes: []
+  # - path: /whitelist
+  #   match: exact  # exact | prefix (default)
+  #   # Route upstreams currently support http:// only; use the default upstream
+  #   # when you need CDS client certs, SNI, or upstream certificate verification.
+  #   upstream: http://assam.default.svc.cluster.local:8080
+
 # -- Public TLS certificate presented to internet clients. When secretName is
 # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
 # compatibility.

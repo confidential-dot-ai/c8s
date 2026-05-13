@@ -1,9 +1,13 @@
 package helmchart
 
 import (
+	"errors"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestChartDefaultRendersReplacementStack(t *testing.T) {
@@ -327,6 +331,175 @@ func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	}
 	if !strings.Contains(out, "proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;") {
 		t.Fatalf("render missing derived proxy_ssl_name\n%s", out)
+	}
+}
+
+func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+		"--set-string", "routes[1].path=/tenant/",
+		"--set-string", "routes[1].upstream=http://tenant-router.c8s-system.svc:8080",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	conf := renderedTLSLBNginxConf(t, out)
+
+	for _, tt := range []struct {
+		name     string
+		location string
+		upstream string
+	}{
+		{
+			name:     "exact",
+			location: "location = /whitelist {",
+			upstream: "http://assam.c8s-system.svc:8080",
+		},
+		{
+			name:     "default-prefix",
+			location: "location /tenant/ {",
+			upstream: "http://tenant-router.c8s-system.svc:8080",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			block := nginxLocationBlock(t, conf, tt.location)
+			want := "proxy_pass " + tt.upstream + ";"
+			if !strings.Contains(block, want) {
+				t.Fatalf("location block missing %q\n%s", want, block)
+			}
+		})
+	}
+
+	if strings.Contains(nginxLocationBlock(t, conf, "location / {"), "assam.c8s-system.svc") {
+		t.Fatalf("default backend location should not inherit route upstreams\n%s", conf)
+	}
+}
+
+func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
+	t.Helper()
+
+	decoder := yaml.NewDecoder(strings.NewReader(manifest))
+	for {
+		var doc map[string]any
+		err := decoder.Decode(&doc)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("parse rendered manifest: %v\n%s", err, manifest)
+		}
+		if doc == nil || doc["kind"] != "ConfigMap" {
+			continue
+		}
+		metadata, ok := doc["metadata"].(map[string]any)
+		if !ok || metadata["name"] != "tls-lb-nginx" {
+			continue
+		}
+		data, ok := doc["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("tls-lb nginx ConfigMap missing data\n%s", manifest)
+		}
+		conf, ok := data["nginx.conf"].(string)
+		if !ok || conf == "" {
+			t.Fatalf("tls-lb nginx ConfigMap missing nginx.conf\n%s", manifest)
+		}
+		return conf
+	}
+	t.Fatalf("rendered manifest missing tls-lb nginx ConfigMap\n%s", manifest)
+	return ""
+}
+
+func nginxLocationBlock(t *testing.T, conf, location string) string {
+	t.Helper()
+
+	start := strings.Index(conf, location)
+	if start < 0 {
+		t.Fatalf("nginx config missing location %q\n%s", location, conf)
+	}
+	var block strings.Builder
+	for _, line := range strings.Split(conf[start:], "\n") {
+		block.WriteString(line)
+		block.WriteByte('\n')
+		if strings.TrimSpace(line) == "}" {
+			return block.String()
+		}
+	}
+	t.Fatalf("nginx config location %q is not closed\n%s", location, conf)
+	return ""
+}
+
+func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].match=regex",
+		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want invalid route match failure\n%s", out)
+	}
+	if !strings.Contains(out, "tls-lb.routes[0].match must be 'exact' or 'prefix'") {
+		t.Fatalf("missing route match error, got:\n%s", out)
+	}
+}
+
+func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "path",
+			args: []string{
+				"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+			},
+			want: "tls-lb.routes[0].path is required",
+		},
+		{
+			name: "upstream",
+			args: []string{
+				"--set-string", "routes[0].path=/whitelist",
+			},
+			want: "tls-lb.routes[0].upstream is required",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := helmTemplateTLSLB(t, tt.args...)
+			if err == nil {
+				t.Fatalf("helm template succeeded, want missing route field failure\n%s", out)
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Fatalf("missing route field error %q, got:\n%s", tt.want, out)
+			}
+		})
+	}
+}
+
+func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/bad;return",
+		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want unsafe route path failure\n%s", out)
+	}
+	if !strings.Contains(out, "tls-lb.routes[0].path must start with '/'") {
+		t.Fatalf("missing route path error, got:\n%s", out)
+	}
+}
+
+func TestTLSLBRejectsHTTPSRouteUpstream(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].upstream=https://assam.c8s-system.svc:8443",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want https route upstream failure\n%s", out)
+	}
+	if !strings.Contains(out, "route-specific HTTPS upstreams are not supported") {
+		t.Fatalf("missing route upstream error, got:\n%s", out)
 	}
 }
 

@@ -15,7 +15,7 @@ For public edge deployments, the chart can instead present a normal WebPKI certi
 3. The CDS cert and key are written to an in-memory volume shared with the nginx container.
 4. If `publicTLS.secretName` is set, nginx presents that Secret's WebPKI cert to clients and the `get-cert` sidecar reloads nginx when Kubernetes rotates the mounted Secret. Otherwise nginx presents the CDS cert for backwards compatibility.
 5. If `discovery.enabled=true`, `get-cert` writes JSON discovery metadata with the issued CDS certificate and attestation evidence, and nginx serves it at `discovery.path`.
-6. Nginx proxies all traffic to the configured upstream backend. If `upstream.protocol=https`, it can present the CDS cert as its upstream client certificate and optionally verify the upstream with the mesh CA bundle.
+6. Nginx serves any configured `routes` first, then proxies all other traffic to the configured upstream backend. If `upstream.protocol=https`, it can present the CDS cert as its upstream client certificate and optionally verify the upstream with the mesh CA bundle.
 
 The CDS cert and key are shared between the init container and nginx via an `emptyDir` volume with `medium: Memory` - backed by tmpfs, so private keys are held in RAM only and never written to disk. Each replica gets a fresh, attested certificate on startup.
 
@@ -50,6 +50,7 @@ helm install my-lb charts/tls-lb \
 | `upstream.tls.verifyDepth` | `2` | Maximum upstream server certificate chain depth nginx verifies when `upstream.tls.verify=true` |
 | `upstream.tls.serverName` | `""` | Optional SNI/verification name for HTTPS upstreams |
 | `upstream.tls.trustedCAPath` | `""` | Optional upstream CA path. Empty uses `<meshCA.mountPath>/<meshCA.key>`; custom paths must be provided by the image or another mount. |
+| `routes` | `[]` | Additional path routes proxied before the default upstream backend. Each entry has `path`, `upstream`, and optional `match` (`exact` or `prefix`, default `prefix`). Route upstreams currently support `http://` only; use the default upstream when you need CDS client certs, SNI, or upstream certificate verification. |
 | `publicTLS.secretName` | `""` | Kubernetes TLS Secret for public client TLS. Empty means present the CDS cert. |
 | `publicTLS.certKey` | `tls.crt` | Secret key containing the public certificate chain |
 | `publicTLS.keyKey` | `tls.key` | Secret key containing the public private key |
