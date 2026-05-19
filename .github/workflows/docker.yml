@@ -4,8 +4,20 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths: &docker-paths
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
+      - "cmd/**/Dockerfile"
+      - "cmd/nri-image-policy/enable-nri.sh"
+      - "internal/helmchart/c8s/**"
+      - "Makefile"
+      - ".github/workflows/docker.yml"
   pull_request:
     branches: [main]
+    paths: *docker-paths
 
 permissions:
   contents: read

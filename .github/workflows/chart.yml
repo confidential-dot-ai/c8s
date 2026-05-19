@@ -4,8 +4,12 @@ on:
   push:
     branches: [main, "feat/**"]
     tags: ["v*"]
+    paths: &chart-paths
+      - "internal/helmchart/**"
+      - ".github/workflows/chart.yml"
   pull_request:
     branches: [main, "feat/**"]
+    paths: *chart-paths
 
 env:
   REGISTRY: ghcr.io
