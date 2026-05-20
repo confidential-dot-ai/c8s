@@ -550,9 +550,9 @@ func findRATLSMeshPrometheusRule(t *testing.T, helmOut string) prometheusRule {
 
 // TestChartRATLSRoutingAlerts pins routing-path alerts that fire on signals
 // downstream consumers should not have to reconstruct by hand: a wedged
-// iptables-sync sidecar (its in-process counters stop publishing), local CIDR
-// discovery failure (inbound pod delivery fails closed), and direct dials to
-// :15001 outside the REDIRECT path. Drop any alert and a refactor of
+// iptables-sync sidecar (its in-process counters stop publishing), unavailable
+// local CIDR route cross-checking, and direct dials to :15001 outside the
+// REDIRECT path. Drop any alert and a refactor of
 // prometheus-rules.yaml could silently lose the corresponding production
 // signal.
 func TestChartRATLSRoutingAlerts(t *testing.T) {
@@ -563,11 +563,11 @@ func TestChartRATLSRoutingAlerts(t *testing.T) {
 	rule := findRATLSMeshPrometheusRule(t, out)
 
 	want := map[string]string{
-		"RATLSMeshIptablesSyncWedged":       "ratls_mesh_iptables_metrics_file_updated_at_seconds",
-		"RATLSMeshLocalCIDRDiscoveryFailed": "ratls_mesh_resolver_local_cidrs == 0",
-		"RATLSMeshOutboundDirectDial":       `reason="host_addr"`,
-		"RATLSMeshIptablesIPSetOverflow":    "ratls_mesh_iptables_ipset_overflow_total",
-		"RATLSMeshJumpPositionViolations":   "ratls_mesh_iptables_jump_position_violations_total",
+		"RATLSMeshIptablesSyncWedged":             "ratls_mesh_iptables_metrics_file_updated_at_seconds",
+		"RATLSMeshLocalCIDRRouteCheckUnavailable": "ratls_mesh_resolver_local_cidrs == 0",
+		"RATLSMeshOutboundDirectDial":             `reason="host_addr"`,
+		"RATLSMeshIptablesIPSetOverflow":          "ratls_mesh_iptables_ipset_overflow_total",
+		"RATLSMeshJumpPositionViolations":         "ratls_mesh_iptables_jump_position_violations_total",
 	}
 	got := make(map[string]string)
 	for _, g := range rule.Spec.Groups {

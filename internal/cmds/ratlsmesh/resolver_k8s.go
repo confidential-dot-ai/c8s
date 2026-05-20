@@ -55,12 +55,13 @@ type k8sResolver struct {
 
 	// localCIDRs is a snapshot of this host's pod-network CIDRs and owning
 	// interfaces derived from network-interface addresses (not from K8s
-	// metadata). ValidateLocalDest requires the dst IP to fall within one of
-	// these and the kernel's best route to use one of the matching
-	// interfaces, so a stale or adversarial Pod.Status.HostIP cannot cause the
-	// inbound listener to plaintext-dial a pod that isn't actually on this
-	// node. Guarded by mu; the refresh goroutine swaps the slice on
-	// transitions.
+	// metadata). When this set is non-empty, ValidateLocalDest requires the
+	// dst IP to fall within one of these CIDRs and the kernel's best route to
+	// use one of the matching interfaces, so a stale or adversarial
+	// Pod.Status.HostIP cannot cause the inbound listener to plaintext-dial a
+	// pod that isn't actually on this node. CNIs that expose no host pod CIDR
+	// use a Kubernetes HostIP fallback instead. Guarded by mu; the refresh
+	// goroutine swaps the slice on transitions.
 	localCIDRs []localCIDR
 
 	// localRouteCheck is the kernel-route cross-check that gates the
@@ -249,8 +250,9 @@ func (r *k8sResolver) CacheSize() int {
 }
 
 // LocalCIDRCount returns the number of host-discovered pod-network CIDRs
-// gating ValidateLocalDest. Zero means inbound pod delivery fails closed until
-// the refresh loop discovers at least one local pod-network CIDR.
+// available for ValidateLocalDest's route cross-check. Zero means inbound
+// delivery falls back to Kubernetes pod HostIP ownership until discovery
+// finds a local pod-network CIDR.
 func (r *k8sResolver) LocalCIDRCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -297,11 +299,12 @@ func (r *k8sResolver) ValidateOutboundDest(ip string) (bool, string) {
 
 // ValidateLocalDest returns true if ip is a non-hostNetwork pod running on this
 // node. Host loopback and node addresses are rejected so the host-network
-// inbound listener cannot be used as a relay to host-local services. The IP
-// must fall within a host-discovered pod-network CIDR, and the kernel's best
-// route must use one of that CIDR's interfaces; both checks are independent of
-// Pod.Status.HostIP so a stale or adversarial K8s hint cannot cause the
-// inbound listener to plaintext-dial across nodes.
+// inbound listener cannot be used as a relay to host-local services. When
+// host-discovered pod-network CIDRs are available, the IP must fall within one
+// of them and the kernel's best route must use one of that CIDR's interfaces.
+// On CNIs where pods get fabric-routable addresses and no host pod CIDR exists
+// (for example Azure CNI on AKS), ValidateLocalDest falls back to the K8s
+// podMap and only accepts pods whose Pod.Status.HostIP matches this node.
 func (r *k8sResolver) ValidateLocalDest(ip string) bool {
 	if r.isHostAddress(ip) {
 		return false
@@ -311,21 +314,18 @@ func (r *k8sResolver) ValidateLocalDest(ip string) bool {
 		return false
 	}
 	r.mu.RLock()
+	hasLocalCIDRs := len(r.localCIDRs) > 0
 	routeIfaces, inLocalCIDR := r.localRouteIfacesForIPLocked(canonical)
-	if !inLocalCIDR {
-		r.mu.RUnlock()
-		return false
-	}
 	entry, found := r.podMap[canonical]
 	routeCheck := r.localRouteCheck
 	r.mu.RUnlock()
 	// Two distinct rejection reasons collapse to the same fail-closed outcome:
 	//
 	//   !found: the informer has not yet seen a pod with this IP. The CIDR
-	//     check above already proved the IP belongs to the local pod-network
-	//     range, so this is almost always informer lag for a freshly-started
-	//     pod. The conservative choice is to refuse plaintext delivery until
-	//     we have an authoritative mapping.
+	//     check may already have proved the IP belongs to a local pod-network
+	//     range; when no CIDR exists, the podMap is the only ownership signal.
+	//     The conservative choice is to refuse plaintext delivery until we
+	//     have an authoritative mapping.
 	//
 	//   found && entry.nodeIP != r.nodeIP: the apiserver places this pod on
 	//     another node. Plaintext-dialing it would exit the node via the CNI
@@ -343,6 +343,13 @@ func (r *k8sResolver) ValidateLocalDest(ip string) bool {
 		r.logger.Warn("inbound destination belongs to a remote node; rejecting", "dst", canonical, "pod_node", entry.nodeIP, "local_node", r.nodeIP)
 		return false
 	}
+	if !hasLocalCIDRs {
+		return true
+	}
+	if !inLocalCIDR {
+		r.logger.Warn("inbound destination is outside host-discovered local pod CIDRs; rejecting", "dst", canonical)
+		return false
+	}
 	ok, err := routeCheck(canonical, routeIfaces)
 	if err != nil {
 		r.logger.Warn("local route check failed; rejecting inbound destination", "dst", canonical, "error", err)
@@ -357,8 +364,9 @@ func (r *k8sResolver) ValidateLocalDest(ip string) bool {
 
 // localRouteIfacesForIPLocked returns the local pod-network interfaces whose
 // CIDRs contain ip. Caller must hold r.mu (read or write). When no CIDRs were
-// discovered (e.g. unusual CNI or the bridge has not come up yet), it returns
-// false so inbound delivery fails closed until the refresh loop recovers.
+// discovered (e.g. unusual CNI, fabric-routable pod IPs, or the bridge has not
+// come up yet), it returns false so ValidateLocalDest can decide whether to
+// fall back to K8s pod ownership.
 func (r *k8sResolver) localRouteIfacesForIPLocked(ip string) ([]string, bool) {
 	if len(r.localCIDRs) == 0 {
 		return nil, false
@@ -387,7 +395,7 @@ func (r *k8sResolver) localRouteIfacesForIPLocked(ip string) ([]string, bool) {
 func (r *k8sResolver) reconcileLocalCIDRs(initial bool) {
 	cidrs, err := r.localCIDRSource(r.nodeIP)
 	if err != nil {
-		r.logger.Warn("local CIDR discovery: net.Interfaces failed; inbound pod delivery will fail closed", "error", err)
+		r.logger.Warn("local CIDR discovery: net.Interfaces failed; falling back to Kubernetes pod ownership for inbound pod delivery", "error", err)
 		cidrs = nil
 	}
 	r.mu.Lock()
@@ -401,7 +409,7 @@ func (r *k8sResolver) reconcileLocalCIDRs(initial bool) {
 		return
 	}
 	if len(cidrs) == 0 {
-		r.logger.Warn("local CIDR set empty; inbound pod delivery will fail closed", "previous", cidrStrings(prev))
+		r.logger.Warn("local CIDR set empty; falling back to Kubernetes pod ownership for inbound pod delivery", "previous", cidrStrings(prev))
 		return
 	}
 	if initial {
@@ -413,11 +421,11 @@ func (r *k8sResolver) reconcileLocalCIDRs(initial bool) {
 
 // bootstrapLocalCIDRs runs discovery synchronously within the given budget
 // so a CNI bridge that comes up shortly after the pod starts doesn't pin
-// ValidateLocalDest in fail-closed until the first periodic refresh tick
-// (up to 30s away). The loop stops on the first non-empty result; if the
-// kernel never returns CIDRs within the budget, we fall through to the
-// existing async path and the RATLSMeshLocalCIDRDiscoveryFailed alert
-// fires after 2m. ctx cancellation short-circuits the wait.
+// ValidateLocalDest to the K8s pod-ownership fallback until the first periodic
+// refresh tick (up to 30s away). The loop stops on the first non-empty result;
+// if the kernel never returns CIDRs within the budget, we fall through to the
+// existing async path and the degraded-mode alert fires after 2m. ctx
+// cancellation short-circuits the wait.
 func (r *k8sResolver) bootstrapLocalCIDRs(ctx context.Context, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	initial := true

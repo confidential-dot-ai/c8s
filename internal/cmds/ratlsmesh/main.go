@@ -139,7 +139,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.DurationVar(&c.healthReadTimeout, "health-read-timeout", 5*time.Second, "health server read timeout")
 	fs.DurationVar(&c.healthWriteTimeout, "health-write-timeout", 10*time.Second, "health server write timeout")
 	fs.DurationVar(&c.metricsUpdateInterval, "metrics-update-interval", 10*time.Second, "interval for resolver cache and cert expiry metric updates")
-	fs.DurationVar(&c.localCIDRBootTimeout, "local-cidr-boot-timeout", time.Second, "synchronous retry budget at startup for host pod-network CIDR discovery; past this we fall through to the async refresh loop and ValidateLocalDest fails closed until it recovers")
+	fs.DurationVar(&c.localCIDRBootTimeout, "local-cidr-boot-timeout", time.Second, "synchronous retry budget at startup for host pod-network CIDR discovery; past this we fall through to the async refresh loop and ValidateLocalDest uses Kubernetes pod HostIP ownership until discovery recovers")
 	fs.StringVar(&c.iptablesMetricsFile, "iptables-metrics-file", defaultIptablesMetricsFile, "shared file where iptables-sync publishes counters (empty disables)")
 	fs.DurationVar(&c.assamOpTimeout, "assam-op-timeout", 30*time.Second, "per-operation timeout for assam certificate upgrade and CA bundle refresh")
 	fs.DurationVar(&c.certPipelineProbeTimeout, "cert-pipeline-probe-timeout", 5*time.Second, "HTTP client timeout for cert pipeline health probe requests")

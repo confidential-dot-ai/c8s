@@ -143,7 +143,7 @@ func newMetrics() *metrics {
 	})
 	m.resolverLocalCIDRs = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_local_cidrs",
-		Help: "Host-discovered pod-network CIDRs guarding ValidateLocalDest (0 = inbound pod delivery fails closed).",
+		Help: "Host-discovered pod-network CIDRs available for ValidateLocalDest route cross-checks (0 = Kubernetes pod HostIP fallback active).",
 	})
 	m.resolverLastEvent = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_resolver_last_event_timestamp_seconds",

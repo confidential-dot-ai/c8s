@@ -54,6 +54,14 @@ direct connections to the host-network listener are rejected unless the original
 destination is a known pod IP. The inbound listener only forwards to local
 non-hostNetwork pod IPs.
 
+Inbound delivery is still protected by RA-TLS on the node-to-node leg. The
+only plaintext segment is the final host-to-local-pod dial on the destination
+node. When the host exposes local pod-network CIDRs, `ValidateLocalDest`
+cross-checks the destination Pod IP against those CIDRs and the kernel route.
+On CNIs that do not expose a local pod CIDR on the host, such as AKS with
+Azure CNI, the resolver falls back to the Kubernetes pod cache and only accepts
+destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
+
 ## Common Flags
 
 | Flag | Default | Description |
@@ -73,7 +81,7 @@ non-hostNetwork pod IPs.
 | `--tls-dial-timeout` | `10s` | RA-TLS dial timeout |
 | `--dest-header-timeout` | `5s` | Inbound destination header read timeout |
 | `--drain-timeout` | `30s` | Graceful shutdown drain timeout |
-| `--local-cidr-boot-timeout` | `1s` | Synchronous retry budget at startup for host pod-network CIDR discovery; past this we fall through to the async refresh loop and `ValidateLocalDest` fails closed until it recovers |
+| `--local-cidr-boot-timeout` | `1s` | Synchronous retry budget at startup for host pod-network CIDR discovery; past this we fall through to the async refresh loop and `ValidateLocalDest` uses Kubernetes `Pod.Status.HostIP` ownership until discovery recovers |
 | `--measurements` | `""` | Comma-separated hex SHA-384 launch measurements (empty = accept any TEE, warns) |
 | `--cert-mode` | `self-signed` | Certificate mode: `self-signed` or `assam` |
 | `--assam-url` | `""` | Assam service URL for attestation (required for `assam` cert mode) |
@@ -202,7 +210,7 @@ are starting points; tune to your scrape interval and pod churn.
 
 | Signal | What it means | Suggested rule |
 |--------|---------------|----------------|
-| `ratls_mesh_resolver_local_cidrs == 0` | `ValidateLocalDest` has no host pod-network CIDRs to cross-check against, so inbound pod delivery fails closed. Expected briefly at startup; persistent zero means CNI bridge discovery is broken. | `avg_over_time(ratls_mesh_resolver_local_cidrs[2m]) == 0` — page after 2× `--resync-period` (default 60s). |
+| `ratls_mesh_resolver_local_cidrs == 0` | `ValidateLocalDest` has no host pod-network CIDRs for the route cross-check, so inbound pod delivery is using Kubernetes `Pod.Status.HostIP` ownership. Expected briefly at startup and expected persistently on CNIs that expose pod IPs without a host-local pod CIDR, such as AKS with Azure CNI. | Warn after 2× `--resync-period` (default 60s) when this is unexpected for the cluster CNI. |
 | `rate(ratls_mesh_iptables_ipset_overflow_total[5m]) > 0` | Pod count exceeded `--ipset-maxelem`; the reconcile rejected the restore and the live ipset is stale. New pod IPs will not be intercepted until the operator bumps `iptablesSync.ipsetMaxElem`. | Page on any non-zero rate for 5+ minutes. |
 | `rate(ratls_mesh_iptables_jump_position_violations_total[5m])` | Watchdog confirmed our PREROUTING/OUTPUT jump was demoted out of position 1 — typically kube-proxy reinserting `KUBE-SERVICES` ahead of us. Occasional events are normal; a steady positive rate indicates a fight with kube-proxy. | Warn when rate > 1/min sustained for 10 min; tune `--watchdog-period` (default 2s) downward if necessary. |
 | `rate(ratls_mesh_iptables_jump_position_check_errors_total[5m])` | `iptables -S` failed during a watchdog tick. Watchdog reinserts defensively, so this is environmental noise, not a kube-proxy race. | Warn at a sustained rate to flag a stuck or busy `xtables.lock`. |

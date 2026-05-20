@@ -28,7 +28,7 @@ Node A                                              Node B
 Each sidecar runs both listeners; the diagram shows the outbound side
 firing on Node A and the inbound side firing on Node B for clarity.
 "Dial local pod" is the inbound→pod plaintext hop over the CNI bridge —
-the only segment not protected by RA-TLS, kept fail-closed by the
+the only segment not protected by RA-TLS, bounded by the
 `ValidateLocalDest` checks discussed under "Local vs remote path".
 
 ### Data flow
@@ -46,9 +46,13 @@ the only segment not protected by RA-TLS, kept fail-closed by the
 
 **Resolver and RA-TLS path.** The resolver maps `podIP → nodeIP`; the outbound proxy always opens RA-TLS to that node's inbound listener, even when the destination is local. Same-node traffic dials this node's own `:15006`, and a pod connecting to its own pod IP takes the same round trip (one extra handshake, no application impact — packet captures of `:15001`/`:15006` showing self-traffic are intentional, not a routing loop). The uniform path fails closed on attestation before any application bytes move, and removes a class of bug in which a "local" routing decision could be silently wrong about where the destination actually runs.
 
-**The plaintext leg.** Only the inbound→pod hop stays plain TCP, traversing the CNI bridge / pod veth from the host netns to a local pod. It never leaves the node — on a confidential VM, the packets stay inside SEV-SNP-protected memory and the hypervisor cannot observe them. The attack to defend is a forged `Pod.Status.HostIP` that claims a *remote* pod is local: the proxy would then dial it through the kernel routing table, the packets would exit the node via the CNI overlay, and a hypervisor-level observer would see plaintext. `ValidateLocalDest` blocks this with two kernel-sourced checks independent of the apiserver hint: the destination IP must fall in a host pod-network CIDR read from `net.Interfaces()`, and the kernel's best route for that IP (queried via `netlink.RouteGet`) must leave through one of the interfaces that owned a matching CIDR. The discovery filter keeps non-loopback, up, broadcast-capable interfaces and drops three classes a forged `HostIP` could otherwise hide in: any interface carrying the node IP itself (the node fabric, including dual-stack addresses on the same NIC, not the pod bridge), point-to-point interfaces (wireguard, IPIP, GRE, VPN tunnels), and link-local or /32 host routes. With no discoverable pod-network CIDR, inbound pod delivery fails closed until the refresh loop discovers one; alert on `ratls_mesh_resolver_local_cidrs == 0` so operators catch broken CNI discovery instead of silently losing the locality bound.
+**The plaintext leg.** Only the inbound→pod hop stays plain TCP, traversing the host's local delivery path to a local pod. It never leaves the node in the normal case — on a confidential VM, the packets stay inside SEV-SNP-protected memory and the hypervisor cannot observe them. The attack to defend is a forged `Pod.Status.HostIP` that claims a *remote* pod is local: the proxy would then dial it through the kernel routing table, the packets would exit the node via the CNI fabric, and a hypervisor-level observer could see plaintext.
 
-**Host compromise.** RA-TLS binds to the SEV-SNP/TDX attestation, not host integrity inside the TEE. A principal *outside* the CVM cannot forge an attestation report, so it cannot impersonate this node to a peer or induce a peer to leak data. It can still disrupt service — a compromised API server misroutes via a fake `HostIP` (the inbound listener then rejects on `ValidateLocalDest`), the network can drop or RST packets, the hypervisor can pause the VM — but those failure modes are visible to the application (broken connection), not silent leakage. A principal *inside* the CVM with host root is already on the wrong side of the attestation boundary: it shares TEE memory with the proxy and the local pods, so sniffing `:15001`/`:15006` is no different from reading pod memory directly, and it can rewrite routes, iptables/ipsets, or the proxy pod itself. On a *legitimately attested* node, that root can issue outbound RA-TLS using the node's identity — peers verify attestation, not which principal on the node initiated the traffic. The routing defenses described above (`ValidateLocalDest`, the CIDR/route cross-check, the jump-position watchdog) target stale or adversarial Kubernetes metadata and CNI topology drift, not a sysadmin with kernel control. Keeping that root from existing post-boot is the launch policy's job (pin `--measurements`) and the platform's; this proxy does not defend against root inside the same TEE.
+When the host exposes pod-network CIDRs, `ValidateLocalDest` blocks that attack with two kernel-sourced checks independent of the apiserver hint: the destination IP must fall in a host pod-network CIDR read from `net.Interfaces()`, and the kernel's best route for that IP must leave through one of the interfaces that owned a matching CIDR. The discovery filter keeps non-loopback, up, broadcast-capable interfaces and drops three classes a forged `HostIP` could otherwise hide in: any interface carrying the node IP itself (the node fabric, including dual-stack addresses on the same NIC, not the pod bridge), point-to-point interfaces (wireguard, IPIP, GRE, VPN tunnels), and link-local or /32 host routes.
+
+Some CNIs, notably AKS with Azure CNI, give pods fabric-routable IPs without exposing a host-local pod CIDR. On those nodes `ratls_mesh_resolver_local_cidrs` remains zero. In that degraded mode, `ValidateLocalDest` falls back to the Kubernetes pod cache: the destination must be a known Pod IP, and its `Pod.Status.HostIP` must equal this node's `NODE_IP`. The node-to-node leg is still RA-TLS/mTLS; the fallback only changes how the destination node authorizes the final local plaintext dial. Operators should alert on persistent `ratls_mesh_resolver_local_cidrs == 0` as "route cross-check unavailable" unless that is the expected CNI shape.
+
+**Host compromise.** RA-TLS binds to the SEV-SNP/TDX attestation, not host integrity inside the TEE. A principal *outside* the CVM cannot forge an attestation report, so it cannot impersonate this node to a peer or induce a peer to leak data. It can still disrupt service — a compromised API server can misroute via a fake `HostIP`, the network can drop or RST packets, the hypervisor can pause the VM — but the inbound listener rejects forged local ownership when CIDR/route cross-checking is available. In HostIP fallback mode, Kubernetes pod placement is the locality authority for the final plaintext dial. A principal *inside* the CVM with host root is already on the wrong side of the attestation boundary: it shares TEE memory with the proxy and the local pods, so sniffing `:15001`/`:15006` is no different from reading pod memory directly, and it can rewrite routes, iptables/ipsets, or the proxy pod itself. On a *legitimately attested* node, that root can issue outbound RA-TLS using the node's identity — peers verify attestation, not which principal on the node initiated the traffic. The routing defenses described above (`ValidateLocalDest`, the CIDR/route cross-check when available, and the jump-position watchdog) target stale or adversarial Kubernetes metadata and CNI topology drift, not a sysadmin with kernel control. Keeping that root from existing post-boot is the launch policy's job (pin `--measurements`) and the platform's; this proxy does not defend against root inside the same TEE.
 
 ## Trust Model
 
@@ -68,7 +72,7 @@ This proves the remote peer is running inside a genuine AMD SEV-SNP CVM. A compr
 
 The K8s informer watches Pod objects and caches `podIP → nodeIP` mappings. This is a routing optimization, **not a trust boundary**:
 
-- **Compromised API server**: Can return wrong nodeIP → proxy dials wrong node → RA-TLS handshake fails (non-TEE node can't produce valid attestation) → **DoS, not data leakage**
+- **Compromised API server**: Can return wrong nodeIP → proxy dials wrong node → RA-TLS handshake fails if the target is not an attested peer. When host pod CIDRs are available, forged local ownership is also rejected by the CIDR/route cross-check. When the HostIP fallback is active because no host pod CIDR exists, Kubernetes pod placement is the locality source for the final inbound→pod dial.
 - **Stale cache**: Pod deleted but IP reused → proxy dials old node → handshake fails or new pod responds → RA-TLS still validates
 - **Unknown IP** (service VIP, external): Does not enter the proxy by default because iptables only redirects IPs in the pod ipsets
 
@@ -84,7 +88,7 @@ The resolver is purely advisory. RA-TLS is the actual trust anchor.
 
 | Threat | Impact | Mitigation |
 |--------|--------|------------|
-| Compromised K8s API server | Routing DoS (wrong node); attempted forged-HostIP relay is rejected before the inbound→pod plaintext dial | RA-TLS rejects non-TEE peers for the outbound→inbound leg; `ValidateLocalDest` cross-checks dst against host interface CIDRs and the kernel's best route interface before dialing the local pod. |
+| Compromised K8s API server | Routing DoS (wrong node); attempted forged-HostIP relay is rejected before the inbound→pod plaintext dial when CIDR/route cross-checking is available. In HostIP fallback mode, Kubernetes pod placement is trusted for final-hop locality. | RA-TLS rejects non-TEE peers for the outbound→inbound leg. `ValidateLocalDest` cross-checks dst against host interface CIDRs and the kernel's best route interface when available; otherwise it only accepts known Pod IPs whose `Pod.Status.HostIP` matches the local node. |
 | Host root / rogue node administrator | Can rewrite routing, iptables/ipsets, process credentials, or mesh pods on that node; local bypass is possible and a legitimately attested node identity may still be usable | Out of scope for in-guest routing controls. Treat host root as part of the node TCB; rely on node hardening, measured boot / measurement pinning, and cluster access controls. Other nodes still require RA-TLS attestation before accepting mesh traffic. |
 | Compromised pod application | App-level data exposure | Out of scope (TEE protects transport, not app logic) |
 | Compromised control plane | Can't forge attestation | Hardware-rooted trust (AMD VCEK) |
@@ -140,7 +144,7 @@ After reading the destination header with `bufio.Reader`, any bytes already buff
 | `preStop` cleanup + sleep | iptables rules must be removed before pod termination to prevent traffic black-holing. The 5s sleep gives K8s time to update endpoints after cleanup. | Adds 5s to every pod termination. |
 | No retry logic | This is an L4 proxy — it doesn't understand the application protocol. Retrying at L4 would duplicate TCP streams, potentially causing data corruption. Retries belong in the application or L7 proxy. | App-visible connection failures on transient network issues. |
 | No connection pooling | Each app TCP connection maps 1:1 to a proxied connection. L4 transparency requires preserving connection boundaries. | RA-TLS handshake per connection (mitigated by cert caching). |
-| Inbound destination validation | Inbound handler validates destination IP against resolver cache (must be a known pod on this node) and the kernel route to that IP, both independent of `Pod.Status.HostIP`. Prevents compromised RA-TLS peers from using the inbound listener as an open relay to localhost, metadata endpoints, or other services. | Bound to the k8s resolver — there's no production static-resolver mode. |
+| Inbound destination validation | Inbound handler validates destination IP against resolver cache (must be a known pod on this node). When host pod CIDRs are available, it also validates the kernel route to that IP independently of `Pod.Status.HostIP`. This prevents compromised RA-TLS peers from using the inbound listener as an open relay to localhost, metadata endpoints, or other services. | Bound to the k8s resolver. On CNIs with no host pod CIDR, final-hop locality relies on Kubernetes `Pod.Status.HostIP` ownership. |
 | Dual-stack iptables | Both `iptables` (IPv4) and `ip6tables` (IPv6) rules are installed. Prevents IPv6 traffic from bypassing the mesh on dual-stack clusters. | Requires `ip6tables` binary in container image. |
 | Measurement pinning | `--measurements` flag accepts expected SHA-384 launch digests. Without it, any valid TEE is accepted (logged as warning). | Requires redeployment when binary changes. |
 
@@ -362,20 +366,26 @@ path.
 
 ### Local CIDR discovery
 
-`ValidateLocalDest` requires the destination IP to fall within a
-host-discovered pod-network CIDR before allowing the plaintext inbound→pod
-hop, independently of `Pod.Status.HostIP`. The CIDR set comes from
-`net.Interfaces()` filtered to non-loopback, up, broadcast-capable
-interfaces (see `selectLocalPodCIDRs` in `resolver_k8s.go` and the
-"Residual gap" discussion in §"Local vs remote path"). When no CIDRs are
-discovered the function fails closed: inbound pod delivery is rejected
-until the refresh loop recovers, and the
-`RATLSMeshLocalCIDRDiscoveryFailed` alert fires after 2m.
+`ValidateLocalDest` uses host-discovered pod-network CIDRs as a route
+cross-check before allowing the plaintext inbound→pod hop. When that CIDR
+set is non-empty, the destination IP must fall within one of those CIDRs,
+and the kernel's best route must use one of the matching interfaces. The
+CIDR set comes from `net.Interfaces()` filtered to non-loopback, up,
+broadcast-capable interfaces (see `selectLocalPodCIDRs` in
+`resolver_k8s.go` and the discussion in §"Local vs remote path").
+
+When no CIDRs are discovered, `ValidateLocalDest` falls back to Kubernetes
+pod ownership instead of failing closed. The destination must still be a
+known Pod IP, and the cached `Pod.Status.HostIP` must match this node's
+`NODE_IP`. This is expected on CNIs that use fabric-routable pod IPs
+without a host-local pod CIDR, such as AKS with Azure CNI. The
+`RATLSMeshLocalCIDRRouteCheckUnavailable` alert marks this degraded route
+cross-check state.
 
 At construction, `bootstrapLocalCIDRs` polls discovery synchronously
 within a deadline (`--local-cidr-boot-timeout`, default `1s`) so a CNI
-bridge that comes up shortly after the pod starts doesn't pin
-`ValidateLocalDest` in fail-closed until the first periodic refresh
+bridge that comes up shortly after the pod starts does not leave
+`ValidateLocalDest` in HostIP fallback until the first periodic refresh
 tick (30s). The loop stops on the first non-empty result; past the
 budget we fall through to the existing async refresh path. Context
 cancellation short-circuits the wait so pod termination mid-startup is

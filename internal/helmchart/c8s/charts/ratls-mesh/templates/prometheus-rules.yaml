@@ -98,18 +98,19 @@ spec:
             description: >-
               Sustained RA-TLS handshake failures. Possible measurement mismatch or misconfigured peer.
 
-        - alert: RATLSMeshLocalCIDRDiscoveryFailed
+        - alert: RATLSMeshLocalCIDRRouteCheckUnavailable
           expr: ratls_mesh_resolver_local_cidrs == 0
           for: 2m
           labels:
-            severity: critical
+            severity: warning
           annotations:
-            summary: "RA-TLS mesh local CIDR discovery failed on {{`{{ $labels.instance }}`}}"
+            summary: "RA-TLS mesh local CIDR route check unavailable on {{`{{ $labels.instance }}`}}"
             description: >-
               ValidateLocalDest has no host-discovered pod-network CIDRs.
-              Inbound pod delivery fails closed until the resolver refresh
-              discovers at least one local pod-network interface. Check CNI
-              bridge/interface state and ratls-mesh logs.
+              Inbound pod delivery is using Kubernetes Pod.Status.HostIP
+              ownership until the resolver refresh discovers at least one local
+              pod-network interface. Check CNI bridge/interface state and
+              ratls-mesh logs if this is unexpected for the cluster CNI.
 
         - alert: RATLSMeshIptablesSyncWedged
           expr: |

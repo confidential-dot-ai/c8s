@@ -106,6 +106,17 @@ func TestK8sResolverValidateLocalDest(t *testing.T) {
 			podMap:          pods,
 		}
 	}
+	withoutCIDR := func(pods map[string]podEntry) *k8sResolver {
+		return &k8sResolver{
+			nodeIP: "10.0.0.1",
+			logger: testLogger(),
+			podMap: pods,
+			localRouteCheck: func(string, []string) (bool, error) {
+				t.Fatal("route check must not run when there are no local CIDRs")
+				return true, nil
+			},
+		}
+	}
 	localPod := map[string]podEntry{"10.244.0.5": {nodeIP: "10.0.0.1", uid: "uid-local"}}
 
 	for _, tc := range []struct {
@@ -147,16 +158,24 @@ func TestK8sResolverValidateLocalDest(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "no local CIDRs fails closed",
-			resolver: &k8sResolver{
-				nodeIP: "10.0.0.1", logger: testLogger(), podMap: localPod,
-				localRouteCheck: func(string, []string) (bool, error) {
-					t.Fatal("route check must not run when there are no local CIDRs")
-					return true, nil
-				},
-			},
-			dest: "10.244.0.5",
+			name:     "no local CIDRs accepts local pod via Kubernetes ownership",
+			resolver: withoutCIDR(localPod),
+			dest:     "10.244.0.5",
+			want:     true,
+		},
+		{
+			name: "no local CIDRs rejects remote pod",
+			resolver: withoutCIDR(map[string]podEntry{
+				"10.244.1.5": {nodeIP: "10.0.0.2", uid: "uid-remote"},
+			}),
+			dest: "10.244.1.5",
 			want: false,
+		},
+		{
+			name:     "no local CIDRs rejects unknown pod",
+			resolver: withoutCIDR(nil),
+			dest:     "10.244.0.99",
+			want:     false,
 		},
 		{
 			name:     "route check returns true → accept",
@@ -351,7 +370,7 @@ const bootstrapTimingSlack = 500 * time.Millisecond
 
 // On a transiently-empty first sample, bootstrap must keep polling within
 // the budget so a CNI bridge coming up after the proxy starts doesn't pin
-// ValidateLocalDest in fail-closed until the 30s refresh tick.
+// ValidateLocalDest in the K8s pod-ownership fallback until the 30s refresh tick.
 func TestBootstrapLocalCIDRsRetriesUntilPopulated(t *testing.T) {
 	_, podCIDR, _ := net.ParseCIDR("10.244.0.0/24")
 	var calls int
@@ -406,7 +425,7 @@ func TestBootstrapLocalCIDRsGivesUpAfterBudget(t *testing.T) {
 		t.Errorf("expected at least one retry, got %d call(s)", calls)
 	}
 	if r.LocalCIDRCount() != 0 {
-		t.Errorf("LocalCIDRCount = %d after exhausted bootstrap, want 0 (fail-closed)", r.LocalCIDRCount())
+		t.Errorf("LocalCIDRCount = %d after exhausted bootstrap, want 0 (fallback active)", r.LocalCIDRCount())
 	}
 }
 
