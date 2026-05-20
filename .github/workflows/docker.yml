@@ -45,8 +45,6 @@ jobs:
     name: Detect changed components
     runs-on: ubuntu-latest
     outputs:
-      shared: ${{ steps.filter.outputs.shared }}
-      changed: ${{ steps.filter.outputs.changes }}
       matrix: ${{ steps.docker-matrix.outputs.matrix }}
       has_images: ${{ steps.docker-matrix.outputs.has_images }}
     steps:
@@ -59,7 +57,12 @@ jobs:
               - 'pkg/**'
               - 'internal/**'
               - '!internal/cmds/**'
+              # cmdsutil is shared across every component's main package
+              - 'internal/cmds/cmdsutil/**'
               - '!internal/helmchart/**'
+              - '!**/*_test.go'
+              - '!**/*.md'
+              - '!**/testdata/**'
               - 'go.mod'
               - 'go.sum'
               - 'go.work'
