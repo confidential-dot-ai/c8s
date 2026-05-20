@@ -1,6 +1,6 @@
 {{- $attestationServiceURL := printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace -}}
 {{- $assamURL := printf "https://%s-assam.%s.svc:8080" .Release.Name .Release.Namespace -}}
-{{- $certIssuerURL := printf "http://%s-cert-issuer.%s.svc:8090" .Release.Name .Release.Namespace -}}
+{{- $certIssuerURL := printf "https://%s-cert-issuer.%s.svc:8090" .Release.Name .Release.Namespace -}}
 {{- $caURL := printf "%s/ca" $certIssuerURL -}}
 {{- /*
 The iptables-cleanup preStop sleep fires last in the native-sidecar

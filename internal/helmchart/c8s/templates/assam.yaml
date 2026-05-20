@@ -161,7 +161,7 @@ spec:
   ports:
     - name: http
       port: {{ .Values.assam.port }}
-      targetPort: http
+      targetPort: https
       {{- if and (eq .Values.assam.service.type "NodePort") .Values.assam.service.nodePort }}
       nodePort: {{ .Values.assam.service.nodePort }}
       {{- end }}

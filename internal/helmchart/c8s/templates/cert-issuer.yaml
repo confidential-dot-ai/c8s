@@ -206,4 +206,4 @@ spec:
   ports:
     - name: http
       port: {{ .Values.certIssuer.port }}
-      targetPort: http
+      targetPort: https

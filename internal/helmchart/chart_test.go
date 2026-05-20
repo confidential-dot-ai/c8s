@@ -858,11 +858,48 @@ func TestChartManagedAssamAndCertIssuerWireTogether(t *testing.T) {
 	assam := renderedDeploymentContainer(t, out, "c8s-assam", "assam")
 	assertContainerHasArg(t, "assam", assam.Args, "--cert-issuer-url=https://c8s-cert-issuer.c8s-system.svc:8090")
 	assertContainerNoArgPrefix(t, "assam", assam.Args, "--cert-issuer-url=http://")
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if got, ok := containerArgValue(meshArgs, "--cert-issuer-url"); !ok || got != "https://c8s-cert-issuer.c8s-system.svc:8090" {
+		t.Fatalf("ratls-mesh --cert-issuer-url = (%q, %v), want HTTPS cert-issuer Service\nargs: %v", got, ok, meshArgs)
+	}
+	if got, ok := containerArgValue(meshArgs, "--ca-url"); !ok || got != "https://c8s-cert-issuer.c8s-system.svc:8090/ca" {
+		t.Fatalf("ratls-mesh --ca-url = (%q, %v), want HTTPS cert-issuer CA endpoint\nargs: %v", got, ok, meshArgs)
+	}
 	for _, prefix := range []string{"--ca-key=", "--ca-cert="} {
 		assertContainerNoArgPrefix(t, "cert-issuer", container.Args, prefix)
 	}
 	if renderedManifestHasKind(t, out, "Secret") {
 		t.Fatalf("chart-managed cert-issuer should not render any Secret (mesh CA key stays in process memory)")
+	}
+}
+
+func TestChartManagedRATLSServiceTargetPortsMatchContainerPorts(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		service    string
+		deployment string
+		container  string
+		want       string
+	}{
+		{service: "c8s-assam", deployment: "c8s-assam", container: "assam", want: "https"},
+		{service: "c8s-cert-issuer", deployment: "c8s-cert-issuer", container: "cert-issuer", want: "https"},
+	} {
+		svc := renderedService(t, out, tc.service)
+		if len(svc.Spec.Ports) != 1 {
+			t.Fatalf("Service %s ports = %d, want 1", tc.service, len(svc.Spec.Ports))
+		}
+		if got := svc.Spec.Ports[0].TargetPort.String(); got != tc.want {
+			t.Fatalf("Service %s targetPort = %q, want %q", tc.service, got, tc.want)
+		}
+
+		container := renderedDeploymentContainer(t, out, tc.deployment, tc.container)
+		if _, ok := containerHostPort(container, tc.want); !ok {
+			t.Fatalf("Deployment %s container %s missing port named %q; ports=%v", tc.deployment, tc.container, tc.want, container.Ports)
+		}
 	}
 }
 
@@ -1854,6 +1891,15 @@ func renderedConfigMap(t *testing.T, manifest, name string) corev1.ConfigMap {
 		t.Fatalf("rendered manifest missing ConfigMap %q\n%s", name, manifest)
 	}
 	return cm
+}
+
+func renderedService(t *testing.T, manifest, name string) corev1.Service {
+	t.Helper()
+	var svc corev1.Service
+	if !findDoc(t, manifest, "Service", name, &svc) {
+		t.Fatalf("rendered manifest missing Service %q\n%s", name, manifest)
+	}
+	return svc
 }
 
 func renderedDaemonSetContainer(t *testing.T, manifest, daemonSetName, containerName string) corev1.Container {
