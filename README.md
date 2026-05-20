@@ -111,11 +111,10 @@ per-role image names remain stable, but each image copies the same multi-mode
 | `ghcr.io/lunal-dev/assam` | distroless | |
 | `ghcr.io/lunal-dev/get-cert` | distroless | |
 | `ghcr.io/lunal-dev/cert-issuer` | distroless | |
-| `ghcr.io/lunal-dev/ratls-mesh` | debian-slim | Needs iptables + attestation binaries |
-| `ghcr.io/lunal-dev/nri-image-policy` | debian-slim | Needs TSS2 libs + attestation binaries |
+| `ghcr.io/lunal-dev/ratls-mesh` | debian-slim | Needs iptables |
+| `ghcr.io/lunal-dev/nri-image-policy` | debian-slim | |
 
 ## Related repos
 
 - [`lunal-dev/deployment-scripts`](https://github.com/lunal-dev/deployment-scripts) - Ansible roles for deploying these components
-- [`lunal-dev/attestation-rs`](https://github.com/lunal-dev/attestation-rs) - Rust attestation binaries (attest-sev-snp, attest-tdx)
 - [`lunal-dev/attestation-service`](https://github.com/lunal-dev/attestation-service) - TEE attestation evidence verification service

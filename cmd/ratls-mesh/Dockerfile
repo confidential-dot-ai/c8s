@@ -9,10 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libtss2-tctildr0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app /opt/lunal-services
+RUN mkdir -p /app
 
 COPY build/c8s /app/c8s
-COPY build/attest-sev-snp /opt/lunal-services/attest-sev-snp
-RUN chmod +x /app/c8s /opt/lunal-services/attest-sev-snp
+RUN chmod +x /app/c8s
 
 ENTRYPOINT ["/app/c8s", "ratls-mesh"]
