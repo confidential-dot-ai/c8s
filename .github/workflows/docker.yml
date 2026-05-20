@@ -22,16 +22,74 @@ on:
 permissions:
   contents: read
   packages: write
+  pull-requests: read   # dorny/paths-filter calls the PR files API on PR events
 
 env:
   REGISTRY: ghcr.io
   GO_VERSION: "1.26.3"
 
 jobs:
-  # job to download modules only once
+  # Per-image jobs run only when the component's own cmd/<X> or
+  # internal/cmds/<X> changed (this applies to both PR events and
+  # branch pushes). Shared code (pkg/**, root internal/** minus
+  # cmds/helmchart, go.mod/sum, Makefile, this workflow) fans out to
+  # every image. Tag pushes (v*) always fan out so semver release
+  # tags land on every image.
+  #
+  # On branch pushes, unchanged components keep their existing
+  # `latest` / `main` tag pointing at the previous build's manifest —
+  # which is the correct state, since nothing changed for them.
+  # Deploys pinned to `latest` or to a release tag work without any
+  # CI-side tag aliasing.
+  changes:
+    name: Detect changed components
+    runs-on: ubuntu-latest
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      changed: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            shared:
+              - 'pkg/**'
+              - 'internal/**'
+              - '!internal/cmds/**'
+              - '!internal/helmchart/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'Makefile'
+              - '.github/workflows/docker.yml'
+            assam:
+              - 'cmd/assam/**'
+              - 'internal/cmds/assam/**'
+            c8s:
+              - 'cmd/c8s/**'
+            get-cert:
+              - 'cmd/get-cert/**'
+              - 'internal/cmds/getcert/**'
+            ratls-mesh:
+              - 'cmd/ratls-mesh/**'
+              - 'internal/cmds/ratlsmesh/**'
+            cert-issuer:
+              - 'cmd/cert-issuer/**'
+              - 'internal/cmds/certissuer/**'
+            nri-image-policy:
+              - 'cmd/nri-image-policy/**'
+              - 'internal/cmds/nriimagepolicy/**'
+
   go-modules:
     name: Cache Go Modules
     runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      needs.changes.outputs.shared == 'true' ||
+      needs.changes.outputs.changed != '[]'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
@@ -45,7 +103,11 @@ jobs:
   images:
     name: Docker (${{ matrix.binary }})
     runs-on: ubuntu-latest
-    needs: [go-modules]
+    needs: [changes, go-modules]
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      needs.changes.outputs.shared == 'true' ||
+      contains(fromJSON(needs.changes.outputs.changed), matrix.binary)
     strategy:
       matrix:
         include:

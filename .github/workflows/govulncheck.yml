@@ -3,13 +3,19 @@ name: govulncheck
 on:
   workflow_dispatch:
   schedule:
-     - cron: "22 16 1,15 * *"
+    - cron: "22 16 1,15 * *"
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+    paths: &go-paths
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
+      - ".github/workflows/govulncheck.yml"
   pull_request:
+    paths: *go-paths
 
 concurrency:
   group: ci-${{ github.ref }}-govulncheck

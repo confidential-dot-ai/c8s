@@ -3,11 +3,17 @@ name: Scan for vulnerabilities
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths: &go-paths
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
+      - ".github/workflows/grype.yml"
   pull_request:
-    branches:
-      - main
+    branches: [main]
+    paths: *go-paths
 
 permissions:
   contents: read
