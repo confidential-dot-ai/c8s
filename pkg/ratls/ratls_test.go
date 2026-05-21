@@ -45,6 +45,16 @@ func fakeSNPReport(reportData [64]byte) []byte {
 	return report
 }
 
+// fakeHCLEnvelope builds the AKS Hyper-V HCL envelope around a raw SNP report.
+func fakeHCLEnvelope(report []byte, trailing int) []byte {
+	env := make([]byte, 32+len(report)+trailing)
+	copy(env[:4], "HCLA")
+	binary.LittleEndian.PutUint32(env[4:8], 1)
+	binary.LittleEndian.PutUint32(env[8:12], uint32(len(report)+trailing))
+	copy(env[32:], report)
+	return env
+}
+
 // testKeyAndAttestation generates a keypair and matching attestation for tests.
 func testKeyAndAttestation(t *testing.T) (*ecdsa.PrivateKey, *Attestation) {
 	t.Helper()
@@ -489,6 +499,50 @@ func TestMinTCBVersionEnforcement(t *testing.T) {
 // marshalASN1 helper for tests.
 func marshalASN1(v *attestationASN1) ([]byte, error) {
 	return asn1.Marshal(*v)
+}
+
+func TestNormalizeSEVSNPReportHCLEnvelope(t *testing.T) {
+	reportData := [64]byte{1, 2, 3}
+	report := fakeSNPReport(reportData)
+	envelope := fakeHCLEnvelope(report, 128)
+
+	normalized, err := NormalizeSEVSNPReport(envelope)
+	if err != nil {
+		t.Fatalf("NormalizeSEVSNPReport failed: %v", err)
+	}
+	if !bytes.Equal(normalized, report) {
+		t.Fatal("normalized report mismatch")
+	}
+}
+
+func TestCheckKeyBindingHCLEnvelope(t *testing.T) {
+	key, att := testKeyAndAttestation(t)
+	att.Report = fakeHCLEnvelope(att.Report, 128)
+
+	if err := CheckKeyBinding(&key.PublicKey, att, nil); err != nil {
+		t.Fatalf("CheckKeyBinding failed for HCL envelope: %v", err)
+	}
+}
+
+func TestUnmarshalExtensionHCLEnvelope(t *testing.T) {
+	reportData := [64]byte{1, 2, 3}
+	report := fakeSNPReport(reportData)
+	att := &attestationASN1{
+		TEEType: int(TEETypeSEVSNP),
+		Report:  fakeHCLEnvelope(report, 128),
+	}
+	data, err := marshalASN1(att)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := UnmarshalExtension(data)
+	if err != nil {
+		t.Fatalf("UnmarshalExtension failed for HCL envelope: %v", err)
+	}
+	if !bytes.Equal(result.Report, report) {
+		t.Fatal("unmarshaled report mismatch")
+	}
 }
 
 func TestUnmarshalExtensionReportSize(t *testing.T) {

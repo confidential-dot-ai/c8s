@@ -147,8 +147,9 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 // checkSEVSNPBinding parses the raw SNP report and verifies that REPORTDATA
 // matches the expected value. Returns the parsed report proto for reuse.
 func checkSEVSNPBinding(rawReport []byte, expected [64]byte) (*spb.Report, error) {
-	if len(rawReport) != SNPReportSize {
-		return nil, fmt.Errorf("%w: SEV-SNP report is %d bytes, expected %d", ErrInvalidReport, len(rawReport), SNPReportSize)
+	rawReport, err := NormalizeSEVSNPReport(rawReport)
+	if err != nil {
+		return nil, err
 	}
 	report, err := sabi.ReportToProto(rawReport)
 	if err != nil {

@@ -132,8 +132,12 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 		return nil, fmt.Errorf("%w: TEE type %d", ErrUnsupportedTEE, raw.TEEType)
 	}
 
-	if teeType == TEETypeSEVSNP && len(raw.Report) != SNPReportSize {
-		return nil, fmt.Errorf("%w: SEV-SNP report is %d bytes, expected %d", ErrInvalidReport, len(raw.Report), SNPReportSize)
+	if teeType == TEETypeSEVSNP {
+		report, err := NormalizeSEVSNPReport(raw.Report)
+		if err != nil {
+			return nil, err
+		}
+		raw.Report = report
 	}
 
 	return &Attestation{
