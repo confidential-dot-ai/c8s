@@ -72,7 +72,9 @@ jobs:
             assam:
               - '{cmd/assam/**,internal/cmds/assam/**}'
             c8s:
-              - 'cmd/c8s/**'
+              # cmd/c8s is the multi-mode binary used by the operator image;
+              # it imports every internal/cmds subcommand, including get-cert.
+              - '{cmd/c8s/**,internal/cmds/**}'
             get-cert:
               - '{cmd/get-cert/**,internal/cmds/getcert/**}'
             ratls-mesh:
