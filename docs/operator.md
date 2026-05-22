@@ -23,9 +23,15 @@ The operator tree is built around these pieces:
 The operator does not inject the RA-TLS mesh sidecar. Pod-to-pod mTLS remains
 the responsibility of the node-level `ratls-mesh` DaemonSet. The chart-managed
 mesh excludes `kube-system` and its own release namespace as local traffic
-sources, so API-server webhooks and c8s control-plane agents do not get
-captured by the pod-to-pod mesh path. Mesh endpoints are still resolved from
-pod IPs; the exclusion is not a broad destination denylist.
+sources, so c8s control-plane agents (and, on kind/kubeadm-style clusters where
+the API server runs as a `kube-system` pod, in-cluster webhook callers) do not
+get captured by the pod-to-pod mesh path. The exclusion is one-sided: it
+removes those pods as PREROUTING sources but keeps their IPs in the destination
+ipset, so a workload that connects to a `kube-system` or release-namespace pod
+by pod IP — bypassing the Service VIP — will still be DNATed into the mesh and
+fail mTLS against a peer with no ratls sidecar. In-cluster Service-VIP traffic
+to those namespaces is unaffected because kube-proxy DNATs the VIP before the
+mesh chain matches.
 
 ## Ownership model
 
