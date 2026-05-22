@@ -4,6 +4,7 @@ package ratlsmesh
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 )
 
@@ -44,11 +45,22 @@ const (
 	iptablesFamilyIPv6 iptablesFamily = "ipv6"
 )
 
-// buildPodIPSetRules computes NAT rules that redirect pod TCP traffic through
-// the mesh. OUTPUT rules cover host-originated packets to pod IPs and can use
-// owner matching; PREROUTING rules cover pod veth traffic and require both the
-// source and destination to be known pod IPs.
-func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32) []iptablesRule {
+// buildPodIPSetRules computes NAT rules that send pod TCP traffic through the
+// mesh. OUTPUT REDIRECT covers host-originated packets to pod IPs and uses
+// owner matching to skip the proxy's own UID. PREROUTING covers pod-veth
+// traffic and DNATs to this node's outbound listener at nodeIPsByFamily[f]
+// for each family with a same-family node IP. Some CNIs (notably Azure CNI
+// on AKS) count a PREROUTING REDIRECT rule but never complete the redirected
+// pod TCP connect; DNAT to the node-local listener follows the same path
+// pods can reach directly. A family without a same-family node IP gets no
+// PREROUTING rule at all — installing a known-broken REDIRECT fallback would
+// silently revive the AKS bug for that family on dual-stack nodes where the
+// operator only configured one family.
+//
+// INVARIANT: each value in nodeIPsByFamily is a canonical, validated IP
+// literal of the matching family. Callers must verify (parseNodeIPs in
+// pod_ipsets_linux.go).
+func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32, nodeIPsByFamily map[iptablesFamily]string) []iptablesRule {
 	portStr := strconv.Itoa(outboundPort)
 	uidStr := strconv.Itoa(uid)
 	allPortsRange := "1:65535"
@@ -73,7 +85,19 @@ func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32) []iptablesR
 			portStr:            portStr,
 			dportRange:         allPortsRange,
 		}))
-		rules = append(rules, makeRedirectRule(redirectRuleSpec{
+		nodeIP, hasFamily := nodeIPsByFamily[spec.family]
+		if !hasFamily {
+			continue
+		}
+		// Defense in depth: parseNodeIPs rejects empty strings, but an empty
+		// value here would produce `--to-destination :15001` which iptables
+		// accepts syntactically and rejects with a generic error not
+		// traceable to this caller. makeDNATRule's panic only catches a
+		// fully empty toDestination, not the `:port` form.
+		if nodeIP == "" {
+			panic(fmt.Sprintf("ratlsmesh: buildPodIPSetRules got empty nodeIP for family %s", spec.family))
+		}
+		rules = append(rules, makeDNATRule(dnatRuleSpec{
 			chain:       preroutingChainName,
 			family:      spec.family,
 			labelPrefix: "prerouting-pod-ipset",
@@ -81,9 +105,8 @@ func buildPodIPSetRules(outboundPort, uid int, excludeUIDs []uint32) []iptablesR
 				"-m", "set", "--match-set", spec.localSetName, "src",
 				"-m", "set", "--match-set", spec.dstSetName, "dst",
 			},
-			uidStr:     uidStr,
-			portStr:    portStr,
-			dportRange: allPortsRange,
+			toDestination: net.JoinHostPort(nodeIP, portStr),
+			dportRange:    allPortsRange,
 		}))
 	}
 	return rules
@@ -133,6 +156,42 @@ func makeRedirectRule(spec redirectRuleSpec) iptablesRule {
 	args = append(args,
 		"--dport", spec.dportRange,
 		"-j", "REDIRECT", "--to-port", spec.portStr,
+	)
+	return iptablesRule{
+		table:  "nat",
+		chain:  spec.chain,
+		label:  label,
+		family: spec.family,
+		args:   args,
+	}
+}
+
+type dnatRuleSpec struct {
+	chain         string
+	family        iptablesFamily
+	labelPrefix   string
+	matchArgs     []string
+	toDestination string
+	dportRange    string
+}
+
+func makeDNATRule(spec dnatRuleSpec) iptablesRule {
+	if spec.toDestination == "" {
+		// Fail fast at build time: an empty --to-destination would install
+		// successfully on some iptables backends with surprising semantics,
+		// and on others surface as a generic "Bad argument" pointing at
+		// rule install rather than at the caller bug that produced it.
+		panic(fmt.Sprintf("ratlsmesh: makeDNATRule called with empty toDestination (chain=%s family=%s)", spec.chain, spec.family))
+	}
+	label := spec.dportRange
+	if spec.labelPrefix != "" {
+		label = spec.labelPrefix + "-" + spec.dportRange
+	}
+	args := []string{"-p", "tcp"}
+	args = append(args, spec.matchArgs...)
+	args = append(args,
+		"--dport", spec.dportRange,
+		"-j", "DNAT", "--to-destination", spec.toDestination,
 	)
 	return iptablesRule{
 		table:  "nat",

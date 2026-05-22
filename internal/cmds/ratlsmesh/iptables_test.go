@@ -7,14 +7,17 @@ import (
 	"testing"
 )
 
-func TestBuildPodIPSetRules(t *testing.T) {
-	rules := mustBuildPodIPSetRules(t, 15001, 1337, nil)
+func TestBuildPodIPSetRulesDualStack(t *testing.T) {
+	rules := mustBuildPodIPSetRules(t, 15001, 1337, nil, map[iptablesFamily]string{
+		iptablesFamilyIPv4: "10.0.0.1",
+		iptablesFamilyIPv6: "fd00::10",
+	})
 
 	if len(rules) != 4 {
-		t.Fatalf("expected 4 rules (2 OUTPUT + 2 PREROUTING), got %d", len(rules))
+		t.Fatalf("expected 4 rules (2 OUTPUT + 2 PREROUTING DNAT), got %d", len(rules))
 	}
 
-	// Rule 1: IPv4 OUTPUT all TCP ports.
+	// Rule 1: IPv4 OUTPUT REDIRECT, owner exclusion for the proxy UID.
 	r1 := rules[0]
 	if r1.table != "nat" || r1.chain != chainName {
 		t.Errorf("rule 1: table=%q chain=%q, want nat/%s", r1.table, r1.chain, chainName)
@@ -28,10 +31,12 @@ func TestBuildPodIPSetRules(t *testing.T) {
 	assertContains(t, "rule 1", r1.args, "--match-set", podIPSetName4)
 	assertContains(t, "rule 1", r1.args, "--dport", "1:65535")
 	assertContains(t, "rule 1", r1.args, "--uid-owner", "1337")
+	assertContains(t, "rule 1", r1.args, "-j", "REDIRECT")
 	assertContains(t, "rule 1", r1.args, "--to-port", "15001")
 
-	// Rule 2: IPv4 PREROUTING all TCP ports. PREROUTING cannot use owner
-	// matching, so it is constrained by source and destination pod ipsets.
+	// Rule 2: IPv4 PREROUTING DNAT to nodeIP:15001. PREROUTING has no socket
+	// owner so no UID exclusion; loop prevention comes from the LOCAL-PODS
+	// src match (the proxy on hostNetwork has src=nodeIP, not in the set).
 	r2 := rules[1]
 	if r2.chain != preroutingChainName {
 		t.Errorf("rule 2: chain=%q, want %q", r2.chain, preroutingChainName)
@@ -45,15 +50,75 @@ func TestBuildPodIPSetRules(t *testing.T) {
 	assertContains(t, "rule 2", r2.args, "--match-set", localPodIPSetName4)
 	assertContains(t, "rule 2", r2.args, "--match-set", podIPSetName4)
 	assertContains(t, "rule 2", r2.args, "--dport", "1:65535")
-	assertContains(t, "rule 2", r2.args, "--to-port", "15001")
-	assertNotContains(t, "rule 2", r2.args, "--uid-owner")
+	assertContains(t, "rule 2", r2.args, "-j", "DNAT")
+	assertContains(t, "rule 2", r2.args, "--to-destination", "10.0.0.1:15001")
+	assertArgNotContains(t, "rule 2", r2.args, "REDIRECT")
+	assertArgNotContains(t, "rule 2", r2.args, "--to-port")
+	assertArgNotContains(t, "rule 2", r2.args, "--uid-owner")
 
-	// Rule 3: IPv6 OUTPUT all TCP ports.
+	// Rule 3: IPv6 OUTPUT REDIRECT.
 	r3 := rules[2]
 	if r3.family != iptablesFamilyIPv6 {
 		t.Errorf("rule 3: family=%q, want IPv6", r3.family)
 	}
 	assertContains(t, "rule 3", r3.args, "--match-set", podIPSetName6)
+	assertContains(t, "rule 3", r3.args, "-j", "REDIRECT")
+
+	// Rule 4: IPv6 PREROUTING DNAT to [nodeIP]:15001.
+	r4 := rules[3]
+	if r4.chain != preroutingChainName || r4.family != iptablesFamilyIPv6 {
+		t.Errorf("rule 4: chain=%q family=%q, want %s/IPv6", r4.chain, r4.family, preroutingChainName)
+	}
+	assertContains(t, "rule 4", r4.args, "-j", "DNAT")
+	assertContains(t, "rule 4", r4.args, "--to-destination", "[fd00::10]:15001")
+	assertArgNotContains(t, "rule 4", r4.args, "REDIRECT")
+}
+
+// TestBuildPodIPSetRulesIPv4Only asserts that an IPv4-only node IP installs
+// IPv4 OUTPUT+PREROUTING but skips the IPv6 PREROUTING rule entirely — no
+// REDIRECT fallback, which would silently reintroduce the AKS bug for IPv6.
+func TestBuildPodIPSetRulesIPv4Only(t *testing.T) {
+	rules := mustBuildPodIPSetRules(t, 15001, 1337, nil, map[iptablesFamily]string{
+		iptablesFamilyIPv4: "10.0.0.1",
+	})
+
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 rules (2 OUTPUT + 1 IPv4 PREROUTING), got %d", len(rules))
+	}
+	assertContains(t, "ipv4 prerouting", rules[1].args, "-j", "DNAT")
+	assertContains(t, "ipv4 prerouting", rules[1].args, "--to-destination", "10.0.0.1:15001")
+	for _, r := range rules {
+		if r.chain == preroutingChainName && r.family == iptablesFamilyIPv6 {
+			t.Fatalf("IPv6 PREROUTING rule must not be emitted without an IPv6 node IP; got %+v", r)
+		}
+	}
+}
+
+// TestBuildPodIPSetRulesIPv6Only mirrors the v4-only case for v6 single-stack.
+func TestBuildPodIPSetRulesIPv6Only(t *testing.T) {
+	rules := mustBuildPodIPSetRules(t, 15001, 1337, nil, map[iptablesFamily]string{
+		iptablesFamilyIPv6: "fd00::10",
+	})
+
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 rules (2 OUTPUT + 1 IPv6 PREROUTING), got %d", len(rules))
+	}
+	for _, r := range rules {
+		if r.chain == preroutingChainName && r.family == iptablesFamilyIPv4 {
+			t.Fatalf("IPv4 PREROUTING rule must not be emitted without an IPv4 node IP; got %+v", r)
+		}
+	}
+	var ipv6Prerouting *iptablesRule
+	for i, r := range rules {
+		if r.chain == preroutingChainName && r.family == iptablesFamilyIPv6 {
+			ipv6Prerouting = &rules[i]
+		}
+	}
+	if ipv6Prerouting == nil {
+		t.Fatal("expected an IPv6 PREROUTING DNAT rule")
+	}
+	assertContains(t, "ipv6 prerouting", ipv6Prerouting.args, "-j", "DNAT")
+	assertContains(t, "ipv6 prerouting", ipv6Prerouting.args, "--to-destination", "[fd00::10]:15001")
 }
 
 func TestBuildPodIPSetRulesExcludeUIDs(t *testing.T) {
@@ -66,9 +131,12 @@ func TestBuildPodIPSetRulesExcludeUIDs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rules := mustBuildPodIPSetRules(t, 15001, 1337, tt.excludeUIDs)
+			rules := mustBuildPodIPSetRules(t, 15001, 1337, tt.excludeUIDs, map[iptablesFamily]string{
+				iptablesFamilyIPv4: "10.0.0.1",
+				iptablesFamilyIPv6: "fd00::10",
+			})
 			if want := len(tt.excludeUIDs) + 4; len(rules) != want {
-				t.Fatalf("got %d rules, want %d (%d exclude + 4 ipset redirects)", len(rules), want, len(tt.excludeUIDs))
+				t.Fatalf("got %d rules, want %d (%d exclude + 4 ipset rules)", len(rules), want, len(tt.excludeUIDs))
 			}
 			for i, uid := range tt.excludeUIDs {
 				r := rules[i]
@@ -80,12 +148,26 @@ func TestBuildPodIPSetRulesExcludeUIDs(t *testing.T) {
 				assertContains(t, wantLabel, r.args, "--uid-owner", uidStr)
 				assertContains(t, wantLabel, r.args, "-j", "RETURN")
 			}
-			// Redirect rules still present after the excludes.
-			redirects := rules[len(tt.excludeUIDs):]
-			assertContains(t, "rule 1", redirects[0].args, "--dport", "1:65535")
-			assertContains(t, "rule 2", redirects[1].args, "--dport", "1:65535")
+			// Ipset rules still present after the excludes.
+			ipsetRules := rules[len(tt.excludeUIDs):]
+			assertContains(t, "rule 1", ipsetRules[0].args, "--dport", "1:65535")
+			assertContains(t, "rule 2", ipsetRules[1].args, "--dport", "1:65535")
 		})
 	}
+}
+
+func TestMakeDNATRulePanicsOnEmptyDestination(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("makeDNATRule with empty toDestination should panic; it did not")
+		}
+	}()
+	_ = makeDNATRule(dnatRuleSpec{
+		chain:       preroutingChainName,
+		family:      iptablesFamilyIPv4,
+		labelPrefix: "test",
+		dportRange:  "1:65535",
+	})
 }
 
 func TestJumpRules(t *testing.T) {
@@ -123,9 +205,9 @@ func TestJumpRulesArgsShape(t *testing.T) {
 	}
 }
 
-func mustBuildPodIPSetRules(t *testing.T, outboundPort, uid int, excludeUIDs []uint32) []iptablesRule {
+func mustBuildPodIPSetRules(t *testing.T, outboundPort, uid int, excludeUIDs []uint32, nodeIPs map[iptablesFamily]string) []iptablesRule {
 	t.Helper()
-	return buildPodIPSetRules(outboundPort, uid, excludeUIDs)
+	return buildPodIPSetRules(outboundPort, uid, excludeUIDs, nodeIPs)
 }
 
 // assertContains checks that args contains the flag followed by the expected value.
@@ -139,11 +221,20 @@ func assertContains(t *testing.T, label string, args []string, flag, want string
 	t.Errorf("%s: args %v missing %s %s", label, args, flag, want)
 }
 
-func assertNotContains(t *testing.T, label string, args []string, value string) {
+// assertArgNotContains rejects any args entry equal to value or that starts
+// with `value=`. The `value=` check catches single-token flag forms
+// (e.g. `--to-port=15001`) which a substring-only matcher misses. Pass the
+// exact token; iptables flag values (IPs, ports, UIDs) never begin with a
+// flag-like prefix in this codebase, so the check is unambiguous in
+// practice. To assert a value is absent (e.g. the literal "REDIRECT"),
+// pass the token form, not a fragment.
+func assertArgNotContains(t *testing.T, label string, args []string, value string) {
 	t.Helper()
+	prefix := value + "="
 	for _, a := range args {
-		if a == value {
+		if a == value || (len(a) > len(prefix) && a[:len(prefix)] == prefix) {
 			t.Errorf("%s: args %v unexpectedly contain %s", label, args, value)
+			return
 		}
 	}
 }

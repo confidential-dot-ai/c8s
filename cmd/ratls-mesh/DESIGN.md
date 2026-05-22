@@ -10,7 +10,7 @@ Node A                                              Node B
 │  App Pod (10.244.1.5:8080)      │     │  App Pod (10.244.2.3:8080)      │
 │            │                    │     │            ▲                    │
 │  iptables NAT PREROUTING        │     │            │ (plaintext, local) │
-│  REDIRECT → :15001              │     │            │                    │
+│  DNAT nodeIP:15001              │     │            │                    │
 │            │                    │     │            │                    │
 │  ┌─────────▼─────────────────┐  │     │  ┌─────────┴─────────────────┐  │
 │  │ ratls-mesh sidecar        │  │     │  │ ratls-mesh sidecar        │  │
@@ -34,7 +34,7 @@ the only segment not protected by RA-TLS, bounded by the
 ### Data flow
 
 1. App sends TCP to `10.244.2.3:8080`
-2. Host iptables NAT PREROUTING redirects pod-to-pod TCP to `:15001` (outbound listener)
+2. Host iptables NAT PREROUTING DNATs pod-to-pod TCP to this node's `nodeIP:15001` (outbound listener). OUTPUT REDIRECT covers host-originated traffic to pod IPs. Azure CNI counts a PREROUTING REDIRECT hit but never completes the redirected TCP connect; DNAT to the node-local listener follows the same path pods can reach directly.
 3. Proxy reads original destination via `SO_ORIGINAL_DST`
 4. Resolver maps pod IP `10.244.2.3` to node IP `10.0.0.2`
 5. Outbound proxy opens RA-TLS to the destination node's `:15006` listener, even when the destination pod is on the same node
@@ -80,7 +80,7 @@ The resolver is purely advisory. RA-TLS is the actual trust anchor.
 
 ### 3. iptables interception
 
-`NET_ADMIN` iptables rules in the host NAT PREROUTING chain redirect pod-to-pod TCP traffic whose source is a local pod IP and whose destination is any known pod IP. OUTPUT rules also cover host-originated traffic to pod IPs, where loop prevention via UID exclusion keeps mesh process traffic (UID 1337) out of the redirect path. ClusterIP Services, metadata, kube API, public egress, and direct external-to-pod traffic fall through because they are not local pod-to-pod egress flows. The outbound listener also rejects original destinations that are not known pod IPs, so direct connections to the host-network listener do not become plaintext proxy sessions.
+`NET_ADMIN` iptables rules in the host NAT PREROUTING chain DNAT pod-to-pod TCP traffic to this node's outbound listener (`nodeIP:15001`) when the source is a local pod IP and the destination is any known pod IP. OUTPUT REDIRECT rules cover host-originated traffic to pod IPs, where loop prevention via UID exclusion keeps mesh process traffic (UID 1337) out of the interception path. PREROUTING uses DNAT rather than REDIRECT because Azure CNI on AKS counts PREROUTING REDIRECT hits but does not complete the redirected pod TCP connect; DNAT to the node-local listener follows the same path pods can reach directly. ClusterIP Services, metadata, kube API, public egress, and direct external-to-pod traffic fall through because they are not local pod-to-pod egress flows. The outbound listener also rejects original destinations that are not known pod IPs, so direct connections to the host-network listener do not become plaintext proxy sessions.
 
 **Not protected by iptables**: UDP, raw sockets, and ICMP. DNS (UDP :53) is not intercepted. Kubernetes NetworkPolicy should complement iptables for non-TCP protocols. Both `iptables` (IPv4) and `ip6tables` (IPv6) rules are installed to prevent dual-stack bypass.
 
@@ -230,7 +230,7 @@ The chart runs `iptables-sync`, which watches Pods and keeps four ipsets current
 - `RATLS-MESH-LOCAL-PODS` for IPv4 pod IPs scheduled on this node
 - `RATLS-MESH-LOCAL-PODS6` for IPv6 pod IPs scheduled on this node
 
-`buildPodIPSetRules(outboundPort, uid, excludeUIDs)` produces NAT rules placed in dedicated `RATLS-MESH` and `RATLS-MESH-PREROUTING` chains, applied to `iptables` and `ip6tables` for dual-stack coverage:
+`buildPodIPSetRules(outboundPort, uid, excludeUIDs, nodeIP)` produces NAT rules placed in dedicated `RATLS-MESH` and `RATLS-MESH-PREROUTING` chains, applied to `iptables` and `ip6tables` for dual-stack coverage:
 
 ```
 -t nat -N RATLS-MESH                                                                    # create OUTPUT chain
@@ -238,15 +238,19 @@ The chart runs `iptables-sync`, which watches Pods and keeps four ipsets current
 -t nat -F RATLS-MESH                                                                    # flush stale OUTPUT rules
 -t nat -F RATLS-MESH-PREROUTING                                                        # flush stale PREROUTING rules
 -t nat -A RATLS-MESH -p tcp -m set --match-set RATLS-MESH-PODS dst -m owner ! --uid-owner 1337 --dport 1:65535 -j REDIRECT --to-port 15001
--t nat -A RATLS-MESH-PREROUTING -p tcp -m set --match-set RATLS-MESH-LOCAL-PODS src -m set --match-set RATLS-MESH-PODS dst --dport 1:65535 -j REDIRECT --to-port 15001
+-t nat -A RATLS-MESH-PREROUTING -p tcp -m set --match-set RATLS-MESH-LOCAL-PODS src -m set --match-set RATLS-MESH-PODS dst --dport 1:65535 -j DNAT --to-destination <nodeIP>:15001
 -t nat -I OUTPUT 1 -j RATLS-MESH                                                        # jump from OUTPUT before service DNAT
 -t nat -I PREROUTING 1 -j RATLS-MESH-PREROUTING                                        # jump from pod veth path before service DNAT
 ```
 
-All pod-to-pod TCP destination ports are redirected. Loop prevention comes from
-the destination pod ipsets plus mesh UID exclusion in OUTPUT; RA-TLS inbound
-connections target node IPs, not pod IPs, so they do not match the pod
-destination ipsets.
+All pod-to-pod TCP destination ports are sent through the mesh. OUTPUT uses
+REDIRECT because it has local socket ownership and can exclude the mesh UID.
+PREROUTING uses node-local DNAT for the node IP address family so pod-veth
+traffic reaches the same listener path pods can dial directly on CNIs where
+PREROUTING REDIRECT is counted but does not complete TCP connects. Loop
+prevention comes from the destination pod ipsets plus mesh UID exclusion in
+OUTPUT; RA-TLS inbound connections target node IPs, not pod IPs, so they do not
+match the pod destination ipsets.
 
 ### Dedicated chain (T5 mitigation)
 
@@ -261,7 +265,7 @@ for each iptables binary (iptables, ip6tables):
     flush chain RATLS-MESH (clear stale rules)
     flush chain RATLS-MESH-PREROUTING (clear stale rules)
     add owner-aware host-originated redirect rules to RATLS-MESH
-    add pod-to-pod PREROUTING redirect rules to RATLS-MESH-PREROUTING
+    add pod-to-pod PREROUTING node-DNAT rules to RATLS-MESH-PREROUTING
     delete stale or duplicate jump rules from OUTPUT and PREROUTING
     insert jump rules at position 1 in OUTPUT and PREROUTING
 ```
@@ -396,8 +400,8 @@ not delayed.
 The `iptables-sync` sidecar and the main proxy run independent Pod informers,
 each consuming its own watch stream from the API server. When a Pod is added,
 the two informers see the ADD event at slightly different times: the sidecar
-may add the new pod IP to `RATLS-MESH-PODS` (so the kernel begins REDIRECTing
-traffic for it) a few hundred milliseconds before the proxy's resolver
+may add the new pod IP to `RATLS-MESH-PODS` (so the kernel begins intercepting
+traffic for it via OUTPUT REDIRECT and PREROUTING DNAT) a few hundred milliseconds before the proxy's resolver
 updates its `podMap`. During that window, the outbound listener gets a
 connection whose destination is not yet in its cache, `ValidateOutboundDest`
 returns false, and the connection is rejected with `result=dest_rejected`.
@@ -410,7 +414,7 @@ for the skew baseline (small steady rate is normal during pod churn;
 sustained spikes mean the informer is far behind) and
 `rate(ratls_mesh_outbound_dest_rejected_total{reason="host_addr"}[5m])`
 for the direct-dial signal (any sustained rate means something reached
-`:15001` outside the iptables REDIRECT path — alert on this without the
+`:15001` outside the iptables OUTPUT-REDIRECT / PREROUTING-DNAT path — alert on this without the
 informer-skew noise). The metric is separate from `route_errors_total` so
 it is not confused with origDst/parse failures.
 
@@ -433,7 +437,7 @@ folds that snapshot into the same Prometheus text output on `GET /metrics`.
 | `ratls_mesh_route_errors_total` | counter | — | origDst/resolve/parse failures |
 | `ratls_mesh_dest_header_errors_total` | counter | `side` | Header read/write failures |
 | `ratls_mesh_inbound_dest_rejected_total` | counter | — | Inbound destination rejected because it is not a local pod |
-| `ratls_mesh_outbound_dest_rejected_total` | counter | `reason` | Outbound destination rejected: `host_addr` = direct dial outside REDIRECT path (security signal); `unknown_pod` = informer skew baseline |
+| `ratls_mesh_outbound_dest_rejected_total` | counter | `reason` | Outbound destination rejected: `host_addr` = direct dial outside the iptables interception path (OUTPUT REDIRECT / PREROUTING DNAT) (security signal); `unknown_pod` = informer skew baseline |
 | `ratls_mesh_iptables_jump_position_violations_total` | counter | — | Watchdog confirmed and repaired a demoted base-chain jump |
 | `ratls_mesh_iptables_jump_position_check_errors_total` | counter | — | Watchdog could not read jump position and reinserted defensively |
 | `ratls_mesh_iptables_ipset_overflow_total` | counter | — | Reconcile saw more pod IPs than `--ipset-maxelem` and left the set stale |

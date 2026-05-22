@@ -5,6 +5,7 @@ package ratlsmesh
 import (
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,7 +42,7 @@ func TestCollectPodIPSetMembersSkipsHostNetworkAndDeduplicates(t *testing.T) {
 				PodIP:  "10.244.0.6",
 			},
 		},
-	}, "10.0.0.1")
+	}, []string{"10.0.0.1"})
 
 	if want := []string{"10.244.0.5", "10.244.0.6"}; !reflect.DeepEqual(sets.allIPv4, want) {
 		t.Fatalf("IPv4 pod IPs = %#v, want %#v", sets.allIPv4, want)
@@ -101,6 +102,147 @@ func TestResetReadyFileRemovesStaleProbeMarker(t *testing.T) {
 	}
 	if err := resetReadyFile(path); err != nil {
 		t.Fatalf("resetReadyFile should ignore already-removed path: %v", err)
+	}
+}
+
+func TestParseNodeIPs(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		wantV4  string
+		wantV6  string
+		wantErr string
+	}{
+		{name: "single ipv4", in: []string{"10.0.0.1"}, wantV4: "10.0.0.1"},
+		{name: "single ipv6", in: []string{"fd00::10"}, wantV6: "fd00::10"},
+		{name: "dual stack", in: []string{"10.0.0.1", "fd00::10"}, wantV4: "10.0.0.1", wantV6: "fd00::10"},
+		{name: "ipv6 non-canonical", in: []string{"fd00:0:0:0:0:0:0:10"}, wantV6: "fd00::10"},
+
+		{name: "empty list", in: nil, wantErr: "at least one --node-ip required"},
+		{name: "empty value", in: []string{""}, wantErr: "empty value"},
+		{name: "whitespace value", in: []string{"   "}, wantErr: "empty value"},
+		{name: "invalid literal", in: []string{"not-an-ip"}, wantErr: "not a valid IP"},
+		{name: "ipv4 unspecified", in: []string{"0.0.0.0"}, wantErr: "unspecified"},
+		{name: "ipv6 unspecified", in: []string{"::"}, wantErr: "unspecified"},
+		{name: "ipv4 loopback", in: []string{"127.0.0.1"}, wantErr: "loopback"},
+		{name: "ipv6 loopback", in: []string{"::1"}, wantErr: "loopback"},
+		{name: "ipv4-mapped ipv6", in: []string{"::ffff:10.0.0.1"}, wantErr: "IPv4-in-IPv6"},
+		{name: "ipv4-mapped ipv6 expanded", in: []string{"0:0:0:0:0:ffff:10.0.0.1"}, wantErr: "IPv4-in-IPv6"},
+		{name: "ipv4-mapped ipv6 mixed case", in: []string{"::FFFF:10.0.0.1"}, wantErr: "IPv4-in-IPv6"},
+		{name: "ipv4-mapped ipv6 all-hex", in: []string{"::ffff:a00:1"}, wantErr: "IPv4-in-IPv6"},
+		{name: "ipv4-compatible ipv6 deprecated form", in: []string{"::1.2.3.4"}, wantErr: "IPv4-in-IPv6"},
+		{name: "zone-scoped ipv6", in: []string{"fe80::1%eth0"}, wantErr: "zone-scoped"},
+		// Ambiguity check runs AFTER ParseIP, so input that has both ':' and
+		// '.' but is not a valid IP gets "not a valid IP", not the misleading
+		// "IPv4-in-IPv6" error.
+		{name: "ipv4 with port", in: []string{"10.0.0.1:15001"}, wantErr: "not a valid IP"},
+		{name: "duplicate family", in: []string{"10.0.0.1", "10.0.0.2"}, wantErr: "multiple ipv4 addresses"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseNodeIPs(tt.in)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v; want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got[iptablesFamilyIPv4] != tt.wantV4 {
+				t.Errorf("ipv4 = %q, want %q", got[iptablesFamilyIPv4], tt.wantV4)
+			}
+			if got[iptablesFamilyIPv6] != tt.wantV6 {
+				t.Errorf("ipv6 = %q, want %q", got[iptablesFamilyIPv6], tt.wantV6)
+			}
+		})
+	}
+}
+
+func TestNodeIPsAreLocal(t *testing.T) {
+	mustCIDR := func(s string) *net.IPNet {
+		t.Helper()
+		ip, ipNet, err := net.ParseCIDR(s)
+		if err != nil {
+			t.Fatalf("net.ParseCIDR(%q): %v", s, err)
+		}
+		return &net.IPNet{IP: ip, Mask: ipNet.Mask}
+	}
+	mustIP := func(s string) *net.IPAddr {
+		t.Helper()
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("net.ParseIP(%q): nil", s)
+		}
+		return &net.IPAddr{IP: ip}
+	}
+
+	tests := []struct {
+		name    string
+		byFam   map[iptablesFamily]string
+		addrs   []net.Addr
+		wantErr string
+	}{
+		{
+			name:  "ipv4 match via IPNet",
+			byFam: map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.1"},
+			addrs: []net.Addr{mustCIDR("10.0.0.1/24"), mustCIDR("127.0.0.1/8")},
+		},
+		{
+			name:  "ipv6 match via IPNet",
+			byFam: map[iptablesFamily]string{iptablesFamilyIPv6: "fd00::10"},
+			addrs: []net.Addr{mustCIDR("fd00::10/64")},
+		},
+		{
+			// Non-canonical IPv6 in the interface list still matches because
+			// net.IP.String() canonicalizes the lookup-side form.
+			name:  "ipv6 non-canonical IPNet matches canonical byFamily",
+			byFam: map[iptablesFamily]string{iptablesFamilyIPv6: "fd00::10"},
+			addrs: []net.Addr{mustCIDR("fd00:0:0:0:0:0:0:10/64")},
+		},
+		{
+			name:  "match via IPAddr fallback",
+			byFam: map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.1"},
+			addrs: []net.Addr{mustIP("10.0.0.1")},
+		},
+		{
+			name:  "dual stack match",
+			byFam: map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.1", iptablesFamilyIPv6: "fd00::10"},
+			addrs: []net.Addr{mustCIDR("10.0.0.1/24"), mustCIDR("fd00::10/64")},
+		},
+		{
+			name:    "no match",
+			byFam:   map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.5"},
+			addrs:   []net.Addr{mustCIDR("10.0.0.1/24")},
+			wantErr: "10.0.0.5 (ipv4) is not bound",
+		},
+		{
+			name:    "partial match — ipv6 missing",
+			byFam:   map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.1", iptablesFamilyIPv6: "fd00::10"},
+			addrs:   []net.Addr{mustCIDR("10.0.0.1/24")},
+			wantErr: "fd00::10 (ipv6) is not bound",
+		},
+		{
+			name:    "empty addrs",
+			byFam:   map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.1"},
+			addrs:   nil,
+			wantErr: "is not bound",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := nodeIPsAreLocal(tt.byFam, tt.addrs)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v; want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

@@ -560,7 +560,7 @@ type iptablesSyncConfig struct {
 	outboundPort   int
 	uid            int
 	excludeUIDs    string
-	nodeIP         string
+	nodeIPs        []string
 	resyncPeriod   time.Duration
 	watchdogPeriod time.Duration
 	ipsetMaxElem   int
@@ -584,7 +584,7 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.IntVar(&cfg.outboundPort, "outbound-port", 15001, "outbound listener port")
 	fs.IntVar(&cfg.uid, "uid", defaultProxyUID, "UID to exclude from redirect")
 	fs.StringVar(&cfg.excludeUIDs, "exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
-	fs.StringVar(&cfg.nodeIP, "node-ip", "", "local node IP used to maintain local pod source ipsets (defaults to NODE_IP)")
+	fs.StringSliceVar(&cfg.nodeIPs, "node-ip", nil, "local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to NODE_IP env. Each address must be a non-loopback, non-unspecified IP bound to a local interface.")
 	fs.DurationVar(&cfg.resyncPeriod, "resync-period", 30*time.Second, "periodic full ipset reconciliation interval")
 	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at position 1 (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")
