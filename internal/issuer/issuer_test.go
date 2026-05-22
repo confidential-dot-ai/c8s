@@ -40,6 +40,40 @@ func TestNewCA(t *testing.T) {
 	}
 }
 
+func TestWrapCA(t *testing.T) {
+	a, err := issuer.NewCA("a", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA a: %v", err)
+	}
+	b, err := issuer.NewCA("b", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA b: %v", err)
+	}
+	c384, err := issuer.NewCAWithCurve("c", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatalf("NewCAWithCurve P-384: %v", err)
+	}
+
+	wrapped, err := issuer.WrapCA(a.Cert, a.Key)
+	if err != nil {
+		t.Errorf("matching keypair: unexpected error %v", err)
+	} else if wrapped.Cert != a.Cert || wrapped.Key != a.Key {
+		t.Error("matching keypair: returned CA fields do not equal inputs")
+	}
+	if _, err := issuer.WrapCA(nil, a.Key); err == nil {
+		t.Error("nil cert: expected error, got nil")
+	}
+	if _, err := issuer.WrapCA(a.Cert, nil); err == nil {
+		t.Error("nil key: expected error, got nil")
+	}
+	if _, err := issuer.WrapCA(a.Cert, b.Key); err == nil {
+		t.Error("mismatched keypair: expected error, got nil")
+	}
+	if _, err := issuer.WrapCA(c384.Cert, a.Key); err == nil {
+		t.Error("cross-curve keypair (P-384 cert, P-256 key): expected error, got nil")
+	}
+}
+
 func TestNewCAWithParent(t *testing.T) {
 	parent, err := issuer.NewCA("parent ca", time.Hour)
 	if err != nil {

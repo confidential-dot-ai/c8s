@@ -3,10 +3,8 @@ package certissuer
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -29,9 +27,9 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jws"
 
 	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/lunal-dev/c8s/internal/issuer"
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/issuerapi"
-	"github.com/lunal-dev/c8s/pkg/ratls"
 	"github.com/lunal-dev/c8s/pkg/resources"
 )
 
@@ -334,37 +332,15 @@ func (iss *Issuer) signCSR(csr *x509.CertificateRequest, claims *earClaims, ttl 
 }
 
 func (iss *Issuer) signCSRWithBundle(b *certBundle, csr *x509.CertificateRequest, claims *earClaims, ttl time.Duration) ([]byte, *big.Int, error) {
-	template, err := certutil.NewLeafTemplate(csr.Subject.CommonName, ttl)
+	ca, err := issuer.WrapCA(b.caCert, b.caKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	template.DNSNames = csr.DNSNames
-	template.IPAddresses = csr.IPAddresses
-	attDigest := sha256.Sum256(claims.RawEvidence)
-	if err := certutil.AppendAttestationDigest(template, attDigest[:]); err != nil {
-		return nil, nil, err
-	}
-	copyRATLSExtension(template, csr)
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, b.caCert, csr.PublicKey, b.caKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sign certificate: %w", err)
-	}
-
-	certPEM := certutil.EncodeCertPEM(certDER)
-	return certPEM, template.SerialNumber, nil
-}
-
-func copyRATLSExtension(template *x509.Certificate, csr *x509.CertificateRequest) {
-	for _, ext := range csr.Extensions {
-		if ext.Id.Equal(ratls.OIDRATLSAttestation) {
-			template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
-				Id:    ext.Id,
-				Value: ext.Value,
-			})
-			return
-		}
-	}
+	return ca.SignCSR(issuer.SignCSRParams{
+		CSR:      csr,
+		TTL:      ttl,
+		Evidence: claims.RawEvidence,
+	})
 }
 
 // earClaims represents the relevant claims from an EAR (Entity Attestation

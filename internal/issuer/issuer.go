@@ -136,6 +136,28 @@ func NewCAWithParent(commonName string, validity time.Duration, curve elliptic.C
 	return &CA{Cert: cert, Key: key}, nil
 }
 
+// WrapCA wraps a pre-parsed certificate and private key as a CA suitable for
+// SignCSR. Verifies the key matches the cert's public key so a misconfigured
+// bundle surfaces here rather than producing an unverifiable leaf on the
+// first signing request. Prefer this constructor over &CA{...} so any future
+// field that participates in signing is propagated in one place.
+func WrapCA(cert *x509.Certificate, key *ecdsa.PrivateKey) (*CA, error) {
+	if cert == nil {
+		return nil, fmt.Errorf("wrap ca: cert is required")
+	}
+	if key == nil {
+		return nil, fmt.Errorf("wrap ca: key is required")
+	}
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("wrap ca: cert has non-ECDSA public key: %T", cert.PublicKey)
+	}
+	if !key.PublicKey.Equal(certPub) {
+		return nil, fmt.Errorf("wrap ca: key does not match cert public key")
+	}
+	return &CA{Cert: cert, Key: key}, nil
+}
+
 // LoadCA reconstructs a CA from PEM-encoded cert and key bytes.
 func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
 	cert, err := certutil.ParseCertificatePEM(certPEM)
