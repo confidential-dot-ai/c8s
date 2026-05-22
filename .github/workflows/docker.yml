@@ -52,44 +52,39 @@ jobs:
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          predicate-quantifier: every
           filters: |
-            shared:
-              - 'pkg/**'
-              - 'internal/**'
+            shared-core:
+              - '{pkg/**,internal/**}'
               - '!internal/cmds/**'
-              # cmdsutil is shared across every component's main package
-              - 'internal/cmds/cmdsutil/**'
               - '!internal/helmchart/**'
               - '!**/*_test.go'
               - '!**/*.md'
               - '!**/testdata/**'
-              - 'go.mod'
-              - 'go.sum'
-              - 'go.work'
-              - 'go.work.sum'
-              - 'Makefile'
-              - '.github/workflows/docker.yml'
+            shared-cmdsutil:
+              # cmdsutil is shared across every component's main package
+              - 'internal/cmds/cmdsutil/**'
+              - '!**/*_test.go'
+              - '!**/*.md'
+              - '!**/testdata/**'
+            shared-root:
+              - '{go.mod,go.sum,go.work,go.work.sum,Makefile,.github/workflows/docker.yml}'
             assam:
-              - 'cmd/assam/**'
-              - 'internal/cmds/assam/**'
+              - '{cmd/assam/**,internal/cmds/assam/**}'
             c8s:
               - 'cmd/c8s/**'
             get-cert:
-              - 'cmd/get-cert/**'
-              - 'internal/cmds/getcert/**'
+              - '{cmd/get-cert/**,internal/cmds/getcert/**}'
             ratls-mesh:
-              - 'cmd/ratls-mesh/**'
-              - 'internal/cmds/ratlsmesh/**'
+              - '{cmd/ratls-mesh/**,internal/cmds/ratlsmesh/**}'
             cert-issuer:
-              - 'cmd/cert-issuer/**'
-              - 'internal/cmds/certissuer/**'
+              - '{cmd/cert-issuer/**,internal/cmds/certissuer/**}'
             nri-image-policy:
-              - 'cmd/nri-image-policy/**'
-              - 'internal/cmds/nriimagepolicy/**'
+              - '{cmd/nri-image-policy/**,internal/cmds/nriimagepolicy/**}'
       - name: Build Docker matrix
         id: docker-matrix
         env:
-          SHARED: ${{ steps.filter.outputs.shared }}
+          SHARED: ${{ steps.filter.outputs['shared-core'] == 'true' || steps.filter.outputs['shared-cmdsutil'] == 'true' || steps.filter.outputs['shared-root'] == 'true' }}
           ASSAM: ${{ steps.filter.outputs.assam }}
           C8S: ${{ steps.filter.outputs.c8s }}
           GET_CERT: ${{ steps.filter.outputs['get-cert'] }}
