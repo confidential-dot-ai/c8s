@@ -1,3 +1,4 @@
+{{- $assamScheme := lower (default "http" .Values.assam.scheme) -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,8 +14,19 @@ data:
       health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" .) | quote }}
 
     whitelist:
-      url: {{ printf "http://127.0.0.1:%d" (int .Values.assam.nodePort) | quote }}
+      url: {{ printf "%s://127.0.0.1:%d" $assamScheme (int .Values.assam.nodePort) | quote }}
       timeout: {{ .Values.refresh.interval | quote }}
+{{ if eq $assamScheme "https" }}
+      attestation_service_url: {{ tpl (default "" .Values.ratls.attestationServiceURL) . | quote }}
+{{ if .Values.assam.measurements }}
+      assam_measurements:
+{{ range .Values.assam.measurements }}
+        - {{ . | quote }}
+{{ end }}
+{{ else }}
+      assam_measurements: []
+{{ end }}
+{{ end }}
 
     containerd:
       socket: {{ .Values.containerd.socket | quote }}

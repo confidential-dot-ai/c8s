@@ -81,11 +81,24 @@ logLevel: info
 # trust path: the install-DaemonSet writes bootstrap.yaml at install time;
 # the plugin process — running outside kubelet's reach — owns refreshes.
 assam:
+  # Scheme Assam serves on the NodePort below. Parent c8s defaults this to
+  # https because chart-managed Assam serves RA-TLS unless explicitly disabled.
+  scheme: http
   # NodePort that the assam Service exposes on every node. The plugin
   # connects to 127.0.0.1:<nodePort>; kube-proxy iptables rules route to an
   # assam pod. The assam chart must be deployed with serviceType=NodePort
   # and a matching nodePort value.
   nodePort: 30808
+  # SHA-384 hex launch measurements accepted for Assam's RA-TLS certificate.
+  # Empty means any attested Assam measurement is accepted; set this in
+  # production once the Assam launch digest is known.
+  measurements: []
+
+ratls:
+  # Optional local attestation-service URL used by RA-TLS verification for
+  # evidence formats that require online verification. Bare SNP reports do not
+  # need it. Keep this host-reachable because the plugin runs as a host process.
+  attestationServiceURL: ""
 
 refresh:
   # How often the plugin pulls the current whitelist from assam.

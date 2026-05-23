@@ -966,6 +966,31 @@ func TestChartRatlsMeshAssamMeasurementsFlagsThrough(t *testing.T) {
 	}
 }
 
+func TestChartNRIWhitelistUsesRATLSAssam(t *testing.T) {
+	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+	out, err := helmTemplate(t,
+		"--set", "nri-image-policy.assam.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cm := renderedConfigMap(t, out, "c8s-nri-image-policy-runtime")
+	cfg := cm.Data["image-policy.yaml"]
+	for _, want := range []string{
+		`url: "https://127.0.0.1:30808"`,
+		`attestation_service_url: ""`,
+		`assam_measurements:`,
+		`- "` + measurement + `"`,
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("runtime config missing %q\n%s", want, cfg)
+		}
+	}
+	if strings.Contains(cfg, `url: "http://127.0.0.1:30808"`) {
+		t.Fatalf("runtime config still uses plaintext Assam URL\n%s", cfg)
+	}
+}
+
 // TestChartCertIssuerHandoffEnabledWiresAssamFlags confirms that turning on
 // certIssuer.handoff.enabled in values plumbs the bootstrap flags into the
 // cert-issuer container — without them, the in-process handoff bootstrap

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
 	"github.com/lunal-dev/c8s/internal/version"
 	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/lunal-dev/c8s/pkg/ratls"
 	"github.com/lunal-dev/c8s/pkg/whitelist"
 	"github.com/lunal-dev/c8s/pkg/whitelistclient"
 )
@@ -69,10 +71,11 @@ func Run(args []string) error {
 	var wlClient whitelistclient.Client
 	if cfg.WhitelistEnabled() {
 		wlCfg := cfg.Whitelist
-		logger.Info("initializing whitelist client", "url", wlCfg.URL)
-		wlClient = whitelistclient.NewClientWithHTTP(wlCfg.URL, &http.Client{
-			Timeout: wlCfg.Timeout,
-		})
+		httpClient, err := newWhitelistHTTPClient(wlCfg, logger)
+		if err != nil {
+			return fmt.Errorf("create whitelist HTTP client: %w", err)
+		}
+		wlClient = whitelistclient.NewClientWithHTTP(wlCfg.URL, httpClient)
 	} else {
 		logger.Info("whitelist disabled, running with label rules only")
 	}
@@ -190,6 +193,38 @@ func Run(args []string) error {
 	}
 	logger.Info("nri-image-policy stopped")
 	return nil
+}
+
+func newWhitelistHTTPClient(cfg whitelistConfig, logger *slog.Logger) (*http.Client, error) {
+	parsed, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse whitelist URL: %w", err)
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		logger.Info("initializing whitelist client", "url", cfg.URL, "transport", "http")
+		return &http.Client{Timeout: cfg.Timeout}, nil
+	case "https":
+		measurements := cfg.parsedAssamMeasurements
+		if len(measurements) == 0 {
+			logger.Warn("whitelist RA-TLS client has no Assam measurements; accepting any attested Assam measurement")
+		}
+		httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+		if err != nil {
+			return nil, fmt.Errorf("create RA-TLS whitelist client: %w", err)
+		}
+		httpClient.Timeout = cfg.Timeout
+		logger.Info("initializing whitelist client",
+			"url", cfg.URL,
+			"transport", "ratls",
+			"assam_measurements", len(measurements),
+			"attestation_service_url", cfg.AttestationServiceURL != "",
+		)
+		return httpClient, nil
+	default:
+		return nil, fmt.Errorf("unsupported whitelist URL scheme %q", parsed.Scheme)
+	}
 }
 
 type healthServerConfig struct {

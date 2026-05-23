@@ -59,6 +59,14 @@ func TestValidate_NegativeTimeout(t *testing.T) {
 	}
 }
 
+func TestValidate_InvalidAssamMeasurement(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.AssamMeasurements = []string{"not-hex"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid Assam measurement")
+	}
+}
+
 func TestValidate_InvalidMode(t *testing.T) {
 	cfg := validConfig()
 	cfg.Policy.Mode = "permissive"
@@ -90,6 +98,40 @@ whitelist:
 	}
 	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
 		t.Errorf("expected default socket, got %s", cfg.Containerd.Socket)
+	}
+}
+
+func TestLoadConfig_WhitelistRATLSFields(t *testing.T) {
+	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+	yaml := `
+whitelist:
+  url: https://127.0.0.1:30808
+  timeout: 5s
+  attestation_service_url: http://127.0.0.1:8400
+  assam_measurements:
+    - ` + measurement + `
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Whitelist.URL != "https://127.0.0.1:30808" {
+		t.Fatalf("whitelist URL = %q", cfg.Whitelist.URL)
+	}
+	if cfg.Whitelist.Timeout != 5*time.Second {
+		t.Fatalf("timeout = %s", cfg.Whitelist.Timeout)
+	}
+	if cfg.Whitelist.AttestationServiceURL != "http://127.0.0.1:8400" {
+		t.Fatalf("attestation service URL = %q", cfg.Whitelist.AttestationServiceURL)
+	}
+	if len(cfg.Whitelist.AssamMeasurements) != 1 || cfg.Whitelist.AssamMeasurements[0] != measurement {
+		t.Fatalf("AssamMeasurements = %#v", cfg.Whitelist.AssamMeasurements)
 	}
 }
 

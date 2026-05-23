@@ -3,8 +3,10 @@ package nriimagepolicy
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/lunal-dev/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,8 +30,14 @@ type pluginConfig struct {
 
 // whitelistConfig contains KBS connection settings for whitelist retrieval.
 type whitelistConfig struct {
-	URL     string        `yaml:"url"`     // KBS service URL
-	Timeout time.Duration `yaml:"timeout"` // Per-request timeout (default: 30s)
+	URL                   string        `yaml:"url"` // Assam whitelist service URL
+	Timeout               time.Duration `yaml:"timeout"`
+	AttestationServiceURL string        `yaml:"attestation_service_url"`
+	AssamMeasurements     []string      `yaml:"assam_measurements"`
+
+	// parsedAssamMeasurements is populated by Validate() so the HTTP client
+	// construction path doesn't have to re-parse and re-error on the same input.
+	parsedAssamMeasurements [][]byte `yaml:"-"`
 }
 
 // containerdConfig contains containerd connection settings for tag-to-digest resolution.
@@ -129,6 +137,11 @@ func (c *config) Validate() error {
 		if c.Whitelist.Timeout <= 0 {
 			return fmt.Errorf("whitelist.timeout must be positive")
 		}
+		parsed, err := ratls.ParseHexMeasurements(strings.Join(c.Whitelist.AssamMeasurements, ","))
+		if err != nil {
+			return fmt.Errorf("whitelist.assam_measurements: %w", err)
+		}
+		c.Whitelist.parsedAssamMeasurements = parsed
 	}
 	if !c.WhitelistEnabled() && len(c.Policy.LabelRules) == 0 {
 		return fmt.Errorf("at least one enforcement mechanism must be configured (whitelist or label_rules)")

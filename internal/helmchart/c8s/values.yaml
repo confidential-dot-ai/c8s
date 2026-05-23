@@ -254,6 +254,18 @@ ratls-mesh:
 
 nri-image-policy:
   enabled: true
+  assam:
+    scheme: https
+    ## Mirror the parent `assam.measurements` value here so the host plugin
+    ## can verify Assam's RA-TLS serving certificate directly. Helm does not
+    ## pass parent values into subcharts automatically; operators must keep
+    ## these two in sync.
+    measurements: []
+  ratls:
+    ## Host-process NRI plugins cannot rely on Kubernetes DNS. Leave this empty
+    ## for bare SNP evidence, or set a host-reachable local verifier URL for
+    ## platforms whose RA-TLS evidence requires online verification.
+    attestationServiceURL: ""
   image:
     repository: ghcr.io/lunal-dev/nri-image-policy
     tag: ""
