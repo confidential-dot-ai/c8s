@@ -29,9 +29,15 @@ upstream:
 routes: []
   # - path: /whitelist
   #   match: exact  # exact | prefix (default)
-  #   # Route upstreams currently support http:// only; use the default upstream
-  #   # when you need CDS client certs, SNI, or upstream certificate verification.
-  #   upstream: http://assam.default.svc.cluster.local:8080
+  #   backend:
+  #     address: assam.default.svc.cluster.local:8080
+  #     protocol: http
+  #     tls:
+  #       useCDSClientCert: false
+  #       verify: false
+  #       verifyDepth: 2
+  #       serverName: assam.default.svc.cluster.local
+  #       trustedCAPath: ""
 
 # -- Public TLS certificate presented to internet clients. When secretName is
 # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards

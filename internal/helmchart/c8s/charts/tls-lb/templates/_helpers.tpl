@@ -68,6 +68,68 @@ switch tls-lb to HTTPS upstream mode without also moving the backend port.
 {{- end -}}
 
 {{/*
+Derive an SNI/verification name from a host:port upstream address.
+*/}}
+{{- define "tls-lb.serverNameFromAddress" -}}
+{{- $serverName := regexReplaceAll `^\[([^\]]+)\](?::[0-9]+)?$` . "${1}" -}}
+{{- regexReplaceAll `^([^:]+)(?::[0-9]+)?$` $serverName "${1}" -}}
+{{- end -}}
+
+{{/*
+Validate the proxy TLS settings for an HTTPS backend (the default upstream or a
+route backend). Fails the render on values that would be silently ignored or
+break out of the generated nginx directives. Args: protocol, tls (dict),
+serverName, trustedCAPath, label.
+*/}}
+{{- define "tls-lb.validateProxyTLS" -}}
+{{- $tls := default dict .tls -}}
+{{- range $k := list "verify" "useCDSClientCert" -}}
+{{- if and (hasKey $tls $k) (not (kindIs "bool" (index $tls $k))) -}}
+{{- fail (printf "%s.tls.%s must be a boolean; do not set it via --set-string, got: %v" $.label $k (index $tls $k)) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $tls "verifyDepth" -}}
+{{- if not (regexMatch `^[0-9]+$` (printf "%v" $tls.verifyDepth)) -}}
+{{- fail (printf "%s.tls.verifyDepth must be a non-negative integer, got: %v" $.label $tls.verifyDepth) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $.protocol "https" -}}
+{{- if not (regexMatch `^[^[:space:]{};/#]+$` $.serverName) -}}
+{{- fail (printf "%s.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: %s" $.label $.serverName) -}}
+{{- end -}}
+{{- if (default false $tls.verify) -}}
+{{- if not (regexMatch `^/[^[:space:]{};]+$` $.trustedCAPath) -}}
+{{- fail (printf "%s.tls.trustedCAPath must be an absolute path without whitespace, semicolons, or braces, got: %s" $.label $.trustedCAPath) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Render nginx proxy TLS directives for an HTTPS backend.
+*/}}
+{{- define "tls-lb.proxySSLDirectives" -}}
+{{- if eq .protocol "https" -}}
+{{- $tls := default dict .tls -}}
+{{- if (default false $tls.useCDSClientCert) }}
+proxy_ssl_certificate {{ .tlsMountPath }}/cert.pem;
+proxy_ssl_certificate_key {{ .tlsMountPath }}/key.pem;
+{{- end }}
+proxy_ssl_server_name on;
+proxy_ssl_name {{ .serverName }};
+{{- if (default false $tls.verify) }}
+{{- $verifyDepth := 2 }}
+{{- if hasKey $tls "verifyDepth" }}{{- $verifyDepth = $tls.verifyDepth }}{{- end }}
+proxy_ssl_verify on;
+proxy_ssl_verify_depth {{ $verifyDepth }};
+proxy_ssl_trusted_certificate {{ .trustedCAPath }};
+{{- else }}
+proxy_ssl_verify off;
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Selector labels.
 */}}
 {{- define "tls-lb.selectorLabels" -}}

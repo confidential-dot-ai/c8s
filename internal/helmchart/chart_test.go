@@ -3,6 +3,7 @@ package helmchart
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -33,6 +34,13 @@ func helmFailMessage(t *testing.T, out string) string {
 		t.Fatalf("no helm fail message in output:\n%s", out)
 	}
 	return m[1]
+}
+
+func assertHelmFailMessage(t *testing.T, out, want string) {
+	t.Helper()
+	if got := helmFailMessage(t, out); got != want {
+		t.Fatalf("helm fail message = %q, want %q\n%s", got, want, out)
+	}
 }
 
 // preStopBoundFailure captures the structured shape of the daemonset
@@ -1387,9 +1395,7 @@ func TestChartRejectsManagedTeeProxyHTTPSWithoutTLS(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want tee-proxy TLS failure\n%s", out)
 	}
-	if !strings.Contains(out, "requires tee-proxy.tls.enabled=true or tee-proxy.domain") {
-		t.Fatalf("missing tee-proxy TLS error, got:\n%s", out)
-	}
+	assertHelmFailMessage(t, out, "tls-lb.upstream.protocol=https with the chart-managed tee-proxy requires tee-proxy.tls.enabled=true or tee-proxy.domain to enable the HTTPS listener")
 }
 
 func TestChartRejectsTLSLBHTTPSWithDefaultTeeProxyHTTPPort(t *testing.T) {
@@ -1399,9 +1405,7 @@ func TestChartRejectsTLSLBHTTPSWithDefaultTeeProxyHTTPPort(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want tls-lb upstream address failure\n%s", out)
 	}
-	if !strings.Contains(out, "tls-lb.upstream.protocol=https requires tls-lb.upstream.address to point at a TLS port") {
-		t.Fatalf("missing tls-lb upstream address error, got:\n%s", out)
-	}
+	assertHelmFailMessage(t, out, "tls-lb.upstream.protocol=https requires tls-lb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443")
 }
 
 func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
@@ -1413,52 +1417,134 @@ func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;") {
-		t.Fatalf("render missing derived proxy_ssl_name\n%s", out)
-	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	defaultRoute := cfg.location(t, "prefix", "/")
+	defaultRoute.assertDirective(t, "proxy_ssl_name", "tee-proxy.tee-attestation.svc.cluster.local")
 }
 
 func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set-string", "routes[0].path=/whitelist",
 		"--set-string", "routes[0].match=exact",
-		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc:8080",
 		"--set-string", "routes[1].path=/tenant/",
-		"--set-string", "routes[1].upstream=http://tenant-router.c8s-system.svc:8080",
+		"--set-string", "routes[1].backend.address=tenant-router.c8s-system.svc:8080",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	conf := renderedTLSLBNginxConf(t, out)
+	cfg := renderedTLSLBNginxConfig(t, out)
 
 	for _, tt := range []struct {
 		name     string
-		location string
-		upstream string
+		match    string
+		path     string
+		proxyURL string
 	}{
 		{
 			name:     "exact",
-			location: "location = /whitelist {",
-			upstream: "http://assam.c8s-system.svc:8080",
+			match:    "exact",
+			path:     "/whitelist",
+			proxyURL: "http://route_0",
 		},
 		{
 			name:     "default-prefix",
-			location: "location /tenant/ {",
-			upstream: "http://tenant-router.c8s-system.svc:8080",
+			match:    "prefix",
+			path:     "/tenant/",
+			proxyURL: "http://route_1",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			block := nginxLocationBlock(t, conf, tt.location)
-			want := "proxy_pass " + tt.upstream + ";"
-			if !strings.Contains(block, want) {
-				t.Fatalf("location block missing %q\n%s", want, block)
-			}
+			route := cfg.location(t, tt.match, tt.path)
+			route.assertDirective(t, "proxy_pass", tt.proxyURL)
 		})
 	}
 
-	if strings.Contains(nginxLocationBlock(t, conf, "location / {"), "assam.c8s-system.svc") {
-		t.Fatalf("default backend location should not inherit route upstreams\n%s", conf)
+	defaultRoute := cfg.location(t, "prefix", "/")
+	defaultRoute.assertDirective(t, "proxy_pass", "http://backend")
+	cfg.upstream(t, "backend").assertServer(t, "vllm:8000")
+	cfg.upstream(t, "route_0").assertServer(t, "assam.c8s-system.svc:8080")
+	cfg.upstream(t, "route_1").assertServer(t, "tenant-router.c8s-system.svc:8080")
+}
+
+func TestTLSLBTypedHTTPRouteConfiguresNginxLocation(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/tenant/",
+		"--set-string", "routes[0].backend.address=tenant-router.c8s-system.svc:8080",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
 	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.upstream(t, "route_0").assertServer(t, "tenant-router.c8s-system.svc:8080")
+	route := cfg.location(t, "prefix", "/tenant/")
+	route.assertDirective(t, "proxy_pass", "http://route_0")
+	route.assertDirective(t, "proxy_set_header", "X-Forwarded-Proto", "$scheme")
+	route.assertNoDirective(t, "proxy_ssl_certificate")
+	route.assertNoDirective(t, "proxy_ssl_certificate_key")
+	route.assertNoDirective(t, "proxy_ssl_name")
+	route.assertNoDirective(t, "proxy_ssl_verify")
+}
+
+func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc.cluster.local:8080",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+		"--set-string", "routes[0].backend.tls.serverName=assam.c8s-system.svc.cluster.local",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.upstream(t, "route_0").assertServer(t, "assam.c8s-system.svc.cluster.local:8080")
+	route := cfg.location(t, "exact", "/whitelist")
+	route.assertDirective(t, "proxy_ssl_server_name", "on")
+	route.assertDirective(t, "proxy_ssl_name", "assam.c8s-system.svc.cluster.local")
+	route.assertDirective(t, "proxy_ssl_verify", "on")
+	route.assertDirective(t, "proxy_ssl_verify_depth", "2")
+	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
+	route.assertDirective(t, "proxy_pass", "https://route_0")
+	route.assertNoDirective(t, "proxy_ssl_certificate")
+	route.assertNoDirective(t, "proxy_ssl_certificate_key")
+	assertTLSLBMeshCAVolume(t, out, "tls-lb-cert-issuer-mesh-ca", true)
+}
+
+func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc.cluster.local:8080",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.useCDSClientCert=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	route := cfg.location(t, "prefix", "/whitelist")
+	route.assertDirective(t, "proxy_ssl_certificate", "/tls/cert.pem")
+	route.assertDirective(t, "proxy_ssl_certificate_key", "/tls/key.pem")
+	route.assertDirective(t, "proxy_ssl_name", "assam.c8s-system.svc.cluster.local")
+	route.assertDirective(t, "proxy_pass", "https://route_0")
+}
+
+func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc.cluster.local:8080",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+		"--set-string", "routes[0].backend.tls.trustedCAPath=/etc/ssl/certs/ca-certificates.crt",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	route := cfg.location(t, "prefix", "/whitelist")
+	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/etc/ssl/certs/ca-certificates.crt")
+	assertNoTLSLBMeshCAVolume(t, out)
 }
 
 func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
@@ -1471,37 +1557,283 @@ func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 	return conf
 }
 
-func nginxLocationBlock(t *testing.T, conf, location string) string {
-	t.Helper()
+type nginxConfig struct {
+	upstreams map[string]*nginxBlock
+	locations map[nginxLocationKey]*nginxBlock
+}
 
-	start := strings.Index(conf, location)
-	if start < 0 {
-		t.Fatalf("nginx config missing location %q\n%s", location, conf)
+type nginxLocationKey struct {
+	match string
+	path  string
+}
+
+type nginxBlock struct {
+	directives map[string][][]string
+}
+
+func renderedTLSLBNginxConfig(t *testing.T, manifest string) nginxConfig {
+	t.Helper()
+	return parseNginxConfig(t, renderedTLSLBNginxConf(t, manifest))
+}
+
+func parseNginxConfig(t *testing.T, conf string) nginxConfig {
+	t.Helper()
+	cfg := nginxConfig{
+		upstreams: make(map[string]*nginxBlock),
+		locations: make(map[nginxLocationKey]*nginxBlock),
 	}
-	var block strings.Builder
-	for _, line := range strings.Split(conf[start:], "\n") {
-		block.WriteString(line)
-		block.WriteByte('\n')
-		if strings.TrimSpace(line) == "}" {
-			return block.String()
+
+	var current *nginxBlock
+	for _, line := range strings.Split(conf, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasSuffix(trimmed, "{") {
+			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+			if len(fields) == 2 && fields[0] == "upstream" {
+				block := &nginxBlock{directives: make(map[string][][]string)}
+				cfg.upstreams[fields[1]] = block
+				current = block
+				continue
+			}
+			if len(fields) >= 2 && fields[0] == "location" {
+				key := nginxLocationKey{match: "prefix", path: fields[1]}
+				if len(fields) == 3 && fields[1] == "=" {
+					key = nginxLocationKey{match: "exact", path: fields[2]}
+				}
+				block := &nginxBlock{directives: make(map[string][][]string)}
+				cfg.locations[key] = block
+				current = block
+				continue
+			}
+			current = nil
+			continue
+		}
+		if trimmed == "}" {
+			current = nil
+			continue
+		}
+		if current == nil || !strings.HasSuffix(trimmed, ";") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
+		if len(fields) == 0 {
+			continue
+		}
+		current.directives[fields[0]] = append(current.directives[fields[0]], fields[1:])
+	}
+	return cfg
+}
+
+func (cfg nginxConfig) upstream(t *testing.T, name string) *nginxBlock {
+	t.Helper()
+	upstream, ok := cfg.upstreams[name]
+	if !ok {
+		t.Fatalf("nginx config missing upstream %q; got %v", name, cfg.upstreams)
+	}
+	return upstream
+}
+
+func (cfg nginxConfig) location(t *testing.T, match, path string) *nginxBlock {
+	t.Helper()
+	key := nginxLocationKey{match: match, path: path}
+	location, ok := cfg.locations[key]
+	if !ok {
+		t.Fatalf("nginx config missing location %#v; got %v", key, cfg.locations)
+	}
+	return location
+}
+
+func (block *nginxBlock) assertServer(t *testing.T, server string) {
+	t.Helper()
+	block.assertDirective(t, "server", server)
+}
+
+func (block *nginxBlock) assertDirective(t *testing.T, name string, args ...string) {
+	t.Helper()
+	for _, got := range block.directives[name] {
+		if slices.Equal(got, args) {
+			return
 		}
 	}
-	t.Fatalf("nginx config location %q is not closed\n%s", location, conf)
-	return ""
+	t.Fatalf("nginx directive %q args %v not found; got %v", name, args, block.directives[name])
+}
+
+func (block *nginxBlock) assertNoDirective(t *testing.T, name string) {
+	t.Helper()
+	if got := block.directives[name]; len(got) > 0 {
+		t.Fatalf("nginx directive %q = %v, want absent", name, got)
+	}
+}
+
+func assertTLSLBMeshCAVolume(t *testing.T, manifest, configMapName string, optional bool) {
+	t.Helper()
+	dep := renderedDeployment(t, manifest, "tls-lb")
+	for _, volume := range dep.Spec.Template.Spec.Volumes {
+		if volume.Name != "mesh-ca" {
+			continue
+		}
+		if volume.ConfigMap == nil {
+			t.Fatalf("mesh-ca volume ConfigMap = nil")
+		}
+		if got := volume.ConfigMap.Name; got != configMapName {
+			t.Fatalf("mesh-ca volume ConfigMap.Name = %q, want %q", got, configMapName)
+		}
+		if volume.ConfigMap.Optional == nil {
+			t.Fatalf("mesh-ca volume ConfigMap.Optional = nil")
+		}
+		if got := *volume.ConfigMap.Optional; got != optional {
+			t.Fatalf("mesh-ca volume optional = %v, want %v", got, optional)
+		}
+		// A mesh-ca volume is useless unless the nginx container mounts it.
+		mounted := false
+		for _, c := range dep.Spec.Template.Spec.Containers {
+			if c.Name != "nginx" {
+				continue
+			}
+			for _, m := range c.VolumeMounts {
+				if m.Name == "mesh-ca" {
+					mounted = true
+				}
+			}
+		}
+		if !mounted {
+			t.Fatalf("Deployment/tls-lb mesh-ca volume present but not mounted into the nginx container")
+		}
+		return
+	}
+	t.Fatalf("Deployment/tls-lb missing mesh-ca volume; volumes: %v", dep.Spec.Template.Spec.Volumes)
+}
+
+func assertNoTLSLBMeshCAVolume(t *testing.T, manifest string) {
+	t.Helper()
+	dep := renderedDeployment(t, manifest, "tls-lb")
+	for _, volume := range dep.Spec.Template.Spec.Volumes {
+		if volume.Name == "mesh-ca" {
+			t.Fatalf("Deployment/tls-lb has mesh-ca volume, want absent: %#v", volume)
+		}
+	}
+}
+
+func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "route-verifyDepth-injection",
+			args: []string{
+				"--set-string", "routes[0].path=/x",
+				"--set-string", "routes[0].backend.address=svc:8080",
+				"--set-string", "routes[0].backend.protocol=https",
+				"--set", "routes[0].backend.tls.verify=true",
+				"--set-string", "routes[0].backend.tls.verifyDepth=9; return 444",
+			},
+			want: "tls-lb.routes[0].backend.tls.verifyDepth must be a non-negative integer, got: 9; return 444",
+		},
+		{
+			name: "route-tls-on-http-backend",
+			args: []string{
+				"--set-string", "routes[0].path=/x",
+				"--set-string", "routes[0].backend.address=svc:8080",
+				"--set", "routes[0].backend.tls.verify=true",
+			},
+			want: "tls-lb.routes[0].backend.tls.verify and useCDSClientCert require backend.protocol: https",
+		},
+		{
+			name: "route-verify-not-bool",
+			args: []string{
+				"--set-string", "routes[0].path=/x",
+				"--set-string", "routes[0].backend.address=svc:8080",
+				"--set-string", "routes[0].backend.protocol=https",
+				"--set-string", "routes[0].backend.tls.verify=false",
+			},
+			want: "tls-lb.routes[0].backend.tls.verify must be a boolean; do not set it via --set-string, got: false",
+		},
+		{
+			name: "route-address-with-hash",
+			args: []string{
+				"--set-string", "routes[0].path=/x",
+				"--set-string", "routes[0].backend.address=svc:8080#x",
+			},
+			want: "tls-lb.routes[0].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: svc:8080#x",
+		},
+		{
+			name: "route-serverName-with-slash",
+			args: []string{
+				"--set-string", "routes[0].path=/x",
+				"--set-string", "routes[0].backend.address=svc:8080",
+				"--set-string", "routes[0].backend.protocol=https",
+				"--set-string", "routes[0].backend.tls.serverName=a/b",
+			},
+			want: "tls-lb.routes[0].backend.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: a/b",
+		},
+		{
+			name: "upstream-serverName-injection",
+			args: []string{
+				"--set", "upstream.protocol=https",
+				"--set", "upstream.tls.verify=true",
+				"--set-string", "upstream.tls.serverName=evil; return 444",
+			},
+			want: "tls-lb.upstream.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: evil; return 444",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := helmTemplateTLSLB(t, tt.args...)
+			if err == nil {
+				t.Fatalf("helm template succeeded, want %q\n%s", tt.want, out)
+			}
+			assertHelmFailMessage(t, out, tt.want)
+		})
+	}
+}
+
+// TestTLSLBVerifyDepthZeroPreserved guards against the sprig `default` footgun
+// where an int 0 is treated as empty: an explicit verifyDepth: 0 (verify leaf
+// only) must reach nginx as 0, not be silently bumped to the default 2.
+func TestTLSLBVerifyDepthZeroPreserved(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "upstream.protocol=https",
+		"--set", "upstream.tls.verify=true",
+		"--set", "upstream.tls.verifyDepth=0",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "prefix", "/").assertDirective(t, "proxy_ssl_verify_depth", "0")
+}
+
+// TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute pins the deployment's
+// $routesUseMeshCA OR-accumulation: a verified HTTPS route using the default
+// (mesh) CA must mount the mesh CA even when an earlier route does not need it.
+func TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/a",
+		"--set-string", "routes[0].backend.address=svc-a:8080",
+		"--set-string", "routes[1].path=/b",
+		"--set-string", "routes[1].backend.address=svc-b:8080",
+		"--set-string", "routes[1].backend.protocol=https",
+		"--set", "routes[1].backend.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertTLSLBMeshCAVolume(t, out, "tls-lb-cert-issuer-mesh-ca", true)
 }
 
 func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set-string", "routes[0].path=/whitelist",
 		"--set-string", "routes[0].match=regex",
-		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc:8080",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want invalid route match failure\n%s", out)
 	}
-	if !strings.Contains(out, "tls-lb.routes[0].match must be 'exact' or 'prefix'") {
-		t.Fatalf("missing route match error, got:\n%s", out)
-	}
+	assertHelmFailMessage(t, out, "tls-lb.routes[0].match must be 'exact' or 'prefix', got: regex")
 }
 
 func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
@@ -1513,16 +1845,24 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 		{
 			name: "path",
 			args: []string{
-				"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+				"--set-string", "routes[0].backend.address=assam.c8s-system.svc:8080",
 			},
 			want: "tls-lb.routes[0].path is required",
 		},
 		{
-			name: "upstream",
+			name: "backend",
 			args: []string{
 				"--set-string", "routes[0].path=/whitelist",
 			},
-			want: "tls-lb.routes[0].upstream is required",
+			want: "tls-lb.routes[0].backend is required",
+		},
+		{
+			name: "backend-address",
+			args: []string{
+				"--set-string", "routes[0].path=/whitelist",
+				"--set-string", "routes[0].backend.protocol=https",
+			},
+			want: "tls-lb.routes[0].backend.address is required",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1530,37 +1870,43 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 			if err == nil {
 				t.Fatalf("helm template succeeded, want missing route field failure\n%s", out)
 			}
-			if !strings.Contains(out, tt.want) {
-				t.Fatalf("missing route field error %q, got:\n%s", tt.want, out)
-			}
+			assertHelmFailMessage(t, out, tt.want)
 		})
 	}
+}
+
+func TestTLSLBRejectsRouteUpstream(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want unsupported route upstream failure\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tls-lb.routes[0].upstream is not supported; set backend.address and backend.protocol instead")
+}
+
+func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc:8080",
+		"--set-string", "routes[0].backend.protocol=grpc",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want invalid typed route protocol failure\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tls-lb.routes[0].backend.protocol must be 'http' or 'https', got: grpc")
 }
 
 func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set-string", "routes[0].path=/bad;return",
-		"--set-string", "routes[0].upstream=http://assam.c8s-system.svc:8080",
+		"--set-string", "routes[0].backend.address=assam.c8s-system.svc:8080",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want unsafe route path failure\n%s", out)
 	}
-	if !strings.Contains(out, "tls-lb.routes[0].path must start with '/'") {
-		t.Fatalf("missing route path error, got:\n%s", out)
-	}
-}
-
-func TestTLSLBRejectsHTTPSRouteUpstream(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
-		"--set-string", "routes[0].path=/whitelist",
-		"--set-string", "routes[0].upstream=https://assam.c8s-system.svc:8443",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want https route upstream failure\n%s", out)
-	}
-	if !strings.Contains(out, "route-specific HTTPS upstreams are not supported") {
-		t.Fatalf("missing route upstream error, got:\n%s", out)
-	}
+	assertHelmFailMessage(t, out, "tls-lb.routes[0].path must start with '/' and contain only URI path characters safe for nginx locations, got: /bad;return")
 }
 
 func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
@@ -1572,12 +1918,10 @@ func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;") {
-		t.Fatalf("render missing custom trusted CA path\n%s", out)
-	}
-	if strings.Contains(out, "- name: mesh-ca") {
-		t.Fatalf("custom trustedCAPath should not mount the chart mesh CA\n%s", out)
-	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	defaultRoute := cfg.location(t, "prefix", "/")
+	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/etc/ssl/certs/ca-certificates.crt")
+	assertNoTLSLBMeshCAVolume(t, out)
 }
 
 func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
@@ -1589,15 +1933,10 @@ func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"proxy_ssl_trusted_certificate /mesh-ca/ca.pem;",
-		"- name: mesh-ca",
-		"optional: true",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
-	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	defaultRoute := cfg.location(t, "prefix", "/")
+	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
+	assertTLSLBMeshCAVolume(t, out, "tls-lb-cert-issuer-mesh-ca", true)
 }
 
 func TestTLSLBMeshCAOptionalCanBeRequired(t *testing.T) {
@@ -1608,9 +1947,7 @@ func TestTLSLBMeshCAOptionalCanBeRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "optional: false") {
-		t.Fatalf("render missing %q\n%s", "optional: false", out)
-	}
+	assertTLSLBMeshCAVolume(t, out, "tls-lb-cert-issuer-mesh-ca", false)
 }
 
 func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
@@ -1620,16 +1957,10 @@ func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"alias /mesh-ca/ca.pem;",
-		"- name: mesh-ca",
-		"name: tls-lb-cert-issuer-mesh-ca",
-		"optional: true",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
-	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
+	meshCA.assertDirective(t, "alias", "/mesh-ca/ca.pem")
+	assertTLSLBMeshCAVolume(t, out, "tls-lb-cert-issuer-mesh-ca", true)
 	assertRenderedDeploymentPodAnnotations(t, out, "tls-lb", map[string]string{
 		webhook.AnnotationDiscoveryMeshCAURL: "/.well-known/mesh-ca.pem",
 	})
@@ -2009,4 +2340,133 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// Example_tlsLBConfig renders the tls-lb ConfigMap for a representative route
+// set — one plaintext HTTP backend (/whitelist) and one RA-TLS-verified HTTPS
+// backend (/tenant/) — and prints the generated nginx.conf. It doubles as a
+// golden test of templates/configmap.yaml: a template edit that changes the
+// rendered config must be reflected in the Output block, so the full config
+// diff surfaces in review. helm is required, as it is for every test in this
+// package; without it the render errors and the example fails.
+func Example_tlsLBConfig() {
+	fmt.Print(renderExampleTLSLBNginxConf())
+	// Output:
+	// worker_processes auto;
+	// error_log /var/log/nginx/error.log warn;
+	// pid /tmp/nginx.pid;
+	//
+	// events {
+	//     worker_connections 1024;
+	// }
+	//
+	// http {
+	//     include /etc/nginx/mime.types;
+	//     default_type application/octet-stream;
+	//
+	//     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+	//                     '$status $body_bytes_sent "$http_referer" '
+	//                     '"$http_user_agent"';
+	//     access_log /var/log/nginx/access.log main;
+	//
+	//     sendfile on;
+	//     keepalive_timeout 65;
+	//
+	//     upstream backend {
+	//         server vllm:8000;
+	//     }
+	//     upstream route_0 {
+	//         server c8s-assam.c8s-system.svc:8080;
+	//     }
+	//     upstream route_1 {
+	//         server tenant-router.c8s-system.svc:8080;
+	//     }
+	//     server {
+	//         listen 443 ssl;
+	//         server_name "tls-lb.c8s-system.svc";
+	//
+	//         ssl_certificate     /tls/cert.pem;
+	//         ssl_certificate_key /tls/key.pem;
+	//
+	//         ssl_protocols TLSv1.2 TLSv1.3;
+	//         ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305;
+	//         ssl_prefer_server_ciphers on;
+	//         ssl_session_cache shared:SSL:10m;
+	//         ssl_session_timeout 1d;
+	//
+	//         # Large buffers for upstream responses that include TEE attestation headers (~8KB).
+	//         proxy_buffer_size 16k;
+	//         proxy_buffers 4 16k;
+	//         # Route: /whitelist -> http://c8s-assam.c8s-system.svc:8080
+	//         location = /whitelist {
+	//             proxy_pass http://route_0;
+	//             proxy_set_header Host $host;
+	//             proxy_set_header X-Real-IP $remote_addr;
+	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	//             proxy_set_header X-Forwarded-Proto $scheme;
+	//         }
+	//         # Route: /tenant/ -> https://tenant-router.c8s-system.svc:8080
+	//         location /tenant/ {
+	//
+	//             proxy_ssl_server_name on;
+	//             proxy_ssl_name tenant-router.c8s-system.svc;
+	//             proxy_ssl_verify on;
+	//             proxy_ssl_verify_depth 2;
+	//             proxy_ssl_trusted_certificate /mesh-ca/ca.pem;
+	//             proxy_pass https://route_1;
+	//             proxy_set_header Host $host;
+	//             proxy_set_header X-Real-IP $remote_addr;
+	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	//             proxy_set_header X-Forwarded-Proto $scheme;
+	//         }
+	//         location / {
+	//             proxy_pass http://backend;
+	//             proxy_set_header Host $host;
+	//             proxy_set_header X-Real-IP $remote_addr;
+	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	//             proxy_set_header X-Forwarded-Proto $scheme;
+	//         }
+	//
+	//         location /healthz {
+	//             access_log off;
+	//             return 200 "ok\n";
+	//             add_header Content-Type text/plain;
+	//         }
+	//     }
+	// }
+	//
+}
+
+// renderExampleTLSLBNginxConf renders the tls-lb nginx.conf the same way
+// helmTemplateTLSLB does, then trims trailing whitespace per line so the
+// golden stays gofmt-clean. Render errors are returned verbatim so the example
+// fails loudly rather than masking a broken template.
+func renderExampleTLSLBNginxConf() string {
+	cmd := exec.Command("helm",
+		"template", "tls-lb", "c8s/charts/tls-lb",
+		"--namespace", "c8s-system",
+		"--set", "nginx.image.tag=dev",
+		"--set-string", "routes[0].path=/whitelist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].backend.address=c8s-assam.c8s-system.svc:8080",
+		"--set-string", "routes[1].path=/tenant/",
+		"--set-string", "routes[1].backend.address=tenant-router.c8s-system.svc:8080",
+		"--set-string", "routes[1].backend.protocol=https",
+		"--set", "routes[1].backend.tls.verify=true",
+		"--show-only", "templates/configmap.yaml",
+	)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("helm template failed: %v\n%s", err, out)
+	}
+	var cm corev1.ConfigMap
+	if err := sigsyaml.Unmarshal(out, &cm); err != nil {
+		return fmt.Sprintf("decode tls-lb ConfigMap: %v\n%s", err, out)
+	}
+	lines := strings.Split(cm.Data["nginx.conf"], "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }

@@ -3,8 +3,17 @@
 {{- $configuredTrustedCAPath := .Values.upstream.tls.trustedCAPath -}}
 {{- $upstreamTLSVerify := and (eq .Values.upstream.protocol "https") .Values.upstream.tls.verify -}}
 {{- $upstreamUsesMeshCA := and $upstreamTLSVerify (or (not $configuredTrustedCAPath) (eq $configuredTrustedCAPath $defaultMeshCAPath)) -}}
+{{- $routesUseMeshCA := false -}}
+{{- range $route := .Values.routes }}
+{{- $backend := default dict $route.backend -}}
+{{- $backendTLS := default dict $backend.tls -}}
+{{- $trustedCAPath := $backendTLS.trustedCAPath -}}
+{{- if and (eq (default "http" $backend.protocol) "https") (default false $backendTLS.verify) (or (not $trustedCAPath) (eq $trustedCAPath $defaultMeshCAPath)) -}}
+{{- $routesUseMeshCA = true -}}
+{{- end -}}
+{{- end -}}
 {{- $discoveryExposesMeshCA := and .Values.discovery.enabled .Values.meshCA.expose -}}
-{{- $mountMeshCA := or $discoveryExposesMeshCA $upstreamUsesMeshCA -}}
+{{- $mountMeshCA := or $discoveryExposesMeshCA $upstreamUsesMeshCA $routesUseMeshCA -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

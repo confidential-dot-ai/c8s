@@ -77,7 +77,14 @@ helm install my-lb charts/tls-lb \
 | `upstream.tls.verifyDepth` | `2` | Maximum upstream server certificate chain depth nginx verifies when `upstream.tls.verify=true` |
 | `upstream.tls.serverName` | `""` | Optional SNI/verification name for HTTPS upstreams |
 | `upstream.tls.trustedCAPath` | `""` | Optional upstream CA path. Empty uses `<meshCA.mountPath>/<meshCA.key>`; custom paths must be provided by the image or another mount. |
-| `routes` | `[]` | Additional path routes proxied before the default upstream backend. Each entry has `path`, `upstream`, and optional `match` (`exact` or `prefix`, default `prefix`). Route upstreams currently support `http://` only; use the default upstream when you need CDS client certs, SNI, or upstream certificate verification. |
+| `routes` | `[]` | Additional path routes proxied before the default upstream backend. Each entry has `path`, optional `match` (`exact` or `prefix`, default `prefix`), and `backend`. |
+| `routes[].backend.address` | _(required)_ | Host:port backend address for a typed route. Do not include a URL scheme. |
+| `routes[].backend.protocol` | `http` | Typed route backend protocol (`http` or `https`). |
+| `routes[].backend.tls.useCDSClientCert` | `false` | Present the CDS cert to this HTTPS route backend. |
+| `routes[].backend.tls.verify` | `false` | Verify this HTTPS route backend certificate. |
+| `routes[].backend.tls.verifyDepth` | `2` | Maximum route backend server certificate chain depth nginx verifies when `verify=true`. |
+| `routes[].backend.tls.serverName` | `""` | Optional SNI/verification name for this HTTPS route backend. Empty derives the host from `address`. |
+| `routes[].backend.tls.trustedCAPath` | `""` | Optional route backend CA path. Empty uses `<meshCA.mountPath>/<meshCA.key>`, mounting the mesh CA when `verify=true`. |
 | `publicTLS.secretName` | `""` | Kubernetes TLS Secret for public client TLS. Empty means present the CDS cert. |
 | `publicTLS.certKey` | `tls.crt` | Secret key containing the public certificate chain |
 | `publicTLS.keyKey` | `tls.key` | Secret key containing the public private key |
