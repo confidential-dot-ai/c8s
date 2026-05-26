@@ -31,7 +31,6 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        supplementalGroups: {{ .Values.tpm.supplementalGroups | toJson }}
         sysctls:
           - name: net.ipv4.ip_unprivileged_port_start
             value: "0"
@@ -107,9 +106,6 @@ spec:
               {{- toYaml .Values.resources.requests | nindent 14 }}
             limits:
               {{- toYaml .Values.resources.limits | nindent 14 }}
-              {{- if .Values.tpm.enabled }}
-              {{ .Values.tpm.resource }}: 1
-              {{- end }}
           readinessProbe:
             tcpSocket:
               port: {{ $probePort }}

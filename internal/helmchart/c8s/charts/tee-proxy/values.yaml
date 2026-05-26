@@ -40,14 +40,6 @@ ports:
   https: 443
   http: 80
 
-# TPM device plugin resource
-tpm:
-  enabled: true
-  resource: "lunal.dev/tpm"
-  supplementalGroups:
-    - 0
-    - 111
-
 # Node placement
 nodeSelector: {}
 tolerations: []

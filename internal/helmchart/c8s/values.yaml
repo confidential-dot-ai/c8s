@@ -240,8 +240,6 @@ ratls-mesh:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   certMode: assam
-  tpm:
-    enabled: false
   networkPolicy:
     enabled: false
     monitoringNamespace: monitoring
@@ -286,8 +284,6 @@ tee-proxy:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   attestationURL: ""
-  tpm:
-    enabled: false
   router:
     routes:
       - path: /whitelist

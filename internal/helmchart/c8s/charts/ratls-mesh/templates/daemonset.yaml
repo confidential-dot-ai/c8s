@@ -57,9 +57,6 @@ spec:
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: {{ $tgp }}
       securityContext:
-        {{- if .Values.tpm.enabled }}
-        supplementalGroups: {{ .Values.tpm.supplementalGroups | toJson }}
-        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       {{- with .Values.imagePullSecrets }}
@@ -276,9 +273,6 @@ spec:
               {{- toYaml .Values.resources.requests | nindent 14 }}
             limits:
               {{- toYaml .Values.resources.limits | nindent 14 }}
-              {{- if .Values.tpm.enabled }}
-              {{ .Values.tpm.resource }}: 1
-              {{- end }}
           startupProbe:
             httpGet:
               path: /ready

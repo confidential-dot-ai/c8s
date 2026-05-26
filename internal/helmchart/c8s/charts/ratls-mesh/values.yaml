@@ -74,14 +74,6 @@ sessionCacheSize: 64
 # Logging
 logLevel: info
 
-# TPM device plugin
-tpm:
-  enabled: true
-  resource: "lunal.dev/tpm"
-  supplementalGroups:
-    - 0
-    - 111
-
 # Node placement
 nodeSelector: {}
 
