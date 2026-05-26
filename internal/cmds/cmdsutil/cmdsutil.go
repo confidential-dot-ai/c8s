@@ -3,11 +3,15 @@
 package cmdsutil
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // RunMain is the body of the per-binary thin shim under cmd/<name>/main.go.
@@ -39,4 +43,15 @@ func ValidateHTTPURL(flagName, u string) error {
 func ParseFlags(fs *flag.FlagSet, args []string) error {
 	fs.SetOutput(os.Stdout)
 	return fs.Parse(args)
+}
+
+// ShutdownOnDone blocks on ctx, then triggers srv.Shutdown with a fresh
+// timeout-bounded context so the in-flight request drain is independent of
+// the cancelled parent. Intended to run in a goroutine.
+func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration) {
+	<-ctx.Done()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 }

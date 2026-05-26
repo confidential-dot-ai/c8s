@@ -1,0 +1,49 @@
+package cds
+
+import (
+	"context"
+	"testing"
+
+	"github.com/lunal-dev/c8s/pkg/ratls"
+)
+
+func TestNewCmdDefaultsToSupportedRATLSPlatform(t *testing.T) {
+	flag := NewCmd().Flags().Lookup("ratls-platform")
+	if flag == nil {
+		t.Fatal("missing --ratls-platform flag")
+	}
+	if flag.DefValue != "sev-snp" {
+		t.Fatalf("default --ratls-platform = %q, want sev-snp", flag.DefValue)
+	}
+
+	_, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		Platform:   flag.DefValue,
+		AttestFunc: func(context.Context, string) (string, error) { return "", nil },
+	})
+	if err != nil {
+		t.Fatalf("default --ratls-platform is not accepted by ratls: %v", err)
+	}
+}
+
+func TestNormalizeRATLSPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{" ", ""},
+		{"snp", "sev-snp"},
+		{"SEV-SNP", "sev-snp"},
+		{"az-snp", "sev-snp"},
+		{"gcp-snp", "sev-snp"},
+		{"tdx", "tdx"},
+		{"az-tdx", "tdx"},
+		{"unknown", "unknown"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := normalizeRATLSPlatform(tc.input); got != tc.want {
+				t.Fatalf("normalizeRATLSPlatform(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

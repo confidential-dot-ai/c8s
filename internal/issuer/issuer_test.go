@@ -1,8 +1,12 @@
 package issuer_test
 
 import (
+	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -72,6 +76,56 @@ func TestWrapCA(t *testing.T) {
 	if _, err := issuer.WrapCA(c384.Cert, a.Key); err == nil {
 		t.Error("cross-curve keypair (P-384 cert, P-256 key): expected error, got nil")
 	}
+
+	leaf := testCertForKey(t, a.Key, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "leaf"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	})
+	if _, err := issuer.WrapCA(leaf, a.Key); err == nil {
+		t.Error("matching non-CA cert: expected error, got nil")
+	}
+
+	missingBasicConstraints := *a.Cert
+	missingBasicConstraints.BasicConstraintsValid = false
+	if _, err := issuer.WrapCA(&missingBasicConstraints, a.Key); err == nil {
+		t.Error("CA missing valid basic constraints: expected error, got nil")
+	}
+
+	missingCertSignUsage := *a.Cert
+	missingCertSignUsage.KeyUsage = x509.KeyUsageDigitalSignature
+	if _, err := issuer.WrapCA(&missingCertSignUsage, a.Key); err == nil {
+		t.Error("CA without cert-sign key usage: expected error, got nil")
+	}
+
+	expired := *a.Cert
+	expired.NotBefore = time.Now().Add(-2 * time.Hour)
+	expired.NotAfter = time.Now().Add(-time.Hour)
+	if _, err := issuer.WrapCA(&expired, a.Key); err == nil {
+		t.Error("expired CA: expected error, got nil")
+	}
+
+	notYetValid := *a.Cert
+	notYetValid.NotBefore = time.Now().Add(time.Hour)
+	notYetValid.NotAfter = time.Now().Add(2 * time.Hour)
+	if _, err := issuer.WrapCA(&notYetValid, a.Key); err == nil {
+		t.Error("not-yet-valid CA: expected error, got nil")
+	}
+}
+
+func testCertForKey(t *testing.T, key *ecdsa.PrivateKey, tmpl *x509.Certificate) *x509.Certificate {
+	t.Helper()
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create test cert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse test cert: %v", err)
+	}
+	return cert
 }
 
 func TestNewCAWithParent(t *testing.T) {

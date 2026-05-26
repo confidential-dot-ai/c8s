@@ -231,6 +231,7 @@ func generateCSRWithExtraExtension(t *testing.T, key *ecdsa.PrivateKey, cn strin
 
 func TestHandleSignCSR(t *testing.T) {
 	iss, tokenKey := testIssuer(t)
+	iss.SANValidation = true
 
 	// Generate a key for the CSR.
 	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -251,6 +252,7 @@ func TestHandleSignCSR(t *testing.T) {
 	body, _ := json.Marshal(newSignCSRRequest(ear, csr, "12h"))
 
 	req := httptest.NewRequest("POST", "/sign-csr", strings.NewReader(string(body)))
+	req.RemoteAddr = "10.0.0.1:12345"
 	w := httptest.NewRecorder()
 	iss.HandleSignCSR(w, req)
 
@@ -585,6 +587,7 @@ func TestHandleSignCSR_ES384(t *testing.T) {
 		MaxTTL:        24 * time.Hour,
 		JWTClockSkew:  30,
 		MinCAValidity: time.Hour,
+		SANValidation: true,
 		Logger:        slog.Default(),
 		tracker:       newNodeTracker(24 * time.Hour),
 	}
@@ -613,6 +616,7 @@ func TestHandleSignCSR_ES384(t *testing.T) {
 	body, _ := json.Marshal(newSignCSRRequest(ear, csr, "12h"))
 
 	req := httptest.NewRequest("POST", "/sign-csr", strings.NewReader(string(body)))
+	req.RemoteAddr = "10.0.0.2:12345"
 	w := httptest.NewRecorder()
 	iss.HandleSignCSR(w, req)
 
@@ -644,6 +648,10 @@ func TestHandleSignCSR_ES384(t *testing.T) {
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}); err != nil {
 		t.Fatalf("certificate does not chain to CA: %v", err)
+	}
+
+	if len(issuedCert.IPAddresses) == 0 || !issuedCert.IPAddresses[0].Equal(net.ParseIP("10.0.0.2")) {
+		t.Errorf("IP SAN = %v, want [10.0.0.2]", issuedCert.IPAddresses)
 	}
 }
 
@@ -704,7 +712,7 @@ func TestHandleSignCSR_AttestationDigestExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr := generateCSR(t, csrKey, "ratls-mesh-10.0.0.4", net.ParseIP("10.0.0.4"))
+	csr := generateCSR(t, csrKey, "ratls-mesh-10.0.0.4")
 
 	// Use a JSON object for submods, matching real KBS EAR token format.
 	rawEvidence := map[string]any{"cpu0": map[string]any{"status": "ok"}}
@@ -783,7 +791,7 @@ func TestHandleSignCSR_CopiesRATLSExtension(t *testing.T) {
 		Critical: true,
 		Value:    []byte{0x30, 0x03, 0x02, 0x01, 0x01},
 	}
-	csr := generateCSRWithExtraExtension(t, csrKey, "ratls-mesh-10.0.0.4", wantExt, net.ParseIP("10.0.0.4"))
+	csr := generateCSRWithExtraExtension(t, csrKey, "ratls-mesh-10.0.0.4", wantExt)
 
 	now := time.Now()
 	ear := signJWT(t, tokenKey, map[string]any{
@@ -916,7 +924,7 @@ func TestMetricsIncremented(t *testing.T) {
 	iss, tokenKey := testIssuer(t)
 
 	csrKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	csr := generateCSR(t, csrKey, "test-node", net.ParseIP("10.0.0.6"))
+	csr := generateCSR(t, csrKey, "test-node")
 
 	ear := signJWT(t, tokenKey, map[string]any{
 		earclaims.Issuer:       "kbs",
@@ -951,7 +959,7 @@ func TestRateLimiting(t *testing.T) {
 	iss, tokenKey := testIssuer(t)
 
 	csrKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	csr := generateCSR(t, csrKey, "test-node", net.ParseIP("10.0.0.7"))
+	csr := generateCSR(t, csrKey, "test-node")
 
 	ear := signJWT(t, tokenKey, map[string]any{
 		earclaims.Issuer:       "kbs",

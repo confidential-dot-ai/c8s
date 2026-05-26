@@ -242,13 +242,7 @@ func run(cfg config) error {
 			return fmt.Errorf("warm up ratls serving cert: %w", err)
 		}
 
-		go func() {
-			<-ctx.Done()
-			slog.Info("shutting down")
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			srv.Shutdown(shutdownCtx)
-		}()
+		go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
 		slog.Info("listening (RA-TLS)", "addr", addr, "platform", cfg.ratlsPlatform)
 		// Empty cert/key paths: the cert is supplied by srv.TLSConfig.GetCertificate.
@@ -260,13 +254,7 @@ func run(cfg config) error {
 
 	slog.Warn("RA-TLS disabled (--ratls-platform empty); serving plain HTTP. UNSAFE outside tests.")
 
-	go func() {
-		<-ctx.Done()
-		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
+	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
 	slog.Info("listening", "addr", addr)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {

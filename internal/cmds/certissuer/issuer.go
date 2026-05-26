@@ -48,7 +48,7 @@ type Issuer struct {
 	bundle           atomic.Pointer[certBundle]
 	keyProvider      KeyProvider
 	MaxTTL           time.Duration
-	SANValidation    bool           // When true, CSR IP SANs must match the request source IP.
+	SANValidation    bool           // When true, CSR IP SANs must match the request source IP; when false, CSRs carrying IP SANs are rejected.
 	DNSSANPattern    *regexp.Regexp // When set, DNS SANs matching this pattern are allowed. Nil = reject all DNS SANs.
 	AllowedCNPattern *regexp.Regexp // When set, CSR CN must match this pattern. Nil = no CN restriction.
 	ExpectedIssuer   string         // When non-empty, validates the EAR issuer claim.
@@ -185,25 +185,22 @@ func (iss *Issuer) HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate requested names even when source-IP matching is disabled for
-	// forwarding brokers such as Assam.
-	if err := iss.validateCSRRequestedNames(csr); err != nil {
-		iss.Logger.Warn("CSR requested-name validation failed", "error", err, "remote_addr", r.RemoteAddr)
+	policy := issuer.CSRPolicy{
+		DNSSANPattern:    iss.DNSSANPattern,
+		AllowedCNPattern: iss.AllowedCNPattern,
+	}
+	if iss.SANValidation {
+		policy.SourceIP = issuer.SourceIPFromRemoteAddr(r.RemoteAddr)
+	}
+	if err := issuer.ValidateCSR(csr, policy); err != nil {
+		iss.Logger.Warn("CSR validation failed", "error", err, "remote_addr", r.RemoteAddr)
 		http.Error(w, "forbidden: certificate request denied", http.StatusForbidden)
 		sanValidationFailuresTotal.Inc()
+		if len(csr.DNSNames) > 0 {
+			dnsSanValidationFailuresTotal.Inc()
+		}
 		signRequestsTotal.WithLabelValues("forbidden").Inc()
 		return
-	}
-
-	// Validate CSR source binding: IP SANs must match the request source IP.
-	if iss.SANValidation {
-		if err := iss.validateCSRSourceIP(csr, r.RemoteAddr); err != nil {
-			iss.Logger.Warn("CSR source-IP validation failed", "error", err, "remote_addr", r.RemoteAddr)
-			http.Error(w, "forbidden: certificate request denied", http.StatusForbidden)
-			sanValidationFailuresTotal.Inc()
-			signRequestsTotal.WithLabelValues("forbidden").Inc()
-			return
-		}
 	}
 
 	// Cap TTL (already parsed by issuerapi.Duration unmarshal).
@@ -528,52 +525,6 @@ func verifyKeyBinding(csr *x509.CertificateRequest, claims *earClaims) error {
 	claimHash := sha256.Sum256(claimPubDER)
 	if csrHash != claimHash {
 		return fmt.Errorf("CSR public key does not match TEE-attested key")
-	}
-
-	return nil
-}
-
-// validateCSRSourceIP checks that all IP SANs in the CSR match the request
-// source IP. This prevents a directly connected compromised TEE node from
-// requesting IP SANs for other nodes. Brokers that forward CSRs can disable this
-// source-IP check while still using validateCSRRequestedNames below.
-func (iss *Issuer) validateCSRSourceIP(csr *x509.CertificateRequest, remoteAddr string) error {
-	srcIP, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		// remoteAddr might not have a port (e.g., Unix socket).
-		srcIP = remoteAddr
-	}
-
-	for _, ip := range csr.IPAddresses {
-		if ip.String() != srcIP {
-			return fmt.Errorf("CSR IP SAN %s does not match request source %s", ip, srcIP)
-		}
-	}
-
-	return nil
-}
-
-// validateCSRRequestedNames checks requested DNS names and common names. DNS
-// SANs are rejected by default unless the caller configures DNSSANPattern. CN is
-// validated against AllowedCNPattern when set.
-func (iss *Issuer) validateCSRRequestedNames(csr *x509.CertificateRequest) error {
-	if len(csr.DNSNames) > 0 {
-		if iss.DNSSANPattern == nil {
-			dnsSanValidationFailuresTotal.Inc()
-			return fmt.Errorf("CSR contains DNS SANs %v but no DNS SAN pattern configured", csr.DNSNames)
-		}
-		for _, dns := range csr.DNSNames {
-			if !iss.DNSSANPattern.MatchString(dns) {
-				dnsSanValidationFailuresTotal.Inc()
-				return fmt.Errorf("CSR DNS SAN %q does not match allowed pattern", dns)
-			}
-		}
-	}
-
-	if iss.AllowedCNPattern != nil && csr.Subject.CommonName != "" {
-		if !iss.AllowedCNPattern.MatchString(csr.Subject.CommonName) {
-			return fmt.Errorf("CSR CN %q does not match allowed pattern", csr.Subject.CommonName)
-		}
 	}
 
 	return nil

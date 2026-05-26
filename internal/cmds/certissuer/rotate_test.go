@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -267,7 +266,7 @@ func TestHandleSignCSRReturnsFullPublicBundleAfterMultipleRotations(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr := generateCSR(t, csrKey, "ratls-mesh-10.0.0.1", net.ParseIP("10.0.0.1"))
+	csr := generateCSR(t, csrKey, "ratls-mesh-10.0.0.1")
 	signEAR := signJWT(t, tokenKey, map[string]any{
 		earclaims.Issuer:       "kbs",
 		earclaims.IssuedAt:     time.Now().Unix(),

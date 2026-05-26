@@ -34,7 +34,7 @@ func Run(args []string) error {
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error")
 	rateLimit := fs.Float64("rate-limit", 10, "maximum requests per second per source IP")
 	rateBurst := fs.Int("rate-burst", 20, "maximum burst size per source IP")
-	sanValidation := fs.Bool("san-validation", true, "validate CSR IP SANs match request source IP")
+	sanValidation := fs.Bool("san-validation", true, "validate CSR IP SANs match request source IP (false rejects CSRs carrying IP SANs)")
 	dnsSANPattern := fs.String("dns-san-pattern", "", "regex pattern for allowed DNS SANs in CSRs (empty = reject all DNS SANs)")
 	allowedCNPattern := fs.String("allowed-cn-pattern", "", "regex pattern for allowed CN in CSRs (empty = no restriction)")
 	expectedIssuer := fs.String("expected-issuer", "", "expected JWT issuer claim (empty = skip validation, with warning)")

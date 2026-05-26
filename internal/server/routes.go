@@ -31,7 +31,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Get("/readyz", attestation.HandleReadyz(deps.ReadyFn))
 	r.Get("/.well-known/jwks.json", HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
 
-	r.Post("/authenticate", deps.AttestationHandler.HandleAuthenticate)
+	r.Post("/authenticate", attestation.HandleAuthenticate(deps.AttestationHandler.Challenges))
 	r.Post("/attest", deps.AttestationHandler.HandleAttest)
 	r.Post("/attest-key", deps.AttestationHandler.HandleAttestKey)
 
