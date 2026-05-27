@@ -1,3 +1,8 @@
+{{/*
+  Legacy split trust root — see assam.yaml. Silent when cds.enabled is true so
+  the unified cds is the sole trust root (lunal-dev/c8s#76).
+*/}}
+{{- if not .Values.cds.enabled }}
 {{- $publicBundlePersistence := .Values.certIssuer.ca.publicBundlePersistence -}}
 {{/*
   Validate handoff wiring. With handoff.enabled=true the cert-issuer pod
@@ -207,3 +212,4 @@ spec:
     - name: http
       port: {{ .Values.certIssuer.port }}
       targetPort: https
+{{- end }}

@@ -184,6 +184,89 @@ certIssuer:
       cpu: 500m
       memory: 256Mi
 
+## Unified Confidential Data Service (cds): the in-process merge of Assam and
+## cert-issuer into one binary, one Service, one ServiceAccount, and one
+## measurement allowlist (see lunal-dev/c8s#76). Off by default while the
+## migration lands; enabling it does not disable the legacy assam/certIssuer
+## blocks — run one or the other, not both (see validations.yaml).
+##
+## The mesh CA key is generated inside the cds process and stays in memory
+## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
+## and JWKS are in-process too, so there is no internal RA-TLS hop to Assam.
+cds:
+  enabled: false
+  image:
+    repository: ghcr.io/lunal-dev/cds
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 8443
+  service:
+    type: NodePort
+    nodePort: 30808
+  logLevel: info
+  whitelistDB: /data/whitelist.db
+  earIssuer: cds
+  expectedIssuer: ""
+  jwtClockSkew: 30
+  certTTL: 24h
+  maxTTL: 24h
+  challengeTTL: 60s
+  requestTimeout: 5s
+  maxRequestSize: 65536
+  readinessInterval: 10s
+  ## Assam forwards CSRs from its own pod under the split design; the unified
+  ## cds receives /attest directly, but /sign-csr CSRs still arrive without a
+  ## matching TCP source IP under chart routing. Leave sanValidation off and
+  ## pin DNS SAN / CN patterns instead.
+  sanValidation: false
+  dnsSanPattern: ""
+  cnPattern: ""
+  ## One flat allowlist of SHA-384 hex launch digests permitted to call /attest
+  ## and (when handoff is enabled) /handoff. Empty = no pinning (UNSAFE outside
+  ## dev). This replaces the split assam.measurements + certIssuer.resourceMap.
+  measurements: []
+  ## SHA-384 hex launch digests whose bearer EAR may mutate the whitelist via
+  ## POST/DELETE /whitelist. Empty = whitelist writes are rejected.
+  whitelistWriteMeasurements: []
+  tokenSignerRotationInterval: 720h
+  tokenSignerOverlap: 25h
+  tokenSignerRotationJitter: 0.1
+  rateLimit: 10
+  rateBurst: 20
+  rateLimiterMaxEntries: 10000
+  rateLimiterEvictInterval: 1m
+  rateLimiterIdleTimeout: 5m
+  ## RA-TLS settings for the cds serving cert. Without this, clients talk to
+  ## cds over plaintext HTTP and an on-path attacker can forge responses.
+  ## Empty platform disables TLS — UNSAFE outside tests.
+  ratlsPlatform: snp
+  ratlsCertTTL: 24h
+  ca:
+    ## The mesh CA key is generated inside cds memory and is not rendered into
+    ## a Kubernetes Secret or persistent volume.
+    commonName: c8s Mesh CA
+    certValidity: 8760h
+    minValidity: 1h
+  ## Attested CA handoff to a joining cds replica. When enabled, cds
+  ## self-provisions its handoff signer EAR in process (no external Assam dial)
+  ## and registers /handoff, authorising peers whose launch digest is in
+  ## cds.measurements. Required for any active/active cds deployment; without
+  ## it, a cds pod restart triggers a full mesh re-bootstrap.
+  handoff:
+    enabled: false
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 ## DaemonSet running github.com/lunal-dev/attestation-service.
 attestationService:
   image:

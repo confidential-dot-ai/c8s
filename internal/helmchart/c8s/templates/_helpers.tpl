@@ -27,6 +27,10 @@
 {{- printf "%s-cert-issuer" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "c8s.cdsName" -}}
+{{- printf "%s-cds" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "c8s.kataName" -}}
 {{- printf "%s-kata-deploy" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -75,6 +79,16 @@
 {{ .Values.certIssuer.image.repository }}:{{ .Values.certIssuer.image.tag }}
 {{- else -}}
 {{ fail "certIssuer.image.tag or certIssuer.image.digest must be set" }}
+{{- end -}}
+{{- end -}}
+
+{{- define "c8s.cdsImage" -}}
+{{- if .Values.cds.image.digest -}}
+{{ .Values.cds.image.repository }}@{{ .Values.cds.image.digest }}
+{{- else if .Values.cds.image.tag -}}
+{{ .Values.cds.image.repository }}:{{ .Values.cds.image.tag }}
+{{- else -}}
+{{ fail "cds.image.tag or cds.image.digest must be set" }}
 {{- end -}}
 {{- end -}}
 

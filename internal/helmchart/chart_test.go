@@ -2403,6 +2403,28 @@ type docMeta struct {
 	} `json:"metadata"`
 }
 
+// renderedComponents decodes every manifest's metadata and returns the set of
+// distinct app.kubernetes.io/component label values. Typed decode (not a
+// substring scan) so a label that only appears in a comment or unrelated
+// string can't be mistaken for a rendered resource.
+func renderedComponents(t *testing.T, manifest string) map[string]bool {
+	t.Helper()
+	const componentKey = "app.kubernetes.io/component"
+	components := map[string]bool{}
+	for _, doc := range splitManifestDocs(manifest) {
+		var obj struct {
+			Metadata metav1.ObjectMeta `json:"metadata"`
+		}
+		if err := sigsyaml.Unmarshal([]byte(doc), &obj); err != nil {
+			continue
+		}
+		if c := obj.Metadata.Labels[componentKey]; c != "" {
+			components[c] = true
+		}
+	}
+	return components
+}
+
 // splitManifestDocs returns each non-empty doc in a multi-doc YAML stream as
 // its own raw YAML chunk. helm template emits empty `---\n` separators that
 // we silently drop.
@@ -2514,6 +2536,144 @@ func renderedOperatorArgs(t *testing.T, manifest string) []string {
 	}
 	t.Fatalf("rendered manifest missing operator container\n%s", manifest)
 	return nil
+}
+
+// helmTemplateCDS renders the chart with the unified cds trust root enabled
+// (cds.enabled=true), which by the either/or design silences the legacy
+// assam + cert-issuer templates. Extra args are appended.
+func helmTemplateCDS(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return helmTemplate(t, append([]string{
+		"--set", "cds.enabled=true",
+		"--set", "cds.image.tag=dev",
+	}, args...)...)
+}
+
+// TestChartCDSDisabledByDefaultRendersLegacyStack locks the migration default:
+// until the legacy-removal PR flips cds.enabled, the default render must carry
+// the assam + cert-issuer trust root and no cds resources.
+func TestChartCDSDisabledByDefaultRendersLegacyStack(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	components := renderedComponents(t, out)
+	for _, want := range []string{"assam", "cert-issuer"} {
+		if !components[want] {
+			t.Fatalf("default render missing %q component; got %v", want, components)
+		}
+	}
+	if components["cds"] {
+		t.Fatalf("default render must not include cds (cds.enabled=false); got %v", components)
+	}
+}
+
+// TestChartCDSEnabledReplacesLegacyStack proves the either/or: enabling cds
+// renders exactly one trust root (cds) and silences assam + cert-issuer, so
+// two mesh CAs and a NodePort collision are impossible.
+func TestChartCDSEnabledReplacesLegacyStack(t *testing.T) {
+	out, err := helmTemplateCDS(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	components := renderedComponents(t, out)
+	if !components["cds"] {
+		t.Fatalf("cds.enabled render missing cds component; got %v", components)
+	}
+	for _, banned := range []string{"assam", "cert-issuer"} {
+		if components[banned] {
+			t.Fatalf("cds.enabled render must not include legacy %q component; got %v", banned, components)
+		}
+	}
+	dep := renderedDeployment(t, out, "c8s-cds")
+	if got := dep.Spec.Template.Annotations["confidential.ai/trust-root-mode"]; got != "inMemory" {
+		t.Fatalf("cds Deployment trust-root-mode annotation = %q, want inMemory", got)
+	}
+	if got := *dep.Spec.Replicas; got != 1 {
+		t.Fatalf("cds replicas = %d, want 1 (in-memory CA singleton)", got)
+	}
+	container := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	if container.Image != "ghcr.io/lunal-dev/cds:dev" {
+		t.Fatalf("cds image = %q, want ghcr.io/lunal-dev/cds:dev", container.Image)
+	}
+}
+
+// TestChartCDSWiresInProcessTrustRoot confirms the merged flag set: the
+// in-memory CA (no Secret/ca-cert flag), the whitelist DB, and the in-process
+// JWKS (no --jwks-url, no --cert-issuer-url hop to a separate binary).
+func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
+	out, err := helmTemplateCDS(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	for _, want := range []string{
+		"--attestation-service-url=http://c8s-attestation-service.c8s-system.svc:8400",
+		"--whitelist-db=/data/whitelist.db",
+		"--ca-common-name=c8s Mesh CA",
+		"--ca-cert-validity=8760h",
+	} {
+		assertContainerHasArg(t, "cds", args, want)
+	}
+	// The merge eliminates the split-binary plumbing: no CA Secret, no JWKS
+	// fetch, no cert-issuer round-trip.
+	for _, banned := range []string{"--ca-cert=", "--ca-key=", "--jwks-url=", "--cert-issuer-url="} {
+		assertContainerNoArgPrefix(t, "cds", args, banned)
+	}
+}
+
+// TestChartCDSMeasurementsPlumbFlatAllowlist proves the consolidation of the
+// split assam.measurements + certIssuer.resourceMap into one flat
+// cds.measurements list driving --measurements.
+func TestChartCDSMeasurementsPlumbFlatAllowlist(t *testing.T) {
+	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+	out, err := helmTemplateCDS(t, "--set", "cds.measurements[0]="+measurement)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--measurements="+measurement)
+}
+
+// TestChartCDSHandoffEnabledWiresMeasurements confirms handoff plumbs the
+// flat allowlist into --handoff-measurements (cds is its own EAR issuer, so
+// there is no external Assam URL to wire, unlike legacy cert-issuer).
+func TestChartCDSHandoffEnabledWiresMeasurements(t *testing.T) {
+	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+	out, err := helmTemplateCDS(t,
+		"--set", "cds.handoff.enabled=true",
+		"--set", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--handoff-measurements="+measurement)
+}
+
+// TestChartCDSHandoffDisabledOmitsFlag is the negative: with handoff off
+// (default) the bootstrap flag MUST be absent, or cds would register /handoff
+// when it shouldn't.
+func TestChartCDSHandoffDisabledOmitsFlag(t *testing.T) {
+	out, err := helmTemplateCDS(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerNoArgPrefix(t, "cds", args, "--handoff-measurements=")
+}
+
+// TestChartCDSHandoffEnabledFailsWithoutMeasurements locks the chart-time
+// guard: handoff with an empty allowlist would register /handoff and 403 every
+// caller — caught at template time, not at scale-up.
+func TestChartCDSHandoffEnabledFailsWithoutMeasurements(t *testing.T) {
+	out, err := helmTemplateCDS(t, "--set", "cds.handoff.enabled=true")
+	if err == nil {
+		t.Fatalf("helm template succeeded with cds handoff enabled but no cds.measurements; output=%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "cds_handoff_measurements" {
+		t.Fatalf("validation kind = %q, want cds_handoff_measurements; output=%s", got, out)
+	}
 }
 
 func renderedDeployment(t *testing.T, manifest, name string) appsv1.Deployment {
