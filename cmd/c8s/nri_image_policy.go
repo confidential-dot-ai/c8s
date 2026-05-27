@@ -1,6 +1,6 @@
 package main
 
-import "github.com/lunal-dev/c8s/internal/cmds/nriimagepolicy"
+import nriimagepolicy "github.com/lunal-dev/c8s/internal/cmds/nri-image-policy"
 
 func init() {
 	rootCmd.AddCommand(wrapFlagBinary(

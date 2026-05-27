@@ -12,13 +12,11 @@ import (
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
-	"golang.org/x/sync/singleflight"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/lunal-dev/c8s/internal/audit"
 	"github.com/lunal-dev/c8s/internal/cache"
 	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
-	"github.com/lunal-dev/c8s/pkg/whitelist"
-	"github.com/lunal-dev/c8s/pkg/whitelistclient"
 )
 
 const (
@@ -40,32 +38,27 @@ const (
 
 // plugin implements the NRI plugin interface for image policy enforcement.
 type plugin struct {
-	stub      stub.Stub
-	cfg       *config
-	cfgMu     sync.RWMutex
-	resolver  *ctrdresolver.Resolver
-	cache     *cache.PolicyCache
-	audit     *audit.Logger
-	logger    *slog.Logger
-	wlClient  whitelistclient.Client
-	wlFetchSF singleflight.Group // deduplicates concurrent whitelist fetches
-	ready     atomic.Bool        // true once whitelist is loaded
+	stub     stub.Stub
+	cfg      *config
+	resolver *ctrdresolver.Resolver
+	cache    *cache.PolicyCache
+	audit    *audit.Logger
+	logger   *slog.Logger
+	ready    atomic.Bool
 
-	// Deferred sweep: stores pods/containers seen during Synchronize before
-	// the plugin is ready so the startup sweep can run after KBS init.
+	// Deferred sweep: pods/containers observed during Synchronize before
+	// the plugin is ready, replayed once the cache has a whitelist.
 	deferredMu   sync.Mutex
 	deferredPods []*api.PodSandbox
 	deferredCtrs []*api.Container
 }
 
-// newPlugin creates a new image policy plugin.
 func newPlugin(
 	cfg *config,
 	resolver *ctrdresolver.Resolver,
 	policyCache *cache.PolicyCache,
 	auditLogger *audit.Logger,
 	logger *slog.Logger,
-	wlClient whitelistclient.Client,
 ) (*plugin, error) {
 	p := &plugin{
 		cfg:      cfg,
@@ -73,7 +66,6 @@ func newPlugin(
 		cache:    policyCache,
 		audit:    auditLogger,
 		logger:   logger,
-		wlClient: wlClient,
 	}
 
 	// Check if running as pre-installed plugin (containerd sets these env vars)
@@ -104,13 +96,6 @@ func newPlugin(
 	return p, nil
 }
 
-// config returns the current configuration under the read lock.
-func (p *plugin) config() *config {
-	p.cfgMu.RLock()
-	defer p.cfgMu.RUnlock()
-	return p.cfg
-}
-
 // Ready returns true when the plugin has a whitelist loaded and is serving.
 func (p *plugin) Ready() bool {
 	return p.ready.Load()
@@ -131,24 +116,6 @@ func (p *plugin) Run(ctx context.Context) error {
 	return p.stub.Run(ctx)
 }
 
-// Reload reloads the plugin configuration.
-func (p *plugin) Reload(configPath string) error {
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		return err
-	}
-
-	p.cfgMu.Lock()
-	p.cfg = cfg
-	p.cfgMu.Unlock()
-
-	// Clear cache on config reload — next CreateContainer triggers fresh KBS fetch
-	p.cache.Clear()
-
-	p.logger.Info("configuration reloaded, cache cleared")
-	return nil
-}
-
 // Configure is called when the plugin is registered with the runtime.
 func (p *plugin) Configure(ctx context.Context, config, runtime, version string) (api.EventMask, error) {
 	p.logger.Info("plugin configured",
@@ -161,42 +128,13 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 	return mask, nil
 }
 
-// fetchWhitelistDeduplicated uses singleflight to prevent concurrent whitelist requests.
-func (p *plugin) fetchWhitelistDeduplicated(ctx context.Context) (*whitelist.Whitelist, error) {
-	v, err, _ := p.wlFetchSF.Do("whitelist", func() (interface{}, error) {
-		return p.wlClient.FetchWhitelist(ctx)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.(*whitelist.Whitelist), nil
-}
-
-// evaluateExpression checks a single label selector expression against a labels map.
-func evaluateExpression(expr labelExpression, labels map[string]string) bool {
-	value, exists := labels[expr.Key]
-	switch expr.Operator {
-	case OpIn:
-		return exists && slices.Contains(expr.Values, value)
-	case OpNotIn:
-		return !exists || !slices.Contains(expr.Values, value)
-	case OpExists:
-		return exists
-	case OpDoesNotExist:
-		return !exists
-	}
-	return false
-}
-
-// evaluateRule checks whether a pod satisfies all expressions in a label rule.
+// evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.
 // Returns true if the pod satisfies the rule (i.e. should be allowed).
 func evaluateRule(rule labelRule, podLabels map[string]string) bool {
-	for _, expr := range rule.MatchExpressions {
-		if !evaluateExpression(expr, podLabels) {
-			return false
-		}
+	if rule.selector == nil {
+		return false
 	}
-	return true
+	return rule.selector.Matches(labels.Set(podLabels))
 }
 
 // checkLabels evaluates all label rules against a pod's labels.
@@ -300,30 +238,18 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		log.Debug("resolved tag to digest via containerd", "digest", digest)
 	}
 
-	// Load whitelist: try cache first, then KBS
 	wl := p.cache.GetWhitelist()
 	if wl == nil {
-		log.Info("no cached whitelist, fetching from remote whitelist API")
-		apiCtx, cancel := context.WithTimeout(ctx, cfg.Whitelist.Timeout)
-		defer cancel()
-
-		fetched, err := p.fetchWhitelistDeduplicated(apiCtx)
-		if err != nil {
-			log.Error("failed to fetch whitelist from KBS", "error", err)
-			p.audit.Log(audit.Event{
-				Action:    "deny",
-				Reason:    "no_whitelist_available",
-				Namespace: namespace,
-				Pod:       podName,
-				Container: containerName,
-				Image:     imageRef,
-				Error:     err.Error(),
-			})
-			return verdictDeny, fmt.Sprintf("no whitelist available for %s: %v", imageRef, err)
-		}
-		wl = fetched
-		p.cache.SetWhitelist(wl)
-		log.Info("whitelist loaded from KBS", "digests", len(wl.Digests))
+		log.Error("no cached whitelist; denying")
+		p.audit.Log(audit.Event{
+			Action:    "deny",
+			Reason:    "no_whitelist_available",
+			Namespace: namespace,
+			Pod:       podName,
+			Container: containerName,
+			Image:     imageRef,
+		})
+		return verdictDeny, fmt.Sprintf("no whitelist available for %s", imageRef)
 	}
 
 	// Check digest against whitelist
@@ -356,7 +282,7 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 // Synchronize is called when the plugin connects to containerd.
 // It checks all existing containers against the whitelist and kills violations.
 func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
-	cfg := p.config()
+	cfg := p.cfg
 
 	if !cfg.Policy.EnforceExisting {
 		p.logger.Info("startup sweep disabled", "pods", len(pods), "containers", len(ctrs))
@@ -436,7 +362,7 @@ func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandb
 // during Synchronize before the plugin was ready. Should be called after
 // SetReady and KBS init.
 func (p *plugin) RunDeferredSweep(ctx context.Context) {
-	cfg := p.config()
+	cfg := p.cfg
 
 	if !cfg.Policy.EnforceExisting {
 		return
@@ -461,7 +387,7 @@ func (p *plugin) RunDeferredSweep(ctx context.Context) {
 // CreateContainer is called when a container is being created.
 // Returning an error will reject the container creation.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	cfg := p.config()
+	cfg := p.cfg
 
 	// Not-ready guard: plugin is registered with NRI but whitelist hasn't
 	// been fetched yet. Deny all non-exempt container creation to close

@@ -1,11 +1,14 @@
 package whitelistclient
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/lunal-dev/c8s/pkg/types"
 )
@@ -124,5 +127,61 @@ func TestDeleteNotFound(t *testing.T) {
 	}
 	if statusErr.Status != 404 {
 		t.Fatalf("expected status 404, got %d", statusErr.Status)
+	}
+}
+
+func TestFetchWhitelistConditionalAcceptsJSONContentTypeWithCharset(t *testing.T) {
+	digest, _ := types.ParseDigest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("ETag", `W/"1"`)
+		_ = json.NewEncoder(w).Encode(types.WhitelistListResponse{
+			Version: "1",
+			Digests: map[types.Digest]string{
+				digest: "image-a",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+	wl, etag, notModified, err := c.FetchWhitelistConditional(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if notModified {
+		t.Fatal("expected 200 response, got notModified")
+	}
+	if etag != `W/"1"` {
+		t.Fatalf("etag = %q, want W/\"1\"", etag)
+	}
+	if got := wl.Digests[digest.String()]; got != "image-a" {
+		t.Fatalf("digest missing from whitelist: %q", got)
+	}
+}
+
+func TestFetchWhitelistConditionalRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `W/"big"`)
+		w.WriteHeader(http.StatusOK)
+		// Stream more bytes than the cap. The body is junk; we expect the
+		// cap to trip before ParseJSON ever runs.
+		chunk := strings.Repeat("a", 64*1024)
+		written := int64(0)
+		for written <= maxWhitelistResponseBytes {
+			n, err := w.Write([]byte(chunk))
+			if err != nil {
+				return
+			}
+			written += int64(n)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, &http.Client{Timeout: 5 * time.Second})
+	_, _, _, err := c.FetchWhitelistConditional(context.Background(), "")
+	if !errors.Is(err, errWhitelistResponseTooLarge) {
+		t.Fatalf("expected errWhitelistResponseTooLarge, got %v", err)
 	}
 }

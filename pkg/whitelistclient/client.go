@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -122,39 +123,14 @@ func (c Client) Delete(digests []types.Digest, earToken []byte) error {
 	return nil
 }
 
-// FetchWhitelist calls GET /whitelist and returns the parsed whitelist.
-// This is a context-aware alternative to List that returns the whitelist
-// type used by the NRI image policy plugin.
-func (c Client) FetchWhitelist(ctx context.Context) (*whitelist.Whitelist, error) {
-	url := c.baseURL + "/whitelist"
+// maxWhitelistResponseBytes caps CDS response bodies. Generous for a
+// realistic fleet (a sha256 entry + image ref is ~150 bytes; 4 MiB ≈ 27k
+// entries) but bounded so a compromised or buggy CDS can't OOM the
+// plugin process on every worker node.
+const maxWhitelistResponseBytes = 4 * 1024 * 1024
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch whitelist: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, &StatusError{Status: resp.StatusCode, Body: string(body)}
-	}
-
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		return nil, fmt.Errorf("fetch whitelist: unexpected content type: %s", ct)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
-	return whitelist.ParseJSON(body)
-}
+// errWhitelistResponseTooLarge is returned when CDS exceeds the body cap.
+var errWhitelistResponseTooLarge = fmt.Errorf("whitelist response exceeds %d bytes", maxWhitelistResponseBytes)
 
 // FetchWhitelistConditional issues GET /whitelist with If-None-Match.
 // notModified is true on a 304 (whitelist nil, etag ""); on 200 the
@@ -182,17 +158,17 @@ func (c Client) FetchWhitelistConditional(ctx context.Context, ifNoneMatch strin
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readCapped(resp.Body, maxWhitelistResponseBytes)
 		return nil, "", false, &StatusError{Status: resp.StatusCode, Body: string(body)}
 	}
 
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+	if ct := resp.Header.Get("Content-Type"); !isJSONContentType(ct) {
 		return nil, "", false, fmt.Errorf("fetch whitelist: unexpected content type: %s", ct)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCapped(resp.Body, maxWhitelistResponseBytes)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("read response body: %w", err)
+		return nil, "", false, err
 	}
 
 	wl, err := whitelist.ParseJSON(body)
@@ -200,6 +176,24 @@ func (c Client) FetchWhitelistConditional(ctx context.Context, ifNoneMatch strin
 		return nil, "", false, err
 	}
 	return wl, resp.Header.Get("ETag"), false, nil
+}
+
+func isJSONContentType(ct string) bool {
+	mediaType, _, err := mime.ParseMediaType(ct)
+	return err == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+// readCapped reads up to maxBytes from r and returns errWhitelistResponseTooLarge
+// if the source produced more.
+func readCapped(r io.Reader, maxBytes int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, errWhitelistResponseTooLarge
+	}
+	return body, nil
 }
 
 // StatusError represents a non-success HTTP response.

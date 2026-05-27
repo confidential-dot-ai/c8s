@@ -10,8 +10,14 @@ import (
 func validConfig() config {
 	return config{
 		Whitelist: whitelistConfig{
-			URL:     "http://localhost:8080",
-			Timeout: 30 * time.Second,
+			AlwaysAllow: map[string]string{
+				"sha256:0000000000000000000000000000000000000000000000000000000000000001": "test-installer",
+			},
+			Pull: pullConfig{
+				URL:      "http://localhost:8080",
+				Timeout:  30 * time.Second,
+				Interval: 30 * time.Second,
+			},
 		},
 		Policy: policyConfig{
 			Mode: "fail-closed",
@@ -45,7 +51,7 @@ func TestValidate_NoEnforcementMechanism(t *testing.T) {
 
 func TestValidate_ZeroTimeout(t *testing.T) {
 	cfg := validConfig()
-	cfg.Whitelist.Timeout = 0
+	cfg.Whitelist.Pull.Timeout = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for zero timeout")
 	}
@@ -53,17 +59,60 @@ func TestValidate_ZeroTimeout(t *testing.T) {
 
 func TestValidate_NegativeTimeout(t *testing.T) {
 	cfg := validConfig()
-	cfg.Whitelist.Timeout = -1 * time.Second
+	cfg.Whitelist.Pull.Timeout = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for negative timeout")
 	}
 }
 
-func TestValidate_InvalidAssamMeasurement(t *testing.T) {
+func TestValidate_PullAndPushMutuallyExclusive(t *testing.T) {
 	cfg := validConfig()
-	cfg.Whitelist.AssamMeasurements = []string{"not-hex"}
+	cfg.Whitelist.Push.PersistPath = "/tmp/pushed.json"
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for invalid Assam measurement")
+		t.Fatal("expected error when both pull and push are configured")
+	}
+}
+
+func TestValidate_AlwaysAllowRequiredWithPull(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.AlwaysAllow = nil
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when pull is configured but always_allow is empty")
+	}
+}
+
+func TestValidate_AlwaysAllowRequiredWithPush(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.Pull = pullConfig{}
+	cfg.Whitelist.Push.PersistPath = "/tmp/pushed.json"
+	cfg.Whitelist.AlwaysAllow = nil
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when push is configured but always_allow is empty")
+	}
+}
+
+func TestValidate_AlwaysAllowRejectsMalformedDigest(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.AlwaysAllow = map[string]string{
+		"sha256:not-hex": "installer",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for non-hex digest in always_allow")
+	}
+
+	cfg.Whitelist.AlwaysAllow = map[string]string{
+		"sha512:0000000000000000000000000000000000000000000000000000000000000001": "installer",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for non-sha256 digest in always_allow")
+	}
+
+	cfg.Whitelist.AlwaysAllow = map[string]string{
+		// 63 hex chars instead of 64.
+		"sha256:000000000000000000000000000000000000000000000000000000000000001": "installer",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for short digest in always_allow")
 	}
 }
 
@@ -78,7 +127,10 @@ func TestValidate_InvalidMode(t *testing.T) {
 func TestLoadConfig_Defaults(t *testing.T) {
 	yaml := `
 whitelist:
-  url: http://localhost:8080
+  always_allow:
+    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+  pull:
+    url: http://localhost:8080
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
@@ -90,48 +142,17 @@ whitelist:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.Whitelist.Timeout != 30*time.Second {
-		t.Errorf("expected default timeout 30s, got %s", cfg.Whitelist.Timeout)
+	if cfg.Whitelist.Pull.Timeout != 30*time.Second {
+		t.Errorf("expected default timeout 30s, got %s", cfg.Whitelist.Pull.Timeout)
+	}
+	if cfg.Whitelist.Pull.Interval != 30*time.Second {
+		t.Errorf("expected default interval 30s, got %s", cfg.Whitelist.Pull.Interval)
 	}
 	if cfg.Policy.Mode != "fail-closed" {
 		t.Errorf("expected default mode fail-closed, got %s", cfg.Policy.Mode)
 	}
 	if cfg.Containerd.Socket != "/run/containerd/containerd.sock" {
 		t.Errorf("expected default socket, got %s", cfg.Containerd.Socket)
-	}
-}
-
-func TestLoadConfig_WhitelistRATLSFields(t *testing.T) {
-	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
-	yaml := `
-whitelist:
-  url: https://127.0.0.1:30808
-  timeout: 5s
-  attestation_service_url: http://127.0.0.1:8400
-  assam_measurements:
-    - ` + measurement + `
-`
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := loadConfig(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if cfg.Whitelist.URL != "https://127.0.0.1:30808" {
-		t.Fatalf("whitelist URL = %q", cfg.Whitelist.URL)
-	}
-	if cfg.Whitelist.Timeout != 5*time.Second {
-		t.Fatalf("timeout = %s", cfg.Whitelist.Timeout)
-	}
-	if cfg.Whitelist.AttestationServiceURL != "http://127.0.0.1:8400" {
-		t.Fatalf("attestation service URL = %q", cfg.Whitelist.AttestationServiceURL)
-	}
-	if len(cfg.Whitelist.AssamMeasurements) != 1 || cfg.Whitelist.AssamMeasurements[0] != measurement {
-		t.Fatalf("AssamMeasurements = %#v", cfg.Whitelist.AssamMeasurements)
 	}
 }
 
@@ -165,7 +186,8 @@ func TestWhitelistEnabled_WithURL(t *testing.T) {
 
 func TestWhitelistEnabled_WithoutURL(t *testing.T) {
 	cfg := validConfig()
-	cfg.Whitelist.URL = ""
+	cfg.Whitelist.Pull.URL = ""
+	cfg.Whitelist.AlwaysAllow = nil
 	if cfg.WhitelistEnabled() {
 		t.Fatal("expected whitelist to be disabled")
 	}
@@ -191,6 +213,12 @@ func TestValidate_LabelRulesOnly(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Policy.LabelRules[0].selector == nil {
+		t.Fatal("expected label rule selector to be compiled during validation")
+	}
+	if !evaluateRule(cfg.Policy.LabelRules[0], map[string]string{"tenant": "acme"}) {
+		t.Fatal("compiled selector should match valid labels")
 	}
 }
 
@@ -273,10 +301,25 @@ func TestValidate_LabelRuleExpressionMissingKey(t *testing.T) {
 	}
 }
 
+func TestValidate_LabelRuleRejectsInvalidKubernetesLabelValue(t *testing.T) {
+	cfg := validConfig()
+	cfg.Policy.LabelRules = []labelRule{
+		{Name: "test", MatchExpressions: []labelExpression{
+			{Key: "tenant", Operator: "In", Values: []string{"not valid"}},
+		}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected Kubernetes label selector validation to reject invalid value")
+	}
+}
+
 func TestLoadConfig_WithLabelRules(t *testing.T) {
 	yaml := `
 whitelist:
-  url: http://localhost:8080
+  always_allow:
+    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+  pull:
+    url: http://localhost:8080
 policy:
   label_rules:
     - name: allowed-tenants

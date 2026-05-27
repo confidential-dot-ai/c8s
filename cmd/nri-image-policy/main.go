@@ -4,7 +4,7 @@ package main
 
 import (
 	"github.com/lunal-dev/c8s/internal/cmds/cmdsutil"
-	"github.com/lunal-dev/c8s/internal/cmds/nriimagepolicy"
+	nriimagepolicy "github.com/lunal-dev/c8s/internal/cmds/nri-image-policy"
 )
 
 func main() { cmdsutil.RunMain(nriimagepolicy.Run) }

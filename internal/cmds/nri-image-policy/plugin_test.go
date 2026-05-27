@@ -12,6 +12,9 @@ import (
 )
 
 func newTestPlugin(cfg *config) *plugin {
+	if err := validateLabelRules(cfg.Policy.LabelRules); err != nil {
+		panic(err)
+	}
 	return &plugin{
 		cfg:      cfg,
 		resolver: &ctrdresolver.Resolver{},
@@ -219,7 +222,7 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	policyCache := cache.NewPolicyCache()
 	p := &plugin{
 		cfg: &config{
-			Whitelist: whitelistConfig{URL: "http://wl.local:8080", Timeout: 30},
+			Whitelist: whitelistConfig{Pull: pullConfig{URL: "http://wl.local:8080", Timeout: 30}},
 			Policy: policyConfig{
 				Mode:                  "fail-closed",
 				DenyMissingAnnotation: true,
@@ -252,7 +255,7 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 	}
 }
 
-// --- Label expression evaluation tests ---
+// --- Label selector evaluation tests ---
 
 func makePodWithLabels(namespace, name string, labels map[string]string) *api.PodSandbox {
 	return &api.PodSandbox{
@@ -263,86 +266,25 @@ func makePodWithLabels(namespace, name string, labels map[string]string) *api.Po
 	}
 }
 
-func TestEvaluateExpression_In_Match(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}}
-	if !evaluateExpression(expr, map[string]string{"tenant": "acme"}) {
-		t.Fatal("expected In to match")
+func mustCompileRule(t *testing.T, rule labelRule) labelRule {
+	t.Helper()
+	rules := []labelRule{rule}
+	if err := validateLabelRules(rules); err != nil {
+		t.Fatalf("compile label rule: %v", err)
 	}
-}
-
-func TestEvaluateExpression_In_NoMatch(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "In", Values: []string{"acme", "beta"}}
-	if evaluateExpression(expr, map[string]string{"tenant": "gamma"}) {
-		t.Fatal("expected In not to match")
-	}
-}
-
-func TestEvaluateExpression_In_KeyMissing(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "In", Values: []string{"acme"}}
-	if evaluateExpression(expr, map[string]string{"other": "acme"}) {
-		t.Fatal("expected In not to match when key missing")
-	}
-}
-
-func TestEvaluateExpression_NotIn_Match(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
-	if !evaluateExpression(expr, map[string]string{"tenant": "acme"}) {
-		t.Fatal("expected NotIn to match when value not in list")
-	}
-}
-
-func TestEvaluateExpression_NotIn_Blocked(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
-	if evaluateExpression(expr, map[string]string{"tenant": "untrusted"}) {
-		t.Fatal("expected NotIn not to match when value in list")
-	}
-}
-
-func TestEvaluateExpression_NotIn_KeyMissing(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "NotIn", Values: []string{"untrusted"}}
-	if !evaluateExpression(expr, map[string]string{}) {
-		t.Fatal("expected NotIn to match when key missing")
-	}
-}
-
-func TestEvaluateExpression_Exists_Present(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "Exists"}
-	if !evaluateExpression(expr, map[string]string{"tenant": "anything"}) {
-		t.Fatal("expected Exists to match")
-	}
-}
-
-func TestEvaluateExpression_Exists_Missing(t *testing.T) {
-	expr := labelExpression{Key: "tenant", Operator: "Exists"}
-	if evaluateExpression(expr, map[string]string{"other": "value"}) {
-		t.Fatal("expected Exists not to match when key missing")
-	}
-}
-
-func TestEvaluateExpression_DoesNotExist_Missing(t *testing.T) {
-	expr := labelExpression{Key: "privileged", Operator: "DoesNotExist"}
-	if !evaluateExpression(expr, map[string]string{"other": "value"}) {
-		t.Fatal("expected DoesNotExist to match")
-	}
-}
-
-func TestEvaluateExpression_DoesNotExist_Present(t *testing.T) {
-	expr := labelExpression{Key: "privileged", Operator: "DoesNotExist"}
-	if evaluateExpression(expr, map[string]string{"privileged": "true"}) {
-		t.Fatal("expected DoesNotExist not to match when key present")
-	}
+	return rules[0]
 }
 
 // --- evaluateRule tests ---
 
 func TestEvaluateRule_AllExpressionsMustMatch(t *testing.T) {
-	rule := labelRule{
+	rule := mustCompileRule(t, labelRule{
 		Name: "test",
 		MatchExpressions: []labelExpression{
 			{Key: "tenant", Operator: "In", Values: []string{"acme"}},
 			{Key: "team", Operator: "Exists"},
 		},
-	}
+	})
 	// Both match
 	if !evaluateRule(rule, map[string]string{"tenant": "acme", "team": "backend"}) {
 		t.Fatal("expected rule to pass when all expressions match")
@@ -354,26 +296,38 @@ func TestEvaluateRule_AllExpressionsMustMatch(t *testing.T) {
 }
 
 func TestEvaluateRule_NilLabels(t *testing.T) {
-	rule := labelRule{
+	rule := mustCompileRule(t, labelRule{
 		Name: "test",
 		MatchExpressions: []labelExpression{
 			{Key: "tenant", Operator: "Exists"},
 		},
-	}
+	})
 	if evaluateRule(rule, nil) {
 		t.Fatal("expected rule to fail with nil labels")
 	}
 }
 
 func TestEvaluateRule_DoesNotExist_NilLabels(t *testing.T) {
-	rule := labelRule{
+	rule := mustCompileRule(t, labelRule{
 		Name: "test",
 		MatchExpressions: []labelExpression{
 			{Key: "privileged", Operator: "DoesNotExist"},
 		},
-	}
+	})
 	if !evaluateRule(rule, nil) {
 		t.Fatal("expected DoesNotExist to pass with nil labels")
+	}
+}
+
+func TestEvaluateRule_UncompiledRuleFailsClosed(t *testing.T) {
+	rule := labelRule{
+		Name: "test",
+		MatchExpressions: []labelExpression{
+			{Key: "tenant", Operator: "Exists"},
+		},
+	}
+	if evaluateRule(rule, map[string]string{"tenant": "acme"}) {
+		t.Fatal("uncompiled label rule should fail closed")
 	}
 }
 

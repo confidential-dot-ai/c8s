@@ -17,9 +17,12 @@ func TestParseJSON_Valid(t *testing.T) {
 }
 
 func TestParseJSON_EmptyDigests(t *testing.T) {
-	_, err := ParseJSON([]byte(`{"version":"1","digests":{}}`))
-	if err == nil {
-		t.Fatal("expected error for empty digests")
+	wl, err := ParseJSON([]byte(`{"version":"1","digests":{}}`))
+	if err != nil {
+		t.Fatalf("empty digests should be accepted: %v", err)
+	}
+	if len(wl.Digests) != 0 {
+		t.Fatalf("got %d digests, want 0", len(wl.Digests))
 	}
 }
 
@@ -44,18 +47,5 @@ func TestContains(t *testing.T) {
 	}
 	if wl.Contains("sha256:missing") {
 		t.Error("expected Contains=false")
-	}
-}
-
-func TestIsValidDigest(t *testing.T) {
-	valid := "sha256:" + strings.Repeat("ab0c", 16) // 64 hex chars
-	if !isValidDigest(valid) {
-		t.Errorf("expected valid: %s", valid)
-	}
-
-	for _, bad := range []string{"", "sha256:short", "md5:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("g", 64)} {
-		if isValidDigest(bad) {
-			t.Errorf("expected invalid: %s", bad)
-		}
 	}
 }
