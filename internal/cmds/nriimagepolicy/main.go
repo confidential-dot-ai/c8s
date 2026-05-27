@@ -50,7 +50,10 @@ func Run(args []string) error {
 		return fmt.Errorf("load config %q: %w", *configPath, err)
 	}
 
-	logger := certutil.NewJSONLogger(cfg.Logging.Level)
+	logger, err := certutil.NewJSONLogger(cfg.Logging.Level)
+	if err != nil {
+		return fmt.Errorf("log level: %w", err)
+	}
 	slog.SetDefault(logger)
 
 	logger.Info("starting nri-image-policy", "version", version.Version, "config", *configPath)

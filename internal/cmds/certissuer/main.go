@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os/signal"
@@ -76,7 +77,11 @@ func Run(args []string) error {
 		return err
 	}
 
-	logger := certutil.NewJSONLogger(*logLevel)
+	logger, err := certutil.NewJSONLogger(*logLevel)
+	if err != nil {
+		return fmt.Errorf("--log-level: %w", err)
+	}
+	slog.SetDefault(logger)
 
 	if *caRotationInterval <= 0 {
 		return fmt.Errorf("--ca-rotation-interval must be positive")

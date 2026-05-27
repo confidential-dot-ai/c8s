@@ -82,6 +82,7 @@ assam:
   tokenSignerRotationInterval: 720h
   tokenSignerOverlap: 25h
   tokenSignerRotationJitter: 0.1
+  logLevel: info
   ## RA-TLS settings for the Assam serving cert (closes the bootstrap-channel
   ## MITM gap: ratls-mesh validates Assam's peer cert via the embedded SEV-SNP
   ## attestation report instead of trusting the cluster network).

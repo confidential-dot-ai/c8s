@@ -226,7 +226,11 @@ func iptablesJumpPositionCheckErrors() int64 {
 }
 
 func runIptablesCleanup() error {
-	logger := certutil.NewJSONLogger("info")
+	logger, err := certutil.NewJSONLogger("info")
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(logger)
 	if err := initIptablesClients(); err != nil {
 		return err
 	}

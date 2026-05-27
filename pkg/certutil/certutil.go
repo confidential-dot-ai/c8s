@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -106,26 +105,19 @@ func LoadCertificateFile(path string) (*x509.Certificate, error) {
 }
 
 // NewJSONLogger creates a JSON [slog.Logger] writing to stdout at the given
-// level string (debug, warn, error — anything else defaults to info).
-func NewJSONLogger(levelStr string) *slog.Logger {
-	level := ParseLogLevel(levelStr)
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-}
-
-// ParseLogLevel converts a log level string to [slog.Level].
-// Recognized values (case-insensitive): debug, warn, error.
-// Any other value returns [slog.LevelInfo].
-func ParseLogLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
+// level string. An empty string selects info; any other value must be one of
+// debug, info, warn, error (case-insensitive) or an error is returned, so a
+// typo fails at startup rather than silently logging at info.
+func NewJSONLogger(levelStr string) (*slog.Logger, error) {
+	level := slog.LevelInfo
+	if levelStr != "" {
+		// Delegate parsing/validation to the stdlib instead of maintaining a
+		// level table here.
+		if err := level.UnmarshalText([]byte(levelStr)); err != nil {
+			return nil, err
+		}
 	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})), nil
 }
 
 // ParsePEMCertificates parses all CERTIFICATE PEM blocks from data and returns

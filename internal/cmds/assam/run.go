@@ -58,6 +58,7 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "How often to rotate the EAR signing key (0 = disable rotation)")
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "How long a retired key stays in JWKS after rotation")
 	flags.Float64Var(&cfg.rotationJitter, "token-signer-rotation-jitter", 0.1, "Fraction of rotation interval to jitter the first tick")
+	flags.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "snp", "TEE platform for the Assam RA-TLS serving cert (snp, tdx, az-snp, az-tdx, gcp-snp, gcp-tdx). Empty disables TLS — UNSAFE outside tests.")
 	flags.DurationVar(&cfg.ratlsCertTTL, "ratls-cert-ttl", 24*time.Hour, "TTL for the Assam RA-TLS serving certificate (rotated at 50%)")
 	flags.Int64Var(&cfg.whitelistMaxBodyBytes, "whitelist-max-body-bytes", whitelist.DefaultMaxWriteBodyBytes, "Max bytes the whitelist mutation handler will read before authorising. Whitelist payloads are tiny; the cap stops a malicious client from forcing the handler to buffer megabytes during the auth check.")
@@ -85,6 +86,7 @@ type config struct {
 	rotationInterval          time.Duration
 	rotationOverlap           time.Duration
 	rotationJitter            float64
+	logLevel                  string
 	ratlsPlatform             string
 	ratlsCertTTL              time.Duration
 	whitelistMaxBodyBytes     int64
@@ -92,7 +94,11 @@ type config struct {
 }
 
 func run(cfg config) error {
-	slog.SetDefault(certutil.NewJSONLogger(""))
+	logger, err := certutil.NewJSONLogger(cfg.logLevel)
+	if err != nil {
+		return fmt.Errorf("--log-level: %w", err)
+	}
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

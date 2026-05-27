@@ -88,6 +88,7 @@ spec:
             - --token-signer-rotation-interval={{ .Values.assam.tokenSignerRotationInterval }}
             - --token-signer-overlap={{ .Values.assam.tokenSignerOverlap }}
             - --token-signer-rotation-jitter={{ .Values.assam.tokenSignerRotationJitter }}
+            - --log-level={{ .Values.assam.logLevel }}
             - --ratls-platform={{ .Values.assam.ratlsPlatform }}
             - --ratls-cert-ttl={{ .Values.assam.ratlsCertTTL }}
             - --whitelist-max-body-bytes={{ .Values.assam.whitelistMaxBodyBytes }}

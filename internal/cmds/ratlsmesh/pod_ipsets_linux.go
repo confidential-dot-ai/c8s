@@ -74,7 +74,11 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	rules := buildPodIPSetRules(cfg.outboundPort, cfg.uid, excludeUIDs, nodeIPsByFamily)
 	jumps := jumpRules()
 
-	logger := certutil.NewJSONLogger(cfg.logLevel)
+	logger, err := certutil.NewJSONLogger(cfg.logLevel)
+	if err != nil {
+		return fmt.Errorf("--log-level: %w", err)
+	}
+	slog.SetDefault(logger)
 	if err := initIptablesClients(); err != nil {
 		return err
 	}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -147,7 +148,11 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 }
 
 func runProxy(ctx context.Context, c *proxyConfig) error {
-	logger := certutil.NewJSONLogger(c.logLevel)
+	logger, err := certutil.NewJSONLogger(c.logLevel)
+	if err != nil {
+		return fmt.Errorf("--log-level: %w", err)
+	}
+	slog.SetDefault(logger)
 
 	if c.nodeIP == "" {
 		c.nodeIP = os.Getenv("NODE_IP")

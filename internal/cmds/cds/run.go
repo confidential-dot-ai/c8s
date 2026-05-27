@@ -27,7 +27,11 @@ import (
 )
 
 func run(cfg config) error {
-	slog.SetDefault(certutil.NewJSONLogger(cfg.logLevel))
+	logger, err := certutil.NewJSONLogger(cfg.logLevel)
+	if err != nil {
+		return fmt.Errorf("--log-level: %w", err)
+	}
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

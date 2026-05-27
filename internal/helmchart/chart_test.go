@@ -817,7 +817,20 @@ func TestChartManagedAssamSatisfiesWebhookAssamURL(t *testing.T) {
 	operatorArgs := renderedOperatorArgs(t, out)
 	assertContainerHasArg(t, "operator", operatorArgs, "--assam-url=https://c8s-assam.c8s-system.svc:8080")
 	assertContainerHasArg(t, "assam", assam.Args, "--cert-issuer-url=https://c8s-cert-issuer.c8s-system.svc:8090")
+	assertContainerHasArg(t, "assam", assam.Args, "--log-level=info")
 	assertContainerNoArgPrefix(t, "assam", assam.Args, "--cert-issuer-url=http://")
+}
+
+func TestChartManagedAssamLogLevel(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "assam.logLevel=debug",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	args := renderedDeploymentContainer(t, out, "c8s-assam", "assam").Args
+	assertContainerHasArg(t, "assam", args, "--log-level=debug")
 }
 
 func TestChartManagedAssamRendersResourceMap(t *testing.T) {
