@@ -1,8 +1,6 @@
 package certissuer
 
 import (
-	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/lunal-dev/c8s/internal/issuer"
@@ -17,13 +15,4 @@ func handlePublicCA(bm *issuer.BundleManager) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		w.Write(bm.BundlePEM())
 	}
-}
-
-func recordTokenValidationFailure(err error) {
-	var tve *issuer.TokenValidationError
-	if errors.As(err, &tve) {
-		tokenValidationFailuresTotal.WithLabelValues(string(tve.Reason)).Inc()
-		return
-	}
-	slog.Warn("token validation failed without typed reason", "error", err)
 }

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os/signal"
 	"regexp"
-	"sync"
 	"syscall"
 	"time"
 
@@ -82,6 +81,11 @@ func Run(args []string) error {
 		return fmt.Errorf("--log-level: %w", err)
 	}
 	slog.SetDefault(logger)
+
+	if *jwtClockSkew < 0 {
+		return fmt.Errorf("--jwt-clock-skew must be non-negative")
+	}
+	issuer.JWTClockSkew = time.Duration(*jwtClockSkew) * time.Second
 
 	if *jwtClockSkew < 0 {
 		return fmt.Errorf("--jwt-clock-skew must be non-negative")
@@ -173,7 +177,7 @@ func Run(args []string) error {
 	}
 	caKey := ca.Key
 	caCert := ca.Cert
-	if err := validateCAKeyPair(caCert, caKey); err != nil {
+	if err := issuer.ValidateCAKeyPair(caCert, caKey); err != nil {
 		return err
 	}
 	logger.Info("generated in-memory mesh CA",
@@ -191,7 +195,7 @@ func Run(args []string) error {
 		RequestTimeout:      *requestTimeout,
 		MinCAValidity:       *minCAValidity,
 		Logger:              logger,
-		tracker:             newNodeTracker(*maxTTLF),
+		tracker:             issuer.NewNodeTracker(*maxTTLF),
 		SignCSRMeasurements: signCSRMeasurements,
 		HandoffMeasurements: handoffMeasurements,
 	}
@@ -212,7 +216,10 @@ func Run(args []string) error {
 	initialFingerprint := certutil.CertFingerprint(caCert.Raw)
 	caCertFingerprintInfo.WithLabelValues(initialFingerprint).Set(1)
 
-	rl := newIPRateLimiter(rate.Limit(*rateLimit), *rateBurst, *rateLimiterMax)
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(*rateLimit), *rateBurst, *rateLimiterMax)
+	if err != nil {
+		return fmt.Errorf("init rate limiter: %w", err)
+	}
 
 	// Initialize public bundle manager.
 	bm := issuer.NewBundleManager(*maxTTLF, *caRepoDir, *caBundlePath, logger)
@@ -239,20 +246,20 @@ func Run(args []string) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /sign-csr", http.MaxBytesHandler(rateLimitMiddleware(rl, http.HandlerFunc(iss.HandleSignCSR)), *maxRequestSize))
+	mux.Handle("POST /sign-csr", http.MaxBytesHandler(issuer.RateLimitMiddleware(rl, http.HandlerFunc(iss.HandleSignCSR)), *maxRequestSize))
 	mux.HandleFunc("GET /live", handleLive)
 	mux.HandleFunc("GET /ready", iss.handleReady)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// /ca serves the public bundle unauthenticated; clients chain the
 	// continuity check (see pkg/ratls/assamclient) to reject untrusted updates.
-	mux.Handle("GET /ca", rateLimitMiddleware(rl, http.HandlerFunc(handlePublicCA(bm))))
+	mux.Handle("GET /ca", issuer.RateLimitMiddleware(rl, http.HandlerFunc(handlePublicCA(bm))))
 
 	if *handoffAssamURL != "" && *handoffAttestationServiceURL == "" {
 		return fmt.Errorf("--handoff-attestation-service-url is required when --handoff-assam-url is set")
 	}
-	var handoffSrc handoffEARSource
-	var handoffBoot *handoffBootstrap
+	var handoffSrc issuer.HandoffEARSource
+	var handoffBoot issuer.HandoffBootstrap
 	if *handoffAssamURL != "" {
 		measurements, err := ratls.ParseHexMeasurements(*assamMeasurementsRaw)
 		if err != nil {
@@ -262,22 +269,22 @@ func Run(args []string) error {
 			logger.Warn("--assam-measurements not set; handoff bootstrap accepts any Assam measurement. Pin the operator-supplied launch digest to close bootstrap MITM.")
 		}
 
-		boot, err := newHandoffBootstrap(*handoffAssamURL, *handoffAttestationServiceURL, measurements)
+		boot, err := issuer.NewHandoffBootstrap(*handoffAssamURL, *handoffAttestationServiceURL, measurements)
 		if err != nil {
 			return fmt.Errorf("prepare handoff bootstrap: %w", err)
 		}
 
-		hh, err := newHandoffHandler(iss, bm, boot.signer, boot.earSource)
+		handoffSrc = boot.EARSource()
+		hh, err := newHandoffHandler(iss, bm, boot.Signer(), handoffSrc)
 		if err != nil {
 			return err
 		}
-		mux.Handle("POST /handoff", http.MaxBytesHandler(rateLimitMiddleware(rl, http.HandlerFunc(hh.HandleHandoff)), *maxRequestSize))
+		mux.Handle("POST /handoff", http.MaxBytesHandler(issuer.RateLimitMiddleware(rl, http.HandlerFunc(hh.HandleHandoff)), *maxRequestSize))
 		logger.Info("attested CA handoff enabled (bootstrap will run in background)",
 			"assam_url", *handoffAssamURL,
 			"measurements", len(iss.HandoffMeasurements),
 			"pinned_assam_measurements", len(measurements),
 		)
-		handoffSrc = hh.issuerEARSource
 		handoffBoot = boot
 	}
 
@@ -326,16 +333,16 @@ func Run(args []string) error {
 	go certExpiryUpdater(ctx, iss, *metricsUpdateInterval)
 
 	// Start rate limiter eviction goroutine.
-	go rl.evictionLoop(ctx, *rateLimiterEvictInterval, *rateLimiterIdleTimeout)
+	go rl.EvictionLoop(ctx, *rateLimiterEvictInterval, *rateLimiterIdleTimeout)
 
 	// Start node tracker metric updater.
-	go nodeTrackerUpdater(ctx, iss.tracker, *metricsUpdateInterval)
+	go iss.tracker.RunUpdater(ctx, *metricsUpdateInterval)
 
 	if handoffSrc != nil {
-		go handoffEARExpiryUpdater(ctx, handoffSrc, *metricsUpdateInterval, logger)
+		go issuer.RunHandoffEARExpiryUpdater(ctx, handoffSrc, *metricsUpdateInterval, logger)
 	}
 	if handoffBoot != nil {
-		go handoffBoot.runRefresh(ctx, logger)
+		go handoffBoot.RunRefresh(ctx, logger)
 	}
 
 	go func() {
@@ -388,113 +395,4 @@ func certExpiryUpdater(ctx context.Context, iss *Issuer, interval time.Duration)
 			update()
 		}
 	}
-}
-
-// nodeTrackerUpdater periodically updates aggregate node metrics.
-func nodeTrackerUpdater(ctx context.Context, tracker *nodeTracker, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tracker.updateMetrics()
-		}
-	}
-}
-
-// ipLimiterEntry wraps a rate.Limiter with a last-seen timestamp for eviction.
-type ipLimiterEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-// ipRateLimiter implements per-source-IP rate limiting with bounded memory.
-type ipRateLimiter struct {
-	mu         sync.Mutex
-	limiters   map[string]*ipLimiterEntry
-	rate       rate.Limit
-	burst      int
-	maxEntries int
-}
-
-func newIPRateLimiter(r rate.Limit, b, maxEntries int) *ipRateLimiter {
-	return &ipRateLimiter{
-		limiters:   make(map[string]*ipLimiterEntry),
-		rate:       r,
-		burst:      b,
-		maxEntries: maxEntries,
-	}
-}
-
-func (rl *ipRateLimiter) getLimiter(ip string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if entry, ok := rl.limiters[ip]; ok {
-		entry.lastSeen = time.Now()
-		return entry.limiter
-	}
-	// Enforce max entries cap.
-	if len(rl.limiters) >= rl.maxEntries {
-		// Evict oldest entry.
-		var oldestIP string
-		var oldestTime time.Time
-		for ip, entry := range rl.limiters {
-			if oldestTime.IsZero() || entry.lastSeen.Before(oldestTime) {
-				oldestIP = ip
-				oldestTime = entry.lastSeen
-			}
-		}
-		if oldestIP != "" {
-			delete(rl.limiters, oldestIP)
-		}
-	}
-	lim := rate.NewLimiter(rl.rate, rl.burst)
-	rl.limiters[ip] = &ipLimiterEntry{
-		limiter:  lim,
-		lastSeen: time.Now(),
-	}
-	return lim
-}
-
-// evictionLoop removes rate limiter entries idle longer than idleTimeout.
-func (rl *ipRateLimiter) evictionLoop(ctx context.Context, interval, idleTimeout time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			rl.evict(idleTimeout)
-		}
-	}
-}
-
-func (rl *ipRateLimiter) evict(idleTimeout time.Duration) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	cutoff := time.Now().Add(-idleTimeout)
-	for ip, entry := range rl.limiters {
-		if entry.lastSeen.Before(cutoff) {
-			delete(rl.limiters, ip)
-		}
-	}
-	rateLimiterEntries.Set(float64(len(rl.limiters)))
-}
-
-func rateLimitMiddleware(rl *ipRateLimiter, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if ip == "" {
-			ip = r.RemoteAddr
-		}
-		if !rl.getLimiter(ip).Allow() {
-			rateLimitRejectionsTotal.Inc()
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

@@ -1,4 +1,4 @@
-package certissuer
+package issuer
 
 import (
 	"bytes"
@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -21,118 +22,167 @@ import (
 	"time"
 
 	"github.com/lunal-dev/c8s/internal/earclaims"
-	issuerpkg "github.com/lunal-dev/c8s/internal/issuer"
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/crypto/cryptobyte"
 )
 
+type testKeyProvider struct{ pub *ecdsa.PublicKey }
+
+func (p testKeyProvider) PublicKey(string) (*ecdsa.PublicKey, error) {
+	return p.pub, nil
+}
+
+type staticHandoffEARSource struct{ ear string }
+
+func (s staticHandoffEARSource) Current() (string, error) {
+	return strings.TrimSpace(s.ear), nil
+}
+
+func snapshotFromCA(ca *CA) func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+	return func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+		return ca.Cert, ca.Key, nil, true
+	}
+}
+
 func TestAttestedHandoffTransfersCAKeyToAllowedReplica(t *testing.T) {
-	active, tokenKey := testIssuer(t)
-	active.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"allowed_measurement": true}
 	activeHandoffKey := handoffTestKey(t)
 	requesterHandoffKey := handoffTestKey(t)
 	activeEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
 	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
 
-	bm := issuerpkg.NewBundleManager(active.MaxTTL, "", "default/mesh/ca-bundle", slog.Default())
-	bm.SetInitial(active.getBundle().caCert)
+	bm := NewBundleManager(time.Hour, "", "default/mesh/ca-bundle", slog.Default())
+	bm.SetInitial(ca.Cert)
 
-	hh := &handoffHandler{
-		issuer:          active,
-		bundle:          bm,
-		issuerEARSource: staticHandoffEARSource{ear: activeEAR},
-		signer:          activeHandoffKey,
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: allowed,
+		Bundle:              bm,
+		Snapshot:            snapshotFromCA(ca),
+	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
 	t.Cleanup(srv.Close)
 
-	joining := &Issuer{
-		keyProvider:         active.keyProvider,
-		Logger:              slog.Default(),
-		HandoffMeasurements: map[string]bool{"allowed_measurement": true},
+	clientDeps := HandoffClientDeps{
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
 	}
-	material, err := requestHandoff(context.Background(), srv.URL, requesterEAR, requesterHandoffKey, joining, srv.Client())
+	material, err := RequestHandoff(context.Background(), clientDeps, srv.URL, requesterEAR, requesterHandoffKey, srv.Client())
 	if err != nil {
 		t.Fatalf("requestHandoff failed: %v", err)
 	}
 
-	activeBundle := active.getBundle()
-	if got, want := certutil.CertFingerprint(material.caCert.Raw), certutil.CertFingerprint(activeBundle.caCert.Raw); got != want {
+	if got, want := certutil.CertFingerprint(material.CACert.Raw), certutil.CertFingerprint(ca.Cert.Raw); got != want {
 		t.Fatalf("handoff CA fingerprint = %s, want %s", got, want)
 	}
-	if err := validateCAKeyPair(material.caCert, material.caKey); err != nil {
+	if err := ValidateCAKeyPair(material.CACert, material.CAKey); err != nil {
 		t.Fatalf("handoff keypair invalid: %v", err)
 	}
-	if !material.caKey.PublicKey.Equal(&activeBundle.caKey.PublicKey) {
+	if !material.CAKey.PublicKey.Equal(&ca.Key.PublicKey) {
 		t.Fatalf("handoff CA key does not match active key")
 	}
-	if len(material.bundle) != 1 {
-		t.Fatalf("handoff bundle count = %d, want 1", len(material.bundle))
+	if len(material.Bundle) != 1 {
+		t.Fatalf("handoff bundle count = %d, want 1", len(material.Bundle))
 	}
 }
 
 func TestHandoffBundleStartsWithHandedOffActiveCA(t *testing.T) {
-	active, tokenKey := testIssuer(t)
-	active.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
-	activeBundle := active.getBundle()
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"allowed_measurement": true}
 	activeHandoffKey := handoffTestKey(t)
 	requesterHandoffKey := handoffTestKey(t)
 	activeEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
 	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
 
-	rotated, err := issuerpkg.NewCAWithParent("Rotated Mesh CA", time.Hour, elliptic.P384(), activeBundle.caCert, activeBundle.caKey)
+	rotated, err := NewCAWithParent("Rotated Mesh CA", time.Hour, elliptic.P384(), ca.Cert, ca.Key)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Simulate the small rotation window where /ca has published the next
 	// bundle before the active signer pointer is swapped.
-	bm := issuerpkg.NewBundleManager(active.MaxTTL, "", "default/mesh/ca-bundle", slog.Default())
-	bm.SetWithCurrent(rotated.Cert, []*x509.Certificate{activeBundle.caCert})
+	bm := NewBundleManager(time.Hour, "", "default/mesh/ca-bundle", slog.Default())
+	bm.SetWithCurrent(rotated.Cert, []*x509.Certificate{ca.Cert})
 
-	hh := &handoffHandler{
-		issuer:          active,
-		bundle:          bm,
-		issuerEARSource: staticHandoffEARSource{ear: activeEAR},
-		signer:          activeHandoffKey,
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: allowed,
+		Bundle:              bm,
+		Snapshot:            snapshotFromCA(ca),
+	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
 	t.Cleanup(srv.Close)
 
-	joining := &Issuer{
-		keyProvider:         active.keyProvider,
-		Logger:              slog.Default(),
-		HandoffMeasurements: map[string]bool{"allowed_measurement": true},
+	clientDeps := HandoffClientDeps{
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
 	}
-	material, err := requestHandoff(context.Background(), srv.URL, requesterEAR, requesterHandoffKey, joining, srv.Client())
+	material, err := RequestHandoff(context.Background(), clientDeps, srv.URL, requesterEAR, requesterHandoffKey, srv.Client())
 	if err != nil {
 		t.Fatalf("requestHandoff failed: %v", err)
 	}
-	if len(material.bundle) != 2 {
-		t.Fatalf("handoff bundle count = %d, want active + published next CA", len(material.bundle))
+	if len(material.Bundle) != 2 {
+		t.Fatalf("handoff bundle count = %d, want active + published next CA", len(material.Bundle))
 	}
-	if !material.caCert.Equal(activeBundle.caCert) || !material.bundle[0].Equal(activeBundle.caCert) {
+	if !material.CACert.Equal(ca.Cert) || !material.Bundle[0].Equal(ca.Cert) {
 		t.Fatalf("handoff bundle first CA must match handed-off active signer")
 	}
-	if !material.bundle[1].Equal(rotated.Cert) {
+	if !material.Bundle[1].Equal(rotated.Cert) {
 		t.Fatalf("handoff bundle should retain the published next CA after active signer")
 	}
 }
 
 func TestHandoffRejectsRequesterKeyNotBoundToEAR(t *testing.T) {
-	active, tokenKey := testIssuer(t)
-	active.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"allowed_measurement": true}
 	activeHandoffKey := handoffTestKey(t)
 	requesterHandoffKey := handoffTestKey(t)
 	attackerKey := handoffTestKey(t)
 	activeEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
 	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
 
-	hh := &handoffHandler{
-		issuer:          active,
-		issuerEARSource: staticHandoffEARSource{ear: activeEAR},
-		signer:          activeHandoffKey,
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: allowed,
+		Snapshot:            snapshotFromCA(ca),
+	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
 	t.Cleanup(srv.Close)
@@ -166,15 +216,29 @@ func TestHandoffRejectsRequesterKeyNotBoundToEAR(t *testing.T) {
 }
 
 func TestHandoffRejectsUnallowedRequesterMeasurement(t *testing.T) {
-	active, tokenKey := testIssuer(t)
-	active.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"allowed_measurement": true}
+	activeHandoffKey := handoffTestKey(t)
 	activeEAR := handoffTestEAR(t, tokenKey, "allowed_measurement")
 	requesterHandoffKey := handoffTestKey(t)
 	requesterEAR := handoffTestEARWithKey(t, tokenKey, "other_measurement", requesterHandoffKey)
 
-	hh := &handoffHandler{
-		issuer:          active,
-		issuerEARSource: staticHandoffEARSource{ear: activeEAR},
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: allowed,
+		Snapshot:            snapshotFromCA(ca),
+	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
 	t.Cleanup(srv.Close)
@@ -208,16 +272,18 @@ func TestHandoffRejectsUnallowedRequesterMeasurement(t *testing.T) {
 }
 
 func TestRequestHandoffRequiresMeasurementAllowlist(t *testing.T) {
-	joining := &Issuer{Logger: slog.Default()}
-	_, err := requestHandoff(context.Background(), "http://127.0.0.1", "ear", handoffTestKey(t), joining, http.DefaultClient)
+	_, err := RequestHandoff(context.Background(), HandoffClientDeps{}, "http://127.0.0.1", "ear", handoffTestKey(t), http.DefaultClient)
 	if err == nil {
 		t.Fatal("expected missing measurement allowlist error")
 	}
 }
 
 func TestUnwrapHandoffResponseRejectsBadNonceLength(t *testing.T) {
-	joining, tokenKey := testIssuer(t)
-	joining.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
 	issuerKey := handoffTestKey(t)
 	requesterKey := handoffTestKey(t)
 	issuerEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", issuerKey)
@@ -238,13 +304,17 @@ func TestUnwrapHandoffResponseRejectsBadNonceLength(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = unwrapHandoffResponse(HandoffResponse{
+	clientDeps := HandoffClientDeps{
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+	}
+	_, err = UnwrapHandoffResponse(HandoffResponse{
 		IssuerEAR:  issuerEAR,
 		PublicKey:  peerPub,
 		Signature:  sig,
 		Nonce:      encodeB64([]byte{1, 2, 3}),
 		Ciphertext: encodeB64([]byte("ciphertext")),
-	}, requesterEAR, requesterPub, requesterECDH, joining)
+	}, clientDeps, requesterEAR, requesterPub, requesterECDH)
 	if err == nil || !strings.Contains(err.Error(), "handoff nonce length") {
 		t.Fatalf("error = %v, want nonce length validation", err)
 	}
@@ -288,21 +358,33 @@ func TestHandoffTranscriptLengthPrefixesAmbiguousFields(t *testing.T) {
 }
 
 func TestHandoffReloadsIssuerEARFromFile(t *testing.T) {
-	active, tokenKey := testIssuer(t)
-	active.HandoffMeasurements = map[string]bool{"allowed_measurement": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"allowed_measurement": true}
 	activeHandoffKey := handoffTestKey(t)
 	requesterHandoffKey := handoffTestKey(t)
 	activeEAR1 := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
 	activeEAR2 := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
 	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
 
-	earSource := &atomicHandoffEAR{}
-	earSource.set(activeEAR1)
+	earSource := &AtomicHandoffEAR{}
+	earSource.Set(activeEAR1)
 
-	hh := &handoffHandler{
-		issuer:          active,
-		issuerEARSource: earSource,
-		signer:          activeHandoffKey,
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: allowed,
+		Snapshot:            snapshotFromCA(ca),
+	}, activeHandoffKey, earSource)
+	if err != nil {
+		t.Fatal(err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
 	t.Cleanup(srv.Close)
@@ -310,7 +392,7 @@ func TestHandoffReloadsIssuerEARFromFile(t *testing.T) {
 	if got := handoffResponseIssuerEAR(t, srv, requesterEAR, requesterHandoffKey); got != activeEAR1 {
 		t.Fatalf("issuer EAR before refresh = %q, want %q", got, activeEAR1)
 	}
-	earSource.set(activeEAR2)
+	earSource.Set(activeEAR2)
 	if got := handoffResponseIssuerEAR(t, srv, requesterEAR, requesterHandoffKey); got != activeEAR2 {
 		t.Fatalf("issuer EAR after refresh = %q, want %q", got, activeEAR2)
 	}
@@ -436,7 +518,7 @@ func TestHandoffEARExpiryReadsExpClaim(t *testing.T) {
 	teeKey := handoffTestKey(t)
 	token := handoffTestEARWithKey(t, tokenKey, "m", teeKey)
 
-	got, err := handoffEARExpiry(token)
+	got, err := HandoffEARExpiry(token)
 	if err != nil {
 		t.Fatalf("handoffEARExpiry: %v", err)
 	}
@@ -453,7 +535,7 @@ func TestHandoffEARExpiryRejectsMalformed(t *testing.T) {
 		"missing-exp": signJWT(t, handoffTestKey(t), map[string]any{earclaims.IssuedAt: time.Now().Unix()}),
 		"bad-claims":  "header." + base64.RawURLEncoding.EncodeToString([]byte("not json")) + ".sig",
 	} {
-		if _, err := handoffEARExpiry(token); err == nil {
+		if _, err := HandoffEARExpiry(token); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
 	}
@@ -465,7 +547,7 @@ func TestHandoffEARExpiryUpdaterMarksInvalidSourceNegative(t *testing.T) {
 
 	handoffEARExpirySeconds.Set(3600)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handoffEARExpiryUpdater(ctx, staticHandoffEARSource{ear: "bad.token"}, time.Hour, logger)
+	RunHandoffEARExpiryUpdater(ctx, staticHandoffEARSource{ear: "bad.token"}, time.Hour, logger)
 
 	if got := testutil.ToFloat64(handoffEARExpirySeconds); got >= 0 {
 		t.Fatalf("handoff EAR expiry gauge = %v, want negative on invalid source", got)
@@ -473,42 +555,58 @@ func TestHandoffEARExpiryUpdaterMarksInvalidSourceNegative(t *testing.T) {
 }
 
 func TestNewHandoffHandlerValidatesInputs(t *testing.T) {
-	iss, _ := testIssuer(t)
-	bm := issuerpkg.NewBundleManager(iss.MaxTTL, "", "ca-bundle", slog.Default())
-	bm.SetInitial(iss.getBundle().caCert)
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bm := NewBundleManager(time.Hour, "", "ca-bundle", slog.Default())
+	bm.SetInitial(ca.Cert)
 
 	signer := handoffTestKey(t)
 	src := staticHandoffEARSource{ear: "ear-token"}
 
-	if _, err := newHandoffHandler(iss, bm, nil, src); err == nil {
+	baseDeps := func(allowed map[string]bool) HandoffDeps {
+		return HandoffDeps{
+			Logger:              slog.Default(),
+			KeyProvider:         kp,
+			AllowedMeasurements: allowed,
+			Bundle:              bm,
+			Snapshot:            snapshotFromCA(ca),
+		}
+	}
+
+	if _, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), nil, src); err == nil {
 		t.Error("expected error when signer key is nil")
 	}
-	if _, err := newHandoffHandler(iss, bm, signer, nil); err == nil {
+	if _, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, nil); err == nil {
 		t.Error("expected error when EAR source is nil")
 	}
 
-	iss.HandoffMeasurements = nil
-	if _, err := newHandoffHandler(iss, bm, signer, src); err == nil {
+	if _, err := NewHandoffHandler(baseDeps(nil), signer, src); err == nil {
 		t.Error("expected error when handoff measurement allowlist is empty")
 	}
 
-	iss.HandoffMeasurements = map[string]bool{"m": true}
 	// An EAR source that hasn't bootstrapped yet is accepted at construction
 	// time — the handler returns 503 at request time. This decouples
 	// cert-issuer startup from Assam reachability.
-	hh, err := newHandoffHandler(iss, bm, signer, erroringHandoffEARSource{})
+	hh, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, erroringHandoffEARSource{})
 	if err != nil {
 		t.Fatalf("newHandoffHandler must accept a not-yet-ready EAR source: %v", err)
 	}
-	if hh.signer == nil || hh.issuerEARSource == nil {
+	if hh.signer == nil || hh.earSource == nil {
 		t.Fatal("handoffHandler missing signer or EAR source")
 	}
 
-	hh, err = newHandoffHandler(iss, bm, signer, src)
+	hh, err = NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, src)
 	if err != nil {
 		t.Fatalf("newHandoffHandler: %v", err)
 	}
-	if hh.signer == nil || hh.issuerEARSource == nil {
+	if hh.signer == nil || hh.earSource == nil {
 		t.Fatal("handoffHandler missing signer or EAR source")
 	}
 }
@@ -524,12 +622,25 @@ func (erroringHandoffEARSource) Current() (string, error) {
 // returning 401, or blocking the request). This is the "Assam unreachable
 // at startup" case after the non-blocking bootstrap fix.
 func TestHandoffReturns503BeforeBootstrap(t *testing.T) {
-	iss, _ := testIssuer(t)
-	bm := issuerpkg.NewBundleManager(iss.MaxTTL, "", "ca-bundle", slog.Default())
-	bm.SetInitial(iss.getBundle().caCert)
-	iss.HandoffMeasurements = map[string]bool{"m": true}
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bm := NewBundleManager(time.Hour, "", "ca-bundle", slog.Default())
+	bm.SetInitial(ca.Cert)
 
-	hh, err := newHandoffHandler(iss, bm, handoffTestKey(t), erroringHandoffEARSource{})
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"m": true},
+		Bundle:              bm,
+		Snapshot:            snapshotFromCA(ca),
+	}, handoffTestKey(t), erroringHandoffEARSource{})
 	if err != nil {
 		t.Fatalf("newHandoffHandler: %v", err)
 	}
@@ -553,4 +664,79 @@ func handoffTestKey(t *testing.T) *ecdsa.PrivateKey {
 		t.Fatal(err)
 	}
 	return key
+}
+
+// signJWT creates an ES256 JWT signed by the given key, adding mandatory EAR
+// shape fields unless the caller provided them.
+func signJWT(t *testing.T, key *ecdsa.PrivateKey, claims map[string]any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT"}`))
+	claims = validTestEARClaims(claims)
+	claimsJSON, _ := json.Marshal(claims)
+	payload := base64.RawURLEncoding.EncodeToString(claimsJSON)
+	signingInput := header + "." + payload
+
+	h := sha256.Sum256([]byte(signingInput))
+	r, s, err := ecdsa.Sign(rand.Reader, key, h[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Encode as r||s (each 32 bytes for P-256).
+	keySize := 32
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+	sig := make([]byte, 2*keySize)
+	copy(sig[keySize-len(rBytes):keySize], rBytes)
+	copy(sig[2*keySize-len(sBytes):], sBytes)
+
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func teePubKeyB64(t *testing.T, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(der)
+}
+
+// validTestEARClaims fills in the mandatory EAR shape fields (profile,
+// verifier id, submods) so signed test tokens pass ValidateEARToken.
+func validTestEARClaims(claims map[string]any) map[string]any {
+	out := make(map[string]any, len(claims)+3)
+	for k, v := range claims {
+		out[k] = v
+	}
+	if _, ok := out[earclaims.EATProfile]; !ok {
+		out[earclaims.EATProfile] = earclaims.EARProfileTag
+	}
+	if _, ok := out[earclaims.EARVerifierID]; !ok {
+		out[earclaims.EARVerifierID] = map[string]any{
+			earclaims.Developer: "test",
+			earclaims.Build:     "test",
+		}
+	}
+	if !hasNonEmptyObjectClaim(out[earclaims.Submods]) {
+		out[earclaims.Submods] = map[string]any{
+			earclaims.SubmodAttester: map[string]any{
+				earclaims.EARStatus: 2,
+			},
+		}
+	}
+	return out
+}
+
+func hasNonEmptyObjectClaim(v any) bool {
+	switch typed := v.(type) {
+	case map[string]any:
+		return len(typed) > 0
+	case map[string]string:
+		return len(typed) > 0
+	case map[string]json.RawMessage:
+		return len(typed) > 0
+	default:
+		return false
+	}
 }

@@ -1,4 +1,4 @@
-package certissuer
+package issuer
 
 import (
 	"context"
@@ -87,11 +87,11 @@ func TestNextRefreshAfter(t *testing.T) {
 // error, a set source returns the token, set is observable atomically, and
 // concurrent readers/writers don't tear.
 func TestAtomicHandoffEARRoundTrip(t *testing.T) {
-	a := &atomicHandoffEAR{}
+	a := &AtomicHandoffEAR{}
 	if _, err := a.Current(); err == nil {
 		t.Fatal("expected unset source to return error")
 	}
-	a.set("token-1")
+	a.Set("token-1")
 	got, err := a.Current()
 	if err != nil {
 		t.Fatalf("Current after set: %v", err)
@@ -118,7 +118,7 @@ func TestAtomicHandoffEARRoundTrip(t *testing.T) {
 		}()
 	}
 	for i := 0; i < 1000; i++ {
-		a.set(fmt.Sprintf("token-%d", i))
+		a.Set(fmt.Sprintf("token-%d", i))
 	}
 	close(stop)
 	wg.Wait()
@@ -137,7 +137,7 @@ func TestHandoffBootstrapPopulatesEAROnSuccess(t *testing.T) {
 
 	boot := &handoffBootstrap{
 		signer:                signer,
-		earSource:             &atomicHandoffEAR{},
+		earSource:             &AtomicHandoffEAR{},
 		assamClient:           attestclient.NewClientWithHTTP(srv.URL, srv.Client()),
 		attestationServiceURL: srv.URL,
 	}
@@ -147,7 +147,7 @@ func TestHandoffBootstrapPopulatesEAROnSuccess(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go boot.runRefresh(ctx, slog.Default())
+	go boot.RunRefresh(ctx, slog.Default())
 
 	waitFor(t, func() bool {
 		_, err := boot.earSource.Current()
@@ -173,14 +173,14 @@ func TestHandoffBootstrapRetriesAfterTransientFailure(t *testing.T) {
 
 	boot := &handoffBootstrap{
 		signer:                signer,
-		earSource:             &atomicHandoffEAR{},
+		earSource:             &AtomicHandoffEAR{},
 		assamClient:           attestclient.NewClientWithHTTP(srv.URL, srv.Client()),
 		attestationServiceURL: srv.URL,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	go boot.runRefresh(ctx, slog.Default())
+	go boot.RunRefresh(ctx, slog.Default())
 
 	// nextRefreshAfter("") is 30s, so the second attempt happens ~30s after
 	// the first failure. Allow up to 60s to cover slow CI.

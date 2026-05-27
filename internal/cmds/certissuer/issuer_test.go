@@ -77,7 +77,7 @@ func testIssuer(t *testing.T) (*Issuer, *ecdsa.PrivateKey) {
 		MaxTTL:        24 * time.Hour,
 		MinCAValidity: time.Hour,
 		Logger:        slog.Default(),
-		tracker:       newNodeTracker(24 * time.Hour),
+		tracker:       issuer.NewNodeTracker(24 * time.Hour),
 	}
 	iss.bundle.Store(&certBundle{
 		caCert:          caCert,
@@ -629,7 +629,7 @@ func TestHandleSignCSR_ES384(t *testing.T) {
 		MinCAValidity: time.Hour,
 		SANValidation: true,
 		Logger:        slog.Default(),
-		tracker:       newNodeTracker(24 * time.Hour),
+		tracker:       issuer.NewNodeTracker(24 * time.Hour),
 	}
 	iss.bundle.Store(&certBundle{
 		caCert:          caCert,
@@ -1012,8 +1012,11 @@ func TestRateLimiting(t *testing.T) {
 	body, _ := json.Marshal(newSignCSRRequest(ear, csr, "1h"))
 
 	// Create a very tight rate limiter: 1 req/s, burst 1.
-	rl := newIPRateLimiter(rate.Limit(1), 1, 10000)
-	handler := rateLimitMiddleware(rl, http.HandlerFunc(iss.HandleSignCSR))
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(1), 1, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := issuer.RateLimitMiddleware(rl, http.HandlerFunc(iss.HandleSignCSR))
 
 	// First request should succeed.
 	req := httptest.NewRequest("POST", "/sign-csr", strings.NewReader(string(body)))
@@ -1237,61 +1240,6 @@ func TestHandleSignCSR_WrongIssuer(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		respBody, _ := io.ReadAll(w.Result().Body)
 		t.Errorf("expected 401 for wrong issuer, got %d: %s", w.Code, respBody)
-	}
-}
-
-func TestRateLimiterEviction(t *testing.T) {
-	rl := newIPRateLimiter(rate.Limit(10), 20, 10000)
-
-	// Add some entries.
-	rl.getLimiter("10.0.0.1")
-	rl.getLimiter("10.0.0.2")
-	rl.getLimiter("10.0.0.3")
-
-	rl.mu.Lock()
-	if len(rl.limiters) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(rl.limiters))
-	}
-
-	// Set lastSeen to 10 minutes ago for two entries.
-	oldTime := time.Now().Add(-10 * time.Minute)
-	rl.limiters["10.0.0.1"].lastSeen = oldTime
-	rl.limiters["10.0.0.2"].lastSeen = oldTime
-	rl.mu.Unlock()
-
-	// Run eviction.
-	rl.evict(5 * time.Minute)
-
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if len(rl.limiters) != 1 {
-		t.Errorf("expected 1 entry after eviction, got %d", len(rl.limiters))
-	}
-	if _, ok := rl.limiters["10.0.0.3"]; !ok {
-		t.Error("expected 10.0.0.3 to survive eviction")
-	}
-}
-
-func TestRateLimiterMaxEntries(t *testing.T) {
-	rl := newIPRateLimiter(rate.Limit(10), 20, 3)
-
-	rl.getLimiter("10.0.0.1")
-	rl.getLimiter("10.0.0.2")
-	rl.getLimiter("10.0.0.3")
-
-	rl.mu.Lock()
-	if len(rl.limiters) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(rl.limiters))
-	}
-	rl.mu.Unlock()
-
-	// Adding a 4th should evict the oldest.
-	rl.getLimiter("10.0.0.4")
-
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if len(rl.limiters) != 3 {
-		t.Errorf("expected 3 entries after cap, got %d", len(rl.limiters))
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,7 +17,6 @@ import (
 	"path"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,7 +48,7 @@ type Issuer struct {
 	RequestTimeout   time.Duration  // Per-request timeout. Zero = no timeout.
 	MinCAValidity    time.Duration  // Minimum remaining CA cert validity for readiness.
 	Logger           *slog.Logger
-	tracker          *nodeTracker
+	tracker          *issuer.NodeTracker
 	caBundle         *issuer.BundleManager // Optional public CA bundle source for sign-csr responses.
 
 	// Per-endpoint measurement allowlists. Empty map = skip check (opt-in).
@@ -126,10 +124,7 @@ func (iss *Issuer) HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	claims, err := issuer.ValidateEARToken(req.EAR, iss.keyProvider, iss.ExpectedIssuer)
 	if err != nil {
 		iss.Logger.Warn("EAR token validation failed", "error", err)
-		var tve *issuer.TokenValidationError
-		if errors.As(err, &tve) {
-			tokenValidationFailuresTotal.WithLabelValues(string(tve.Reason)).Inc()
-		}
+		issuer.RecordTokenValidationFailure(err)
 		http.Error(w, "unauthorized: invalid attestation token", http.StatusUnauthorized)
 		signRequestsTotal.WithLabelValues("unauthorized").Inc()
 		return
@@ -138,7 +133,7 @@ func (iss *Issuer) HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	// Check measurement allowlist.
 	if err := issuer.CheckMeasurement(claims, iss.SignCSRMeasurements, "sign-csr"); err != nil {
 		iss.Logger.Warn("measurement check failed", "error", err)
-		measurementDeniedTotal.WithLabelValues("sign-csr").Inc()
+		issuer.RecordMeasurementDenied("sign-csr")
 		http.Error(w, "forbidden: measurement not allowed", http.StatusForbidden)
 		signRequestsTotal.WithLabelValues("forbidden").Inc()
 		return
@@ -165,7 +160,7 @@ func (iss *Issuer) HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	if err := issuer.VerifyKeyBinding(csr, claims); err != nil {
 		iss.Logger.Warn("key binding failed", "error", err)
 		http.Error(w, "forbidden: certificate request denied", http.StatusForbidden)
-		tokenValidationFailuresTotal.WithLabelValues("key_binding").Inc()
+		issuer.RecordTokenValidationFailure(&issuer.TokenValidationError{Reason: issuer.ReasonKeyBinding, Err: err})
 		signRequestsTotal.WithLabelValues("forbidden").Inc()
 		return
 	}
@@ -225,7 +220,7 @@ func (iss *Issuer) HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	srcIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	notAfter := time.Now().Add(ttl)
 	if srcIP != "" && iss.tracker != nil {
-		iss.tracker.track(srcIP, notAfter)
+		iss.tracker.Track(srcIP, notAfter)
 	}
 
 	// Build SAN lists for audit logging.
@@ -401,63 +396,4 @@ func capTTL(d time.Duration, maxTTL time.Duration) time.Duration {
 		return maxTTL
 	}
 	return d
-}
-
-// nodeTracker tracks aggregate certificate issuance metrics without per-IP cardinality.
-type nodeTracker struct {
-	mu     sync.Mutex
-	nodes  map[string]nodeEntry
-	maxTTL time.Duration
-}
-
-type nodeEntry struct {
-	lastSeen   time.Time
-	certExpiry time.Time
-}
-
-func newNodeTracker(maxTTL time.Duration) *nodeTracker {
-	return &nodeTracker{
-		nodes:  make(map[string]nodeEntry),
-		maxTTL: maxTTL,
-	}
-}
-
-func (nt *nodeTracker) track(ip string, certExpiry time.Time) {
-	nt.mu.Lock()
-	defer nt.mu.Unlock()
-	nt.nodes[ip] = nodeEntry{
-		lastSeen:   time.Now(),
-		certExpiry: certExpiry,
-	}
-}
-
-// updateMetrics recomputes aggregate metrics. Called periodically from a background goroutine.
-func (nt *nodeTracker) updateMetrics() {
-	nt.mu.Lock()
-	defer nt.mu.Unlock()
-
-	now := time.Now()
-	cutoff := now.Add(-2 * nt.maxTTL)
-
-	// Evict stale entries.
-	for ip, entry := range nt.nodes {
-		if entry.lastSeen.Before(cutoff) {
-			delete(nt.nodes, ip)
-		}
-	}
-
-	activeNodes.Set(float64(len(nt.nodes)))
-
-	if len(nt.nodes) == 0 {
-		oldestActiveCertExpiry.Set(0)
-		return
-	}
-
-	var oldest time.Time
-	for _, entry := range nt.nodes {
-		if oldest.IsZero() || entry.certExpiry.Before(oldest) {
-			oldest = entry.certExpiry
-		}
-	}
-	oldestActiveCertExpiry.Set(oldest.Sub(now).Seconds())
 }

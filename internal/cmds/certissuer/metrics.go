@@ -32,11 +32,6 @@ var (
 		Help: "Total certificates successfully issued.",
 	})
 
-	tokenValidationFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cert_issuer_token_validation_failures_total",
-		Help: "Token validation failures by reason.",
-	}, []string{"reason"})
-
 	activeRequests = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cert_issuer_active_requests",
 		Help: "Number of in-flight sign-csr requests.",
@@ -50,11 +45,6 @@ var (
 	tokenCertExpirySeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cert_issuer_token_cert_expiry_seconds",
 		Help: "Seconds until token-signer certificate expires.",
-	})
-
-	rateLimitRejectionsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "cert_issuer_rate_limit_rejections_total",
-		Help: "Total requests rejected by rate limiter.",
 	})
 
 	certReloadsTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -75,30 +65,5 @@ var (
 	dnsSanValidationFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cert_issuer_dns_san_validation_failures_total",
 		Help: "Total CSR DNS SAN validation failures.",
-	})
-
-	rateLimiterEntries = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cert_issuer_rate_limiter_entries",
-		Help: "Current number of entries in the per-IP rate limiter.",
-	})
-
-	activeNodes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cert_issuer_active_nodes",
-		Help: "Number of distinct node IPs that received certificates within the TTL window.",
-	})
-
-	oldestActiveCertExpiry = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cert_issuer_oldest_active_cert_expiry_seconds",
-		Help: "Seconds until the oldest active node certificate expires.",
-	})
-
-	measurementDeniedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cert_issuer_measurement_denied_total",
-		Help: "Requests denied due to measurement mismatch.",
-	}, []string{"endpoint"})
-
-	handoffEARExpirySeconds = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "cert_issuer_handoff_ear_expiry_seconds",
-		Help: "Seconds until the handoff issuer EAR exp claim; negative when expired or unreadable.",
 	})
 )
