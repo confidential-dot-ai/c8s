@@ -97,6 +97,11 @@ func Run(args []string) error {
 	}
 	issuer.JWTClockSkew = time.Duration(*jwtClockSkew) * time.Second
 
+	if *jwtClockSkew < 0 {
+		return fmt.Errorf("--jwt-clock-skew must be non-negative")
+	}
+	issuer.JWTClockSkew = time.Duration(*jwtClockSkew) * time.Second
+
 	if *caRotationInterval <= 0 {
 		return fmt.Errorf("--ca-rotation-interval must be positive")
 	}

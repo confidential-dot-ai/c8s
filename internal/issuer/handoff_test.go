@@ -39,9 +39,9 @@ func (s staticHandoffEARSource) Current() (string, error) {
 	return strings.TrimSpace(s.ear), nil
 }
 
-func snapshotFromCA(ca *CA) func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
-	return func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
-		return ca.Cert, ca.Key, nil, true
+func snapshotFromCA(ca *CA) func() (CASnapshot, bool) {
+	return func() (CASnapshot, bool) {
+		return CASnapshot{Cert: ca.Cert, Key: ca.Key}, true
 	}
 }
 
@@ -69,8 +69,10 @@ func TestAttestedHandoffTransfersCAKeyToAllowedReplica(t *testing.T) {
 		KeyProvider:         kp,
 		AllowedMeasurements: allowed,
 		Bundle:              bm,
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
 		Snapshot:            snapshotFromCA(ca),
-	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +133,10 @@ func TestHandoffBundleStartsWithHandedOffActiveCA(t *testing.T) {
 		KeyProvider:         kp,
 		AllowedMeasurements: allowed,
 		Bundle:              bm,
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
 		Snapshot:            snapshotFromCA(ca),
-	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +183,10 @@ func TestHandoffRejectsRequesterKeyNotBoundToEAR(t *testing.T) {
 		Logger:              slog.Default(),
 		KeyProvider:         kp,
 		AllowedMeasurements: allowed,
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
 		Snapshot:            snapshotFromCA(ca),
-	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,8 +241,10 @@ func TestHandoffRejectsUnallowedRequesterMeasurement(t *testing.T) {
 		Logger:              slog.Default(),
 		KeyProvider:         kp,
 		AllowedMeasurements: allowed,
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
 		Snapshot:            snapshotFromCA(ca),
-	}, activeHandoffKey, staticHandoffEARSource{ear: activeEAR})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,8 +389,10 @@ func TestHandoffReloadsIssuerEARFromFile(t *testing.T) {
 		Logger:              slog.Default(),
 		KeyProvider:         kp,
 		AllowedMeasurements: allowed,
+		Signer:              activeHandoffKey,
+		EARSource:           earSource,
 		Snapshot:            snapshotFromCA(ca),
-	}, activeHandoffKey, earSource)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,25 +586,33 @@ func TestNewHandoffHandlerValidatesInputs(t *testing.T) {
 			KeyProvider:         kp,
 			AllowedMeasurements: allowed,
 			Bundle:              bm,
+			Signer:              signer,
+			EARSource:           src,
 			Snapshot:            snapshotFromCA(ca),
 		}
 	}
 
-	if _, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), nil, src); err == nil {
+	nilSigner := baseDeps(map[string]bool{"m": true})
+	nilSigner.Signer = nil
+	if _, err := NewHandoffHandler(nilSigner); err == nil {
 		t.Error("expected error when signer key is nil")
 	}
-	if _, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, nil); err == nil {
+	nilSource := baseDeps(map[string]bool{"m": true})
+	nilSource.EARSource = nil
+	if _, err := NewHandoffHandler(nilSource); err == nil {
 		t.Error("expected error when EAR source is nil")
 	}
 
-	if _, err := NewHandoffHandler(baseDeps(nil), signer, src); err == nil {
+	if _, err := NewHandoffHandler(baseDeps(nil)); err == nil {
 		t.Error("expected error when handoff measurement allowlist is empty")
 	}
 
 	// An EAR source that hasn't bootstrapped yet is accepted at construction
 	// time — the handler returns 503 at request time. This decouples
 	// cert-issuer startup from Assam reachability.
-	hh, err := NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, erroringHandoffEARSource{})
+	notReady := baseDeps(map[string]bool{"m": true})
+	notReady.EARSource = erroringHandoffEARSource{}
+	hh, err := NewHandoffHandler(notReady)
 	if err != nil {
 		t.Fatalf("newHandoffHandler must accept a not-yet-ready EAR source: %v", err)
 	}
@@ -602,7 +620,7 @@ func TestNewHandoffHandlerValidatesInputs(t *testing.T) {
 		t.Fatal("handoffHandler missing signer or EAR source")
 	}
 
-	hh, err = NewHandoffHandler(baseDeps(map[string]bool{"m": true}), signer, src)
+	hh, err = NewHandoffHandler(baseDeps(map[string]bool{"m": true}))
 	if err != nil {
 		t.Fatalf("newHandoffHandler: %v", err)
 	}
@@ -639,8 +657,10 @@ func TestHandoffReturns503BeforeBootstrap(t *testing.T) {
 		KeyProvider:         kp,
 		AllowedMeasurements: map[string]bool{"m": true},
 		Bundle:              bm,
+		Signer:              handoffTestKey(t),
+		EARSource:           erroringHandoffEARSource{},
 		Snapshot:            snapshotFromCA(ca),
-	}, handoffTestKey(t), erroringHandoffEARSource{})
+	})
 	if err != nil {
 		t.Fatalf("newHandoffHandler: %v", err)
 	}
@@ -648,6 +668,60 @@ func TestHandoffReturns503BeforeBootstrap(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestHandoffReturns503ForEmptyCASnapshot(t *testing.T) {
+	tokenKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	activeHandoffKey := handoffTestKey(t)
+	requesterHandoffKey := handoffTestKey(t)
+	activeEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
+	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
+
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
+		Snapshot: func() (CASnapshot, bool) {
+			return CASnapshot{}, true
+		},
+	})
+	if err != nil {
+		t.Fatalf("newHandoffHandler: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
+	t.Cleanup(srv.Close)
+
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := encodeB64(priv.PublicKey().Bytes())
+	sig, err := signHandoffMessage(requesterHandoffKey, mustHandoffRequestMessage(t, requesterEAR, pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(HandoffRequest{
+		EAR:       requesterEAR,
+		PublicKey: pub,
+		Signature: sig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Post(srv.URL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}

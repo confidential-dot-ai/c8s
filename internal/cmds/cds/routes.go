@@ -4,9 +4,11 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/lunal-dev/c8s/internal/attestation"
 	"github.com/lunal-dev/c8s/internal/ear"
+	"github.com/lunal-dev/c8s/internal/issuer"
 	"github.com/lunal-dev/c8s/internal/server"
 	"github.com/lunal-dev/c8s/internal/whitelist"
 )
@@ -14,18 +16,24 @@ import (
 // dependencies bundles everything the cds router needs.
 type dependencies struct {
 	AttestHandler    AttestHandler
+	AttestKeyHandler attestation.Handler
 	SignCSRHandler   SignCSRHandler
 	WhitelistHandler whitelist.Handler
+	HandoffHandler   *issuer.HandoffHandler // nil disables /handoff (no --handoff-measurements)
 	ReadyFn          attestation.ReadinessFunc
 	EarIssuer        ear.Issuer
 	JWKSFunc         func() []byte
 	CACertPEM        []byte
-	MaxRequestSize   int64 // applied to write endpoints; must be > 0
+	RateLimiter      *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
+	MaxRequestSize   int64                 // applied to write endpoints; must be > 0
 }
 
 func newRouter(deps dependencies) http.Handler {
 	if deps.MaxRequestSize <= 0 {
 		panic("cds: dependencies.MaxRequestSize must be positive")
+	}
+	if deps.RateLimiter == nil {
+		panic("cds: dependencies.RateLimiter must be set")
 	}
 	r := chi.NewRouter()
 	r.Use(server.RequestLogger)
@@ -35,10 +43,18 @@ func newRouter(deps dependencies) http.Handler {
 	})
 	r.Get("/readyz", attestation.HandleReadyz(deps.ReadyFn))
 	r.Get("/.well-known/jwks.json", server.HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
+	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
 	r.Post("/authenticate", attestation.HandleAuthenticate(deps.AttestHandler.Challenges))
-	r.Method(http.MethodPost, "/attest", capBody(deps.MaxRequestSize, http.HandlerFunc(deps.AttestHandler.HandleAttest)))
-	r.Method(http.MethodPost, "/sign-csr", capBody(deps.MaxRequestSize, http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
+	r.Method(http.MethodPost, "/attest", deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest)))
+	r.Method(http.MethodPost, "/attest-key", deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey)))
+	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
+
+	// /handoff is mounted only when --handoff-measurements is set; a singleton
+	// cds runs without it.
+	if deps.HandoffHandler != nil {
+		r.Method(http.MethodPost, "/handoff", deps.protected(http.HandlerFunc(deps.HandoffHandler.HandleHandoff)))
+	}
 
 	r.Get("/whitelist", deps.WhitelistHandler.HandleList)
 	r.Method(http.MethodPost, "/whitelist", capBody(deps.MaxRequestSize, http.HandlerFunc(deps.WhitelistHandler.HandleAdd)))
@@ -47,6 +63,13 @@ func newRouter(deps dependencies) http.Handler {
 	r.Get("/ca", handleCA(deps.CACertPEM))
 
 	return r
+}
+
+// protected wraps a write handler with per-source-IP rate limiting and the
+// request-body cap. Used for the attestation endpoints an unauthenticated
+// caller can hit before any signature check.
+func (deps dependencies) protected(next http.Handler) http.Handler {
+	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(deps.MaxRequestSize, next))
 }
 
 func capBody(max int64, next http.Handler) http.Handler {

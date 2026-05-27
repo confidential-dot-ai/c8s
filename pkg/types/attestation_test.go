@@ -1,6 +1,7 @@
 package types
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -159,5 +160,26 @@ func TestErrorResponseJSONRoundtrip(t *testing.T) {
 	}
 	if decoded.Message != "resource not found" {
 		t.Fatalf("message: got %q, want %q", decoded.Message, "resource not found")
+	}
+}
+
+func TestVerifyReportData(t *testing.T) {
+	evidence := AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"q":1}`)}
+	reportData := NewBase64Bytes([]byte("report-data-digest"))
+
+	req := VerifyReportData(evidence, reportData)
+
+	if req.Evidence.Platform != "snp" {
+		t.Fatalf("evidence platform = %q, want snp", req.Evidence.Platform)
+	}
+	if req.Params == nil || req.Params.ExpectedReportData == nil {
+		t.Fatalf("expected report-data binding, got params=%+v", req.Params)
+	}
+	if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, reportData.Bytes()) {
+		t.Fatalf("expected report-data = %x, want %x", got, reportData.Bytes())
+	}
+	// Token issuance must be explicitly off — c8s mints its own EAR.
+	if req.IssueToken == nil || *req.IssueToken {
+		t.Fatalf("IssueToken = %v, want explicit false", req.IssueToken)
 	}
 }

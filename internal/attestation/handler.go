@@ -86,13 +86,7 @@ func (h Handler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the evidence with the attestation service
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyRequest{
-		Evidence: req.Evidence,
-		Params: &types.VerifyParams{
-			ExpectedReportData: &reportData,
-		},
-		IssueToken: new(bool),
-	}
+	verifyReq := types.VerifyReportData(req.Evidence, reportData)
 
 	verifyResp, err := h.AttestationClient.Verify(r.Context(), verifyReq)
 	if err != nil {
@@ -192,13 +186,7 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyRequest{
-		Evidence: req.Evidence,
-		Params: &types.VerifyParams{
-			ExpectedReportData: &reportData,
-		},
-		IssueToken: new(bool),
-	}
+	verifyReq := types.VerifyReportData(req.Evidence, reportData)
 	verifyResp, err := h.AttestationClient.Verify(r.Context(), verifyReq)
 	if err != nil {
 		h.handleAttestationError(w, err)

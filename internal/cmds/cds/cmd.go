@@ -42,6 +42,7 @@ func NewCmd() *cobra.Command {
 
 	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
 	flags.StringVar(&cfg.expectedIssuer, "expected-issuer", "", "EAR JWT issuer claim required on /sign-csr (empty disables)")
+	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "EAR JWT exp/nbf/iat clock skew tolerance in seconds")
 	flags.DurationVar(&cfg.maxTTL, "max-ttl", 24*time.Hour, "upper bound on /sign-csr leaf TTL")
 	flags.DurationVar(&cfg.certTTL, "cert-ttl", 24*time.Hour, "")
 	flags.DurationVar(&cfg.challengeTTL, "challenge-ttl", 60*time.Second, "")
@@ -59,6 +60,14 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.readinessInterval, "readiness-interval", 10*time.Second, "")
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
 	flags.StringVar(&cfg.whitelistDB, "whitelist-db", "", "Path to the whitelist SQLite database")
+	flags.StringSliceVar(&cfg.whitelistWriteMeasurements, "whitelist-write-measurements", nil, "SHA-384 hex launch measurements allowed to mutate the whitelist via a bearer EAR (empty = reject all writes)")
+	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA via /handoff (empty = /handoff disabled)")
+
+	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
+	flags.IntVar(&cfg.rateBurst, "rate-burst", 20, "max burst size per source IP")
+	flags.IntVar(&cfg.rateLimiterMax, "rate-limiter-max-entries", 10000, "max entries in the per-IP rate limiter")
+	flags.DurationVar(&cfg.rateLimiterEvictInterval, "rate-limiter-evict-interval", time.Minute, "interval for per-IP rate limiter eviction sweep")
+	flags.DurationVar(&cfg.rateLimiterIdleTimeout, "rate-limiter-idle-timeout", 5*time.Minute, "idle duration before a per-IP rate limiter entry is evicted")
 
 	flags.DurationVar(&cfg.rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "EAR signing key rotation interval (0 disables)")
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
@@ -74,34 +83,43 @@ func NewCmd() *cobra.Command {
 }
 
 type config struct {
-	host              string
-	port              int
-	logLevel          string
-	attestationSvcURL string
-	caCommonName      string
-	caCertValidity    time.Duration
-	measurements      []string
-	earIssuerName     string
-	expectedIssuer    string
-	maxTTL            time.Duration
-	certTTL           time.Duration
-	challengeTTL      time.Duration
-	requestTimeout    time.Duration
-	maxRequestSize    int64
-	readTimeout       time.Duration
-	readHeaderTimeout time.Duration
-	writeTimeout      time.Duration
-	idleTimeout       time.Duration
-	maxHeaderBytes    int
-	sanValidation     bool
-	dnsSANPattern     string
-	allowedCNPattern  string
-	readinessInterval time.Duration
-	minCAValidity     time.Duration
-	whitelistDB       string
-	rotationInterval  time.Duration
-	rotationOverlap   time.Duration
-	rotationJitter    float64
-	ratlsPlatform     string
-	ratlsCertTTL      time.Duration
+	host                       string
+	port                       int
+	logLevel                   string
+	attestationSvcURL          string
+	caCommonName               string
+	caCertValidity             time.Duration
+	measurements               []string
+	earIssuerName              string
+	expectedIssuer             string
+	jwtClockSkew               int64
+	maxTTL                     time.Duration
+	certTTL                    time.Duration
+	challengeTTL               time.Duration
+	requestTimeout             time.Duration
+	maxRequestSize             int64
+	readTimeout                time.Duration
+	readHeaderTimeout          time.Duration
+	writeTimeout               time.Duration
+	idleTimeout                time.Duration
+	maxHeaderBytes             int
+	sanValidation              bool
+	dnsSANPattern              string
+	allowedCNPattern           string
+	readinessInterval          time.Duration
+	minCAValidity              time.Duration
+	whitelistDB                string
+	whitelistWriteMeasurements []string
+	handoffMeasurements        []string
+	rotationInterval           time.Duration
+	rotationOverlap            time.Duration
+	rotationJitter             float64
+	ratlsPlatform              string
+	ratlsCertTTL               time.Duration
+
+	rateLimit                float64
+	rateBurst                int
+	rateLimiterMax           int
+	rateLimiterEvictInterval time.Duration
+	rateLimiterIdleTimeout   time.Duration
 }

@@ -103,13 +103,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyRequest{
-		Evidence: req.Evidence,
-		Params: &types.VerifyParams{
-			ExpectedReportData: &reportData,
-		},
-		IssueToken: new(bool),
-	}
+	verifyReq := types.VerifyReportData(req.Evidence, reportData)
 	verifyResp, err := h.AttestationClient.Verify(ctx, verifyReq)
 	if err != nil {
 		slog.Warn("attestation service error", "error", err)

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/lunal-dev/c8s/internal/earclaims"
 	"github.com/lunal-dev/c8s/pkg/attestclient"
+	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 // TestNextRefreshAfter exercises the refresh-cadence math without touching
@@ -240,6 +242,131 @@ func fakeAssamForBootstrap(t *testing.T, _ *ecdsa.PrivateKey, calls *atomic.Int3
 		_ = json.NewEncoder(w).Encode(map[string]string{"ear": token})
 	})
 	return httptest.NewServer(mux)
+}
+
+// --- LocalHandoffBootstrap (cds in-process attest-key) ---
+
+type stubAttestation struct {
+	attestResp types.AttestResponse
+	attestErr  error
+	verifyResp types.VerifyResponse
+	verifyErr  error
+}
+
+func (s stubAttestation) Attest(context.Context, types.AttestRequest) (types.AttestResponse, error) {
+	return s.attestResp, s.attestErr
+}
+
+func (s stubAttestation) Verify(context.Context, types.VerifyRequest) (types.VerifyResponse, error) {
+	return s.verifyResp, s.verifyErr
+}
+
+type stubMinter struct {
+	called       atomic.Int32
+	gotDigest    string
+	gotPub       *ecdsa.PublicKey
+	tokenToIssue string
+}
+
+func (m *stubMinter) IssueWithLaunchDigestAndPubKey(_ json.RawMessage, launchDigest string, pub *ecdsa.PublicKey) (string, error) {
+	m.called.Add(1)
+	m.gotDigest = launchDigest
+	m.gotPub = pub
+	return m.tokenToIssue, nil
+}
+
+func verifyOK(match bool, digest string) types.VerifyResponse {
+	return types.VerifyResponse{Result: types.VerificationResult{
+		SignatureValid:  true,
+		ReportDataMatch: &match,
+		Claims:          types.Claims{LaunchDigest: digest},
+	}}
+}
+
+// TestLocalHandoffBootstrapMintsOnlyAfterVerify is the load-bearing test for
+// the cds-local handoff signer EAR: it must mint exactly when the verifier
+// confirms both SignatureValid and ReportDataMatch, and must refuse otherwise.
+// Skipping verification would let a host-supplied evidence blob dictate the
+// EAR's launch digest — the value /handoff peers pin against.
+func TestLocalHandoffBootstrapMintsOnlyAfterVerify(t *testing.T) {
+	cases := []struct {
+		name     string
+		verify   types.VerifyResponse
+		wantMint bool
+	}{
+		{"signature valid + report-data match", verifyOK(true, "deadbeef"), true},
+		{"signature invalid", types.VerifyResponse{Result: types.VerificationResult{SignatureValid: false}}, false},
+		{"report-data mismatch", verifyOK(false, "deadbeef"), false},
+		{"report-data nil", types.VerifyResponse{Result: types.VerificationResult{SignatureValid: true}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			minter := &stubMinter{tokenToIssue: "minted-ear"}
+			b, err := NewLocalHandoffBootstrap(
+				stubAttestation{
+					attestResp: types.AttestResponse{Platform: "snp"},
+					verifyResp: tc.verify,
+				},
+				minter,
+			)
+			if err != nil {
+				t.Fatalf("NewLocalHandoffBootstrap: %v", err)
+			}
+			lb := b.(*localHandoffBootstrap)
+			pubDER, err := x509.MarshalPKIXPublicKey(&lb.signer.PublicKey)
+			if err != nil {
+				t.Fatalf("marshal pubkey: %v", err)
+			}
+
+			token, err := lb.attestKey(context.Background(), pubDER)
+			if tc.wantMint {
+				if err != nil {
+					t.Fatalf("attestKey: %v", err)
+				}
+				if token != "minted-ear" {
+					t.Fatalf("token = %q, want minted-ear", token)
+				}
+				if minter.called.Load() != 1 {
+					t.Fatalf("minter calls = %d, want 1", minter.called.Load())
+				}
+				if minter.gotDigest != "deadbeef" {
+					t.Fatalf("launch digest = %q, want deadbeef", minter.gotDigest)
+				}
+				if minter.gotPub == nil || !minter.gotPub.Equal(&lb.signer.PublicKey) {
+					t.Fatalf("minted EAR not bound to the signer pubkey")
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expected attestKey to refuse, got token %q", token)
+				}
+				if minter.called.Load() != 0 {
+					t.Fatalf("minter called %d times on a failed verify; must be 0", minter.called.Load())
+				}
+			}
+		})
+	}
+}
+
+// TestLocalHandoffBootstrapRequiresDeps guards the constructor's nil checks: a
+// nil attestation service or minter is a wiring bug that must fail loudly at
+// startup, not silently disable handoff.
+func TestLocalHandoffBootstrapRequiresDeps(t *testing.T) {
+	as := stubAttestation{}
+	mi := &stubMinter{}
+	for _, tc := range []struct {
+		name string
+		as   AttestationService
+		mi   LocalEARMinter
+	}{
+		{"nil attestation", nil, mi},
+		{"nil minter", as, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewLocalHandoffBootstrap(tc.as, tc.mi); err == nil {
+				t.Fatal("expected constructor to reject nil dependency")
+			}
+		})
+	}
 }
 
 func makeUnsignedJWTForTest(t *testing.T, exp int64) string {

@@ -119,6 +119,20 @@ type VerifyRequest struct {
 	IssueToken *bool               `json:"issue_token,omitempty"`
 }
 
+// VerifyReportData builds a VerifyRequest that checks the evidence binds
+// expectedReportData and explicitly does not ask the attestation service to
+// issue a token. c8s callers mint their own EAR after verifying, so token
+// issuance is always off; setting IssueToken here keeps that intent in one
+// place instead of every call site spelling out new(bool).
+func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes) VerifyRequest {
+	noToken := false
+	return VerifyRequest{
+		Evidence:   evidence,
+		Params:     &VerifyParams{ExpectedReportData: &expectedReportData},
+		IssueToken: &noToken,
+	}
+}
+
 // VerifyParams contains optional verification parameters.
 type VerifyParams struct {
 	ExpectedReportData   *Base64Bytes `json:"expected_report_data,omitempty"`

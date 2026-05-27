@@ -3,7 +3,6 @@ package certissuer
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/x509"
 	"net/http"
 	"strings"
 
@@ -23,14 +22,16 @@ func newHandoffHandler(iss *Issuer, bm *issuer.BundleManager, signer *ecdsa.Priv
 		ExpectedIssuer:      iss.ExpectedIssuer,
 		AllowedMeasurements: iss.HandoffMeasurements,
 		Bundle:              bm,
-		Snapshot: func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+		Signer:              signer,
+		EARSource:           src,
+		Snapshot: func() (issuer.CASnapshot, bool) {
 			b := iss.getBundle()
 			if b == nil {
-				return nil, nil, nil, false
+				return issuer.CASnapshot{}, false
 			}
-			return b.caCert, b.caKey, b.parentCert, true
+			return issuer.CASnapshot{Cert: b.caCert, Key: b.caKey, ParentCert: b.parentCert}, true
 		},
-	}, signer, src)
+	})
 }
 
 // requestHandoff is the cert-issuer-side client wrapper around

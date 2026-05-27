@@ -14,6 +14,7 @@ import (
 	"github.com/lunal-dev/c8s/internal/whitelist"
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/earsigner"
+	"golang.org/x/time/rate"
 )
 
 func newStubRouter(t *testing.T) http.Handler {
@@ -42,9 +43,57 @@ func newStubRouter(t *testing.T) http.Handler {
 		ReadyFn:          func() bool { return true },
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      newTestRateLimiter(t),
 		MaxRequestSize:   65536,
 	}
 	return newRouter(deps)
+}
+
+func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
+	keyPEM, _ := earsigner.Generate()
+	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	store, _ := whitelist.OpenInMemory()
+	t.Cleanup(func() { _ = store.Close() })
+	ca, _ := issuer.NewCA("test ca", time.Hour)
+	cs := attestation.NewChallengeStore(time.Minute)
+	// Burst of 1, so the second request from the same source IP is rejected.
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(1), 1, 100)
+	if err != nil {
+		t.Fatalf("rate limiter: %v", err)
+	}
+	deps := dependencies{
+		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
+		WhitelistHandler: whitelist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		ReadyFn:          func() bool { return true },
+		EarIssuer:        earIss,
+		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      rl,
+		MaxRequestSize:   65536,
+	}
+	r := newRouter(deps)
+
+	do := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/sign-csr", bytes.NewReader([]byte(`{}`)))
+		req.RemoteAddr = "10.0.0.1:1234"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := do(); got == http.StatusTooManyRequests {
+		t.Fatalf("first request rate-limited unexpectedly: %d", got)
+	}
+	if got := do(); got != http.StatusTooManyRequests {
+		t.Fatalf("second request: got %d, want 429", got)
+	}
+}
+
+func newTestRateLimiter(t *testing.T) *issuer.IPRateLimiter {
+	t.Helper()
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(1000), 1000, 1000)
+	if err != nil {
+		t.Fatalf("rate limiter: %v", err)
+	}
+	return rl
 }
 
 func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
@@ -55,6 +104,7 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/readyz", http.StatusOK},
 		{http.MethodGet, "/.well-known/jwks.json", http.StatusOK},
+		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/ca", http.StatusOK},
 		{http.MethodGet, "/whitelist", http.StatusOK},
 		{http.MethodGet, "/does-not-exist", http.StatusNotFound},
@@ -74,6 +124,30 @@ func TestRouter_RoutesMountedWithExpectedMethods(t *testing.T) {
 	}
 }
 
+func TestRouter_HandoffMountedOnlyWhenConfigured(t *testing.T) {
+	// Stub router is built without a HandoffHandler, so /handoff is absent.
+	r := newStubRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/handoff", bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/handoff without --handoff-measurements: got %d, want 404", w.Code)
+	}
+}
+
+func TestRouter_AttestKeyMounted(t *testing.T) {
+	// /attest-key is always mounted; an empty body is rejected as a bad request,
+	// proving the route exists (a missing route would 404, a wrong method 405).
+	r := newStubRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/attest-key", bytes.NewReader([]byte(`{}`)))
+	req.RemoteAddr = "10.0.0.1:1234"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("/attest-key not mounted: got %d", w.Code)
+	}
+}
+
 func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 	keyPEM, _ := earsigner.Generate()
 	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
@@ -87,6 +161,7 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 		ReadyFn:          func() bool { return true },
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      newTestRateLimiter(t),
 		MaxRequestSize:   16,
 	}
 	r := newRouter(deps)

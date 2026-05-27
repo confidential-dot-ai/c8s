@@ -85,9 +85,30 @@ type HandoffDeps struct {
 	AllowedMeasurements map[string]bool
 	Bundle              *BundleManager // optional; nil falls back to caCert-only bundle PEM
 
+	// Signer (bootstrapped via HandoffBootstrap) signs the response transcript.
+	Signer *ecdsa.PrivateKey
+
+	// EARSource yields the issuer EAR refreshed via /attest-key. Need not be
+	// ready at construction: the bootstrap runs asynchronously and HandleHandoff
+	// returns 503 until the first refresh populates it.
+	EARSource HandoffEARSource
+
 	// Snapshot returns the active CA material. ok=false means no bundle is
 	// loaded (handler returns 503).
-	Snapshot func() (caCert *x509.Certificate, caKey *ecdsa.PrivateKey, parentCert *x509.Certificate, ok bool)
+	Snapshot func() (snap CASnapshot, ok bool)
+}
+
+// CASnapshot is the active CA material a handoff response transfers: the CA
+// cert and its private key, plus the optional parent cert when the CA is an
+// intermediate.
+type CASnapshot struct {
+	Cert       *x509.Certificate
+	Key        *ecdsa.PrivateKey
+	ParentCert *x509.Certificate // nil for a self-signed root CA
+}
+
+func (s CASnapshot) hasCAKeyPair() bool {
+	return s.Cert != nil && s.Key != nil
 }
 
 // HandoffHandler wraps the active in-memory CA to attested replicas. The CA
@@ -100,18 +121,16 @@ type HandoffHandler struct {
 }
 
 // NewHandoffHandler validates the dependencies and returns a HandoffHandler.
-// signer (bootstrapped via HandoffBootstrap) signs the response transcript;
-// src yields the issuer EAR refreshed via /attest-key.
 //
-// Does NOT require src.Current() to succeed at construction: the bootstrap runs
-// asynchronously, and HandleHandoff returns 503 until the first refresh
-// populates the source.
-func NewHandoffHandler(deps HandoffDeps, signer *ecdsa.PrivateKey, src HandoffEARSource) (*HandoffHandler, error) {
-	if signer == nil {
-		return nil, fmt.Errorf("handoff signer key is required")
+// Does NOT require deps.EARSource.Current() to succeed at construction: the
+// bootstrap runs asynchronously, and HandleHandoff returns 503 until the first
+// refresh populates the source.
+func NewHandoffHandler(deps HandoffDeps) (*HandoffHandler, error) {
+	if deps.Signer == nil {
+		return nil, fmt.Errorf("HandoffDeps.Signer is required")
 	}
-	if src == nil {
-		return nil, fmt.Errorf("handoff EAR source is required")
+	if deps.EARSource == nil {
+		return nil, fmt.Errorf("HandoffDeps.EARSource is required")
 	}
 	if deps.KeyProvider == nil {
 		return nil, fmt.Errorf("HandoffDeps.KeyProvider is required")
@@ -125,7 +144,7 @@ func NewHandoffHandler(deps HandoffDeps, signer *ecdsa.PrivateKey, src HandoffEA
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	return &HandoffHandler{deps: deps, earSource: src, signer: signer}, nil
+	return &HandoffHandler{deps: deps, earSource: deps.EARSource, signer: deps.Signer}, nil
 }
 
 // IssuerEARSource exposes the source so callers can wire the expiry-metric
@@ -209,13 +228,13 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	caCert, caKey, parentCert, ok := hh.deps.Snapshot()
-	if !ok {
+	snap, ok := hh.deps.Snapshot()
+	if !ok || !snap.hasCAKeyPair() {
 		http.Error(w, "service unavailable: no certificates loaded", http.StatusServiceUnavailable)
 		return
 	}
 
-	resp, err := hh.wrap(req, caCert, caKey, parentCert, issuerEAR)
+	resp, err := hh.wrap(req, snap, issuerEAR)
 	if err != nil {
 		hh.deps.Logger.Error("handoff wrap failed", "error", err)
 		http.Error(w, "internal error: handoff wrap failed", http.StatusInternalServerError)
@@ -228,7 +247,11 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (hh *HandoffHandler) wrap(req HandoffRequest, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, parentCert *x509.Certificate, issuerEAR string) (HandoffResponse, error) {
+func (hh *HandoffHandler) wrap(req HandoffRequest, snap CASnapshot, issuerEAR string) (HandoffResponse, error) {
+	if !snap.hasCAKeyPair() {
+		return HandoffResponse{}, fmt.Errorf("handoff CA snapshot requires cert and key")
+	}
+
 	requesterPubRaw, err := decodeB64(req.PublicKey, "requester public key")
 	if err != nil {
 		return HandoffResponse{}, err
@@ -238,23 +261,23 @@ func (hh *HandoffHandler) wrap(req HandoffRequest, caCert *x509.Certificate, caK
 		return HandoffResponse{}, fmt.Errorf("parse requester public key: %w", err)
 	}
 
-	keyPEM, err := certutil.MarshalECKeyPEM(caKey)
+	keyPEM, err := certutil.MarshalECKeyPEM(snap.Key)
 	if err != nil {
 		return HandoffResponse{}, fmt.Errorf("marshal CA key: %w", err)
 	}
 
-	bundlePEM := certutil.EncodeCertPEM(caCert.Raw)
+	bundlePEM := certutil.EncodeCertPEM(snap.Cert.Raw)
 	if hh.deps.Bundle != nil {
-		bundlePEM = hh.deps.Bundle.BundlePEMForCurrent(caCert)
+		bundlePEM = hh.deps.Bundle.BundlePEMForCurrent(snap.Cert)
 	}
 
 	payload := handoffPayload{
 		CAKey:         string(keyPEM),
-		CACertificate: string(certutil.EncodeCertPEM(caCert.Raw)),
+		CACertificate: string(certutil.EncodeCertPEM(snap.Cert.Raw)),
 		CABundle:      string(bundlePEM),
 	}
-	if parentCert != nil {
-		payload.ParentCertificate = string(certutil.EncodeCertPEM(parentCert.Raw))
+	if snap.ParentCert != nil {
+		payload.ParentCertificate = string(certutil.EncodeCertPEM(snap.ParentCert.Raw))
 	}
 
 	plain, err := json.Marshal(payload)

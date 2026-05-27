@@ -24,6 +24,7 @@ import (
 	"github.com/lunal-dev/c8s/pkg/certutil"
 	"github.com/lunal-dev/c8s/pkg/earsigner"
 	"github.com/lunal-dev/c8s/pkg/ratls"
+	"golang.org/x/time/rate"
 )
 
 func run(cfg config) error {
@@ -43,6 +44,15 @@ func run(cfg config) error {
 		return err
 	}
 	cfg.ratlsPlatform = normalizeRATLSPlatform(cfg.ratlsPlatform)
+
+	// EAR JWT validation reads the clock-skew leeway from this package-level
+	// var; set it before any /sign-csr request can be served.
+	issuer.JWTClockSkew = time.Duration(cfg.jwtClockSkew) * time.Second
+
+	rateLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
+	if err != nil {
+		return fmt.Errorf("init rate limiter: %w", err)
+	}
 
 	// CDS generates its mesh CA in process; the private key never touches a
 	// Kubernetes Secret. Rotation and public-bundle write-back land with the
@@ -102,17 +112,41 @@ func run(cfg config) error {
 	}
 	defer whitelistStore.Close()
 
-	// /whitelist mutations are out of scope for PR #2a (resource-map-driven
-	// EAR authorizer lands with the measurement pinning in PR #2c). For now,
-	// reject all writes so the endpoint stays present but useless.
-	rejectAllWrites := func(*http.Request, []byte) error {
-		return fmt.Errorf("whitelist mutations require an EAR authorizer (see cds #2c)")
+	// /whitelist mutations require a bearer EAR whose launch measurement is in
+	// --whitelist-write-measurements. Empty allowlist rejects all writes.
+	whitelistWriteMeasurements := parseMeasurementAllowlist(cfg.whitelistWriteMeasurements)
+	var writeAuthorizer whitelist.WriteAuthorizer = func(*http.Request, []byte) error {
+		return fmt.Errorf("whitelist writes are disabled: set --whitelist-write-measurements")
+	}
+	if len(whitelistWriteMeasurements) > 0 {
+		writeAuthorizer = whitelist.EARWriteAuthorizer{
+			PublicKey:           earIssuer.PublicKey,
+			ExpectedIssuer:      cfg.earIssuerName,
+			AllowedMeasurements: whitelistWriteMeasurements,
+			ClockSkew:           time.Duration(cfg.jwtClockSkew) * time.Second,
+		}.Authorize
+		slog.Info("whitelist write authorization enabled", "count", len(whitelistWriteMeasurements))
 	}
 
 	policy := issuer.CSRPolicy{
 		DNSSANPattern:    dnsPattern,
 		AllowedCNPattern: cnPattern,
 	}
+
+	// /attest-key issues a TEE-attested EAR for a caller-generated key (no CSR,
+	// no certificate). Shares the challenge store, attestation service, and EAR
+	// issuer with /attest. CertIssuer is unused by HandleAttestKey.
+	attestKeyHandler := attestation.Handler{
+		Challenges:        &challengeStore,
+		AttestationClient: asClient,
+		EarIssuer:         earIssuer,
+	}
+
+	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, rotator, earIssuer, asClient)
+	if err != nil {
+		return err
+	}
+
 	deps := dependencies{
 		AttestHandler: AttestHandler{
 			Challenges:        &challengeStore,
@@ -138,17 +172,21 @@ func run(cfg config) error {
 		},
 		WhitelistHandler: whitelist.Handler{
 			Store:           &whitelistStore,
-			WriteAuthorizer: rejectAllWrites,
+			WriteAuthorizer: writeAuthorizer,
 		},
-		ReadyFn:        readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:      earIssuer,
-		JWKSFunc:       rotator.JWKSetJSON,
-		CACertPEM:      caChainPEM,
-		MaxRequestSize: cfg.maxRequestSize,
+		AttestKeyHandler: attestKeyHandler,
+		HandoffHandler:   handoffHandler,
+		ReadyFn:          readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
+		EarIssuer:        earIssuer,
+		JWKSFunc:         rotator.JWKSetJSON,
+		CACertPEM:        caChainPEM,
+		RateLimiter:      rateLimiter,
+		MaxRequestSize:   cfg.maxRequestSize,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)
 	}
+	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 
 	router := newRouter(deps)
 
@@ -194,6 +232,47 @@ func run(cfg config) error {
 		return err
 	}
 	return nil
+}
+
+// buildHandoffHandler wires the /handoff endpoint that hands the in-memory mesh
+// CA to an attested peer replica. It is disabled (returns nil) unless
+// --handoff-measurements pins which peer launch digests may pull the CA.
+//
+// Unlike legacy cert-issuer, cds self-provisions its handoff signer EAR in
+// process via LocalHandoffBootstrap: cds is its own EAR issuer, so the
+// requester EAR is validated against cds's own rotator/issuer name, and the
+// signer EAR is minted by cds's earIssuer — no external Assam to dial.
+func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
+	handoffMeasurements := parseMeasurementAllowlist(cfg.handoffMeasurements)
+	if len(handoffMeasurements) == 0 {
+		slog.Info("/handoff disabled: set --handoff-measurements to enable mesh CA handoff to peer replicas")
+		return nil, nil
+	}
+
+	boot, err := issuer.NewLocalHandoffBootstrap(asClient, earIssuer)
+	if err != nil {
+		return nil, fmt.Errorf("prepare handoff bootstrap: %w", err)
+	}
+
+	hh, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
+		Logger:              slog.Default(),
+		KeyProvider:         keyProvider,
+		ExpectedIssuer:      cfg.earIssuerName,
+		AllowedMeasurements: handoffMeasurements,
+		Signer:              boot.Signer(),
+		EARSource:           boot.EARSource(),
+		Snapshot: func() (issuer.CASnapshot, bool) {
+			return issuer.CASnapshot{Cert: mesh.Cert, Key: mesh.Key}, true
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go boot.RunRefresh(ctx, slog.Default())
+	go issuer.RunHandoffEARExpiryUpdater(ctx, hh.IssuerEARSource(), time.Minute, slog.Default())
+	slog.Info("attested CA handoff enabled (bootstrap runs in background)", "measurements", len(handoffMeasurements))
+	return hh, nil
 }
 
 func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {
