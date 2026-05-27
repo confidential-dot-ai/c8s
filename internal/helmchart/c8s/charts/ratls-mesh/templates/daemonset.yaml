@@ -1,7 +1,15 @@
 {{- $attestationServiceURL := printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace -}}
-{{- $assamURL := printf "https://%s-assam.%s.svc:8080" .Release.Name .Release.Namespace -}}
-{{- $certIssuerURL := printf "https://%s-cert-issuer.%s.svc:8090" .Release.Name .Release.Namespace -}}
-{{- $caURL := printf "%s/ca" $certIssuerURL -}}
+{{/*
+  cds mode (single --cds-url to the unified CDS, which serves /attest and /ca)
+  only applies once global.cdsEnabled is set. Until then the CDS Service does
+  not exist, so force self-signed — the legacy split trust root has no single
+  URL serving both attest and CA, and the old two-flag form is gone.
+*/}}
+{{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
+{{- $certMode := .Values.certMode -}}
+{{- if not .Values.global.cdsEnabled -}}
+{{- $certMode = "self-signed" -}}
+{{- end -}}
 {{- $excludeSourceNamespaces := append .Values.iptablesSync.excludeSourceNamespaces .Release.Namespace | uniq | join "," -}}
 {{- /*
 The iptables-cleanup preStop sleep fires last in the native-sidecar
@@ -236,19 +244,15 @@ spec:
             - --session-cache-size
             - {{ .Values.sessionCacheSize | quote }}
             {{- end }}
-            {{- if ne .Values.certMode "self-signed" }}
+            {{- if ne $certMode "self-signed" }}
             - --cert-mode
-            - {{ .Values.certMode | quote }}
-            - --assam-url
-            - {{ $assamURL | quote }}
-            - --cert-issuer-url
-            - {{ $certIssuerURL | quote }}
-            - --ca-url
-            - {{ $caURL | quote }}
+            - {{ $certMode | quote }}
+            - --cds-url
+            - {{ $cdsURL | quote }}
             - --ca-poll-interval
-            - {{ .Values.assam.caPollInterval | quote }}
-            {{- with .Values.assam.measurements }}
-            - --assam-measurements
+            - {{ .Values.cds.caPollInterval | quote }}
+            {{- with .Values.global.cdsMeasurements }}
+            - --cds-measurements
             - {{ join "," . | quote }}
             {{- end }}
             {{- end }}

@@ -1,4 +1,4 @@
-// mock-assam is a fake assam KBS for integration testing.
+// mock-cds is a fake CDS attestation+signing service for integration testing.
 // It implements /authenticate and /attest endpoints but skips real TEE verification.
 // On /attest it signs the provided CSR with an ephemeral CA, returning a valid certificate.
 // Use only in test environments.
@@ -38,7 +38,7 @@ func init() {
 
 	template := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "mock-assam-ca"},
+		Subject:               pkix.Name{CommonName: "mock-cds-ca"},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -114,7 +114,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	slog.Info("mock assam starting", "port", port)
+	slog.Info("mock cds starting", "port", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)

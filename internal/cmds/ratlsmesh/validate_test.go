@@ -181,38 +181,38 @@ func TestRATLSTEEType(t *testing.T) {
 	}
 }
 
-func TestEffectiveAssamCAURL(t *testing.T) {
+func TestEffectiveCDSCAURL(t *testing.T) {
 	tests := []struct {
-		name          string
-		certMode      string
-		certIssuerURL string
-		caURL         string
-		want          string
+		name     string
+		certMode string
+		cdsURL   string
+		caURL    string
+		want     string
 	}{
 		{
-			name:          "assam mode defaults to cert issuer CA endpoint",
-			certMode:      "assam",
-			certIssuerURL: "http://cert-issuer:8090",
-			want:          "http://cert-issuer:8090/ca",
+			name:     "cds mode defaults to cds /ca endpoint",
+			certMode: "cds",
+			cdsURL:   "https://cds:8443",
+			want:     "https://cds:8443/ca",
 		},
 		{
-			name:          "assam mode trims cert issuer URL slash",
-			certMode:      "assam",
-			certIssuerURL: "http://cert-issuer:8090/",
-			want:          "http://cert-issuer:8090/ca",
+			name:     "cds mode trims cds URL slash",
+			certMode: "cds",
+			cdsURL:   "https://cds:8443/",
+			want:     "https://cds:8443/ca",
 		},
 		{
-			name:          "explicit CA URL wins",
-			certMode:      "assam",
-			certIssuerURL: "http://cert-issuer:8090",
-			caURL:         "http://ca.example/mesh.pem",
-			want:          "http://ca.example/mesh.pem",
+			name:     "explicit CA URL wins",
+			certMode: "cds",
+			cdsURL:   "https://cds:8443",
+			caURL:    "http://ca.example/mesh.pem",
+			want:     "http://ca.example/mesh.pem",
 		},
 		{
-			name:          "self signed keeps empty default",
-			certMode:      "self-signed",
-			certIssuerURL: "http://cert-issuer:8090",
-			want:          "",
+			name:     "self signed keeps empty default",
+			certMode: "self-signed",
+			cdsURL:   "https://cds:8443",
+			want:     "",
 		},
 		{
 			name:     "self signed preserves explicit CA URL",
@@ -224,9 +224,9 @@ func TestEffectiveAssamCAURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := effectiveAssamCAURL(tt.certMode, tt.certIssuerURL, tt.caURL)
+			got := effectiveCDSCAURL(tt.certMode, tt.cdsURL, tt.caURL)
 			if got != tt.want {
-				t.Fatalf("effectiveAssamCAURL() = %q, want %q", got, tt.want)
+				t.Fatalf("effectiveCDSCAURL() = %q, want %q", got, tt.want)
 			}
 		})
 	}

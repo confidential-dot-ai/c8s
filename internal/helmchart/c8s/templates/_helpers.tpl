@@ -154,6 +154,24 @@ https://{{ include "c8s.assamName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.
 https://{{ include "c8s.certIssuerName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.certIssuer.port }}
 {{- end -}}
 
+{{- define "c8s.cdsURL" -}}
+https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
+{{- end -}}
+
+{{/*
+  c8s.trustRootURL is the URL clients (get-cert, ratls-mesh) point their single
+  --cds-url at. It resolves to the unified cds when enabled, otherwise the legacy
+  assam Service — so the same client flag works in both chart modes during the
+  migration. The legacy branch is dropped when assam.yaml is removed.
+*/}}
+{{- define "c8s.trustRootURL" -}}
+{{- if .Values.global.cdsEnabled -}}
+{{ include "c8s.cdsURL" . }}
+{{- else -}}
+{{ include "c8s.assamURL" . }}
+{{- end -}}
+{{- end -}}
+
 {{- define "c8s.certIssuerJWKSURL" -}}
 https://{{ include "c8s.assamName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.assam.port }}/.well-known/jwks.json
 {{- end -}}

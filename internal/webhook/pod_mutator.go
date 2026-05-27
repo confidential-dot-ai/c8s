@@ -90,8 +90,8 @@ type Config struct {
 	// injected get-cert containers.
 	GetCertImage string
 
-	// AssamURL points at the assam Service in-cluster.
-	AssamURL string
+	// CDSURL points at the CDS Service in-cluster.
+	CDSURL string
 
 	// AttestationServiceURL points at the node-local attestation-service.
 	AttestationServiceURL string
@@ -531,12 +531,12 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	pod.Annotations[AnnotationInjected] = "true"
 }
 
-// initCertContainer fetches the workload's leaf cert from assam over HTTP
+// initCertContainer fetches the workload's leaf cert from CDS over HTTP
 // using the existing get-cert subcommand.
 func initCertContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
-		"--assam-url=" + cfg.AssamURL,
+		"--cds-url=" + cfg.CDSURL,
 		"--attestation-service-url=" + cfg.AttestationServiceURL,
 		"--san=" + inj.WorkloadID,
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
@@ -566,7 +566,7 @@ func renewCertContainer(inj *injection, cfg Config) corev1.Container {
 	always := corev1.ContainerRestartPolicyAlways
 	args := []string{
 		"get-cert",
-		"--assam-url=" + cfg.AssamURL,
+		"--cds-url=" + cfg.CDSURL,
 		"--attestation-service-url=" + cfg.AttestationServiceURL,
 		"--san=" + inj.WorkloadID,
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),

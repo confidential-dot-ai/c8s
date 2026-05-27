@@ -21,26 +21,26 @@ import (
 	"github.com/lunal-dev/c8s/pkg/attestclient"
 )
 
-func TestAssamHTTPClientUsesDefaultTransportForPlainHTTP(t *testing.T) {
-	client, err := assamHTTPClient(config{
-		AssamURL:              "http://assam:8080",
+func TestCDSHTTPClientUsesDefaultTransportForPlainHTTP(t *testing.T) {
+	client, err := cdsHTTPClient(config{
+		CDSURL:                "http://cds:8443",
 		AttestationServiceURL: "http://attestation-service:8400",
 	})
 	if err != nil {
-		t.Fatalf("assamHTTPClient: %v", err)
+		t.Fatalf("cdsHTTPClient: %v", err)
 	}
 	if client != http.DefaultClient {
 		t.Fatalf("client = %#v, want http.DefaultClient", client)
 	}
 }
 
-func TestAssamHTTPClientUsesRATLSForHTTPS(t *testing.T) {
-	client, err := assamHTTPClient(config{
-		AssamURL:              "https://assam:8080",
+func TestCDSHTTPClientUsesRATLSForHTTPS(t *testing.T) {
+	client, err := cdsHTTPClient(config{
+		CDSURL:                "https://cds:8443",
 		AttestationServiceURL: "http://attestation-service:8400",
 	})
 	if err != nil {
-		t.Fatalf("assamHTTPClient: %v", err)
+		t.Fatalf("cdsHTTPClient: %v", err)
 	}
 	if client == http.DefaultClient {
 		t.Fatal("client = http.DefaultClient, want RA-TLS client")
@@ -144,7 +144,7 @@ func TestBuildDiscoveryDocumentIncludesCertificateAndEvidence(t *testing.T) {
 
 func TestValidateConfigRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 	err := validateConfig(config{
-		AssamURL:               "http://assam:8080",
+		CDSURL:                 "http://cds:8443",
 		AttestationServiceURL:  "http://attestation-service:8400",
 		SAN:                    "confidential-gke.lunal.dev",
 		DiscoveryOutPath:       "/tmp/discovery.json",
@@ -160,7 +160,7 @@ func TestValidateConfigRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 
 func TestValidateConfigRejectsInvalidReloadWatchInterval(t *testing.T) {
 	err := validateConfig(config{
-		AssamURL:              "http://assam:8080",
+		CDSURL:                "http://cds:8443",
 		AttestationServiceURL: "http://attestation-service:8400",
 		SAN:                   "confidential-gke.lunal.dev",
 		ReloadWatchPaths:      []string{"/public-tls/tls.crt"},
@@ -175,7 +175,7 @@ func TestValidateConfigRejectsInvalidReloadWatchInterval(t *testing.T) {
 
 func TestValidateConfigRejectsReloadWatchWithoutRenewInterval(t *testing.T) {
 	err := validateConfig(config{
-		AssamURL:              "http://assam:8080",
+		CDSURL:                "http://cds:8443",
 		AttestationServiceURL: "http://attestation-service:8400",
 		SAN:                   "confidential-gke.lunal.dev",
 		ReloadWatchPaths:      []string{"/public-tls/tls.crt"},
@@ -191,7 +191,7 @@ func TestValidateConfigRejectsReloadWatchWithoutRenewInterval(t *testing.T) {
 
 func TestValidateConfigRejectsContinueOnInitialErrorWithoutRenewInterval(t *testing.T) {
 	err := validateConfig(config{
-		AssamURL:               "http://assam:8080",
+		CDSURL:                 "http://cds:8443",
 		AttestationServiceURL:  "http://attestation-service:8400",
 		SAN:                    "confidential-gke.lunal.dev",
 		ContinueOnInitialError: true,

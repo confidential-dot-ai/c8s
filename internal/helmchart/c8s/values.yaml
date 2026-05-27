@@ -1,3 +1,12 @@
+## Single source for the unified CDS, under `global` so the vendored ratls-mesh
+## subchart reads the same values the parent does (no per-subchart mirror to
+## drift). cdsEnabled toggles cds vs the legacy assam/cert-issuer trust root;
+## cdsMeasurements is the SHA-384 hex launch-digest allowlist clients pin CDS's
+## RA-TLS cert against (empty = accept any, UNSAFE outside dev).
+global:
+  cdsEnabled: false
+  cdsMeasurements: []
+
 ## Operator container image. The same image runs every c8s mode that
 ## doesn't need extra OS bins: controller manager and injected get-cert.
 ## `tag` and `digest` are consumer-supplied — the chart fails to render if
@@ -186,15 +195,14 @@ certIssuer:
 
 ## Unified Confidential Data Service (cds): the in-process merge of Assam and
 ## cert-issuer into one binary, one Service, one ServiceAccount, and one
-## measurement allowlist (see lunal-dev/c8s#76). Off by default while the
-## migration lands; enabling it does not disable the legacy assam/certIssuer
-## blocks — run one or the other, not both (see validations.yaml).
+## measurement allowlist (see lunal-dev/c8s#76). Toggled by global.cdsEnabled
+## (off by default); the legacy assam/cert-issuer templates render in the other
+## state — run one trust root or the other, not both.
 ##
 ## The mesh CA key is generated inside the cds process and stays in memory
 ## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
 ## and JWKS are in-process too, so there is no internal RA-TLS hop to Assam.
 cds:
-  enabled: false
   image:
     repository: ghcr.io/lunal-dev/cds
     tag: ""
@@ -402,16 +410,12 @@ ratls-mesh:
     digest: ""
     pullPolicy: IfNotPresent
   imagePullSecrets: []
-  certMode: assam
+  certMode: cds
+  tpm:
+    enabled: false
   networkPolicy:
     enabled: false
     monitoringNamespace: monitoring
-  ## Mirror the parent `assam.measurements` here so the subchart's
-  ## --assam-measurements flag is populated. Helm does not pass parent values
-  ## into subchart values automatically; operators must keep these two in
-  ## sync (chart_test fails if they diverge).
-  assam:
-    measurements: []
 
 nri-image-policy:
   enabled: true

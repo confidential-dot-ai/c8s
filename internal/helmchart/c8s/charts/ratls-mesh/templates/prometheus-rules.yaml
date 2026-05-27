@@ -56,7 +56,7 @@ spec:
           annotations:
             summary: "RA-TLS mesh cert mode mismatch on {{`{{ $labels.instance }}`}}"
             description: >-
-              KBS certificate upgrade may be stuck. Check KBS and cert-issuer.
+              CDS certificate upgrade may be stuck. Check CDS.
 
         - alert: RATLSMeshAttestationFailures
           expr: rate(ratls_mesh_attestation_failures_total[5m]) > 0
@@ -76,7 +76,7 @@ spec:
           annotations:
             summary: "RA-TLS mesh cert pipeline unhealthy on {{`{{ $labels.instance }}`}}"
             description: >-
-              cert-issuer unreachable for over 10 minutes. Certificate renewal will fail.
+              CDS unreachable for over 10 minutes. Certificate renewal will fail.
 
         - alert: RATLSMeshAcceptLoopDegraded
           expr: ratls_mesh_accept_consecutive_errors > 5

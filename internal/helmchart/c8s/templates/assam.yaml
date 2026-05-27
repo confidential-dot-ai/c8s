@@ -1,10 +1,10 @@
 {{/*
   Legacy split trust root. The unified cds (lunal-dev/c8s#76) replaces both
-  assam and cert-issuer with one binary; when cds.enabled is true this template
-  is silent so the two never coexist (mutually exclusive trust roots, shared
-  NodePort). The legacy-removal PR deletes this file and flips cds on.
+  assam and cert-issuer with one binary; when global.cdsEnabled is true this
+  template is silent so the two never coexist (mutually exclusive trust roots,
+  shared NodePort). The legacy-removal PR deletes this file and flips cds on.
 */}}
-{{- if not .Values.cds.enabled }}
+{{- if not .Values.global.cdsEnabled }}
 {{- $certIssuerURL := include "c8s.certIssuerURL" . -}}
 {{- if .Values.assam.resourceMap }}
 apiVersion: v1

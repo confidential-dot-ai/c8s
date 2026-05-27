@@ -179,7 +179,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
 		"--get-cert-image=ghcr.io/lunal-dev/c8s-operator:dev",
-		"--assam-url=https://c8s-assam.c8s-system.svc:8080",
+		"--cds-url=https://c8s-assam.c8s-system.svc:8080",
 		"--get-cert-renew-interval=6h",
 	} {
 		if !slices.Contains(args, want) {
@@ -815,7 +815,9 @@ func TestChartManagedAssamSatisfiesWebhookAssamURL(t *testing.T) {
 		t.Fatalf("assam container image = %q, want ghcr.io/lunal-dev/assam:dev", assam.Image)
 	}
 	operatorArgs := renderedOperatorArgs(t, out)
-	assertContainerHasArg(t, "operator", operatorArgs, "--assam-url=https://c8s-assam.c8s-system.svc:8080")
+	// In the legacy default (cds disabled), the operator points injected
+	// get-cert at the assam Service via the single --cds-url flag.
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-url=https://c8s-assam.c8s-system.svc:8080")
 	assertContainerHasArg(t, "assam", assam.Args, "--cert-issuer-url=https://c8s-cert-issuer.c8s-system.svc:8090")
 	assertContainerHasArg(t, "assam", assam.Args, "--log-level=info")
 	assertContainerNoArgPrefix(t, "assam", assam.Args, "--cert-issuer-url=http://")
@@ -880,11 +882,15 @@ func TestChartManagedAssamAndCertIssuerWireTogether(t *testing.T) {
 	assertContainerHasArg(t, "assam", assam.Args, "--cert-issuer-url=https://c8s-cert-issuer.c8s-system.svc:8090")
 	assertContainerNoArgPrefix(t, "assam", assam.Args, "--cert-issuer-url=http://")
 	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
-	if got, ok := containerArgValue(meshArgs, "--cert-issuer-url"); !ok || got != "https://c8s-cert-issuer.c8s-system.svc:8090" {
-		t.Fatalf("ratls-mesh --cert-issuer-url = (%q, %v), want HTTPS cert-issuer Service\nargs: %v", got, ok, meshArgs)
+	// In the legacy default (global.cdsEnabled=false) the unified CDS Service
+	// does not exist and the single --cds-url cannot serve both attest and CA,
+	// so ratls-mesh stays self-signed: no --cert-mode cds, no --cds-url, no
+	// legacy --cert-issuer-url/--ca-url either.
+	if got, ok := containerArgValue(meshArgs, "--cert-mode"); ok && got != "self-signed" {
+		t.Fatalf("ratls-mesh --cert-mode = %q in legacy default, want self-signed (or absent)\nargs: %v", got, meshArgs)
 	}
-	if got, ok := containerArgValue(meshArgs, "--ca-url"); !ok || got != "https://c8s-cert-issuer.c8s-system.svc:8090/ca" {
-		t.Fatalf("ratls-mesh --ca-url = (%q, %v), want HTTPS cert-issuer CA endpoint\nargs: %v", got, ok, meshArgs)
+	for _, prefix := range []string{"--cds-url", "--cert-issuer-url", "--ca-url"} {
+		assertContainerNoArgPrefix(t, "ratls-mesh", meshArgs, prefix)
 	}
 	for _, prefix := range []string{"--ca-key=", "--ca-cert="} {
 		assertContainerNoArgPrefix(t, "cert-issuer", container.Args, prefix)
@@ -943,47 +949,43 @@ func TestChartAssamServesRATLS(t *testing.T) {
 	}
 }
 
-// TestChartCallersDialAssamOverHTTPS proves the operator and the ratls-mesh
-// daemonset dial Assam over https://, not http://. A regression here would
-// silently turn off the H1 defence.
-func TestChartCallersDialAssamOverHTTPS(t *testing.T) {
+// TestChartOperatorDialsTrustRootOverHTTPS proves the operator injects get-cert
+// with --cds-url over https://, not http://. In the legacy default it resolves
+// to the assam Service; a regression to http:// would silently turn off the H1
+// defence. (ratls-mesh stays self-signed in the legacy default — see
+// TestChartManagedAssamAndCertIssuerWireTogether.)
+func TestChartOperatorDialsTrustRootOverHTTPS(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	const wantAssamURL = "https://c8s-assam.c8s-system.svc:8080"
+	const wantURL = "https://c8s-assam.c8s-system.svc:8080"
 
 	operatorArgs := renderedOperatorArgs(t, out)
-	assertContainerHasArg(t, "operator", operatorArgs, "--assam-url="+wantAssamURL)
-	assertContainerNoArgPrefix(t, "operator", operatorArgs, "--assam-url=http://")
-
-	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
-	if i := slices.Index(meshArgs, "--assam-url"); i < 0 || i+1 >= len(meshArgs) {
-		t.Fatalf("ratls-mesh container missing --assam-url <value>\nargs: %v", meshArgs)
-	} else if got := meshArgs[i+1]; got != wantAssamURL {
-		t.Fatalf("ratls-mesh --assam-url = %q, want %q", got, wantAssamURL)
-	}
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-url="+wantURL)
+	assertContainerNoArgPrefix(t, "operator", operatorArgs, "--cds-url=http://")
 }
 
-// TestChartRatlsMeshAssamMeasurementsFlagsThrough confirms a measurement set
-// in `ratls-mesh.assam.measurements` reaches the daemonset's
-// --assam-measurements flag — without this the RA-TLS handshake accepts any
-// measurement and the H1 defence collapses to "trust the cluster network".
-func TestChartRatlsMeshAssamMeasurementsFlagsThrough(t *testing.T) {
+// TestChartRatlsMeshCDSMeasurementsFlagsThrough confirms the single
+// global.cdsMeasurements reaches the daemonset's --cds-measurements flag —
+// without this the RA-TLS handshake accepts any measurement and the H1 defence
+// collapses to "trust the cluster network". The subchart reads the global
+// directly, so there is no parent/subchart mirror to drift.
+func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
-	out, err := helmTemplate(t,
-		"--set", "ratls-mesh.assam.measurements[0]="+measurement,
+	out, err := helmTemplateCDS(t,
+		"--set", "global.cdsMeasurements[0]="+measurement,
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	args := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
-	i := slices.Index(args, "--assam-measurements")
+	i := slices.Index(args, "--cds-measurements")
 	if i < 0 || i+1 >= len(args) {
-		t.Fatalf("ratls-mesh container missing --assam-measurements <value>\nargs: %v", args)
+		t.Fatalf("ratls-mesh container missing --cds-measurements <value>\nargs: %v", args)
 	}
 	if got := args[i+1]; got != measurement {
-		t.Fatalf("--assam-measurements = %q, want %q", got, measurement)
+		t.Fatalf("--cds-measurements = %q, want %q", got, measurement)
 	}
 }
 
@@ -1234,7 +1236,7 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	}
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
-		"--assam-url=https://c8s-assam.c8s-system.svc:8080",
+		"--cds-url=https://c8s-assam.c8s-system.svc:8080",
 		"--cert-fs-group=4242",
 		"--cert-key-mode=0440",
 		"--get-cert-renew-interval=3h",
@@ -2538,13 +2540,14 @@ func renderedOperatorArgs(t *testing.T, manifest string) []string {
 	return nil
 }
 
-// helmTemplateCDS renders the chart with the unified cds trust root enabled
-// (cds.enabled=true), which by the either/or design silences the legacy
-// assam + cert-issuer templates. Extra args are appended.
+// helmTemplateCDS renders the chart with the unified cds trust root enabled via
+// the single global.cdsEnabled switch, which silences the legacy assam +
+// cert-issuer templates (parent) and points the ratls-mesh subchart's --cds-url
+// at the cds Service. Extra args are appended.
 func helmTemplateCDS(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	return helmTemplate(t, append([]string{
-		"--set", "cds.enabled=true",
+		"--set", "global.cdsEnabled=true",
 		"--set", "cds.image.tag=dev",
 	}, args...)...)
 }
@@ -2595,6 +2598,30 @@ func TestChartCDSEnabledReplacesLegacyStack(t *testing.T) {
 	container := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	if container.Image != "ghcr.io/lunal-dev/cds:dev" {
 		t.Fatalf("cds image = %q, want ghcr.io/lunal-dev/cds:dev", container.Image)
+	}
+}
+
+// TestChartCDSEnabledPointsClientsAtCDS proves the migration's payoff: with the
+// unified cds enabled, the operator-injected get-cert and the ratls-mesh
+// daemonset both resolve their single --cds-url to the cds Service (not the
+// legacy assam Service). The ratls-mesh subchart can't read cds.enabled, so it
+// keys off the global.cdsEnabled mirror — this locks that wiring.
+func TestChartCDSEnabledPointsClientsAtCDS(t *testing.T) {
+	out, err := helmTemplateCDS(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	const wantURL = "https://c8s-cds.c8s-system.svc:8443"
+
+	operatorArgs := renderedOperatorArgs(t, out)
+	assertContainerHasArg(t, "operator", operatorArgs, "--cds-url="+wantURL)
+
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	if got, ok := containerArgValue(meshArgs, "--cds-url"); !ok || got != wantURL {
+		t.Fatalf("ratls-mesh --cds-url = (%q, %v), want %q\nargs: %v", got, ok, wantURL, meshArgs)
+	}
+	if got, ok := containerArgValue(meshArgs, "--cert-mode"); !ok || got != "cds" {
+		t.Fatalf("ratls-mesh --cert-mode = (%q, %v), want cds\nargs: %v", got, ok, meshArgs)
 	}
 }
 

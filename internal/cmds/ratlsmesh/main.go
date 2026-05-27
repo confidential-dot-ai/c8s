@@ -79,17 +79,16 @@ type proxyConfig struct {
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
-	assamURL                  string
-	certIssuerURL             string
+	cdsURL                    string
 	caCertPath                string
 	caURL                     string
 	caPollInterval            time.Duration
-	assamMeasurements         string
+	cdsMeasurements           string
 	sessionCacheSize          int
 	accessLog                 bool
 	certPipelineProbeURL      string
-	assamRetryBackoff         time.Duration
-	assamRetryMaxBackoff      time.Duration
+	cdsRetryBackoff           time.Duration
+	cdsRetryMaxBackoff        time.Duration
 	maxDestHeaderSize         int
 	pipeBufferSize            int
 	acceptErrThreshold        int64
@@ -98,7 +97,7 @@ type proxyConfig struct {
 	metricsUpdateInterval     time.Duration
 	localCIDRBootTimeout      time.Duration
 	iptablesMetricsFile       string
-	assamOpTimeout            time.Duration
+	cdsOpTimeout              time.Duration
 	certPipelineProbeTimeout  time.Duration
 	certPipelineProbeInterval time.Duration
 }
@@ -122,18 +121,17 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
-	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), assam (boots self-signed, upgrades to assam-issued in background)")
-	fs.StringVar(&c.assamURL, "assam-url", "", "assam service URL for attestation (required for assam mode)")
-	fs.StringVar(&c.certIssuerURL, "cert-issuer-url", "", "cert-issuer URL for CA bundle retrieval (required for assam mode)")
+	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
+	fs.StringVar(&c.cdsURL, "cds-url", "", "CDS service URL for attestation and CA bundle retrieval (required for cds mode)")
 	fs.StringVar(&c.caCertPath, "ca-cert", "", "path to CA certificate file for peer verification")
-	fs.StringVar(&c.caURL, "ca-url", "", "cert-issuer /ca URL for periodic CA bundle refresh (assam mode); empty derives from --cert-issuer-url")
-	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll cert-issuer /ca for CA bundle updates")
-	fs.StringVar(&c.assamMeasurements, "assam-measurements", "", "comma-separated SHA-384 hex launch measurements that Assam's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
+	fs.StringVar(&c.caURL, "ca-url", "", "CDS /ca URL for periodic CA bundle refresh (cds mode); empty derives from --cds-url")
+	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
+	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
 	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "cert-issuer /ready URL for pipeline health probing (empty = disabled)")
-	fs.DurationVar(&c.assamRetryBackoff, "assam-retry-backoff", 2*time.Second, "initial backoff duration for assam certificate upgrade retries")
-	fs.DurationVar(&c.assamRetryMaxBackoff, "assam-retry-max-backoff", 60*time.Second, "maximum backoff duration for assam certificate upgrade retries")
+	fs.DurationVar(&c.cdsRetryBackoff, "cds-retry-backoff", 2*time.Second, "initial backoff duration for CDS certificate upgrade retries")
+	fs.DurationVar(&c.cdsRetryMaxBackoff, "cds-retry-max-backoff", 60*time.Second, "maximum backoff duration for CDS certificate upgrade retries")
 	fs.IntVar(&c.maxDestHeaderSize, "max-dest-header-size", 256, "maximum destination header size in bytes")
 	fs.IntVar(&c.pipeBufferSize, "pipe-buffer-size", 32768, "buffer size for TCP pipe forwarding")
 	fs.Int64Var(&c.acceptErrThreshold, "accept-error-threshold", 10, "consecutive accept errors before marking unhealthy")
@@ -142,7 +140,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.DurationVar(&c.metricsUpdateInterval, "metrics-update-interval", 10*time.Second, "interval for resolver cache and cert expiry metric updates")
 	fs.DurationVar(&c.localCIDRBootTimeout, "local-cidr-boot-timeout", time.Second, "synchronous retry budget at startup for host pod-network CIDR discovery; past this we fall through to the async refresh loop and ValidateLocalDest uses Kubernetes pod HostIP ownership until discovery recovers")
 	fs.StringVar(&c.iptablesMetricsFile, "iptables-metrics-file", defaultIptablesMetricsFile, "shared file where iptables-sync publishes counters (empty disables)")
-	fs.DurationVar(&c.assamOpTimeout, "assam-op-timeout", 30*time.Second, "per-operation timeout for assam certificate upgrade and CA bundle refresh")
+	fs.DurationVar(&c.cdsOpTimeout, "cds-op-timeout", 30*time.Second, "per-operation timeout for CDS certificate upgrade and CA bundle refresh")
 	fs.DurationVar(&c.certPipelineProbeTimeout, "cert-pipeline-probe-timeout", 5*time.Second, "HTTP client timeout for cert pipeline health probe requests")
 	fs.DurationVar(&c.certPipelineProbeInterval, "cert-pipeline-probe-interval", 60*time.Second, "interval between cert pipeline health probe requests")
 }
@@ -221,23 +219,23 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		logger.Info("CA certificate(s) loaded for dual-mode verification", "count", len(caCerts), "subjects", names)
 	}
 
-	if c.certMode != "self-signed" && c.certMode != "assam" {
-		return fmt.Errorf("invalid --cert-mode %q (valid: self-signed, assam)", c.certMode)
+	if c.certMode != "self-signed" && c.certMode != "cds" {
+		return fmt.Errorf("invalid --cert-mode %q (valid: self-signed, cds)", c.certMode)
 	}
-	if c.certMode == "assam" && (c.assamURL == "" || c.attestationServiceURL == "" || c.certIssuerURL == "") {
-		return fmt.Errorf("--assam-url, --attestation-service-url, and --cert-issuer-url are required for --cert-mode assam")
+	if c.certMode == "cds" && (c.cdsURL == "" || c.attestationServiceURL == "") {
+		return fmt.Errorf("--cds-url and --attestation-service-url are required for --cert-mode cds")
 	}
 	teeType, err := ratlsTEEType(c.platform)
 	if err != nil {
 		return err
 	}
-	effectiveCAURL := effectiveAssamCAURL(c.certMode, c.certIssuerURL, c.caURL)
-	assamMeasurements, err := parseHexMeasurements(c.assamMeasurements)
+	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL, c.caURL)
+	cdsMeasurements, err := parseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
-		return fmt.Errorf("--assam-measurements: %w", err)
+		return fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if c.certMode == "assam" && len(assamMeasurements) == 0 {
-		logger.Warn("--assam-measurements not set; the RA-TLS handshake will accept any Assam measurement. Set this to the chart-distributed launch digest of Assam to close bootstrap MITM.")
+	if c.certMode == "cds" && len(cdsMeasurements) == 0 {
+		logger.Warn("--cds-measurements not set; the RA-TLS handshake will accept any CDS measurement. Set this to the chart-distributed launch digest of CDS to close bootstrap MITM.")
 	}
 
 	serverTLS, serverCertMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
@@ -274,7 +272,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	}
 
 	m := newMetrics()
-	if c.certMode == "assam" {
+	if c.certMode == "cds" {
 		m.certModeConfigured.Store(1)
 	}
 	if len(meshPolicy.Measurements) > 0 {
@@ -399,60 +397,61 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		}
 	}()
 
-	// Assam certificate upgrade: after self-signed RA-TLS boot, a background
-	// goroutine contacts assam, gets CA-signed certs, and hot-swaps them via
-	// CertManager.SwapProvider. The assamCfg is shared with the CA bundle
-	// refresh goroutine below.
-	var assamCfg *assamclient.Config
-	if c.certMode == "assam" {
-		assamCfg = &assamclient.Config{
-			AssamURL:              c.assamURL,
+	// CDS certificate upgrade: after self-signed RA-TLS boot, a background
+	// goroutine contacts CDS, gets CA-signed certs, and hot-swaps them via
+	// CertManager.SwapProvider. The cdsCfg is shared with the CA bundle
+	// refresh goroutine below. cds serves both attestation and CA bundle on
+	// one URL, so AssamURL and CertIssuerURL both take --cds-url.
+	var cdsCfg *assamclient.Config
+	if c.certMode == "cds" {
+		cdsCfg = &assamclient.Config{
+			AssamURL:              c.cdsURL,
 			AttestationServiceURL: c.attestationServiceURL,
-			CertIssuerURL:         c.certIssuerURL,
+			CertIssuerURL:         c.cdsURL,
 			CACertURL:             effectiveCAURL,
 			NodeIP:                c.nodeIP,
 			TEEType:               teeType,
-			AssamMeasurements:     assamMeasurements,
+			AssamMeasurements:     cdsMeasurements,
 		}
 		go func() {
-			assamProvider, err := assamclient.NewProvider(assamCfg, logger)
+			cdsProvider, err := assamclient.NewProvider(cdsCfg, logger)
 			if err != nil {
-				logger.Error("assam provider creation failed", "error", err)
+				logger.Error("cds provider creation failed", "error", err)
 				return
 			}
 
 			bo := backoff.NewExponentialBackOff()
-			bo.InitialInterval = c.assamRetryBackoff
-			bo.MaxInterval = c.assamRetryMaxBackoff
+			bo.InitialInterval = c.cdsRetryBackoff
+			bo.MaxInterval = c.cdsRetryMaxBackoff
 			// MaxElapsedTime defaults to 0 (unlimited); ctx cancellation is
 			// the only exit.
 
 			_, err = backoff.Retry(ctx, func() (struct{}, error) {
-				upgradeCtx, cancel := context.WithTimeout(ctx, c.assamOpTimeout)
+				upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
 				defer cancel()
-				if err := serverCertMgr.SwapProvider(upgradeCtx, assamProvider); err != nil {
+				if err := serverCertMgr.SwapProvider(upgradeCtx, cdsProvider); err != nil {
 					return struct{}{}, err
 				}
 				return struct{}{}, nil
 			},
 				backoff.WithBackOff(bo),
 				backoff.WithNotify(func(err error, d time.Duration) {
-					logger.Warn("assam certificate upgrade attempt failed (will retry)", "error", err, "backoff", d)
+					logger.Warn("cds certificate upgrade attempt failed (will retry)", "error", err, "backoff", d)
 				}),
 			)
 			if err != nil {
 				// ctx cancelled or unrecoverable error from the operation.
 				return
 			}
-			logger.Info("certificate upgraded from self-signed to assam-issued (server)")
+			logger.Info("certificate upgraded from self-signed to cds-issued (server)")
 
 			// Upgrade client cert too.
 			if clientCertMgr != nil {
-				upgradeCtx, cancel := context.WithTimeout(ctx, c.assamOpTimeout)
-				if err := clientCertMgr.SwapProvider(upgradeCtx, assamProvider); err != nil {
-					logger.Warn("assam client certificate upgrade failed", "error", err)
+				upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
+				if err := clientCertMgr.SwapProvider(upgradeCtx, cdsProvider); err != nil {
+					logger.Warn("cds client certificate upgrade failed", "error", err)
 				} else {
-					logger.Info("certificate upgraded from self-signed to assam-issued (client)")
+					logger.Info("certificate upgraded from self-signed to cds-issued (client)")
 				}
 				cancel()
 			}
@@ -461,10 +460,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		}()
 	}
 
-	// CA bundle refresh: periodically poll cert-issuer /ca for updated CA bundle.
-	if effectiveCAURL != "" && c.certMode == "assam" {
+	// CA bundle refresh: periodically poll CDS /ca for updated CA bundle.
+	if effectiveCAURL != "" && c.certMode == "cds" {
 		go func() {
-			assamClient := assamclient.NewClient(assamCfg)
+			cdsClient := assamclient.NewClient(cdsCfg)
 
 			ticker := time.NewTicker(c.caPollInterval)
 			defer ticker.Stop()
@@ -474,8 +473,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					refreshCtx, cancel := context.WithTimeout(ctx, c.assamOpTimeout)
-					newCerts, err := assamClient.RefreshCABundle(refreshCtx)
+					refreshCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
+					newCerts, err := cdsClient.RefreshCABundle(refreshCtx)
 					cancel()
 					if err != nil {
 						logger.Warn("CA bundle refresh failed", "url", effectiveCAURL, "error", err)
@@ -682,12 +681,12 @@ func makeAttestFunc(client attestclient.Client, attestationServiceURL string) fu
 	}
 }
 
-func effectiveAssamCAURL(certMode, certIssuerURL, caURL string) string {
+func effectiveCDSCAURL(certMode, cdsURL, caURL string) string {
 	caURL = strings.TrimSpace(caURL)
-	if caURL != "" || certMode != "assam" {
+	if caURL != "" || certMode != "cds" {
 		return caURL
 	}
-	return strings.TrimRight(certIssuerURL, "/") + "/ca"
+	return strings.TrimRight(cdsURL, "/") + "/ca"
 }
 
 func ratlsTEEType(platform string) (ratls.TEEType, error) {

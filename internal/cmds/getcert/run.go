@@ -1,5 +1,5 @@
 // Package getcert implements the get-cert subcommand: it requests a TLS
-// certificate from assam by proving the caller runs inside a TEE.
+// certificate from CDS by proving the caller runs inside a TEE.
 package getcert
 
 import (
@@ -39,8 +39,8 @@ import (
 
 // config holds all CLI configuration for get-cert.
 type config struct {
-	AssamURL               string
-	AssamMeasurements      string
+	CDSURL                 string
+	CDSMeasurements        string
 	AttestationServiceURL  string
 	OutPath                string
 	KeyPath                string
@@ -99,13 +99,13 @@ func NewCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "get-cert",
-		Short: "Obtain a signed certificate via the assam attestation flow",
-		Long: `get-cert requests a TLS certificate from a key broker service (assam)
+		Short: "Obtain a signed certificate via the CDS attestation flow",
+		Long: `get-cert requests a TLS certificate from the Confidential Data Service (CDS)
 by proving it is running in a Trusted Execution Environment (TEE).
 
 It generates an ECDSA P-256 key pair (or loads the key passed with --key),
 creates a CSR with the specified SAN (Subject Alternative Name), and uses
-the assam attestation flow to obtain a signed certificate. The P-384 keypair
+the CDS attestation flow to obtain a signed certificate. The P-384 keypair
 used elsewhere in c8s is limited to mesh CA rotation; get-cert leaf keys stay
 P-256 by default.
 
@@ -119,8 +119,8 @@ alongside a workload that uses the obtained certificate.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.AssamURL, "assam-url", "", "URL of the assam service (e.g. http://assam:8080)")
-	flags.StringVar(&cfg.AssamMeasurements, "assam-measurements", "", "comma-separated SHA-384 hex launch measurements for Assam RA-TLS verification (empty = accept any attested Assam)")
+	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
+	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
 	flags.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
@@ -138,7 +138,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
 
-	_ = cmd.MarkFlagRequired("assam-url")
+	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-service-url")
 	_ = cmd.MarkFlagRequired("san")
 
@@ -154,35 +154,35 @@ func setupLogging(verbose bool) {
 	slog.SetDefault(slog.New(handler))
 }
 
-func newAssamClient(cfg config) (attestclient.Client, error) {
-	httpClient, err := assamHTTPClient(cfg)
+func newCDSClient(cfg config) (attestclient.Client, error) {
+	httpClient, err := cdsHTTPClient(cfg)
 	if err != nil {
 		var zero attestclient.Client
 		return zero, err
 	}
-	return attestclient.NewClientWithHTTP(cfg.AssamURL, httpClient), nil
+	return attestclient.NewClientWithHTTP(cfg.CDSURL, httpClient), nil
 }
 
-func assamHTTPClient(cfg config) (*http.Client, error) {
-	parsed, err := url.Parse(cfg.AssamURL)
+func cdsHTTPClient(cfg config) (*http.Client, error) {
+	parsed, err := url.Parse(cfg.CDSURL)
 	if err != nil {
-		return nil, fmt.Errorf("--assam-url: %w", err)
+		return nil, fmt.Errorf("--cds-url: %w", err)
 	}
 	if parsed.Scheme != "https" {
 		return http.DefaultClient, nil
 	}
 
-	measurements, err := ratls.ParseHexMeasurements(cfg.AssamMeasurements)
+	measurements, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)
 	if err != nil {
-		return nil, fmt.Errorf("--assam-measurements: %w", err)
+		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
 	if len(measurements) == 0 {
-		slog.Warn("--assam-measurements not set; get-cert accepts any RA-TLS-attested Assam measurement")
+		slog.Warn("--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
 	}
 
 	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
 	if err != nil {
-		return nil, fmt.Errorf("assam RA-TLS client: %w", err)
+		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}
 	return client, nil
 }
@@ -199,7 +199,7 @@ func run(cfg config) error {
 	}
 	slog.Debug("output paths validated")
 
-	client, err := newAssamClient(cfg)
+	client, err := newCDSClient(cfg)
 	if err != nil {
 		return err
 	}
@@ -280,7 +280,7 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 		return err
 	}
 
-	slog.Info("requesting certificate from assam", "assam_url", cfg.AssamURL, "san", cfg.SAN)
+	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN)
 	result, err := client.ObtainCertificateWithEvidenceContext(ctx, cfg.AttestationServiceURL, string(csrPEM))
 	if err != nil {
 		return fmt.Errorf("attestation failed: %w", err)
@@ -344,7 +344,7 @@ func findNginxMasterPID() (int, error) {
 
 // validateConfig checks that all required configuration is valid.
 func validateConfig(cfg config) error {
-	if err := cmdsutil.ValidateHTTPURL("--assam-url", cfg.AssamURL); err != nil {
+	if err := cmdsutil.ValidateHTTPURL("--cds-url", cfg.CDSURL); err != nil {
 		return err
 	}
 	if err := cmdsutil.ValidateHTTPURL("--attestation-service-url", cfg.AttestationServiceURL); err != nil {

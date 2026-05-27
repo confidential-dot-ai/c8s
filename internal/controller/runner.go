@@ -43,9 +43,9 @@ type Options struct {
 	// sidecar is injected.
 	GetCertImage string
 
-	// AssamURL points at the assam Service in-cluster (the URL the
+	// CDSURL points at the CDS Service in-cluster (the URL the
 	// injected get-cert containers POST evidence + CSR to).
-	AssamURL string
+	CDSURL string
 
 	// AttestationServiceURL points at the attestation-service.
 	AttestationServiceURL string
@@ -131,7 +131,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		if err := webhook.Register(mgr, webhook.Config{
 			GetCertImage:                 opts.GetCertImage,
-			AssamURL:                     opts.AssamURL,
+			CDSURL:                       opts.CDSURL,
 			AttestationServiceURL:        opts.AttestationServiceURL,
 			CertFSGroup:                  int64Ptr(opts.CertFSGroup),
 			CertKeyMode:                  opts.CertKeyMode,
@@ -147,8 +147,8 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		logger.Info("pod-injection webhook enabled",
 			"image", opts.GetCertImage,
-			"assam", opts.AssamURL,
-			"kataEnforce", opts.KataEnforce)
+			"cds_url", opts.CDSURL,
+			"kata_enforce", opts.KataEnforce)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

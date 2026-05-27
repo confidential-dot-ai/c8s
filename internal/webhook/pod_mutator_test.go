@@ -19,7 +19,7 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "ghcr.io/lunal-dev/c8s-operator:test",
-		AssamURL:              "http://assam.c8s-system.svc:8080",
+		CDSURL:                "http://cds.c8s-system.svc:8443",
 		AttestationServiceURL: "http://attestation-service.c8s-system.svc:8400",
 		CertDir:               "/etc/c8s/certs",
 	})
@@ -38,6 +38,9 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 		t.Fatalf("fsGroup = %d, want %d", got, defaultCertFSGroup)
 	}
 	init := pod.Spec.InitContainers[0]
+	if !hasArg(init.Args, "--cds-url=http://cds.c8s-system.svc:8443") {
+		t.Fatalf("init args %v missing --cds-url", init.Args)
+	}
 	if !hasArg(init.Args, "--key-mode=0640") {
 		t.Fatalf("init args %v missing --key-mode=0640", init.Args)
 	}
@@ -102,7 +105,7 @@ func TestMutatePodPreservesExistingFSGroup(t *testing.T) {
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "image",
-		AssamURL:              "http://assam",
+		CDSURL:                "http://cds",
 		AttestationServiceURL: "http://attestation-service",
 		CertDir:               "/etc/c8s/certs",
 	})
@@ -122,7 +125,7 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "image",
-		AssamURL:              "http://assam",
+		CDSURL:                "http://cds",
 		AttestationServiceURL: "http://attestation-service",
 		CertDir:               "/etc/c8s/certs",
 		CertFSGroup:           int64Ptr(4242),
@@ -198,7 +201,7 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 	}
 	mutatePod(pod, inj, Config{
 		GetCertImage:          "image",
-		AssamURL:              "http://assam",
+		CDSURL:                "http://cds",
 		AttestationServiceURL: "http://attestation-service",
 		CertDir:               "/etc/c8s/certs",
 	})

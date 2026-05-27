@@ -38,18 +38,15 @@ uid: 1337
 excludeUids: "0"
 
 # Certificate settings
-certMode: self-signed  # self-signed | assam
+certMode: self-signed  # self-signed | cds
 certTtl: "4h"
 rotationTimeout: "30s"
 
-# Assam integration (used when certMode=assam)
-assam:
+# CDS integration (used when certMode=cds). The launch-measurement allowlist
+# for CDS's RA-TLS peer cert comes from the parent's global.cdsMeasurements, not
+# a per-subchart mirror.
+cds:
   caPollInterval: "5m"
-  # SHA-384 hex launch measurements that Assam's RA-TLS peer cert must match.
-  # Set from the parent chart's `assam.measurements`. Empty = accept any
-  # (UNSAFE outside tests — bootstrap MITM defence depends on this list being
-  # populated with the operator-pinned Assam launch digest).
-  measurements: []
 
 # Expected launch digests for measurement pinning (empty = accept any)
 measurements: []

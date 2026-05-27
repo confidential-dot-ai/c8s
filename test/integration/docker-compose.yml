@@ -5,9 +5,9 @@ services:
     environment:
       PORT: "8400"
 
-  mock-assam:
+  mock-cds:
     build:
-      context: ../mock-assam
+      context: ../mock-cds
     environment:
       PORT: "8080"
     depends_on:
@@ -23,7 +23,7 @@ services:
       context: ../..
       dockerfile: Dockerfile.get-cert
     command:
-      - --assam-url=http://mock-assam:8080
+      - --cds-url=http://mock-cds:8080
       - --attestation-service-url=http://mock-attestation:8400
       - --san=nginx-lb
       - --out=/tls/cert.pem
@@ -32,7 +32,7 @@ services:
     volumes:
       - tls-certs:/tls
     depends_on:
-      - mock-assam
+      - mock-cds
       - mock-attestation
 
   nginx-lb:
