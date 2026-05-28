@@ -1,0 +1,310 @@
+{{- if .Values.ratlsMesh.enabled }}
+{{- $attestationServiceURL := printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace -}}
+{{/*
+  cds mode points a single --cds-url at the unified CDS, which serves both
+  /attest and /ca.
+*/}}
+{{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
+{{- $certMode := .Values.ratlsMesh.certMode -}}
+{{- $excludeSourceNamespaces := append .Values.ratlsMesh.iptablesSync.excludeSourceNamespaces .Release.Namespace | uniq | join "," -}}
+{{- /*
+The iptables-cleanup preStop sleep fires last in the native-sidecar
+reverse-init order; its budget is what terminationGracePeriod leaves after
+the main proxy drain. A higher value gets SIGKILL'd mid-cleanup, leaking
+iptables chains and ipsets across pod restarts. Fail at template time so
+the misconfig is caught before the rollout starts.
+*/ -}}
+{{- $tgp := include "ratls-mesh.durationSeconds" .Values.ratlsMesh.terminationGracePeriod | int -}}
+{{- $drain := include "ratls-mesh.durationSeconds" .Values.ratlsMesh.drainTimeout | int -}}
+{{- $preStopSleep := int .Values.ratlsMesh.iptablesCleanup.preStopSleepSeconds -}}
+{{- $preStopUpperBound := sub $tgp $drain -}}
+{{- if le $tgp $drain }}
+{{- fail (printf "terminationGracePeriod (%s) must exceed drainTimeout (%s) to leave a preStop budget" .Values.ratlsMesh.terminationGracePeriod .Values.ratlsMesh.drainTimeout) }}
+{{- end }}
+{{- if lt $preStopSleep 0 }}
+{{- fail (printf "iptablesCleanup.preStopSleepSeconds must be ≥ 0, got %d" $preStopSleep) }}
+{{- end }}
+{{- if gt $preStopSleep $preStopUpperBound }}
+{{- fail (printf "iptablesCleanup.preStopSleepSeconds must be ≤ %d (terminationGracePeriod=%s minus drainTimeout=%s; higher values get SIGKILL'd mid-cleanup), got %d" $preStopUpperBound .Values.ratlsMesh.terminationGracePeriod .Values.ratlsMesh.drainTimeout $preStopSleep) }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ratls-mesh.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratls-mesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service-mesh
+spec:
+  selector:
+    matchLabels:
+      {{- include "ratls-mesh.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "ratls-mesh.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ratlsMesh.ports.health | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- with .Values.ratlsMesh.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # iptables-sync must run in the host network namespace to intercept
+      # node-level pod traffic rather than only the mesh pod's own traffic.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ include "ratls-mesh.fullname" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: {{ $tgp }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.ratlsMesh.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      volumes:
+        - name: xtables-lock
+          hostPath:
+            path: {{ .Values.ratlsMesh.xtablesLockPath }}
+            type: FileOrCreate
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+      initContainers:
+        # Native sidecar (K8s 1.29+): cleanup runs last on shutdown because
+        # sidecars stop in reverse initContainer order.
+        - name: iptables-cleanup
+          restartPolicy: Always
+          image: {{ include "ratls-mesh.image" . }}
+          securityContext:
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_ADMIN
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: xtables-lock
+              mountPath: /run/xtables.lock
+          command:
+            - /bin/sh
+            - -c
+            - "trap 'exit 0' TERM; while true; do sleep 3600 & wait $!; done"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    /app/c8s ratls-mesh iptables-cleanup
+                    sleep {{ .Values.ratlsMesh.iptablesCleanup.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.ratlsMesh.iptablesCleanup.resources | nindent 12 }}
+        - name: iptables-sync
+          restartPolicy: Always
+          image: {{ include "ratls-mesh.image" . }}
+          securityContext:
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_ADMIN
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: xtables-lock
+              mountPath: /run/xtables.lock
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /app/c8s
+            - ratls-mesh
+            - iptables-sync
+            - --outbound-port
+            - {{ .Values.ratlsMesh.ports.outbound | quote }}
+            - --uid
+            - {{ .Values.ratlsMesh.uid | quote }}
+            - --exclude-uids
+            - {{ .Values.ratlsMesh.excludeUids | quote }}
+            - --exclude-source-namespaces
+            - {{ $excludeSourceNamespaces | quote }}
+            - --node-ip
+            - $(NODE_IP)
+            - --resync-period
+            - {{ .Values.ratlsMesh.iptablesSync.resyncPeriod | quote }}
+            - --watchdog-period
+            - {{ .Values.ratlsMesh.iptablesSync.watchdogPeriod | quote }}
+            - --ipset-maxelem
+            - {{ .Values.ratlsMesh.iptablesSync.ipsetMaxElem | quote }}
+            - --ready-file
+            - /tmp/ratls-iptables-ready
+            - --iptables-metrics-file
+            - /tmp/ratls-iptables-metrics.json
+            - --log-level
+            - {{ .Values.ratlsMesh.logLevel | quote }}
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          startupProbe:
+            exec:
+              command:
+                - test
+                - -f
+                - /tmp/ratls-iptables-ready
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            {{- toYaml .Values.ratlsMesh.iptablesSync.resources | nindent 12 }}
+      containers:
+        - name: ratls-mesh
+          image: {{ include "ratls-mesh.image" . }}
+          imagePullPolicy: {{ .Values.ratlsMesh.image.pullPolicy }}
+          workingDir: /tmp
+          securityContext:
+            runAsUser: {{ .Values.ratlsMesh.uid }}
+            runAsGroup: {{ .Values.ratlsMesh.uid }}
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          args:
+            - --platform
+            - {{ .Values.ratlsMesh.platform | quote }}
+            - --attestation-service-url
+            - {{ $attestationServiceURL | quote }}
+            - --outbound-port
+            - {{ .Values.ratlsMesh.ports.outbound | quote }}
+            - --inbound-port
+            - {{ .Values.ratlsMesh.ports.inbound | quote }}
+            - --health-port
+            - {{ .Values.ratlsMesh.ports.health | quote }}
+            - --drain-timeout
+            - {{ .Values.ratlsMesh.drainTimeout | quote }}
+            - --iptables-metrics-file
+            - /tmp/ratls-iptables-metrics.json
+            - --log-level
+            - {{ .Values.ratlsMesh.logLevel | quote }}
+            {{- if ne .Values.ratlsMesh.certTtl "4h" }}
+            - --cert-ttl
+            - {{ .Values.ratlsMesh.certTtl | quote }}
+            {{- end }}
+            {{- if ne .Values.ratlsMesh.rotationTimeout "30s" }}
+            - --rotation-timeout
+            - {{ .Values.ratlsMesh.rotationTimeout | quote }}
+            {{- end }}
+            {{- if .Values.ratlsMesh.measurements }}
+            - --measurements
+            - {{ .Values.ratlsMesh.measurements | join "," | quote }}
+            {{- end }}
+            {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
+            - --max-conns
+            - {{ .Values.ratlsMesh.maxConns | quote }}
+            {{- end }}
+            {{- if gt (int .Values.ratlsMesh.maxConnsPerSource) 0 }}
+            - --max-conns-per-source
+            - {{ .Values.ratlsMesh.maxConnsPerSource | quote }}
+            {{- end }}
+            {{- if .Values.ratlsMesh.idleTimeout }}
+            - --idle-timeout
+            - {{ .Values.ratlsMesh.idleTimeout | quote }}
+            {{- end }}
+            {{- if ne (int .Values.ratlsMesh.sessionCacheSize) 64 }}
+            - --session-cache-size
+            - {{ .Values.ratlsMesh.sessionCacheSize | quote }}
+            {{- end }}
+            {{- if ne $certMode "self-signed" }}
+            - --cert-mode
+            - {{ $certMode | quote }}
+            - --cds-url
+            - {{ $cdsURL | quote }}
+            - --ca-poll-interval
+            - {{ .Values.ratlsMesh.cds.caPollInterval | quote }}
+            {{- with .Values.cds.measurements }}
+            - --cds-measurements
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- end }}
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: outbound
+              containerPort: {{ .Values.ratlsMesh.ports.outbound }}
+              protocol: TCP
+            - name: inbound
+              containerPort: {{ .Values.ratlsMesh.ports.inbound }}
+              hostPort: {{ .Values.ratlsMesh.ports.inbound }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.ratlsMesh.ports.health }}
+              protocol: TCP
+          resources:
+            requests:
+              {{- toYaml .Values.ratlsMesh.resources.requests | nindent 14 }}
+            limits:
+              {{- toYaml .Values.ratlsMesh.resources.limits | nindent 14 }}
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.ratlsMesh.ports.health }}
+            periodSeconds: {{ .Values.ratlsMesh.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.ratlsMesh.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.ratlsMesh.ports.health }}
+            periodSeconds: {{ .Values.ratlsMesh.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.ratlsMesh.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.ratlsMesh.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: {{ .Values.ratlsMesh.ports.health }}
+            initialDelaySeconds: {{ .Values.ratlsMesh.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ratlsMesh.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.ratlsMesh.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.ratlsMesh.probes.liveness.failureThreshold }}
+      {{- with .Values.ratlsMesh.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+{{- end }}

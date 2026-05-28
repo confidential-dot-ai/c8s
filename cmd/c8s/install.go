@@ -52,7 +52,7 @@ var installCmd = &cobra.Command{
   - the mutating admission webhook configuration
   - the attestation-service DaemonSet (per-node /attest + /verify)
   - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
-  - vendored component charts from lunal-dev/c8s-charts
+  - the ratls-mesh, nri-image-policy, tee-proxy, and tls-lb components
 
 On RKE2 (--distro rke2) the kata-deploy and nri-image-policy DaemonSets carry
 a containerd-prep initContainer that wires up the drop-in import; no node
@@ -85,9 +85,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 			"--set", "image.tag=" + imageTag,
 			"--set", "attestationService.image.tag=" + imageTag,
 			"--set", "cds.image.tag=" + imageTag,
-			"--set", "ratls-mesh.image.tag=" + imageTag,
-			"--set", "nri-image-policy.image.tag=" + imageTag,
-			"--set", "tee-proxy.image.tag=" + imageTag,
+			"--set", "ratlsMesh.image.tag=" + imageTag,
+			"--set", "nriImagePolicy.image.tag=" + imageTag,
+			"--set", "teeProxy.image.tag=" + imageTag,
 		}
 		helmArgs = appendInstallCRDArgs(helmArgs, installCRDs)
 		helmArgs, err = appendDistroInstallArgs(helmArgs, installDistro)

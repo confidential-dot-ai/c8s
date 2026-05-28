@@ -1,0 +1,146 @@
+{{- if .Values.tlsLb.enabled }}
+{{- $meshCAConfigMapName := default (printf "%s-cds-mesh-ca" .Release.Name) .Values.tlsLb.meshCA.configMapName -}}
+{{- $defaultMeshCAPath := printf "%s/%s" .Values.tlsLb.meshCA.mountPath .Values.tlsLb.meshCA.key -}}
+{{- $configuredTrustedCAPath := .Values.tlsLb.upstream.tls.trustedCAPath -}}
+{{- $upstreamTLSVerify := and (eq .Values.tlsLb.upstream.protocol "https") .Values.tlsLb.upstream.tls.verify -}}
+{{- $upstreamUsesMeshCA := and $upstreamTLSVerify (or (not $configuredTrustedCAPath) (eq $configuredTrustedCAPath $defaultMeshCAPath)) -}}
+{{- $routesUseMeshCA := false -}}
+{{- range $route := .Values.tlsLb.routes }}
+{{- $backend := default dict $route.backend -}}
+{{- $backendTLS := default dict $backend.tls -}}
+{{- $trustedCAPath := $backendTLS.trustedCAPath -}}
+{{- if and (eq (default "http" $backend.protocol) "https") (default false $backendTLS.verify) (or (not $trustedCAPath) (eq $trustedCAPath $defaultMeshCAPath)) -}}
+{{- $routesUseMeshCA = true -}}
+{{- end -}}
+{{- end -}}
+{{- $discoveryExposesMeshCA := and .Values.tlsLb.discovery.enabled .Values.tlsLb.meshCA.expose -}}
+{{- $mountMeshCA := or $discoveryExposesMeshCA $upstreamUsesMeshCA $routesUseMeshCA -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tls-lb.fullname" . }}
+  labels:
+    {{- include "tls-lb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.tlsLb.nginx.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tls-lb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tls-lb.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/nginx-config: {{ include (print $.Template.BasePath "/tls-lb-configmap.yaml") . | sha256sum }}
+        {{- include "tls-lb.c8s-annotations" . | nindent 8 }}
+    spec:
+      {{- with .Values.tlsLb.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      shareProcessNamespace: true
+      containers:
+        - name: nginx
+          image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}
+          imagePullPolicy: {{ .Values.tlsLb.nginx.image.pullPolicy }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.tlsLb.nginx.httpsPort }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
+            runAsUser: {{ .Values.tlsLb.nginx.runAsUser }}
+            runAsGroup: {{ .Values.tlsLb.nginx.runAsGroup }}
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: tls-certs
+              mountPath: {{ .Values.tlsLb.tlsMountPath }}
+              readOnly: true
+            {{- if .Values.tlsLb.publicTLS.secretName }}
+            - name: public-tls
+              mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tlsLb.discovery.enabled }}
+            - name: discovery
+              mountPath: {{ .Values.tlsLb.discovery.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if $mountMeshCA }}
+            - name: mesh-ca
+              mountPath: {{ .Values.tlsLb.meshCA.mountPath }}
+              readOnly: true
+            {{- end }}
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+          {{- with .Values.tlsLb.nginx.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: tls-certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- if .Values.tlsLb.publicTLS.secretName }}
+        - name: public-tls
+          secret:
+            secretName: {{ .Values.tlsLb.publicTLS.secretName }}
+            items:
+              - key: {{ .Values.tlsLb.publicTLS.certKey }}
+                path: {{ .Values.tlsLb.publicTLS.certKey }}
+              - key: {{ .Values.tlsLb.publicTLS.keyKey }}
+                path: {{ .Values.tlsLb.publicTLS.keyKey }}
+        {{- end }}
+        {{- if .Values.tlsLb.discovery.enabled }}
+        - name: discovery
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- end }}
+        {{- if $mountMeshCA }}
+        - name: mesh-ca
+          configMap:
+            name: {{ $meshCAConfigMapName }}
+            optional: {{ .Values.tlsLb.meshCA.optional }}
+            items:
+              - key: {{ .Values.tlsLb.meshCA.key }}
+                path: {{ .Values.tlsLb.meshCA.key }}
+        {{- end }}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-config
+          configMap:
+            name: {{ include "tls-lb.fullname" . }}-nginx
+      securityContext:
+        runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
+        fsGroup: {{ .Values.tlsLb.nginx.runAsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+{{- end }}

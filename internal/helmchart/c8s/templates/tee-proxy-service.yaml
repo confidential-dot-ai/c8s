@@ -1,0 +1,22 @@
+{{- if .Values.teeProxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tee-proxy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tee-proxy.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: {{ .Values.teeProxy.ports.http }}
+      protocol: TCP
+      name: http
+    - port: 443
+      targetPort: {{ .Values.teeProxy.ports.https }}
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "tee-proxy.selectorLabels" . | nindent 4 }}
+{{- end }}

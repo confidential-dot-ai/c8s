@@ -425,10 +425,11 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 // feature gate, while 1.29 enables that gate by default. If the gate is off,
 // iptables-cleanup is invalid as a native sidecar, its preStop cannot run,
 // and the host can leak managed chains/ipsets across pod restarts. Helm
-// rejects older clusters via the kubeVersion constraint; keep the constraint
-// pinned here so an accidental relaxation cannot slip in via Chart.yaml.
+// rejects older clusters via the kubeVersion constraint; after hoisting the
+// ratls-mesh subchart this constraint lives on the parent c8s chart, so keep
+// it pinned there against an accidental relaxation.
 func TestChartRATLSKubeVersionPinned(t *testing.T) {
-	const path = "c8s/charts/ratls-mesh/Chart.yaml"
+	const path = "c8s/Chart.yaml"
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -441,7 +442,7 @@ func TestChartRATLSKubeVersionPinned(t *testing.T) {
 	}
 	const want = ">=1.29.0-0"
 	if chart.KubeVersion != want {
-		t.Fatalf("ratls-mesh Chart.yaml kubeVersion = %q; want %q (native sidecars require SidecarContainers default-on behavior from k8s 1.29+; relaxing this leaks iptables/ipset state across pod restarts on older clusters)", chart.KubeVersion, want)
+		t.Fatalf("c8s Chart.yaml kubeVersion = %q; want %q (native sidecars require SidecarContainers default-on behavior from k8s 1.29+; relaxing this leaks iptables/ipset state across pod restarts on older clusters)", chart.KubeVersion, want)
 	}
 }
 
@@ -561,7 +562,7 @@ func findRATLSMeshPrometheusRule(t *testing.T, helmOut string) prometheusRule {
 // prometheus-rules.yaml could silently lose the corresponding production
 // signal.
 func TestChartRATLSRoutingAlerts(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "ratls-mesh.prometheusRules.enabled=true")
+	out, err := helmTemplate(t, "--set", "ratlsMesh.prometheusRules.enabled=true")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -601,7 +602,7 @@ func TestChartRATLSRoutingAlerts(t *testing.T) {
 // that misconfig ship. The bound is derived, not hardcoded, so changes to
 // either underlying value reshape it automatically.
 func TestChartRejectsExcessivePreStopSleep(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "ratls-mesh.iptablesCleanup.preStopSleepSeconds=30")
+	out, err := helmTemplate(t, "--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=30")
 	if err == nil {
 		t.Fatalf("helm template succeeded, want preStopSleepSeconds upper-bound failure\n%s", out)
 	}
@@ -612,7 +613,7 @@ func TestChartRejectsExcessivePreStopSleep(t *testing.T) {
 }
 
 func TestChartRejectsNegativePreStopSleep(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "ratls-mesh.iptablesCleanup.preStopSleepSeconds=-1")
+	out, err := helmTemplate(t, "--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=-1")
 	if err == nil {
 		t.Fatalf("helm template succeeded, want preStopSleepSeconds lower-bound failure\n%s", out)
 	}
@@ -623,7 +624,7 @@ func TestChartRejectsNegativePreStopSleep(t *testing.T) {
 }
 
 func TestChartAcceptsPreStopSleepAtBoundary(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "ratls-mesh.iptablesCleanup.preStopSleepSeconds=15")
+	out, err := helmTemplate(t, "--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=15")
 	if err != nil {
 		t.Fatalf("helm template at boundary should succeed: %v\n%s", err, out)
 	}
@@ -649,9 +650,9 @@ func TestChartAcceptsPreStopSleepAtBoundary(t *testing.T) {
 // pins that the durationSeconds helper handles each correctly.
 func TestChartPreStopBoundFollowsGracePeriodAndDrain(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "ratls-mesh.terminationGracePeriod=2m",
-		"--set-string", "ratls-mesh.drainTimeout=60s",
-		"--set", "ratls-mesh.iptablesCleanup.preStopSleepSeconds=45",
+		"--set-string", "ratlsMesh.terminationGracePeriod=2m",
+		"--set-string", "ratlsMesh.drainTimeout=60s",
+		"--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=45",
 	)
 	if err != nil {
 		t.Fatalf("helm template at (tgp=2m, drain=60s, sleep=45) should succeed: %v\n%s", err, out)
@@ -670,9 +671,9 @@ func TestChartPreStopBoundFollowsGracePeriodAndDrain(t *testing.T) {
 
 	// Same knobs, sleep one above the derived bound — must fail.
 	out, err = helmTemplate(t,
-		"--set-string", "ratls-mesh.terminationGracePeriod=2m",
-		"--set-string", "ratls-mesh.drainTimeout=60s",
-		"--set", "ratls-mesh.iptablesCleanup.preStopSleepSeconds=61",
+		"--set-string", "ratlsMesh.terminationGracePeriod=2m",
+		"--set-string", "ratlsMesh.drainTimeout=60s",
+		"--set", "ratlsMesh.iptablesCleanup.preStopSleepSeconds=61",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded above derived bound, want failure\n%s", out)
@@ -688,8 +689,8 @@ func TestChartPreStopBoundFollowsGracePeriodAndDrain(t *testing.T) {
 // DaemonSet.
 func TestChartRejectsZeroPreStopBudget(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "ratls-mesh.terminationGracePeriod=30s",
-		"--set-string", "ratls-mesh.drainTimeout=30s",
+		"--set-string", "ratlsMesh.terminationGracePeriod=30s",
+		"--set-string", "ratlsMesh.drainTimeout=30s",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded with zero preStop budget, want failure\n%s", out)
@@ -705,7 +706,7 @@ func TestChartRejectsZeroPreStopBudget(t *testing.T) {
 // int parsing (which would otherwise read "1m30s" as 1 second).
 func TestChartRejectsCompoundDurations(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "ratls-mesh.drainTimeout=1m30s",
+		"--set-string", "ratlsMesh.drainTimeout=1m30s",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded for compound duration, want failure\n%s", out)
@@ -720,7 +721,7 @@ func TestChartRejectsCompoundDurations(t *testing.T) {
 // helper can't remove the unit check without flagging in tests.
 func TestChartRejectsUnitlessDuration(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "ratls-mesh.drainTimeout=30",
+		"--set-string", "ratlsMesh.drainTimeout=30",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded for unitless duration, want failure\n%s", out)
@@ -732,7 +733,7 @@ func TestChartRejectsUnitlessDuration(t *testing.T) {
 }
 
 func TestChartRendersRATLSCustomOutboundPortConsistently(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "ratls-mesh.ports.outbound=16001")
+	out, err := helmTemplate(t, "--set", "ratlsMesh.ports.outbound=16001")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -840,14 +841,14 @@ func TestChartOperatorDialsTrustRootOverHTTPS(t *testing.T) {
 }
 
 // TestChartRatlsMeshCDSMeasurementsFlagsThrough confirms the single
-// global.cdsMeasurements reaches the daemonset's --cds-measurements flag —
-// without this the RA-TLS handshake accepts any measurement and the H1 defence
-// collapses to "trust the cluster network". The subchart reads the global
-// directly, so there is no parent/subchart mirror to drift.
+// cds.measurements reaches the daemonset's --cds-measurements flag — without
+// this the RA-TLS handshake accepts any measurement and the H1 defence
+// collapses to "trust the cluster network". ratls-mesh reads the parent's
+// cds.measurements directly, so there is no mirror to drift.
 func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
 	out, err := helmTemplate(t,
-		"--set", "global.cdsMeasurements[0]="+measurement,
+		"--set", "cds.measurements[0]="+measurement,
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -864,7 +865,7 @@ func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 
 func TestChartNRIImagePolicyUsesCDSPushAndPullModes(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "nri-image-policy.cds.url=http://c8s-cds.c8s-system.svc:8080",
+		"--set", "nriImagePolicy.cds.url=http://c8s-cds.c8s-system.svc:8080",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -936,10 +937,10 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 		"--set", "webhook.getCert.runAsUser=0",
 		"--set", "webhook.getCert.runAsGroup=0",
 		"--set", "webhook.getCert.runAsNonRoot=false",
-		"--set", "ratls-mesh.enabled=false",
-		"--set", "nri-image-policy.enabled=false",
-		"--set", "tee-proxy.enabled=false",
-		"--set", "tls-lb.enabled=false",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "teeProxy.enabled=false",
+		"--set", "tlsLb.enabled=false",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -983,18 +984,18 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 
 func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "tls-lb.publicTLS.secretName=tls-lb-public-tls",
-		"--set-string", "tls-lb.publicTLS.mountPath=/edge-tls",
-		"--set-string", "tls-lb.publicTLS.certKey=public.crt",
-		"--set-string", "tls-lb.publicTLS.keyKey=public.key",
-		"--set", "tls-lb.discovery.enabled=true",
-		"--set-string", "tls-lb.meshCA.configMapName=c8s-cds-mesh-ca",
-		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
-		"--set", "tls-lb.upstream.protocol=https",
-		"--set", "tls-lb.upstream.tls.verify=true",
-		"--set-string", "tls-lb.upstream.tls.serverName=tee-proxy.tee-attestation.svc.cluster.local",
-		"--set", "tee-proxy.tls.enabled=true",
-		"--set-string", "tee-proxy.tls.secretName=tee-proxy-internal-tls",
+		"--set-string", "tlsLb.publicTLS.secretName=tls-lb-public-tls",
+		"--set-string", "tlsLb.publicTLS.mountPath=/edge-tls",
+		"--set-string", "tlsLb.publicTLS.certKey=public.crt",
+		"--set-string", "tlsLb.publicTLS.keyKey=public.key",
+		"--set", "tlsLb.discovery.enabled=true",
+		"--set-string", "tlsLb.meshCA.configMapName=c8s-cds-mesh-ca",
+		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tlsLb.upstream.protocol=https",
+		"--set", "tlsLb.upstream.tls.verify=true",
+		"--set-string", "tlsLb.upstream.tls.serverName=tee-proxy.tee-attestation.svc.cluster.local",
+		"--set", "teeProxy.tls.enabled=true",
+		"--set-string", "teeProxy.tls.secretName=tee-proxy-internal-tls",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1055,10 +1056,10 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 
 func TestChartRendersTeeProxyStaticTLSSecret(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "tee-proxy.tls.enabled=true",
-		"--set-string", "tee-proxy.tls.secretName=tee-proxy-internal-tls",
-		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
-		"--set", "tls-lb.upstream.protocol=https",
+		"--set", "teeProxy.tls.enabled=true",
+		"--set-string", "teeProxy.tls.secretName=tee-proxy-internal-tls",
+		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tlsLb.upstream.protocol=https",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1083,11 +1084,11 @@ func TestChartRendersTeeProxyStaticTLSSecret(t *testing.T) {
 
 func TestTLSLBCertProvisioningValuesDriveWebhookAnnotations(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "tls-lb.certProvisioning.renewInterval=30m",
-		"--set", "tls-lb.certProvisioning.verbose=true",
-		"--set", "tls-lb.nginx.runAsUser=201",
-		"--set", "tls-lb.nginx.runAsGroup=202",
-		"--set", "tls-lb.nginx.runAsNonRoot=false",
+		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",
+		"--set", "tlsLb.certProvisioning.verbose=true",
+		"--set", "tlsLb.nginx.runAsUser=201",
+		"--set", "tlsLb.nginx.runAsGroup=202",
+		"--set", "tlsLb.nginx.runAsNonRoot=false",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1117,23 +1118,23 @@ func TestTLSLBCertProvisioningValuesDriveWebhookAnnotations(t *testing.T) {
 
 func TestChartRejectsManagedTeeProxyHTTPSWithoutTLS(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set-string", "tls-lb.upstream.address=c8s-tee-proxy:443",
-		"--set", "tls-lb.upstream.protocol=https",
+		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
+		"--set", "tlsLb.upstream.protocol=https",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want tee-proxy TLS failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.upstream.protocol=https with the chart-managed tee-proxy requires tee-proxy.tls.enabled=true or tee-proxy.domain to enable the HTTPS listener")
+	assertHelmFailMessage(t, out, "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.tls.enabled=true or teeProxy.domain to enable the HTTPS listener")
 }
 
 func TestChartRejectsTLSLBHTTPSWithDefaultTeeProxyHTTPPort(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "tls-lb.upstream.protocol=https",
+		"--set", "tlsLb.upstream.protocol=https",
 	)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want tls-lb upstream address failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.upstream.protocol=https requires tls-lb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443")
+	assertHelmFailMessage(t, out, "tlsLb.upstream.protocol=https requires tlsLb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443")
 }
 
 func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
@@ -1237,7 +1238,7 @@ func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 	route.assertDirective(t, "proxy_pass", "https://route_0")
 	route.assertNoDirective(t, "proxy_ssl_certificate")
 	route.assertNoDirective(t, "proxy_ssl_certificate_key")
-	assertTLSLBMeshCAVolume(t, out, "tls-lb-cds-mesh-ca", true)
+	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
 }
 
 func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
@@ -1277,7 +1278,7 @@ func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T)
 
 func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 	t.Helper()
-	cm := renderedConfigMap(t, manifest, "tls-lb-nginx")
+	cm := renderedConfigMap(t, manifest, "c8s-tls-lb-nginx")
 	conf, ok := cm.Data["nginx.conf"]
 	if !ok || conf == "" {
 		t.Fatalf("tls-lb nginx ConfigMap missing nginx.conf\n%s", manifest)
@@ -1397,7 +1398,7 @@ func (block *nginxBlock) assertNoDirective(t *testing.T, name string) {
 
 func assertTLSLBMeshCAVolume(t *testing.T, manifest, configMapName string, optional bool) {
 	t.Helper()
-	dep := renderedDeployment(t, manifest, "tls-lb")
+	dep := renderedDeployment(t, manifest, "c8s-tls-lb")
 	for _, volume := range dep.Spec.Template.Spec.Volumes {
 		if volume.Name != "mesh-ca" {
 			continue
@@ -1436,7 +1437,7 @@ func assertTLSLBMeshCAVolume(t *testing.T, manifest, configMapName string, optio
 
 func assertNoTLSLBMeshCAVolume(t *testing.T, manifest string) {
 	t.Helper()
-	dep := renderedDeployment(t, manifest, "tls-lb")
+	dep := renderedDeployment(t, manifest, "c8s-tls-lb")
 	for _, volume := range dep.Spec.Template.Spec.Volumes {
 		if volume.Name == "mesh-ca" {
 			t.Fatalf("Deployment/tls-lb has mesh-ca volume, want absent: %#v", volume)
@@ -1459,7 +1460,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set", "routes[0].backend.tls.verify=true",
 				"--set-string", "routes[0].backend.tls.verifyDepth=9; return 444",
 			},
-			want: "tls-lb.routes[0].backend.tls.verifyDepth must be a non-negative integer, got: 9; return 444",
+			want: "tlsLb.routes[0].backend.tls.verifyDepth must be a non-negative integer, got: 9; return 444",
 		},
 		{
 			name: "route-tls-on-http-backend",
@@ -1468,7 +1469,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set", "routes[0].backend.tls.verify=true",
 			},
-			want: "tls-lb.routes[0].backend.tls.verify and useCDSClientCert require backend.protocol: https",
+			want: "tlsLb.routes[0].backend.tls.verify and useCDSClientCert require backend.protocol: https",
 		},
 		{
 			name: "route-verify-not-bool",
@@ -1478,7 +1479,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.protocol=https",
 				"--set-string", "routes[0].backend.tls.verify=false",
 			},
-			want: "tls-lb.routes[0].backend.tls.verify must be a boolean; do not set it via --set-string, got: false",
+			want: "tlsLb.routes[0].backend.tls.verify must be a boolean; do not set it via --set-string, got: false",
 		},
 		{
 			name: "route-address-with-hash",
@@ -1486,7 +1487,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080#x",
 			},
-			want: "tls-lb.routes[0].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: svc:8080#x",
+			want: "tlsLb.routes[0].backend.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: svc:8080#x",
 		},
 		{
 			name: "route-serverName-with-slash",
@@ -1496,7 +1497,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set-string", "routes[0].backend.protocol=https",
 				"--set-string", "routes[0].backend.tls.serverName=a/b",
 			},
-			want: "tls-lb.routes[0].backend.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: a/b",
+			want: "tlsLb.routes[0].backend.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: a/b",
 		},
 		{
 			name: "upstream-serverName-injection",
@@ -1505,7 +1506,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set", "upstream.tls.verify=true",
 				"--set-string", "upstream.tls.serverName=evil; return 444",
 			},
-			want: "tls-lb.upstream.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: evil; return 444",
+			want: "tlsLb.upstream.tls.serverName must not contain whitespace, semicolons, braces, slashes, or '#', got: evil; return 444",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1549,7 +1550,7 @@ func TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertTLSLBMeshCAVolume(t, out, "tls-lb-cds-mesh-ca", true)
+	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
 }
 
 func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
@@ -1561,7 +1562,7 @@ func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want invalid route match failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.routes[0].match must be 'exact' or 'prefix', got: regex")
+	assertHelmFailMessage(t, out, "tlsLb.routes[0].match must be 'exact' or 'prefix', got: regex")
 }
 
 func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
@@ -1575,14 +1576,14 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 			args: []string{
 				"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 			},
-			want: "tls-lb.routes[0].path is required",
+			want: "tlsLb.routes[0].path is required",
 		},
 		{
 			name: "backend",
 			args: []string{
 				"--set-string", "routes[0].path=/whitelist",
 			},
-			want: "tls-lb.routes[0].backend is required",
+			want: "tlsLb.routes[0].backend is required",
 		},
 		{
 			name: "backend-address",
@@ -1590,7 +1591,7 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 				"--set-string", "routes[0].path=/whitelist",
 				"--set-string", "routes[0].backend.protocol=https",
 			},
-			want: "tls-lb.routes[0].backend.address is required",
+			want: "tlsLb.routes[0].backend.address is required",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1611,7 +1612,7 @@ func TestTLSLBRejectsRouteUpstream(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want unsupported route upstream failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.routes[0].upstream is not supported; set backend.address and backend.protocol instead")
+	assertHelmFailMessage(t, out, "tlsLb.routes[0].upstream is not supported; set backend.address and backend.protocol instead")
 }
 
 func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
@@ -1623,7 +1624,7 @@ func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want invalid typed route protocol failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.routes[0].backend.protocol must be 'http' or 'https', got: grpc")
+	assertHelmFailMessage(t, out, "tlsLb.routes[0].backend.protocol must be 'http' or 'https', got: grpc")
 }
 
 func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
@@ -1634,7 +1635,7 @@ func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
 	if err == nil {
 		t.Fatalf("helm template succeeded, want unsafe route path failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "tls-lb.routes[0].path must start with '/' and contain only URI path characters safe for nginx locations, got: /bad;return")
+	assertHelmFailMessage(t, out, "tlsLb.routes[0].path must start with '/' and contain only URI path characters safe for nginx locations, got: /bad;return")
 }
 
 func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
@@ -1664,7 +1665,7 @@ func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
 	cfg := renderedTLSLBNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
-	assertTLSLBMeshCAVolume(t, out, "tls-lb-cds-mesh-ca", true)
+	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
 }
 
 func TestTLSLBMeshCAOptionalCanBeRequired(t *testing.T) {
@@ -1675,7 +1676,7 @@ func TestTLSLBMeshCAOptionalCanBeRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertTLSLBMeshCAVolume(t, out, "tls-lb-cds-mesh-ca", false)
+	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", false)
 }
 
 func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
@@ -1688,8 +1689,8 @@ func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
 	cfg := renderedTLSLBNginxConfig(t, out)
 	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
 	meshCA.assertDirective(t, "alias", "/mesh-ca/ca.pem")
-	assertTLSLBMeshCAVolume(t, out, "tls-lb-cds-mesh-ca", true)
-	assertRenderedDeploymentPodAnnotations(t, out, "tls-lb", map[string]string{
+	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
+	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", map[string]string{
 		webhook.AnnotationDiscoveryMeshCAURL: "/.well-known/mesh-ca.pem",
 	})
 }
@@ -1701,7 +1702,7 @@ func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertRenderedDeploymentPodAnnotations(t, out, "tls-lb", map[string]string{
+	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", map[string]string{
 		webhook.AnnotationDiscoveryPublicTLSMode: "cds",
 	})
 }
@@ -1949,7 +1950,7 @@ func TestChartKataEnforceRequiresEnabled(t *testing.T) {
 	}
 }
 
-// TestChartNriImagePolicyDistroSelectsContainerdLayout: nri-image-policy.distro
+// TestChartNriImagePolicyDistroSelectsContainerdLayout: nriImagePolicy.distro
 // drives the host containerd directory the installer binds and the patch
 // strategy. The drop-in file path itself is discovered at runtime (the config
 // file name varies), so it is not asserted here — only the dir, mode, restart.
@@ -1974,7 +1975,7 @@ func TestChartNriImagePolicyDistroSelectsContainerdLayout(t *testing.T) {
 		},
 	} {
 		t.Run(tc.distro, func(t *testing.T) {
-			out, err := helmTemplate(t, "--set-string", "nri-image-policy.distro="+tc.distro)
+			out, err := helmTemplate(t, "--set-string", "nriImagePolicy.distro="+tc.distro)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
@@ -2001,9 +2002,9 @@ func TestChartNriImagePolicyDistroSelectsContainerdLayout(t *testing.T) {
 // TestChartNriImagePolicyRejectsUnknownDistro: an unsupported distro must fail
 // the render, not silently fall through to a wrong containerd layout.
 func TestChartNriImagePolicyRejectsUnknownDistro(t *testing.T) {
-	out, err := helmTemplate(t, "--set-string", "nri-image-policy.distro=openshift")
+	out, err := helmTemplate(t, "--set-string", "nriImagePolicy.distro=openshift")
 	if err == nil {
-		t.Fatalf("helm template succeeded for an unknown nri-image-policy.distro, want failure\n%s", out)
+		t.Fatalf("helm template succeeded for an unknown nriImagePolicy.distro, want failure\n%s", out)
 	}
 }
 
@@ -2013,7 +2014,7 @@ func TestChartNriImagePolicyRejectsUnknownDistro(t *testing.T) {
 // installer patches config.toml in place, so the prep must be absent.
 func TestChartNriImagePolicyContainerdPrepInitContainer(t *testing.T) {
 	t.Run("rke2", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set-string", "nri-image-policy.distro=rke2")
+		out, err := helmTemplate(t, "--set-string", "nriImagePolicy.distro=rke2")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -2036,7 +2037,7 @@ func TestChartNriImagePolicyContainerdPrepInitContainer(t *testing.T) {
 	})
 
 	t.Run("k8s", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set-string", "nri-image-policy.distro=k8s")
+		out, err := helmTemplate(t, "--set-string", "nriImagePolicy.distro=k8s")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -2092,13 +2093,13 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "image.tag=dev",
 		"--set", "attestationService.image.tag=dev",
 		"--set", "cds.image.tag=dev",
-		"--set", "ratls-mesh.image.tag=dev",
-		"--set", "nri-image-policy.image.tag=dev",
-		"--set", "nri-image-policy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000",
-		"--set", "nri-image-policy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
-		"--set", "nri-image-policy.cds.image.reference=ghcr.io/lunal-dev/cds:dev",
-		"--set", "nri-image-policy.cds.node.selector.role=cds-node",
-		"--set", "tee-proxy.image.tag=dev",
+		"--set", "ratlsMesh.image.tag=dev",
+		"--set", "teeProxy.image.tag=dev",
+		"--set", "nriImagePolicy.image.tag=dev",
+		"--set", "nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000",
+		"--set", "nriImagePolicy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
+		"--set", "nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds:dev",
+		"--set", "nriImagePolicy.cds.node.selector.role=cds-node",
 	}
 	cmd := exec.Command("helm", append(base, args...)...)
 	cmd.Dir = "."
@@ -2469,20 +2470,54 @@ func tlsLBAnnotations(workload string, overrides map[string]string) map[string]s
 	return annotations
 }
 
+// helmTemplateTLSLB renders the tls-lb component from the parent c8s chart in
+// isolation: siblings are disabled and every caller-supplied --set/--set-string
+// path is prefixed with tlsLb. so the existing subchart-relative test values
+// (upstream.*, routes[*], nginx.*) keep working after the hoist. The release is
+// named "c8s" so tls-lb.fullname resolves to c8s-tls-lb, matching the resource
+// names the parent-chart tls-lb tests already assert. upstream.address is
+// pinned to the standalone subchart's old default (vllm:8000) so the
+// default-backend assertions remain a meaningful fixture rather than the
+// parent's c8s-tee-proxy:80 wiring.
 func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm CLI not found")
 	}
 	base := []string{
-		"template", "tls-lb", "c8s/charts/tls-lb",
+		"template", "c8s", "c8s",
 		"--namespace", "c8s-system",
-		"--set", "nginx.image.tag=dev",
+		"--set", "image.tag=dev",
+		"--set", "attestationService.image.tag=dev",
+		"--set", "cds.image.tag=dev",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "teeProxy.enabled=false",
+		"--set-string", "tlsLb.upstream.address=vllm:8000",
+		"--set", "tlsLb.nginx.image.tag=dev",
+		"--show-only", "templates/tls-lb-configmap.yaml",
+		"--show-only", "templates/tls-lb-deployment.yaml",
 	}
-	cmd := exec.Command("helm", append(base, args...)...)
+	cmd := exec.Command("helm", append(base, prefixTLSLBSetArgs(args)...)...)
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// prefixTLSLBSetArgs rewrites the value path of each --set/--set-string pair to
+// live under the parent chart's tlsLb key, leaving the value (right of '=')
+// untouched.
+func prefixTLSLBSetArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] != "--set" && out[i] != "--set-string" {
+			continue
+		}
+		out[i+1] = "tlsLb." + out[i+1]
+		i++
+	}
+	return out
 }
 
 // Example_tlsLBConfig renders the tls-lb ConfigMap for a representative route
@@ -2526,7 +2561,7 @@ func Example_tlsLBConfig() {
 	//     }
 	//     server {
 	//         listen 443 ssl;
-	//         server_name "tls-lb.c8s-system.svc";
+	//         server_name "c8s-tls-lb.c8s-system.svc";
 	//
 	//         ssl_certificate     /tls/cert.pem;
 	//         ssl_certificate_key /tls/key.pem;
@@ -2586,17 +2621,24 @@ func Example_tlsLBConfig() {
 // fails loudly rather than masking a broken template.
 func renderExampleTLSLBNginxConf() string {
 	cmd := exec.Command("helm",
-		"template", "tls-lb", "c8s/charts/tls-lb",
+		"template", "c8s", "c8s",
 		"--namespace", "c8s-system",
-		"--set", "nginx.image.tag=dev",
-		"--set-string", "routes[0].path=/whitelist",
-		"--set-string", "routes[0].match=exact",
-		"--set-string", "routes[0].backend.address=c8s-cds.c8s-system.svc:8443",
-		"--set-string", "routes[1].path=/tenant/",
-		"--set-string", "routes[1].backend.address=tenant-router.c8s-system.svc:8080",
-		"--set-string", "routes[1].backend.protocol=https",
-		"--set", "routes[1].backend.tls.verify=true",
-		"--show-only", "templates/configmap.yaml",
+		"--set", "image.tag=dev",
+		"--set", "attestationService.image.tag=dev",
+		"--set", "cds.image.tag=dev",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "teeProxy.enabled=false",
+		"--set-string", "tlsLb.upstream.address=vllm:8000",
+		"--set", "tlsLb.nginx.image.tag=dev",
+		"--set-string", "tlsLb.routes[0].path=/whitelist",
+		"--set-string", "tlsLb.routes[0].match=exact",
+		"--set-string", "tlsLb.routes[0].backend.address=c8s-cds.c8s-system.svc:8443",
+		"--set-string", "tlsLb.routes[1].path=/tenant/",
+		"--set-string", "tlsLb.routes[1].backend.address=tenant-router.c8s-system.svc:8080",
+		"--set-string", "tlsLb.routes[1].backend.protocol=https",
+		"--set", "tlsLb.routes[1].backend.tls.verify=true",
+		"--show-only", "templates/tls-lb-configmap.yaml",
 	)
 	cmd.Dir = "."
 	out, err := cmd.CombinedOutput()

@@ -1,0 +1,192 @@
+{{- if .Values.teeProxy.enabled }}
+{{- $attestationURL := default (printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace) .Values.teeProxy.attestationURL -}}
+{{- $tlsMode := or .Values.teeProxy.tls.enabled (ne .Values.teeProxy.domain "") -}}
+{{- $probePort := ternary .Values.teeProxy.ports.https .Values.teeProxy.ports.http $tlsMode -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tee-proxy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tee-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: {{ .Values.teeProxy.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "tee-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tee-proxy.selectorLabels" . | nindent 8 }}
+      {{- if .Values.teeProxy.router.enabled }}
+      annotations:
+        checksum/router-config: {{ include (print $.Template.BasePath "/tee-proxy-configmap-router.yaml") . | sha256sum }}
+      {{- end }}
+    spec:
+      {{- with .Values.teeProxy.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "0"
+      {{- if gt (int .Values.teeProxy.replicas) 1 }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "tee-proxy.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- with .Values.teeProxy.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: {{ include "tee-proxy.image" . }}
+          imagePullPolicy: {{ .Values.teeProxy.image.pullPolicy }}
+          args:
+            - --host
+            - {{ .Values.teeProxy.domain | quote }}
+            - --upstream
+            {{- if .Values.teeProxy.router.enabled }}
+            - "http://127.0.0.1:{{ .Values.teeProxy.router.port }}"
+            {{- else }}
+            - "http://{{ .Values.teeProxy.upstream }}"
+            {{- end }}
+            - --platform
+            - {{ .Values.teeProxy.platform | quote }}
+            - --header-name
+            - {{ .Values.teeProxy.headerName | quote }}
+            {{- if $attestationURL }}
+            - --attestation-url
+            - {{ $attestationURL | quote }}
+            {{- end }}
+            {{- if .Values.teeProxy.tls.enabled }}
+            - --tls-dir
+            - {{ .Values.teeProxy.tls.mountPath | quote }}
+            {{- end }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.teeProxy.ports.https }}
+              hostPort: {{ .Values.teeProxy.ports.https }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.teeProxy.ports.http }}
+              hostPort: {{ .Values.teeProxy.ports.http }}
+              protocol: TCP
+          workingDir: /tmp
+          env:
+            - name: AUTOCERT_DIR
+              value: /app/certs
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: autocert-cache
+              mountPath: /app/certs
+            {{- if .Values.teeProxy.tls.enabled }}
+            - name: static-tls
+              mountPath: {{ .Values.teeProxy.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+          resources:
+            requests:
+              {{- toYaml .Values.teeProxy.resources.requests | nindent 14 }}
+            limits:
+              {{- toYaml .Values.teeProxy.resources.limits | nindent 14 }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ $probePort }}
+            initialDelaySeconds: {{ .Values.teeProxy.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.probes.readiness.periodSeconds }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ $probePort }}
+            initialDelaySeconds: {{ .Values.teeProxy.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.probes.liveness.periodSeconds }}
+        {{- if .Values.teeProxy.router.enabled }}
+        - name: edge-router
+          image: {{ include "c8s-common.image" .Values.teeProxy.router.image }}
+          imagePullPolicy: {{ .Values.teeProxy.router.image.pullPolicy }}
+          ports:
+            - name: router
+              containerPort: {{ .Values.teeProxy.router.port }}
+              protocol: TCP
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.teeProxy.router.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /nginx-health
+              port: {{ .Values.teeProxy.router.port }}
+            initialDelaySeconds: {{ .Values.teeProxy.router.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.router.probes.readiness.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /nginx-health
+              port: {{ .Values.teeProxy.router.port }}
+            initialDelaySeconds: {{ .Values.teeProxy.router.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.router.probes.liveness.periodSeconds }}
+          volumeMounts:
+            - name: router-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: router-tmp
+              mountPath: /tmp
+            - name: router-cache
+              mountPath: /var/cache/nginx
+        {{- end }}
+      volumes:
+        - name: autocert-cache
+          persistentVolumeClaim:
+            claimName: {{ include "tee-proxy.fullname" . }}-certs
+        {{- if .Values.teeProxy.tls.enabled }}
+        - name: static-tls
+          secret:
+            secretName: {{ required "teeProxy.tls.secretName must be set when teeProxy.tls.enabled=true" .Values.teeProxy.tls.secretName }}
+            items:
+              - key: {{ .Values.teeProxy.tls.certKey }}
+                path: localhost+2.pem
+              - key: {{ .Values.teeProxy.tls.keyKey }}
+                path: localhost+2-key.pem
+        {{- end }}
+        {{- if .Values.teeProxy.router.enabled }}
+        - name: router-config
+          configMap:
+            name: {{ include "tee-proxy.fullname" . }}-router
+        - name: router-tmp
+          emptyDir: {}
+        - name: router-cache
+          emptyDir: {}
+        {{- end }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.teeProxy.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.teeProxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

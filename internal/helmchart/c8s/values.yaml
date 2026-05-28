@@ -1,11 +1,3 @@
-## Single source for the unified CDS, under `global` so the vendored subcharts
-## (ratls-mesh, nri-image-policy) read the same values the parent does (no
-## per-subchart mirror to drift). cdsMeasurements is the SHA-384 hex
-## launch-digest allowlist clients pin CDS's RA-TLS cert against (empty = accept
-## any, UNSAFE outside dev).
-global:
-  cdsMeasurements: []
-
 ## Operator container image. The same image runs every c8s mode that
 ## doesn't need extra OS bins: controller manager and injected get-cert.
 ## `tag` and `digest` are consumer-supplied — the chart fails to render if
@@ -95,11 +87,14 @@ cds:
   sanValidation: false
   dnsSanPattern: ""
   cnPattern: ""
-  ## One flat allowlist of SHA-384 hex launch digests permitted to call /attest,
-  ## /sign-csr, and (when handoff is enabled) /handoff. NOTE: /handoff hands over
-  ## the mesh CA private key, so every digest listed here can pull the CA — there
-  ## is no separate, narrower handoff allowlist in the chart. Empty = no pinning
-  ## (UNSAFE outside dev).
+  ## The single flat allowlist of SHA-384 hex launch digests, used two ways:
+  ##   1. CDS admits these to call /attest, /sign-csr, and (when handoff is
+  ##      enabled) /handoff. NOTE: /handoff hands over the mesh CA private key,
+  ##      so every digest listed here can pull the CA — there is no separate,
+  ##      narrower handoff allowlist.
+  ##   2. The ratls-mesh daemonset and nri-image-policy plugin pin CDS's RA-TLS
+  ##      serving cert against it when they dial CDS.
+  ## Empty = no pinning (UNSAFE outside dev).
   measurements: []
   ## SHA-384 hex launch digests whose bearer EAR may mutate the whitelist via
   ## POST/DELETE /whitelist. Empty = whitelist writes are rejected.
@@ -267,24 +262,165 @@ kata:
   enforce:
     enabled: false
 
-## Vendored component charts from lunal-dev/c8s-charts. They are enabled by
-## default so c8s can replace the previous per-component HelmReleases.
-ratls-mesh:
+## RA-TLS service mesh: transparent L4 proxy with hardware-attested mTLS.
+##
+## --- CRITICAL OPERATIONAL REQUIREMENT ---
+## The ratls-mesh DaemonSet hardcodes hostNetwork: true and
+## dnsPolicy: ClusterFirstWithHostNet (see templates/ratls-mesh-daemonset.yaml).
+## Both are non-toggleable: iptables-sync must run in the host network namespace
+## to intercept pre-DNAT pod traffic at the node level, and the paired
+## dnsPolicy keeps in-cluster service DNS working from that netns. Removing
+## either breaks the routing model — there is no values knob because there
+## is no supported configuration without them. Confirm your cluster CNI and
+## any node-level NetworkPolicy/firewall posture is compatible before
+## deploying.
+ratlsMesh:
   enabled: true
+
   image:
     repository: ghcr.io/lunal-dev/ratls-mesh
+    # -- Image tag. Required: the chart does not pin a default; the consumer
+    #    (HelmRelease values or cluster overlay) must set tag or digest.
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
+
   imagePullSecrets: []
-  certMode: cds
-  tpm:
+
+  # TEE platform. The supported c8s chart shape is SEV-SNP.
+  platform: sev-snp
+
+  # Host path for iptables lock (k3s: /run/k3s/agent/xtables.lock)
+  xtablesLockPath: /run/xtables.lock
+
+  # Mesh ports
+  ports:
+    outbound: 15001
+    inbound: 15006
+    health: 15021
+
+  # UID for the ratls-mesh process (iptables excludes this UID)
+  uid: 1337
+
+  # UIDs excluded from iptables redirect (comma-separated)
+  excludeUids: "0"
+
+  # Certificate settings
+  certMode: cds  # self-signed | cds
+  certTtl: "4h"
+  rotationTimeout: "30s"
+
+  # CDS integration (used when certMode=cds). The launch-measurement allowlist
+  # for CDS's RA-TLS peer cert comes from the parent's cds.measurements, not
+  # a per-component mirror.
+  cds:
+    caPollInterval: "5m"
+
+  # Expected launch digests for measurement pinning (empty = accept any)
+  measurements: []
+
+  # Pod shutdown budget. The iptables-cleanup preStop hook fires last in the
+  # native-sidecar reverse-init order, so its sleep upper bound must leave room
+  # for the main proxy to drain first:
+  #   preStopSleepSeconds ≤ terminationGracePeriod - drainTimeout
+  # Durations use the Go single-unit form (Ns / Nm / Nh) and are parsed via
+  # the ratls-mesh.durationSeconds helper for chart-bound arithmetic.
+  terminationGracePeriod: "45s"
+  drainTimeout: "30s"
+
+  # Connection limits
+  maxConns: 10000
+  maxConnsPerSource: 0
+  idleTimeout: ""
+
+  # TLS session cache
+  sessionCacheSize: 64
+
+  # Logging
+  logLevel: info
+
+  # Node placement
+  nodeSelector: {}
+
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+  # Iptables sync sidecar resources
+  iptablesSync:
+    # Local source namespaces excluded from transparent mesh interception. The chart
+    # also appends its release namespace so ratls does not intercept its own control plane.
+    excludeSourceNamespaces:
+      - kube-system
+    resyncPeriod: 30s
+    watchdogPeriod: 2s
+    ipsetMaxElem: 262144
+    resources:
+      requests:
+        cpu: 5m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  iptablesCleanup:
+    # Seconds the preStop hook sleeps after running iptables-cleanup, giving
+    # kube-endpoints time to drop this node from Service backends so in-flight
+    # traffic stops landing here before the rules are gone. Bump on clusters
+    # with slow endpoint controllers; the upper bound is
+    # terminationGracePeriodSeconds (45) minus the main proxy's drain (~30s).
+    preStopSleepSeconds: 5
+    resources:
+      requests:
+        cpu: 1m
+        memory: 8Mi
+      limits:
+        cpu: 10m
+        memory: 16Mi
+
+  # Probe timings
+  probes:
+    startup:
+      periodSeconds: 2
+      failureThreshold: 60
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  # --- Policies ---
+
+  # TCP-only egress policy for application namespaces
+  tcpEgressPolicy:
     enabled: false
+    namespaces: []
+
+  # ValidatingAdmissionPolicy to prevent pods from running as mesh UID
+  uidAdmissionPolicy:
+    enabled: true
+
+  # PrometheusRule for threat model alerting
+  prometheusRules:
+    enabled: false
+
+  # Priority class for pod scheduling
+  priorityClassName: system-node-critical
+
   networkPolicy:
     enabled: false
     monitoringNamespace: monitoring
 
-nri-image-policy:
+nriImagePolicy:
   enabled: true
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
   ## Selects the containerd config layout it targets — see the subchart's
@@ -292,10 +428,35 @@ nri-image-policy:
   distro: k8s
   image:
     repository: ghcr.io/lunal-dev/nri-image-policy
+    # -- Image tag. Required: the chart does not pin a default; the consumer
+    #    (HelmRelease values or cluster overlay) must set tag or digest. The
+    #    image must contain both the host plugin binary at
+    #    /usr/local/bin/nri-image-policy and the install scripts the
+    #    DaemonSet executes (install-host-plugin.sh, patch-containerd.sh).
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
+
+  # RKE2-only containerd-prep initContainer. Runs privileged with the host
+  # containerd config directory mounted to wire up the drop-in import before
+  # the installer writes its NRI drop-in. Digest-pin this image because it runs
+  # as root on every selected node.
+  containerdPrep:
+    image:
+      repository: busybox
+      tag: ""
+      digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+      pullPolicy: IfNotPresent
+
   imagePullSecrets: []
+
+  # Plugin name. Must match the name the binary registers with at the NRI
+  # socket and the entry written to containerd's default_validator.required_plugins.
+  pluginName: nri-image-policy
+  # Plugin filename inside hostPaths.pluginDir. The "10-" prefix sets sort order
+  # relative to other NRI plugins.
+  pluginFilename: 10-nri-image-policy
+
   # CDS coordinates. The chart uses cds.node.selector three ways:
   # cds-installer affinity (In), worker-installer anti-affinity (NotIn),
   # push hook nodeSelector. Set to whatever label the CDS chart uses to
@@ -307,38 +468,321 @@ nri-image-policy:
     url: "http://c8s-cds.c8s-system.svc:8080"
     node:
       selector: {}
+      tolerations: []
   policy:
-    mode: audit
+    mode: audit  # audit | fail-closed
+    enforceExisting: true
+    denyMissingAnnotation: true
     exemptNamespaces:
       - kube-system
-tee-proxy:
+    # labelRules: Kubernetes-style label selectors evaluated against pod
+    # labels at container creation time. With the host-process model there
+    # is one plugin per node, so these rules apply globally on each node;
+    # multi-tenant isolation needs node-level (not pod-label) partitioning
+    # plus per-node values. Leaving empty disables label-based filtering.
+    labelRules: []
+
+  # Logging
+  logLevel: info
+
+  # Push hook tuning. The hook uses the install image; image.digest is rendered
+  # into always_allow so the hook Pod can be admitted by the CDS-node plugin.
+  push:
+    curlMaxTime: "10"
+    retries: "30"
+    retryDelay: "2"
+    backoffLimit: 3
+    ttlSecondsAfterFinished: 300
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 32Mi
+
+  # Host paths the installer DaemonSets write to.
+  hostPaths:
+    pluginDir: /opt/nri/plugins
+    configDir: /etc/nri/conf.d
+    cacheDir: /var/lib/nri-image-policy
+    runtimeDir: /var/run/nri-image-policy
+
+  # Containerd configuration the installer targets. The config directory,
+  # socket, and restart command default from distro; set the fields below only
+  # for a distro the built-in values do not cover.
+  containerd:
+    # Empty derives from distro (k8s -> /etc/containerd,
+    # rke2 -> /var/lib/rancher/rke2/agent/etc/containerd).
+    configDir: ""
+    # Empty derives from distro (k8s -> /run/containerd/containerd.sock,
+    # rke2 -> /run/k3s/containerd/containerd.sock).
+    socket: ""
+    namespace: k8s.io
+    # Empty derives from distro (k8s -> "systemctl restart containerd",
+    # rke2 -> "systemctl restart rke2-agent").
+    restartCommand: ""
+
+  refresh:
+    # How often the worker plugin pulls the current whitelist from CDS.
+    interval: 30s
+
+  # --- Bootstrap allowlist ---
+  # Digests that must be allowed for the cluster to bring itself up before
+  # CDS is reachable (CDS itself, kube-proxy, coredns, kubelet static
+  # pods, this chart's install-DaemonSet image, the plugin image).
+  #
+  # Populated by the c8s-fleet whitelist-sync workflow, which resolves digests
+  # via crane and writes them into the per-cluster HelmRelease values.
+  #
+  # Format: map of "sha256:<hex>" -> "<image reference>"
+  bootstrapWhitelist:
+    digests: {}
+    # sha256:abc123...: "ghcr.io/lunal-dev/cds:v0.1.0"
+
+  # --- Uninstall hook ---
+  # Pre-delete DaemonSet that reverts the containerd config patch and removes
+  # host artifacts. Helm waits for the DS to be Ready before continuing the
+  # uninstall, so cleanup is observable. Disable to leave host artifacts in
+  # place (rare; mostly forensic use).
+  uninstall:
+    enabled: true
+
+  # Node affinity — exclude edge nodes by default
+  nodeAffinity:
+    excludeLabels: []
+
+  # Resources for the install-DaemonSet pod itself (init container that
+  # copies files and patches containerd, then sleeps idle). Not the host
+  # plugin process, which runs outside K8s and has no resource limits.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+  # Priority class for the install-DaemonSet pod.
+  priorityClassName: system-node-critical
+
+  # Health probe socket on the host. The host plugin listens on this unix
+  # domain socket inside hostPaths.runtimeDir; the install-DaemonSet probes
+  # it after install to verify the plugin came up. Unix socket avoids
+  # hostNetwork and the port-conflict surface that comes with it.
+  #
+  # The plugin source must support binding to a unix socket via the
+  # plugin.health_addr config field (rendered as "unix://<path>").
+  healthSocketName: health.sock
+
+teeProxy:
   enabled: true
-  upstream: vllm-router-service.vllm.svc.cluster.local
   image:
     repository: ghcr.io/lunal-dev/tee-proxy
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   imagePullSecrets: []
-  attestationURL: ""
-  tpm:
+  replicas: 1
+  # TEE platform. The supported c8s chart shape is SEV-SNP.
+  platform: sev-snp
+  # Domain for autocert TLS
+  domain: ""
+  # Static TLS certificate Secret. When enabled, tee-proxy starts HTTPS using
+  # --tls-dir and expects cert/key files named localhost+2.pem and
+  # localhost+2-key.pem inside mountPath.
+  tls:
     enabled: false
+    secretName: ""
+    certKey: tls.crt
+    keyKey: tls.key
+    mountPath: /tls
+  # Upstream service to proxy to
+  upstream: vllm-router-service.vllm.svc.cluster.local
+  # Attestation header name
+  headerName: "Attestation-Report"
+  # Remote attestation service URL (required for new tee-proxy versions)
+  attestationURL: ""
+  # Listening ports
+  ports:
+    https: 443
+    http: 80
+  # Node placement
+  nodeSelector: {}
+  tolerations: []
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+  # Autocert PVC
+  persistence:
+    storageClass: ""
+    size: 1Gi
+  # --- Edge Router (nginx sidecar) ---
   router:
-    ## No extra host routes by default; CDS serves /whitelist directly.
-    routes: []
+    enabled: true
     image:
       repository: docker.io/library/nginx
       digest: "sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b"
+      tag: ""
+      pullPolicy: IfNotPresent
+    port: 8080
+    ## No extra host routes by default; CDS serves /whitelist directly.
+    routes: []
+    # DNS resolver for nginx dynamic upstream resolution
+    resolver: "kube-dns.kube-system.svc.cluster.local"
+    # Proxy timeouts (seconds)
+    proxyReadTimeout: 120
+    proxyConnectTimeout: 10
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+    probes:
+      readiness:
+        initialDelaySeconds: 2
+        periodSeconds: 10
+      liveness:
+        initialDelaySeconds: 5
+        periodSeconds: 30
+  # Probe timings
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 30
+  # Priority class for pod scheduling
+  priorityClassName: system-node-critical
 
-tls-lb:
+tlsLb:
   enabled: true
+
+  # -- Subject Alternative Name for the CDS certificate. Empty defaults to the
+  # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc.
+  san: ""
+
+  # -- Upstream backend service to proxy traffic to.
+  upstream:
+    # -- Host and port of the upstream service.
+    address: c8s-tee-proxy:80
+    # -- Protocol for the upstream connection (http or https).
+    protocol: http
+    tls:
+      # -- Present the CDS-issued certificate to HTTPS upstreams.
+      useCDSClientCert: true
+      # -- Verify HTTPS upstream certificates with the mounted mesh CA bundle.
+      verify: false
+      # -- Maximum upstream server certificate chain depth nginx will verify when
+      # upstream.tls.verify=true. Increase for private PKI chains with more
+      # intermediates between the upstream leaf and trusted CA bundle.
+      verifyDepth: 2
+      # -- Optional SNI/verification name for the HTTPS upstream.
+      serverName: ""
+      # -- Optional CA file path. Empty defaults to <meshCA.mountPath>/<meshCA.key>.
+      # Custom paths must be provided by the image or another mount.
+      trustedCAPath: ""
+
+  # -- Additional path routes proxied before the default upstream backend.
+  # Useful for preserving control-plane endpoints while the catch-all route
+  # points at an inference backend.
+  routes: []
+    # - path: /whitelist
+    #   match: exact  # exact | prefix (default)
+    #   backend:
+    #     address: cds.default.svc.cluster.local:8080
+    #     protocol: http
+    #     tls:
+    #       useCDSClientCert: false
+    #       verify: false
+    #       verifyDepth: 2
+    #       serverName: cds.default.svc.cluster.local
+    #       trustedCAPath: ""
+
+  # -- Public TLS certificate presented to internet clients. When secretName is
+  # empty, nginx falls back to the CDS-issued cert at tlsMountPath for backwards
+  # compatibility.
+  publicTLS:
+    secretName: ""
+    certKey: tls.crt
+    keyKey: tls.key
+    mountPath: "/public-tls"
+
+  # -- Discovery/preflight metadata served by nginx. The c8s admission webhook
+  # injects get-cert with the matching discovery-output annotations.
+  discovery:
+    enabled: false
+    path: "/v1/discovery"
+    mountPath: "/discovery"
+    fileName: "discovery.json"
+    cdsCertPath: "/.well-known/cds-cert.pem"
+    meshCAPath: "/.well-known/mesh-ca.pem"
+
+  # -- Mesh CA bundle exposed for demo preflight clients. Defaults match the
+  # chart-managed c8s CDS ConfigMap name.
+  meshCA:
+    # -- Serve and advertise the mesh CA PEM when discovery is enabled. The
+    # ConfigMap must exist for nginx to serve the bundle; setting optional=true
+    # below lets the pod start without it (the discovery URL will then return
+    # 404 until the ConfigMap is created).
+    expose: true
+    # -- Name of an existing ConfigMap holding the mesh CA bundle. CDS does not
+    # render this ConfigMap itself (the bundle lives in the in-memory CA + public
+    # bundle on the CDS pod), so the operator must provide one when discovery is
+    # enabled. Empty defaults to "<release>-cds-mesh-ca".
+    configMapName: ""
+    key: ca.pem
+    mountPath: "/mesh-ca"
+    # -- Tolerate a missing mesh CA ConfigMap at pod start. Defaults to true so
+    # enabling discovery does not break pod creation; set to false to fail fast
+    # in environments that pre-create the ConfigMap.
+    optional: true
+
+  imagePullSecrets: []
+
+  certProvisioning:
+    # -- Enable verbose (debug) logging for webhook-injected cert provisioning.
+    verbose: false
+    # -- How often the webhook-injected get-cert sidecar renews the TLS
+    #    certificate and SIGHUPs nginx. Must be shorter than the cert TTL issued by CDS.
+    renewInterval: "1h"
+
   nginx:
     image:
       repository: nginxinc/nginx-unprivileged
       digest: "sha256:4359d693e04e2384cafa10a0fcdca850767dcf541457470124542356a9852c3f"
-  upstream:
-    address: c8s-tee-proxy:80
-    protocol: http
+      tag: ""
+      pullPolicy: IfNotPresent
+    # -- Number of nginx replicas.
+    replicas: 1
+    # -- HTTPS port nginx listens on.
+    httpsPort: 443
+    # -- UID/GID used by nginx and the webhook-injected get-cert containers so
+    #    both can access the in-memory CDS key material.
+    runAsUser: 101
+    runAsGroup: 101
+    runAsNonRoot: true
+    resources: {}
+
+  service:
+    type: ClusterIP
+    port: 443
+    # -- Optional annotations on the Service (e.g. cloud LB / static IP hints).
+    annotations: {}
+    # -- Optional pre-allocated static load balancer IP. Cloud-provider specific.
+    loadBalancerIP: ""
+
+  # -- Volume mount path for the CDS-issued TLS certificate and key shared
+  # between get-cert and nginx.
+  tlsMountPath: "/tls"
 
 ## Common pod-level security knobs.
 podSecurityContext:

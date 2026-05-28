@@ -17,20 +17,3 @@ keywords:
 maintainers:
   - name: lunal-dev
 home: https://github.com/lunal-dev
-dependencies:
-  - name: ratls-mesh
-    version: 0.1.0
-    repository: file://charts/ratls-mesh
-    condition: ratls-mesh.enabled
-  - name: nri-image-policy
-    version: 0.3.0
-    repository: file://charts/nri-image-policy
-    condition: nri-image-policy.enabled
-  - name: tee-proxy
-    version: 0.1.0
-    repository: file://charts/tee-proxy
-    condition: tee-proxy.enabled
-  - name: tls-lb
-    version: 0.5.0
-    repository: file://charts/tls-lb
-    condition: tls-lb.enabled

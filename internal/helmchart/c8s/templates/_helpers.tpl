@@ -157,3 +157,18 @@ imagePullSecrets:
 {{ toYaml . }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+  Image reference with digest support, inlined from the former c8s-common
+  library chart. Usage: {{ include "c8s-common.image" .Values.<x>.image }}
+  Renders repo@digest when .digest is set, otherwise repo:tag, and fails loudly
+  if neither is provided.
+*/}}
+{{- define "c8s-common.image" -}}
+{{- $img := . -}}
+{{- if $img.digest -}}
+{{ $img.repository }}@{{ $img.digest }}
+{{- else -}}
+{{ $img.repository }}:{{ required (printf "image.tag or image.digest is required for %s" $img.repository) $img.tag }}
+{{- end -}}
+{{- end }}

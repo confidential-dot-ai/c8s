@@ -1,4 +1,0 @@
-san: ci.example.com
-nginx:
-  image:
-    tag: ci-test

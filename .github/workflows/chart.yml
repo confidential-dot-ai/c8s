@@ -48,13 +48,13 @@ jobs:
             --set image.tag=ci \
             --set attestationService.image.tag=ci \
             --set cds.image.tag=ci \
-            --set ratls-mesh.image.tag=ci \
-            --set nri-image-policy.image.tag=ci \
-            --set nri-image-policy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set nri-image-policy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nri-image-policy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
-            --set nri-image-policy.cds.node.selector.role=cds-node \
-            --set tee-proxy.image.tag=ci
+            --set ratlsMesh.image.tag=ci \
+            --set teeProxy.image.tag=ci \
+            --set nriImagePolicy.image.tag=ci \
+            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
+            --set nriImagePolicy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
+            --set nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
+            --set nriImagePolicy.cds.node.selector.role=cds-node
 
       - name: Helm template
         run: |
@@ -63,13 +63,13 @@ jobs:
             --set image.tag=ci \
             --set attestationService.image.tag=ci \
             --set cds.image.tag=ci \
-            --set ratls-mesh.image.tag=ci \
-            --set nri-image-policy.image.tag=ci \
-            --set nri-image-policy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set nri-image-policy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nri-image-policy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
-            --set nri-image-policy.cds.node.selector.role=cds-node \
-            --set tee-proxy.image.tag=ci \
+            --set ratlsMesh.image.tag=ci \
+            --set teeProxy.image.tag=ci \
+            --set nriImagePolicy.image.tag=ci \
+            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
+            --set nriImagePolicy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
+            --set nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
+            --set nriImagePolicy.cds.node.selector.role=cds-node \
             > /dev/null
 
       - name: Helm template with webhook
@@ -79,13 +79,13 @@ jobs:
             --set image.tag=ci \
             --set attestationService.image.tag=ci \
             --set cds.image.tag=ci \
-            --set ratls-mesh.image.tag=ci \
-            --set nri-image-policy.image.tag=ci \
-            --set nri-image-policy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set nri-image-policy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nri-image-policy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
-            --set nri-image-policy.cds.node.selector.role=cds-node \
-            --set tee-proxy.image.tag=ci \
+            --set ratlsMesh.image.tag=ci \
+            --set teeProxy.image.tag=ci \
+            --set nriImagePolicy.image.tag=ci \
+            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
+            --set nriImagePolicy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
+            --set nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds:ci \
+            --set nriImagePolicy.cds.node.selector.role=cds-node \
             --set webhook.enabled=true \
             > /dev/null
 

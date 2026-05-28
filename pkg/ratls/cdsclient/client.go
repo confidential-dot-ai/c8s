@@ -63,7 +63,7 @@ type Config struct {
 	// accepted launch digests during the RA-TLS handshake to this set.
 	// Each entry is a 48-byte SEV-SNP measurement. Empty means "any
 	// measurement" — UNSAFE outside development; the chart should always
-	// populate this from `global.cdsMeasurements` in values.yaml.
+	// populate this from `cds.measurements` in values.yaml.
 	CDSMeasurements [][]byte
 
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS

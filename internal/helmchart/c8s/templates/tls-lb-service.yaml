@@ -1,0 +1,24 @@
+{{- if .Values.tlsLb.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tls-lb.fullname" . }}
+  labels:
+    {{- include "tls-lb.labels" . | nindent 4 }}
+  {{- with .Values.tlsLb.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.tlsLb.service.type }}
+  {{- with .Values.tlsLb.service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  ports:
+    - port: {{ .Values.tlsLb.service.port }}
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "tls-lb.selectorLabels" . | nindent 4 }}
+{{- end }}

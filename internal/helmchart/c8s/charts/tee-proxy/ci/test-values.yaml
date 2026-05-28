@@ -1,5 +1,0 @@
-image:
-  tag: ci-test
-router:
-  image:
-    tag: ci-test
