@@ -186,7 +186,6 @@ func TestEffectiveCDSCAURL(t *testing.T) {
 		name     string
 		certMode string
 		cdsURL   string
-		caURL    string
 		want     string
 	}{
 		{
@@ -202,29 +201,16 @@ func TestEffectiveCDSCAURL(t *testing.T) {
 			want:     "https://cds:8443/ca",
 		},
 		{
-			name:     "explicit CA URL wins",
-			certMode: "cds",
-			cdsURL:   "https://cds:8443",
-			caURL:    "http://ca.example/mesh.pem",
-			want:     "http://ca.example/mesh.pem",
-		},
-		{
 			name:     "self signed keeps empty default",
 			certMode: "self-signed",
 			cdsURL:   "https://cds:8443",
 			want:     "",
 		},
-		{
-			name:     "self signed preserves explicit CA URL",
-			certMode: "self-signed",
-			caURL:    "http://ca.example/mesh.pem",
-			want:     "http://ca.example/mesh.pem",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := effectiveCDSCAURL(tt.certMode, tt.cdsURL, tt.caURL)
+			got := effectiveCDSCAURL(tt.certMode, tt.cdsURL)
 			if got != tt.want {
 				t.Fatalf("effectiveCDSCAURL() = %q, want %q", got, tt.want)
 			}

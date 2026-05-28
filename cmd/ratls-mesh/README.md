@@ -88,8 +88,7 @@ destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 | `--attestation-service-url` | (required) | Local attestation service URL (required for cds mode) |
 | `--cds-measurements` | `""` | Comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development) |
 | `--ca-cert` | `""` | Path to CA certificate PEM for X.509 chain verification |
-| `--ca-url` | `""` | CDS `/ca` URL for periodic CA bundle refresh (cds mode); empty derives from --cds-url |
-| `--ca-poll-interval` | `5m` | Interval for polling `--ca-url` |
+| `--ca-poll-interval` | `5m` | Interval for polling the CDS `/ca` endpoint for CA bundle updates (cds mode) |
 | `--cert-ttl` | `24h` | Certificate lifetime; rotates at 50% of TTL |
 | `--rotation-timeout` | `30s` | Max time for background certificate rotation |
 | `--session-cache-size` | `64` | TLS session cache size per node (0 = disabled) |
@@ -133,12 +132,9 @@ The `--cert-mode` flag controls how ratls-mesh obtains TLS certificates:
 
 This design ensures zero-downtime upgrades — nodes can be upgraded from self-signed to CDS-issued certificates without service interruption.
 
-**CA bundle wiring.** cds mode needs a CA trust root from CDS.
-Set either `cds.caUrl` (in the chart) / `--ca-url` (CLI) for dynamic
-periodic refresh, *or* mount a static CA configMap — the chart references
-`{release}-cds-mesh-ca` by default and mounts it at
-`/etc/mesh-ca` when `cds.caUrl` is empty. With neither set, the pod
-fails to schedule with a "configmap not found" error at install time.
+**CA bundle wiring.** cds mode needs a CA trust root from CDS. The proxy
+derives the CA bundle endpoint from `--cds-url` (the unified CDS serves
+`/ca` on the same URL) and polls it every `--ca-poll-interval`.
 
 ### Dual verification
 

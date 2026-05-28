@@ -81,7 +81,6 @@ type proxyConfig struct {
 	certMode                  string
 	cdsURL                    string
 	caCertPath                string
-	caURL                     string
 	caPollInterval            time.Duration
 	cdsMeasurements           string
 	sessionCacheSize          int
@@ -124,7 +123,6 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
 	fs.StringVar(&c.cdsURL, "cds-url", "", "CDS service URL for attestation and CA bundle retrieval (required for cds mode)")
 	fs.StringVar(&c.caCertPath, "ca-cert", "", "path to CA certificate file for peer verification")
-	fs.StringVar(&c.caURL, "ca-url", "", "CDS /ca URL for periodic CA bundle refresh (cds mode); empty derives from --cds-url")
 	fs.DurationVar(&c.caPollInterval, "ca-poll-interval", 5*time.Minute, "interval to poll CDS /ca for CA bundle updates")
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
@@ -229,7 +227,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if err != nil {
 		return err
 	}
-	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL, c.caURL)
+	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
 	cdsMeasurements, err := parseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
@@ -681,10 +679,9 @@ func makeAttestFunc(client attestclient.Client, attestationServiceURL string) fu
 	}
 }
 
-func effectiveCDSCAURL(certMode, cdsURL, caURL string) string {
-	caURL = strings.TrimSpace(caURL)
-	if caURL != "" || certMode != "cds" {
-		return caURL
+func effectiveCDSCAURL(certMode, cdsURL string) string {
+	if certMode != "cds" {
+		return ""
 	}
 	return strings.TrimRight(cdsURL, "/") + "/ca"
 }
