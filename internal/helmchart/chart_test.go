@@ -864,41 +864,116 @@ func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 }
 
 func TestChartNRIImagePolicyUsesCDSPushAndPullModes(t *testing.T) {
+	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
 	out, err := helmTemplate(t,
-		"--set", "nriImagePolicy.cds.url=http://c8s-cds.c8s-system.svc:8080",
+		"--set", "cds.measurements[0]="+measurement,
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 
-	worker := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
-	workerInstall := strings.Join(containerArgs(t, &worker, "install"), "\n")
-	for _, want := range []string{
-		`pull:`,
-		`url: "http://c8s-cds.c8s-system.svc:8080"`,
-		`interval: "30s"`,
-	} {
-		if !strings.Contains(workerInstall, want) {
-			t.Fatalf("worker install script missing %q\n%s", want, workerInstall)
-		}
+	workerCfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if got, want := workerCfg.Whitelist.Pull.URL, "https://127.0.0.1:30808"; got != want {
+		t.Fatalf("worker pull URL = %q, want %q", got, want)
 	}
-	if strings.Contains(workerInstall, `push:`) || strings.Contains(workerInstall, `assam_measurements`) {
-		t.Fatalf("worker boot config contains stale push/Assam fields\n%s", workerInstall)
+	if got, want := workerCfg.Whitelist.Pull.Interval, "30s"; got != want {
+		t.Fatalf("worker pull interval = %q, want %q", got, want)
+	}
+	if got, want := workerCfg.Whitelist.Pull.AttestationServiceURL, "http://localhost:30840"; got != want {
+		t.Fatalf("runtime attestation service URL = %q, want %q", got, want)
+	}
+	if want := []string{measurement}; !slices.Equal(workerCfg.Whitelist.Pull.CDSMeasurements, want) {
+		t.Fatalf("worker CDS measurements = %v, want %v", workerCfg.Whitelist.Pull.CDSMeasurements, want)
+	}
+	if workerCfg.Whitelist.Push.PersistPath != "" {
+		t.Fatalf("worker boot config has push persist path %q, want empty", workerCfg.Whitelist.Push.PersistPath)
 	}
 
-	cds := renderedDaemonSet(t, out, "c8s-nri-image-policy-cds")
-	cdsInstall := strings.Join(containerArgs(t, &cds, "install"), "\n")
-	for _, want := range []string{
-		`push:`,
-		`persist_path: "/var/lib/nri-image-policy/pushed.json"`,
-	} {
-		if !strings.Contains(cdsInstall, want) {
-			t.Fatalf("CDS install script missing %q\n%s", want, cdsInstall)
-		}
+	cdsCfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-cds")
+	if got, want := cdsCfg.Whitelist.Push.PersistPath, "/var/lib/nri-image-policy/pushed.json"; got != want {
+		t.Fatalf("CDS-node push persist path = %q, want %q", got, want)
 	}
-	if strings.Contains(cdsInstall, `pull:`) || strings.Contains(cdsInstall, `127.0.0.1:30808`) {
-		t.Fatalf("CDS boot config contains stale pull/Assam fields\n%s", cdsInstall)
+	if cdsCfg.Whitelist.Pull.URL != "" {
+		t.Fatalf("CDS-node boot config has pull URL %q, want empty", cdsCfg.Whitelist.Pull.URL)
 	}
+}
+
+func TestChartAttestationServiceNodePortEnabledWithNRI(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	svc := renderedService(t, out, "c8s-attestation-service")
+	if svc.Spec.Type != corev1.ServiceTypeNodePort {
+		t.Fatalf("attestation-service Service type = %q by default, want NodePort", svc.Spec.Type)
+	}
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+		t.Fatalf("attestation-service externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+	}
+	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
+		t.Fatalf("attestation-service nodePort = %d by default, want 30840", got)
+	}
+}
+
+func TestChartAttestationServiceNodePortWiresNRI(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "attestationService.service.nodePort=31040",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	svc := renderedService(t, out, "c8s-attestation-service")
+	if svc.Spec.Type != corev1.ServiceTypeNodePort {
+		t.Fatalf("attestation-service Service type = %q, want NodePort", svc.Spec.Type)
+	}
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+		t.Fatalf("attestation-service externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+	}
+	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
+		t.Fatalf("attestation-service nodePort = %d, want 31040", got)
+	}
+
+	cfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if got, want := cfg.Whitelist.Pull.AttestationServiceURL, "http://localhost:31040"; got != want {
+		t.Fatalf("runtime attestation service URL = %q, want %q", got, want)
+	}
+}
+
+func TestChartAttestationServiceNodePortDisabledWithoutNRI(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "attestationService.service.nodePort=0",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	svc := renderedService(t, out, "c8s-attestation-service")
+	if svc.Spec.Type == corev1.ServiceTypeNodePort {
+		t.Fatalf("attestation-service Service type = NodePort with NRI disabled, want no NodePort")
+	}
+	if got := svc.Spec.Ports[0].NodePort; got != 0 {
+		t.Fatalf("attestation-service nodePort = %d with NRI disabled, want 0", got)
+	}
+}
+
+func TestChartRejectsPlaintextNRIWhitelist(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "nriImagePolicy.cds.url=http://c8s-cds.c8s-system.svc:8443",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want plaintext NRI whitelist failure\n%s", out)
+	}
+	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the whitelist over RA-TLS`)
+}
+
+func TestChartRejectsInvalidAttestationServiceNodePortWithNRI(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "attestationService.service.nodePort=0",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want invalid attestation-service host nodePort failure\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "attestationService.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got 0)")
 }
 
 // parseValidationErrorKind extracts kind=<id> from helm's stderr when the
@@ -2385,6 +2460,48 @@ func renderedDaemonSet(t *testing.T, manifest, name string) appsv1.DaemonSet {
 		t.Fatalf("rendered manifest missing DaemonSet %q\n%s", name, manifest)
 	}
 	return ds
+}
+
+type nriRuntimeConfig struct {
+	Whitelist struct {
+		Pull struct {
+			URL                   string   `yaml:"url"`
+			Interval              string   `yaml:"interval"`
+			Timeout               string   `yaml:"timeout"`
+			AttestationServiceURL string   `yaml:"attestation_service_url"`
+			CDSMeasurements       []string `yaml:"cds_measurements"`
+		} `yaml:"pull"`
+		Push struct {
+			PersistPath string `yaml:"persist_path"`
+		} `yaml:"push"`
+	} `yaml:"whitelist"`
+}
+
+func renderedNRIBootConfig(t *testing.T, manifest, daemonSetName string) nriRuntimeConfig {
+	t.Helper()
+	ds := renderedDaemonSet(t, manifest, daemonSetName)
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	raw := extractHeredoc(t, script, "IMAGE_POLICY_EOF")
+	var cfg nriRuntimeConfig
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("decode %s boot config: %v\n%s", daemonSetName, err, raw)
+	}
+	return cfg
+}
+
+func extractHeredoc(t *testing.T, script, marker string) string {
+	t.Helper()
+	startMarker := "<<'" + marker + "'\n"
+	start := strings.Index(script, startMarker)
+	if start < 0 {
+		t.Fatalf("script missing heredoc start marker %q\n%s", marker, script)
+	}
+	bodyStart := start + len(startMarker)
+	end := strings.Index(script[bodyStart:], "\n"+marker)
+	if end < 0 {
+		t.Fatalf("script missing heredoc end marker %q\n%s", marker, script)
+	}
+	return script[bodyStart : bodyStart+end]
 }
 
 func renderedConfigMap(t *testing.T, manifest, name string) corev1.ConfigMap {

@@ -145,6 +145,10 @@ attestationService:
     digest: ""
     pullPolicy: IfNotPresent
   port: 8400
+  service:
+    ## NodePort used by host-process components such as nri-image-policy.
+    ## Rendered only when nri-image-policy.enabled=true.
+    nodePort: 30840
   ## Per-device hostPath mounts. hostPath.type=CharDevice fails the pod if
   ## the device node doesn't exist on the host, so disable for nodes that
   ## lack the corresponding hardware.
@@ -465,7 +469,9 @@ nriImagePolicy:
     image:
       digest: ""
       reference: ""
-    url: "http://c8s-cds.c8s-system.svc:8080"
+    ## Host-process NRI pulls through the chart-managed CDS NodePort and
+    ## verifies CDS RA-TLS instead of trusting cluster DNS or ClusterIP routing.
+    url: "https://127.0.0.1:30808"
     node:
       selector: {}
       tolerations: []

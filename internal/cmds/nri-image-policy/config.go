@@ -2,6 +2,7 @@ package nriimagepolicy
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
+	"github.com/lunal-dev/c8s/pkg/ratls"
 	"github.com/lunal-dev/c8s/pkg/types"
 )
 
@@ -46,9 +48,11 @@ type whitelistConfig struct {
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
-	URL      string        `yaml:"url"`      // empty disables pull
-	Interval time.Duration `yaml:"interval"` // ticker cadence; > 0 required when URL is set
-	Timeout  time.Duration `yaml:"timeout"`  // per-request timeout; > 0 required when URL is set
+	URL                   string        `yaml:"url"`                     // empty disables pull
+	Interval              time.Duration `yaml:"interval"`                // ticker cadence; > 0 required when URL is set
+	Timeout               time.Duration `yaml:"timeout"`                 // per-request timeout; > 0 required when URL is set
+	AttestationServiceURL string        `yaml:"attestation_service_url"` // required for https pull
+	CDSMeasurements       []string      `yaml:"cds_measurements"`        // SHA-384 hex launch digests
 }
 
 // pushConfig configures the operator-push source.
@@ -179,6 +183,21 @@ func (c *config) Validate() error {
 		}
 		if c.Whitelist.Pull.Interval <= 0 {
 			return fmt.Errorf("whitelist.pull.interval must be > 0 when pull.url is set")
+		}
+		parsed, err := url.Parse(c.Whitelist.Pull.URL)
+		if err != nil {
+			return fmt.Errorf("whitelist.pull.url: %w", err)
+		}
+		// CDS serves RA-TLS only, so the pull URL must be https — a plaintext
+		// pull would defeat the attestation handshake entirely.
+		if parsed.Scheme != "https" {
+			return fmt.Errorf("whitelist.pull.url scheme must be https, got %q", parsed.Scheme)
+		}
+		if c.Whitelist.Pull.AttestationServiceURL == "" {
+			return fmt.Errorf("whitelist.pull.attestation_service_url must be set")
+		}
+		if _, err := ratls.ParseHexMeasurementsList(c.Whitelist.Pull.CDSMeasurements); err != nil {
+			return fmt.Errorf("whitelist.pull.cds_measurements: %w", err)
 		}
 	}
 	if !c.WhitelistEnabled() && len(c.Policy.LabelRules) == 0 {

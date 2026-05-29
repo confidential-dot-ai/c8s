@@ -14,9 +14,10 @@ func validConfig() config {
 				"sha256:0000000000000000000000000000000000000000000000000000000000000001": "test-installer",
 			},
 			Pull: pullConfig{
-				URL:      "http://localhost:8080",
-				Timeout:  30 * time.Second,
-				Interval: 30 * time.Second,
+				URL:                   "https://127.0.0.1:30808",
+				Timeout:               30 * time.Second,
+				Interval:              30 * time.Second,
+				AttestationServiceURL: "http://localhost:30840",
 			},
 		},
 		Policy: policyConfig{
@@ -62,6 +63,38 @@ func TestValidate_NegativeTimeout(t *testing.T) {
 	cfg.Whitelist.Pull.Timeout = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for negative timeout")
+	}
+}
+
+func TestValidate_PullRequiresAttestationService(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.Pull.AttestationServiceURL = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when pull lacks attestation_service_url")
+	}
+}
+
+func TestValidate_PullRejectsInvalidCDSMeasurement(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.Pull.CDSMeasurements = []string{"not-hex"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid CDS measurement")
+	}
+}
+
+func TestValidate_PullRejectsPlaintextScheme(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.Pull.URL = "http://localhost:8080"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for plaintext http pull URL")
+	}
+}
+
+func TestValidate_PullRejectsUnsupportedScheme(t *testing.T) {
+	cfg := validConfig()
+	cfg.Whitelist.Pull.URL = "ftp://127.0.0.1/whitelist"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for unsupported pull URL scheme")
 	}
 }
 
@@ -130,7 +163,8 @@ whitelist:
   always_allow:
     "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
   pull:
-    url: http://localhost:8080
+    url: https://127.0.0.1:30808
+    attestation_service_url: http://localhost:30840
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
@@ -319,7 +353,8 @@ whitelist:
   always_allow:
     "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
   pull:
-    url: http://localhost:8080
+    url: https://127.0.0.1:30808
+    attestation_service_url: http://localhost:30840
 policy:
   label_rules:
     - name: allowed-tenants

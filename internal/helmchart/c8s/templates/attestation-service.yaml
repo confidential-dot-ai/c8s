@@ -1,3 +1,5 @@
+{{- $nri := .Values.nriImagePolicy -}}
+{{- $attestationNodePort := int .Values.attestationService.service.nodePort -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -29,6 +31,10 @@ metadata:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: attestation-service
 spec:
+  {{- if $nri.enabled }}
+  type: NodePort
+  externalTrafficPolicy: Local
+  {{- end }}
   selector:
     app.kubernetes.io/name: c8s-operator
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -41,6 +47,9 @@ spec:
     - name: http
       port: {{ .Values.attestationService.port }}
       targetPort: http
+      {{- if $nri.enabled }}
+      nodePort: {{ $attestationNodePort }}
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet

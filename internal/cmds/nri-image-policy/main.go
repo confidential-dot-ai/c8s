@@ -31,6 +31,7 @@ import (
 	"github.com/lunal-dev/c8s/internal/httputil"
 	"github.com/lunal-dev/c8s/internal/version"
 	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/lunal-dev/c8s/pkg/ratls"
 	"github.com/lunal-dev/c8s/pkg/types"
 	"github.com/lunal-dev/c8s/pkg/whitelist"
 	"github.com/lunal-dev/c8s/pkg/whitelistclient"
@@ -119,9 +120,11 @@ func Run(args []string) error {
 	var wlClient whitelistclient.Client
 	if cfg.PullEnabled() {
 		logger.Info("initializing whitelist client", "url", cfg.Whitelist.Pull.URL)
-		wlClient = whitelistclient.NewClientWithHTTP(cfg.Whitelist.Pull.URL, &http.Client{
-			Timeout: cfg.Whitelist.Pull.Timeout,
-		})
+		httpClient, err := whitelistPullHTTPClient(cfg.Whitelist.Pull)
+		if err != nil {
+			return fmt.Errorf("create whitelist client: %w", err)
+		}
+		wlClient = whitelistclient.NewClientWithHTTP(cfg.Whitelist.Pull.URL, httpClient)
 	}
 
 	plugin, err := newPlugin(cfg, resolver, policyCache, auditLogger, logger)
@@ -236,6 +239,25 @@ func Run(args []string) error {
 	}
 	logger.Info("nri-image-policy stopped")
 	return nil
+}
+
+// whitelistPullHTTPClient builds the RA-TLS client for the CDS pull. The pull
+// URL is always https (enforced by config.Validate), so this always verifies
+// the CDS attestation handshake.
+func whitelistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
+	measurements, err := ratls.ParseHexMeasurementsList(cfg.CDSMeasurements)
+	if err != nil {
+		return nil, fmt.Errorf("parse CDS measurements: %w", err)
+	}
+	if len(measurements) == 0 {
+		slog.Warn("whitelist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
+	}
+	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	if err != nil {
+		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
+	}
+	client.Timeout = cfg.Timeout
+	return client, nil
 }
 
 // alwaysAllowWhitelist builds an in-memory Whitelist from the config's
