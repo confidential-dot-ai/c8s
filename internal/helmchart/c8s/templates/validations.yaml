@@ -12,6 +12,10 @@
 {{- if and .Values.kata.enforce.enabled (ne .Values.webhook.failurePolicy "Fail") -}}
 {{- fail (printf "kata.enforce.enabled=true requires webhook.failurePolicy=Fail (got %q): the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
 {{- end -}}
+{{- if and .Values.nriImagePolicy.enabled (or (not .Values.nriImagePolicy.cds.image.digest) (not .Values.nriImagePolicy.cds.image.reference)) -}}
+{{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}
+{{- fail "VALIDATION_ERROR kind=cds_image_digest: nriImagePolicy.enabled requires nriImagePolicy.cds.image.digest and .reference to be set. The CDS digest is seeded into CDS's served /whitelist and pushed to the CDS-node plugin by the push-hook; without it the image policy would deny CDS on its own node. A floating tag cannot be admitted by digest. Pass --resolve-digests to c8s install, or set these values via -f." -}}
+{{- end -}}
 {{- if and $nri.enabled (not (hasPrefix "https://" $nriCDSURL)) -}}
 {{- fail (printf "nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got %q): the host plugin must fetch the whitelist over RA-TLS" $nriCDSURL) -}}
 {{- end -}}

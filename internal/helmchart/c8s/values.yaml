@@ -533,13 +533,20 @@ nriImagePolicy:
     # How often the worker plugin pulls the current whitelist from CDS.
     interval: 30s
 
-  # --- Bootstrap allowlist ---
-  # Digests that must be allowed for the cluster to bring itself up before
-  # CDS is reachable (CDS itself, kube-proxy, coredns, kubelet static
-  # pods, this chart's install-DaemonSet image, the plugin image).
+  # --- Bootstrap allowlist (the authoritative floor) ---
+  # The single source of truth for the image-digest floor. Used two ways:
+  #   1. Rendered into every plugin's always_allow (both installer DaemonSets,
+  #      via nri-image-policy.bootConfig), so the cluster can bring itself up
+  #      before CDS is reachable.
+  #   2. Rendered into CDS's --whitelist-seed (templates/cds.yaml), so CDS's
+  #      served /whitelist is non-empty on the first worker pull.
+  # Must allow everything needed to reach a Ready CDS on the CDS node and a
+  # working kubelet on every node: attestation-service, kube-proxy, coredns,
+  # pause/sandbox, CNI, the plugin/installer image. The CDS image self-entry is
+  # added to the served seed automatically from nriImagePolicy.cds.image
+  # (digest + reference), so it need not be listed here.
   #
-  # Populated by the c8s-fleet whitelist-sync workflow, which resolves digests
-  # via crane and writes them into the per-cluster HelmRelease values.
+  # Operator-supplied via values or `-f` (resolve digests with crane/skopeo).
   #
   # Format: map of "sha256:<hex>" -> "<image reference>"
   bootstrapWhitelist:

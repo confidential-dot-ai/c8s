@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	webhook "github.com/lunal-dev/c8s/internal/webhook"
+	pkgwhitelist "github.com/lunal-dev/c8s/pkg/whitelist"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -2732,8 +2733,124 @@ func Example_tlsLBConfig() {
 	//
 }
 
-// renderExampleTLSLBNginxConf renders the tls-lb nginx.conf the same way
-// helmTemplateTLSLB does, then trims trailing whitespace per line so the
+// containerVolumeMount returns the named volume mount from a container
+// (read-only state checked separately by the caller).
+func containerVolumeMount(c corev1.Container, name string) (corev1.VolumeMount, bool) {
+	for _, m := range c.VolumeMounts {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return corev1.VolumeMount{}, false
+}
+
+func podVolume(spec corev1.PodSpec, name string) (corev1.Volume, bool) {
+	for _, v := range spec.Volumes {
+		if v.Name == name {
+			return v, true
+		}
+	}
+	return corev1.Volume{}, false
+}
+
+// TestChartSeedsCDSWhitelistFromFloor proves the single authoritative floor
+// (nriImagePolicy.bootstrapWhitelist.digests) plus the CDS image self-entry are
+// rendered into CDS's --whitelist-seed ConfigMap, so CDS's served /whitelist is
+// non-empty on the first worker pull. Decoded with the same typed Whitelist
+// shape CDS parses, not substring-matched.
+func TestChartSeedsCDSWhitelistFromFloor(t *testing.T) {
+	const floorDigest = "sha256:abcdef0000000000000000000000000000000000000000000000000000000000"
+	out, err := helmTemplate(t,
+		"--set-string", "nriImagePolicy.bootstrapWhitelist.digests."+floorDigest+"=ghcr.io/x/coredns:v1",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	cm := renderedConfigMap(t, out, "c8s-cds-whitelist-seed")
+	raw, ok := cm.Data["whitelist-seed.json"]
+	if !ok {
+		t.Fatalf("seed ConfigMap missing whitelist-seed.json key: %v", cm.Data)
+	}
+
+	seed, err := pkgwhitelist.ParseJSON([]byte(raw))
+	if err != nil {
+		t.Fatalf("seed JSON does not parse as a Whitelist (CDS would fail closed): %v\n%s", err, raw)
+	}
+
+	// The floor digest the operator supplied.
+	if got := seed.Digests[floorDigest]; got != "ghcr.io/x/coredns:v1" {
+		t.Errorf("seed floor digest = %q, want ghcr.io/x/coredns:v1\nseed: %v", got, seed.Digests)
+	}
+	// The CDS self-entry, taken from nriImagePolicy.cds.image (set by the test
+	// harness to digest ...0001 / reference ghcr.io/lunal-dev/cds:dev).
+	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	if got := seed.Digests[cdsDigest]; got != "ghcr.io/lunal-dev/cds:dev" {
+		t.Errorf("seed CDS self-entry = %q, want ghcr.io/lunal-dev/cds:dev\nseed: %v", got, seed.Digests)
+	}
+}
+
+// TestChartWiresCDSWhitelistSeedFlagAndVolume proves the CDS container receives
+// --whitelist-seed pointing at a read-only mount of the seed ConfigMap. The CDS
+// pod runs readOnlyRootFilesystem, so the seed must be a read-only volume, not a
+// writable path.
+func TestChartWiresCDSWhitelistSeedFlagAndVolume(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	assertContainerHasArg(t, "cds", cds.Args, "--whitelist-seed=/etc/cds/whitelist-seed.json")
+
+	mount, ok := containerVolumeMount(cds, "whitelist-seed")
+	if !ok {
+		t.Fatalf("cds container missing whitelist-seed volume mount; mounts=%v", cds.VolumeMounts)
+	}
+	if mount.MountPath != "/etc/cds" {
+		t.Errorf("whitelist-seed mountPath = %q, want /etc/cds", mount.MountPath)
+	}
+	if !mount.ReadOnly {
+		t.Errorf("whitelist-seed mount must be readOnly (cds has readOnlyRootFilesystem)")
+	}
+
+	vol, ok := podVolume(renderedDeployment(t, out, "c8s-cds").Spec.Template.Spec, "whitelist-seed")
+	if !ok {
+		t.Fatalf("cds pod missing whitelist-seed volume")
+	}
+	if vol.ConfigMap == nil || vol.ConfigMap.Name != "c8s-cds-whitelist-seed" {
+		t.Errorf("whitelist-seed volume should source ConfigMap c8s-cds-whitelist-seed; got %+v", vol.ConfigMap)
+	}
+}
+
+// With nriImagePolicy disabled there is no floor to seed and no image-policy to
+// admit CDS, so the seed wiring must drop out entirely.
+func TestChartOmitsCDSSeedWhenImagePolicyDisabled(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "nriImagePolicy.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-cds-whitelist-seed") {
+		t.Fatalf("seed ConfigMap should not render when nriImagePolicy is disabled")
+	}
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	assertContainerNoArgPrefix(t, "cds", cds.Args, "--whitelist-seed")
+}
+
+// The CDS image must be admittable by digest in the floor/seed; without
+// nriImagePolicy.cds.image.digest the image policy would deny CDS on its own
+// node. The chart fails the render with a structured marker rather than shipping
+// that deadlock.
+func TestChartRejectsImagePolicyWithoutCDSDigest(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "nriImagePolicy.cds.image.digest=")
+	if err == nil {
+		t.Fatalf("helm template succeeded without cds image digest, want guard failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "cds_image_digest" {
+		t.Fatalf("validation error kind = %q, want cds_image_digest\n%s", kind, out)
+	}
+}
+
 // golden stays gofmt-clean. Render errors are returned verbatim so the example
 // fails loudly rather than masking a broken template.
 func renderExampleTLSLBNginxConf() string {

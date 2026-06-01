@@ -82,8 +82,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   `attestationService.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
   running `c8s install`. Unstamped local builds report version `dev`, and the
-  install CLI maps that to the `latest` image tag because CI does not publish
-  `dev`.
+  install CLI maps that to the `main` branch tag because CI does not publish
+  `dev` (and `cds` publishes only `main`, not `latest`).
 
 This means a default platform install creates the operator, CRDs, RBAC,
 webhook, attestation-service, and CDS. It does not mutate
@@ -312,36 +312,49 @@ Run the chart tests only:
 go test ./internal/helmchart
 ```
 
-Run Helm lint:
+Validate the chart with `helm template` (use it, not `helm lint`: lint's
+standalone YAML parse chokes on the nri-image-policy installer's embedded
+host-config heredoc, while `helm template` — the path CI and the chart tests
+use — renders it correctly).
 
-```bash
-helm lint internal/helmchart/c8s \
-  --set image.tag=latest \
-  --set attestationService.image.tag=latest \
-  --set cds.image.tag=latest
-```
-
-Render the chart defaults. The output should include the chart-managed CDS
-Service wired through the operator's `--cds-url` arg:
-
-```bash
-helm template c8s internal/helmchart/c8s \
-  --namespace c8s-system \
-  --set image.tag=latest \
-  --set attestationService.image.tag=latest \
-  --set cds.image.tag=latest
-```
-
-Render the supported shape with a whitelist-write allowlist:
+The chart ships no default image tag, so a bare `helm template` must set one.
+`c8s install` injects this for you; `main` here is the same fallback tag it
+uses for a non-release build. The simplest validation renders with the
+image-policy component disabled, so only image tags are required:
 
 ```bash
 helm template c8s internal/helmchart/c8s \
   --namespace c8s-system \
-  --set image.tag=latest \
-  --set attestationService.image.tag=latest \
-  --set cds.image.tag=latest \
-  --set 'cds.whitelistWriteMeasurements[0]=<sha384-launch-measurement>'
+  --set image.tag=main \
+  --set attestationService.image.tag=main \
+  --set cds.image.tag=main \
+  --set ratlsMesh.image.tag=main \
+  --set teeProxy.image.tag=main \
+  --set nriImagePolicy.enabled=false >/dev/null && echo OK
 ```
+
+To render the full default shape (image policy enabled), the chart requires the
+nri-image-policy installer image and the CDS image to be digest-pinned, plus the
+single-label CDS node selector. `c8s install --resolve-digests` fills the
+digests from the registry; for a manual render the values below are placeholders:
+
+```bash
+helm template c8s internal/helmchart/c8s \
+  --namespace c8s-system \
+  --set image.tag=main \
+  --set attestationService.image.tag=main \
+  --set cds.image.tag=main \
+  --set ratlsMesh.image.tag=main \
+  --set teeProxy.image.tag=main \
+  --set nriImagePolicy.image.tag=main \
+  --set nriImagePolicy.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set nriImagePolicy.cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds:main \
+  --set 'nriImagePolicy.cds.node.selector.role=cds-node' >/dev/null && echo OK
+```
+
+Append `--set 'cds.whitelistWriteMeasurements[0]=<sha384-launch-measurement>'`
+to either command to render the whitelist-write allowlist.
 
 The rendered manifests should include:
 

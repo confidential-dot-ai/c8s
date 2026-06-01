@@ -19,10 +19,18 @@ webhook, attestation-service, and CDS.
 c8s install --namespace c8s-system
 ```
 
-`c8s install` passes the CLI build version as the chart image tag. Official
-release images are tagged with the literal Git tag, for example `v0.1.0`.
-Unstamped local builds report version `dev`; for that path, `c8s install` uses
-the `latest` image tag because CI does not publish `dev`.
+`c8s install` passes the CLI build version as the chart image tag, but only when
+it is a release tag (for example `v0.1.0`), the version CI publishes a matching
+image for. Any other build (a local `git describe` derivative, a commit SHA, or
+the unstamped default) falls back to the `main` branch tag, the only other tag
+every component publishes.
+
+The chart itself is versioned separately. CI publishes it to
+`oci://ghcr.io/lunal-dev/charts` under a SemVer chart version (`1.2.3` for a
+release tag, `<Chart.yaml version>-<short-sha>` for a `main` build), never a
+`main` tag, because Helm chart versions must be SemVer. The chart carries no
+default image tag of its own, so the image tag above is supplied by
+`c8s install` rather than baked into the published chart.
 
 To install without the advisory CRDs:
 

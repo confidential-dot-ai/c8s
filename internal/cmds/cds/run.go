@@ -112,6 +112,16 @@ func run(cfg config) error {
 	}
 	defer whitelistStore.Close()
 
+	// Seed before serving so the first GET /whitelist returns the bootstrap
+	// allowlist (CDS, attestation-service, system images) rather than an empty
+	// set; an unseeded store would deny every worker pull until an operator
+	// populated it. Fail closed on any seed error.
+	if cfg.whitelistSeed != "" {
+		if err := seedStore(&whitelistStore, cfg.whitelistSeed); err != nil {
+			return fmt.Errorf("seed whitelist: %w", err)
+		}
+	}
+
 	// /whitelist mutations require a bearer EAR whose launch measurement is in
 	// --whitelist-write-measurements. Empty allowlist rejects all writes.
 	whitelistWriteMeasurements := parseMeasurementAllowlist(cfg.whitelistWriteMeasurements)

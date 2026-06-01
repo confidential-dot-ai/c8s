@@ -61,6 +61,7 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.readinessInterval, "readiness-interval", 10*time.Second, "")
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
 	flags.StringVar(&cfg.whitelistDB, "whitelist-db", "", "Path to the whitelist SQLite database")
+	flags.StringVar(&cfg.whitelistSeed, "whitelist-seed", "", "Path to a JSON whitelist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringSliceVar(&cfg.whitelistWriteMeasurements, "whitelist-write-measurements", nil, "SHA-384 hex launch measurements allowed to mutate the whitelist via a bearer EAR (empty = reject all writes)")
 	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA via /handoff (empty = /handoff disabled)")
 
@@ -110,6 +111,7 @@ type config struct {
 	readinessInterval          time.Duration
 	minCAValidity              time.Duration
 	whitelistDB                string
+	whitelistSeed              string
 	whitelistWriteMeasurements []string
 	handoffMeasurements        []string
 	rotationInterval           time.Duration

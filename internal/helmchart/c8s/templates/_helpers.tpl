@@ -145,6 +145,31 @@ platforms = [{{- range $i, $p := $root.Values.attestationService.platforms -}}
 cache_max_entries = 1024
 {{- end -}}
 
+{{/*
+  c8s.whitelistSeedJSON renders the bootstrap image-digest allowlist as the
+  JSON shape CDS's --whitelist-seed expects ({"version","digests"}). CDS seeds
+  its served /whitelist from it so the first worker pull returns a real list
+  rather than an empty set. Contents: nriImagePolicy.bootstrapWhitelist.digests
+  (the operator-supplied floor, also rendered into each plugin's always_allow)
+  plus the CDS image self-entry (nriImagePolicy.cds.image, the same one the
+  push-hook pins) so CDS appears in its own served allowlist. Note the served
+  seed and a plugin's always_allow overlap on the floor but are not identical:
+  always_allow also carries the plugin/installer self-image, and the CDS
+  self-entry here is not added to always_allow (the CDS-node plugin learns the
+  CDS digest via the push-hook, not always_allow).
+*/}}
+{{- define "c8s.whitelistSeedJSON" -}}
+{{- $digests := dict -}}
+{{- range $digest, $image := .Values.nriImagePolicy.bootstrapWhitelist.digests -}}
+{{- $_ := set $digests $digest $image -}}
+{{- end -}}
+{{- $cdsImg := .Values.nriImagePolicy.cds.image -}}
+{{- if and $cdsImg.digest $cdsImg.reference -}}
+{{- $_ := set $digests $cdsImg.digest $cdsImg.reference -}}
+{{- end -}}
+{{ dict "version" "1" "digests" $digests | toJson }}
+{{- end -}}
+
 {{- define "c8s.commonLabels" -}}
 app.kubernetes.io/name: c8s-operator
 app.kubernetes.io/instance: {{ .Release.Name }}

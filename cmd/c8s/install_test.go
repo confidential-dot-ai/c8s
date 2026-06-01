@@ -4,10 +4,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 )
+
+var errTestResolve = errors.New("simulated resolve failure")
 
 func TestDefaultInstallImageTag(t *testing.T) {
 	tests := []struct {
@@ -15,10 +18,13 @@ func TestDefaultInstallImageTag(t *testing.T) {
 		buildVersion string
 		want         string
 	}{
-		{name: "unstamped dev build", buildVersion: "dev", want: "latest"},
-		{name: "empty build version", buildVersion: "", want: "latest"},
-		{name: "release tag", buildVersion: "v0.1.0", want: "v0.1.0"},
-		{name: "branch tag", buildVersion: "feat-phase5-chart-docs", want: "feat-phase5-chart-docs"},
+		{name: "release tag used verbatim", buildVersion: "v0.1.0", want: "v0.1.0"},
+		{name: "empty falls back", buildVersion: "", want: "main"},
+		{name: "unstamped default falls back", buildVersion: "dev", want: "main"},
+		{name: "git describe derivative falls back", buildVersion: "v0.1.0-5-gabc1234", want: "main"},
+		{name: "dirty tree falls back", buildVersion: "v0.1.0-dirty", want: "main"},
+		{name: "bare commit sha falls back", buildVersion: "abc1234", want: "main"},
+		{name: "branch name falls back", buildVersion: "feat-phase5-chart-docs", want: "main"},
 	}
 
 	for _, tt := range tests {
@@ -144,6 +150,88 @@ func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
 func TestAppendDistroInstallArgsRejectsUnknownDistro(t *testing.T) {
 	if _, err := appendDistroInstallArgs([]string{"upgrade"}, "openshift"); err == nil {
 		t.Fatal("appendDistroInstallArgs accepted an unknown --distro, want error")
+	}
+}
+
+func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
+	// Deterministic fake resolver: digest derived from the ref so each
+	// component gets a distinct, predictable value.
+	resolve := func(ref string) (string, error) {
+		switch ref {
+		case "ghcr.io/lunal-dev/c8s-operator:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000aa", nil
+		case "ghcr.io/lunal-dev/attestation-service:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000bb", nil
+		case "ghcr.io/lunal-dev/cds:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000cc", nil
+		case "ghcr.io/lunal-dev/ratls-mesh:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000dd", nil
+		case "ghcr.io/lunal-dev/nri-image-policy:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000ee", nil
+		case "ghcr.io/lunal-dev/tee-proxy:v1":
+			return "sha256:00000000000000000000000000000000000000000000000000000000000000ff", nil
+		}
+		t.Fatalf("unexpected ref resolved: %q", ref)
+		return "", nil
+	}
+
+	got, err := buildDigestArgs([]string{"upgrade"}, "v1", resolve)
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	assertArgsEqual(t, got, []string{
+		"upgrade",
+		// Each component pins both repository and digest so an -f repository
+		// override cannot diverge from the digest resolved against it.
+		"--set-string", "image.repository=ghcr.io/lunal-dev/c8s-operator",
+		"--set-string", "image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000aa",
+		"--set-string", "attestationService.image.repository=ghcr.io/lunal-dev/attestation-service",
+		"--set-string", "attestationService.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000bb",
+		"--set-string", "cds.image.repository=ghcr.io/lunal-dev/cds",
+		"--set-string", "cds.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000cc",
+		"--set-string", "ratlsMesh.image.repository=ghcr.io/lunal-dev/ratls-mesh",
+		"--set-string", "ratlsMesh.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000dd",
+		"--set-string", "nriImagePolicy.image.repository=ghcr.io/lunal-dev/nri-image-policy",
+		"--set-string", "nriImagePolicy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ee",
+		"--set-string", "teeProxy.image.repository=ghcr.io/lunal-dev/tee-proxy",
+		"--set-string", "teeProxy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ff",
+		// cds resolved once; reused for the nri push-hook/seed self-entry, with
+		// repository, digest, and the full repo@digest reference.
+		"--set-string", "nriImagePolicy.cds.image.repository=ghcr.io/lunal-dev/cds",
+		"--set-string", "nriImagePolicy.cds.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000cc",
+		"--set-string", "nriImagePolicy.cds.image.reference=ghcr.io/lunal-dev/cds@sha256:00000000000000000000000000000000000000000000000000000000000000cc",
+	})
+}
+
+// The cds repository is resolved for two value targets; it must be looked up
+// exactly once so the cds Deployment image and the nri self-entry can never
+// diverge.
+func TestBuildDigestArgsResolvesCDSOnce(t *testing.T) {
+	calls := map[string]int{}
+	resolve := func(ref string) (string, error) {
+		calls[ref]++
+		return "sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
+	}
+	if _, err := buildDigestArgs(nil, "v1", resolve); err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	if got := calls["ghcr.io/lunal-dev/cds:v1"]; got != 1 {
+		t.Fatalf("cds resolved %d times, want 1", got)
+	}
+}
+
+// A resolution failure for any component must abort: a partially pinned floor
+// would pass the render guard while the served whitelist pointed at a wrong or
+// missing digest.
+func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
+	resolve := func(ref string) (string, error) {
+		if ref == "ghcr.io/lunal-dev/cds:v1" {
+			return "", errTestResolve
+		}
+		return "sha256:2222222222222222222222222222222222222222222222222222222222222222", nil
+	}
+	if _, err := buildDigestArgs(nil, "v1", resolve); err == nil {
+		t.Fatal("buildDigestArgs ignored a resolver error, want fail-closed")
 	}
 }
 

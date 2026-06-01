@@ -23,6 +23,19 @@ metadata:
     app.kubernetes.io/component: cds
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
+{{- if .Values.nriImagePolicy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s.cdsName" . }}-whitelist-seed
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: cds
+data:
+  whitelist-seed.json: {{ include "c8s.whitelistSeedJSON" . | trim | quote }}
+---
+{{- end }}
 {{- if .Values.cds.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -87,6 +100,9 @@ spec:
             - --log-level={{ .Values.cds.logLevel }}
             - --attestation-service-url={{ include "c8s.attestationServiceURL" . }}
             - --whitelist-db={{ .Values.cds.whitelistDB }}
+            {{- if .Values.nriImagePolicy.enabled }}
+            - --whitelist-seed=/etc/cds/whitelist-seed.json
+            {{- end }}
             - --ear-issuer={{ .Values.cds.earIssuer }}
             {{- if .Values.cds.expectedIssuer }}
             - --expected-issuer={{ .Values.cds.expectedIssuer }}
@@ -147,6 +163,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if .Values.nriImagePolicy.enabled }}
+            - name: whitelist-seed
+              mountPath: /etc/cds
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -163,6 +184,11 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.nriImagePolicy.enabled }}
+        - name: whitelist-seed
+          configMap:
+            name: {{ include "c8s.cdsName" . }}-whitelist-seed
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

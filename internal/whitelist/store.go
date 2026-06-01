@@ -144,6 +144,15 @@ func (s *Store) queryAll() ([]row, error) {
 	return result, rows.Err()
 }
 
+// bumpVersionTx increments the store version within tx. The version is the
+// worker pull ETag, so it is bumped once per mutation that changes the set.
+func bumpVersionTx(tx *sql.Tx) error {
+	_, err := tx.Exec(
+		"UPDATE whitelist_version SET version = CAST(CAST(version AS INTEGER) + 1 AS TEXT)",
+	)
+	return err
+}
+
 // Add inserts or replaces a digest in the whitelist and increments the version.
 func (s *Store) Add(digest types.Digest, image string) error {
 	s.mu.Lock()
@@ -161,14 +170,60 @@ func (s *Store) Add(digest types.Digest, image string) error {
 	); err != nil {
 		return err
 	}
-
-	if _, err := tx.Exec(
-		"UPDATE whitelist_version SET version = CAST(CAST(version AS INTEGER) + 1 AS TEXT)",
-	); err != nil {
+	if err := bumpVersionTx(tx); err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+// SeedDigests adds every digest not already present, in a single transaction,
+// and returns the number added. It is additive and idempotent: existing entries
+// are left untouched and the version is bumped at most once — and only when at
+// least one digest was new. The version is the worker pull ETag, so a re-seed
+// that adds nothing must not bump it (which would force every worker to
+// re-pull). Operator entries added at runtime via POST /whitelist are never
+// removed.
+func (s *Store) SeedDigests(digests map[types.Digest]string) (int, error) {
+	if len(digests) == 0 {
+		return 0, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// INSERT OR IGNORE is the skip-if-present: an existing digest (e.g. one an
+	// operator added at runtime via POST /whitelist) is left untouched, and
+	// RowsAffected reports 0 for it so it does not count toward the bump.
+	var added int64
+	for digest, image := range digests {
+		res, err := tx.Exec(
+			"INSERT OR IGNORE INTO whitelist (digest, image) VALUES (?, ?)",
+			digest.String(), image,
+		)
+		if err != nil {
+			return 0, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		added += n
+	}
+
+	if added > 0 {
+		if err := bumpVersionTx(tx); err != nil {
+			return 0, err
+		}
+	}
+
+	return int(added), tx.Commit()
 }
 
 // Delete removes all given digests atomically. Returns false (and deletes nothing)
@@ -210,9 +265,7 @@ func (s *Store) Delete(digests []types.Digest) (bool, error) {
 		return false, err
 	}
 
-	if _, err := tx.Exec(
-		"UPDATE whitelist_version SET version = CAST(CAST(version AS INTEGER) + 1 AS TEXT)",
-	); err != nil {
+	if err := bumpVersionTx(tx); err != nil {
 		return false, err
 	}
 
