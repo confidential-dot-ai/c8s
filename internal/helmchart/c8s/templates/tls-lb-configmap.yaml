@@ -7,6 +7,10 @@
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamServerName := default (include "tls-lb.serverNameFromAddress" .Values.tlsLb.upstream.address) .Values.tlsLb.upstream.tls.serverName -}}
 {{- include "tls-lb.validateProxyTLS" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "tlsLb.upstream") -}}
+{{- include "tls-lb.validateCORS" .Values.tlsLb.cors -}}
+{{- range $i, $route := .Values.tlsLb.routes -}}
+{{- include "tls-lb.validateRouteCORS" (dict "cors" $route.cors "label" (printf "tlsLb.routes[%d]" $i)) -}}
+{{- end }}
 
 apiVersion: v1
 kind: ConfigMap
@@ -35,6 +39,9 @@ data:
 
         sendfile on;
         keepalive_timeout 65;
+{{- if default false .Values.tlsLb.cors.enabled }}
+        {{- include "tls-lb.corsMap" . | nindent 8 }}
+{{- end }}
 
         upstream backend {
             server {{ .Values.tlsLb.upstream.address }};
@@ -96,12 +103,20 @@ data:
             {{- if and (ne $backendProtocol "https") (or (default false $backendTLS.verify) (default false $backendTLS.useCDSClientCert)) }}
             {{- fail (printf "tlsLb.routes[%d].backend.tls.verify and useCDSClientCert require backend.protocol: https" $i) }}
             {{- end }}
+            {{- /* Route inherits the global CORS block; route.cors.enabled (if set) toggles it on/off for this route only. */}}
+            {{- $routeCors := deepCopy $.Values.tlsLb.cors }}
+            {{- if and (hasKey $route "cors") (hasKey (default dict $route.cors) "enabled") }}
+            {{- $_ := set $routeCors "enabled" $route.cors.enabled }}
+            {{- end }}
             # Route: {{ $path }} -> {{ $backendProtocol }}://{{ $backendAddress }}
             {{- if eq $match "exact" }}
             location = {{ $path }} {
             {{- else }}
             location {{ $path }} {
             {{- end }}
+                {{- if default false $routeCors.enabled }}
+                {{- include "tls-lb.corsLocationDirectives" $routeCors | nindent 16 }}
+                {{- end }}
                 {{- if eq $backendProtocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "tlsMountPath" $.Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}
@@ -139,6 +154,9 @@ data:
 
             {{- end }}
             location / {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- end }}
                 {{- if eq .Values.tlsLb.upstream.protocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}

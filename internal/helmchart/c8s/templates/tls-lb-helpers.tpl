@@ -121,6 +121,119 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
+Validate the global CORS configuration. Skips when disabled.
+*/}}
+{{- define "tls-lb.validateCORS" -}}
+{{- $cors := default dict . -}}
+{{- if hasKey $cors "enabled" -}}
+{{- if not (kindIs "bool" $cors.enabled) -}}
+{{- fail (printf "tlsLb.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $cors.enabled) -}}
+{{- end -}}
+{{- end -}}
+{{- if default false $cors.enabled -}}
+{{- $origins := default (list) $cors.allowOrigins -}}
+{{- if not $origins -}}
+{{- fail "tlsLb.cors.enabled=true requires tlsLb.cors.allowOrigins to be non-empty" -}}
+{{- end -}}
+{{- range $o := $origins -}}
+{{- if not (or (eq $o "*") (regexMatch `^https?://[A-Za-z0-9.-]+(?::[0-9]+)?$` $o)) -}}
+{{- fail (printf "tlsLb.cors.allowOrigins entry %q must be \"*\" or a scheme://host[:port] URL" $o) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (default false $cors.allowCredentials) (has "*" $origins) -}}
+{{- fail "tlsLb.cors.allowCredentials=true is incompatible with allowOrigins containing \"*\" (browsers reject this combination)" -}}
+{{- end -}}
+{{- range $field := list "allowMethods" "allowHeaders" "exposeHeaders" -}}
+{{- range $v := default (list) (index $cors $field) -}}
+{{- if regexMatch `[\r\n";{}\\]` $v -}}
+{{- fail (printf "tlsLb.cors.%s entry %q must not contain CR, LF, quotes, semicolons, braces, or backslashes" $field $v) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $cors "maxAge" -}}
+{{- if not (regexMatch `^[0-9]+$` (printf "%v" $cors.maxAge)) -}}
+{{- fail (printf "tlsLb.cors.maxAge must be a non-negative integer, got: %v" $cors.maxAge) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate a per-route CORS override. Only the `enabled` field is honored;
+shared knobs live on tlsLb.cors. Args: dict { "cors": route.cors, "label": ... }.
+*/}}
+{{- define "tls-lb.validateRouteCORS" -}}
+{{- if .cors -}}
+{{- $cors := .cors -}}
+{{- range $k, $_ := $cors -}}
+{{- if ne $k "enabled" -}}
+{{- fail (printf "%s.cors only supports the `enabled` field; remove %q (configure shared CORS knobs under tlsLb.cors)" $.label $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $cors "enabled" -}}
+{{- if not (kindIs "bool" $cors.enabled) -}}
+{{- fail (printf "%s.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $.label $cors.enabled) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Render the http-level `map $http_origin $cors_origin {...}` block driven by
+tlsLb.cors.allowOrigins. Emitted only when CORS is enabled. Caller nindents
+into the nginx `http {}` context.
+*/}}
+{{- define "tls-lb.corsMap" -}}
+{{- $cors := default dict .Values.tlsLb.cors -}}
+{{- if default false $cors.enabled -}}
+{{- $origins := default (list) $cors.allowOrigins }}
+map $http_origin $cors_origin {
+{{- if has "*" $origins }}
+    default "*";
+{{- else }}
+    default "";
+{{- range $o := $origins }}
+    "{{ $o }}" "{{ $o }}";
+{{- end }}
+{{- end }}
+}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Render per-location CORS directives, including a 204 short-circuit for
+preflight OPTIONS requests. Caller passes the effective CORS dict and
+guarantees CORS is enabled. Caller nindents into a `location {}` block.
+*/}}
+{{- define "tls-lb.corsLocationDirectives" -}}
+{{- $cors := default dict . -}}
+{{- $methods := join ", " (default (list "GET" "POST" "OPTIONS") $cors.allowMethods) -}}
+{{- $headers := join ", " (default (list "Authorization" "Content-Type") $cors.allowHeaders) -}}
+{{- $exposeHeaders := default (list) $cors.exposeHeaders -}}
+{{- $maxAge := default 600 $cors.maxAge }}
+if ($request_method = 'OPTIONS') {
+    add_header Access-Control-Allow-Origin  $cors_origin always;
+    add_header Access-Control-Allow-Methods "{{ $methods }}" always;
+    add_header Access-Control-Allow-Headers "{{ $headers }}" always;
+{{- if default false $cors.allowCredentials }}
+    add_header Access-Control-Allow-Credentials "true" always;
+{{- end }}
+    add_header Access-Control-Max-Age       "{{ $maxAge }}" always;
+    add_header Content-Length 0;
+    return 204;
+}
+add_header Access-Control-Allow-Origin  $cors_origin always;
+add_header Access-Control-Allow-Methods "{{ $methods }}" always;
+add_header Access-Control-Allow-Headers "{{ $headers }}" always;
+{{- if default false $cors.allowCredentials }}
+add_header Access-Control-Allow-Credentials "true" always;
+{{- end }}
+{{- if $exposeHeaders }}
+add_header Access-Control-Expose-Headers "{{ join ", " $exposeHeaders }}" always;
+{{- end }}
+{{- end -}}
+
+{{/*
 Selector labels.
 */}}
 {{- define "tls-lb.selectorLabels" -}}
