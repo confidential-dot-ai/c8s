@@ -827,10 +827,11 @@ func TestChartManagedRATLSServiceTargetPortsMatchContainerPorts(t *testing.T) {
 }
 
 // TestChartCDSPinnedToCDSNode proves the CDS Deployment is pinned to the
-// cds.node.selector node. CDS is a singleton trust root reached over a
-// node-local NodePort and (with persistence) an RWO volume, so it must land on
-// a known node — independent of image policy. When policy is on, that node is
-// also where the push-mode plugin and push-hook seed the CDS digest.
+// cds.node.selector node and tolerates that node's dedicated taint. CDS is a
+// singleton trust root reached over a node-local NodePort and (with
+// persistence) an RWO volume, so it must land on a known node — independent of
+// image policy. Pinning without tolerating the dedicated taint leaves CDS
+// Pending, so both must hold.
 func TestChartCDSPinnedToCDSNode(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -844,12 +845,24 @@ func TestChartCDSPinnedToCDSNode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			sel := renderedDeployment(t, out, "c8s-cds").Spec.Template.Spec.NodeSelector
-			if got := sel["role"]; got != "cds" {
+			spec := renderedDeployment(t, out, "c8s-cds").Spec.Template.Spec
+			if got := spec.NodeSelector["role"]; got != "cds" {
 				t.Errorf("CDS nodeSelector[role] = %q, want %q (CDS must pin to a known node)", got, "cds")
+			}
+			if !tolerates(spec.Tolerations, "dedicated", "cds") {
+				t.Errorf("CDS does not tolerate the dedicated=cds taint; it would stay Pending on a dedicated node: %v", spec.Tolerations)
 			}
 		})
 	}
+}
+
+func tolerates(tols []corev1.Toleration, key, value string) bool {
+	for _, t := range tols {
+		if t.Key == key && t.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 // TestChartOperatorDialsTrustRootOverHTTPS proves the operator injects get-cert

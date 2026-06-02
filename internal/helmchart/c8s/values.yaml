@@ -113,10 +113,18 @@ cds:
   ## pair. The default expects that node labelled `role=cds`; override to match
   ## your cluster. When image policy is enabled, the same selector also drives
   ## the cds-installer affinity, worker anti-affinity, and push-hook placement.
+  ##
+  ## tolerations let CDS land on a node dedicated to it. The default tolerates
+  ## `dedicated=cds:NoSchedule`, the conventional dedicated-CDS-node taint (the
+  ## counterpart of the role=cds label); override for a different taint, or set
+  ## [] for an untainted node.
   node:
     selector:
       role: cds
-    tolerations: []
+    tolerations:
+      - key: dedicated
+        value: cds
+        effect: NoSchedule
   logLevel: info
   whitelistDB: /data/whitelist.db
   earIssuer: cds
