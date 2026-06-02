@@ -31,7 +31,7 @@ func mockServers(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate
 		caBundle = []*x509.Certificate{caCert}
 	}
 
-	// Attestation service: returns mock evidence for any request.
+	// attestation-api: returns mock evidence for any request.
 	attestSvc = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/attest" {
 			http.NotFound(w, r)
@@ -261,13 +261,13 @@ func TestProviderProvision(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -325,12 +325,12 @@ func TestRefreshCABundle(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, caCert)
 
@@ -362,13 +362,13 @@ func TestRefreshCABundleUsesExplicitCACertURL(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              "http://unused.invalid",
-		CACertURL:             issuer.URL + "/custom/ca.pem",
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          "http://unused.invalid",
+		CACertURL:         issuer.URL + "/custom/ca.pem",
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, caCert)
 
@@ -394,12 +394,12 @@ func TestRefreshCABundleRejectsUntrustedInitialBundle(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 
 	_, err := client.RefreshCABundle(context.Background())
@@ -419,12 +419,12 @@ func TestRefreshCABundleDoesNotAddUnverifiedRotationRoot(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
@@ -451,12 +451,12 @@ func TestRefreshCABundleDoesNotTrustPublicKeyCloneChain(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, trustedCert)
 
@@ -482,12 +482,12 @@ func TestRefreshCABundleRejectsTrustedSignerPublicKeyClone(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, trustedCert)
 
@@ -514,13 +514,13 @@ func TestProviderProvisionRetainsRotationParentCA(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -545,13 +545,13 @@ func TestProviderProvisionRetainsPreviouslyTrustedPublishedCA(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	})
 	seedTrustedCABundle(t, client, oldCert)
 	p, err := NewProviderWithClient(client, nil)
@@ -578,13 +578,13 @@ func TestProviderProvisionDoesNotRetainUntrustedPublishedCA(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -610,13 +610,13 @@ func TestProviderProvisionRetainsMultiGenerationRotationParents(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -644,13 +644,13 @@ func TestProviderProvisionRejectsBundleWhoseFirstCADoesNotSignLeaf(t *testing.T)
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -713,13 +713,13 @@ func TestProviderProvisionRejectsLeafForDifferentKey(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -740,13 +740,13 @@ func TestProviderProvisionDoesNotTrustAppendedPublicKeyCloneChain(t *testing.T) 
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -781,13 +781,13 @@ func TestProviderProvisionDoesNotTrustUnauthenticatedAlternateCA(t *testing.T) {
 	defer publicIssuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              publicIssuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          publicIssuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -813,13 +813,13 @@ func TestProviderProvisionHonorsCanceledContext(t *testing.T) {
 	defer issuer.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                cdsSrv.URL,
-		AttestationServiceURL: attestSvc.URL,
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
-		NodeName:              "test-node",
+		CDSURL:            cdsSrv.URL,
+		AttestationApiURL: attestSvc.URL,
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
+		NodeName:          "test-node",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -842,12 +842,12 @@ func TestRefreshCABundleAcceptsContinuitySignedRotationCA(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
@@ -874,12 +874,12 @@ func TestRefreshCABundleAcceptsContinuitySignedRotationChainInBundleOrder(t *tes
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
@@ -900,12 +900,12 @@ func TestRefreshCABundleRejectsReplacementWithoutOverlap(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, oldCert)
 
@@ -926,12 +926,12 @@ func TestRefreshCABundleRejectsExpiredTrustedOnlyBundle(t *testing.T) {
 	defer issuer.Close()
 
 	client := NewClient(&Config{
-		CDSURL:                "http://unused",
-		AttestationServiceURL: "http://unused",
-		CDSCAURL:              issuer.URL,
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://unused",
+		AttestationApiURL: "http://unused",
+		CDSCAURL:          issuer.URL,
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	})
 	seedTrustedCABundle(t, client, currentCert, expiredCert)
 
@@ -951,12 +951,12 @@ func TestRefreshCABundleRejectsExpiredTrustedOnlyBundle(t *testing.T) {
 
 func TestNewProviderValidation(t *testing.T) {
 	base := Config{
-		CDSURL:                "http://cds",
-		AttestationServiceURL: "http://attest",
-		CDSCAURL:              "http://issuer",
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		HTTPClient:            plainHTTPClient(),
+		CDSURL:            "http://cds",
+		AttestationApiURL: "http://attest",
+		CDSCAURL:          "http://issuer",
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		HTTPClient:        plainHTTPClient(),
 	}
 
 	tests := []struct {
@@ -964,7 +964,7 @@ func TestNewProviderValidation(t *testing.T) {
 		modify func(*Config)
 	}{
 		{"missing CDSURL", func(c *Config) { c.CDSURL = "" }},
-		{"missing AttestationServiceURL", func(c *Config) { c.AttestationServiceURL = "" }},
+		{"missing AttestationApiURL", func(c *Config) { c.AttestationApiURL = "" }},
 		{"missing CDSCAURL", func(c *Config) { c.CDSCAURL = "" }},
 		{"missing NodeIP", func(c *Config) { c.NodeIP = "" }},
 		{"invalid NodeIP", func(c *Config) { c.NodeIP = "not-an-ip" }},

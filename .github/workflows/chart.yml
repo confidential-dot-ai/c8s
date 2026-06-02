@@ -50,7 +50,7 @@ jobs:
         run: |
           helm lint "$CHART_DIR" \
             --set image.tag=ci \
-            --set attestationService.image.tag=ci \
+            --set attestationApi.image.tag=ci \
             --set cds.image.tag=ci \
             --set ratlsMesh.image.tag=ci \
             --set teeProxy.image.tag=ci \
@@ -64,7 +64,7 @@ jobs:
           helm template c8s "$CHART_DIR" \
             --namespace c8s-system \
             --set image.tag=ci \
-            --set attestationService.image.tag=ci \
+            --set attestationApi.image.tag=ci \
             --set cds.image.tag=ci \
             --set ratlsMesh.image.tag=ci \
             --set teeProxy.image.tag=ci \
@@ -79,7 +79,7 @@ jobs:
           helm template c8s "$CHART_DIR" \
             --namespace c8s-system \
             --set image.tag=ci \
-            --set attestationService.image.tag=ci \
+            --set attestationApi.image.tag=ci \
             --set cds.image.tag=ci \
             --set ratlsMesh.image.tag=ci \
             --set teeProxy.image.tag=ci \

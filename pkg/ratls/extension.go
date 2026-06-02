@@ -86,7 +86,7 @@ type Attestation struct {
 	// If empty, the verifier must fetch certificates from AMD KDS online.
 	CertChain []byte
 
-	// embedded is the parsed attestation-service envelope when Report was
+	// embedded is the parsed attestation-api envelope when Report was
 	// produced by a verifier-requires-online path (e.g. az-snp). Populated
 	// by UnmarshalExtension; nil means the Report holds a raw hardware
 	// report that can be verified offline.
@@ -167,7 +167,7 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 	return att, nil
 }
 
-// parseEmbeddedEvidence returns the parsed attestation-service envelope when
+// parseEmbeddedEvidence returns the parsed attestation-api envelope when
 // raw is a JSON-encoded types.AttestationEvidence, or nil when raw is a raw
 // hardware report. Callers use the non-nil return as a signal to take the
 // online verification path instead of parsing raw as an SNP report.

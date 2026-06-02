@@ -16,7 +16,7 @@ c8sComponents:
   - valuePath: cds.image
     enabledPath: ""
     cdsExempt: true
-  - valuePath: attestationService.image
+  - valuePath: attestationApi.image
     enabledPath: ""
     cdsExempt: false
   - valuePath: ratlsMesh.image
@@ -59,7 +59,7 @@ operator:
 imagePullSecrets: []
 
 ## Common ServiceAccount settings for the chart-managed top-level c8s
-## workloads: operator, attestation-service, and CDS. Leave empty to inherit
+## workloads: operator, attestation-api, and CDS. Leave empty to inherit
 ## the chart-wide imagePullSecrets above; set to override for these workloads.
 serviceAccount:
   imagePullSecrets: []
@@ -191,10 +191,10 @@ cds:
       cpu: 500m
       memory: 256Mi
 
-## DaemonSet running github.com/lunal-dev/attestation-service.
-attestationService:
+## DaemonSet running the attestation-api image from github.com/lunal-dev/attestation-rs.
+attestationApi:
   image:
-    repository: ghcr.io/lunal-dev/attestation-service
+    repository: ghcr.io/lunal-dev/attestation-api
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -605,7 +605,7 @@ nriImagePolicy:
   bootstrapWhitelist:
     # deriveComponents: a demo convenience (off by default, like
     # `c8s install --resolve-digests`, which turns it on). When true, the c8s
-    # component images this chart installs (operator, cds, attestation-service,
+    # component images this chart installs (operator, cds, attestation-api,
     # ratls-mesh, nri-image-policy, tee-proxy) are auto-added to the floor
     # whenever their image.digest is set, so a digest-pinned install self-allows
     # the c8s images without listing them in `digests`. It never covers the
@@ -677,7 +677,7 @@ teeProxy:
   upstream: vllm-router-service.vllm.svc.cluster.local
   # Attestation header name
   headerName: "Attestation-Report"
-  # Remote attestation service URL (required for new tee-proxy versions)
+  # Remote attestation-api URL (required for new tee-proxy versions)
   attestationURL: ""
   # Listening ports
   ports:

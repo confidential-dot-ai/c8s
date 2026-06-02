@@ -37,7 +37,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := cmdsutil.ValidateHTTPURL("--attestation-service-url", cfg.attestationSvcURL); err != nil {
+	if err := cmdsutil.ValidateHTTPURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -102,7 +102,7 @@ func run(cfg config) error {
 		return fmt.Errorf("create EAR key rotator: %w", err)
 	}
 
-	asClient := attestationclient.NewClient(cfg.attestationSvcURL)
+	asClient := attestationclient.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
 	checker := readiness.NewChecker(asClient, cfg.readinessInterval)
 
@@ -113,7 +113,7 @@ func run(cfg config) error {
 	defer whitelistStore.Close()
 
 	// Seed before serving so the first GET /whitelist returns the bootstrap
-	// allowlist (CDS, attestation-service, system images) rather than an empty
+	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
 	if cfg.whitelistSeed != "" {
@@ -144,7 +144,7 @@ func run(cfg config) error {
 	}
 
 	// /attest-key issues a TEE-attested EAR for a caller-generated key (no CSR,
-	// no certificate). Shares the challenge store, attestation service, and EAR
+	// no certificate). Shares the challenge store, attestation-api, and EAR
 	// issuer with /attest.
 	attestKeyHandler := attestation.Handler{
 		Challenges:        &challengeStore,
@@ -206,7 +206,7 @@ func run(cfg config) error {
 	srv := newHTTPServer(addr, router, cfg)
 
 	if cfg.ratlsPlatform != "" {
-		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationSvcURL)
+		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
 		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 			Platform:   cfg.ratlsPlatform,
 			AttestFunc: attestFunc,
@@ -375,7 +375,7 @@ func parseMeasurementAllowlist(raw []string) map[string]bool {
 }
 
 // readinessFn returns a closure that flips /readyz to 503 when either the
-// attestation service is unhealthy or the loaded mesh CA is within
+// attestation-api is unhealthy or the loaded mesh CA is within
 // minCAValidity of expiry. The CA expiry signal gives operators a window to
 // rotate before signing requests start producing leaves that outlive the CA.
 func readinessFn(svcReady func() bool, caCert *x509.Certificate, minCAValidity time.Duration) func() bool {

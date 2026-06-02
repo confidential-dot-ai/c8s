@@ -1,5 +1,5 @@
 {{- if .Values.teeProxy.enabled }}
-{{- $attestationURL := default (printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace) .Values.teeProxy.attestationURL -}}
+{{- $attestationURL := default (printf "http://%s-attestation-api.%s.svc:8400" .Release.Name .Release.Namespace) .Values.teeProxy.attestationURL -}}
 {{- $tlsMode := or .Values.teeProxy.tls.enabled (ne .Values.teeProxy.domain "") -}}
 {{- $probePort := ternary .Values.teeProxy.ports.https .Values.teeProxy.ports.http $tlsMode -}}
 apiVersion: apps/v1

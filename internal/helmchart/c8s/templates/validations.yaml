@@ -2,7 +2,7 @@
 {{- $teeProxy := .Values.teeProxy -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (default "" $nri.cds.url) . -}}
-{{- $attestationNodePort := int .Values.attestationService.service.nodePort -}}
+{{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 {{- if and $tlsLB.enabled $teeProxy.enabled (eq $tlsLB.upstream.protocol "https") (eq $tlsLB.upstream.address "c8s-tee-proxy:443") (not (or $teeProxy.tls.enabled $teeProxy.domain)) -}}
 {{- fail "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.tls.enabled=true or teeProxy.domain to enable the HTTPS listener" -}}
 {{- end -}}
@@ -36,5 +36,5 @@
 {{- fail (printf "nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got %q): the host plugin must fetch the whitelist over RA-TLS" $nriCDSURL) -}}
 {{- end -}}
 {{- if and $nri.enabled (or (lt $attestationNodePort 30000) (gt $attestationNodePort 32767)) -}}
-{{- fail (printf "attestationService.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got %d)" $attestationNodePort) -}}
+{{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got %d)" $attestationNodePort) -}}
 {{- end -}}

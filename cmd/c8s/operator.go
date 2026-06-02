@@ -30,7 +30,7 @@ by this command.`,
 			DisableStatusMirror:          !statusMirrorEnabled,
 			GetCertImage:                 getCertImage,
 			CDSURL:                       cdsURL,
-			AttestationServiceURL:        attestationServiceURL,
+			AttestationApiURL:            attestationApiURL,
 			WebhookConfigName:            webhookConfigName,
 			WebhookServiceName:           webhookServiceName,
 			WebhookServiceNamespace:      webhookServiceNamespace,
@@ -55,7 +55,7 @@ var (
 	statusMirrorEnabled     bool
 	getCertImage            string
 	cdsURL                  string
-	attestationServiceURL   string
+	attestationApiURL       string
 	webhookConfigName       string
 	webhookServiceName      string
 	webhookServiceNamespace string
@@ -79,7 +79,7 @@ func init() {
 	operatorCmd.Flags().BoolVar(&statusMirrorEnabled, "status-mirror-enabled", true, "enable CRD-backed ConfidentialWorkload status mirror controller")
 	operatorCmd.Flags().StringVar(&getCertImage, "get-cert-image", "", "image reference the admission webhook injects for get-cert containers (empty = webhook disabled)")
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
-	operatorCmd.Flags().StringVar(&attestationServiceURL, "attestation-service-url", "", "attestation-service endpoint (empty = no verification)")
+	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")
 	operatorCmd.Flags().StringVar(&webhookServiceName, "webhook-service-name", "", "webhook Service name (defaults to c8s)")
 	operatorCmd.Flags().StringVar(&webhookServiceNamespace, "webhook-service-namespace", "", "webhook Service namespace (defaults to --leader-election-namespace)")

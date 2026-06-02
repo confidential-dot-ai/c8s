@@ -41,7 +41,7 @@ import (
 type config struct {
 	CDSURL                 string
 	CDSMeasurements        string
-	AttestationServiceURL  string
+	AttestationApiURL      string
 	OutPath                string
 	KeyPath                string
 	KeyOutPath             string
@@ -121,7 +121,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags := cmd.Flags()
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
-	flags.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
+	flags.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
 	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys)")
@@ -139,7 +139,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
 
 	_ = cmd.MarkFlagRequired("cds-url")
-	_ = cmd.MarkFlagRequired("attestation-service-url")
+	_ = cmd.MarkFlagRequired("attestation-api-url")
 	_ = cmd.MarkFlagRequired("san")
 
 	return cmd
@@ -180,7 +180,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		slog.Warn("--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
 	}
 
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}
@@ -281,7 +281,7 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 	}
 
 	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN)
-	result, err := client.ObtainCertificateWithEvidenceContext(ctx, cfg.AttestationServiceURL, string(csrPEM))
+	result, err := client.ObtainCertificateWithEvidenceContext(ctx, cfg.AttestationApiURL, string(csrPEM))
 	if err != nil {
 		return fmt.Errorf("attestation failed: %w", err)
 	}
@@ -347,7 +347,7 @@ func validateConfig(cfg config) error {
 	if err := cmdsutil.ValidateHTTPURL("--cds-url", cfg.CDSURL); err != nil {
 		return err
 	}
-	if err := cmdsutil.ValidateHTTPURL("--attestation-service-url", cfg.AttestationServiceURL); err != nil {
+	if err := cmdsutil.ValidateHTTPURL("--attestation-api-url", cfg.AttestationApiURL); err != nil {
 		return err
 	}
 	if err := validateSAN(cfg.SAN); err != nil {

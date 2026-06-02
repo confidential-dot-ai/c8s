@@ -1,5 +1,5 @@
 // Package cdsclient implements certificate provisioning via the CDS
-// attestation service. It performs the attestation flow:
+// attestation-api. It performs the attestation flow:
 // authenticate -> attest -> obtain certificate and authenticated CA bundle.
 // Later CA refreshes fetch /ca from CDS and require trust
 // continuity.
@@ -34,10 +34,10 @@ type Config struct {
 	// (e.g., "https://cds.c8s-system.svc:8443").
 	CDSURL string
 
-	// AttestationServiceURL is the URL of the local attestation service
+	// AttestationApiURL is the URL of the local attestation-api
 	// used by CDS to generate TEE evidence
 	// (e.g., "http://localhost:8400").
-	AttestationServiceURL string
+	AttestationApiURL string
 
 	// CDSCAURL is the base URL of the CDS CA endpoint for CA
 	// bundle refreshes after authenticated provisioning
@@ -91,7 +91,7 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, AttestationServiceURL: cfg.AttestationServiceURL}
+		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, AttestationApiURL: cfg.AttestationApiURL}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc
@@ -136,7 +136,7 @@ func (c *Client) RequestCert(ctx context.Context) (*ecdsa.PrivateKey, []byte, []
 		return nil, nil, nil, fmt.Errorf("create CSR: %w", err)
 	}
 
-	certPEM, err := c.cdsAttestClient.ObtainCertificateWithContext(ctx, c.cfg.AttestationServiceURL, csrPEM)
+	certPEM, err := c.cdsAttestClient.ObtainCertificateWithContext(ctx, c.cfg.AttestationApiURL, csrPEM)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("CDS attestation: %w", err)
 	}
@@ -261,9 +261,9 @@ func (c *Client) attestationExtension(ctx context.Context, key *ecdsa.PrivateKey
 	if err != nil {
 		return pkix.Extension{}, err
 	}
-	resp, err := c.cdsAttestClient.GenerateEvidenceContext(ctx, c.cfg.AttestationServiceURL, reportData[:sha512.Size384])
+	resp, err := c.cdsAttestClient.GenerateEvidenceContext(ctx, c.cfg.AttestationApiURL, reportData[:sha512.Size384])
 	if err != nil {
-		return pkix.Extension{}, fmt.Errorf("attestation service: %w", err)
+		return pkix.Extension{}, fmt.Errorf("attestation-api: %w", err)
 	}
 	report, err := attestclient.RATLSEvidence(resp)
 	if err != nil {

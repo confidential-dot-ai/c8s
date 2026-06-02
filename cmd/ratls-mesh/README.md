@@ -17,7 +17,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ratls-mesh ./cmd/ratls-mesh
 ```bash
 ratls-mesh \
   --platform sev-snp \
-  --attestation-service-url http://localhost:8400 \
+  --attestation-api-url http://localhost:8400 \
   --outbound-port 15001 \
   --inbound-port 15006 \
   --health-port 15021
@@ -67,7 +67,7 @@ destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--platform` | `sev-snp` | TEE platform: `sev-snp` or `tdx` |
-| `--attestation-service-url` | (required) | URL of the local attestation service (e.g. `http://localhost:8400`) |
+| `--attestation-api-url` | (required) | URL of the local attestation-api (e.g. `http://localhost:8400`) |
 | `--outbound-port` | `15001` | Outbound listener port (iptables redirect target) |
 | `--inbound-port` | `15006` | Inbound listener port (RA-TLS from peer nodes) |
 | `--node-ip` | `$NODE_IP` | This node's IP address |
@@ -85,7 +85,7 @@ destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 | `--measurements` | `""` | Comma-separated hex SHA-384 launch measurements (empty = accept any TEE, warns) |
 | `--cert-mode` | `self-signed` | Certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background) |
 | `--cds-url` | `""` | CDS service URL for attestation and CA bundle retrieval (required for cds mode) |
-| `--attestation-service-url` | (required) | Local attestation service URL (required for cds mode) |
+| `--attestation-api-url` | (required) | Local attestation-api URL (required for cds mode) |
 | `--cds-measurements` | `""` | Comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development) |
 | `--ca-cert` | `""` | Path to CA certificate PEM for X.509 chain verification |
 | `--ca-poll-interval` | `5m` | Interval for polling the CDS `/ca` endpoint for CA bundle updates (cds mode) |

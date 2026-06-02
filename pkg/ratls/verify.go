@@ -47,19 +47,19 @@ type VerifyPolicy struct {
 	// check is performed (TLS 1.3 already provides replay protection).
 	Nonce []byte
 
-	// AttestationServiceURL enables online verification for evidence formats
+	// AttestationApiURL enables online verification for evidence formats
 	// that cannot be verified from the SNP report alone. AKS az-snp binds the
 	// caller nonce through the TPM quote, so verifiers must call the local
-	// attestation-service /verify endpoint for those RA-TLS extensions.
+	// attestation-api /verify endpoint for those RA-TLS extensions.
 	//
 	// SECURITY: the /verify response is currently not signed; the verifier
 	// trusts whatever this URL returns. Operators MUST point this at an
-	// attestation service inside the same TCB (e.g. a same-node DaemonSet
+	// attestation-api inside the same TCB (e.g. a same-node DaemonSet
 	// fronted by a Service with internalTrafficPolicy=Local, or a loopback
 	// sidecar). A response-signing scheme would lift this constraint.
-	AttestationServiceURL string
+	AttestationApiURL string
 
-	// AttestationVerifyTimeout bounds online attestation-service verification.
+	// AttestationVerifyTimeout bounds online attestation-api verification.
 	// If unset, a conservative default is used.
 	AttestationVerifyTimeout time.Duration
 }
@@ -191,7 +191,7 @@ func checkSEVSNPBinding(rawReport []byte, expected [64]byte) (*spb.Report, error
 const defaultAttestationVerifyTimeout = 10 * time.Second
 
 // unpackSNPMinTcb maps a packed AMD SEV-SNP TCB uint64 onto the components
-// the attestation service understands. Layout matches the SEV-SNP ABI
+// the attestation-api understands. Layout matches the SEV-SNP ABI
 // TcbVersion: byte 0 = bootloader, byte 1 = tee, bytes 2-5 reserved,
 // byte 6 = snp, byte 7 = microcode.
 func unpackSNPMinTcb(packed uint64) types.MinTcb {
@@ -210,11 +210,11 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 	if evidence.Platform != string(types.PlatformAzSnp) {
 		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 	}
-	if policy == nil || policy.AttestationServiceURL == "" {
-		return nil, fmt.Errorf("%w: attestation service URL is required for %s evidence", ErrInvalidReport, evidence.Platform)
+	if policy == nil || policy.AttestationApiURL == "" {
+		return nil, fmt.Errorf("%w: attestation-api URL is required for %s evidence", ErrInvalidReport, evidence.Platform)
 	}
 	if policy.RequireSMT {
-		// The attestation-service /verify API has no SMT parameter, so we
+		// The attestation-api /verify API has no SMT parameter, so we
 		// cannot enforce this constraint online without extending the wire
 		// protocol. Fail closed so the policy is never silently ignored.
 		return nil, fmt.Errorf("%w: RequireSMT is not enforceable for online (%s) verification", ErrPolicyViolation, evidence.Platform)
@@ -238,7 +238,7 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 		minTcb := unpackSNPMinTcb(policy.MinTCBVersion)
 		params.MinTcb = &minTcb
 	}
-	resp, err := attestationclient.NewClient(policy.AttestationServiceURL).Verify(ctx, types.VerifyRequest{
+	resp, err := attestationclient.NewClient(policy.AttestationApiURL).Verify(ctx, types.VerifyRequest{
 		Evidence:   *evidence,
 		Params:     params,
 		IssueToken: &issueToken,

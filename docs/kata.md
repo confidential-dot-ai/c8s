@@ -293,7 +293,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   mixed-arch cluster.
 
 - **Confidential kata is SEV-SNP only.** TDX is intentionally out of scope in
-  this release even though the c8s attestation-service and ratls-mesh both
+  this release even though the c8s attestation-api and ratls-mesh both
   already handle TDX. There is no `kata-qemu-tdx` shim in `SHIMS_X86_64`, no
   `kata-qemu-tdx` RuntimeClass, and the kata-enforcement allowlist accepts
   only `kata-qemu`, `kata-clh`, and `kata-qemu-snp`. The webhook auto-promotes

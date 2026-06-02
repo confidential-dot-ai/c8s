@@ -11,8 +11,8 @@
 {{- printf "%s-operator" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "c8s.attestationServiceName" -}}
-{{- printf "%s-attestation-service" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- define "c8s.attestationApiName" -}}
+{{- printf "%s-attestation-api" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "c8s.cdsName" -}}
@@ -40,13 +40,13 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "c8s.attestationServiceImage" -}}
-{{- if .Values.attestationService.image.digest -}}
-{{ .Values.attestationService.image.repository }}@{{ .Values.attestationService.image.digest }}
-{{- else if .Values.attestationService.image.tag -}}
-{{ .Values.attestationService.image.repository }}:{{ .Values.attestationService.image.tag }}
+{{- define "c8s.attestationApiImage" -}}
+{{- if .Values.attestationApi.image.digest -}}
+{{ .Values.attestationApi.image.repository }}@{{ .Values.attestationApi.image.digest }}
+{{- else if .Values.attestationApi.image.tag -}}
+{{ .Values.attestationApi.image.repository }}:{{ .Values.attestationApi.image.tag }}
 {{- else -}}
-{{ fail "attestationService.image.tag or attestationService.image.digest must be set" }}
+{{ fail "attestationApi.image.tag or attestationApi.image.digest must be set" }}
 {{- end -}}
 {{- end -}}
 
@@ -110,8 +110,8 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "c8s.attestationServiceURL" -}}
-http://{{ include "c8s.attestationServiceName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationService.port }}
+{{- define "c8s.attestationApiURL" -}}
+http://{{ include "c8s.attestationApiName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationApi.port }}
 {{- end -}}
 
 {{- define "c8s.cdsURL" -}}
@@ -126,10 +126,10 @@ https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cd
 {{ include "c8s.cdsURL" . }}
 {{- end -}}
 
-{{- define "c8s.attestationServiceConfig" -}}
+{{- define "c8s.attestationApiConfig" -}}
 {{- $root := .root -}}
 [server]
-bind = "0.0.0.0:{{ $root.Values.attestationService.port }}"
+bind = "0.0.0.0:{{ $root.Values.attestationApi.port }}"
 mode = "hosted"
 
 [server.tls]
@@ -137,7 +137,7 @@ enabled = false
 
 [attestation]
 enabled = true
-platforms = [{{- range $i, $p := $root.Values.attestationService.platforms -}}
+platforms = [{{- range $i, $p := $root.Values.attestationApi.platforms -}}
   {{- if $i }}, {{ end -}}{{- $p | quote -}}
 {{- end -}}]
 

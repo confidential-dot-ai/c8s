@@ -186,7 +186,7 @@ func stringAtPath(tree map[string]any, path string) (string, error) {
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install the c8s operator, CRDs, attestation-service, and component charts via Helm",
+	Short: "Install the c8s operator, CRDs, attestation-api, and component charts via Helm",
 	Long: `Extracts the bundled c8s Helm chart and runs
 'helm upgrade --install' against the current kubeconfig context. Deploys:
 
@@ -194,7 +194,7 @@ var installCmd = &cobra.Command{
   - the c8s Deployment + Service (admission webhook + status-mirror controllers)
   - the ConfidentialWorkload CRD
   - the mutating admission webhook configuration
-  - the attestation-service DaemonSet (per-node /attest + /verify)
+  - the attestation-api DaemonSet (per-node /attest + /verify)
   - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, tee-proxy, and tls-lb components
 
@@ -527,7 +527,7 @@ const installNextSteps = `Next steps:
 
   1. Deploy this chart inside the intended CVM trust boundary. The supported
      install shape wires the chart-managed CDS trust root and
-     attestation-service together.
+     attestation-api together.
 
   2. (Optional) Mirror status with a ConfidentialWorkload CR:
 

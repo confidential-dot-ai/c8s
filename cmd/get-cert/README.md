@@ -11,7 +11,7 @@ Obtain a certificate with a DNS SAN:
 ```bash
 get-cert \
   --cds-url http://cds:8443 \
-  --attestation-service-url http://localhost:8400 \
+  --attestation-api-url http://localhost:8400 \
   --san api.example.com \
   --out /tls/cert.pem \
   --key-out /tls/key.pem
@@ -22,7 +22,7 @@ Obtain a certificate with an IP SAN:
 ```bash
 get-cert \
   --cds-url http://cds:8443 \
-  --attestation-service-url http://localhost:8400 \
+  --attestation-api-url http://localhost:8400 \
   --san 10.0.0.1 \
   --out /tls/cert.pem \
   --key-out /tls/key.pem
@@ -33,7 +33,7 @@ Use an existing private key:
 ```bash
 get-cert \
   --cds-url http://cds:8443 \
-  --attestation-service-url http://localhost:8400 \
+  --attestation-api-url http://localhost:8400 \
   --san api.example.com \
   --key my-key.pem \
   --out cert.pem
@@ -45,7 +45,7 @@ get-cert \
 |------|-------|---------|-------------|
 | `--cds-url` | | *(required)* | URL of the running cds service |
 | `--cds-measurements` | | *(empty)* | Comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification; empty accepts any attested CDS |
-| `--attestation-service-url` | | *(required)* | URL of the local attestation service |
+| `--attestation-api-url` | | *(required)* | URL of the local attestation-api |
 | `--san` | | *(required)* | Subject Alternative Name — IP address or hostname |
 | `--out` | `-o` | *(stdout)* | Path to write the signed certificate chain PEM |
 | `--key` | | *(ephemeral)* | Path to an existing PEM private key for the CSR |

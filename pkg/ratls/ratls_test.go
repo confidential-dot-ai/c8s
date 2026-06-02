@@ -688,7 +688,7 @@ func TestSNPMeasurementSizeConstant(t *testing.T) {
 
 // embeddedAzureCert builds an RA-TLS certificate whose attestation extension
 // carries an az-snp envelope (the post-PR-98 wire shape). Returns the parsed
-// cert and the SHA-384(pubkey) that the attestation-service would expect to
+// cert and the SHA-384(pubkey) that the attestation-api would expect to
 // see bound through the TPM quote.
 func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
 	t.Helper()
@@ -714,7 +714,7 @@ func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
 	return cert, expectedReportData
 }
 
-// verifyResponse is a minimal builder for an attestation-service /verify
+// verifyResponse is a minimal builder for an attestation-api /verify
 // response. Tests mutate the returned map then JSON-encode it.
 func verifyResponse(measurement []byte) map[string]any {
 	result := map[string]any{
@@ -731,7 +731,7 @@ func verifyResponse(measurement []byte) map[string]any {
 	return map[string]any{"result": result}
 }
 
-func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationService(t *testing.T) {
+func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	key, expectedReportData, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -793,14 +793,14 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationService(t *testing.T) {
 	defer srv.Close()
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationServiceURL: srv.URL,
-		Measurements:          [][]byte{measurement},
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{measurement},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
 	if !sawVerify {
-		t.Fatal("attestation-service /verify was not called")
+		t.Fatal("attestation-api /verify was not called")
 	}
 	if !bytes.Equal(result.ReportData[:], expectedReportData[:]) {
 		t.Fatalf("ReportData = %x, want %x", result.ReportData, expectedReportData)
@@ -833,7 +833,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		resp["result"].(map[string]any)["signature_valid"] = false
 		srv := newMockedSrv(t, resp)
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrSignatureInvalid) {
 			t.Fatalf("got %v, want ErrSignatureInvalid", err)
 		}
@@ -844,7 +844,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		delete(resp["result"].(map[string]any), "report_data_match")
 		srv := newMockedSrv(t, resp)
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
@@ -855,13 +855,13 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		resp["result"].(map[string]any)["report_data_match"] = false
 		srv := newMockedSrv(t, resp)
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
 	})
 
-	t.Run("empty attestation service URL rejects embedded evidence", func(t *testing.T) {
+	t.Run("empty attestation-api URL rejects embedded evidence", func(t *testing.T) {
 		_, err := VerifyCert(cert, &VerifyPolicy{Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
@@ -871,7 +871,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("RequireSMT fails closed on online path", func(t *testing.T) {
 		srv := newMockedSrv(t, verifyResponse(measurement))
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements, RequireSMT: true}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements, RequireSMT: true}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
@@ -880,7 +880,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	t.Run("launch_digest missing with pinned measurements is rejected", func(t *testing.T) {
 		srv := newMockedSrv(t, verifyResponse(nil))
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
@@ -890,7 +890,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		other := bytes.Repeat([]byte{0x99}, SNPMeasurementSize)
 		srv := newMockedSrv(t, verifyResponse(other))
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
@@ -901,7 +901,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		resp["result"].(map[string]any)["claims"] = map[string]any{"launch_digest": "not-hex"}
 		srv := newMockedSrv(t, resp)
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -914,18 +914,18 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 		srv := newMockedSrv(t, resp)
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
 	})
 
-	t.Run("attestation service HTTP 500 surfaces an error", func(t *testing.T) {
+	t.Run("attestation-api HTTP 500 surfaces an error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 		}))
 		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if err == nil {
 			t.Fatal("expected error from 500 response")
 		}
@@ -939,7 +939,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		defer srv.Close()
 		start := time.Now()
 		_, err := VerifyCert(cert, &VerifyPolicy{
-			AttestationServiceURL:    srv.URL,
+			AttestationApiURL:        srv.URL,
 			Measurements:             allowedMeasurements,
 			AttestationVerifyTimeout: 25 * time.Millisecond,
 		}, nil)
@@ -965,9 +965,9 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		// microcode=0x44 (byte 7). Reserved bytes stay zero.
 		packed := uint64(0x44_33_00_00_00_00_22_11)
 		_, err := VerifyCert(cert, &VerifyPolicy{
-			AttestationServiceURL: srv.URL,
-			Measurements:          allowedMeasurements,
-			MinTCBVersion:         packed,
+			AttestationApiURL: srv.URL,
+			Measurements:      allowedMeasurements,
+			MinTCBVersion:     packed,
 		}, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -1003,7 +1003,7 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 		srv := newMockedSrv(t, verifyResponse(measurement))
 		defer srv.Close()
-		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationServiceURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrUnsupportedTEE) {
 			t.Fatalf("got %v, want ErrUnsupportedTEE", err)
 		}

@@ -1,4 +1,4 @@
-// mock-attestation is a fake attestation service for integration testing.
+// mock-attestation is a fake attestation-api for integration testing.
 // It responds to /attest with synthetic evidence and to /health with OK.
 // It does NOT perform real TEE attestation — use only in test environments.
 package main
@@ -21,7 +21,7 @@ func main() {
 	mux.HandleFunc("POST /attest", handleAttest)
 	mux.HandleFunc("GET /health", handleHealth)
 
-	slog.Info("mock attestation service starting", "port", port)
+	slog.Info("mock attestation-api starting", "port", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)

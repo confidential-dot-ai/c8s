@@ -287,7 +287,7 @@ func TestReadinessFn(t *testing.T) {
 		want      bool
 	}{
 		{"all good", healthyService, freshCA, time.Hour, true},
-		{"attestation service down", unhealthyService, freshCA, time.Hour, false},
+		{"attestation-api down", unhealthyService, freshCA, time.Hour, false},
 		{"CA expiring inside window", healthyService, expiringCA, time.Hour, false},
 		{"CA already expired", healthyService, expiredCA, time.Hour, false},
 		{"nil CA", healthyService, nil, time.Hour, false},

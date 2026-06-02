@@ -150,26 +150,26 @@ func (h Handler) handleAttestationError(w http.ResponseWriter, err error) {
 
 	switch {
 	case errors.As(err, &reqErr):
-		slog.Warn("attestation service unreachable", "error", reqErr.Err)
-		WriteError(w, http.StatusBadGateway, "attestation_service_unreachable",
-			fmt.Sprintf("failed to reach attestation service: %s", reqErr.Err))
+		slog.Warn("attestation-api unreachable", "error", reqErr.Err)
+		WriteError(w, http.StatusBadGateway, "attestation_api_unreachable",
+			fmt.Sprintf("failed to reach attestation-api: %s", reqErr.Err))
 
 	case errors.As(err, &apiErr):
-		slog.Warn("attestation service returned error",
+		slog.Warn("attestation-api returned error",
 			"status", apiErr.Status, "error", apiErr.Response.Message)
-		WriteError(w, http.StatusBadGateway, "attestation_service_error",
-			fmt.Sprintf("attestation service returned %d: %s", apiErr.Status, apiErr.Response.Message))
+		WriteError(w, http.StatusBadGateway, "attestation_api_error",
+			fmt.Sprintf("attestation-api returned %d: %s", apiErr.Status, apiErr.Response.Message))
 
 	case errors.As(err, &unexpErr):
-		slog.Warn("unexpected response from attestation service",
+		slog.Warn("unexpected response from attestation-api",
 			"status", unexpErr.Status, "body", unexpErr.Text)
-		WriteError(w, http.StatusBadGateway, "attestation_service_error",
-			fmt.Sprintf("attestation service returned %d: %s", unexpErr.Status, unexpErr.Text))
+		WriteError(w, http.StatusBadGateway, "attestation_api_error",
+			fmt.Sprintf("attestation-api returned %d: %s", unexpErr.Status, unexpErr.Text))
 
 	default:
-		slog.Warn("attestation service unreachable", "error", err)
-		WriteError(w, http.StatusBadGateway, "attestation_service_unreachable",
-			fmt.Sprintf("failed to reach attestation service: %s", err))
+		slog.Warn("attestation-api unreachable", "error", err)
+		WriteError(w, http.StatusBadGateway, "attestation_api_unreachable",
+			fmt.Sprintf("failed to reach attestation-api: %s", err))
 	}
 }
 

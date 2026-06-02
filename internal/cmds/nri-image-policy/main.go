@@ -260,7 +260,7 @@ func whitelistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if len(measurements) == 0 {
 		slog.Warn("whitelist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

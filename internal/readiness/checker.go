@@ -9,7 +9,7 @@ import (
 	"github.com/lunal-dev/c8s/pkg/attestationclient"
 )
 
-// Checker periodically polls the attestation service and exposes a readiness flag.
+// Checker periodically polls the attestation-api and exposes a readiness flag.
 type Checker struct {
 	ready atomic.Bool
 
@@ -28,7 +28,7 @@ func NewChecker(
 	}
 }
 
-// Ready returns true when the attestation service is healthy.
+// Ready returns true when the attestation-api is healthy.
 func (c *Checker) Ready() bool {
 	return c.ready.Load()
 }
@@ -62,6 +62,6 @@ func (c *Checker) check(ctx context.Context) {
 	c.ready.Store(ready)
 
 	if !ready {
-		slog.Warn("readiness check failed: attestation service unhealthy")
+		slog.Warn("readiness check failed: attestation-api unhealthy")
 	}
 }

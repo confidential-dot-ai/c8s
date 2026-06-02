@@ -534,7 +534,7 @@ Certificates are provisioned lazily on the first TLS handshake and cached in mem
 
 1. Generate ECDSA P-256 key pair
 2. Compute `REPORTDATA = SHA-384(pubkey || nonce)`
-3. Request attestation evidence from the attestation service (`POST /attest` with REPORTDATA)
+3. Request attestation evidence from the attestation-api (`POST /attest` with REPORTDATA)
 4. Extract raw attestation report from the structured evidence response
 5. Embed attestation report in X.509 certificate extension
 6. Cache certificate in `certState` (RWMutex-protected)

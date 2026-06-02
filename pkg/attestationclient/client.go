@@ -12,13 +12,13 @@ import (
 	"github.com/lunal-dev/c8s/pkg/types"
 )
 
-// Client is an HTTP client for the external attestation service.
+// Client is an HTTP client for the external attestation-api.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
 }
 
-// NewClient creates a new attestation service client.
+// NewClient creates a new attestation-api client.
 func NewClient(baseURL string) Client {
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
@@ -34,7 +34,7 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 	}
 }
 
-// Health calls GET /health on the attestation service.
+// Health calls GET /health on the attestation-api.
 func (c Client) Health(ctx context.Context) (types.HealthResponse, error) {
 	var result types.HealthResponse
 	if err := c.getJSON(ctx, "/health", &result); err != nil {
@@ -43,7 +43,7 @@ func (c Client) Health(ctx context.Context) (types.HealthResponse, error) {
 	return result, nil
 }
 
-// Attest calls POST /attest on the attestation service.
+// Attest calls POST /attest on the attestation-api.
 func (c Client) Attest(ctx context.Context, req types.AttestRequest) (types.AttestResponse, error) {
 	var result types.AttestResponse
 	if err := c.postJSON(ctx, "/attest", req, &result); err != nil {
@@ -52,7 +52,7 @@ func (c Client) Attest(ctx context.Context, req types.AttestRequest) (types.Atte
 	return result, nil
 }
 
-// Verify calls POST /verify on the attestation service.
+// Verify calls POST /verify on the attestation-api.
 func (c Client) Verify(ctx context.Context, req types.VerifyRequest) (types.VerifyResponse, error) {
 	var result types.VerifyResponse
 	if err := c.postJSON(ctx, "/verify", req, &result); err != nil {
@@ -118,7 +118,7 @@ func (e *RequestError) Unwrap() error {
 	return e.Err
 }
 
-// APIError represents a structured error response from the attestation service.
+// APIError represents a structured error response from the attestation-api.
 type APIError struct {
 	Status   int
 	Response types.ErrorResponse

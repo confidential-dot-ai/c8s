@@ -1,35 +1,35 @@
 {{- $nri := .Values.nriImagePolicy -}}
-{{- $attestationNodePort := int .Values.attestationService.service.nodePort -}}
+{{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "c8s.attestationServiceName" . }}
+  name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-service
+    app.kubernetes.io/component: attestation-api
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "c8s.attestationServiceName" . }}
+  name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-service
+    app.kubernetes.io/component: attestation-api
 data:
   config.toml: |
-{{ include "c8s.attestationServiceConfig" (dict "root" .) | indent 4 }}
+{{ include "c8s.attestationApiConfig" (dict "root" .) | indent 4 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "c8s.attestationServiceName" . }}
+  name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-service
+    app.kubernetes.io/component: attestation-api
 spec:
   {{- if $nri.enabled }}
   type: NodePort
@@ -38,14 +38,14 @@ spec:
   selector:
     app.kubernetes.io/name: c8s-operator
     app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: attestation-service
-  # Local: pods always hit their same-node attestation-service replica.
+    app.kubernetes.io/component: attestation-api
+  # Local: pods always hit their same-node attestation-api replica.
   # /attest generates evidence for the LOCAL TEE, so a cross-node hop
   # would produce evidence against the wrong node.
   internalTrafficPolicy: Local
   ports:
     - name: http
-      port: {{ .Values.attestationService.port }}
+      port: {{ .Values.attestationApi.port }}
       targetPort: http
       {{- if $nri.enabled }}
       nodePort: {{ $attestationNodePort }}
@@ -54,59 +54,59 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "c8s.attestationServiceName" . }}
+  name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-service
+    app.kubernetes.io/component: attestation-api
 spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: c8s-operator
       app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: attestation-service
+      app.kubernetes.io/component: attestation-api
   template:
     metadata:
       labels:
         app.kubernetes.io/name: c8s-operator
         app.kubernetes.io/instance: {{ .Release.Name }}
-        app.kubernetes.io/component: attestation-service
+        app.kubernetes.io/component: attestation-api
       annotations:
-        checksum/config: {{ include "c8s.attestationServiceConfig" (dict "root" .) | sha256sum }}
+        checksum/config: {{ include "c8s.attestationApiConfig" (dict "root" .) | sha256sum }}
     spec:
-      serviceAccountName: {{ include "c8s.attestationServiceName" . }}
+      serviceAccountName: {{ include "c8s.attestationApiName" . }}
       tolerations:
         - operator: Exists
       containers:
-        - name: attestation-service
-          image: {{ include "c8s.attestationServiceImage" . }}
-          imagePullPolicy: {{ .Values.attestationService.image.pullPolicy }}
-          args: [--config, /etc/attestation-service/config.toml]
+        - name: attestation-api
+          image: {{ include "c8s.attestationApiImage" . }}
+          imagePullPolicy: {{ .Values.attestationApi.image.pullPolicy }}
+          args: [--config, /etc/attestation-api/config.toml]
           ports:
             - name: http
-              containerPort: {{ .Values.attestationService.port }}
+              containerPort: {{ .Values.attestationApi.port }}
           securityContext:
-            {{- if eq .Values.attestationService.cvmMode "managed" }}
+            {{- if eq .Values.attestationApi.cvmMode "managed" }}
             privileged: true
             readOnlyRootFilesystem: true
-            {{- else if eq .Values.attestationService.cvmMode "baremetal" }}
-{{ toYaml .Values.attestationService.securityContext | indent 12 }}
+            {{- else if eq .Values.attestationApi.cvmMode "baremetal" }}
+{{ toYaml .Values.attestationApi.securityContext | indent 12 }}
             {{- else }}
-{{ fail (printf "attestationService.cvmMode must be \"baremetal\" or \"managed\" (got %q)" .Values.attestationService.cvmMode) }}
+{{ fail (printf "attestationApi.cvmMode must be \"baremetal\" or \"managed\" (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
           volumeMounts:
             - name: config
-              mountPath: /etc/attestation-service
+              mountPath: /etc/attestation-api
               readOnly: true
-            {{- if .Values.attestationService.teeDevices.sevGuest }}
+            {{- if .Values.attestationApi.teeDevices.sevGuest }}
             - name: sev-guest
               mountPath: /dev/sev-guest
             {{- end }}
-            {{- if .Values.attestationService.teeDevices.tdxGuest }}
+            {{- if .Values.attestationApi.teeDevices.tdxGuest }}
             - name: tdx-guest
               mountPath: /dev/tdx-guest
             {{- end }}
-            {{- if .Values.attestationService.teeDevices.tpm }}
+            {{- if .Values.attestationApi.teeDevices.tpm }}
             - name: tpm
               mountPath: /dev/tpm0
             - name: tpmrm
@@ -119,28 +119,28 @@ spec:
             httpGet: { path: /health, port: http }
             periodSeconds: 30
           resources:
-{{ toYaml .Values.attestationService.resources | indent 12 }}
+{{ toYaml .Values.attestationApi.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
-            name: {{ include "c8s.attestationServiceName" . }}
+            name: {{ include "c8s.attestationApiName" . }}
         # hostPath.type=CharDevice forces a hard failure on nodes that
         # lack the device, instead of silently mounting an empty file —
         # attestation evidence would then be silently bogus. Toggle each
         # device individually based on the host hardware shape.
-        {{- if .Values.attestationService.teeDevices.sevGuest }}
+        {{- if .Values.attestationApi.teeDevices.sevGuest }}
         - name: sev-guest
           hostPath:
             path: /dev/sev-guest
             type: CharDevice
         {{- end }}
-        {{- if .Values.attestationService.teeDevices.tdxGuest }}
+        {{- if .Values.attestationApi.teeDevices.tdxGuest }}
         - name: tdx-guest
           hostPath:
             path: /dev/tdx-guest
             type: CharDevice
         {{- end }}
-        {{- if .Values.attestationService.teeDevices.tpm }}
+        {{- if .Values.attestationApi.teeDevices.tpm }}
         - name: tpm
           hostPath:
             path: /dev/tpm0

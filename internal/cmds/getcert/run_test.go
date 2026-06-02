@@ -23,8 +23,8 @@ import (
 
 func TestCDSHTTPClientUsesDefaultTransportForPlainHTTP(t *testing.T) {
 	client, err := cdsHTTPClient(config{
-		CDSURL:                "http://cds:8443",
-		AttestationServiceURL: "http://attestation-service:8400",
+		CDSURL:            "http://cds:8443",
+		AttestationApiURL: "http://attestation-api:8400",
 	})
 	if err != nil {
 		t.Fatalf("cdsHTTPClient: %v", err)
@@ -36,8 +36,8 @@ func TestCDSHTTPClientUsesDefaultTransportForPlainHTTP(t *testing.T) {
 
 func TestCDSHTTPClientUsesRATLSForHTTPS(t *testing.T) {
 	client, err := cdsHTTPClient(config{
-		CDSURL:                "https://cds:8443",
-		AttestationServiceURL: "http://attestation-service:8400",
+		CDSURL:            "https://cds:8443",
+		AttestationApiURL: "http://attestation-api:8400",
 	})
 	if err != nil {
 		t.Fatalf("cdsHTTPClient: %v", err)
@@ -145,7 +145,7 @@ func TestBuildDiscoveryDocumentIncludesCertificateAndEvidence(t *testing.T) {
 func TestValidateConfigRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 	err := validateConfig(config{
 		CDSURL:                 "http://cds:8443",
-		AttestationServiceURL:  "http://attestation-service:8400",
+		AttestationApiURL:      "http://attestation-api:8400",
 		SAN:                    "confidential-gke.lunal.dev",
 		DiscoveryOutPath:       "/tmp/discovery.json",
 		DiscoveryPublicTLSMode: "invalid",
@@ -160,10 +160,10 @@ func TestValidateConfigRejectsInvalidDiscoveryPublicTLSMode(t *testing.T) {
 
 func TestValidateConfigRejectsInvalidReloadWatchInterval(t *testing.T) {
 	err := validateConfig(config{
-		CDSURL:                "http://cds:8443",
-		AttestationServiceURL: "http://attestation-service:8400",
-		SAN:                   "confidential-gke.lunal.dev",
-		ReloadWatchPaths:      []string{"/public-tls/tls.crt"},
+		CDSURL:            "http://cds:8443",
+		AttestationApiURL: "http://attestation-api:8400",
+		SAN:               "confidential-gke.lunal.dev",
+		ReloadWatchPaths:  []string{"/public-tls/tls.crt"},
 	})
 	if err == nil {
 		t.Fatal("validateConfig succeeded, want reload watch interval error")
@@ -175,11 +175,11 @@ func TestValidateConfigRejectsInvalidReloadWatchInterval(t *testing.T) {
 
 func TestValidateConfigRejectsReloadWatchWithoutRenewInterval(t *testing.T) {
 	err := validateConfig(config{
-		CDSURL:                "http://cds:8443",
-		AttestationServiceURL: "http://attestation-service:8400",
-		SAN:                   "confidential-gke.lunal.dev",
-		ReloadWatchPaths:      []string{"/public-tls/tls.crt"},
-		ReloadWatchInterval:   time.Minute,
+		CDSURL:              "http://cds:8443",
+		AttestationApiURL:   "http://attestation-api:8400",
+		SAN:                 "confidential-gke.lunal.dev",
+		ReloadWatchPaths:    []string{"/public-tls/tls.crt"},
+		ReloadWatchInterval: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("validateConfig succeeded, want reload watch renew interval error")
@@ -192,7 +192,7 @@ func TestValidateConfigRejectsReloadWatchWithoutRenewInterval(t *testing.T) {
 func TestValidateConfigRejectsContinueOnInitialErrorWithoutRenewInterval(t *testing.T) {
 	err := validateConfig(config{
 		CDSURL:                 "http://cds:8443",
-		AttestationServiceURL:  "http://attestation-service:8400",
+		AttestationApiURL:      "http://attestation-api:8400",
 		SAN:                    "confidential-gke.lunal.dev",
 		ContinueOnInitialError: true,
 	})

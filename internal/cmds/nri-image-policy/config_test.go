@@ -14,10 +14,10 @@ func validConfig() config {
 				"sha256:0000000000000000000000000000000000000000000000000000000000000001": "test-installer",
 			},
 			Pull: pullConfig{
-				URL:                   "https://127.0.0.1:30808",
-				Timeout:               30 * time.Second,
-				Interval:              30 * time.Second,
-				AttestationServiceURL: "http://localhost:30840",
+				URL:               "https://127.0.0.1:30808",
+				Timeout:           30 * time.Second,
+				Interval:          30 * time.Second,
+				AttestationApiURL: "http://localhost:30840",
 			},
 		},
 		Policy: policyConfig{
@@ -66,11 +66,11 @@ func TestValidate_NegativeTimeout(t *testing.T) {
 	}
 }
 
-func TestValidate_PullRequiresAttestationService(t *testing.T) {
+func TestValidate_PullRequiresAttestationApi(t *testing.T) {
 	cfg := validConfig()
-	cfg.Whitelist.Pull.AttestationServiceURL = ""
+	cfg.Whitelist.Pull.AttestationApiURL = ""
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when pull lacks attestation_service_url")
+		t.Fatal("expected error when pull lacks attestation_api_url")
 	}
 }
 
@@ -164,7 +164,7 @@ whitelist:
     "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
   pull:
     url: https://127.0.0.1:30808
-    attestation_service_url: http://localhost:30840
+    attestation_api_url: http://localhost:30840
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
@@ -354,7 +354,7 @@ whitelist:
     "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
   pull:
     url: https://127.0.0.1:30808
-    attestation_service_url: http://localhost:30840
+    attestation_api_url: http://localhost:30840
 policy:
   label_rules:
     - name: allowed-tenants

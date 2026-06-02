@@ -47,8 +47,8 @@ type Options struct {
 	// injected get-cert containers POST evidence + CSR to).
 	CDSURL string
 
-	// AttestationServiceURL points at the attestation-service.
-	AttestationServiceURL string
+	// AttestationApiURL points at the attestation-api.
+	AttestationApiURL string
 
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
@@ -132,7 +132,7 @@ func Run(ctx context.Context, opts Options) error {
 		if err := webhook.Register(mgr, webhook.Config{
 			GetCertImage:                 opts.GetCertImage,
 			CDSURL:                       opts.CDSURL,
-			AttestationServiceURL:        opts.AttestationServiceURL,
+			AttestationApiURL:            opts.AttestationApiURL,
 			CertFSGroup:                  int64Ptr(opts.CertFSGroup),
 			CertKeyMode:                  opts.CertKeyMode,
 			CertRenewInterval:            opts.CertRenewInterval,

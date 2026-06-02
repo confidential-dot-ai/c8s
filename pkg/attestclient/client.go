@@ -55,18 +55,18 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 	}
 }
 
-// GenerateEvidence calls the local attestation service to generate TEE evidence
-// for the given report data. This is the same attestation service call used
+// GenerateEvidence calls the local attestation-api to generate TEE evidence
+// for the given report data. This is the same attestation-api call used
 // internally by ObtainCertificate, exposed for callers that need evidence
 // without the full CDS challenge-attest-certify flow.
-func (c Client) GenerateEvidence(attestationServiceURL string, reportData []byte) (types.AttestResponse, error) {
-	return c.GenerateEvidenceContext(context.Background(), attestationServiceURL, reportData)
+func (c Client) GenerateEvidence(attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
+	return c.GenerateEvidenceContext(context.Background(), attestationApiURL, reportData)
 }
 
 // GenerateEvidenceContext is GenerateEvidence with caller-controlled
 // cancellation.
-func (c Client) GenerateEvidenceContext(ctx context.Context, attestationServiceURL string, reportData []byte) (types.AttestResponse, error) {
-	asClient := attestationclient.NewClientWithHTTP(attestationServiceURL, c.httpClient)
+func (c Client) GenerateEvidenceContext(ctx context.Context, attestationApiURL string, reportData []byte) (types.AttestResponse, error) {
+	asClient := attestationclient.NewClientWithHTTP(attestationApiURL, c.httpClient)
 	return asClient.Attest(contextOrBackground(ctx), types.AttestRequest{
 		ReportData: types.NewBase64Bytes(reportData),
 		Platform:   types.PlatformAuto,
@@ -79,17 +79,17 @@ func (c Client) GenerateEvidenceContext(ctx context.Context, attestationServiceU
 // It:
 //  1. Requests a challenge nonce from CDS (POST /authenticate)
 //  2. Passes SHA-384(CSR public key || challenge) as report_data to the
-//     local attestation service (POST /attest)
+//     local attestation-api (POST /attest)
 //  3. Submits the evidence and caller-provided CSR to CDS (POST /attest)
 //     which verifies the evidence and returns a signed certificate chain
-func (c Client) ObtainCertificate(attestationServiceURL, csrPEM string) (string, error) {
-	return c.ObtainCertificateWithContext(context.Background(), attestationServiceURL, csrPEM)
+func (c Client) ObtainCertificate(attestationApiURL, csrPEM string) (string, error) {
+	return c.ObtainCertificateWithContext(context.Background(), attestationApiURL, csrPEM)
 }
 
 // ObtainCertificateWithContext is ObtainCertificate with caller-controlled
 // cancellation.
-func (c Client) ObtainCertificateWithContext(ctx context.Context, attestationServiceURL, csrPEM string) (string, error) {
-	result, err := c.ObtainCertificateWithEvidenceContext(ctx, attestationServiceURL, csrPEM)
+func (c Client) ObtainCertificateWithContext(ctx context.Context, attestationApiURL, csrPEM string) (string, error) {
+	result, err := c.ObtainCertificateWithEvidenceContext(ctx, attestationApiURL, csrPEM)
 	if err != nil {
 		return "", err
 	}
@@ -98,14 +98,14 @@ func (c Client) ObtainCertificateWithContext(ctx context.Context, attestationSer
 
 // ObtainCertificateWithEvidence performs the full attestation flow and returns
 // both the issued certificate chain and the evidence used to obtain it.
-func (c Client) ObtainCertificateWithEvidence(attestationServiceURL, csrPEM string) (CertificateResult, error) {
-	return c.ObtainCertificateWithEvidenceContext(context.Background(), attestationServiceURL, csrPEM)
+func (c Client) ObtainCertificateWithEvidence(attestationApiURL, csrPEM string) (CertificateResult, error) {
+	return c.ObtainCertificateWithEvidenceContext(context.Background(), attestationApiURL, csrPEM)
 }
 
 // ObtainCertificateWithEvidenceContext is ObtainCertificateWithEvidence with
 // caller-controlled cancellation across authenticate, local attest, and CDS
 // attest requests.
-func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationServiceURL, csrPEM string) (CertificateResult, error) {
+func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationApiURL, csrPEM string) (CertificateResult, error) {
 	ctx = contextOrBackground(ctx)
 
 	// Step 1: get challenge from CDS
@@ -125,9 +125,9 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 		return CertificateResult{}, err
 	}
 
-	asResp, err := c.GenerateEvidenceContext(ctx, attestationServiceURL, reportData)
+	asResp, err := c.GenerateEvidenceContext(ctx, attestationApiURL, reportData)
 	if err != nil {
-		return CertificateResult{}, fmt.Errorf("attestation service: %w", err)
+		return CertificateResult{}, fmt.Errorf("attestation-api: %w", err)
 	}
 
 	// Step 3: submit evidence + CSR to CDS for verification and cert issuance.
@@ -157,7 +157,7 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 
 // AttestKey performs the attestation flow for an in-process ECDSA key:
 //  1. Requests a challenge nonce from CDS (POST /authenticate)
-//  2. Calls the local attestation service for evidence binding
+//  2. Calls the local attestation-api for evidence binding
 //     SHA-384(pubkey || challenge) into REPORTDATA
 //  3. Submits evidence + the PKIX-DER pubkey to CDS (POST /attest-key) and
 //     returns the signed EAR JWT
@@ -165,7 +165,7 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 // Used by in-cluster c8s components (CDS for its handoff signer key
 // bootstrap) that need a CDS-issued EAR bound to a key they hold in
 // memory, without going through the cert-issuance flow.
-func (c Client) AttestKey(ctx context.Context, attestationServiceURL string, pubKeyDER []byte) (string, error) {
+func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyDER []byte) (string, error) {
 	ctx = contextOrBackground(ctx)
 
 	challengeResp, err := c.AuthenticateContext(ctx)
@@ -186,9 +186,9 @@ func (c Client) AttestKey(ctx context.Context, attestationServiceURL string, pub
 		return "", err
 	}
 
-	asResp, err := c.GenerateEvidenceContext(ctx, attestationServiceURL, reportData[:sha512.Size384])
+	asResp, err := c.GenerateEvidenceContext(ctx, attestationApiURL, reportData[:sha512.Size384])
 	if err != nil {
-		return "", fmt.Errorf("attestation service: %w", err)
+		return "", fmt.Errorf("attestation-api: %w", err)
 	}
 
 	body, err := json.Marshal(types.AttestKeyRequestBody{

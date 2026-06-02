@@ -18,10 +18,10 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
-		GetCertImage:          "ghcr.io/lunal-dev/c8s-operator:test",
-		CDSURL:                "http://cds.c8s-system.svc:8443",
-		AttestationServiceURL: "http://attestation-service.c8s-system.svc:8400",
-		CertDir:               "/etc/c8s/certs",
+		GetCertImage:      "ghcr.io/lunal-dev/c8s-operator:test",
+		CDSURL:            "http://cds.c8s-system.svc:8443",
+		AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
+		CertDir:           "/etc/c8s/certs",
 	})
 
 	if len(pod.Spec.InitContainers) != 2 {
@@ -104,10 +104,10 @@ func TestMutatePodPreservesExistingFSGroup(t *testing.T) {
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
-		GetCertImage:          "image",
-		CDSURL:                "http://cds",
-		AttestationServiceURL: "http://attestation-service",
-		CertDir:               "/etc/c8s/certs",
+		GetCertImage:      "image",
+		CDSURL:            "http://cds",
+		AttestationApiURL: "http://attestation-api",
+		CertDir:           "/etc/c8s/certs",
 	})
 
 	if got := *pod.Spec.SecurityContext.FSGroup; got != existing {
@@ -124,16 +124,16 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
-		GetCertImage:          "image",
-		CDSURL:                "http://cds",
-		AttestationServiceURL: "http://attestation-service",
-		CertDir:               "/etc/c8s/certs",
-		CertFSGroup:           int64Ptr(4242),
-		CertKeyMode:           "0440",
-		CertRenewInterval:     time.Hour,
-		GetCertRunAsUser:      int64Ptr(0),
-		GetCertRunAsGroup:     int64Ptr(0),
-		GetCertRunAsNonRoot:   boolPtr(false),
+		GetCertImage:        "image",
+		CDSURL:              "http://cds",
+		AttestationApiURL:   "http://attestation-api",
+		CertDir:             "/etc/c8s/certs",
+		CertFSGroup:         int64Ptr(4242),
+		CertKeyMode:         "0440",
+		CertRenewInterval:   time.Hour,
+		GetCertRunAsUser:    int64Ptr(0),
+		GetCertRunAsGroup:   int64Ptr(0),
+		GetCertRunAsNonRoot: boolPtr(false),
 	})
 
 	if got := *pod.Spec.SecurityContext.FSGroup; got != 4242 {
@@ -200,10 +200,10 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 		t.Fatalf("parseAnnotations: %v", err)
 	}
 	mutatePod(pod, inj, Config{
-		GetCertImage:          "image",
-		CDSURL:                "http://cds",
-		AttestationServiceURL: "http://attestation-service",
-		CertDir:               "/etc/c8s/certs",
+		GetCertImage:      "image",
+		CDSURL:            "http://cds",
+		AttestationApiURL: "http://attestation-api",
+		CertDir:           "/etc/c8s/certs",
 	})
 
 	if pod.Spec.ShareProcessNamespace == nil || !*pod.Spec.ShareProcessNamespace {

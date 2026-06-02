@@ -925,8 +925,8 @@ func TestChartNRIImagePolicyUsesCDSPushAndPullModes(t *testing.T) {
 	if got, want := workerCfg.Whitelist.Pull.Interval, "30s"; got != want {
 		t.Fatalf("worker pull interval = %q, want %q", got, want)
 	}
-	if got, want := workerCfg.Whitelist.Pull.AttestationServiceURL, "http://localhost:30840"; got != want {
-		t.Fatalf("runtime attestation service URL = %q, want %q", got, want)
+	if got, want := workerCfg.Whitelist.Pull.AttestationApiURL, "http://localhost:30840"; got != want {
+		t.Fatalf("runtime attestation-api URL = %q, want %q", got, want)
 	}
 	if want := []string{measurement}; !slices.Equal(workerCfg.Whitelist.Pull.CDSMeasurements, want) {
 		t.Fatalf("worker CDS measurements = %v, want %v", workerCfg.Whitelist.Pull.CDSMeasurements, want)
@@ -944,61 +944,61 @@ func TestChartNRIImagePolicyUsesCDSPushAndPullModes(t *testing.T) {
 	}
 }
 
-func TestChartAttestationServiceNodePortEnabledWithNRI(t *testing.T) {
+func TestChartAttestationApiNodePortEnabledWithNRI(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	svc := renderedService(t, out, "c8s-attestation-service")
+	svc := renderedService(t, out, "c8s-attestation-api")
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
-		t.Fatalf("attestation-service Service type = %q by default, want NodePort", svc.Spec.Type)
+		t.Fatalf("attestation-api Service type = %q by default, want NodePort", svc.Spec.Type)
 	}
 	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
-		t.Fatalf("attestation-service externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
-		t.Fatalf("attestation-service nodePort = %d by default, want 30840", got)
+		t.Fatalf("attestation-api nodePort = %d by default, want 30840", got)
 	}
 }
 
-func TestChartAttestationServiceNodePortWiresNRI(t *testing.T) {
+func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "attestationService.service.nodePort=31040",
+		"--set", "attestationApi.service.nodePort=31040",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	svc := renderedService(t, out, "c8s-attestation-service")
+	svc := renderedService(t, out, "c8s-attestation-api")
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
-		t.Fatalf("attestation-service Service type = %q, want NodePort", svc.Spec.Type)
+		t.Fatalf("attestation-api Service type = %q, want NodePort", svc.Spec.Type)
 	}
 	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
-		t.Fatalf("attestation-service externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
-		t.Fatalf("attestation-service nodePort = %d, want 31040", got)
+		t.Fatalf("attestation-api nodePort = %d, want 31040", got)
 	}
 
 	cfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
-	if got, want := cfg.Whitelist.Pull.AttestationServiceURL, "http://localhost:31040"; got != want {
-		t.Fatalf("runtime attestation service URL = %q, want %q", got, want)
+	if got, want := cfg.Whitelist.Pull.AttestationApiURL, "http://localhost:31040"; got != want {
+		t.Fatalf("runtime attestation-api URL = %q, want %q", got, want)
 	}
 }
 
-func TestChartAttestationServiceNodePortDisabledWithoutNRI(t *testing.T) {
+func TestChartAttestationApiNodePortDisabledWithoutNRI(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.enabled=false",
-		"--set", "attestationService.service.nodePort=0",
+		"--set", "attestationApi.service.nodePort=0",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	svc := renderedService(t, out, "c8s-attestation-service")
+	svc := renderedService(t, out, "c8s-attestation-api")
 	if svc.Spec.Type == corev1.ServiceTypeNodePort {
-		t.Fatalf("attestation-service Service type = NodePort with NRI disabled, want no NodePort")
+		t.Fatalf("attestation-api Service type = NodePort with NRI disabled, want no NodePort")
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 0 {
-		t.Fatalf("attestation-service nodePort = %d with NRI disabled, want 0", got)
+		t.Fatalf("attestation-api nodePort = %d with NRI disabled, want 0", got)
 	}
 }
 
@@ -1012,14 +1012,14 @@ func TestChartRejectsPlaintextNRIWhitelist(t *testing.T) {
 	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the whitelist over RA-TLS`)
 }
 
-func TestChartRejectsInvalidAttestationServiceNodePortWithNRI(t *testing.T) {
+func TestChartRejectsInvalidAttestationApiNodePortWithNRI(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "attestationService.service.nodePort=0",
+		"--set", "attestationApi.service.nodePort=0",
 	)
 	if err == nil {
-		t.Fatalf("helm template succeeded, want invalid attestation-service host nodePort failure\n%s", out)
+		t.Fatalf("helm template succeeded, want invalid attestation-api host nodePort failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "attestationService.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got 0)")
+	assertHelmFailMessage(t, out, "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got 0)")
 }
 
 // parseValidationErrorKind extracts kind=<id> from helm's stderr when the
@@ -1085,19 +1085,19 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	}
 }
 
-// TestChartAttestationServiceBaremetalLeastPrivilege proves the default
+// TestChartAttestationApiBaremetalLeastPrivilege proves the default
 // (cvmMode=baremetal) renders the least-privilege securityContext — not
 // privileged — so a plain install does not over-privilege a host-device
 // DaemonSet. This is the over-privilege regression guard.
-func TestChartAttestationServiceBaremetalLeastPrivilege(t *testing.T) {
+func TestChartAttestationApiBaremetalLeastPrivilege(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	c := renderedDaemonSetContainer(t, out, "c8s-attestation-service", "attestation-service")
+	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
 	sc := c.SecurityContext
 	if sc == nil {
-		t.Fatal("attestation-service missing securityContext")
+		t.Fatal("attestation-api missing securityContext")
 	}
 	if sc.Privileged != nil && *sc.Privileged {
 		t.Errorf("default (baremetal) must not be privileged; got privileged=true")
@@ -1113,16 +1113,16 @@ func TestChartAttestationServiceBaremetalLeastPrivilege(t *testing.T) {
 	}
 }
 
-// TestChartAttestationServiceManagedPrivileged proves cvmMode=managed renders a
+// TestChartAttestationApiManagedPrivileged proves cvmMode=managed renders a
 // privileged container (managed CVM gates vTPM access below the capability
 // layer, so /dev/tpm0 needs full privilege) and drops the least-privilege
 // capabilities map — the two modes are strictly either/or, not merged.
-func TestChartAttestationServiceManagedPrivileged(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationService.cvmMode=managed")
+func TestChartAttestationApiManagedPrivileged(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=managed")
 	if err != nil {
 		t.Fatalf("helm template (cvmMode=managed): %v\n%s", err, out)
 	}
-	c := renderedDaemonSetContainer(t, out, "c8s-attestation-service", "attestation-service")
+	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
 	sc := c.SecurityContext
 	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
 		t.Errorf("managed must be privileged for vTPM access; got %+v", sc)
@@ -1132,21 +1132,21 @@ func TestChartAttestationServiceManagedPrivileged(t *testing.T) {
 	}
 }
 
-// TestChartAttestationServiceInvalidCvmMode proves an unrecognized cvmMode fails
+// TestChartAttestationApiInvalidCvmMode proves an unrecognized cvmMode fails
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on a managed CVM).
-func TestChartAttestationServiceInvalidCvmMode(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationService.cvmMode=bogus")
+func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=bogus")
 	if err == nil {
 		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 	}
-	assertHelmFailMessage(t, out, `attestationService.cvmMode must be "baremetal" or "managed" (got "bogus")`)
+	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be "baremetal" or "managed" (got "bogus")`)
 }
 
 func TestChartRendersManagedClusterKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "serviceAccount.imagePullSecrets[0].name=ghcr-secret",
-		"--set", "attestationService.cvmMode=managed",
+		"--set", "attestationApi.cvmMode=managed",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1986,7 +1986,7 @@ func TestChartWebhookAddsCABundleRBAC(t *testing.T) {
 	}
 }
 
-func TestChartRollsAttestationServiceOnConfigChange(t *testing.T) {
+func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	defaultOut, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template default config: %v\n%s", err, defaultOut)
@@ -1997,7 +1997,7 @@ func TestChartRollsAttestationServiceOnConfigChange(t *testing.T) {
 	}
 
 	changedOut, err := helmTemplate(t,
-		"--set", "attestationService.platforms[0]=az-snp",
+		"--set", "attestationApi.platforms[0]=az-snp",
 	)
 	if err != nil {
 		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
@@ -2301,7 +2301,7 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"template", "c8s", "c8s",
 		"--namespace", "c8s-system",
 		"--set", "image.tag=dev",
-		"--set", "attestationService.image.tag=dev",
+		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.image.tag=dev",
 		"--set", "teeProxy.image.tag=dev",
@@ -2500,7 +2500,7 @@ func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
 	}
 	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
 	for _, want := range []string{
-		"--attestation-service-url=http://c8s-attestation-service.c8s-system.svc:8400",
+		"--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400",
 		"--whitelist-db=/data/whitelist.db",
 		"--ca-common-name=c8s Mesh CA",
 		"--ca-cert-validity=8760h",
@@ -2598,11 +2598,11 @@ func renderedDaemonSet(t *testing.T, manifest, name string) appsv1.DaemonSet {
 type nriRuntimeConfig struct {
 	Whitelist struct {
 		Pull struct {
-			URL                   string   `yaml:"url"`
-			Interval              string   `yaml:"interval"`
-			Timeout               string   `yaml:"timeout"`
-			AttestationServiceURL string   `yaml:"attestation_service_url"`
-			CDSMeasurements       []string `yaml:"cds_measurements"`
+			URL               string   `yaml:"url"`
+			Interval          string   `yaml:"interval"`
+			Timeout           string   `yaml:"timeout"`
+			AttestationApiURL string   `yaml:"attestation_api_url"`
+			CDSMeasurements   []string `yaml:"cds_measurements"`
 		} `yaml:"pull"`
 		Push struct {
 			PersistPath string `yaml:"persist_path"`
@@ -2738,7 +2738,7 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"template", "c8s", "c8s",
 		"--namespace", "c8s-system",
 		"--set", "image.tag=dev",
-		"--set", "attestationService.image.tag=dev",
+		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
@@ -2939,7 +2939,7 @@ func TestChartDerivesComponentDigestsIntoWhitelist(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.bootstrapWhitelist.deriveComponents=true",
 		"--set-string", "image.digest="+opD,
-		"--set-string", "attestationService.image.digest="+asD,
+		"--set-string", "attestationApi.image.digest="+asD,
 		"--set-string", "cds.image.digest="+cdsD,
 		"--set-string", "ratlsMesh.image.digest="+rmD,
 		"--set-string", "nriImagePolicy.image.digest="+nriD,
@@ -2959,7 +2959,7 @@ func TestChartDerivesComponentDigestsIntoWhitelist(t *testing.T) {
 	// actually deploys (#51: refs match the rendered pod images).
 	want := map[string]string{
 		opD:  "ghcr.io/lunal-dev/c8s-operator@" + opD,
-		asD:  "ghcr.io/lunal-dev/attestation-service@" + asD,
+		asD:  "ghcr.io/lunal-dev/attestation-api@" + asD,
 		cdsD: "ghcr.io/lunal-dev/cds@" + cdsD,
 		rmD:  "ghcr.io/lunal-dev/ratls-mesh@" + rmD,
 		nriD: "ghcr.io/lunal-dev/nri-image-policy@" + nriD,
@@ -3211,7 +3211,7 @@ func renderExampleTLSLBNginxConf() string {
 		"template", "c8s", "c8s",
 		"--namespace", "c8s-system",
 		"--set", "image.tag=dev",
-		"--set", "attestationService.image.tag=dev",
+		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",

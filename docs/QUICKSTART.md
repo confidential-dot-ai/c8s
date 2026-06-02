@@ -10,12 +10,12 @@ This is the supported install path for the consolidated c8s chart.
 - c8s images published with the same tag as the release, for example `v0.1.0`,
   resolved to digests by default or supplied in a values file.
 - One node labelled to run CDS (`role=cds` by default).
-- Nodes with the TEE device shape expected by `attestationService.teeDevices`.
+- Nodes with the TEE device shape expected by `attestationApi.teeDevices`.
 
 ## Install c8s
 
 This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
-webhook, attestation-service, and CDS.
+webhook, attestation-api, and CDS.
 
 ```sh
 c8s install --namespace c8s-system

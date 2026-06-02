@@ -1,5 +1,5 @@
 {{- if .Values.ratlsMesh.enabled }}
-{{- $attestationServiceURL := printf "http://%s-attestation-service.%s.svc:8400" .Release.Name .Release.Namespace -}}
+{{- $attestationApiURL := printf "http://%s-attestation-api.%s.svc:8400" .Release.Name .Release.Namespace -}}
 {{/*
   cds mode points a single --cds-url at the unified CDS, which serves both
   /attest and /ca.
@@ -205,8 +205,8 @@ spec:
           args:
             - --platform
             - {{ .Values.ratlsMesh.platform | quote }}
-            - --attestation-service-url
-            - {{ $attestationServiceURL | quote }}
+            - --attestation-api-url
+            - {{ $attestationApiURL | quote }}
             - --outbound-port
             - {{ .Values.ratlsMesh.ports.outbound | quote }}
             - --inbound-port

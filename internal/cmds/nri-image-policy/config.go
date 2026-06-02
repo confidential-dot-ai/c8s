@@ -48,11 +48,11 @@ type whitelistConfig struct {
 
 // pullConfig configures the CDS polling source.
 type pullConfig struct {
-	URL                   string        `yaml:"url"`                     // empty disables pull
-	Interval              time.Duration `yaml:"interval"`                // ticker cadence; > 0 required when URL is set
-	Timeout               time.Duration `yaml:"timeout"`                 // per-request timeout; > 0 required when URL is set
-	AttestationServiceURL string        `yaml:"attestation_service_url"` // required for https pull
-	CDSMeasurements       []string      `yaml:"cds_measurements"`        // SHA-384 hex launch digests
+	URL               string        `yaml:"url"`                 // empty disables pull
+	Interval          time.Duration `yaml:"interval"`            // ticker cadence; > 0 required when URL is set
+	Timeout           time.Duration `yaml:"timeout"`             // per-request timeout; > 0 required when URL is set
+	AttestationApiURL string        `yaml:"attestation_api_url"` // required for https pull
+	CDSMeasurements   []string      `yaml:"cds_measurements"`    // SHA-384 hex launch digests
 }
 
 // pushConfig configures the operator-push source.
@@ -193,8 +193,8 @@ func (c *config) Validate() error {
 		if parsed.Scheme != "https" {
 			return fmt.Errorf("whitelist.pull.url scheme must be https, got %q", parsed.Scheme)
 		}
-		if c.Whitelist.Pull.AttestationServiceURL == "" {
-			return fmt.Errorf("whitelist.pull.attestation_service_url must be set")
+		if c.Whitelist.Pull.AttestationApiURL == "" {
+			return fmt.Errorf("whitelist.pull.attestation_api_url must be set")
 		}
 		if _, err := ratls.ParseHexMeasurementsList(c.Whitelist.Pull.CDSMeasurements); err != nil {
 			return fmt.Errorf("whitelist.pull.cds_measurements: %w", err)

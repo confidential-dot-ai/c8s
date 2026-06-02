@@ -93,8 +93,8 @@ type Config struct {
 	// CDSURL points at the CDS Service in-cluster.
 	CDSURL string
 
-	// AttestationServiceURL points at the node-local attestation-service.
-	AttestationServiceURL string
+	// AttestationApiURL points at the node-local attestation-api.
+	AttestationApiURL string
 
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
@@ -537,7 +537,7 @@ func initCertContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-service-url=" + cfg.AttestationServiceURL,
+		"--attestation-api-url=" + cfg.AttestationApiURL,
 		"--san=" + inj.WorkloadID,
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key-out=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
@@ -567,7 +567,7 @@ func renewCertContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-service-url=" + cfg.AttestationServiceURL,
+		"--attestation-api-url=" + cfg.AttestationApiURL,
 		"--san=" + inj.WorkloadID,
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),

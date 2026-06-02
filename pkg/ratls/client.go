@@ -13,7 +13,7 @@ import (
 // attestation extension — UNSAFE outside development; the caller is
 // expected to warn.
 //
-// attestationServiceURL is the local attestation service used to verify
+// attestationApiURL is the local attestation-api used to verify
 // peer evidence that cannot be checked offline (today: Azure SNP, whose
 // caller nonce is bound through the TPM quote). Pass an empty string only
 // for bare-metal-only deployments; the verifier will reject embedded
@@ -21,9 +21,9 @@ import (
 //
 // Connection-pool and timeout knobs: 5s dial, 10s response-header, 30s
 // overall, MaxIdleConns=5, MaxConnsPerHost=2.
-func NewVerifyingHTTPClient(measurements [][]byte, attestationServiceURL string) (*http.Client, error) {
+func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*http.Client, error) {
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{
-		Policy: &VerifyPolicy{Measurements: measurements, AttestationServiceURL: attestationServiceURL},
+		Policy: &VerifyPolicy{Measurements: measurements, AttestationApiURL: attestationApiURL},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)

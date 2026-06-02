@@ -62,8 +62,8 @@ func validateConfig(cfg *Config) error {
 	if cfg.CDSURL == "" {
 		return fmt.Errorf("cdsclient: CDSURL is required")
 	}
-	if cfg.AttestationServiceURL == "" {
-		return fmt.Errorf("cdsclient: AttestationServiceURL is required")
+	if cfg.AttestationApiURL == "" {
+		return fmt.Errorf("cdsclient: AttestationApiURL is required")
 	}
 	if cfg.CDSCAURL == "" {
 		return fmt.Errorf("cdsclient: CDSCAURL is required")

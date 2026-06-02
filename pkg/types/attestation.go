@@ -49,7 +49,7 @@ type AttestationEvidence struct {
 	Evidence json.RawMessage `json:"evidence"`
 }
 
-// --- Attestation service types ---
+// --- attestation-api types ---
 
 // Base64Bytes wraps a byte slice that serialises to/from standard base64 in JSON.
 type Base64Bytes struct {
@@ -95,16 +95,16 @@ const (
 	PlatformAzTdx Platform = "az-tdx"
 )
 
-// AttestRequest is the request body for the attestation service POST /attest.
+// AttestRequest is the request body for the attestation-api POST /attest.
 type AttestRequest struct {
 	ReportData Base64Bytes `json:"report_data"`
 	Platform   Platform    `json:"platform"`
 }
 
-// AttestResponse is the response from the attestation service POST /attest.
+// AttestResponse is the response from the attestation-api POST /attest.
 //
 // Evidence is the platform-specific evidence object (e.g. SnpEvidence,
-// TdxEvidence) emitted directly by the attestation service. Callers that
+// TdxEvidence) emitted directly by the attestation-api. Callers that
 // need to forward evidence to /verify must wrap it in an AttestationEvidence
 // envelope keyed by Platform.
 type AttestResponse struct {
@@ -112,7 +112,7 @@ type AttestResponse struct {
 	Evidence json.RawMessage `json:"evidence"`
 }
 
-// VerifyRequest is sent to the attestation service POST /verify.
+// VerifyRequest is sent to the attestation-api POST /verify.
 type VerifyRequest struct {
 	Evidence   AttestationEvidence `json:"evidence"`
 	Params     *VerifyParams       `json:"params,omitempty"`
@@ -120,7 +120,7 @@ type VerifyRequest struct {
 }
 
 // VerifyReportData builds a VerifyRequest that checks the evidence binds
-// expectedReportData and explicitly does not ask the attestation service to
+// expectedReportData and explicitly does not ask the attestation-api to
 // issue a token. c8s callers mint their own EAR after verifying, so token
 // issuance is always off; setting IssueToken here keeps that intent in one
 // place instead of every call site spelling out new(bool).
@@ -149,7 +149,7 @@ type MinTcb struct {
 	Microcode  uint8 `json:"microcode"`
 }
 
-// VerifyResponse is the response from the attestation service POST /verify.
+// VerifyResponse is the response from the attestation-api POST /verify.
 type VerifyResponse struct {
 	Result VerificationResult `json:"result"`
 	Token  *string            `json:"token"`
@@ -175,7 +175,7 @@ type Claims struct {
 	PlatformData json.RawMessage `json:"platform_data"`
 }
 
-// HealthResponse is the response from the attestation service GET /health.
+// HealthResponse is the response from the attestation-api GET /health.
 type HealthResponse struct {
 	Status      string     `json:"status"`
 	Platform    *string    `json:"platform,omitempty"`
@@ -183,7 +183,7 @@ type HealthResponse struct {
 	TokenIssuer bool       `json:"token_issuer"`
 }
 
-// CacheStats holds cache statistics from the attestation service.
+// CacheStats holds cache statistics from the attestation-api.
 type CacheStats struct {
 	VcekEntries    uint64  `json:"vcek_entries"`
 	ChainEntries   uint64  `json:"chain_entries"`

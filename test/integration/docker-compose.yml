@@ -24,7 +24,7 @@ services:
       dockerfile: Dockerfile.get-cert
     command:
       - --cds-url=http://mock-cds:8080
-      - --attestation-service-url=http://mock-attestation:8400
+      - --attestation-api-url=http://mock-attestation:8400
       - --san=nginx-lb
       - --out=/tls/cert.pem
       - --key-out=/tls/key.pem

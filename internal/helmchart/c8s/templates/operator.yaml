@@ -50,7 +50,7 @@ spec:
             - --webhook-config-name={{ include "c8s.fullname" . }}-pod-injector
             - --webhook-service-name={{ include "c8s.operatorName" . }}
             - --webhook-service-namespace={{ .Release.Namespace }}
-            - --attestation-service-url={{ include "c8s.attestationServiceURL" . }}
+            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --cert-fs-group={{ .Values.webhook.certVolume.fsGroup }}
             - --cert-key-mode={{ .Values.webhook.certVolume.keyMode }}
             - --get-cert-renew-interval={{ .Values.webhook.getCert.renewInterval }}

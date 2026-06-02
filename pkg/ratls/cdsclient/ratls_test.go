@@ -21,7 +21,7 @@ import (
 	"github.com/lunal-dev/c8s/pkg/types"
 )
 
-// fakeASEvidence stands up a minimal attestation-service stub that returns
+// fakeASEvidence stands up a minimal attestation-api stub that returns
 // canned SNP evidence for any /attest call. Required because RequestCert
 // dials the AS to embed an attestation report into the CSR before talking
 // to CDS — we want the test to fail at the CDS TLS handshake, not at
@@ -60,12 +60,12 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 	defer srv.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                srv.URL,
-		AttestationServiceURL: as.URL,
-		CDSCAURL:              "http://unused.invalid",
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		CDSMeasurements:       [][]byte{make([]byte, ratls.SNPMeasurementSize)},
+		CDSURL:            srv.URL,
+		AttestationApiURL: as.URL,
+		CDSCAURL:          "http://unused.invalid",
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		CDSMeasurements:   [][]byte{make([]byte, ratls.SNPMeasurementSize)},
 		// HTTPClient deliberately nil so NewClient builds the RA-TLS transport.
 	}, nil)
 	if err != nil {
@@ -126,12 +126,12 @@ func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
 	defer srv.Close()
 
 	p, err := NewProvider(&Config{
-		CDSURL:                srv.URL,
-		AttestationServiceURL: as.URL,
-		CDSCAURL:              "http://unused.invalid",
-		NodeIP:                "10.0.0.1",
-		TEEType:               ratls.TEETypeSEVSNP,
-		CDSMeasurements:       [][]byte{make([]byte, ratls.SNPMeasurementSize)},
+		CDSURL:            srv.URL,
+		AttestationApiURL: as.URL,
+		CDSCAURL:          "http://unused.invalid",
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		CDSMeasurements:   [][]byte{make([]byte, ratls.SNPMeasurementSize)},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -33,7 +33,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-func newMockAttestationService(t *testing.T, launchDigest string) *httptest.Server {
+func newMockAttestationApi(t *testing.T, launchDigest string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/verify" {
@@ -128,7 +128,7 @@ func leafFromAttestResponse(t *testing.T, w *httptest.ResponseRecorder) *x509.Ce
 }
 
 func TestAttest_InProcessSignAndReturnsChain(t *testing.T) {
-	mock := newMockAttestationService(t, "deadbeef")
+	mock := newMockAttestationApi(t, "deadbeef")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
@@ -161,7 +161,7 @@ func TestAttest_InProcessSignAndReturnsChain(t *testing.T) {
 }
 
 func TestAttest_ClampsCertTTLBeforeSigning(t *testing.T) {
-	mock := newMockAttestationService(t, "deadbeef")
+	mock := newMockAttestationApi(t, "deadbeef")
 	base := newTestAttestHandler(t, mock.URL, nil)
 	for _, tc := range []struct {
 		name       string
@@ -193,7 +193,7 @@ func TestAttest_ClampsCertTTLBeforeSigning(t *testing.T) {
 }
 
 func TestAttest_LaunchDigestAllowlistAllowed(t *testing.T) {
-	mock := newMockAttestationService(t, "approved-digest")
+	mock := newMockAttestationApi(t, "approved-digest")
 	h := newTestAttestHandler(t, mock.URL, map[string]bool{"approved-digest": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
@@ -205,7 +205,7 @@ func TestAttest_LaunchDigestAllowlistAllowed(t *testing.T) {
 }
 
 func TestAttest_LaunchDigestAllowlistCaseInsensitive(t *testing.T) {
-	mock := newMockAttestationService(t, "DEADBEEF")
+	mock := newMockAttestationApi(t, "DEADBEEF")
 	h := newTestAttestHandler(t, mock.URL, map[string]bool{"deadbeef": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
@@ -217,7 +217,7 @@ func TestAttest_LaunchDigestAllowlistCaseInsensitive(t *testing.T) {
 }
 
 func TestAttest_LaunchDigestAllowlistDenied(t *testing.T) {
-	mock := newMockAttestationService(t, "unknown-digest")
+	mock := newMockAttestationApi(t, "unknown-digest")
 	h := newTestAttestHandler(t, mock.URL, map[string]bool{"approved-digest": true})
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
@@ -281,7 +281,7 @@ func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 }
 
 func TestAttest_ConsumedChallengeRejectsReplay(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSR(t)
@@ -296,7 +296,7 @@ func TestAttest_ConsumedChallengeRejectsReplay(t *testing.T) {
 }
 
 func TestAttest_BadCSRRejected(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	challenge := issueChallenge(t, h)
 
@@ -307,7 +307,7 @@ func TestAttest_BadCSRRejected(t *testing.T) {
 }
 
 func TestAttest_RejectsCSRWithUnconfiguredDNSSAN(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, []string{"foo.mesh.svc"}, nil)
@@ -322,7 +322,7 @@ func TestAttest_RejectsCSRWithUnconfiguredDNSSAN(t *testing.T) {
 }
 
 func TestAttest_AcceptsCSRWithAllowedDNSSAN(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	h.Policy.DNSSANPattern = regexp.MustCompile(`^[a-z]+\.mesh\.svc$`)
 	challenge := issueChallenge(t, h)
@@ -335,7 +335,7 @@ func TestAttest_AcceptsCSRWithAllowedDNSSAN(t *testing.T) {
 }
 
 func TestAttest_RejectsCSRWithBadCN(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	h.Policy.AllowedCNPattern = regexp.MustCompile(`^ratls-mesh-[0-9.]+$`)
 	challenge := issueChallenge(t, h)
@@ -348,7 +348,7 @@ func TestAttest_RejectsCSRWithBadCN(t *testing.T) {
 }
 
 func TestAttest_RejectsCSRWithMismatchedSourceIP(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	h.SANValidation = true
 	challenge := issueChallenge(t, h)
@@ -371,7 +371,7 @@ func TestAttest_RejectsCSRWithMismatchedSourceIP(t *testing.T) {
 }
 
 func TestAttest_RejectsCSRWithIPSANWhenSANValidationDisabled(t *testing.T) {
-	mock := newMockAttestationService(t, "x")
+	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
 	// SANValidation defaults to false, leaving Policy.SourceIP empty.
 	challenge := issueChallenge(t, h)
@@ -383,7 +383,7 @@ func TestAttest_RejectsCSRWithIPSANWhenSANValidationDisabled(t *testing.T) {
 	}
 }
 
-func TestAttest_AttestationServiceFailureReturns502(t *testing.T) {
+func TestAttest_AttestationApiFailureReturns502(t *testing.T) {
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))

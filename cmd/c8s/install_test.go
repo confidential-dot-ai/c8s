@@ -186,7 +186,7 @@ func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
 // path (chartComponents) is covered separately by TestChartComponentsFromValues.
 var testComponents = []c8sComponent{
 	{"image", "ghcr.io/lunal-dev/c8s-operator"},
-	{"attestationService.image", "ghcr.io/lunal-dev/attestation-service"},
+	{"attestationApi.image", "ghcr.io/lunal-dev/attestation-api"},
 	{"cds.image", "ghcr.io/lunal-dev/cds"},
 	{"ratlsMesh.image", "ghcr.io/lunal-dev/ratls-mesh"},
 	{"nriImagePolicy.image", "ghcr.io/lunal-dev/nri-image-policy"},
@@ -200,7 +200,7 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 		switch ref {
 		case "ghcr.io/lunal-dev/c8s-operator:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000aa", nil
-		case "ghcr.io/lunal-dev/attestation-service:v1":
+		case "ghcr.io/lunal-dev/attestation-api:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000bb", nil
 		case "ghcr.io/lunal-dev/cds:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000cc", nil
@@ -225,8 +225,8 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 		// override cannot diverge from the digest resolved against it.
 		"--set-string", "image.repository=ghcr.io/lunal-dev/c8s-operator",
 		"--set-string", "image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000aa",
-		"--set-string", "attestationService.image.repository=ghcr.io/lunal-dev/attestation-service",
-		"--set-string", "attestationService.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000bb",
+		"--set-string", "attestationApi.image.repository=ghcr.io/lunal-dev/attestation-api",
+		"--set-string", "attestationApi.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000bb",
 		"--set-string", "cds.image.repository=ghcr.io/lunal-dev/cds",
 		"--set-string", "cds.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000cc",
 		"--set-string", "ratlsMesh.image.repository=ghcr.io/lunal-dev/ratls-mesh",
@@ -296,12 +296,12 @@ func TestChartComponentsFromValues(t *testing.T) {
 		got[c.valuePrefix] = c.repository
 	}
 	want := map[string]string{
-		"image":                    "ghcr.io/lunal-dev/c8s-operator",
-		"attestationService.image": "ghcr.io/lunal-dev/attestation-service",
-		"cds.image":                "ghcr.io/lunal-dev/cds",
-		"ratlsMesh.image":          "ghcr.io/lunal-dev/ratls-mesh",
-		"nriImagePolicy.image":     "ghcr.io/lunal-dev/nri-image-policy",
-		"teeProxy.image":           "ghcr.io/lunal-dev/tee-proxy",
+		"image":                "ghcr.io/lunal-dev/c8s-operator",
+		"attestationApi.image": "ghcr.io/lunal-dev/attestation-api",
+		"cds.image":            "ghcr.io/lunal-dev/cds",
+		"ratlsMesh.image":      "ghcr.io/lunal-dev/ratls-mesh",
+		"nriImagePolicy.image": "ghcr.io/lunal-dev/nri-image-policy",
+		"teeProxy.image":       "ghcr.io/lunal-dev/tee-proxy",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)

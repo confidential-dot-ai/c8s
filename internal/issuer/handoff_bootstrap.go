@@ -61,11 +61,11 @@ type LocalEARMinter interface {
 	IssueWithLaunchDigestAndPubKey(submodsEvidence json.RawMessage, launchDigest string, teePubKey *ecdsa.PublicKey) (string, error)
 }
 
-// AttestationService is the attestation-service client the bootstrap drives:
+// AttestationApi is the attestation-api client the bootstrap drives:
 // Attest produces a TEE report binding reportData, Verify checks the report's
 // signature and report-data and returns the launch digest. *attestationclient.Client
 // satisfies it, so the same client used elsewhere in CDS is reused here.
-type AttestationService interface {
+type AttestationApi interface {
 	Attest(ctx context.Context, req types.AttestRequest) (types.AttestResponse, error)
 	Verify(ctx context.Context, req types.VerifyRequest) (types.VerifyResponse, error)
 }
@@ -74,20 +74,20 @@ type localHandoffBootstrap struct {
 	signer    *ecdsa.PrivateKey
 	earSource *AtomicHandoffEAR
 
-	attestation AttestationService
+	attestation AttestationApi
 	minter      LocalEARMinter
 }
 
 var _ HandoffBootstrap = (*localHandoffBootstrap)(nil)
 
 // NewLocalHandoffBootstrap generates the handoff signer key and prepares an
-// in-process attest-key flow against the local attestation service. It issues
+// in-process attest-key flow against the local attestation-api. It issues
 // the EAR with the supplied minter (CDS's own EAR issuer) in process — there is
 // no RA-TLS hop and no remote measurement to pin, because the evidence is
 // verified and the EAR signed inside the CDS trust boundary.
-func NewLocalHandoffBootstrap(attestation AttestationService, minter LocalEARMinter) (HandoffBootstrap, error) {
+func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter) (HandoffBootstrap, error) {
 	if attestation == nil || minter == nil {
-		return nil, fmt.Errorf("local handoff bootstrap requires an attestation service and EAR minter")
+		return nil, fmt.Errorf("local handoff bootstrap requires an attestation-api and EAR minter")
 	}
 	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -220,14 +220,14 @@ func TestLocalHandoffBootstrapMintsOnlyAfterVerify(t *testing.T) {
 }
 
 // TestLocalHandoffBootstrapRequiresDeps guards the constructor's nil checks: a
-// nil attestation service or minter is a wiring bug that must fail loudly at
+// nil attestation-api or minter is a wiring bug that must fail loudly at
 // startup, not silently disable handoff.
 func TestLocalHandoffBootstrapRequiresDeps(t *testing.T) {
 	as := stubAttestation{}
 	mi := &stubMinter{}
 	for _, tc := range []struct {
 		name string
-		as   AttestationService
+		as   AttestationApi
 		mi   LocalEARMinter
 	}{
 		{"nil attestation", nil, mi},

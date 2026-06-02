@@ -106,9 +106,9 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	verifyReq := types.VerifyReportData(req.Evidence, reportData)
 	verifyResp, err := h.AttestationClient.Verify(ctx, verifyReq)
 	if err != nil {
-		slog.Warn("attestation service error", "error", err)
-		attestation.WriteError(w, http.StatusBadGateway, types.ErrorCodeAttestationServiceUnreachable,
-			fmt.Sprintf("failed to reach attestation service: %s", err))
+		slog.Warn("attestation-api error", "error", err)
+		attestation.WriteError(w, http.StatusBadGateway, types.ErrorCodeAttestationApiUnreachable,
+			fmt.Sprintf("failed to reach attestation-api: %s", err))
 		return
 	}
 	if !verifyResp.Result.SignatureValid {

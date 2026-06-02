@@ -157,7 +157,7 @@ install image so chart upgrades can roll.
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
 {{- $cds := eq .archetype "cds" -}}
-{{- $attestationNodePort := int $root.Values.attestationService.service.nodePort -}}
+{{- $attestationNodePort := int $root.Values.attestationApi.service.nodePort -}}
 plugin:
   health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" $root) | quote }}
 whitelist:
@@ -169,7 +169,7 @@ whitelist:
     url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}
     interval: {{ $root.Values.nriImagePolicy.refresh.interval | quote }}
     timeout: "30s"
-    attestation_service_url: {{ printf "http://localhost:%d" $attestationNodePort | quote }}
+    attestation_api_url: {{ printf "http://localhost:%d" $attestationNodePort | quote }}
     cds_measurements:
 {{- range $root.Values.cds.measurements }}
       - {{ . | quote }}

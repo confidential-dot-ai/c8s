@@ -19,7 +19,7 @@ Confidential computing infrastructure for Kubernetes. Provides TEE attestation, 
 | [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) |
 | [`pkg/ratls/cdsclient`](pkg/ratls/cdsclient/) | CDS attestation client for certificate provisioning |
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the CDS attestation flow |
-| [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation service |
+| [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation-api |
 | [`pkg/whitelistclient`](pkg/whitelistclient/) | CRUD client for the CDS whitelist API |
 | [`pkg/whitelist`](pkg/whitelist/) | Whitelist types and JSON parsing |
 | [`pkg/types`](pkg/types/) | Shared request/response types |
@@ -54,7 +54,7 @@ pkg/
   ratls/                   RA-TLS library (AMD SEV-SNP, Intel TDX)
     cdsclient/             CDS attestation client
   attestclient/            High-level attestation flow client
-  attestationclient/       Attestation service HTTP client
+  attestationclient/       attestation-api HTTP client
   whitelistclient/         Whitelist CRUD + fetch client
   whitelist/               Whitelist types
   types/                   Shared request/response types
@@ -116,4 +116,4 @@ per-role image names remain stable, but each image copies the same multi-mode
 ## Related repos
 
 - [`lunal-dev/deployment-scripts`](https://github.com/lunal-dev/deployment-scripts) - Ansible roles for deploying these components
-- [`lunal-dev/attestation-service`](https://github.com/lunal-dev/attestation-service) - TEE attestation evidence verification service
+- [`lunal-dev/attestation-rs`](https://github.com/lunal-dev/attestation-rs) - TEE attestation evidence verification service (publishes the `attestation-api` image)

@@ -6,7 +6,7 @@ The current milestone enforces these gates:
 
 | Gate | Enforced by | Source of truth |
 |---|---|---|
-| TEE evidence is valid | attestation-service and CDS | hardware evidence verification |
+| TEE evidence is valid | attestation-api and CDS | hardware evidence verification |
 | A CSR can be signed | CDS | EAR JWT, plus `cds.measurements` when configured |
 | Image digest is allowed | nri-image-policy | CDS-served whitelist |
 | Mesh peer cert chains to the mesh CA | ratls-mesh | mesh CA bundle |

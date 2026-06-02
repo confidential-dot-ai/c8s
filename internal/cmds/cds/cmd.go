@@ -36,7 +36,7 @@ func NewCmd() *cobra.Command {
 	flags.IntVarP(&cfg.port, "port", "p", 8443, "")
 	flags.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
-	flags.StringVar(&cfg.attestationSvcURL, "attestation-service-url", "", "URL of the attestation service")
+	flags.StringVar(&cfg.attestationApiURL, "attestation-api-url", "", "URL of the attestation-api service")
 	flags.StringVar(&cfg.caCommonName, "ca-common-name", issuer.DefaultCACommonName, "common name for the in-memory generated mesh CA")
 	flags.DurationVar(&cfg.caCertValidity, "ca-cert-validity", 8760*time.Hour, "validity period of the in-memory mesh CA certificate")
 	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest (empty = no pinning, UNSAFE)")
@@ -78,7 +78,7 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "sev-snp", "TEE platform for the RA-TLS serving cert (sev-snp; snp, az-snp, and gcp-snp aliases are normalized). Empty disables TLS — UNSAFE outside tests.")
 	flags.DurationVar(&cfg.ratlsCertTTL, "ratls-cert-ttl", 24*time.Hour, "")
 
-	_ = cmd.MarkFlagRequired("attestation-service-url")
+	_ = cmd.MarkFlagRequired("attestation-api-url")
 	_ = cmd.MarkFlagRequired("whitelist-db")
 
 	return cmd
@@ -88,7 +88,7 @@ type config struct {
 	host                       string
 	port                       int
 	logLevel                   string
-	attestationSvcURL          string
+	attestationApiURL          string
 	caCommonName               string
 	caCertValidity             time.Duration
 	measurements               []string

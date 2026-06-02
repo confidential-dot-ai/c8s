@@ -61,7 +61,7 @@ func newRatlsMeshCommand() *cobra.Command {
 
 type proxyConfig struct {
 	platform                  string
-	attestationServiceURL     string
+	attestationApiURL         string
 	outboundPort              int
 	inboundPort               int
 	nodeIP                    string
@@ -103,7 +103,7 @@ type proxyConfig struct {
 
 func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.platform, "platform", "sev-snp", "TEE platform: sev-snp, tdx")
-	fs.StringVar(&c.attestationServiceURL, "attestation-service-url", "", "URL of the local attestation service (e.g. http://localhost:8400)")
+	fs.StringVar(&c.attestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
 	fs.IntVar(&c.outboundPort, "outbound-port", 15001, "outbound listener port (intercepted app traffic)")
 	fs.IntVar(&c.inboundPort, "inbound-port", 15006, "inbound listener port (RA-TLS from peer nodes)")
 	fs.StringVar(&c.nodeIP, "node-ip", "", "this node's IP (auto-detected from NODE_IP env if unset)")
@@ -162,7 +162,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	}
 	c.nodeIP = canonicalNodeIP
 
-	if err := validateConfig(c.attestationServiceURL, c.outboundPort, c.inboundPort, c.healthPort, c.certTTL); err != nil {
+	if err := validateConfig(c.attestationApiURL, c.outboundPort, c.inboundPort, c.healthPort, c.certTTL); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
@@ -182,9 +182,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	asClient := attestclient.NewClientWithHTTP("", &http.Client{
 		Timeout: c.rotationTimeout,
 	})
-	attestFunc := makeAttestFunc(asClient, c.attestationServiceURL)
+	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy := &ratls.VerifyPolicy{AttestationServiceURL: c.attestationServiceURL}
+	meshPolicy := &ratls.VerifyPolicy{AttestationApiURL: c.attestationApiURL}
 	if c.measurements != "" {
 		for _, h := range strings.Split(c.measurements, ",") {
 			h = strings.TrimSpace(h)
@@ -220,8 +220,8 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	if c.certMode != "self-signed" && c.certMode != "cds" {
 		return fmt.Errorf("invalid --cert-mode %q (valid: self-signed, cds)", c.certMode)
 	}
-	if c.certMode == "cds" && (c.cdsURL == "" || c.attestationServiceURL == "") {
-		return fmt.Errorf("--cds-url and --attestation-service-url are required for --cert-mode cds")
+	if c.certMode == "cds" && (c.cdsURL == "" || c.attestationApiURL == "") {
+		return fmt.Errorf("--cds-url and --attestation-api-url are required for --cert-mode cds")
 	}
 	teeType, err := ratlsTEEType(c.platform)
 	if err != nil {
@@ -403,13 +403,13 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	var cdsCfg *cdsclient.Config
 	if c.certMode == "cds" {
 		cdsCfg = &cdsclient.Config{
-			CDSURL:                c.cdsURL,
-			AttestationServiceURL: c.attestationServiceURL,
-			CDSCAURL:              c.cdsURL,
-			CACertURL:             effectiveCAURL,
-			NodeIP:                c.nodeIP,
-			TEEType:               teeType,
-			CDSMeasurements:       cdsMeasurements,
+			CDSURL:            c.cdsURL,
+			AttestationApiURL: c.attestationApiURL,
+			CDSCAURL:          c.cdsURL,
+			CACertURL:         effectiveCAURL,
+			NodeIP:            c.nodeIP,
+			TEEType:           teeType,
+			CDSMeasurements:   cdsMeasurements,
 		}
 		go func() {
 			cdsProvider, err := cdsclient.NewProvider(cdsCfg, logger)
@@ -612,12 +612,12 @@ func newIptablesCleanupCommand() *cobra.Command {
 
 // validateConfig checks for misconfigurations that would cause cryptic runtime
 // failures. Called once at startup before any goroutine.
-func validateConfig(attestationServiceURL string, outboundPort, inboundPort, healthPort int, certTTL time.Duration) error {
-	if attestationServiceURL == "" {
-		return fmt.Errorf("--attestation-service-url is required")
+func validateConfig(attestationApiURL string, outboundPort, inboundPort, healthPort int, certTTL time.Duration) error {
+	if attestationApiURL == "" {
+		return fmt.Errorf("--attestation-api-url is required")
 	}
-	if !strings.HasPrefix(attestationServiceURL, "http://") && !strings.HasPrefix(attestationServiceURL, "https://") {
-		return fmt.Errorf("--attestation-service-url %q must start with http:// or https://", attestationServiceURL)
+	if !strings.HasPrefix(attestationApiURL, "http://") && !strings.HasPrefix(attestationApiURL, "https://") {
+		return fmt.Errorf("--attestation-api-url %q must start with http:// or https://", attestationApiURL)
 	}
 	if err := validatePort("--outbound-port", outboundPort); err != nil {
 		return err
@@ -653,9 +653,9 @@ func validatePort(flag string, port int) error {
 	return nil
 }
 
-// makeAttestFunc returns an AttestFunc that calls the attestation service
+// makeAttestFunc returns an AttestFunc that calls the attestation-api
 // via attestclient. Used for RA-TLS self-signed certificates.
-func makeAttestFunc(client attestclient.Client, attestationServiceURL string) func(context.Context, string) (string, error) {
+func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, customData string) (string, error) {
 		// customData is hex-encoded REPORTDATA (e.g. SHA-384 of pubkey,
 		// zero-padded to 64 bytes for the SNP REPORTDATA field).
@@ -670,9 +670,9 @@ func makeAttestFunc(client attestclient.Client, attestationServiceURL string) fu
 		// 64 bytes, so sending the full padded array causes TPM_RC_SIZE.
 		reportDataBytes = reportDataBytes[:sha512.Size384]
 
-		resp, err := client.GenerateEvidence(attestationServiceURL, reportDataBytes)
+		resp, err := client.GenerateEvidence(attestationApiURL, reportDataBytes)
 		if err != nil {
-			return "", fmt.Errorf("attestation service: %w", err)
+			return "", fmt.Errorf("attestation-api: %w", err)
 		}
 
 		return attestclient.RATLSEvidence(resp)

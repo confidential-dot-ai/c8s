@@ -3,7 +3,7 @@
 The c8s operator installs the Kubernetes-facing c8s components. It hosts
 status-mirror controllers, serves the pod-injection admission webhook, and
 ships an embedded Helm chart for installing the operator, CRDs, RBAC, webhook
-resources, attestation-service DaemonSet, and CDS (the Certificate
+resources, attestation-api DaemonSet, and CDS (the Certificate
 Distribution Service trust root).
 
 ## Overview
@@ -16,7 +16,7 @@ The operator tree is built around these pieces:
 - `cmd/c8s install` extracts the embedded chart from `internal/helmchart`
   and shells out to `helm upgrade --install`.
 - `internal/helmchart/c8s` installs the operator Deployment and Service, the
-  CRDs, RBAC, webhook configuration, attestation-service DaemonSet, and CDS.
+  CRDs, RBAC, webhook configuration, attestation-api DaemonSet, and CDS.
 - `internal/webhook` injects get-cert containers into opted-in pods so each
   workload can fetch and renew a leaf certificate through CDS.
 
@@ -40,14 +40,14 @@ self-service application-team workflow.
 
 The install creates or updates cluster-scoped resources such as CRDs, RBAC,
 the operator Deployment, the webhook Service and configuration, and the
-attestation-service DaemonSet. Enabling injection also requires platform-owned
+attestation-api DaemonSet. Enabling injection also requires platform-owned
 prerequisites:
 
 - the chart-managed CDS Service reachable from workload pods;
 - whitelist storage and a measurement allowlist for any workload allowed to
   mutate the whitelist;
 - a CDS public-bundle PVC for CA continuity;
-- nodes with the expected TEE device access for attestation-service;
+- nodes with the expected TEE device access for attestation-api;
 
 After the platform installs those pieces, workload opt-in is self-service:
 application teams annotate their pod templates with `confidential.ai/cw`.
@@ -70,23 +70,23 @@ The main source directories are:
 The supported chart shape is chart-managed and CVM-only. The chart does not
 support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 
-- The chart renders webhook, attestation-service, and CDS together.
+- The chart renders webhook, attestation-api, and CDS together.
 - The webhook is wired to the chart-managed CDS Service.
 - CDS verifies evidence, issues EAR tokens, and signs workload CSRs in one
   process; EAR validation and signing share that process, so there is no
   internal Service hop or JWKS fetch between them.
 - whitelist admin is EAR-authorized through CDS; the chart does not render a
-  CDS whitelist password or attestation-service API key into Kubernetes
+  CDS whitelist password or attestation-api API key into Kubernetes
   Secrets.
-- `image.tag` or `image.digest`, `attestationService.image.tag` or
-  `attestationService.image.digest`, and `cds.image.tag` or
+- `image.tag` or `image.digest`, `attestationApi.image.tag` or
+  `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
   running `c8s install`. Unstamped local builds report version `dev`, and the
   install CLI maps that to the `main` branch tag because CI does not publish
   `dev` (and `cds` publishes only `main`, not `latest`).
 
 This means a default platform install creates the operator, CRDs, RBAC,
-webhook, attestation-service, and CDS. It does not mutate
+webhook, attestation-api, and CDS. It does not mutate
 application workloads until those workloads opt in with
 `confidential.ai/cw`.
 
@@ -237,7 +237,7 @@ The init container runs:
 ```bash
 get-cert \
   --cds-url=https://<release>-cds.<namespace>.svc:8443 \
-  --attestation-service-url=<release-attestation-service-url> \
+  --attestation-api-url=<release-attestation-api-url> \
   --san=<confidential.ai/cw> \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
@@ -326,7 +326,7 @@ image-policy component disabled, so only image tags are required:
 helm template c8s internal/helmchart/c8s \
   --namespace c8s-system \
   --set image.tag=main \
-  --set attestationService.image.tag=main \
+  --set attestationApi.image.tag=main \
   --set cds.image.tag=main \
   --set ratlsMesh.image.tag=main \
   --set teeProxy.image.tag=main \
@@ -343,7 +343,7 @@ different label. `c8s install` fills these digests from the registry by default
 helm template c8s internal/helmchart/c8s \
   --namespace c8s-system \
   --set image.tag=main \
-  --set attestationService.image.tag=main \
+  --set attestationApi.image.tag=main \
   --set cds.image.tag=main \
   --set ratlsMesh.image.tag=main \
   --set teeProxy.image.tag=main \
@@ -359,6 +359,6 @@ The rendered manifests should include:
 
 - a CDS Deployment, Service, and ServiceAccount;
 - the operator arg `--cds-url=https://c8s-cds.c8s-system.svc:8443`;
-- no CDS admin-password Secret and no attestation-service API-key Secret;
+- no CDS admin-password Secret and no attestation-api API-key Secret;
 - `confidential.ai/trust-root-mode: inMemory` annotations on the chart-managed
   CDS resources.

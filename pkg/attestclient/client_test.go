@@ -62,20 +62,20 @@ func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
 		t.Fatalf("reportDataForCSR: %v", err)
 	}
 
-	var attestationServiceSawReportData []byte
-	attestationService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var attestationApiSawReportData []byte
+	attestationApi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/attest" {
-			t.Fatalf("attestation service path = %s, want /attest", r.URL.Path)
+			t.Fatalf("attestation-api path = %s, want /attest", r.URL.Path)
 		}
 		var req types.AttestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode attestation request: %v", err)
 		}
-		attestationServiceSawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		attestationApiSawReportData = append([]byte(nil), req.ReportData.Bytes()...)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"platform":"snp","evidence":{"quote":"abc"}}`)
 	}))
-	defer attestationService.Close()
+	defer attestationApi.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authenticate", func(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +102,7 @@ func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
 	defer cds.Close()
 
 	client := NewClientWithHTTP(cds.URL, cds.Client())
-	result, err := client.ObtainCertificateWithEvidence(attestationService.URL, csrPEM)
+	result, err := client.ObtainCertificateWithEvidence(attestationApi.URL, csrPEM)
 	if err != nil {
 		t.Fatalf("ObtainCertificateWithEvidence: %v", err)
 	}
@@ -119,8 +119,8 @@ func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
 	if !strings.Contains(string(result.Evidence), `"quote":"abc"`) {
 		t.Fatalf("evidence = %s, want quote", result.Evidence)
 	}
-	if !bytes.Equal(attestationServiceSawReportData, expectedReportData) {
-		t.Fatalf("report_data = %x, want key-bound challenge %x", attestationServiceSawReportData, expectedReportData)
+	if !bytes.Equal(attestationApiSawReportData, expectedReportData) {
+		t.Fatalf("report_data = %x, want key-bound challenge %x", attestationApiSawReportData, expectedReportData)
 	}
 }
 
