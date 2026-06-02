@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,8 +42,17 @@ var (
 	installKata        bool
 	installKataEnforce bool
 	installDistro      string
+	installCvmMode     string
 
 	installResolveDigests bool
+)
+
+// Flag names referenced in more than one place (registration plus a Changed()
+// gate or an arg-builder call). Naming them once keeps the references from
+// drifting.
+const (
+	flagDistro  = "distro"
+	flagCvmMode = "cvm-mode"
 )
 
 // c8sComponent maps a chart image to the helm value keys --resolve-digests
@@ -238,6 +248,15 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return err
 		}
+		// Only emit --set when the operator passed --cvm-mode, so a value from
+		// -f (or the chart default) wins when the flag is unset; helm gives
+		// --set strict precedence over -f.
+		if cmd.Flags().Changed(flagCvmMode) {
+			helmArgs, err = appendCvmModeInstallArgs(helmArgs, installCvmMode)
+			if err != nil {
+				return err
+			}
+		}
 		helmArgs = appendKataInstallArgs(helmArgs, installKata, installKataEnforce)
 		if installResolveDigests {
 			helmArgs, err = appendResolvedDigestArgs(cmd.Context(), helmArgs, imageTag, components)
@@ -389,20 +408,39 @@ func appendInstallCRDArgs(helmArgs []string, installCRDs bool) []string {
 	return append(helmArgs, "--skip-crds", "--set", "statusMirror.enabled=false")
 }
 
-// appendDistroInstallArgs validates --distro and translates it into the
-// per-component host-distro values. It always applies: nri-image-policy
-// installs regardless of --kata, and both it and kata-deploy must bind the
-// containerd config layout the host distro uses.
-func appendDistroInstallArgs(helmArgs []string, distro string) ([]string, error) {
-	switch distro {
-	case "k8s", "rke2":
-	default:
-		return nil, fmt.Errorf("--distro must be k8s or rke2, got %q", distro)
+// appendEnumSetArg validates value against allowed, then appends a
+// --set-string <path>=<value> for each path. Used by the enum install flags
+// (--distro, --cvm-mode) so they share one validate-then-set shape. The chart
+// re-validates, so the allowed check is a fast typo guard before shelling to
+// helm; flag names the offending flag in the error.
+func appendEnumSetArg(helmArgs []string, flag, value string, allowed, paths []string) ([]string, error) {
+	if !slices.Contains(allowed, value) {
+		return nil, fmt.Errorf("--%s must be one of %s, got %q", flag, strings.Join(allowed, ", "), value)
 	}
-	return append(helmArgs,
-		"--set-string", "kata.distro="+distro,
-		"--set-string", "nri-image-policy.distro="+distro,
-	), nil
+	for _, path := range paths {
+		helmArgs = append(helmArgs, "--set-string", path+"="+value)
+	}
+	return helmArgs, nil
+}
+
+// appendDistroInstallArgs translates --distro into the per-component host-distro
+// values. It always applies: nri-image-policy installs regardless of --kata,
+// and both it and kata-deploy must bind the containerd config layout the host
+// distro uses.
+func appendDistroInstallArgs(helmArgs []string, distro string) ([]string, error) {
+	return appendEnumSetArg(helmArgs, flagDistro, distro,
+		[]string{"k8s", "rke2"},
+		[]string{"kata.distro", "nri-image-policy.distro"})
+}
+
+// appendCvmModeInstallArgs translates --cvm-mode into the attestation-service
+// value. managed renders a privileged attestation-service for managed-cloud
+// CVMs that gate TEE device access below the device/capability layer; baremetal
+// keeps the least-privilege securityContext.
+func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
+	return appendEnumSetArg(helmArgs, flagCvmMode, cvmMode,
+		[]string{"baremetal", "managed"},
+		[]string{"attestationService.cvmMode"})
 }
 
 // appendKataInstallArgs translates the --kata / --kata-enforce flags into helm
@@ -515,7 +553,8 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsUser, "webhook-get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
-	installCmd.Flags().StringVar(&installDistro, "distro", "k8s", "host Kubernetes distro: k8s (vanilla/kubeadm) or rke2 — selects containerd config paths for kata and nri-image-policy")
+	installCmd.Flags().StringVar(&installDistro, flagDistro, "k8s", "host Kubernetes distro: k8s (vanilla/kubeadm) or rke2 — selects containerd config paths for kata and nri-image-policy")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape: baremetal (least-privilege device access) or managed (privileged attestation-service for managed-cloud CVMs that gate TEE device access)")
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses)")
 	installCmd.Flags().BoolVar(&installKataEnforce, "kata-enforce", false, "enable kata enforcement: inject runtimeClasses into workload pods and reject non-kata RuntimeClasses (implies --kata)")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")

@@ -226,10 +226,10 @@ attestationService:
   ##
   ## baremetal (default): direct TEE device node. The least-privilege
   ##   securityContext below (device mount + SYS_RAWIO) suffices.
-  ## managed: managed-cloud CVM (AKS/GKE), where vTPM access for SEV-SNP
-  ##   attestation is gated below the LSM/device-capability layer, so /dev/tpm0
-  ##   returns "Operation not permitted" without full privilege even with the
-  ##   device mounted and SYS_RAWIO granted. Renders privileged: true.
+  ## managed: managed-cloud CVM that gates TEE device access below the
+  ##   LSM/device-capability layer (e.g. Azure SEV-SNP via the vTPM at
+  ##   /dev/tpm0, which returns "Operation not permitted" even with the device
+  ##   mounted and SYS_RAWIO granted). Renders privileged: true.
   cvmMode: baremetal
   ## Least-privilege device access, used only when cvmMode=baremetal.
   securityContext:

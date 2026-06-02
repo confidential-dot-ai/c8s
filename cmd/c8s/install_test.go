@@ -160,6 +160,27 @@ func TestAppendDistroInstallArgsRejectsUnknownDistro(t *testing.T) {
 	}
 }
 
+func TestAppendCvmModeInstallArgsSetsAttestationServiceValue(t *testing.T) {
+	for _, mode := range []string{"baremetal", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertArgsEqual(t, got, []string{
+				"upgrade",
+				"--set-string", "attestationService.cvmMode=" + mode,
+			})
+		})
+	}
+}
+
+func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure"); err == nil {
+		t.Fatal("appendCvmModeInstallArgs accepted an unknown --cvm-mode, want error")
+	}
+}
+
 // testComponents mirrors the chart's c8sComponents for the resolver tests,
 // which exercise buildDigestArgs without reading a real chart. The chart-read
 // path (chartComponents) is covered separately by TestChartComponentsFromValues.
