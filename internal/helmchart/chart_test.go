@@ -1288,7 +1288,7 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"proxy_ssl_certificate_key /tls/key.pem;",
 		"proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;",
 		"proxy_ssl_verify on;",
-		"proxy_ssl_trusted_certificate /mesh-ca/ca.pem;",
+		"proxy_ssl_trusted_certificate /tls/cert.pem;",
 		"proxy_pass https://backend;",
 		"name: tls-certs",
 		"name: public-tls",
@@ -1468,7 +1468,9 @@ func TestChartDefaultTLSLBToTeeProxyIsMutualTLS(t *testing.T) {
 		"proxy_ssl_verify on;",
 		"proxy_ssl_name c8s-tee-proxy.c8s-system.svc;",
 		"proxy_ssl_certificate /tls/cert.pem;",
-		"proxy_ssl_trusted_certificate /mesh-ca/ca.pem;",
+		// trust = the get-cert output cert.pem, which CDS returns as leaf+CA
+		// chain, so the CDS CA that signed tee-proxy is the anchor.
+		"proxy_ssl_trusted_certificate /tls/cert.pem;",
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Fatalf("tls-lb nginx config missing %q\n%s", want, cfg)

@@ -746,7 +746,9 @@ tlsLb:
     tls:
       # -- Present the CDS-issued certificate to HTTPS upstreams.
       useCDSClientCert: true
-      # -- Verify HTTPS upstream certificates with the mounted mesh CA bundle.
+      # -- Verify the HTTPS upstream's certificate chain. The default trustedCAPath
+      # (the CDS-issued cert file, which already contains the CA chain) is what
+      # verifies the chart-managed tee-proxy's CDS cert.
       verify: true
       # -- Maximum upstream server certificate chain depth nginx will verify when
       # upstream.tls.verify=true. Increase for private PKI chains with more
@@ -756,9 +758,12 @@ tlsLb:
       # cert SAN. Empty defaults to the address host, except for the chart-managed
       # tee-proxy where it defaults to its CDS cert SAN <release>-tee-proxy.<ns>.svc.
       serverName: ""
-      # -- Optional CA file path. Empty defaults to <meshCA.mountPath>/<meshCA.key>.
-      # Custom paths must be provided by the image or another mount.
-      trustedCAPath: ""
+      # -- CA file nginx verifies the upstream against. Defaults to the get-cert
+      # output at <tlsMountPath>/cert.pem, which CDS returns as leaf+CA chain, so
+      # the CA that signed the chart-managed tee-proxy is already on disk. Set to
+      # <meshCA.mountPath>/<meshCA.key> (and provide that ConfigMap) or another
+      # path for a different upstream.
+      trustedCAPath: /tls/cert.pem
 
   # -- Additional path routes proxied before the default upstream backend.
   # Useful for preserving control-plane endpoints while the catch-all route
