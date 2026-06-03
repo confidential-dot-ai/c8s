@@ -19,7 +19,7 @@ on:
     paths: *go-paths
 
 env:
-  GO_VERSION: "1.26.3"
+  GO_VERSION: "1.26.4"
 
 concurrency:
   group: ci-${{ github.ref }}-tests

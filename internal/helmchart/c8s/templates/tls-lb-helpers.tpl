@@ -267,42 +267,109 @@ cert under tlsMountPath.
 {{- end -}}
 
 {{/*
-c8s sidecar-injection annotations consumed by the c8s admission webhook
-(internal/webhook/pod_mutator.go). Caller must nindent into the Pod template
-metadata annotations.
+Discovery + verbose args shared by both get-cert containers. tls-lb owns its
+own cert provisioning: the chart renders the same get-cert containers the
+admission webhook would inject, driven directly by chart values instead of
+round-tripping through pod annotations.
 */}}
-{{- define "tls-lb.c8s-annotations" -}}
-{{- $publicTLSMode := "cds" -}}
-{{- if .Values.tlsLb.publicTLS.secretName -}}{{- $publicTLSMode = "webpki" -}}{{- end -}}
-confidential.ai/cw: {{ include "tls-lb.san" . | quote }}
-confidential.ai/c8s-cert-volume: "tls-certs"
-confidential.ai/c8s-cert-dir: {{ .Values.tlsLb.tlsMountPath | quote }}
-confidential.ai/c8s-cert-file: "cert.pem"
-confidential.ai/c8s-key-file: "key.pem"
-confidential.ai/c8s-renew-interval: {{ .Values.tlsLb.certProvisioning.renewInterval | quote }}
-confidential.ai/c8s-reload-nginx: "true"
-confidential.ai/c8s-get-cert-run-as-user: {{ .Values.tlsLb.nginx.runAsUser | quote }}
-confidential.ai/c8s-get-cert-run-as-group: {{ .Values.tlsLb.nginx.runAsGroup | quote }}
-{{- /* webhook default already matches runAsNonRoot=true; emit only on override. */ -}}
-{{- if not .Values.tlsLb.nginx.runAsNonRoot }}
-confidential.ai/c8s-get-cert-run-as-non-root: "false"
+{{- define "tls-lb.getCertCommonArgs" -}}
+{{- if .Values.tlsLb.discovery.enabled }}
+- --discovery-out={{ include "tls-lb.discoveryFilePath" . }}
+- --discovery-cds-cert-url={{ .Values.tlsLb.discovery.cdsCertPath }}
+- --discovery-public-tls-mode={{ ternary "webpki" "cds" (ne .Values.tlsLb.publicTLS.secretName "") }}
+{{- if .Values.tlsLb.meshCA.expose }}
+- --discovery-mesh-ca-url={{ .Values.tlsLb.discovery.meshCAPath }}
+{{- end }}
 {{- end }}
 {{- if .Values.tlsLb.certProvisioning.verbose }}
-confidential.ai/c8s-get-cert-verbose: "true"
+- --verbose
 {{- end }}
-{{- if .Values.tlsLb.publicTLS.secretName }}
-confidential.ai/c8s-reload-watch-volume: "public-tls"
-confidential.ai/c8s-reload-watch-mount-path: {{ .Values.tlsLb.publicTLS.mountPath | quote }}
-confidential.ai/c8s-reload-watch-paths: {{ printf "%s,%s" (include "tls-lb.publicCertPath" .) (include "tls-lb.publicKeyPath" .) | quote }}
 {{- end }}
-{{- if .Values.tlsLb.discovery.enabled }}
-confidential.ai/c8s-discovery-volume: "discovery"
-confidential.ai/c8s-discovery-mount-path: {{ .Values.tlsLb.discovery.mountPath | quote }}
-confidential.ai/c8s-discovery-out: {{ include "tls-lb.discoveryFilePath" . | quote }}
-confidential.ai/c8s-discovery-cds-cert-url: {{ .Values.tlsLb.discovery.cdsCertPath | quote }}
-confidential.ai/c8s-discovery-public-tls-mode: {{ $publicTLSMode | quote }}
-{{- if .Values.tlsLb.meshCA.expose }}
-confidential.ai/c8s-discovery-mesh-ca-url: {{ .Values.tlsLb.discovery.meshCAPath | quote }}
+
+{{/*
+SecurityContext shared by the get-cert containers. Runs as nginx's UID/GID so
+the shared tls-certs emptyDir is writable by both, with a locked-down posture
+otherwise (no privilege escalation, read-only root, all caps dropped).
+*/}}
+{{- define "tls-lb.getCertSecurityContext" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
+runAsUser: {{ .Values.tlsLb.nginx.runAsUser }}
+runAsGroup: {{ .Values.tlsLb.nginx.runAsGroup }}
+capabilities:
+  drop:
+    - ALL
+seccompProfile:
+  type: RuntimeDefault
 {{- end }}
+
+{{/*
+get-cert init + renew containers. c8s-init-cert obtains the leaf once and
+exits; c8s-renew-cert runs as a native sidecar (restartPolicy: Always) that
+reuses the key and SIGHUPs nginx on renewal. Caller nindents into the Pod
+spec's initContainers list.
+*/}}
+{{- define "tls-lb.getCertContainers" -}}
+{{- $certPem := printf "%s/cert.pem" .Values.tlsLb.tlsMountPath -}}
+{{- $keyPem := printf "%s/key.pem" .Values.tlsLb.tlsMountPath -}}
+- name: c8s-init-cert
+  image: {{ include "c8s.image" . }}
+  imagePullPolicy: IfNotPresent
+  args:
+    - get-cert
+    - --cds-url={{ include "c8s.cdsURL" . }}
+    - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+    - --san={{ include "tls-lb.san" . }}
+    - --out={{ $certPem }}
+    - --key-out={{ $keyPem }}
+    - --key-mode=0640
+    {{- include "tls-lb.getCertCommonArgs" . | nindent 4 }}
+  volumeMounts:
+    {{- include "tls-lb.getCertVolumeMounts" (dict "ctx" . "reloadWatch" false) | nindent 4 }}
+  securityContext:
+    {{- include "tls-lb.getCertSecurityContext" . | nindent 4 }}
+- name: c8s-renew-cert
+  image: {{ include "c8s.image" . }}
+  imagePullPolicy: IfNotPresent
+  restartPolicy: Always
+  args:
+    - get-cert
+    - --cds-url={{ include "c8s.cdsURL" . }}
+    - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+    - --san={{ include "tls-lb.san" . }}
+    - --key={{ $keyPem }}
+    - --out={{ $certPem }}
+    - --renew-interval={{ .Values.tlsLb.certProvisioning.renewInterval }}
+    - --reload-nginx=true
+    - --continue-on-initial-error
+    {{- if .Values.tlsLb.publicTLS.secretName }}
+    - --reload-watch={{ include "tls-lb.publicCertPath" . }}
+    - --reload-watch={{ include "tls-lb.publicKeyPath" . }}
+    {{- end }}
+    {{- include "tls-lb.getCertCommonArgs" . | nindent 4 }}
+  volumeMounts:
+    {{- include "tls-lb.getCertVolumeMounts" (dict "ctx" . "reloadWatch" true) | nindent 4 }}
+  securityContext:
+    {{- include "tls-lb.getCertSecurityContext" . | nindent 4 }}
+{{- end }}
+
+{{/*
+Volume mounts for the get-cert containers: the shared tls-certs volume
+(writable), the discovery volume when enabled, and the public-TLS volume for
+the renew container's --reload-watch. dict args: ctx, reloadWatch (bool).
+*/}}
+{{- define "tls-lb.getCertVolumeMounts" -}}
+{{- $ctx := .ctx -}}
+- name: tls-certs
+  mountPath: {{ $ctx.Values.tlsLb.tlsMountPath }}
+{{- if $ctx.Values.tlsLb.discovery.enabled }}
+- name: discovery
+  mountPath: {{ $ctx.Values.tlsLb.discovery.mountPath }}
+{{- end }}
+{{- if and .reloadWatch $ctx.Values.tlsLb.publicTLS.secretName }}
+- name: public-tls
+  mountPath: {{ $ctx.Values.tlsLb.publicTLS.mountPath }}
+  readOnly: true
 {{- end }}
 {{- end }}

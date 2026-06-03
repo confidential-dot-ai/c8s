@@ -787,8 +787,8 @@ tlsLb:
     keyKey: tls.key
     mountPath: "/public-tls"
 
-  # -- Discovery/preflight metadata served by nginx. The c8s admission webhook
-  # injects get-cert with the matching discovery-output annotations.
+  # -- Discovery/preflight metadata served by nginx. The chart-rendered
+  # get-cert containers write it with the matching --discovery-* args.
   discovery:
     enabled: false
     path: "/v1/discovery"
@@ -820,10 +820,10 @@ tlsLb:
   imagePullSecrets: []
 
   certProvisioning:
-    # -- Enable verbose (debug) logging for webhook-injected cert provisioning.
+    # -- Enable verbose (debug) logging for the chart-rendered get-cert containers.
     verbose: false
-    # -- How often the webhook-injected get-cert sidecar renews the TLS
-    #    certificate and SIGHUPs nginx. Must be shorter than the cert TTL issued by CDS.
+    # -- How often the c8s-renew-cert sidecar renews the TLS certificate and
+    #    SIGHUPs nginx. Must be shorter than the cert TTL issued by CDS.
     renewInterval: "1h"
 
   nginx:
@@ -840,8 +840,8 @@ tlsLb:
     #    (targetPort references the named `https` port), so public 443 is
     #    unaffected; front it with a LoadBalancer for external ingress.
     httpsPort: 8443
-    # -- UID/GID used by nginx and the webhook-injected get-cert containers so
-    #    both can access the in-memory CDS key material.
+    # -- UID/GID used by nginx and the get-cert containers so both can access
+    #    the in-memory CDS key material on the shared tls-certs volume.
     runAsUser: 101
     runAsGroup: 101
     runAsNonRoot: true

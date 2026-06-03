@@ -32,10 +32,11 @@ spec:
         {{- include "tls-lb.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/nginx-config: {{ include (print $.Template.BasePath "/tls-lb-configmap.yaml") . | sha256sum }}
-        {{- include "tls-lb.c8s-annotations" . | nindent 8 }}
     spec:
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
+      initContainers:
+        {{- include "tls-lb.getCertContainers" . | nindent 8 }}
       containers:
         - name: nginx
           image: {{ include "c8s-common.image" .Values.tlsLb.nginx.image }}

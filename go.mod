@@ -1,6 +1,6 @@
 module github.com/lunal-dev/c8s
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3

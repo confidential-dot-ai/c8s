@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	webhook "github.com/lunal-dev/c8s/internal/webhook"
 	pkgwhitelist "github.com/lunal-dev/c8s/pkg/whitelist"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
@@ -170,9 +169,28 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 			t.Fatalf("default chart missing %q\n%s", want, out)
 		}
 	}
-	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", tlsLBAnnotations("c8s-tls-lb.c8s-system.svc", nil))
-	if got := renderedDeploymentInitContainers(t, out, "c8s-tls-lb"); len(got) != 0 {
-		t.Fatalf("tls-lb should rely on webhook-injected get-cert containers, got %v", got)
+	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
+	assertContainerArgs(t, initCert,
+		"get-cert",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400",
+		"--san=c8s-tls-lb.c8s-system.svc",
+		"--out=/tls/cert.pem",
+		"--key-out=/tls/key.pem",
+	)
+	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
+	assertContainerArgs(t, renewCert,
+		"--key=/tls/key.pem",
+		"--out=/tls/cert.pem",
+		"--renew-interval=1h",
+		"--reload-nginx=true",
+		"--continue-on-initial-error",
+	)
+	if renewCert.RestartPolicy == nil || *renewCert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("c8s-renew-cert restartPolicy = %v, want Always", renewCert.RestartPolicy)
+	}
+	if got := initCert.SecurityContext.RunAsUser; got == nil || *got != 101 {
+		t.Fatalf("c8s-init-cert runAsUser = %v, want 101", got)
 	}
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
@@ -498,6 +516,37 @@ func containerNames(containers []corev1.Container) []string {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+// tlsLBGetCertContainer returns the named tls-lb get-cert init container
+// (c8s-init-cert or c8s-renew-cert), failing if absent.
+func tlsLBGetCertContainer(t *testing.T, manifest, name string) corev1.Container {
+	t.Helper()
+	init := renderedDeploymentInitContainers(t, manifest, "c8s-tls-lb")
+	c, ok := findContainer(init, name)
+	if !ok {
+		t.Fatalf("tls-lb init container %q missing; have %v", name, containerNames(init))
+	}
+	return c
+}
+
+// assertContainerArgs fails unless every wanted arg is present on the container.
+func assertContainerArgs(t *testing.T, c corev1.Container, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		assertContainerHasArg(t, c.Name, c.Args, w)
+	}
+}
+
+// assertContainerArgsAbsent fails if any listed exact arg is present on the
+// container (assertContainerNoArgPrefix covers the prefix case).
+func assertContainerArgsAbsent(t *testing.T, c corev1.Container, absent ...string) {
+	t.Helper()
+	for _, a := range absent {
+		if slices.Contains(c.Args, a) {
+			t.Fatalf("%s container should not contain arg %q\nargs: %v", c.Name, a, c.Args)
+		}
+	}
 }
 
 func hasCapability(c corev1.Container, want corev1.Capability) bool {
@@ -1241,26 +1290,23 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 			t.Fatalf("render missing %q\n%s", want, out)
 		}
 	}
-	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", tlsLBAnnotations("c8s-tls-lb.c8s-system.svc", map[string]string{
-		webhook.AnnotationReloadWatchVolume:      "public-tls",
-		webhook.AnnotationReloadWatchMountPath:   "/edge-tls",
-		webhook.AnnotationReloadWatchPaths:       "/edge-tls/public.crt,/edge-tls/public.key",
-		webhook.AnnotationDiscoveryVolume:        "discovery",
-		webhook.AnnotationDiscoveryMountPath:     "/discovery",
-		webhook.AnnotationDiscoveryOut:           "/discovery/discovery.json",
-		webhook.AnnotationDiscoveryCDSCertURL:    "/.well-known/cds-cert.pem",
-		webhook.AnnotationDiscoveryPublicTLSMode: "webpki",
-		webhook.AnnotationDiscoveryMeshCAURL:     "/.well-known/mesh-ca.pem",
-	}))
+	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
+	assertContainerArgs(t, initCert,
+		"--discovery-out=/discovery/discovery.json",
+		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
+		"--discovery-public-tls-mode=webpki",
+		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
+	)
+	assertContainerArgsAbsent(t, initCert, "--reload-watch=/edge-tls/public.crt")
+	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
+	assertContainerArgs(t, renewCert,
+		"--reload-watch=/edge-tls/public.crt",
+		"--reload-watch=/edge-tls/public.key",
+		"--discovery-public-tls-mode=webpki",
+	)
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
 		t.Fatalf("tls-lb shareProcessNamespace = %v, want true", got)
-	}
-	if got := deployment.Spec.Template.Spec.InitContainers; len(got) != 0 {
-		t.Fatalf("tls-lb should rely on webhook-injected get-cert containers, got %v", got)
-	}
-	if got, ok := deployment.Spec.Template.Annotations[webhook.AnnotationGetCertRunAsNonRoot]; ok {
-		t.Fatalf("%s should be absent when nginx.runAsNonRoot matches the webhook default, got %q", webhook.AnnotationGetCertRunAsNonRoot, got)
 	}
 }
 
@@ -1292,7 +1338,7 @@ func TestChartRendersTeeProxyStaticTLSSecret(t *testing.T) {
 	}
 }
 
-func TestTLSLBCertProvisioningValuesDriveWebhookAnnotations(t *testing.T) {
+func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",
 		"--set", "tlsLb.certProvisioning.verbose=true",
@@ -1303,13 +1349,19 @@ func TestTLSLBCertProvisioningValuesDriveWebhookAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", tlsLBAnnotations("c8s-tls-lb.c8s-system.svc", map[string]string{
-		webhook.AnnotationRenewInterval:       "30m",
-		webhook.AnnotationGetCertRunAsUser:    "201",
-		webhook.AnnotationGetCertRunAsGroup:   "202",
-		webhook.AnnotationGetCertRunAsNonRoot: "false",
-		webhook.AnnotationGetCertVerbose:      "true",
-	}))
+	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
+	assertContainerArgs(t, initCert, "--verbose")
+	if got := initCert.SecurityContext.RunAsUser; got == nil || *got != 201 {
+		t.Fatalf("c8s-init-cert runAsUser = %v, want 201", got)
+	}
+	if got := initCert.SecurityContext.RunAsGroup; got == nil || *got != 202 {
+		t.Fatalf("c8s-init-cert runAsGroup = %v, want 202", got)
+	}
+	if got := initCert.SecurityContext.RunAsNonRoot; got == nil || *got {
+		t.Fatalf("c8s-init-cert runAsNonRoot = %v, want false", got)
+	}
+	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
+	assertContainerArgs(t, renewCert, "--renew-interval=30m", "--verbose")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.SecurityContext.FSGroup; got == nil || *got != 202 {
 		t.Fatalf("tls-lb fsGroup = %v, want 202", got)
@@ -1900,9 +1952,8 @@ func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
 	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
 	meshCA.assertDirective(t, "alias", "/mesh-ca/ca.pem")
 	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
-	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", map[string]string{
-		webhook.AnnotationDiscoveryMeshCAURL: "/.well-known/mesh-ca.pem",
-	})
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem")
 }
 
 func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
@@ -1912,9 +1963,8 @@ func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertRenderedDeploymentPodAnnotations(t, out, "c8s-tls-lb", map[string]string{
-		webhook.AnnotationDiscoveryPublicTLSMode: "cds",
-	})
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+		"--discovery-public-tls-mode=cds")
 }
 
 func TestTLSLBRollsOnNginxConfigChange(t *testing.T) {
@@ -2690,34 +2740,6 @@ func assertRenderedDeploymentPodLabels(t *testing.T, manifest, name string, want
 			t.Fatalf("Deployment %s label %s = %q, want %q\nlabels: %v", name, key, got, wantValue, labels)
 		}
 	}
-}
-
-func assertRenderedDeploymentPodAnnotations(t *testing.T, manifest, name string, want map[string]string) {
-	t.Helper()
-	annotations := renderedDeployment(t, manifest, name).Spec.Template.Annotations
-	for key, wantValue := range want {
-		if got := annotations[key]; got != wantValue {
-			t.Fatalf("Deployment %s annotation %s = %q, want %q\nannotations: %v", name, key, got, wantValue, annotations)
-		}
-	}
-}
-
-func tlsLBAnnotations(workload string, overrides map[string]string) map[string]string {
-	annotations := map[string]string{
-		webhook.AnnotationWorkload:          workload,
-		webhook.AnnotationCertVolume:        "tls-certs",
-		webhook.AnnotationCertDir:           "/tls",
-		webhook.AnnotationCertFile:          "cert.pem",
-		webhook.AnnotationKeyFile:           "key.pem",
-		webhook.AnnotationRenewInterval:     "1h",
-		webhook.AnnotationReloadNginx:       "true",
-		webhook.AnnotationGetCertRunAsUser:  "101",
-		webhook.AnnotationGetCertRunAsGroup: "101",
-	}
-	for key, value := range overrides {
-		annotations[key] = value
-	}
-	return annotations
 }
 
 // helmTemplateTLSLB renders the tls-lb component from the parent c8s chart in
