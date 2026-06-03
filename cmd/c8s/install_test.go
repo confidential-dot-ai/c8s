@@ -160,7 +160,7 @@ func TestAppendDistroInstallArgsRejectsUnknownDistro(t *testing.T) {
 	}
 }
 
-func TestAppendCvmModeInstallArgsSetsAttestationServiceValue(t *testing.T) {
+func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 	for _, mode := range []string{"baremetal", "managed"} {
 		t.Run(mode, func(t *testing.T) {
 			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode)
@@ -169,7 +169,7 @@ func TestAppendCvmModeInstallArgsSetsAttestationServiceValue(t *testing.T) {
 			}
 			assertArgsEqual(t, got, []string{
 				"upgrade",
-				"--set-string", "attestationService.cvmMode=" + mode,
+				"--set-string", "attestationApi.cvmMode=" + mode,
 			})
 		})
 	}

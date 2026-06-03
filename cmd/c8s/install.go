@@ -433,14 +433,14 @@ func appendDistroInstallArgs(helmArgs []string, distro string) ([]string, error)
 		[]string{"kata.distro", "nri-image-policy.distro"})
 }
 
-// appendCvmModeInstallArgs translates --cvm-mode into the attestation-service
-// value. managed renders a privileged attestation-service for managed-cloud
+// appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
+// value. managed renders a privileged attestation-api for managed-cloud
 // CVMs that gate TEE device access below the device/capability layer; baremetal
 // keeps the least-privilege securityContext.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
 	return appendEnumSetArg(helmArgs, flagCvmMode, cvmMode,
 		[]string{"baremetal", "managed"},
-		[]string{"attestationService.cvmMode"})
+		[]string{"attestationApi.cvmMode"})
 }
 
 // appendKataInstallArgs translates the --kata / --kata-enforce flags into helm
