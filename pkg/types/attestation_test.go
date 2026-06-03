@@ -85,10 +85,8 @@ func TestAttestRequestBodyJSONRoundtrip(t *testing.T) {
 
 func TestVerifyRequestOmitemptyFields(t *testing.T) {
 	req := VerifyRequest{
-		Evidence: AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{}`),
-		},
+		Platform: "snp",
+		Evidence: json.RawMessage(`{}`),
 		// Params and IssueToken are nil - should be omitted
 	}
 
@@ -102,6 +100,10 @@ func TestVerifyRequestOmitemptyFields(t *testing.T) {
 		t.Fatalf("unmarshal to map: %v", err)
 	}
 
+	// platform must be at the top level (not nested under evidence).
+	if string(raw["platform"]) != `"snp"` {
+		t.Fatalf("top-level platform = %s, want \"snp\"", raw["platform"])
+	}
 	if _, ok := raw["params"]; ok {
 		t.Fatal("params should be omitted when nil")
 	}
@@ -111,12 +113,10 @@ func TestVerifyRequestOmitemptyFields(t *testing.T) {
 
 	// Now with values set
 	req2 := VerifyRequest{
-		Evidence: AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{}`),
-		},
+		Platform: "snp",
+		Evidence: json.RawMessage(`{}`),
 		Params: &VerifyParams{
-			AllowDebug: new(bool),
+			AllowDebug: ptrTo(false),
 		},
 		IssueToken: ptrTo(true),
 	}
@@ -169,8 +169,13 @@ func TestVerifyReportData(t *testing.T) {
 
 	req := VerifyReportData(evidence, reportData)
 
-	if req.Evidence.Platform != "snp" {
-		t.Fatalf("evidence platform = %q, want snp", req.Evidence.Platform)
+	// VerifyReportData must split the envelope into the top-level platform +
+	// platform-specific evidence shape attestation-api's /verify expects.
+	if req.Platform != "snp" {
+		t.Fatalf("platform = %q, want snp", req.Platform)
+	}
+	if string(req.Evidence) != `{"q":1}` {
+		t.Fatalf("evidence = %s, want the inner platform-specific evidence", req.Evidence)
 	}
 	if req.Params == nil || req.Params.ExpectedReportData == nil {
 		t.Fatalf("expected report-data binding, got params=%+v", req.Params)

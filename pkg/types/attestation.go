@@ -112,11 +112,26 @@ type AttestResponse struct {
 	Evidence json.RawMessage `json:"evidence"`
 }
 
-// VerifyRequest is sent to the attestation-api POST /verify.
+// VerifyRequest is sent to the attestation-api POST /verify. The attestation-api
+// expects the platform at the top level and Evidence to be the platform-specific
+// evidence object (not an AttestationEvidence envelope) — build it via
+// NewVerifyRequest / VerifyReportData, which split an AttestationEvidence.
 type VerifyRequest struct {
-	Evidence   AttestationEvidence `json:"evidence"`
-	Params     *VerifyParams       `json:"params,omitempty"`
-	IssueToken *bool               `json:"issue_token,omitempty"`
+	Platform   string          `json:"platform"`
+	Evidence   json.RawMessage `json:"evidence"`
+	Params     *VerifyParams   `json:"params,omitempty"`
+	IssueToken *bool           `json:"issue_token,omitempty"`
+}
+
+// NewVerifyRequest splits an AttestationEvidence envelope into the top-level
+// platform + platform-specific evidence shape attestation-api's /verify wants.
+func NewVerifyRequest(evidence AttestationEvidence, params *VerifyParams, issueToken bool) VerifyRequest {
+	return VerifyRequest{
+		Platform:   evidence.Platform,
+		Evidence:   evidence.Evidence,
+		Params:     params,
+		IssueToken: &issueToken,
+	}
 }
 
 // VerifyReportData builds a VerifyRequest that checks the evidence binds
@@ -125,12 +140,7 @@ type VerifyRequest struct {
 // issuance is always off; setting IssueToken here keeps that intent in one
 // place instead of every call site spelling out new(bool).
 func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes) VerifyRequest {
-	noToken := false
-	return VerifyRequest{
-		Evidence:   evidence,
-		Params:     &VerifyParams{ExpectedReportData: &expectedReportData},
-		IssueToken: &noToken,
-	}
+	return NewVerifyRequest(evidence, &VerifyParams{ExpectedReportData: &expectedReportData}, false)
 }
 
 // VerifyParams contains optional verification parameters.

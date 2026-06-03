@@ -69,10 +69,8 @@ func TestVerifySuccess(t *testing.T) {
 
 	c := NewClientWithHTTP(srv.URL, srv.Client())
 	resp, err := c.Verify(context.Background(), types.VerifyRequest{
-		Evidence: types.AttestationEvidence{
-			Platform: "snp",
-			Evidence: json.RawMessage(`{"test":true}`),
-		},
+		Platform: "snp",
+		Evidence: json.RawMessage(`{"test":true}`),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

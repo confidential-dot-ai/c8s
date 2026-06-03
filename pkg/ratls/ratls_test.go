@@ -765,8 +765,13 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 			t.Fatalf("decode verify request: %v", err)
 		}
 		sawVerify = true
-		if req.Evidence.Platform != string(types.PlatformAzSnp) {
-			t.Fatalf("platform = %q, want az-snp", req.Evidence.Platform)
+		// attestation-api wants platform at the top level and Evidence as the
+		// platform-specific evidence, not a nested AttestationEvidence envelope.
+		if req.Platform != string(types.PlatformAzSnp) {
+			t.Fatalf("platform = %q, want az-snp", req.Platform)
+		}
+		if string(req.Evidence) != string(evidenceJSON) {
+			t.Fatalf("evidence = %s, want the platform-specific evidence %s (not a nested envelope)", req.Evidence, evidenceJSON)
 		}
 		if req.Params == nil || req.Params.ExpectedReportData == nil {
 			t.Fatal("missing expected report data")

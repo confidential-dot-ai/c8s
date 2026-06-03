@@ -238,11 +238,7 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 		minTcb := unpackSNPMinTcb(policy.MinTCBVersion)
 		params.MinTcb = &minTcb
 	}
-	resp, err := attestationclient.NewClient(policy.AttestationApiURL).Verify(ctx, types.VerifyRequest{
-		Evidence:   *evidence,
-		Params:     params,
-		IssueToken: &issueToken,
-	})
+	resp, err := attestationclient.NewClient(policy.AttestationApiURL).Verify(ctx, types.NewVerifyRequest(*evidence, params, issueToken))
 	if err != nil {
 		return nil, fmt.Errorf("ratls: online attestation verify: %w", err)
 	}
