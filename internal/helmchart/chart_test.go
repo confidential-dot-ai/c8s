@@ -2637,6 +2637,46 @@ func TestChartCDSServesRATLS(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--ratls-platform=snp")
 }
 
+// TestChartCDSDnsSanPatternAcceptsAnyNamespace pins the default --dns-san-pattern
+// and the identities it admits: CDS full-matches the regex (issuer.fullRegexMatch),
+// so the default must sign any <service>.<namespace>.svc (workloads live in their
+// own namespaces, not just the release namespace) while still rejecting SANs that
+// are not in-cluster Service DNS names.
+func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	const wantArg = "--dns-san-pattern=^[a-z0-9-]+[.][a-z0-9-]+[.]svc$"
+	assertContainerHasArg(t, "cds", args, wantArg)
+
+	re := regexp.MustCompile(strings.TrimPrefix(wantArg, "--dns-san-pattern="))
+	fullMatch := func(s string) bool {
+		loc := re.FindStringIndex(s)
+		return loc != nil && loc[0] == 0 && loc[1] == len(s)
+	}
+	for _, san := range []string{
+		"c8s-tls-lb.c8s-system.svc",
+		"acme-vllm-router-service.vllm.svc",
+		"acme-vllm-acme-opt-125m-engine-service.vllm.svc",
+	} {
+		if !fullMatch(san) {
+			t.Fatalf("default dns-san-pattern should accept in-cluster SAN %q", san)
+		}
+	}
+	for _, san := range []string{
+		"evil.example.com",                    // not a .svc name
+		"svc.cluster.local",                   // wrong shape
+		"a.b.c.svc",                           // more than <name>.<ns>
+		"tls-lb.c8s-system.svc.cluster.local", // trailing labels
+	} {
+		if fullMatch(san) {
+			t.Fatalf("default dns-san-pattern should reject non-Service SAN %q", san)
+		}
+	}
+}
+
 // TestChartCDSMeasurementsPlumbFlatAllowlist proves the flat cds.measurements
 // list drives --measurements.
 func TestChartCDSMeasurementsPlumbFlatAllowlist(t *testing.T) {

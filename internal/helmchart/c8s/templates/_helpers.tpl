@@ -120,13 +120,14 @@ https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cd
 
 {{/*
   c8s.cdsDnsSanPattern is the default --dns-san-pattern CDS enforces when
-  cds.dnsSanPattern is unset: a regex matching the chart's in-cluster Service
-  DNS (<name>.<namespace>.svc), so CDS issues the leaf tls-lb's get-cert
-  requests for its Service name. Operators fronting a public domain override
-  cds.dnsSanPattern (matching tlsLb.san).
+  cds.dnsSanPattern is unset: a regex matching any in-cluster Service DNS
+  name (<name>.<namespace>.svc). CDS full-matches it, so workloads in any
+  namespace (tls-lb in the release namespace, tenant workloads in their own)
+  can request a leaf for their Service name. Operators fronting a public
+  domain, or wanting to pin specific namespaces, override cds.dnsSanPattern.
 */}}
 {{- define "c8s.cdsDnsSanPattern" -}}
-^[a-z0-9-]+[.]{{ .Release.Namespace }}[.]svc$
+^[a-z0-9-]+[.][a-z0-9-]+[.]svc$
 {{- end -}}
 
 {{/*
