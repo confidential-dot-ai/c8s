@@ -762,7 +762,9 @@ tlsLb:
     #     enabled: false  # opt this route out of the global CORS block
 
   # -- CORS headers added to every proxied location (the catch-all upstream and
-  # each entry in `routes`). The internal /healthz and discovery endpoints are
+  # each entry in `routes`) and to the discovery endpoints (`discovery.path`,
+  # `discovery.cdsCertPath`, `discovery.meshCAPath`) so browser clients can
+  # bootstrap the attested TLS handshake. The internal /healthz endpoint is
   # never affected. Preflight `OPTIONS` requests are short-circuited at nginx
   # with a 204 response. Per-route opt-out: set `routes[i].cors.enabled: false`
   # to disable CORS on that route while leaving the global block enabled. Only

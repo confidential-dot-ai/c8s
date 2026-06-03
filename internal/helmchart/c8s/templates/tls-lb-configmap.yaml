@@ -130,6 +130,9 @@ data:
             {{- end }}
             {{- if .Values.tlsLb.discovery.enabled }}
             location = {{ .Values.tlsLb.discovery.path }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- end }}
                 access_log off;
                 default_type application/json;
                 add_header Cache-Control "no-store" always;
@@ -137,6 +140,9 @@ data:
             }
 
             location = {{ .Values.tlsLb.discovery.cdsCertPath }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
                 add_header Cache-Control "no-store" always;
@@ -145,6 +151,9 @@ data:
 
             {{- if .Values.tlsLb.meshCA.expose }}
             location = {{ .Values.tlsLb.discovery.meshCAPath }} {
+                {{- if default false .Values.tlsLb.cors.enabled }}
+                {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
                 add_header Cache-Control "no-store" always;
