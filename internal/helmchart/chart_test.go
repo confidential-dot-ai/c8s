@@ -239,6 +239,12 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 	if !argvContainsFlagValue(mesh.Args, "--iptables-metrics-file", "/tmp/ratls-iptables-metrics.json") {
 		t.Errorf("ratls-mesh args missing the shared iptables metrics file flag; args=%q", mesh.Args)
 	}
+	// --platform is the RA-TLS TEE type; an empty value (the old missing
+	// default) trips the binary's "--platform is required" check, so the mesh
+	// pod never starts. Pin the non-empty default.
+	if !argvContainsFlagValue(mesh.Args, "--platform", "sev-snp") {
+		t.Errorf("ratls-mesh args must default --platform to sev-snp; args=%q", mesh.Args)
+	}
 	if hp, ok := containerHostPort(mesh, "inbound"); !ok || hp != 15006 {
 		t.Errorf("ratls-mesh inbound port must publish hostPort 15006; got %d (found=%v)", hp, ok)
 	}

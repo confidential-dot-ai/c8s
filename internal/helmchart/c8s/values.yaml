@@ -355,6 +355,12 @@ ratlsMesh:
 
   imagePullSecrets: []
 
+  # -- RA-TLS TEE type embedded in and verified on mesh certs: sev-snp or tdx.
+  #    This is the wire-level platform identifier, not the attestation-api
+  #    detection vocab (az-snp and bare-metal snp both verify as sev-snp here);
+  #    attestation-api still auto-detects how to gather the evidence.
+  platform: sev-snp
+
   # Host path for iptables lock (k3s: /run/k3s/agent/xtables.lock)
   xtablesLockPath: /run/xtables.lock
 
