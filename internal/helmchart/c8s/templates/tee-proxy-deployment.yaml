@@ -118,14 +118,20 @@ spec:
               {{- toYaml .Values.teeProxy.resources.requests | nindent 14 }}
             limits:
               {{- toYaml .Values.teeProxy.resources.limits | nindent 14 }}
+          {{- /* httpGet, not tcpSocket: a TCP probe to the TLS port logs a
+                 spurious "TLS handshake error: EOF". */}}
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /.well-known/health
               port: {{ $probePort }}
+              scheme: {{ ternary "HTTPS" "HTTP" $tlsMode }}
             initialDelaySeconds: {{ .Values.teeProxy.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.teeProxy.probes.readiness.periodSeconds }}
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /.well-known/health
               port: {{ $probePort }}
+              scheme: {{ ternary "HTTPS" "HTTP" $tlsMode }}
             initialDelaySeconds: {{ .Values.teeProxy.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.teeProxy.probes.liveness.periodSeconds }}
       volumes:
