@@ -2736,27 +2736,33 @@ func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--dns-san-pattern="+public)
 }
 
-// TestChartCertDependentPodsSurgeNotRecreate proves tee-proxy and tls-lb roll
-// with surge (new cert-holding pod Ready before the old one retires) rather
-// than Recreate, so a failed roll leaves the old pod serving instead of opening
-// a gap — the convergence-over-current-state stance from the reconcile incident.
-func TestChartCertDependentPodsSurgeNotRecreate(t *testing.T) {
+// TestChartCertDependentPodStrategies pins each cert-dependent pod's rollout
+// strategy to its storage constraint: tls-lb has no PVC so it surges (new
+// cert-holding pod Ready before the old one retires, no serving gap), while
+// tee-proxy mounts a RWO autocert PVC and must stay Recreate — surge would
+// deadlock two pods on Multi-Attach. get-cert's in-process retry covers
+// tee-proxy's brief restart gap.
+func TestChartCertDependentPodStrategies(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
-		dep := renderedDeployment(t, out, name)
-		if dep.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Errorf("%s strategy = %q, want RollingUpdate", name, dep.Spec.Strategy.Type)
-		}
-		ru := dep.Spec.Strategy.RollingUpdate
-		if ru == nil || ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 {
-			t.Errorf("%s should set maxUnavailable=0 to keep the old pod serving across a roll, got %+v", name, ru)
-		}
-		if ru == nil || ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
-			t.Errorf("%s should set maxSurge=1, got %+v", name, ru)
-		}
+
+	// tls-lb: surge, no gap.
+	tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
+	if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+		t.Errorf("c8s-tls-lb strategy = %q, want RollingUpdate", tlsLB.Spec.Strategy.Type)
+	}
+	if ru := tlsLB.Spec.Strategy.RollingUpdate; ru == nil ||
+		ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
+		ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
+		t.Errorf("c8s-tls-lb should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
+	}
+
+	// tee-proxy: Recreate, because of its RWO autocert PVC.
+	teeProxy := renderedDeployment(t, out, "c8s-tee-proxy")
+	if teeProxy.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Errorf("c8s-tee-proxy strategy = %q, want Recreate (RWO autocert PVC forbids two concurrent pods)", teeProxy.Spec.Strategy.Type)
 	}
 }
 

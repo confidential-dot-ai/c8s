@@ -682,14 +682,11 @@ teeProxy:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   replicas: 1
-  ## Rollout strategy. tee-proxy is stateless, so RollingUpdate with surge
-  ## brings the new (cert-holding) pod up Ready before retiring the old one:
-  ## a failed roll leaves the old pod serving instead of opening a gap.
+  ## Rollout strategy. Recreate, not surge: tee-proxy mounts a RWO autocert
+  ## PVC, so two concurrent pods would deadlock on Multi-Attach. get-cert's
+  ## in-process retry covers the brief gap while the single pod restarts.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   # Domain for autocert TLS
   domain: ""
   # -- Self-provision a CDS-issued serving cert via get-cert (like tls-lb),
