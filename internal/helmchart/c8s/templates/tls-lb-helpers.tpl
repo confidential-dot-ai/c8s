@@ -197,8 +197,16 @@ Render the http-level CORS maps. `$cors_origin` echoes a matching request
 Origin from tlsLb.cors.allowOrigins. The remaining maps implement
 upstream-pass-through: when the upstream emits Access-Control-Allow-Origin
 we adopt its full CORS header set verbatim (so browsers never see duplicate
-headers); otherwise we fall back to tls-lb's configured values. Emitted only
-when CORS is enabled. Caller nindents into the nginx `http {}` context.
+headers); otherwise we fall back to tls-lb's configured values.
+
+Access-Control-Expose-Headers is the one exception: tls-lb's configured
+exposeHeaders are ALWAYS advertised (and merged in front of upstream's
+value when in pass-through mode). This is required so browsers can read
+tee-proxy-injected headers like Attestation-Report, which the vllm
+upstream does not know to advertise.
+
+Emitted only when CORS is enabled. Caller nindents into the nginx `http {}`
+context.
 */}}
 {{- define "tls-lb.corsMap" -}}
 {{- $cors := default dict .Values.tlsLb.cors -}}
@@ -244,10 +252,22 @@ map $cors_passthrough $cors_out_credentials {
     "1" $upstream_http_access_control_allow_credentials;
 }
 
+{{- if $exposeHeaders }}
+map $upstream_http_access_control_expose_headers $cors_upstream_expose_suffix {
+    default "";
+    "~.+"   ", $upstream_http_access_control_expose_headers";
+}
+
 map $cors_passthrough $cors_out_expose {
-    "0" "{{ if $exposeHeaders }}{{ join ", " $exposeHeaders }}{{ end }}";
+    "0" "{{ join ", " $exposeHeaders }}";
+    "1" "{{ join ", " $exposeHeaders }}$cors_upstream_expose_suffix";
+}
+{{- else }}
+map $cors_passthrough $cors_out_expose {
+    "0" "";
     "1" $upstream_http_access_control_expose_headers;
 }
+{{- end }}
 {{- end -}}
 {{- end -}}
 

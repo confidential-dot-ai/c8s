@@ -808,8 +808,13 @@ tlsLb:
     allowMethods: ["GET", "POST", "OPTIONS"]
     # -- Headers advertised in Access-Control-Allow-Headers.
     allowHeaders: ["Authorization", "Content-Type"]
-    # -- Headers advertised in Access-Control-Expose-Headers (omitted when empty).
-    exposeHeaders: []
+    # -- Headers advertised in Access-Control-Expose-Headers. Always emitted
+    # by tls-lb (and merged in front of the upstream's value in pass-through
+    # mode) so browsers can read these headers from JS regardless of what
+    # the upstream advertises. Defaults to the tee-proxy attestation header
+    # (see teeProxy.headerName); update this list if teeProxy.headerName is
+    # changed or other custom response headers need to be readable.
+    exposeHeaders: ["Attestation-Report"]
     # -- Sets Access-Control-Allow-Credentials: true when enabled.
     allowCredentials: false
     # -- Seconds browsers may cache the preflight response.
