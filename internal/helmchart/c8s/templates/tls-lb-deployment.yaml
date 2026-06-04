@@ -1,20 +1,4 @@
 {{- if .Values.tlsLb.enabled }}
-{{- $meshCAConfigMapName := default (printf "%s-cds-mesh-ca" .Release.Name) .Values.tlsLb.meshCA.configMapName -}}
-{{- $defaultMeshCAPath := printf "%s/%s" .Values.tlsLb.meshCA.mountPath .Values.tlsLb.meshCA.key -}}
-{{- $configuredTrustedCAPath := .Values.tlsLb.upstream.tls.trustedCAPath -}}
-{{- $upstreamTLSVerify := and (eq .Values.tlsLb.upstream.protocol "https") .Values.tlsLb.upstream.tls.verify -}}
-{{- $upstreamUsesMeshCA := and $upstreamTLSVerify (or (not $configuredTrustedCAPath) (eq $configuredTrustedCAPath $defaultMeshCAPath)) -}}
-{{- $routesUseMeshCA := false -}}
-{{- range $route := .Values.tlsLb.routes }}
-{{- $backend := default dict $route.backend -}}
-{{- $backendTLS := default dict $backend.tls -}}
-{{- $trustedCAPath := $backendTLS.trustedCAPath -}}
-{{- if and (eq (default "http" $backend.protocol) "https") (default false $backendTLS.verify) (or (not $trustedCAPath) (eq $trustedCAPath $defaultMeshCAPath)) -}}
-{{- $routesUseMeshCA = true -}}
-{{- end -}}
-{{- end -}}
-{{- $discoveryExposesMeshCA := and .Values.tlsLb.discovery.enabled .Values.tlsLb.meshCA.expose -}}
-{{- $mountMeshCA := or $discoveryExposesMeshCA $upstreamUsesMeshCA $routesUseMeshCA -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -84,11 +68,6 @@ spec:
               mountPath: {{ .Values.tlsLb.discovery.mountPath }}
               readOnly: true
             {{- end }}
-            {{- if $mountMeshCA }}
-            - name: mesh-ca
-              mountPath: {{ .Values.tlsLb.meshCA.mountPath }}
-              readOnly: true
-            {{- end }}
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
@@ -121,15 +100,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
-        {{- end }}
-        {{- if $mountMeshCA }}
-        - name: mesh-ca
-          configMap:
-            name: {{ $meshCAConfigMapName }}
-            optional: {{ .Values.tlsLb.meshCA.optional }}
-            items:
-              - key: {{ .Values.tlsLb.meshCA.key }}
-                path: {{ .Values.tlsLb.meshCA.key }}
         {{- end }}
         - name: nginx-cache
           emptyDir: {}

@@ -1263,7 +1263,6 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"--set-string", "tlsLb.publicTLS.certKey=public.crt",
 		"--set-string", "tlsLb.publicTLS.keyKey=public.key",
 		"--set", "tlsLb.discovery.enabled=true",
-		"--set-string", "tlsLb.meshCA.configMapName=c8s-cds-mesh-ca",
 		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
 		"--set", "tlsLb.upstream.protocol=https",
 		"--set", "tlsLb.upstream.tls.verify=true",
@@ -1283,7 +1282,7 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"location = /.well-known/cds-cert.pem",
 		"alias /tls/cert.pem;",
 		"location = /.well-known/mesh-ca.pem",
-		"alias /mesh-ca/ca.pem;",
+		"alias /tls/ca.pem;",
 		"proxy_ssl_certificate /tls/cert.pem;",
 		"proxy_ssl_certificate_key /tls/key.pem;",
 		"proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;",
@@ -1297,9 +1296,6 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"key: public.crt",
 		"path: public.key",
 		"name: discovery",
-		"name: mesh-ca",
-		"name: c8s-cds-mesh-ca",
-		"optional: true",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("render missing %q\n%s", want, out)
@@ -1575,11 +1571,10 @@ func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 	route.assertDirective(t, "proxy_ssl_name", "cds.c8s-system.svc.cluster.local")
 	route.assertDirective(t, "proxy_ssl_verify", "on")
 	route.assertDirective(t, "proxy_ssl_verify_depth", "2")
-	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
+	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/ca.pem")
 	route.assertDirective(t, "proxy_pass", "https://route_0")
 	route.assertNoDirective(t, "proxy_ssl_certificate")
 	route.assertNoDirective(t, "proxy_ssl_certificate_key")
-	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
 }
 
 func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
@@ -1737,45 +1732,6 @@ func (block *nginxBlock) assertNoDirective(t *testing.T, name string) {
 	}
 }
 
-func assertTLSLBMeshCAVolume(t *testing.T, manifest, configMapName string, optional bool) {
-	t.Helper()
-	dep := renderedDeployment(t, manifest, "c8s-tls-lb")
-	for _, volume := range dep.Spec.Template.Spec.Volumes {
-		if volume.Name != "mesh-ca" {
-			continue
-		}
-		if volume.ConfigMap == nil {
-			t.Fatalf("mesh-ca volume ConfigMap = nil")
-		}
-		if got := volume.ConfigMap.Name; got != configMapName {
-			t.Fatalf("mesh-ca volume ConfigMap.Name = %q, want %q", got, configMapName)
-		}
-		if volume.ConfigMap.Optional == nil {
-			t.Fatalf("mesh-ca volume ConfigMap.Optional = nil")
-		}
-		if got := *volume.ConfigMap.Optional; got != optional {
-			t.Fatalf("mesh-ca volume optional = %v, want %v", got, optional)
-		}
-		// A mesh-ca volume is useless unless the nginx container mounts it.
-		mounted := false
-		for _, c := range dep.Spec.Template.Spec.Containers {
-			if c.Name != "nginx" {
-				continue
-			}
-			for _, m := range c.VolumeMounts {
-				if m.Name == "mesh-ca" {
-					mounted = true
-				}
-			}
-		}
-		if !mounted {
-			t.Fatalf("Deployment/tls-lb mesh-ca volume present but not mounted into the nginx container")
-		}
-		return
-	}
-	t.Fatalf("Deployment/tls-lb missing mesh-ca volume; volumes: %v", dep.Spec.Template.Spec.Volumes)
-}
-
 func assertNoTLSLBMeshCAVolume(t *testing.T, manifest string) {
 	t.Helper()
 	dep := renderedDeployment(t, manifest, "c8s-tls-lb")
@@ -1876,10 +1832,11 @@ func TestTLSLBVerifyDepthZeroPreserved(t *testing.T) {
 	cfg.location(t, "prefix", "/").assertDirective(t, "proxy_ssl_verify_depth", "0")
 }
 
-// TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute pins the deployment's
-// $routesUseMeshCA OR-accumulation: a verified HTTPS route using the default
-// (mesh) CA must mount the mesh CA even when an earlier route does not need it.
-func TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute(t *testing.T) {
+// TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle pins that a verified HTTPS
+// route using the default (mesh) CA resolves its trusted cert to the mesh CA
+// bundle the get-cert sidecar writes alongside the leaf, even when an earlier
+// route does not need it.
+func TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set-string", "routes[0].path=/a",
 		"--set-string", "routes[0].backend.address=svc-a:8080",
@@ -1891,7 +1848,10 @@ func TestTLSLBMultiRouteMountsMeshCAForVerifiedRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
+	cfg := renderedTLSLBNginxConfig(t, out)
+	route := cfg.location(t, "prefix", "/b")
+	route.assertDirective(t, "proxy_ssl_verify", "on")
+	route.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/ca.pem")
 }
 
 func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
@@ -1994,7 +1954,11 @@ func TestTLSLBCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
 	assertNoTLSLBMeshCAVolume(t, out)
 }
 
-func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
+// TestTLSLBExplicitTrustedCAPathRendersVerbatim pins that an operator-supplied
+// trustedCAPath is emitted verbatim in proxy_ssl_trusted_certificate. The chart
+// no longer mounts any volume for it: providing the file at that path is the
+// operator's responsibility.
+func TestTLSLBExplicitTrustedCAPathRendersVerbatim(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
@@ -2006,18 +1970,6 @@ func TestTLSLBDefaultTrustedCAPathStillMountsMeshCAWhenExplicit(t *testing.T) {
 	cfg := renderedTLSLBNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
 	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/mesh-ca/ca.pem")
-	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
-}
-
-func TestTLSLBMeshCAOptionalCanBeRequired(t *testing.T) {
-	out, err := helmTemplateTLSLB(t,
-		"--set", "discovery.enabled=true",
-		"--set", "meshCA.optional=false",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", false)
 }
 
 func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
@@ -2029,10 +1981,25 @@ func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
 	}
 	cfg := renderedTLSLBNginxConfig(t, out)
 	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
-	meshCA.assertDirective(t, "alias", "/mesh-ca/ca.pem")
-	assertTLSLBMeshCAVolume(t, out, "c8s-cds-mesh-ca", true)
+	meshCA.assertDirective(t, "alias", "/tls/ca.pem")
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+		"--ca-out=/tls/ca.pem")
 	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem")
+}
+
+// TestTLSLBGetCertWritesMeshCABundle pins the mechanism that replaced the
+// c8s-cds-mesh-ca ConfigMap mount: both get-cert sidecars write the mesh CA
+// bundle to /tls/ca.pem (the tls-certs volume that already holds the leaf).
+func TestTLSLBGetCertWritesMeshCABundle(t *testing.T) {
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+		"--ca-out=/tls/ca.pem")
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-renew-cert"),
+		"--ca-out=/tls/ca.pem")
 }
 
 func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
@@ -3069,7 +3036,7 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_name tenant-router.c8s-system.svc;
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
-	//             proxy_ssl_trusted_certificate /mesh-ca/ca.pem;
+	//             proxy_ssl_trusted_certificate /tls/ca.pem;
 	//             proxy_pass https://route_1;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;

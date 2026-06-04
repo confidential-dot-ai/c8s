@@ -293,3 +293,37 @@ func testCertificatePEM(t *testing.T) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
+
+func TestCABundleFromChain(t *testing.T) {
+	// caBundleFromChain splits by PEM block, so synthetic CERTIFICATE blocks
+	// with arbitrary bytes exercise the logic without minting real certs.
+	leaf := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("leaf")}))
+	ca1 := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("ca-one")}))
+	ca2 := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("ca-two")}))
+
+	t.Run("drops the leaf, returns one CA", func(t *testing.T) {
+		got, err := caBundleFromChain([]byte(leaf + ca1))
+		if err != nil {
+			t.Fatalf("caBundleFromChain: %v", err)
+		}
+		if string(got) != ca1 {
+			t.Fatalf("bundle = %q, want %q", got, ca1)
+		}
+	})
+
+	t.Run("returns all issuers after the leaf", func(t *testing.T) {
+		got, err := caBundleFromChain([]byte(leaf + ca1 + ca2))
+		if err != nil {
+			t.Fatalf("caBundleFromChain: %v", err)
+		}
+		if string(got) != ca1+ca2 {
+			t.Fatalf("bundle = %q, want %q", got, ca1+ca2)
+		}
+	})
+
+	t.Run("errors when only the leaf is present", func(t *testing.T) {
+		if _, err := caBundleFromChain([]byte(leaf)); err == nil {
+			t.Fatal("expected error for a leaf-only chain, got nil")
+		}
+	})
+}

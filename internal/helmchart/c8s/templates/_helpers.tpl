@@ -129,6 +129,9 @@ Caller passes a dict:
   san           - --san for the cert (the workload identity / Service DNS name)
   certOut       - --out path (also --out for the renew container)
   keyOut        - --key-out path for init; --key for renew
+  caOut         - optional --ca-out path: write just the mesh CA bundle (the
+                  issuer certs trailing the leaf in the CDS chain) so nginx can
+                  serve it at the discovery endpoint without a separate ConfigMap
   volume        - name of the writable cert volume to mount
   mountPath     - where to mount it (the cert dir)
   renewInterval - --renew-interval for the sidecar
@@ -156,6 +159,9 @@ Caller passes a dict:
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
     - --key-mode={{ default "0640" .keyMode }}
+    {{- with .caOut }}
+    - --ca-out={{ . }}
+    {{- end }}
     # Retry CDS in-process during a roll instead of exiting into kubelet
     # CrashLoopBackOff; still fails closed once the timeout elapses.
     - --initial-retry-timeout={{ $root.Values.certProvisioning.initialRetryTimeout }}
@@ -181,6 +187,9 @@ Caller passes a dict:
     - --san={{ .san }}
     - --key={{ .keyOut }}
     - --out={{ .certOut }}
+    {{- with .caOut }}
+    - --ca-out={{ . }}
+    {{- end }}
     - --renew-interval={{ .renewInterval }}
     - --reload-nginx={{ default "false" .reloadNginx }}
     - --continue-on-initial-error

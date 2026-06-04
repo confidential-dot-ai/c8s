@@ -44,6 +44,7 @@ type config struct {
 	CDSMeasurements        string
 	AttestationApiURL      string
 	OutPath                string
+	CAOutPath              string
 	KeyPath                string
 	KeyOutPath             string
 	KeyMode                string
@@ -126,6 +127,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
 	flags.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
+	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
 	flags.StringVar(&cfg.KeyPath, "key", "", "Path to a PEM private key to use for the CSR (generates an ephemeral key if omitted)")
 	flags.StringVar(&cfg.KeyOutPath, "key-out", "", "Path to write the generated private key PEM (only used with ephemeral keys)")
 	flags.StringVar(&cfg.KeyMode, "key-mode", "0600", "octal mode for generated private key")
@@ -534,6 +536,35 @@ func createCSR(key *ecdsa.PrivateKey, san string) ([]byte, error) {
 	return csrPEM, nil
 }
 
+// caBundleFromChain returns the issuer (CA) portion of a CDS-issued PEM chain:
+// every CERTIFICATE block after the first. CDS serves leaf-first, CA-last
+// (see the /attest handler), so the leaf is dropped and the remaining blocks
+// — the mesh CA bundle — are re-emitted. Errors if no issuer block is present.
+func caBundleFromChain(chainPEM []byte) ([]byte, error) {
+	var out []byte
+	rest := chainPEM
+	seenLeaf := false
+	for {
+		block, remainder := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = remainder
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if !seenLeaf {
+			seenLeaf = true // skip the leaf
+			continue
+		}
+		out = append(out, pem.EncodeToMemory(block)...)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no CA certificate found after the leaf in the issued chain")
+	}
+	return out, nil
+}
+
 // writeOutputs writes the certificate, key, and optional discovery metadata.
 func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult) error {
 	if cfg.KeyOutPath != "" {
@@ -556,6 +587,17 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 		slog.Info("certificate written", "path", cfg.OutPath)
 	} else {
 		fmt.Print(result.Certificate)
+	}
+
+	if cfg.CAOutPath != "" {
+		caPEM, err := caBundleFromChain([]byte(result.Certificate))
+		if err != nil {
+			return fmt.Errorf("extract mesh CA bundle: %w", err)
+		}
+		if err := fileutil.WriteAtomic(cfg.CAOutPath, caPEM, 0644); err != nil {
+			return fmt.Errorf("failed to write mesh CA to %s: %w", cfg.CAOutPath, err)
+		}
+		slog.Info("mesh CA bundle written", "path", cfg.CAOutPath)
 	}
 
 	if cfg.DiscoveryOutPath != "" {

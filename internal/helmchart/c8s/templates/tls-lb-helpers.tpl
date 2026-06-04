@@ -382,6 +382,7 @@ spec's initContainers list.
   "san" (include "tls-lb.san" .)
   "certOut" (printf "%s/cert.pem" .Values.tlsLb.tlsMountPath)
   "keyOut" (printf "%s/key.pem" .Values.tlsLb.tlsMountPath)
+  "caOut" (printf "%s/ca.pem" .Values.tlsLb.tlsMountPath)
   "volume" "tls-certs"
   "mountPath" .Values.tlsLb.tlsMountPath
   "renewInterval" .Values.tlsLb.certProvisioning.renewInterval

@@ -3,7 +3,7 @@
 {{- include "tls-lb.validateSan" $san -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
 {{- include "tls-lb.validateUpstreamAddress" .Values.tlsLb.upstream -}}
-{{- $defaultMeshCAPath := printf "%s/%s" .Values.tlsLb.meshCA.mountPath .Values.tlsLb.meshCA.key -}}
+{{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamServerName := default (include "tls-lb.upstreamServerName" .) .Values.tlsLb.upstream.tls.serverName -}}
 {{- include "tls-lb.validateProxyTLS" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "tlsLb.upstream") -}}
