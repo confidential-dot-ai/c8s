@@ -219,12 +219,13 @@ seccompProfile:
 {{- end -}}
 
 {{/*
-  c8s.cdsDnsSanPattern is the default --dns-san-pattern CDS enforces when
-  cds.dnsSanPattern is unset: a regex matching any in-cluster Service DNS
-  name (<name>.<namespace>.svc). CDS full-matches it, so workloads in any
-  namespace (tls-lb in the release namespace, tenant workloads in their own)
-  can request a leaf for their Service name. Operators fronting a public
-  domain, or wanting to pin specific namespaces, override cds.dnsSanPattern.
+  c8s.cdsDnsSanPattern is the in-cluster --dns-san-pattern the chart always
+  passes to CDS: a regex matching any in-cluster Service DNS name
+  (<name>.<namespace>.svc). CDS full-matches it, so workloads in any namespace
+  (tls-lb, tee-proxy, ratls-mesh in the release namespace; tenant workloads in
+  their own) can request a leaf for their Service name. Operators fronting a
+  public domain append that hostname via cds.dnsSanPatterns, which adds further
+  --dns-san-pattern args alongside this one rather than replacing it.
 */}}
 {{- define "c8s.cdsDnsSanPattern" -}}
 ^[a-z0-9-]+[.][a-z0-9-]+[.]svc$

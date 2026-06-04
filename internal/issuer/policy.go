@@ -16,9 +16,13 @@ import (
 // must satisfy before its presented Subject/SANs are signed onto a leaf
 // certificate. Empty fields disable the corresponding check.
 type CSRPolicy struct {
-	// DNSSANPattern is the regex DNS SANs must match in full. Nil rejects any
-	// CSR carrying DNS SANs.
-	DNSSANPattern *regexp.Regexp
+	// DNSSANPatterns are full-match regexes a CSR's DNS SANs may match. A SAN
+	// passes if it matches any one of them; they are independent allow-rules,
+	// not a conjunction. The chart always supplies the in-cluster Service DNS
+	// pattern (<name>.<namespace>.svc) so the mesh's own CSRs validate, and an
+	// operator fronting a routed domain appends the public hostname for the
+	// tls-lb leaf. Empty (nil/zero-length) rejects any CSR carrying DNS SANs.
+	DNSSANPatterns []*regexp.Regexp
 
 	// AllowedCNPattern restricts the CSR's Subject CN to a full regex match.
 	// Nil disables CN validation.
@@ -36,11 +40,11 @@ type CSRPolicy struct {
 // workload mint a leaf for any subject they choose.
 func ValidateCSR(csr *x509.CertificateRequest, p CSRPolicy) error {
 	if len(csr.DNSNames) > 0 {
-		if p.DNSSANPattern == nil {
+		if len(p.DNSSANPatterns) == 0 {
 			return fmt.Errorf("CSR contains DNS SANs %v but no DNS SAN pattern configured", csr.DNSNames)
 		}
 		for _, dns := range csr.DNSNames {
-			if !fullRegexMatch(p.DNSSANPattern, dns) {
+			if !matchesAnyPattern(dns, p.DNSSANPatterns) {
 				return fmt.Errorf("CSR DNS SAN %q does not match allowed pattern", dns)
 			}
 		}
@@ -80,6 +84,18 @@ func parseSourceIP(host string) net.IP {
 		host = host[:i]
 	}
 	return net.ParseIP(host)
+}
+
+// matchesAnyPattern reports whether value fully matches at least one of the
+// patterns. Nil entries are skipped, so a SAN passes if it satisfies any
+// configured allow-pattern.
+func matchesAnyPattern(value string, patterns []*regexp.Regexp) bool {
+	for _, re := range patterns {
+		if re != nil && fullRegexMatch(re, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // fullRegexMatch reports whether re matches value in its entirety (anchored at

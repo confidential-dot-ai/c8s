@@ -139,12 +139,16 @@ cds:
   ## /sign-csr CSRs arrive without a matching TCP source IP under chart routing,
   ## so leave sanValidation off and pin DNS SAN / CN patterns instead.
   sanValidation: false
-  ## Regex a CSR's DNS SANs must match in full. Empty uses the chart default
-  ## (c8s.cdsDnsSanPattern: any in-cluster Service DNS <name>.<namespace>.svc),
-  ## so CDS signs leaf certs for tls-lb and for workloads in any namespace that
-  ## request their Service name. Override to pin specific namespaces, or to a
-  ## public hostname (matching tlsLb.san) when tls-lb fronts a routed domain.
-  dnsSanPattern: ""
+  ## Extra full-match regexes a CSR's DNS SANs may match, on top of the chart's
+  ## always-present in-cluster Service DNS pattern (c8s.cdsDnsSanPattern:
+  ## <name>.<namespace>.svc). A SAN passes if it matches any allowed pattern.
+  ##
+  ## The mesh's own CSRs (tls-lb, c8s-tee-proxy.<ns>.svc, ratls-mesh.<ns>.svc)
+  ## always validate against the built-in Service pattern, so leave this empty
+  ## for purely in-cluster deployments. When tls-lb fronts a routed domain, set
+  ## tlsLb.san to that hostname and add the same hostname here so CDS signs it
+  ## onto the tls-lb leaf — appending here never shadows the in-cluster pattern.
+  dnsSanPatterns: []
   cnPattern: ""
   ## The single flat allowlist of SHA-384 hex launch digests, used two ways:
   ##   1. CDS admits these to call /attest, /sign-csr, and (when handoff is

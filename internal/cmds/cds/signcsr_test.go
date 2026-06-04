@@ -327,7 +327,7 @@ func TestSignCSR_MeasurementAllowlistCaseInsensitive(t *testing.T) {
 
 func TestSignCSR_EnforcesDNSSANPolicy(t *testing.T) {
 	h, earKey, _ := newTestSignCSRHandler(t)
-	h.Policy.DNSSANPattern = regexp.MustCompile(`^allowed\.svc$`)
+	h.Policy.DNSSANPatterns = []*regexp.Regexp{regexp.MustCompile(`^allowed\.svc$`)}
 	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, []string{"forbidden.svc"})
 	ear := signEAR(t, earKey, earClaimsLite{
 		Issuer:    "cds",

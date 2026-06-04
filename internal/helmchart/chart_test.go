@@ -2674,11 +2674,13 @@ func TestChartCDSServesRATLS(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--ratls-platform=snp")
 }
 
-// TestChartCDSDnsSanPatternAcceptsAnyNamespace pins the default --dns-san-pattern
-// and the identities it admits: CDS full-matches the regex (issuer.fullRegexMatch),
-// so the default must sign any <service>.<namespace>.svc (workloads live in their
-// own namespaces, not just the release namespace) while still rejecting SANs that
-// are not in-cluster Service DNS names.
+// TestChartCDSDnsSanPatternAcceptsAnyNamespace pins the always-present
+// in-cluster --dns-san-pattern and the identities it admits: CDS full-matches
+// the regex (issuer.fullRegexMatch), so it must sign any
+// <service>.<namespace>.svc (workloads live in their own namespaces, not just
+// the release namespace) while still rejecting SANs that are not in-cluster
+// Service DNS names. This pattern is emitted by the chart unconditionally, so a
+// per-cluster public hostname (cds.dnsSanPatterns) only ever adds to it.
 func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
@@ -2695,6 +2697,8 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 	}
 	for _, san := range []string{
 		"c8s-tls-lb.c8s-system.svc",
+		"c8s-tee-proxy.c8s-system.svc",
+		"ratls-mesh.c8s-system.svc",
 		"acme-vllm-router-service.vllm.svc",
 		"acme-vllm-acme-opt-125m-engine-service.vllm.svc",
 	} {
@@ -2712,6 +2716,24 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 			t.Fatalf("default dns-san-pattern should reject non-Service SAN %q", san)
 		}
 	}
+}
+
+// TestChartCDSDnsSanPatternsAppendPublicHostname proves that adding a public
+// hostname via cds.dnsSanPatterns (the per-cluster ingress override that broke
+// the mesh before this fix) leaves the always-present in-cluster pattern
+// intact, so CDS renders both --dns-san-pattern args and both the public
+// hostname and the mesh Service SANs validate.
+func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
+	// helm --set strips backslashes, so use a literal pattern that needs no
+	// escaping to prove plumbing without the assertion fighting --set parsing.
+	const public = "confidential-gke-lunal-dev"
+	out, err := helmTemplate(t, "--set", "cds.dnsSanPatterns[0]="+public)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--dns-san-pattern=^[a-z0-9-]+[.][a-z0-9-]+[.]svc$")
+	assertContainerHasArg(t, "cds", args, "--dns-san-pattern="+public)
 }
 
 // TestChartCDSMeasurementsPlumbFlatAllowlist proves the flat cds.measurements

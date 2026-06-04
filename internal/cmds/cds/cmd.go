@@ -56,7 +56,7 @@ func NewCmd() *cobra.Command {
 	flags.IntVar(&cfg.maxHeaderBytes, "max-header-bytes", defaultHTTPMaxHeaderBytes, "maximum HTTP request header bytes")
 
 	flags.BoolVar(&cfg.sanValidation, "san-validation", true, "require CSR IP SANs to equal the request source IP (false rejects CSRs carrying IP SANs)")
-	flags.StringVar(&cfg.dnsSANPattern, "dns-san-pattern", "", "regex DNS SANs must match in full (empty rejects any DNS SAN)")
+	flags.StringSliceVar(&cfg.dnsSANPatterns, "dns-san-pattern", nil, "regex a CSR's DNS SANs may match in full; repeatable, and a SAN passes if it matches any one. The chart always supplies the in-cluster Service DNS pattern and appends a public hostname when tls-lb fronts a routed domain. A CSR carrying DNS SANs is rejected when none are set.")
 	flags.StringVar(&cfg.allowedCNPattern, "allowed-cn-pattern", "", "regex the CSR Subject CN must match in full (empty disables)")
 	flags.DurationVar(&cfg.readinessInterval, "readiness-interval", 10*time.Second, "")
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
@@ -106,7 +106,7 @@ type config struct {
 	idleTimeout                time.Duration
 	maxHeaderBytes             int
 	sanValidation              bool
-	dnsSANPattern              string
+	dnsSANPatterns             []string
 	allowedCNPattern           string
 	readinessInterval          time.Duration
 	minCAValidity              time.Duration

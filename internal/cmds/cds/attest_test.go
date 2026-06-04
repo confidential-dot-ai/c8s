@@ -324,7 +324,7 @@ func TestAttest_RejectsCSRWithUnconfiguredDNSSAN(t *testing.T) {
 func TestAttest_AcceptsCSRWithAllowedDNSSAN(t *testing.T) {
 	mock := newMockAttestationApi(t, "x")
 	h := newTestAttestHandler(t, mock.URL, nil)
-	h.Policy.DNSSANPattern = regexp.MustCompile(`^[a-z]+\.mesh\.svc$`)
+	h.Policy.DNSSANPatterns = []*regexp.Regexp{regexp.MustCompile(`^[a-z]+\.mesh\.svc$`)}
 	challenge := issueChallenge(t, h)
 	csrPEM, _ := generateCSRWith(t, pkix.Name{CommonName: "node"}, []string{"foo.mesh.svc"}, nil)
 

@@ -39,18 +39,52 @@ func TestValidateCSR(t *testing.T) {
 		{
 			name:   "DNS SAN matching pattern accepted",
 			csr:    &x509.CertificateRequest{DNSNames: []string{"foo.mesh.svc"}},
-			policy: issuer.CSRPolicy{DNSSANPattern: dnsAny},
+			policy: issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{dnsAny}},
 		},
 		{
 			name:    "DNS SAN not matching pattern rejected",
 			csr:     &x509.CertificateRequest{DNSNames: []string{"evil.example.com"}},
-			policy:  issuer.CSRPolicy{DNSSANPattern: dnsAny},
+			policy:  issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{dnsAny}},
 			wantErr: "does not match allowed pattern",
 		},
 		{
 			name:    "DNS SAN substring match rejected",
 			csr:     &x509.CertificateRequest{DNSNames: []string{"evil-foo.mesh.svc"}},
-			policy:  issuer.CSRPolicy{DNSSANPattern: regexp.MustCompile(`foo\.mesh\.svc`)},
+			policy:  issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{regexp.MustCompile(`foo\.mesh\.svc`)}},
+			wantErr: "does not match allowed pattern",
+		},
+		{
+			name: "DNS SAN matching the second of multiple patterns accepted",
+			csr:  &x509.CertificateRequest{DNSNames: []string{"foo.mesh.svc"}},
+			policy: issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{
+				regexp.MustCompile(`public\.example\.com`),
+				dnsAny,
+			}},
+		},
+		{
+			name: "DNS SAN matching the first of multiple patterns accepted",
+			csr:  &x509.CertificateRequest{DNSNames: []string{"public.example.com"}},
+			policy: issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{
+				regexp.MustCompile(`public\.example\.com`),
+				dnsAny,
+			}},
+		},
+		{
+			name: "DNS SAN matching none of multiple patterns rejected",
+			csr:  &x509.CertificateRequest{DNSNames: []string{"evil.example.com"}},
+			policy: issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{
+				regexp.MustCompile(`public\.example\.com`),
+				dnsAny,
+			}},
+			wantErr: "does not match allowed pattern",
+		},
+		{
+			name: "every DNS SAN must match some pattern",
+			csr:  &x509.CertificateRequest{DNSNames: []string{"foo.mesh.svc", "evil.example.com"}},
+			policy: issuer.CSRPolicy{DNSSANPatterns: []*regexp.Regexp{
+				dnsAny,
+				regexp.MustCompile(`public\.example\.com`),
+			}},
 			wantErr: "does not match allowed pattern",
 		},
 		{

@@ -74,7 +74,7 @@ func run(cfg config) error {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
 
-	dnsPattern, err := compilePattern("--dns-san-pattern", cfg.dnsSANPattern)
+	dnsPatterns, err := compilePatterns("--dns-san-pattern", cfg.dnsSANPatterns)
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func run(cfg config) error {
 	}
 
 	policy := issuer.CSRPolicy{
-		DNSSANPattern:    dnsPattern,
+		DNSSANPatterns:   dnsPatterns,
 		AllowedCNPattern: cnPattern,
 	}
 
@@ -355,6 +355,23 @@ func compilePattern(name, raw string) (*regexp.Regexp, error) {
 		return nil, fmt.Errorf("invalid %s %q: %w", name, raw, err)
 	}
 	return re, nil
+}
+
+// compilePatterns compiles each raw pattern, skipping empties so a stray "" in
+// the list does not become a match-nothing rule. Returns nil for no patterns,
+// which ValidateCSR treats as "reject any DNS SAN".
+func compilePatterns(name string, raws []string) ([]*regexp.Regexp, error) {
+	var patterns []*regexp.Regexp
+	for _, raw := range raws {
+		re, err := compilePattern(name, raw)
+		if err != nil {
+			return nil, err
+		}
+		if re != nil {
+			patterns = append(patterns, re)
+		}
+	}
+	return patterns, nil
 }
 
 func parseMeasurementAllowlist(raw []string) map[string]bool {
