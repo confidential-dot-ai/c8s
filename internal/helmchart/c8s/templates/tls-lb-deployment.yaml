@@ -23,6 +23,8 @@ metadata:
     {{- include "tls-lb.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.tlsLb.nginx.replicas }}
+  strategy:
+    {{- toYaml .Values.tlsLb.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "tls-lb.selectorLabels" . | nindent 6 }}

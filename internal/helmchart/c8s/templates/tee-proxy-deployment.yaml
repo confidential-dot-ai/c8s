@@ -16,7 +16,7 @@ metadata:
 spec:
   replicas: {{ .Values.teeProxy.replicas }}
   strategy:
-    type: Recreate
+    {{- toYaml .Values.teeProxy.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "tee-proxy.selectorLabels" . | nindent 6 }}

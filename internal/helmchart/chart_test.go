@@ -2736,6 +2736,51 @@ func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--dns-san-pattern="+public)
 }
 
+// TestChartCertDependentPodsSurgeNotRecreate proves tee-proxy and tls-lb roll
+// with surge (new cert-holding pod Ready before the old one retires) rather
+// than Recreate, so a failed roll leaves the old pod serving instead of opening
+// a gap — the convergence-over-current-state stance from the reconcile incident.
+func TestChartCertDependentPodsSurgeNotRecreate(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
+		dep := renderedDeployment(t, out, name)
+		if dep.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("%s strategy = %q, want RollingUpdate", name, dep.Spec.Strategy.Type)
+		}
+		ru := dep.Spec.Strategy.RollingUpdate
+		if ru == nil || ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 {
+			t.Errorf("%s should set maxUnavailable=0 to keep the old pod serving across a roll, got %+v", name, ru)
+		}
+		if ru == nil || ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
+			t.Errorf("%s should set maxSurge=1, got %+v", name, ru)
+		}
+	}
+}
+
+// TestChartGetCertInitRetriesInProcess proves the injected init get-cert
+// container retries CDS in-process (--initial-retry-timeout) instead of exiting
+// into kubelet CrashLoopBackOff on a transient CDS/mesh outage during a roll.
+func TestChartGetCertInitRetriesInProcess(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	inits := renderedDeploymentInitContainers(t, out, "c8s-tee-proxy")
+	var initCert *corev1.Container
+	for i := range inits {
+		if inits[i].Name == "c8s-init-cert" {
+			initCert = &inits[i]
+		}
+	}
+	if initCert == nil {
+		t.Fatalf("tee-proxy has no c8s-init-cert init container\n%s", out)
+	}
+	assertContainerHasArg(t, "c8s-init-cert", initCert.Args, "--initial-retry-timeout=2m")
+}
+
 // TestChartCDSMeasurementsPlumbFlatAllowlist proves the flat cds.measurements
 // list drives --measurements.
 func TestChartCDSMeasurementsPlumbFlatAllowlist(t *testing.T) {

@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
 	"github.com/lunal-dev/c8s/internal/cmds/cmdsutil"
@@ -49,6 +50,8 @@ type config struct {
 	SAN                    string
 	Verbose                bool
 	RenewInterval          time.Duration
+	InitialRetryTimeout    time.Duration
+	InitialRetryInterval   time.Duration
 	ReloadNginx            bool
 	ContinueOnInitialError bool
 	ReloadWatchPaths       []string
@@ -129,6 +132,8 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.SAN, "san", "", "Subject Alternative Name for the certificate (IP address or hostname)")
 	flags.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable debug logging")
 	flags.DurationVar(&cfg.RenewInterval, "renew-interval", 0, "Re-obtain the certificate at this interval (0 = run once and exit)")
+	flags.DurationVar(&cfg.InitialRetryTimeout, "initial-retry-timeout", 2*time.Minute, "Retry the first certificate request in-process for up to this long before failing, so a transient CDS/mesh outage during a roll does not crash the init container into kubelet backoff (0 = try once)")
+	flags.DurationVar(&cfg.InitialRetryInterval, "initial-retry-interval", 2*time.Second, "Delay between in-process retries of the first certificate request")
 	flags.BoolVar(&cfg.ReloadNginx, "reload-nginx", true, "SIGHUP nginx after certificate renewal or watched file changes")
 	flags.BoolVar(&cfg.ContinueOnInitialError, "continue-on-initial-error", false, "In renewal mode, keep running when the first certificate request fails")
 	flags.StringArrayVar(&cfg.ReloadWatchPaths, "reload-watch", nil, "File path to poll for changes and reload nginx when it changes (repeatable)")
@@ -207,7 +212,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	if err := obtainCert(ctx, cfg, client); err != nil {
+	if err := obtainCertWithRetry(ctx, cfg, client); err != nil {
 		if cfg.RenewInterval <= 0 || !cfg.ContinueOnInitialError {
 			return err
 		}
@@ -267,6 +272,30 @@ func run(cfg config) error {
 			}
 		}
 	}
+}
+
+// obtainCertWithRetry runs the first certificate request, retrying in-process
+// on a fixed cadence until it succeeds, InitialRetryTimeout elapses, or the
+// context is cancelled. During a full-stack roll CDS and the mesh are briefly
+// unavailable; retrying here keeps a transient failure from exiting the init
+// container into kubelet's minutes-long CrashLoopBackOff. It still fails closed:
+// once the deadline passes the last error is returned and the pod does not
+// start without a real mesh cert.
+func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client) error {
+	if cfg.InitialRetryTimeout <= 0 {
+		return obtainCert(ctx, cfg, client)
+	}
+	bo := backoff.NewConstantBackOff(cfg.InitialRetryInterval)
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		return struct{}{}, obtainCert(ctx, cfg, client)
+	},
+		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(cfg.InitialRetryTimeout),
+		backoff.WithNotify(func(err error, d time.Duration) {
+			slog.Warn("certificate request failed, retrying", "retry_in", d, "error", err)
+		}),
+	)
+	return err
 }
 
 func obtainCert(ctx context.Context, cfg config, client attestclient.Client) error {

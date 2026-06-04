@@ -58,6 +58,16 @@ operator:
 ## sets its own .imagePullSecrets. One entry here covers all c8s images.
 imagePullSecrets: []
 
+## Chart-wide get-cert behavior for the injected mesh-cert init containers.
+certProvisioning:
+  ## How long an init get-cert container retries CDS in-process before failing.
+  ## During a full-stack roll CDS and the mesh are briefly unavailable; retrying
+  ## here keeps a transient outage from crashing the init container into
+  ## kubelet's minutes-long CrashLoopBackOff. Set comfortably above CDS's
+  ## startup-to-serving time. It still fails closed once elapsed: the pod does
+  ## not start without a real mesh cert.
+  initialRetryTimeout: "2m"
+
 ## Common ServiceAccount settings for the chart-managed top-level c8s
 ## workloads: operator, attestation-api, and CDS. Leave empty to inherit
 ## the chart-wide imagePullSecrets above; set to override for these workloads.
@@ -672,6 +682,14 @@ teeProxy:
     pullPolicy: IfNotPresent
   imagePullSecrets: []
   replicas: 1
+  ## Rollout strategy. tee-proxy is stateless, so RollingUpdate with surge
+  ## brings the new (cert-holding) pod up Ready before retiring the old one:
+  ## a failed roll leaves the old pod serving instead of opening a gap.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   # Domain for autocert TLS
   domain: ""
   # -- Self-provision a CDS-issued serving cert via get-cert (like tls-lb),
@@ -732,6 +750,15 @@ teeProxy:
 
 tlsLb:
   enabled: true
+
+  ## Rollout strategy. Surge so the new (cert-holding) tls-lb pod is Ready
+  ## before the old one is retired — the front door keeps serving across a roll,
+  ## and a pod that fails to get its cert never replaces a working one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
 
   # -- Subject Alternative Name for the CDS certificate. Empty defaults to the
   # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc.

@@ -156,6 +156,9 @@ Caller passes a dict:
     - --out={{ .certOut }}
     - --key-out={{ .keyOut }}
     - --key-mode={{ default "0640" .keyMode }}
+    # Retry CDS in-process during a roll instead of exiting into kubelet
+    # CrashLoopBackOff; still fails closed once the timeout elapses.
+    - --initial-retry-timeout={{ $root.Values.certProvisioning.initialRetryTimeout }}
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
