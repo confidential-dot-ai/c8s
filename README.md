@@ -2,7 +2,7 @@
 
 The confidential computing stack for AI. 
 
-We run your AI workloads (inference, training, agents) in hardware-encrypted Trusted Execution Environments (TEEs). 
+We run your AI workloads (inference, agents, training) in hardware-encrypted Trusted Execution Environments (TEEs). 
 
 Data and weights stay private and untamperable while being processed.
 
