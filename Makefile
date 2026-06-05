@@ -1,4 +1,4 @@
-.PHONY: build build-c8s build-c8s-node build-get-cert build-ratls-mesh \
+.PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy \
        test test-integration vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
@@ -13,17 +13,27 @@ VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "d
 BUILD_DIR  = ./build
 MODULE     = github.com/lunal-dev/c8s
 
+LDFLAGS = -s -w -X $(MODULE)/internal/version.Version=$(VERSION)
+
 # --- All binaries ---
 
 build: build-c8s
+
+# Build the c8s CLI and install it onto PATH via `go install`. The day-2 CLI
+# (install, attest, ops) is meant to run on an operator's machine, so it lands
+# in GOBIN (else GOPATH/bin) rather than ./build.
+install:
+	go install -ldflags="$(LDFLAGS)" ./cmd/c8s
+	@bindir="$$(go env GOBIN)"; [ -n "$$bindir" ] || bindir="$$(go env GOPATH)/bin"; \
+		echo "Installed c8s to $$bindir/c8s"
 
 # --- c8s multi-mode binary (the canonical artifact each per-role image
 # COPYs in). Per-role Dockerfiles set ENTRYPOINT ["/c8s", "<name>"].
 
 build-c8s:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+	CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" \
 		-o $(BUILD_DIR)/c8s ./cmd/c8s
 	@echo "Built $(BUILD_DIR)/c8s"
 
@@ -32,9 +42,9 @@ build-c8s:
 # binary doesn't pull controller-runtime or the embedded helm chart.
 build-c8s-node:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+	CGO_ENABLED=0 \
 		go build -tags c8s_node \
-		-ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-ldflags="$(LDFLAGS)" \
 		-o $(BUILD_DIR)/c8s-node ./cmd/c8s
 	@echo "Built $(BUILD_DIR)/c8s-node"
 
@@ -42,8 +52,8 @@ build-c8s-node:
 
 build-get-cert:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+	CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" \
 		-o $(BUILD_DIR)/get-cert ./cmd/get-cert
 	@echo "Built $(BUILD_DIR)/get-cert"
 
@@ -51,8 +61,8 @@ build-get-cert:
 
 build-ratls-mesh:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+	CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" \
 		-o $(BUILD_DIR)/ratls-mesh ./cmd/ratls-mesh
 	@echo "Built $(BUILD_DIR)/ratls-mesh"
 
@@ -60,8 +70,8 @@ build-ratls-mesh:
 
 build-nri-image-policy:
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+	CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" \
 		-o $(BUILD_DIR)/nri-image-policy ./cmd/nri-image-policy
 	@echo "Built $(BUILD_DIR)/nri-image-policy"
 
