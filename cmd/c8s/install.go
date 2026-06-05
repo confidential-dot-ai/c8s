@@ -430,7 +430,7 @@ func appendEnumSetArg(helmArgs []string, flag, value string, allowed, paths []st
 func appendDistroInstallArgs(helmArgs []string, distro string) ([]string, error) {
 	return appendEnumSetArg(helmArgs, flagDistro, distro,
 		[]string{"k8s", "rke2"},
-		[]string{"kata.distro", "nri-image-policy.distro"})
+		[]string{"kata.distro", "nriImagePolicy.distro"})
 }
 
 // appendCvmModeInstallArgs translates --cvm-mode into the attestation-api

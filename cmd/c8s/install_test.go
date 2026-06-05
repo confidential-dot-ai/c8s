@@ -148,7 +148,7 @@ func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
 			assertArgsEqual(t, got, []string{
 				"upgrade",
 				"--set-string", "kata.distro=" + distro,
-				"--set-string", "nri-image-policy.distro=" + distro,
+				"--set-string", "nriImagePolicy.distro=" + distro,
 			})
 		})
 	}
