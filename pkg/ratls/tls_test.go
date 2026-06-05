@@ -475,24 +475,25 @@ func TestCertRotationTiming(t *testing.T) {
 		t.Error("expected old cert returned during background rotation")
 	}
 
-	// Wait for background rotation to complete.
+	// Poll until the rotated cert is served. callCount bumps when the
+	// background attestation *starts*, but the new cert is stored only after
+	// Provision returns, so waiting on the counter races the store. Poll the
+	// observable outcome instead — the cert actually changing.
 	deadline := time.After(2 * time.Second)
-	for callCount.Load() < 2 {
+	for {
+		cert2, err := tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cert2 != cert1 {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for background rotation")
+			t.Fatal("timed out waiting for background rotation to serve the new cert")
 		default:
 			time.Sleep(5 * time.Millisecond)
 		}
-	}
-
-	// Now we should get the new cert.
-	cert2, err := tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cert1 == cert2 {
-		t.Error("expected different cert after background rotation")
 	}
 }
 
