@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Lint and render the c8s Helm chart for .github/workflows/chart.yml. Runs three
+# checks in sequence (they always ran together, unconditionally):
+#   1. helm lint
+#   2. helm template                       (renders cleanly)
+#   3. helm template --set webhook.enabled=true
+#
+# The image tags/digests below are CI placeholders: helm must resolve every
+# `required`/digest reference for lint+template to pass, but nothing is deployed,
+# so opaque dummy values are fine. They're defined once here instead of being
+# repeated across three near-identical workflow steps.
+#
+# Inputs (env):
+#   CHART_DIR   chart directory to lint/template.
+
+set -euo pipefail
+
+: "${CHART_DIR:?CHART_DIR must be set}"
+
+# Shared --set flags for every check below. The digests are well-formed but
+# arbitrary sha256 placeholders (lint/template only need them to parse).
+common_set=(
+  --set image.tag=ci
+  --set attestationApi.image.tag=ci
+  --set cds.image.tag=ci
+  --set ratlsMesh.image.tag=ci
+  --set teeProxy.image.tag=ci
+  --set nriImagePolicy.image.tag=ci
+  --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000
+  --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001
+  --set nriImagePolicy.cds.node.selector.role=cds-node
+)
+
+echo "::group::helm lint"
+helm lint "$CHART_DIR" "${common_set[@]}"
+echo "::endgroup::"
+
+echo "::group::helm template"
+helm template c8s "$CHART_DIR" \
+  --namespace c8s-system \
+  "${common_set[@]}" \
+  > /dev/null
+echo "::endgroup::"
+
+echo "::group::helm template (webhook enabled)"
+helm template c8s "$CHART_DIR" \
+  --namespace c8s-system \
+  "${common_set[@]}" \
+  --set webhook.enabled=true \
+  > /dev/null
+echo "::endgroup::"

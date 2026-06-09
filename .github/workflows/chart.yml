@@ -32,63 +32,10 @@ jobs:
 
       - name: Determine chart version
         id: ver
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            v="${GITHUB_REF#refs/tags/v}"
-          else
-            base=$(grep -E '^version:' "$CHART_DIR/Chart.yaml" | awk '{print $2}' | tr -d '"')
-            # Prefix the sha with "g" (git-describe convention) so the SemVer
-            # pre-release segment is never a pure-numeric identifier, which
-            # forbids leading zeros: an all-digit sha like 0091982 would make
-            # helm reject "0.1.0-0091982" with "Version segment starts with 0".
-            v="${base}-g$(git rev-parse --short HEAD)"
-          fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+        run: .github/scripts/chart-version.sh
 
-      - name: Helm lint
-        run: |
-          helm lint "$CHART_DIR" \
-            --set image.tag=ci \
-            --set attestationApi.image.tag=ci \
-            --set cds.image.tag=ci \
-            --set ratlsMesh.image.tag=ci \
-            --set teeProxy.image.tag=ci \
-            --set nriImagePolicy.image.tag=ci \
-            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nriImagePolicy.cds.node.selector.role=cds-node
-
-      - name: Helm template
-        run: |
-          helm template c8s "$CHART_DIR" \
-            --namespace c8s-system \
-            --set image.tag=ci \
-            --set attestationApi.image.tag=ci \
-            --set cds.image.tag=ci \
-            --set ratlsMesh.image.tag=ci \
-            --set teeProxy.image.tag=ci \
-            --set nriImagePolicy.image.tag=ci \
-            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nriImagePolicy.cds.node.selector.role=cds-node \
-            > /dev/null
-
-      - name: Helm template with webhook
-        run: |
-          helm template c8s "$CHART_DIR" \
-            --namespace c8s-system \
-            --set image.tag=ci \
-            --set attestationApi.image.tag=ci \
-            --set cds.image.tag=ci \
-            --set ratlsMesh.image.tag=ci \
-            --set teeProxy.image.tag=ci \
-            --set nriImagePolicy.image.tag=ci \
-            --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000 \
-            --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 \
-            --set nriImagePolicy.cds.node.selector.role=cds-node \
-            --set webhook.enabled=true \
-            > /dev/null
+      - name: Lint & template chart
+        run: .github/scripts/chart-verify.sh
 
       - name: Helm package
         run: |

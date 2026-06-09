@@ -288,21 +288,7 @@ jobs:
       # jq, yq, gh, rsync and systemctl ship by default on GitHub-hosted ubuntu;
       # on the self-hosted `the-machine` runner they must be preprovisioned.
       - name: Install kata-guest-base build deps
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y skopeo erofs-utils cryptsetup-bin parted gdisk e2fsprogs qemu-utils zstd
-          # umoci isn't in apt; install the static binary, pinned by version
-          # AND sha256. umoci runs under sudo to unpack the pause bundle that
-          # lands in the dm-verity guest root, so a swapped binary would sit in
-          # the measured TCB — verify the checksum before chmod, same treatment
-          # as the sha256-pinned kata-static tarball in stage-kata-conf.sh.
-          # Hash is the v0.6.0 linux/amd64 release asset.
-          UMOCI_SHA256=b51c267ec394499e42c6fde47f240b7b7dba57ea49df0b5acd304378b82a3b71
-          sudo curl -fsSL -o /usr/local/bin/umoci \
-            https://github.com/opencontainers/umoci/releases/download/v0.6.0/umoci.linux.amd64
-          echo "${UMOCI_SHA256}  /usr/local/bin/umoci" | sha256sum -c -
-          sudo chmod +x /usr/local/bin/umoci
+        run: c8s/kata-guest-base/scripts/ci/install-build-deps.sh
 
       # The confidential image is immutable per kata version, so cache it — the
       # multi-GB kata-static download then happens once, not on every run.
@@ -428,31 +414,7 @@ jobs:
           # github.ref_name is the workflow_dispatch fallback.
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: |
-          set -euo pipefail
-          SHORT_SHA="${HEAD_SHA::7}"
-          IMAGE="${REGISTRY}/lunal-dev/kata-guest-base"
-          # Always publish the immutable, commit-pinned short-SHA tag. Then add
-          # exactly one human-friendly pointer, scoped to the ref class:
-          #   - release tag push (vX) -> the release tag   (official)
-          #   - main                  -> latest            (official)
-          #   - any side branch       -> branch-<sanitized branch name>
-          # A side branch NEVER gets latest/main/vX — nothing a human could
-          # mistake for a released, production image. The branch- prefix plus
-          # ref sanitization (any char outside [A-Za-z0-9_.-] -> '-') keeps it an
-          # obvious dev artifact and a valid OCI tag (leading 'b', <=128 chars).
-          tags=("${SHORT_SHA}")
-          if [[ "${HEAD_BRANCH}" == v* ]]; then
-            tags+=("${HEAD_BRANCH}")
-          elif [[ "${HEAD_BRANCH}" == "main" ]]; then
-            tags+=("latest")
-          else
-            SAFE_BRANCH="$(printf '%s' "${HEAD_BRANCH}" | tr -c 'A-Za-z0-9_.-' '-')"
-            tags+=("branch-${SAFE_BRANCH}")
-          fi
-          joined=$(IFS=,; echo "${tags[*]}")
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "tags=${joined}" >> "$GITHUB_OUTPUT"
+        run: c8s/kata-guest-base/scripts/ci/compute-tags.sh
 
       - name: Push to GHCR
         working-directory: c8s/kata-guest-base/output
