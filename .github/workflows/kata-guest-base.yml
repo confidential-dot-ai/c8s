@@ -39,11 +39,25 @@ permissions:
   packages: write
 
 concurrency:
-  # One build per ref; a newer push supersedes an in-flight one (and stops the
-  # two from racing on the shared caches). Release tags are unique refs, so this
-  # never cancels a publish in progress.
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # One build per *commit*, keyed on the triggering Docker run's head_sha — NOT
+  # per ref. Under the workflow_run trigger github.ref is always the default
+  # branch (refs/heads/main), the ref this workflow file lives on, regardless of
+  # which commit Docker actually succeeded on — the same reason the Checkout step
+  # below builds from workflow_run.head_sha rather than github.sha. So the old
+  # `${{ github.workflow }}-${{ github.ref }}` group collapsed EVERY run into one
+  # bucket: each new merge to main (and even side-branch / tag Docker
+  # completions, whose jobs the `if:` later skips) shared the group, so with
+  # cancel-in-progress a new merge killed the in-flight build and that commit's
+  # measured guest image was never published. Keying on head_sha gives a distinct
+  # group per commit, so every merge to main builds to completion (they serialize
+  # on the single self-hosted `the-machine` runner); only a duplicate run of the
+  # *same* commit shares a group. workflow_dispatch has no workflow_run payload,
+  # so it falls back to github.sha (the dispatched commit) — still per-commit.
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha }}
+  # Never cancel an in-flight build: we want every commit on main to publish its
+  # kata-guest-base. A same-commit re-run queues behind the running one (which it
+  # would just reproduce) instead of killing it.
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
