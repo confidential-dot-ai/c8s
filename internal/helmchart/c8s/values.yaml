@@ -379,14 +379,22 @@ kata:
     ## In-guest workload registry auth source. When set, the puller appends
     ## `agent.image_registry_auth=<this>` to the kata-qemu-snp guest kernel
     ## cmdline so the in-guest CDH can authenticate private guest-pulls.
-    ##   - kbs:///<repo>/<type>/<tag>  PRODUCTION: CDH fetches the docker
-    ##     auth.json from the Key Broker Service after the guest attests, so
-    ##     no credential is ever baked into an image.
-    ##   - file:///etc/c8s/ghcr-auth.json  TEST ONLY: a docker auth.json baked
-    ##     into the dm-verity-measured rootfs. Acceptable for local guest-pull
-    ##     testing, NOT for anything shipped.
-    ##   - ""  anonymous pulls (public images only) — the default.
-    registryAuth: ""
+    ##   - file:///run/image-security/auth.json  DEFAULT: a docker auth.json
+    ##     baked into the dm-verity-measured rootfs at build time (from the
+    ##     READ_PRIVATE_GHCR_TOKEN repo secret — a read-only GHCR PAT) and
+    ##     copied to this tmpfs path early in boot. Lets every kata-qemu-snp
+    ##     pod guest-pull PRIVATE ghcr.io/lunal-dev images out of the box. The
+    ##     credential lives in the measured rootfs — a deliberate tradeoff
+    ##     while the repos/artifacts are private (see kata-guest-base/README.md
+    ##     "Private guest-pull" + docs/pitfalls.md). NOTE: appending this moves
+    ##     the SNP launch measurement vs. an empty value — predict accordingly.
+    ##   - kbs:///<repo>/<type>/<tag>  Secret-free: CDH fetches the docker
+    ##     auth.json from the Key Broker Service AFTER the guest attests, so no
+    ##     credential is baked into the image. Pair it with a guest-base built
+    ##     WITHOUT the token (bakes empty auths). Preferred once a KBS is wired.
+    ##   - ""  anonymous pulls (public images only) — the puller omits the
+    ##     cmdline param entirely.
+    registryAuth: "file:///run/image-security/auth.json"
     ## puller image (oras + a shell). Pinned by digest — the puller writes
     ## into a privileged host path so a repointed tag would be code execution
     ## on the node. The `tag` is kept for human readability; the digest is

@@ -25,8 +25,11 @@ extra/usr/local/bin/
 # artifact (its digests go stale) and is regenerated on every build.
 extra/etc/c8s/bootstrap-allowlist.json
 
-# TEST-ONLY in-guest registry auth: a docker auth.json holding a live GHCR PAT,
-# baked into the dm-verity rootfs for LOCAL guest-pull testing only. MUST NOT be
-# committed or baked in CI — production delivers creds via kbs:// after the
-# guest attests. See docs/decisions/2026-05-28-kata-broker-bringup.md.
+# In-guest GHCR registry auth: a docker auth.json baked into the dm-verity
+# rootfs so the in-guest CDH can guest-pull PRIVATE ghcr.io/lunal-dev images.
+# GENERATED at build time by scripts/fetch.sh from the READ_PRIVATE_GHCR_TOKEN
+# env (CI passes the repo secret of the same name); a no-token build bakes an
+# empty auth set. It holds a credential and is build output, so it is NEVER
+# source-controlled — keep it gitignored. See docs/pitfalls.md "ghcr-auth.json"
+# + README.md "Private guest-pull".
 extra/etc/c8s/ghcr-auth.json

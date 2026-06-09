@@ -280,4 +280,60 @@ echo "==> bootstrap allowlist: ${ALLOWLIST_DST}"
     printf 'allowlist_get_cert_digest: %s\n' "${GET_CERT_DIGEST}"
 } >> "${EXTRA_DIR}/usr/local/share/c8s/.kata-guest-base-baked"
 
+# --- In-guest GHCR registry auth (private guest-pull) ------------------
+#
+# Bake a docker auth.json into the overlay so the in-guest CDH/image-rs can
+# guest-pull workload images from PRIVATE ghcr.io/lunal-dev repos. kata's
+# experimental_force_guest_pull pulls the workload OCI image INSIDE the
+# guest; without creds the agent only gets anonymous access and a private
+# image 401s. The kata-agent finds the file via
+#   agent.image_registry_auth=file:///run/image-security/auth.json
+# on the guest kernel cmdline (the puller appends this from
+# kata.guestImage.registryAuth — internal/helmchart/c8s/files/scripts/
+# pull-and-configure.sh). We bake the file at /etc/c8s/ghcr-auth.json in the
+# dm-verity root; tmpfiles (extra/etc/tmpfiles.d/c8s.conf) copies it to the
+# tmpfs path /run/image-security/auth.json early in boot, so it is present
+# at that file:// path before any CreateContainer/guest-pull.
+#
+# Credential source: the READ_PRIVATE_GHCR_TOKEN env — a classic PAT with
+# read:packages — passed by CI from the repo secret of the same name. This
+# DELIBERATELY bakes a credential into the measured rootfs. It is acceptable
+# only because the token is READ-ONLY and the repos/artifacts are private
+# (and once public the PAT grants no more than anonymous access). A
+# secret-free production image instead delivers creds via kbs:// after the
+# guest attests (set kata.guestImage.registryAuth to a kbs:// URI) and is
+# built WITHOUT the token — the empty-auths fallback below bakes nothing.
+# See docs/pitfalls.md "ghcr-auth.json" + kata-guest-base/README.md
+# "Private guest-pull".
+#
+# Like the bootstrap allowlist, the bytes are part of the dm-verity root, so
+# rotating the PAT changes the root hash -> the SNP launch measurement; a
+# token rotation requires an image rebuild + re-pinned measurement.
+GHCR_AUTH_DST="${EXTRA_DIR}/etc/c8s/ghcr-auth.json"
+# GHCR validates the token, not the username, but the basic-auth username
+# must be non-empty. Default to the org; CI passes the repo owner. Override
+# GHCR_PULL_USER if a future GHCR change starts validating it (then it must
+# be the PAT owner's GitHub username).
+GHCR_PULL_USER="${GHCR_PULL_USER:-lunal-dev}"
+GHCR_REGISTRY_HOST="${GHCR_REGISTRY_HOST:-ghcr.io}"
+mkdir -p "$(dirname "${GHCR_AUTH_DST}")"
+if [[ -n "${READ_PRIVATE_GHCR_TOKEN:-}" ]]; then
+    # docker auth.json: auths.<host>.auth = base64("<user>:<token>").
+    auth_b64="$(printf '%s:%s' "${GHCR_PULL_USER}" "${READ_PRIVATE_GHCR_TOKEN}" | base64 -w0)"
+    # Subshell umask so the token never lands in a world-readable file, even
+    # briefly, and the umask change doesn't leak to the rest of the script.
+    ( umask 077; printf '{"auths":{"%s":{"auth":"%s"}}}\n' "${GHCR_REGISTRY_HOST}" "${auth_b64}" > "${GHCR_AUTH_DST}" )
+    echo "==> ghcr-auth.json: baked PRIVATE ${GHCR_REGISTRY_HOST} creds (user='${GHCR_PULL_USER}') into the measured rootfs"
+elif [[ -s "${GHCR_AUTH_DST}" ]]; then
+    # No token in env, but a developer pre-placed a file (local guest-pull
+    # testing). Keep it as-is — don't clobber a hand-staged credential.
+    echo "==> ghcr-auth.json: READ_PRIVATE_GHCR_TOKEN unset; keeping pre-staged ${GHCR_AUTH_DST}"
+else
+    # No token, no pre-placed file: bake an empty auth set so the file:// path
+    # the kata cmdline names still resolves (anonymous == public images only).
+    # No credential ends up in the measured rootfs.
+    ( umask 077; printf '{"auths":{}}\n' > "${GHCR_AUTH_DST}" )
+    echo "==> ghcr-auth.json: no READ_PRIVATE_GHCR_TOKEN -> baked empty auths (anonymous guest-pull only)"
+fi
+
 echo "==> Done. Run scripts/build.sh next."

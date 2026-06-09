@@ -255,6 +255,18 @@ jobs:
           # build time. The workflow_run trigger already ensures Docker
           # succeeded on this same head_sha before we get here.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # In-guest GHCR creds baked into the dm-verity rootfs so kata's
+          # experimental_force_guest_pull can fetch PRIVATE ghcr.io/lunal-dev
+          # workload images (fetch.sh -> /etc/c8s/ghcr-auth.json -> tmpfiles
+          # copies it to /run/image-security/auth.json at boot). Classic
+          # read:packages PAT in the repo secret READ_PRIVATE_GHCR_TOKEN; if it
+          # is unset, fetch.sh bakes an empty auth set (anonymous, no secret in
+          # the image). GHCR validates the token not the username, but it must
+          # be non-empty — pass the repo owner. Baking a credential into the
+          # measured rootfs is a deliberate, documented tradeoff while the repos
+          # are private — see docs/pitfalls.md "ghcr-auth.json".
+          READ_PRIVATE_GHCR_TOKEN: ${{ secrets.READ_PRIVATE_GHCR_TOKEN }}
+          GHCR_PULL_USER: ${{ github.repository_owner }}
         run: |
           # docker.yml tags every push by 7-char short SHA
           # (metadata-action `type=sha,prefix=`), so trim head_sha to match.

@@ -107,10 +107,41 @@ floating-tag promotion**: a third workflow that rolls `:main` and `:latest` on
 all c8s artifacts only after BOTH `Docker` AND `kata-guest-base` succeed for
 the same commit. Out of scope here; tracked as a follow-up.
 
-## `ghcr-auth.json` is a live PAT — keep it gitignored
+## `ghcr-auth.json` bakes a real GHCR PAT into the measured rootfs — by design, but know the tradeoff
 
-`kata-guest-base/extra/etc/c8s/ghcr-auth.json` is a **TEST-ONLY** docker auth.json
-holding a live GHCR PAT, baked into the dm-verity rootfs for local guest-pull. It
-is gitignored (`kata-guest-base/.gitignore`) and must **never** be committed or
-baked in CI — production delivers in-guest creds via `kbs://` after the guest
-attests. The CI guest-base build does not reference it.
+`kata-guest-base/extra/etc/c8s/ghcr-auth.json` is a docker auth.json baked into
+the dm-verity guest rootfs so kata's `experimental_force_guest_pull` can fetch
+**private** `ghcr.io/lunal-dev` workload images from inside the guest. It is
+**generated at build time** by `kata-guest-base/scripts/fetch.sh` from the
+`READ_PRIVATE_GHCR_TOKEN` env — a classic **read-only** (`read:packages`) PAT
+that CI passes from the repo secret of the same name. At boot, tmpfiles
+(`extra/etc/tmpfiles.d/c8s.conf`) copies it to `/run/image-security/auth.json`,
+the `file://` path named by `agent.image_registry_auth` on the guest kernel
+cmdline (the puller appends that from `kata.guestImage.registryAuth`, which now
+**defaults** to `file:///run/image-security/auth.json` — see
+`internal/helmchart/c8s/values.yaml`).
+
+It is gitignored (`kata-guest-base/.gitignore`) because it holds a credential
+and is build output — **never commit it.** But, unlike before, the CI build
+**does** consume the secret and bake it. The four things to keep in mind:
+
+1. **The credential is inside the SNP launch measurement.** The file's bytes are
+   part of the dm-verity root, exactly like `bootstrap-allowlist.json`. So
+   **rotating the PAT changes the measurement** and requires an image rebuild +
+   re-pinned digest. The cmdline value itself is a fixed `file://` URI (not the
+   secret), so adding it is deterministic — but it still *moves* the measurement
+   vs. the old empty default, so re-predict after upgrading to a guest-base that
+   carries it.
+2. **Why this is acceptable today:** the token is read-only and the repos +
+   published artifacts are private; once they go public the PAT grants no more
+   than anonymous access already would. This is the deliberate decision recorded
+   here — it is *not* a leak to fix.
+3. **The secret-free path still exists.** A build run **without**
+   `READ_PRIVATE_GHCR_TOKEN` bakes an empty auth set (`{"auths":{}}`) — no
+   credential in the image, anonymous guest-pull only. Production that wants zero
+   baked secrets should build that way and set `kata.guestImage.registryAuth` to
+   a `kbs://` URI so CDH fetches the auth.json from the Key Broker Service *after*
+   the guest attests.
+4. **A locally hand-placed `ghcr-auth.json` is preserved.** `fetch.sh` only
+   overwrites it when `READ_PRIVATE_GHCR_TOKEN` is set, so a developer's
+   pre-staged file for local guest-pull testing survives a no-token `fetch.sh`.
