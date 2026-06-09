@@ -377,9 +377,6 @@ kata:
     ## installs SHOULD override this to a specific `<short-sha>` digest-stand-in
     ## per docs/pitfalls.md "The bootstrap allowlist binds to floating :main
     ## digests" — the puller has no `digest:` field yet (tracked there).
-    ## :latest is deliberately NOT the default: cds and the kata-guest-base
-    ## release pipeline do not publish a :latest tag, so a stock install would
-    ## 401/MANIFEST_UNKNOWN out of the box.
     tag: main
     ## Pull the kata-guest-base oras artifact over plain HTTP (no TLS). For a
     ## local / in-cluster registry mirror only. Never set for a real registry.

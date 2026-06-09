@@ -6,10 +6,14 @@
 # Always publish the immutable, commit-pinned short-SHA tag. Then add exactly one
 # human-friendly pointer, scoped to the ref class:
 #   - release tag push (vX) -> the release tag       (official)
-#   - main                  -> latest                (official)
+#   - main                  -> main                  (official)
 #   - any side branch       -> branch-<sanitized branch name>
 #
-# A side branch NEVER gets latest/main/vX — nothing a human could mistake for a
+# :main matches every other c8s artifact (docker.yml: cds, operator,
+# ratls-mesh, …) and cmd/c8s/install.go's fallbackImageTag, so the chart's
+# kata.guestImage.tag default resolves here.
+#
+# A side branch NEVER gets main/vX — nothing a human could mistake for a
 # released, production image. The branch- prefix plus ref sanitization (any char
 # outside [A-Za-z0-9_.-] -> '-') keeps it an obvious dev artifact and a valid OCI
 # tag (leading 'b', <=128 chars).
@@ -37,7 +41,7 @@ tags=("${SHORT_SHA}")
 if [[ "${HEAD_BRANCH}" == v* ]]; then
   tags+=("${HEAD_BRANCH}")
 elif [[ "${HEAD_BRANCH}" == "main" ]]; then
-  tags+=("latest")
+  tags+=("main")
 else
   SAFE_BRANCH="$(printf '%s' "${HEAD_BRANCH}" | tr -c 'A-Za-z0-9_.-' '-')"
   tags+=("branch-${SAFE_BRANCH}")
