@@ -71,13 +71,9 @@ type Options struct {
 
 	// KataEnforce makes the pod webhook inject a kata runtimeClassName into
 	// in-scope workload pods that do not request one. Independent of
-	// GetCertImage — the webhook registers when either is set.
+	// GetCertImage — the webhook registers when either is set. The injected
+	// classes (kata-qemu / kata-qemu-snp) are fixed in the webhook.
 	KataEnforce bool
-
-	// KataRuntimeClass / KataConfidentialRuntimeClass name the runtime
-	// classes injected by kata enforcement (defaults applied in the webhook).
-	KataRuntimeClass             string
-	KataConfidentialRuntimeClass string
 }
 
 var scheme = runtime.NewScheme()
@@ -136,18 +132,16 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
 		if err := webhook.Register(mgr, webhook.Config{
-			GetCertImage:                 opts.GetCertImage,
-			CDSURL:                       opts.CDSURL,
-			AttestationApiURL:            opts.AttestationApiURL,
-			CertFSGroup:                  int64Ptr(opts.CertFSGroup),
-			CertKeyMode:                  opts.CertKeyMode,
-			CertRenewInterval:            opts.CertRenewInterval,
-			GetCertRunAsUser:             int64Ptr(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:            int64Ptr(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot:          boolPtr(opts.GetCertRunAsNonRoot),
-			KataEnforce:                  opts.KataEnforce,
-			KataRuntimeClass:             opts.KataRuntimeClass,
-			KataConfidentialRuntimeClass: opts.KataConfidentialRuntimeClass,
+			GetCertImage:        opts.GetCertImage,
+			CDSURL:              opts.CDSURL,
+			AttestationApiURL:   opts.AttestationApiURL,
+			CertFSGroup:         int64Ptr(opts.CertFSGroup),
+			CertKeyMode:         opts.CertKeyMode,
+			CertRenewInterval:   opts.CertRenewInterval,
+			GetCertRunAsUser:    int64Ptr(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:   int64Ptr(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot: boolPtr(opts.GetCertRunAsNonRoot),
+			KataEnforce:         opts.KataEnforce,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

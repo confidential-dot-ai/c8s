@@ -1,0 +1,91 @@
+[Unit]
+# In-guest ratls-mesh — runs as a systemd service inside the kata VM
+# instead of as a hostNetwork DaemonSet container.
+#
+# Acts as the guest's outbound + inbound proxy: iptables REDIRECT rules
+# divert all workload traffic through ratls-mesh, which terminates RA-TLS
+# on both legs against the mesh peers it connects to.
+#
+# This unit MUST reach `active` before any workload-relevant in-guest
+# unit (kata-agent's CreateContainer hook waits on c8s-ready.target,
+# which Requires=ratls-mesh.service). If we cannot establish a healthy
+# connection to CDS, the unit fails and the pod's CreateContainer
+# fails with it — kubelet sees CreateContainerError and retries.
+Description=c8s ratls-mesh (in-guest mode)
+Documentation=https://github.com/lunal-dev/c8s/tree/main/cmd/ratls-mesh
+
+# Order. attestation-service.service must be up so ratls-mesh's
+# RA-TLS handshake can mint local evidence. c8s-cloudinit-env.service
+# must be up so /run/c8s/ratls-mesh.env exists. network-online.target
+# must be up so the CDS URL is dialable.
+Requires=attestation-service.service c8s-cloudinit-env.service network-online.target
+After=attestation-service.service c8s-cloudinit-env.service network-online.target
+
+[Service]
+Type=simple
+
+# EnvironmentFile is the contract surface with cloud-init: cloudinit-env.sh
+# writes /run/c8s/ratls-mesh.env with C8S_WORKLOAD_ID, C8S_CDS_URL, etc.
+EnvironmentFile=/run/c8s/ratls-mesh.env
+
+# Default the in-guest attestation-service URL if cloud-init didn't
+# override it. The override path exists for the integration tests S4
+# will add (point at a mock attestation-service over localhost-different-port).
+Environment=C8S_ATTESTATION_SERVICE_URL=http://127.0.0.1:8400
+
+# The actual binary entry-point is owned by S4: ratls-mesh's `in-guest`
+# subcommand reads the EnvironmentFile, configures iptables redirects on
+# the pod interface, and runs the outbound (15001) / inbound (15006)
+# proxies.
+ExecStart=/usr/local/bin/ratls-mesh in-guest
+
+# After ExecStart returns from initial setup, the binary stays running.
+# ExecStartPost performs the readiness check synchronously — exits 0
+# once ratls-mesh's proxy listeners are bound and *any* leaf has been
+# minted (the bootstrap self-signed one suffices). The background
+# upgrade to a CDS-issued leaf does NOT gate readiness — that
+# avoids a deadlock in the CDS pod's VM, where CDS is the workload
+# container kata-agent hasn't started yet. See in_guest_linux.go's
+# probeReadiness for the full rationale. Non-zero -> unit fails ->
+# dependent units (c8s-ready.target) never reach active -> kata-agent's
+# CreateContainer hook never sees `ready` and the pod fails to start.
+ExecStartPost=/usr/local/bin/ratls-mesh readiness-check
+
+# Pull c8s-ready.target up once ratls-mesh is healthy. c8s-ready.target
+# Requires=ratls-mesh.service, so its one-shot boot job FAILS (result=dependency)
+# if ratls-mesh's first start attempt fails — and systemd does NOT retry the
+# target's job when ratls-mesh later recovers via Restart=on-failure. The
+# kata-agent then waits forever on an inactive c8s-ready.target and
+# CreateContainer times out. Re-asserting the target from this ExecStartPost
+# (which only runs after readiness-check succeeds, i.e. ratls-mesh IS active)
+# makes c8s-ready.target reliably reach active on whichever attempt succeeds.
+# `-` + `--no-block`: never fail or block ratls-mesh on this.
+ExecStartPost=-/usr/bin/systemctl start --no-block c8s-ready.target
+
+# CAP_NET_ADMIN — required to install the iptables/ipset redirect rules
+# inside the guest network namespace. The trust boundary moved to the VM
+# (we don't ship a workload that doesn't trust the kernel of its own VM),
+# so this is not a privilege escalation.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Reads /run/c8s/ratls-mesh.env (RW for the env file refresh path if we
+# ever wire one). Use ReadWritePaths to allow it while keeping
+# ProtectSystem=strict.
+ReadWritePaths=/run/c8s
+
+# Restart aggressively — if ratls-mesh dies the pod has no mesh and the
+# kata-agent should consider it broken.
+Restart=on-failure
+RestartSec=2s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=c8s-ready.target

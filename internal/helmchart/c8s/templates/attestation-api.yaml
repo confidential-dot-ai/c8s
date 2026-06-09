@@ -1,3 +1,4 @@
+{{- if .Values.attestationApi.enabled }}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 apiVersion: v1
@@ -150,3 +151,4 @@ spec:
             path: /dev/tpmrm0
             type: CharDevice
         {{- end }}
+{{- end }}

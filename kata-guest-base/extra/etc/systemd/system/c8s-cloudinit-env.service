@@ -1,0 +1,54 @@
+[Unit]
+# One-shot: read /etc/c8s/cloudinit.env (written by cloud-init from the
+# pod's user-data NoCloud payload) and write /run/c8s/ratls-mesh.env in
+# the KEY=value form systemd's EnvironmentFile= consumes.
+#
+# The two-file dance exists because cloud-init writes to /etc/ (the
+# committed rootfs) but the kata guest's verity root is read-only —
+# writes land on the tmpfs overlay cloud-init sets up, but
+# EnvironmentFile= is happier reading from /run anyway (predictable
+# location, gets wiped on reboot, no stale state across pod restarts).
+Description=Materialise c8s in-guest config from cloud-init user-data
+Documentation=file:///usr/local/lib/c8s/cloudinit-env.sh
+
+# cloud-init.service would run cloud-init's user-data write_files step (which
+# drops /etc/c8s/cloudinit.env). INTERIM: there is no per-pod NoCloud
+# datasource yet (the PHASE2 mutator-side injection is unbuilt), so cloud-init
+# finds no datasource and stays inactive. A hard Requires=cloud-init.service
+# would then block this unit (and ratls-mesh, and c8s-ready.target) forever.
+# We therefore do NOT depend on cloud-init: the baked /etc/c8s/cloudinit.env
+# (interim broker defaults) is the source of truth. After= keeps the correct
+# ordering for when per-pod cloud-init injection lands — it is a no-op while
+# cloud-init.service is not in the boot transaction. Before=ratls-mesh.service
+# guarantees /run/c8s/ratls-mesh.env exists before the proxy reads it.
+After=cloud-init.service
+Before=ratls-mesh.service
+
+# This unit is wanted by ratls-mesh anyway, but declare it here too so
+# `systemctl start ratls-mesh.service` from a debug shell drags the env
+# materialisation along.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/c8s/cloudinit-env.sh
+
+# Run as root — the script writes to /run/c8s, owned by root. The
+# materialised env file is then world-readable; secret values DO NOT
+# belong in cloud-init user-data (the host can see it).
+User=root
+Group=root
+
+# Reduced isolation: needs to read /etc/c8s/cloudinit.env and write
+# /run/c8s/ratls-mesh.env. ProtectSystem=strict mounts the WHOLE hierarchy
+# read-only (including /run — the old comment here was wrong, which is why
+# the install(1) to /run/c8s/ratls-mesh.env failed with "Read-only file
+# system" and the unit died), so /run/c8s must be explicitly carved back out
+# as writable — same as ratls-mesh.service does.
+ProtectSystem=strict
+ReadWritePaths=/run/c8s
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

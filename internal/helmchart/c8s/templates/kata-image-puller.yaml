@@ -1,0 +1,147 @@
+{{- if and .Values.kata.enabled .Values.kata.guestImage.enabled }}
+{{- /*
+  c8s-kata-image-puller: DaemonSet that pulls the kata-guest-base oras
+  artifact onto each kata node and rewrites kata-runtime's qemu-snp config
+  to use it (guest-pull enabled). Rationale, threat model, ordering vs
+  kata-deploy and the single-variant decision live in
+  docs/kata-guest-base.md ("Puller DaemonSet").
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "c8s.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+{{ include "c8s.serviceAccountImagePullSecrets" . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+data:
+  pull-and-configure.sh: |
+{{ .Files.Get "files/scripts/pull-and-configure.sh" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s.kataName" . }}-image-puller
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: kata-image-puller
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: kata-image-puller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: kata-image-puller
+      annotations:
+        # Re-run the puller when the tag or repository changes. Helm
+        # sees a different sha256 on the ConfigMap and rolls the
+        # DaemonSet.
+        checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository .Values.kata.guestImage.tag | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "c8s.kataName" . }}-image-puller
+      # Same node selector / tolerations as kata-deploy (templates/kata.yaml).
+      # The puller must land on every node kata-deploy lands on so the
+      # guest image is present before kata-runtime tries to boot a pod.
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.kata.nodeSelector }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+      tolerations:
+        - operator: Exists
+      # Single reconcile container: assert the guest-pull patch and KEEP it
+      # asserted. kata-deploy has no ordering dependency on this puller, so it
+      # writes the stock qemu-snp config both before this pod's first run AND
+      # again whenever it restarts — clobbering our patch (observed: a
+      # kata-deploy restart reverted experimental_force_guest_pull, and the next
+      # kata-qemu-snp sandbox failed to mount its rootfs). The loop therefore:
+      #   1. waits out kata-deploy's install — pull-and-configure.sh exits
+      #      non-zero until the qemu-snp config exists, so we simply retry;
+      #   2. applies the guest-pull patch (pull guest-base + rewrite the TOML);
+      #   3. re-applies whenever kata-deploy later clobbers it.
+      # The script is idempotent (oras pull is content-addressed; the rewrite
+      # re-derives from the pristine <cfg>.upstream snapshot), and re-runs are
+      # gated on a cheap grep, so steady state costs ~nothing. Readiness tracks
+      # "patch present", so dependent kata-qemu-snp pods can be ordered against
+      # it. This makes the puller the durable source of truth for the qemu-snp
+      # guest-pull config — see docs/pitfalls.md.
+      containers:
+        - name: reconcile
+          image: {{ if .Values.kata.guestImage.pullerImage.digest -}}
+              {{ .Values.kata.guestImage.pullerImage.repository }}@{{ .Values.kata.guestImage.pullerImage.digest }}
+            {{- else -}}
+              {{ .Values.kata.guestImage.pullerImage.repository }}:{{ .Values.kata.guestImage.pullerImage.tag }}
+            {{- end }}
+          imagePullPolicy: {{ .Values.kata.guestImage.pullerImage.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              CFG=/host/opt/kata/share/defaults/kata-containers/runtimes/qemu-snp/configuration-qemu-snp.toml
+              while true; do
+                if ! grep -qE '^[[:space:]]*experimental_force_guest_pull[[:space:]]*=[[:space:]]*true' "$CFG" 2>/dev/null; then
+                  echo "reconcile: guest-pull patch absent — (re)applying"
+                  sh /scripts/pull-and-configure.sh || echo "reconcile: not ready (kata-deploy still installing?)" >&2
+                fi
+                sleep 30
+              done
+          # All puller config comes from the env (the script is pure POSIX shell
+          # with no helm interpolation — see files/scripts/pull-and-configure.sh).
+          env:
+            - name: REGISTRY
+              value: {{ .Values.kata.guestImage.repository | quote }}
+            - name: TAG
+              value: {{ .Values.kata.guestImage.tag | quote }}
+            - name: HOST_IMG_DIR
+              value: "/host{{ .Values.kata.guestImage.hostPath }}"
+            - name: REGISTRY_AUTH
+              value: {{ .Values.kata.guestImage.registryAuth | quote }}
+            - name: ORAS_INSECURE
+              value: {{ .Values.kata.guestImage.insecure | quote }}
+          securityContext:
+            # Privileged because we write into /opt/kata (kata-deploy's install
+            # location). Same posture as kata-deploy; the /host bind mount is the
+            # real escalation vector and privileged just avoids per-mount AppArmor
+            # surprises.
+            privileged: true
+          readinessProbe:
+            # Ready once the guest-pull patch is present in the qemu-snp config.
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - grep -qE '^[[:space:]]*experimental_force_guest_pull[[:space:]]*=[[:space:]]*true' /host/opt/kata/share/defaults/kata-containers/runtimes/qemu-snp/configuration-qemu-snp.toml
+            periodSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: host
+              mountPath: /host
+          resources:
+{{ toYaml .Values.kata.guestImage.resources | indent 12 }}
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "c8s.kataName" . }}-image-puller
+            defaultMode: 0755
+        - name: host
+          hostPath:
+            path: /
+{{- end }}

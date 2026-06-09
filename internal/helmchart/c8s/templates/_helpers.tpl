@@ -110,8 +110,20 @@
 {{- end -}}
 {{- end -}}
 
+{{- /*
+c8s.attestationApiURL — the attestation-api endpoint injected into the operator
+and CDS. Under kata.enabled the host attestation-api DaemonSet is typically not
+rendered; the kata-guest-base image bakes an in-guest attestation-service on
+loopback, and the components that consume this URL (the operator's get-cert
+sidecars and CDS) run INSIDE the CVM, so they must dial 127.0.0.1, not the
+(absent) host Service.
+*/ -}}
 {{- define "c8s.attestationApiURL" -}}
+{{- if .Values.kata.enabled -}}
+http://127.0.0.1:{{ .Values.attestationApi.port }}
+{{- else -}}
 http://{{ include "c8s.attestationApiName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationApi.port }}
+{{- end -}}
 {{- end -}}
 
 {{- define "c8s.cdsURL" -}}

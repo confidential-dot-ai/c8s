@@ -37,9 +37,13 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
 }
 
 // List returns all whitelisted image digests.
-func (c Client) List() (types.WhitelistListResponse, error) {
+func (c Client) List(ctx context.Context) (types.WhitelistListResponse, error) {
 	url := c.baseURL + "/whitelist"
-	resp, err := c.httpClient.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return types.WhitelistListResponse{}, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return types.WhitelistListResponse{}, fmt.Errorf("request failed: %w", err)
 	}

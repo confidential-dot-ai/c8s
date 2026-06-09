@@ -1,0 +1,33 @@
+[Unit]
+# Synthetic target reached when the in-guest c8s mesh is healthy.
+#
+# Workload-side units (kata-agent itself; anything ordered before
+# CreateContainer can complete) declare `Requires=c8s-ready.target
+# After=c8s-ready.target` — without c8s-ready active, the kata-agent's
+# CreateContainer flow blocks and kubelet reports CreateContainerError.
+#
+# The target gates on ratls-mesh.service AND policy-monitor.service.
+# Gating on policy-monitor closes the window where the guest goes ready
+# (and kata-agent starts containers) while digest enforcement is offline
+# — e.g. policy-monitor died on a bad or unreadable baked allowlist.
+# This does NOT reintroduce the CDS bootstrap cycle: policy-monitor
+# enforces from t=0 on the dm-verity-baked seed with no network (the CDS
+# whitelist refresh is a separate runtime loop, not a startup dependency),
+# so unlike the old guest-policy-agent it never dials CDS to come up. See
+# docs/kata-guest-base.md for the full rationale.
+#
+# Note: policy-monitor.service is Type=simple, so this gate guarantees the
+# enforcement process is launched (and its startup seed pass has run)
+# before ready — not a separately-signalled "watch is live". Switching it
+# to Type=notify + sd_notify after the inotify watch is established would
+# tighten that residual window further.
+Description=c8s in-guest readiness
+
+Requires=ratls-mesh.service policy-monitor.service
+After=ratls-mesh.service policy-monitor.service
+
+# We must reach this target as part of the normal boot, not lazily on
+# demand. Without this the kata-agent never observes c8s-ready.target
+# active and the CreateContainer hook waits forever.
+[Install]
+WantedBy=multi-user.target

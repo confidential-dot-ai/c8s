@@ -1,0 +1,44 @@
+# Systemd preset for the kata-guest-base image.
+#
+# scripts/build.sh enables these c8s units offline (`systemctl --root
+# enable`) after overlaying them onto the osbuilder-built rootfs, baking
+# the /etc/systemd/system/...wants/ symlinks into the dm-verity root (so
+# they're part of the launch measurement). This file is the source of
+# truth for "which c8s units are on" and doubles as a first-boot fallback
+# if a future build runs `systemctl preset-all` instead.
+#
+# kata-agent is NOT listed here — kata's osbuilder installs and enables
+# the version-matched kata-agent.service for us. We only add c8s units.
+#
+# Order is bake-time only: at runtime systemd determines the actual
+# ordering from Wants/Requires/After.
+
+# The c8s-ready.target is wanted by multi-user.target (declared in its
+# own [Install] stanza). Explicitly enable it so the WantedBy symlink
+# gets created at bake time.
+enable c8s-ready.target
+
+# Pull in the gates of c8s-ready.target. With these enabled,
+# multi-user.target reaches c8s-ready.target at boot, which reaches
+# ratls-mesh.service, which transitively pulls in attestation-service
+# and c8s-cloudinit-env.
+enable c8s-cloudinit-env.service
+enable attestation-service.service
+enable ratls-mesh.service
+
+# policy-monitor enforces image-digest allowlisting inside the VM —
+# watches kata-agent's container-bundle directory and SIGKILLs
+# containers whose image digest isn't on the baked
+# /etc/c8s/bootstrap-allowlist.json. WantedBy=multi-user.target in
+# the unit itself; this preset line is the bake-time enable so the
+# Wants= symlink lands in the verity root.
+enable policy-monitor.service
+
+# Make sure cloud-init's units are on — without these, our env
+# materialisation never sees the user-data. Ubuntu's default preset
+# already enables them, but be explicit so a base-image refactor
+# doesn't drop them.
+enable cloud-init.service
+enable cloud-init-local.service
+enable cloud-final.service
+enable cloud-config.service

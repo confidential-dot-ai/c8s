@@ -6,7 +6,9 @@ import (
 	"crypto"
 	"crypto/sha512"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -204,10 +206,10 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 }
 
 func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
-	// Only az-snp is wired end-to-end through this verifier today. az-tdx and
-	// any future platform would need their own measurement semantics and
-	// result population; fail closed rather than approve under SNP rules.
-	if evidence.Platform != string(types.PlatformAzSnp) {
+	// az-snp and bare-metal snp share SNP measurement/result semantics and are
+	// wired end-to-end through this verifier. az-tdx and any future platform
+	// would need their own; fail closed rather than approve under SNP rules.
+	if evidence.Platform != string(types.PlatformAzSnp) && evidence.Platform != string(types.PlatformSnp) {
 		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 	}
 	if policy == nil || policy.AttestationApiURL == "" {
@@ -274,11 +276,39 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 	return result, nil
 }
 
+// snpEvidence wraps a raw SEV-SNP attestation report in the attestation-api's
+// bare-metal "snp" evidence envelope for POST /verify.
+func snpEvidence(rawReport []byte) (*types.AttestationEvidence, error) {
+	inner, err := json.Marshal(struct {
+		AttestationReport string `json:"attestation_report"`
+	}{base64.StdEncoding.EncodeToString(rawReport)})
+	if err != nil {
+		return nil, fmt.Errorf("ratls: build snp evidence: %w", err)
+	}
+	return &types.AttestationEvidence{
+		Platform: string(types.PlatformSnp),
+		Evidence: inner,
+	}, nil
+}
+
 // verifySEVSNP performs full verification: key binding, AMD signature chain,
 // and policy validation. The report is parsed once and reused.
 func verifySEVSNP(att *Attestation, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
 	if att.embedded != nil {
 		return verifySEVSNPOnline(att.embedded, policy, expectedReportData)
+	}
+
+	// Prefer the in-guest attestation-api /verify when available: its verifier
+	// classifies CPUs that go-sev-guest's bundled tables don't (e.g. Zen4c
+	// Bergamo/Siena, which offline verification rejects as an unknown product).
+	// RequireSMT can't be enforced over the /verify wire, so fall back to the
+	// offline path when it's set.
+	if policy != nil && policy.AttestationApiURL != "" && !policy.RequireSMT {
+		evidence, err := snpEvidence(att.Report)
+		if err != nil {
+			return nil, err
+		}
+		return verifySEVSNPOnline(evidence, policy, expectedReportData)
 	}
 
 	report, err := checkSEVSNPBinding(att.Report, expectedReportData)

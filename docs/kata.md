@@ -160,7 +160,10 @@ seeking isolation from the host.
   path. To get both a confidential VM *and* a c8s workload identity,
   annotate the pod with `confidential.ai/cw: <workload-id>` and let the
   webhook inject `kata-qemu-snp` for you (or set both the annotation and
-  the class explicitly).
+  the class explicitly). CDS uses exactly this path — it pins
+  `kata-qemu-snp` directly and carries no `cw`, to avoid dialing itself for
+  a leaf; see the [admission flow](install-flows.md#admission-flow) in
+  [`install-flows.md`](install-flows.md).
 - **Already-running pods.** The webhook fires on `CREATE` only. Enabling
   enforcement does not restart or reject existing pods; it applies to pods
   created afterwards.
@@ -244,10 +247,10 @@ kubectl delete runtimeclass crun --ignore-not-found
 
 ## Threat model
 
-kata-deploy is **privileged**: it runs `privileged: true` with `hostPID` and
-the host root filesystem bind-mounted at `/host`, and it nsenters PID 1 to
-restart the runtime. That is inherent to installing a runtime onto a host —
-there is no less-privileged way to do it.
+kata-deploy is **privileged**: it runs `privileged: true` with `hostPID`,
+`hostNetwork`, and the host root filesystem bind-mounted at `/host`, and it
+nsenters PID 1 to restart the runtime. That is inherent to installing a
+runtime onto a host — there is no less-privileged way to do it.
 
 For **pod-as-kata-cvm this does not weaken the threat model**, and that is the
 core reasoning of [c8s#97](https://github.com/lunal-dev/c8s/issues/97):
@@ -297,10 +300,10 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   already handle TDX. There is no `kata-qemu-tdx` shim in `SHIMS_X86_64`, no
   `kata-qemu-tdx` RuntimeClass, and the kata-enforcement allowlist accepts
   only `kata-qemu`, `kata-clh`, and `kata-qemu-snp`. The webhook auto-promotes
-  `confidential.ai/cw` pods to `kata-qemu-snp` unconditionally; the
-  `--kata-confidential-runtime-class` flag could point at a different class,
-  but the shim and the allowlist would also need updating. TDX support is
-  future work.
+  `confidential.ai/cw` pods to `kata-qemu-snp` unconditionally, and the
+  confidential class is **fixed, not configurable** — adding one (e.g.
+  `kata-qemu-tdx`) means updating the shim set, the RuntimeClasses, and the
+  enforcement allowlist together. TDX support is future work.
 
 - **No mixed-platform clusters.** The `kata-qemu-snp` RuntimeClass has no
   `scheduling.nodeSelector`, so the scheduler can place a confidential pod on

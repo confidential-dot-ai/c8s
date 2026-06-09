@@ -1,0 +1,446 @@
+name: Kata guest base
+
+# Builds + pushes the kata-guest-base rootfs image — the kata-native
+# guest every c8s kata-qemu-snp pod boots into. kata-qemu does measured
+# direct-kernel boot (no IGVM/UKI), so we publish the parts kata wants: a
+# hardened kernel (built by steep), a dm-verity erofs rootfs (built by
+# kata's osbuilder, with our ratls-mesh / attestation-service /
+# policy-monitor + bootstrap allowlist baked into the verity root), and
+# the verity params. The rootfs root hash rides in the kata kernel
+# cmdline and is folded into the SNP kernel-hashes launch measurement;
+# per-pod container images (assam, cert-issuer, workloads) are secondary
+# measurements the operator attests post-install.
+#
+# Output: ghcr.io/lunal-dev/kata-guest-base:<tag> via `oras push`. Flat
+# at the org level matches every other c8s artifact
+# (ghcr.io/lunal-dev/{assam,cert-issuer,ratls-mesh,...}).
+
+on:
+  # Run AFTER the Docker workflow finishes so the cds/get-cert image digests
+  # we bake into the bootstrap allowlist (fetch.sh, via `oras manifest fetch
+  # ghcr.io/lunal-dev/{cds,get-cert}:<IMAGE_TAG>`) are the ones docker.yml
+  # just published — not whatever stale digests were on `main` at the moment
+  # of a concurrent push. The job-level `if:` below gates on a successful
+  # Docker push event (excludes Docker's own PR runs).
+  #
+  # No `pull_request:` trigger: the build is 45+ min and historically flaky
+  # on upstream deps (snapshot.ubuntu.com 5xx, docker+apparmor on newer
+  # runners). Cost of a post-merge break is "revert + open follow-up";
+  # paid PR feedback isn't worth the 45 min × every push. Use
+  # workflow_dispatch to rebuild on demand.
+  workflow_run:
+    workflows: ["Docker"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # One build per ref; a newer push supersedes an in-flight one (and stops the
+  # two from racing on the shared caches). Release tags are unique refs, so this
+  # never cancels a publish in progress.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # Kata release the guest-base is built against. Drives the kata-static
+  # download + its cache key below, and is inherited by build.sh (whose own
+  # KATA_VERSION default is just the local-build fallback — keep it in sync).
+  KATA_VERSION: "3.30.0"
+  # steep ref the guest kernel is built against. Single source of truth: the
+  # checkout pins it and the kernel-output cache key below is scoped to it (a
+  # different steep => a potentially different kernel). Pinned to PR #13
+  # (feat/kernel-config) head — see the Checkout steep step for why. Switch to
+  # a main commit / release tag once that PR merges.
+  STEEP_REF: "0d36c190cbe39c856424efe5b9aa91d1e7b50f9f"
+
+jobs:
+  build:
+    name: Build kata-guest-base
+    # workflow_run fires for every Docker completion — including its PR runs,
+    # which don't publish. Gate to "Docker succeeded on a push event" (push
+    # is the only event that does `docker push`). workflow_dispatch is the
+    # manual-rebuild escape hatch and always runs.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    # Self-hosted runner (the SEV-SNP build host) rather than a GitHub-hosted
+    # ubuntu image. See the build-deps / glibc / AppArmor notes below for the
+    # provisioning invariants this runner has to satisfy.
+    runs-on: the-machine
+    steps:
+      # Source layout in the runner workspace mirrors local dev:
+      #   ./c8s
+      #   ./attestation-service
+      #   ./steep
+      # so the scripts' WORKSPACE resolution (IMAGE_DIR/../..) finds
+      # both sibling repos without env overrides.
+      - name: Checkout c8s
+        # On workflow_run, default GITHUB_SHA is the workflow's own ref (main)
+        # — not the SHA Docker just succeeded on. Use head_sha so we build the
+        # same commit whose images we'll bake into the allowlist.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          path: c8s
+
+      - name: Checkout attestation-rs
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: lunal-dev/attestation-rs
+          path: attestation-rs
+          token: ${{ secrets.ATTESTATION_REPO_TOKEN || github.token }}
+
+      - name: Checkout steep
+        # Pinned to PR #13 (feat/kernel-config) head: it adds `steep kernel
+        # --kernel-config-fragment`, which build.sh needs to fold c8s's
+        # kernel/container.config into the guest kernel. steep `main` lacks it
+        # (the build dies at "unexpected argument --kernel-config-fragment").
+        # Switch this ref to a main commit / release tag once the PR merges.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: lunal-dev/steep
+          ref: ${{ env.STEEP_REF }}
+          path: steep
+          token: ${{ secrets.STEEP_REPO_TOKEN || github.token }}
+
+      # --- Build the in-guest binaries ---------------------------------
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          # Derive the toolchain from the module itself rather than a separate
+          # GO_VERSION pin — one source of truth (c8s/go.mod), and no drift
+          # between this workflow, docker.yml and go.mod. go.mod declares the
+          # minor only (go 1.26), so this floats to the latest 1.26.x patch.
+          go-version-file: c8s/go.mod
+          cache-dependency-path: c8s/go.sum
+
+      - name: Build c8s-node binary (ratls-mesh entry)
+        working-directory: c8s
+        run: make build-c8s-node
+
+      - name: Build policy-monitor binary
+        working-directory: c8s
+        run: make build-policy-monitor
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
+
+      # attestation-rs changes less often than this repo, so cache the built
+      # binary keyed on its source and skip the build (+ its apt dep) on a hit.
+      # restore/save are split (not the unified `cache` action) on purpose: the
+      # unified action only saves on a fully green job (its post step is
+      # post-if: success()). While the downstream kata-guest-base build is being
+      # stabilised the job fails late, which skips that save — so the binary
+      # never caches and every run rebuilds it cold. The Save step below runs
+      # right after the build, before that flaky step.
+      - name: Restore attestation-api build
+        id: attestation-api-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: attestation-rs/target/release/attestation-api
+          key: ${{ runner.os }}-attestation-api-${{ hashFiles('attestation-rs/Cargo.lock', 'attestation-rs/Cargo.toml', 'attestation-rs/crates/**') }}
+
+      # attestation-api links tss-esapi-sys, whose build.rs resolves the TPM2-TSS
+      # system library via pkg-config (tss2-sys.pc, shipped by libtss2-dev) for
+      # the TPM/vTPM path. Mirrors attestation-rs's own CI.
+      - name: Install attestation-api build deps (TPM2-TSS)
+        if: steps.attestation-api-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+
+      # Build directly on the runner. Constraint: the runner's glibc must stay
+      # <= the noble guest's (2.39), or the binary dies inside the guest with
+      # "GLIBC_x.xx not found" and blocks c8s-ready.target. On the self-hosted
+      # `the-machine` runner this is a provisioning invariant rather than a
+      # property we get for free from a GitHub-hosted image: keep its toolchain
+      # glibc <= 2.39 (e.g. build in a noble container/sysroot if the host is
+      # newer). (musl would dodge glibc but can't resolve tss2-sys via
+      # pkg-config, so the glibc pin is the lever here.)
+      - name: Build attestation-api
+        id: build-attestation-api
+        if: steps.attestation-api-cache.outputs.cache-hit != 'true'
+        working-directory: attestation-rs
+        run: cargo build --release -p attestation-api --bin attestation-api
+
+      # Save now, before the kata-guest-base step that fails today — see the
+      # restore-step note for why the unified cache action wouldn't.
+      - name: Save attestation-api build
+        if: steps.attestation-api-cache.outputs.cache-hit != 'true' && steps.build-attestation-api.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: attestation-rs/target/release/attestation-api
+          key: ${{ steps.attestation-api-cache.outputs.cache-primary-key }}
+
+      # --- Build steep (kernel only) + its sandbox deps ----------------
+      # steep is used ONLY to compile the hardened guest kernel here; the
+      # rootfs is built by kata's osbuilder (in Docker) inside build.sh.
+      # The mkosi/systemd-container/uv steps below are steep's kernel-
+      # builder sandbox deps.
+
+      - name: Setup uv (mkosi v26 toolchain)
+        uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+
+      - name: Setup mkosi
+        # Keep in lockstep with steep/.github/workflows/base.yml.
+        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+
+      - name: Install systemd-container (mkosi sandbox dep)
+        run: sudo apt-get update && sudo apt-get install -y systemd-container
+
+      # restore/save split for the same reason as attestation-api above —
+      # the save must not hang off whole-job success while we stabilise the
+      # kata-guest-base build.
+      - name: Restore steep build
+        id: steep-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: steep/target/release/steep
+          key: ${{ runner.os }}-steep-${{ hashFiles('steep/Cargo.lock', 'steep/src/**', 'steep/crates/**') }}
+
+      # steep changes less often than this repo; skip the rebuild when the cached
+      # binary matches the source. (Without this gate the cache restored the
+      # binary but cargo rebuilt it anyway — its fingerprints aren't cached.)
+      - name: Build steep
+        id: build-steep
+        if: steps.steep-cache.outputs.cache-hit != 'true'
+        working-directory: steep
+        run: cargo build --release
+
+      - name: Save steep build
+        if: steps.steep-cache.outputs.cache-hit != 'true' && steps.build-steep.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: steep/target/release/steep
+          key: ${{ steps.steep-cache.outputs.cache-primary-key }}
+
+      # --- Assemble + build the rootfs image ---------------------------
+
+      # Set up oras BEFORE fetch.sh runs: the script's bootstrap-
+      # allowlist substitution step calls `oras manifest fetch` against
+      # the c8s container images at this commit's tag to pin their
+      # SHA-256 digests into /etc/c8s/bootstrap-allowlist.json (which
+      # ends up in the dm-verity root and thus the launch measurement).
+      # Without oras available, the digest substitution fails fast and
+      # the build is aborted — by design; an unpinned allowlist would be
+      # silently permissive.
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+
+      # Log in to GHCR for the manifest-fetch step. GHCR allows
+      # anonymous reads of public images, but the c8s images are
+      # currently private at certain tags; logging in unconditionally
+      # avoids a "works on main, breaks on a PR branch" pit. Same
+      # token as the publish step below.
+      - name: Log in to GHCR (for digest resolution)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch kata-guest-base extras (binaries + unit + config + allowlist)
+        working-directory: c8s/kata-guest-base
+        env:
+          # IMAGE_TAG is the published tag whose cds/get-cert image digests get
+          # baked into the bootstrap allowlist. Use the short SHA Docker just
+          # published (docker.yml's metadata-action emits `type=sha,prefix=`,
+          # which tags every push by 7-char short SHA), so the baked digests —
+          # and the launch measurement that pins them — are tied to an
+          # immutable commit rather than wherever `main` happens to point at
+          # build time. The workflow_run trigger already ensures Docker
+          # succeeded on this same head_sha before we get here.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          # docker.yml tags every push by 7-char short SHA
+          # (metadata-action `type=sha,prefix=`), so trim head_sha to match.
+          export IMAGE_TAG="${HEAD_SHA::7}"
+          ./scripts/fetch.sh
+
+      # build.sh runs osbuilder's image-builder on the host (loop-device
+      # partitioning fails inside a container) and bakes a pause bundle, so it
+      # needs umoci (not packaged on ubuntu — static binary), skopeo, the
+      # verity/image tools, and zstd (to unpack kata-static below). docker, sudo,
+      # jq, yq, gh, rsync and systemctl ship by default on GitHub-hosted ubuntu;
+      # on the self-hosted `the-machine` runner they must be preprovisioned.
+      - name: Install kata-guest-base build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo erofs-utils cryptsetup-bin parted gdisk e2fsprogs qemu-utils zstd
+          # umoci isn't in apt; install the static binary, pinned by version
+          # AND sha256. umoci runs under sudo to unpack the pause bundle that
+          # lands in the dm-verity guest root, so a swapped binary would sit in
+          # the measured TCB — verify the checksum before chmod, same treatment
+          # as the sha256-pinned kata-static tarball in stage-kata-conf.sh.
+          # Hash is the v0.6.0 linux/amd64 release asset.
+          UMOCI_SHA256=b51c267ec394499e42c6fde47f240b7b7dba57ea49df0b5acd304378b82a3b71
+          sudo curl -fsSL -o /usr/local/bin/umoci \
+            https://github.com/opencontainers/umoci/releases/download/v0.6.0/umoci.linux.amd64
+          echo "${UMOCI_SHA256}  /usr/local/bin/umoci" | sha256sum -c -
+          sudo chmod +x /usr/local/bin/umoci
+
+      # The confidential image is immutable per kata version, so cache it — the
+      # multi-GB kata-static download then happens once, not on every run.
+      - name: Restore kata confidential image
+        id: kata-conf-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/kata-conf
+          key: kata-confidential-image-${{ env.KATA_VERSION }}
+
+      # Stage kata's confidential rootfs image (the source of the CoCo
+      # guest-components that build.sh bakes into the measured rootfs).
+      # Standalone script so shellcheck sees it; reads KATA_VERSION + the
+      # runner's RUNNER_TEMP/GITHUB_ENV and exports KATA_CONFIDENTIAL_IMG.
+      - name: Stage kata confidential image (CoCo guest-components source)
+        id: stage-kata-conf
+        run: c8s/kata-guest-base/scripts/ci/stage-kata-conf.sh
+
+      # Save right after staging (see the attestation-api note): the unified
+      # cache action would skip this when the kata-guest-base build later fails,
+      # forcing the multi-GB kata-static re-download on every run.
+      - name: Save kata confidential image
+        if: steps.kata-conf-cache.outputs.cache-hit != 'true' && steps.stage-kata-conf.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/kata-conf
+          key: ${{ steps.kata-conf-cache.outputs.cache-primary-key }}
+
+      # Cache the guest kernel build output (steep/output/kernel) — the most
+      # expensive INVARIANT in this job. build.sh Step 1/5 runs `steep kernel`,
+      # which short-circuits the ~10-min compile (and the kernel-source
+      # download under output/kernel/cache/) when its manifest.json fingerprint
+      # matches the inputs (steep src/commands/kernel.rs). Key on STEEP_REF (a
+      # different steep can yield a different kernel) + the c8s kernel config
+      # fragment; restore-keys falls back to the latest same-steep cache so even
+      # a fragment change reuses the cached kernel-source tarball. steep
+      # re-validates the fingerprint internally, so a stale restore can never
+      # yield the wrong kernel — it just rebuilds. Restore here (before build);
+      # the matching always()-save is after the build step below.
+      - name: Restore guest kernel build
+        id: kernel-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: steep/output/kernel
+          key: ${{ runner.os }}-kata-kernel-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          restore-keys: |
+            ${{ runner.os }}-kata-kernel-${{ env.STEEP_REF }}-
+
+      # kata osbuilder's rootfs-builder Dockerfile fails its first RUN with
+      # "apparmor failed to apply profile: ... /proc/thread-self/attr/apparmor/
+      # exec: no such file or directory" on newer ubuntu runners. kata's own
+      # rootfs.sh already adds --security-opt apparmor=unconfined to its
+      # `docker run` (rootfs-builder/rootfs.sh ~L335) but not to its
+      # `docker build`, and exposes no env hook to inject one. Disable
+      # apparmor on the runner before invoking osbuilder.
+      #
+      # NOTE: on the self-hosted `the-machine` runner this is NOT bounded to a
+      # single ephemeral job the way it was on a throwaway GitHub-hosted VM —
+      # the host persists across jobs, so leaving AppArmor torn down would
+      # weaken every later workload on it. The "Re-enable AppArmor" step below
+      # (if: always()) restores it once the build is done or has failed.
+      - name: Disable AppArmor for kata osbuilder docker build
+        run: |
+          sudo systemctl stop apparmor.service || true
+          sudo aa-teardown || true
+          sudo systemctl restart docker
+
+      - name: Build kata-guest-base image (steep kernel + kata osbuilder)
+        working-directory: c8s/kata-guest-base
+        env:
+          # build.sh fetches the kata-containers source at the pinned
+          # version via `gh api .../tarball` (the repo's git remote is
+          # SSH-gated), then drives osbuilder in Docker (which must be
+          # available on the self-hosted `the-machine` runner). gh needs a
+          # token even for the public repo.
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/build.sh
+
+      # Restore the AppArmor posture torn down above. if: always() so it runs
+      # whether the build succeeded or failed — on the persistent self-hosted
+      # runner we must not leave the host with AppArmor disabled for the next
+      # job. Best-effort (|| true): the worst case is a stale teardown that the
+      # next run's disable step would redo anyway.
+      - name: Re-enable AppArmor
+        if: always()
+        run: |
+          sudo systemctl start apparmor.service || true
+          sudo systemctl restart docker || true
+
+      # Save the guest kernel build even when a LATER step failed — the kernel
+      # is Step 1/5 of build.sh, so an osbuilder/rootfs/publish failure (the
+      # historically flaky part) still leaves a complete output/kernel worth
+      # keeping. if: always() is the whole point: the default success()-gated
+      # post-save of the unified cache action would skip on those late failures
+      # and re-pay the ~10-min compile next run. Skip only on an exact-key hit
+      # (nothing new to store); a restore-keys-only (prefix) hit still saves
+      # under the new fragment's key.
+      - name: Save guest kernel build
+        if: always() && steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: steep/output/kernel
+          key: ${{ runner.os }}-kata-kernel-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+
+      # --- Push to GHCR ------------------------------------------------
+      #
+      # The job-level `if:` already gates the whole job on a successful
+      # Docker push (or workflow_dispatch), so we publish unconditionally
+      # here. Tag derivation uses `head_branch`/`head_sha` from the
+      # workflow_run payload so the published tags match the commit Docker
+      # just succeeded on (not this workflow's own ref, which is the default
+      # branch under workflow_run). workflow_dispatch falls back to github.*.
+      #
+      # We already logged in to GHCR earlier for the digest-resolution step
+      # that feeds the bootstrap allowlist, so no second login is needed.
+
+      - name: Compute tags
+        id: tags
+        env:
+          # head_branch is the source branch of the triggering Docker event:
+          # "main" for a main push, the tag name (e.g. "v0.1.0") for a tag push.
+          # github.ref_name is the workflow_dispatch fallback.
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${HEAD_SHA::7}"
+          IMAGE="${REGISTRY}/lunal-dev/kata-guest-base"
+          # Always publish the immutable, commit-pinned short-SHA tag. Then add
+          # exactly one human-friendly pointer, scoped to the ref class:
+          #   - release tag push (vX) -> the release tag   (official)
+          #   - main                  -> latest            (official)
+          #   - any side branch       -> branch-<sanitized branch name>
+          # A side branch NEVER gets latest/main/vX — nothing a human could
+          # mistake for a released, production image. The branch- prefix plus
+          # ref sanitization (any char outside [A-Za-z0-9_.-] -> '-') keeps it an
+          # obvious dev artifact and a valid OCI tag (leading 'b', <=128 chars).
+          tags=("${SHORT_SHA}")
+          if [[ "${HEAD_BRANCH}" == v* ]]; then
+            tags+=("${HEAD_BRANCH}")
+          elif [[ "${HEAD_BRANCH}" == "main" ]]; then
+            tags+=("latest")
+          else
+            SAFE_BRANCH="$(printf '%s' "${HEAD_BRANCH}" | tr -c 'A-Za-z0-9_.-' '-')"
+            tags+=("branch-${SAFE_BRANCH}")
+          fi
+          joined=$(IFS=,; echo "${tags[*]}")
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tags=${joined}" >> "$GITHUB_OUTPUT"
+
+      - name: Push to GHCR
+        working-directory: c8s/kata-guest-base/output
+        run: |
+          set -euo pipefail
+          # The artifact is the kata-native guest: vmlinuz + the dm-verity
+          # rootfs image + the verity-params / rootfs-type sidecars +
+          # manifest.json. The puller pulls all of these (see
+          # kata-image-puller.yaml).
+          oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.tags }}" \
+            --artifact-type application/vnd.lunal.kata-guest.v2 \
+            ./*

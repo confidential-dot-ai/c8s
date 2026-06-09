@@ -1,0 +1,105 @@
+[Unit]
+# In-VM container-digest enforcement. policy-monitor watches the
+# kata-agent container-bundle directory via inotify; for each new
+# container, it reads the bundle's config.json, extracts the image
+# digest from OCI annotations (io.kubernetes.cri.image-name from
+# containerd's CRI plugin), and compares against the allowlist —
+# the baked /etc/c8s/bootstrap-allowlist.json seed, plus whatever the
+# runtime CDS refresh has merged on top (see EnvironmentFile + the
+# hybrid note below). Containers whose digest is not on the list get
+# their init PID looked up via the cgroup hierarchy and SIGKILLed.
+#
+# Replaces the earlier guest-policy-agent (Rego renderer that fetched
+# a whitelist from CDS over RA-TLS and only rendered it informationally,
+# enforcing nothing). policy-monitor enforces directly. The boot-time
+# seed is baked: the digests in /etc/c8s/bootstrap-allowlist.json sit on
+# the dm-verity root and are folded into the kernel-hashes launch digest,
+# so the operator's pin on kata.guestImage.tag is also a pin on the
+# bootstrap image set — and the guest enforces from t=0 with no network
+# (no boot-path fetch, so no CDS-bootstrap deadlock). At runtime the set
+# is extended by the CDS whitelist refresh (RA-TLS, pinned to
+# cds.measurements) so operator additions land without a guest rebuild;
+# it only ever grows the allowlist, never shrinks it. See
+# docs/kata-image-policy.md for the threat-model discussion and the
+# BPF-LSM upgrade path that would close the post-start kill gap.
+#
+# Gating: c8s-ready.target Requires= and After= this unit, so the guest
+# does not reach readiness (and kata-agent does not start workload
+# containers) until policy-monitor has launched and run its startup seed
+# pass — closing the window where containers could run with enforcement
+# offline. This is safe from the CDS-bootstrap angle because startup needs
+# only the dm-verity-baked seed, never a network/CDS round-trip. The unit
+# stays decoupled from CDS at runtime (the whitelist refresh is best-effort
+# and never blocks boot). `Restart=on-failure` below keeps a crashed
+# monitor retrying; while it is down, c8s-ready stays inactive.
+Description=c8s policy-monitor (in-guest container-digest enforcement)
+Documentation=https://github.com/lunal-dev/c8s/tree/main/cmd/policy-monitor
+
+# /etc must be readable so the baked allowlist seed is loadable; the
+# verity-protected /etc layer is mounted by the time local-fs.target
+# is reached. network-online.target + c8s-cloudinit-env.service order
+# the CDS whitelist refresh: the env file (C8S_CDS_URL/measurements) and
+# the network must be up before the refresh loop can reach CDS. These
+# are ordering-only (not Requires) — policy-monitor stays decoupled and
+# falls back to baked-seed-only if the env file is absent.
+After=local-fs.target network-online.target c8s-cloudinit-env.service
+Wants=local-fs.target network-online.target
+
+[Service]
+Type=simple
+
+# Defaults + the cloud-init env: the binary picks up the baked allowlist
+# and /run/kata-containers from its built-in defaults, and the CDS
+# refresh config (C8S_CDS_URL, C8S_CDS_MEASUREMENTS,
+# C8S_ATTESTATION_SERVICE_URL) from this env file — the same file
+# ratls-mesh reads, so both pin the same CDS. Optional (`-`): absent →
+# baked-seed-only (see internal/cmds/policymonitor/run.go).
+EnvironmentFile=-/run/c8s/ratls-mesh.env
+ExecStart=/usr/local/bin/policy-monitor monitor
+
+# Capabilities: CAP_KILL lets us SIGKILL processes outside our own UID
+# (kata-agent's container inits run as their image-declared user, which
+# is rarely the same as policy-monitor's). CAP_DAC_READ_SEARCH lets us
+# read kata-agent's container-bundle config.json files and walk the
+# cgroup hierarchy without having to chown anything.
+CapabilityBoundingSet=CAP_KILL CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_KILL CAP_DAC_READ_SEARCH
+
+# Hardening — match the strictness of ratls-mesh's unit minus the
+# bits we don't need.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# RestrictAddressFamilies keeps AF_UNIX (journald) and adds AF_INET/
+# AF_INET6 for the CDS whitelist refresh — policy-monitor pulls
+# CDS's /whitelist over RA-TLS (see cds_refresh.go). With no CDS URL
+# configured the refresh loop never starts and no socket is opened, but
+# the families are permitted either way (the unit is static).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Restart on transient failures (e.g. inotify watcher reset after the
+# kernel drops events under load). A flapping unit is bounded by the
+# StartLimit budget — past that, systemd stops restarting and the
+# admin can see "policy-monitor in failed state" rather than tail-
+# chasing logs.
+Restart=on-failure
+RestartSec=2s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+TimeoutStartSec=30s
+
+[Install]
+# Multi-user.target is the right hook: we want policy-monitor enabled and
+# active on a normal boot, by the time any kata-agent CreateContainer call
+# could plausibly land. The readiness gate is pulled from the other side —
+# c8s-ready.target Requires=+After= this unit (see the [Unit] section above
+# and c8s-ready.target) — so we deliberately do NOT also
+# WantedBy=c8s-ready.target here; that would be a redundant second edge to
+# the same gate.
+WantedBy=multi-user.target

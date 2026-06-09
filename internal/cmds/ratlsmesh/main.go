@@ -56,6 +56,8 @@ func newRatlsMeshCommand() *cobra.Command {
 	bindProxyFlags(cmd.Flags(), &cfg)
 	cmd.AddCommand(newIptablesSyncCommand())
 	cmd.AddCommand(newIptablesCleanupCommand())
+	cmd.AddCommand(newInGuestCommand())
+	cmd.AddCommand(newReadinessCheckCommand())
 	return cmd
 }
 

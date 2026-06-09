@@ -43,7 +43,7 @@ func TestListSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithHTTP(srv.URL, srv.Client())
-	resp, err := c.List()
+	resp, err := c.List(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

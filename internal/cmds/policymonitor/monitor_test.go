@@ -1,0 +1,272 @@
+//go:build linux
+
+package policymonitor
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/lunal-dev/c8s/pkg/certutil"
+)
+
+// writeConfigJSON synthesises an OCI spec config.json with the given
+// annotations and writes it under <watchDir>/<cid>/config.json.
+func writeConfigJSON(t *testing.T, watchDir, cid string, annotations map[string]string) {
+	t.Helper()
+	dir := filepath.Join(watchDir, cid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(ociSpec{Annotations: annotations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newTestMonitor wires the monitor against tempdirs + fakes.
+func newTestMonitor(t *testing.T, allowlistEntries []string) (*monitor, *fakeKiller, *threadSafeFakeLocator, string) {
+	t.Helper()
+	watchDir := t.TempDir()
+
+	allowlistDir := t.TempDir()
+	allowlistPath := filepath.Join(allowlistDir, "allowlist.json")
+	body, err := json.Marshal(bootstrapAllowlistFile{Sha256Digests: allowlistEntries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allowlistPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, _, err := loadAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatalf("loadAllowlist: %v", err)
+	}
+
+	killer := &fakeKiller{}
+	locator := &threadSafeFakeLocator{pid: 4242, ok: true}
+
+	logger, err := certutil.NewJSONLogger("debug")
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	m := &monitor{
+		cfg: &Config{
+			AllowlistPath: allowlistPath,
+			WatchDir:      watchDir,
+			CgroupRoot:    "/sys/fs/cgroup",
+			LogLevel:      "debug",
+		},
+		logger:             logger,
+		allowlist:          a,
+		killer:             killer,
+		pidLocator:         locator,
+		configReadDeadline: 200 * time.Millisecond,
+		configReadInterval: 10 * time.Millisecond,
+	}
+	return m, killer, locator, watchDir
+}
+
+// threadSafeFakeLocator is a fakePIDLocator with a mutex so the
+// concurrent inotify-event goroutines can read it without -race tripping.
+type threadSafeFakeLocator struct {
+	mu  sync.Mutex
+	pid int
+	ok  bool
+	err error
+}
+
+func (l *threadSafeFakeLocator) findInitPID(string) (int, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pid, l.ok, l.err
+}
+
+func TestHandleNewContainer_AllowedDigest(t *testing.T) {
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+
+	cid := "abcdef0123"
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam@sha256:" + digest,
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("unexpected kill calls: %+v", calls)
+	}
+}
+
+func TestHandleNewContainer_DeniedDigest(t *testing.T) {
+	allowed := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:" + allowed})
+
+	cid := "deadbeef"
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.image-name": "ghcr.io/evil/badimage@sha256:" + denied,
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	calls := killer.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 kill, got %d: %+v", len(calls), calls)
+	}
+	if calls[0].pid != 4242 {
+		t.Errorf("pid = %d, want 4242", calls[0].pid)
+	}
+	if calls[0].sig != syscall.SIGKILL {
+		t.Errorf("signal = %v, want SIGKILL", calls[0].sig)
+	}
+}
+
+func TestHandleNewContainer_NoDigestAnnotation_Denies(t *testing.T) {
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "no-anno"
+	writeConfigJSON(t, watchDir, cid, map[string]string{})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected deny+kill on missing annotation, got %d calls", len(calls))
+	}
+}
+
+func TestHandleNewContainer_SandboxSkipped(t *testing.T) {
+	// The pod sandbox (pause) container carries container-type=sandbox and
+	// no image digest. kata runs the measured baked pause for it, so
+	// policy-monitor must skip it rather than deny — otherwise every pod's
+	// sandbox gets killed and no pod can start.
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "sandbox0"
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type": "sandbox",
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("sandbox container should be skipped, got %d kill calls: %+v", len(calls), calls)
+	}
+}
+
+func TestHandleNewContainer_SandboxSkippedEvenWithUnallowlistedDigest(t *testing.T) {
+	// Safety property: a container marked as the sandbox is skipped even
+	// when it also carries a non-allowlisted image digest. That's safe
+	// because kata-agent runs the measured baked pause for any sandbox
+	// regardless of the requested image, so a host that mislabels a
+	// workload as a sandbox to dodge enforcement gains nothing — its image
+	// never runs. policy-monitor identifies the sandbox the same way kata
+	// does (isSandbox), keeping the two in lockstep.
+	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "sandbox-evil"
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type": "sandbox",
+		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("sandbox should be skipped even with a non-allowlisted digest, got %d kill calls: %+v", len(calls), calls)
+	}
+}
+
+func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+
+	cid := "late-config"
+	// Create only the directory; spawn a goroutine to drop config.json
+	// in after a short delay (mirrors the kata-agent race between mkdir
+	// and write).
+	dir := filepath.Join(watchDir, cid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		body, _ := json.Marshal(ociSpec{
+			Annotations: map[string]string{
+				"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam@sha256:" + digest,
+			},
+		})
+		_ = os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644)
+	}()
+	m.handleNewContainer(context.Background(), dir)
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected allow (no kills) after late config.json, got %+v", calls)
+	}
+}
+
+func TestPathLooksLikeContainer(t *testing.T) {
+	m, _, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join(watchDir, "abc123"), true},
+		{filepath.Join(watchDir, "shared"), true},                    // not a digest, but valid id charset; filtered later by no annotation
+		{filepath.Join(watchDir, "deep", "nested", "abc123"), false}, // not a direct child
+		{filepath.Join(watchDir, "with spaces"), false},              // disallowed character
+		{filepath.Join(watchDir, ""), false},                         // empty
+		{watchDir, false},                                            // the watch dir itself
+	} {
+		got := m.pathLooksLikeContainer(tc.path)
+		if got != tc.want {
+			t.Errorf("pathLooksLikeContainer(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestRun_DetectsCreatedContainer(t *testing.T) {
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- m.run(ctx) }()
+
+	// Give the watcher time to install.
+	time.Sleep(50 * time.Millisecond)
+
+	cid := "live-deny"
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.image-name": "ghcr.io/evil/badimage@sha256:" + denied,
+	})
+
+	// Poll for the kill (the watcher dispatches to a goroutine, so
+	// we don't have a synchronisation point; one second is generous).
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if killSeen(killer) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !killSeen(killer) {
+		t.Fatal("denied container did not trigger SIGKILL via inotify event")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run returned err: %v", err)
+	}
+}
+
+func killSeen(k *fakeKiller) bool {
+	return len(k.snapshot()) > 0
+}

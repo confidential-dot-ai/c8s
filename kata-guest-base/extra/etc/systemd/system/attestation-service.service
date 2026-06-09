@@ -1,0 +1,61 @@
+# attestation-service.service
+#
+# In-guest unit for the kata guest base image (S5 lays this file at
+# /etc/systemd/system/attestation-service.service). Names, paths, and
+# ports must match what ratls-mesh.service depends on.
+#
+# Threat model: this process runs inside the SEV-SNP kata guest. It owns
+# /dev/sev-guest (passed through by kata-qemu-snp) and exposes a
+# loopback-only HTTP API for in-guest callers (ratls-mesh). The host is
+# adversarial; loopback is inside the guest network namespace and is
+# not observable from the host.
+
+[Unit]
+Description=Confidential AI attestation service (in-guest)
+Documentation=https://github.com/lunal-dev/attestation-rs
+After=network.target
+Before=ratls-mesh.service
+# kata-qemu-snp passes /dev/sev-guest through; if it's missing the host
+# misconfigured the kata runtime and we want to fail loudly rather than
+# silently produce unverifiable evidence.
+AssertPathExists=/dev/sev-guest
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/attestation-service --config /etc/c8s/attestation-service.toml
+Restart=on-failure
+RestartSec=2s
+
+# Hardening. The service only needs read access to /dev/sev-guest and
+# network on loopback; everything else is locked down to shrink the
+# in-guest TCB attack surface.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DeviceAllow=/dev/sev-guest rw
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Listen on loopback (the binary enforces this via the bind address), but allow
+# OUTBOUND egress: /verify must fetch the per-chip VCEK + (for some product
+# lines) the cert chain from AMD KDS (kdsintf.amd.com). A loopback-only egress
+# filter here silently breaks /verify with "error sending request". The data
+# fetched is public AMD endorsement certs — no secret leaves the guest — so
+# permitting outbound is safe; the listen socket stays loopback-only.
+IPAddressAllow=any
+
+# In-guest config is rendered by cloud-init / the base image at this path.
+ReadOnlyPaths=/etc/c8s
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

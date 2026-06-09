@@ -77,12 +77,14 @@ const defaultGetCertRunAsNonRoot = true
 const discoveryPublicTLSModeCDS = "cds"
 const discoveryPublicTLSModeWebPKI = "webpki"
 
-// Default runtimeClassName values injected by kata enforcement. kata-qemu is
-// a VM-isolated (non-confidential) pod; kata-qemu-snp is a confidential VM.
-// Both names are a fixed contract with the RuntimeClasses the c8s chart
-// installs via kata-deploy (internal/helmchart/c8s/templates/kata.yaml).
-const defaultKataRuntimeClass = "kata-qemu"
-const defaultKataConfidentialRuntimeClass = "kata-qemu-snp"
+// runtimeClassName values injected by kata enforcement. kata-qemu is a
+// VM-isolated (non-confidential) pod; kata-qemu-snp is a confidential VM.
+// These are NOT configurable: the names are a fixed contract with the
+// RuntimeClasses the c8s chart installs (internal/helmchart/c8s/templates/kata.yaml)
+// AND with the kata-enforcement ValidatingAdmissionPolicy allowlist, so a custom
+// class would be rejected by the policy and have no matching shim or measurement.
+const kataRuntimeClass = "kata-qemu"
+const kataConfidentialRuntimeClass = "kata-qemu-snp"
 
 // Config tunes the injector.
 type Config struct {
@@ -118,18 +120,10 @@ type Config struct {
 	// KataEnforce turns on kata runtimeClass injection. When set, the webhook
 	// injects a runtimeClassName into every in-scope workload pod that does
 	// not already request one. Independent of get-cert injection — a pod with
-	// no confidential.ai/cw annotation is still given a runtimeClassName.
+	// no confidential.ai/cw annotation is still given a runtimeClassName. The
+	// injected classes are the fixed kataRuntimeClass / kataConfidentialRuntimeClass
+	// constants (kata-qemu / kata-qemu-snp); they are not configurable.
 	KataEnforce bool
-
-	// KataRuntimeClass is injected into in-scope workload pods that do not
-	// request a runtimeClassName. Defaults to "kata-qemu".
-	KataRuntimeClass string
-
-	// KataConfidentialRuntimeClass is injected instead of KataRuntimeClass
-	// when the pod carries the confidential.ai/cw annotation — a pod opted in
-	// to a c8s workload identity also gets a confidential VM. Defaults to
-	// "kata-qemu-snp".
-	KataConfidentialRuntimeClass string
 }
 
 // Register wires the pod mutator onto the manager's webhook server.
@@ -488,9 +482,9 @@ func kataRuntimeClassFor(pod *corev1.Pod, cfg Config) string {
 		return ""
 	}
 	if pod.Annotations[AnnotationWorkload] != "" {
-		return cfg.KataConfidentialRuntimeClass
+		return kataConfidentialRuntimeClass
 	}
-	return cfg.KataRuntimeClass
+	return kataRuntimeClass
 }
 
 // kataIncompatible reports whether pod uses a host namespace. Kata launches
@@ -701,12 +695,6 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.GetCertRunAsNonRoot == nil {
 		cfg.GetCertRunAsNonRoot = boolPtr(defaultGetCertRunAsNonRoot)
-	}
-	if cfg.KataRuntimeClass == "" {
-		cfg.KataRuntimeClass = defaultKataRuntimeClass
-	}
-	if cfg.KataConfidentialRuntimeClass == "" {
-		cfg.KataConfidentialRuntimeClass = defaultKataConfidentialRuntimeClass
 	}
 	return cfg
 }

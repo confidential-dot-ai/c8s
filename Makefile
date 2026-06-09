@@ -1,4 +1,5 @@
-.PHONY: build install build-c8s \
+.PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
+       build-nri-image-policy build-policy-monitor \
        test test-integration vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
 
@@ -36,6 +37,57 @@ build-c8s:
 		-o $(BUILD_DIR)/c8s ./cmd/c8s
 	@echo "Built $(BUILD_DIR)/c8s"
 
+# Slim variant for node-side images (nri-image-policy, ratls-mesh, get-cert):
+# omits 'operator' and 'install' subcommands so the
+# binary doesn't pull controller-runtime or the embedded helm chart.
+build-c8s-node:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -tags c8s_node \
+		-ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/c8s-node ./cmd/c8s
+	@echo "Built $(BUILD_DIR)/c8s-node"
+
+# --- Policy-monitor (in-kata-guest image-digest enforcer) ---
+# Standalone binary baked into kata-guest-base. It watches kata-agent's
+# container bundles and SIGKILLs any container whose image digest isn't
+# on the allowlist baked into the dm-verity guest rootfs. Static build
+# with the same flags as the other in-guest binaries so the kata-guest
+# osbuilder can copy it into the rootfs.
+build-policy-monitor:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/policy-monitor ./cmd/policy-monitor
+	@echo "Built $(BUILD_DIR)/policy-monitor"
+
+# --- Get-Cert ---
+
+build-get-cert:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/get-cert ./cmd/get-cert
+	@echo "Built $(BUILD_DIR)/get-cert"
+
+# --- RA-TLS Mesh ---
+
+build-ratls-mesh:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/ratls-mesh ./cmd/ratls-mesh
+	@echo "Built $(BUILD_DIR)/ratls-mesh"
+
+# --- NRI Image Policy ---
+
+build-nri-image-policy:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/nri-image-policy ./cmd/nri-image-policy
+	@echo "Built $(BUILD_DIR)/nri-image-policy"
+
 # --- Tests ---
 
 test:
@@ -49,8 +101,11 @@ test-integration:
 vet:
 	go vet ./...
 
+# gofmt over tracked Go files only — scanning `.` recurses into the gitignored
+# kata-guest-base/.build/ (fetched kata source + a root-owned rootfs tree) and
+# fails on permission-denied.
 fmt:
-	@test -z "$$(gofmt -l .)" || (echo "files need formatting:"; gofmt -l .; exit 1)
+	@test -z "$$(git ls-files '*.go' | xargs gofmt -l)" || (echo "files need formatting:"; git ls-files '*.go' | xargs gofmt -l; exit 1)
 
 lint: fmt vet
 

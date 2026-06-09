@@ -1,0 +1,52 @@
+# Configuration for the attestation API (attestation-rs `attestation-api`,
+# staged under the attestation-service role) running inside a kata guest
+# VM alongside ratls-mesh. The contract surface covers the network ports
+# inside the guest.
+#
+# Bind loopback only: the service is intra-VM IPC for ratls-mesh, never
+# reached from outside the guest. (The attestation-api schema has no
+# `localhost_only` knob — we set `bind` explicitly; the systemd unit's
+# IPAddressAllow=127.0.0.0/8 + IPAddressDeny=any is the defence-in-depth.)
+# api_keys is empty (loopback callers are trusted; the binary logs an
+# "unauthenticated" warning, which is expected here) and TLS is off.
+#
+# The threat model is: ratls-mesh and the attestation API run inside the
+# same SEV-SNP kata guest, encrypted memory boundary, no other process
+# in the guest is in the TCB. The host is adversarial but cannot read
+# loopback inside the VM's network namespace.
+
+[server]
+bind = "127.0.0.1:8400"
+
+[server.tls]
+enabled = false
+
+[auth]
+api_keys = []
+
+[certs]
+cache_max_entries = 1024
+vcek_ttl_hours = 24
+chain_ttl_hours = 168
+crl_refresh_hours = 6
+tdx_collateral_ttl_hours = 24
+# Warm the AMD cert-chain cache for this host's product line. EPYC 8004/8224P
+# (Siena) and 9004 (Genoa/Bergamo) are Zen4 and use the "genoa" KDS product
+# line; Milan (7003) would be "milan", Turin (9005) "turin". A mismatch here
+# means /verify fetches the wrong chain (404) at request time.
+prefetch_chains = ["genoa"]
+require_crl = false
+
+[token]
+enabled = false
+
+[attestation]
+enabled = true
+# Bare-metal SEV-SNP only. kata-qemu-snp doesn't run on clouds (no nested SNP),
+# so the in-guest attester only ever sees /dev/sev-guest. Leaving the cloud
+# variants (az-snp/gcp-snp) in made every /attest log "Failed to instantiate
+# TCTI" because they probe a vTPM and DMI board_vendor that don't exist here,
+# and the failing attempts raced the working bare-snp one — ratls-mesh's
+# RA-TLS leaf minting then failed on first try, failing c8s-ready.target.
+platforms = ["snp"]
+allow_debug = false

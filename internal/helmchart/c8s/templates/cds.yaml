@@ -90,6 +90,15 @@ spec:
       annotations:
         confidential.ai/trust-root-mode: "inMemory"
     spec:
+      {{- if .Values.kata.enabled }}
+      # Run the trust root inside a confidential VM. Its mesh CA and EAR signing
+      # keys live only in SEV-SNP-encrypted guest memory, and peers verify cds's
+      # RA-TLS serving cert against the guest launch measurement. Pinned directly
+      # (not via the confidential.ai/cw webhook path) because get-cert would dial
+      # cds — cds fetching a leaf from itself is a bootstrap cycle. See
+      # docs/install-flows.md ("Why CDS doesn't use cw for its runtimeClass").
+      runtimeClassName: kata-qemu-snp
+      {{- end }}
       serviceAccountName: {{ include "c8s.cdsName" . }}
       automountServiceAccountToken: false
       {{- /* CDS is a singleton trust root reached over a node-local NodePort
@@ -106,7 +115,17 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
+      {{- if .Values.kata.enabled }}
+        # In a kata-qemu-snp guest with shared_fs="none", the kubelet fsGroup
+        # chown lands on a host emptyDir the guest never mounts, so the agent
+        # creates a fresh root-owned /data inside the guest and UID 65532 cannot
+        # write whitelist.db. Run as in-guest root — safe, since the SNP VM is the
+        # trust boundary and cds is its sole workload.
+        runAsUser: 0
+        runAsNonRoot: false
+      {{- else }}
 {{ toYaml .Values.podSecurityContext | indent 8 }}
+      {{- end }}
       containers:
         - name: cds
           image: {{ include "c8s.cdsImage" . }}
@@ -114,6 +133,9 @@ spec:
           args:
             - --port={{ .Values.cds.port }}
             - --log-level={{ .Values.cds.logLevel }}
+            # c8s.attestationApiURL resolves to the in-guest loopback endpoint
+            # under kata.enabled (CDS runs inside the CVM where the baked
+            # attestation-service listens) and to the host Service otherwise.
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --whitelist-db={{ .Values.cds.whitelistDB }}
             {{- if .Values.nriImagePolicy.enabled }}
@@ -166,6 +188,21 @@ spec:
           ports:
             - name: https
               containerPort: {{ .Values.cds.port }}
+          {{- if .Values.kata.enabled }}
+          # In-guest cds serves mutual RA-TLS: the kubelet prober presents no
+          # attested client cert, so an httpGet handshake is rejected. The port
+          # only opens once cds has provisioned its RA-TLS serving cert (which
+          # needs a healthy in-guest attestation-service), so an open socket is
+          # the correct "attested and serving" signal.
+          readinessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 30
+          {{- else }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -178,6 +215,7 @@ spec:
               port: https
               scheme: HTTPS
             periodSeconds: 30
+          {{- end }}
           resources:
 {{ toYaml .Values.cds.resources | indent 12 }}
           volumeMounts:
@@ -191,8 +229,13 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+          {{- if .Values.kata.enabled }}
+            runAsUser: 0
+            runAsNonRoot: false
+          {{- else }}
             runAsNonRoot: true
             runAsUser: 65532
+          {{- end }}
             capabilities:
               drop:
                 - ALL

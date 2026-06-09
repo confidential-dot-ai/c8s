@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+# Build the c8s kata-guest-base: a kata-NATIVE guest rootfs for the
+# kata-qemu-snp runtime class.
+#
+# WHY THIS LOOKS NOTHING LIKE THE OLD steep BUILD
+# ------------------------------------------------
+# kata-qemu does measured *direct-kernel* boot — there is no IGVM and no
+# UKI on kata's path (verified against kata 3.30.0: no igvm-cfg in govmm,
+# no igvm config knob; SNP uses `-object sev-snp-guest,...,kernel-hashes=on`
+# over OVMF + a directly-loaded kernel). So kata wants three passive parts,
+# not a self-booting image:
+#
+#   kernel = <vmlinuz>                 a bare bzImage  (steep's hardened kernel)
+#   image  = <kata-rootfs.img>         a 2-partition image: p1=erofs rootfs,
+#                                      p2=dm-verity hash tree (NO superblock)
+#   kernel_verity_params = root_hash=…,salt=…,data_blocks=…,…
+#
+# kata builds the dm-verity table from kernel_verity_params at boot and
+# pins root=/dev/vda1, hash=/dev/vda2 (qemu drops nvdimm for SNP). The
+# root hash rides in the kernel cmdline, which kernel-hashes folds into
+# the SNP launch measurement → the rootfs is attested transitively.
+#
+# steep is the wrong tool for that shape (it builds UEFI/IGVM self-booting
+# disks), so we build the ROOTFS with kata's own osbuilder — which also
+# installs the version-matched kata-agent for us. We keep steep ONLY for
+# the hardened kernel (decoupled from the rootfs in kata).
+#
+# PIPELINE
+#   1. steep kernel              -> hardened vmlinuz             (kernel =)
+#   2. osbuilder rootfs (ubuntu) -> base rootfs + kata-agent
+#   3. overlay extra/            -> c8s bins + units + policy + allowlist
+#   4. osbuilder image (verity)  -> kata-rootfs.img + kernel_verity_params
+#   5. assemble output/          -> vmlinuz, kata-rootfs.img, manifest.json
+#
+# Output: ${IMAGE_DIR}/output/{vmlinuz,kata-rootfs.img,manifest.json}
+#
+# PREREQS (this CANNOT run in a user-namespaced dev container):
+#   - docker running        (osbuilder builds inside Docker; needs loop devices)
+#   - sudo                  (osbuilder partitions/loop-mounts the image)
+#   - a steep checkout at ${WORKSPACE}/steep (built on demand)
+#   - c8s binaries staged   (run scripts/fetch.sh first)
+#   - kata source at KATA_VERSION (fetched via `gh` if not already present)
+#
+# Override knobs (env): KATA_VERSION, FS_TYPE, BUILD_VARIANT, KATA_SRC,
+#   STEEP_DIR, OUTPUT_DIR, SKIP_KERNEL=1 (reuse an existing vmlinuz).
+#
+# NOTE (first-build validation): osbuilder's exact make-variable surface
+# (ROOTFS_BUILD_DEST / IMAGES_BUILD_DEST / AGENT_POLICY wiring) is pinned
+# to kata 3.30.0; if a step fails, the most likely culprit is one of the
+# clearly-marked osbuilder invocations below — they're split into discrete
+# steps so each is independently debuggable.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_DIR="$(cd "${HERE}/.." && pwd)"
+WORKSPACE="$(cd "${IMAGE_DIR}/../.." && pwd)"
+
+KATA_VERSION="${KATA_VERSION:-3.30.0}"
+# ext4, not erofs: kata 3.30.0's osbuilder only implements the dm-verity /
+# measured-rootfs path for ext4 (create_rootfs_image). Its erofs path
+# (create_erofs_rootfs_image) loop-attaches the image before creating it
+# AND never runs veritysetup — so erofs + MEASURED_ROOTFS is broken there.
+# ext4 is kata's standard measured-rootfs fs. (Caveat: mkfs.ext4 writes a
+# random UUID/timestamps, so the verity root hash isn't bit-for-bit
+# reproducible across builds yet — see docs; pin the per-build digest.)
+FS_TYPE="${FS_TYPE:-ext4}"
+BUILD_VARIANT="${BUILD_VARIANT:-c8s}"
+DISTRO="${DISTRO:-ubuntu}"
+# osbuilder's ubuntu rootfs requires the release codename. kata 3.30's
+# agent ships from the ubuntu-noble confidential rootfs, so match it.
+OS_VERSION="${OS_VERSION:-noble}"
+
+STEEP_DIR="${STEEP_DIR:-${WORKSPACE}/steep}"
+OUTPUT_DIR="${OUTPUT_DIR:-${IMAGE_DIR}/output}"
+WORK_DIR="${WORK_DIR:-${IMAGE_DIR}/.build}"
+KATA_SRC="${KATA_SRC:-${WORK_DIR}/kata-${KATA_VERSION}}"
+
+EXTRA_DIR="${IMAGE_DIR}/extra"
+# c8s's kernel config fragment, merged after steep's required + hardening
+# baseline by `steep kernel --kernel-config-fragment`. steep owns the
+# resolved-config snapshot internally now (fixed path in the steep tree,
+# auto-updated every build); the old --kernel-snapshot flag is gone, so
+# kernel/config-x86_64.snapshot in this repo is no longer a build input.
+KERNEL_FRAGMENT="${IMAGE_DIR}/kernel/container.config"
+
+log() { printf '\n=== %s ===\n' "$*"; }
+die() { echo "FATAL: $*" >&2; exit 1; }
+
+# --- Preflight ----------------------------------------------------------
+command -v docker >/dev/null 2>&1 || die "docker not found — osbuilder builds the rootfs/image inside Docker. Install docker.io and start the daemon."
+command -v sudo   >/dev/null 2>&1 || die "sudo not found — osbuilder needs root for loop devices + partitioning."
+command -v jq     >/dev/null 2>&1 || die "jq not found — needed to emit manifest.json. Install jq."
+# osbuilder reads kata's versions.yaml (rust/go toolchain pins) with yq to
+# compute the rootfs-builder Docker build-args; without it RUST_TOOLCHAIN
+# comes back empty and the rustup install fails with a cryptic
+# '--default-toolchain <...> required' error.
+command -v yq >/dev/null 2>&1 || die "yq not found — osbuilder needs it to read kata's versions.yaml. Install mikefarah yq:
+       sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq"
+
+# Guest-pull sandboxes need a pause image baked into the rootfs at
+# /pause_bundle — the kata-agent unpacks it for the sandbox (pause) container
+# rather than pulling it (that pull would be a chicken-and-egg: the sandbox is
+# what guest-pull runs inside). Without it every guest-pull pod fails sandbox
+# creation with "Pause image not present in rootfs" (src/agent/.../
+# confidential_data_hub/image.rs). We build the bundle the same way kata's
+# tools/packaging/static-build/pause-image/build-static-pause-image.sh does:
+# skopeo copy into an OCI layout, then umoci unpack into a runtime bundle.
+command -v skopeo >/dev/null 2>&1 || die "skopeo not found — needed to fetch the pause image for the guest /pause_bundle. Install: sudo apt-get install -y skopeo"
+command -v umoci  >/dev/null 2>&1 || die "umoci not found — needed to unpack the pause image into an OCI runtime bundle. Install the static binary (pinned + checksummed; it feeds the measured guest root):
+       sudo curl -fsSL -o /usr/local/bin/umoci https://github.com/opencontainers/umoci/releases/download/v0.6.0/umoci.linux.amd64 && echo 'b51c267ec394499e42c6fde47f240b7b7dba57ea49df0b5acd304378b82a3b71  /usr/local/bin/umoci' | sha256sum -c - && sudo chmod +x /usr/local/bin/umoci"
+
+# The image step (Step 4) seals the rootfs into a partitioned dm-verity
+# image. We run it on the HOST, not in a container: loop-device partition
+# scanning (losetup -P) is unreliable inside podman/docker (it fails with
+# `losetup: ... failed to set up loop device` / `p1 is not a block
+# device`). That needs these host tools — the same set kata's
+# image-builder Dockerfile installs.
+for t in "mkfs.${FS_TYPE}" veritysetup parted qemu-img; do
+    command -v "${t}" >/dev/null 2>&1 \
+        || PATH="${PATH}:/usr/sbin:/sbin" command -v "${t}" >/dev/null 2>&1 \
+        || die "${t} not found — needed to build the verity image on the host. Install: sudo apt-get install -y erofs-utils cryptsetup-bin parted gdisk e2fsprogs qemu-utils"
+done
+
+# image_builder uses `losetup -P` to partition the image. On hosts where
+# the loop module isn't auto-loaded, losetup fails with `failed to set up
+# loop device: No such file or directory`. Load it best-effort up front.
+sudo modprobe loop 2>/dev/null || true
+
+[[ -f "${KERNEL_FRAGMENT}" ]] || die "${KERNEL_FRAGMENT} missing (c8s kernel config fragment, merged after steep's required + hardening baseline) — see README."
+
+# The overlay binaries must be staged before we build the rootfs image,
+# because they end up in the dm-verity root (and thus the measurement).
+for bin in ratls-mesh policy-monitor attestation-service; do
+    [[ -x "${EXTRA_DIR}/usr/local/bin/${bin}" ]] || die "${EXTRA_DIR}/usr/local/bin/${bin} missing — run scripts/fetch.sh first."
+done
+[[ -f "${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json" ]] || die "bootstrap-allowlist.json not staged — run scripts/fetch.sh (with IMAGE_TAG or *_DIGEST env vars) first."
+[[ -f "${EXTRA_DIR}/etc/kata-opa/default-policy.rego" ]] || die "default-policy.rego missing from overlay."
+
+mkdir -p "${OUTPUT_DIR}" "${WORK_DIR}"
+
+# --- Step 1/5: hardened kernel (steep) ---------------------------------
+# We only use steep to compile the kernel; the rootfs is osbuilder's job.
+VMLINUZ_OUT="${OUTPUT_DIR}/vmlinuz"
+if [[ "${SKIP_KERNEL:-0}" == "1" && -f "${VMLINUZ_OUT}" ]]; then
+    log "Step 1/5: reusing existing kernel (SKIP_KERNEL=1): ${VMLINUZ_OUT}"
+else
+    log "Step 1/5: building hardened kernel with steep"
+    [[ -d "${STEEP_DIR}" ]] || die "steep checkout not found at ${STEEP_DIR} (set STEEP_DIR)."
+    STEEP_BIN="${STEEP_BIN:-${STEEP_DIR}/target/release/steep}"
+    if [[ ! -x "${STEEP_BIN}" ]]; then
+        echo "    building steep (cargo build --release)"
+        ( cd "${STEEP_DIR}" && cargo build --release )
+    fi
+    # steep writes output/kernel/vmlinuz relative to its own dir. steep
+    # resolves its config snapshot internally (fixed kernel/config-x86_64.snapshot
+    # in the steep tree, auto-updated each build), so we pass only the fragment —
+    # the old --kernel-snapshot flag no longer exists.
+    ( cd "${STEEP_DIR}" && "${STEEP_BIN}" kernel \
+        --kernel-config-fragment "${KERNEL_FRAGMENT}" )
+    STEEP_VMLINUZ="${STEEP_DIR}/output/kernel/vmlinuz"
+    [[ -f "${STEEP_VMLINUZ}" ]] || die "steep did not produce ${STEEP_VMLINUZ}"
+    install -m 0644 "${STEEP_VMLINUZ}" "${VMLINUZ_OUT}"
+fi
+echo "    kernel: ${VMLINUZ_OUT}"
+
+# --- Fetch kata source (for osbuilder) ---------------------------------
+OSBUILDER="${KATA_SRC}/tools/osbuilder"
+if [[ ! -d "${OSBUILDER}" ]]; then
+    log "Fetching kata-containers ${KATA_VERSION} source (osbuilder) via gh"
+    command -v gh >/dev/null 2>&1 || die "gh not found — needed to fetch the kata source tarball (the repo's git remote is SSH-gated)."
+    mkdir -p "${KATA_SRC}"
+    gh api "repos/kata-containers/kata-containers/tarball/${KATA_VERSION}" \
+        > "${WORK_DIR}/kata-src.tar.gz"
+    tar xzf "${WORK_DIR}/kata-src.tar.gz" -C "${KATA_SRC}" --strip-components=1
+    [[ -d "${OSBUILDER}" ]] || die "osbuilder not found at ${OSBUILDER} after extract — kata source layout changed?"
+fi
+echo "    osbuilder: ${OSBUILDER}"
+
+# osbuilder writes the rootfs tree and the image under paths we control,
+# so the overlay can be injected between the two phases.
+ROOTFS_BUILD_DEST="${WORK_DIR}/rootfs"
+IMAGES_BUILD_DEST="${WORK_DIR}/images"
+TARGET_ROOTFS="${ROOTFS_BUILD_DEST}/${DISTRO}_rootfs"
+# osbuilder bind-mounts GOPATH into the rootfs-builder container (it uses
+# yq there). Under sudo, GOPATH defaults to ${HOME}/go = /root/go, which
+# doesn't exist -> the container run dies with `statfs /root/go: no such
+# file or directory`. Point it at a dir under the build tree instead.
+GO_PATH_DIR="${WORK_DIR}/go"
+mkdir -p "${ROOTFS_BUILD_DEST}" "${IMAGES_BUILD_DEST}" "${GO_PATH_DIR}"
+
+# --- Step 2/5: base rootfs (osbuilder) ---------------------------------
+# AGENT_INIT=no  -> systemd-based rootfs (our services run as units).
+# AGENT_POLICY=yes -> build kata-agent WITH the OPA/regorus policy engine
+#   so the baked /etc/kata-opa/default-policy.rego is actually enforced
+#   (the load-bearing `SetPolicyRequest := false` rule). osbuilder drops
+#   its default allow-all policy here; Step 3 overlays OUR policy on top.
+# EXTRA_PKGS: the in-guest attestation-service binary is dynamically linked
+# against the TPM2-TSS runtime (libtss2-esys/-mu/-sys/-tctildr) — even on SNP,
+# where it reads /dev/sev-guest — so without these libs it fails to load with
+# "libtss2-esys.so.0: cannot open shared object file" and ratls-mesh's
+# Requires=attestation-service.service then blocks c8s-ready.target. osbuilder's
+# ubuntu rootfs_lib feeds EXTRA_PKGS to debootstrap --include. Names are the
+# ubuntu-noble (t64) package names. (packages.txt in this dir is dead config
+# from the old steep-only rootfs path — build.sh uses osbuilder, not steep, for
+# the rootfs, so it is NOT consulted; keep additions here.)
+# ca-certificates: attestation-service's background cert-cache warm-up and the
+# verifier path fetch AMD KDS / Intel PCS collateral over HTTPS and need the CA
+# bundle to validate those TLS connections (osbuilder's `required`-variant
+# rootfs ships none). The boot path (/attest) is network-free, so a missing
+# bundle would only degrade verification — but it is cheap and in `main`.
+# Only `main`-component packages are installable (osbuilder sets
+# REPO_COMPONENTS=main); universe packages (e.g. traceroute, mtr-tiny) fail the
+# rootfs build with "no installation candidate".
+KATA_EXTRA_PKGS="libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-sys1t64 libtss2-tctildr0t64 ca-certificates"
+# --- Step 1b/5: stage the CoCo guest-components ------------------------
+# confidential-data-hub (CDH), attestation-agent (AA), api-server-rest. The
+# kata-agent SPAWNS these at boot (its guest_components_procs default is
+# ApiServerRest, which implies CDH + AA) and performs in-guest image guest-pull
+# by delegating to CDH over /run/confidential-containers/cdh.sock. WITHOUT them
+# the agent's pull_image blocks on that never-created socket and EVERY workload
+# CreateContainer times out at 60s — no network, no rootfs (the original
+# broker-boot blocker). osbuilder only installs them when handed
+# COCO_GUEST_COMPONENTS_TARBALL, so we stage the version-matched binaries into
+# the extra/ overlay (Step 3 rsyncs them to /usr/local/bin, sealed into the
+# verity root). Source: kata's own confidential rootfs image — the SAME kata
+# release that provides the agent, so the agent<->CDH ttRPC versions match.
+# Override KATA_CONFIDENTIAL_IMG (or pre-stage the three binaries in
+# extra/usr/local/bin/) in a build env without kata-deploy's /opt/kata.
+GC_BIN_DIR="${EXTRA_DIR}/usr/local/bin"
+GUEST_COMPONENTS=(confidential-data-hub attestation-agent api-server-rest)
+need_gc=0
+for gc in "${GUEST_COMPONENTS[@]}"; do [[ -x "${GC_BIN_DIR}/${gc}" ]] || need_gc=1; done
+if [[ "${need_gc}" == "1" ]]; then
+    KATA_CONFIDENTIAL_IMG="${KATA_CONFIDENTIAL_IMG:-/opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image}"
+    [[ -f "${KATA_CONFIDENTIAL_IMG}" ]] || die "CoCo guest-components missing from ${GC_BIN_DIR} and KATA_CONFIDENTIAL_IMG=${KATA_CONFIDENTIAL_IMG} not found. Stage confidential-data-hub/attestation-agent/api-server-rest there, or point KATA_CONFIDENTIAL_IMG at a kata confidential rootfs image, or set COCO_GUEST_COMPONENTS_TARBALL."
+    log "Step 1b/5: staging CoCo guest-components from ${KATA_CONFIDENTIAL_IMG}"
+    gc_loop="$(sudo losetup -fP --show "${KATA_CONFIDENTIAL_IMG}")"
+    gc_mnt="$(mktemp -d)"
+    sudo mount -o ro "${gc_loop}p1" "${gc_mnt}"
+    for gc in "${GUEST_COMPONENTS[@]}"; do
+        sudo install -m 0755 "${gc_mnt}/usr/local/bin/${gc}" "${GC_BIN_DIR}/${gc}"
+        sudo chown "$(id -u):$(id -g)" "${GC_BIN_DIR}/${gc}"
+    done
+    sudo umount "${gc_mnt}"; sudo losetup -d "${gc_loop}"; rmdir "${gc_mnt}"
+else
+    log "Step 1b/5: CoCo guest-components already staged in ${GC_BIN_DIR}"
+fi
+for gc in "${GUEST_COMPONENTS[@]}"; do log "  guest-component: ${gc} ($(stat -c%s "${GC_BIN_DIR}/${gc}") bytes)"; done
+
+log "Step 2/5: building ${DISTRO} rootfs with osbuilder (kata-agent included)"
+sudo make -C "${OSBUILDER}" \
+    DISTRO="${DISTRO}" \
+    OS_VERSION="${OS_VERSION}" \
+    GOPATH="${GO_PATH_DIR}" \
+    AGENT_INIT=no \
+    AGENT_POLICY=yes \
+    USE_DOCKER=1 \
+    EXTRA_PKGS="${KATA_EXTRA_PKGS}" \
+    ROOTFS_BUILD_DEST="${ROOTFS_BUILD_DEST}" \
+    rootfs
+[[ -d "${TARGET_ROOTFS}" ]] || die "osbuilder did not produce a rootfs at ${TARGET_ROOTFS}"
+
+# --- Step 3/5: overlay the c8s layer -----------------------------------
+# Drop our binaries, systemd units, OPA policy (overwriting osbuilder's
+# allow-all), the bootstrap allowlist, tmpfiles, and the cloud-init env
+# helper into the rootfs, then enable our units offline so they come up
+# at boot. We do NOT ship a kata-agent.service in the overlay — osbuilder
+# already installed and enabled the version-matched one.
+log "Step 3/5: overlaying c8s layer into the rootfs"
+sudo rsync -a "${EXTRA_DIR}/" "${TARGET_ROOTFS}/"
+
+# Enable our units offline (creates the .wants symlinks in the rootfs).
+# systemctl --root operates on an offline tree without booting it.
+C8S_UNITS=(
+    c8s-ready.target
+    attestation-service.service
+    ratls-mesh.service
+    policy-monitor.service
+    c8s-cloudinit-env.service
+)
+# kata boots the guest with `systemd.unit=kata-containers.target` on the kernel
+# cmdline, which does NOT pull in multi-user.target. Units that are only
+# WantedBy=multi-user.target (our [Install] sections + 50-c8s.preset) therefore
+# never start, so c8s-ready.target is never reached and the kata-agent's
+# CreateContainer hook times out. `enable` below still creates the
+# multi-user.target.wants links (correct for a normal boot / debug); the extra
+# kata-containers.target.wants symlink is what actually starts them under kata.
+KATA_WANTS_DIR="${TARGET_ROOTFS}/etc/systemd/system/kata-containers.target.wants"
+sudo mkdir -p "${KATA_WANTS_DIR}"
+for unit in "${C8S_UNITS[@]}"; do
+    if [[ -f "${TARGET_ROOTFS}/etc/systemd/system/${unit}" ]]; then
+        sudo systemctl --root="${TARGET_ROOTFS}" enable "${unit}" \
+            || echo "    WARN: could not enable ${unit} offline; relying on 50-c8s.preset" >&2
+        sudo ln -sf "/etc/systemd/system/${unit}" "${KATA_WANTS_DIR}/${unit}"
+    fi
+done
+
+# --- Step 3b/5: bake the pause bundle for guest-pull -------------------
+# The kata-agent reads /pause_bundle (config.json + rootfs) to start the
+# sandbox/pause container under guest-pull; it cannot pull the pause image.
+# We drop the bundle straight into the rootfs here so it's sealed into the
+# verity root (covered by the launch measurement) in Step 4. Version is
+# pinned from kata's own versions.yaml so the pause image tracks the kata
+# release. Same skopeo+umoci flow as kata's build-static-pause-image.sh.
+PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
+PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
+[[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
+[[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
+log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER}) into the rootfs"
+rm -rf "${WORK_DIR}/pause-oci" "${WORK_DIR}/pause_bundle"
+skopeo copy "${PAUSE_REPO}:${PAUSE_VER}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
+umoci unpack --rootless --image "${WORK_DIR}/pause-oci:${PAUSE_VER}" "${WORK_DIR}/pause_bundle"
+[[ -f "${WORK_DIR}/pause_bundle/config.json" ]] || die "umoci did not produce pause_bundle/config.json"
+sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
+sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
+
+# --- Step 4/5: verity image (osbuilder) --------------------------------
+# MEASURED_ROOTFS=yes makes image_builder.sh lay out p1=rootfs / p2=hash
+# and run `veritysetup format --no-superblock` (exactly what kata's
+# dm-mod.create expects), writing the verity params to
+# root_hash_<variant>.txt.
+#
+# We deliberately do NOT set USE_DOCKER here — image_builder runs on the
+# host so its losetup -P partition scan works (it doesn't inside a
+# container). The host-tool preflight above guarantees the deps are present.
+log "Step 4/5: sealing the rootfs into a dm-verity image (on host)"
+KATA_ROOTFS_IMG="${IMAGES_BUILD_DEST}/kata-rootfs-${BUILD_VARIANT}.img"
+sudo env \
+    MEASURED_ROOTFS=yes \
+    BUILD_VARIANT="${BUILD_VARIANT}" \
+    AGENT_INIT=no \
+    "${OSBUILDER}/image-builder/image_builder.sh" \
+    -o "${KATA_ROOTFS_IMG}" \
+    -f "${FS_TYPE}" \
+    "${TARGET_ROOTFS}"
+[[ -f "${KATA_ROOTFS_IMG}" ]] || die "image_builder did not produce ${KATA_ROOTFS_IMG}"
+
+# image_builder writes the verity params next to the image it created.
+ROOT_HASH_FILE="$(dirname "${KATA_ROOTFS_IMG}")/root_hash_${BUILD_VARIANT}.txt"
+[[ -f "${ROOT_HASH_FILE}" ]] || die "verity params file ${ROOT_HASH_FILE} not produced — was MEASURED_ROOTFS honoured?"
+KERNEL_VERITY_PARAMS="$(tr -d '\n' < "${ROOT_HASH_FILE}")"
+[[ "${KERNEL_VERITY_PARAMS}" == root_hash=* ]] || die "unexpected verity params: ${KERNEL_VERITY_PARAMS}"
+
+# --- Step 5/5: assemble output -----------------------------------------
+log "Step 5/5: assembling output + manifest"
+sudo install -m 0644 "${KATA_ROOTFS_IMG}" "${OUTPUT_DIR}/kata-rootfs.img"
+sudo chown "$(id -u):$(id -g)" "${OUTPUT_DIR}/kata-rootfs.img"
+
+vmlinuz_sha="$(sha256sum "${VMLINUZ_OUT}" | awk '{print $1}')"
+image_sha="$(sha256sum "${OUTPUT_DIR}/kata-rootfs.img" | awk '{print $1}')"
+
+# The manifest carries everything the c8s side needs to (a) wire the kata
+# config (kernel/image/rootfs_type/kernel_verity_params) and (b) PREDICT
+# the SNP launch digest with sev-snp-measure (OVMF + this vmlinuz + the
+# kata-generated cmdline that embeds kernel_verity_params, at a pinned
+# vcpu count). The launch digest itself is computed downstream once the
+# exact kata cmdline is captured — see docs/kata-guest-base.md.
+jq -n \
+    --arg version "2" \
+    --arg kata_version "${KATA_VERSION}" \
+    --arg fs_type "${FS_TYPE}" \
+    --arg build_variant "${BUILD_VARIANT}" \
+    --arg kvp "${KERNEL_VERITY_PARAMS}" \
+    --arg vmlinuz_sha "${vmlinuz_sha}" \
+    --arg image_sha "${image_sha}" \
+    --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+       version: ($version|tonumber),
+       boot_model: "kata-direct-kernel",
+       kata_version: $kata_version,
+       built_at: $built_at,
+       rootfs_type: $fs_type,
+       build_variant: $build_variant,
+       kernel_verity_params: $kvp,
+       outputs: {
+         kernel:        { path: "vmlinuz",         sha256: $vmlinuz_sha },
+         rootfs_image:  { path: "kata-rootfs.img", sha256: $image_sha }
+       }
+     }' > "${OUTPUT_DIR}/manifest.json"
+
+# Plain-text sidecars so the in-cluster puller (a shell script in the
+# oras image, no jq) can read these without a JSON parser. They mirror
+# manifest.json exactly.
+printf '%s\n' "${KERNEL_VERITY_PARAMS}" > "${OUTPUT_DIR}/kernel_verity_params"
+printf '%s\n' "${FS_TYPE}" > "${OUTPUT_DIR}/rootfs_type"
+
+cat <<EOF
+
+===============================
+  kata-guest-base build complete
+  Output:        ${OUTPUT_DIR}
+  kernel:        vmlinuz          (${vmlinuz_sha})
+  rootfs image:  kata-rootfs.img  (${image_sha})
+  rootfs type:   ${FS_TYPE}
+  verity params: ${KERNEL_VERITY_PARAMS}
+  manifest:      ${OUTPUT_DIR}/manifest.json
+
+  The puller (or a manual test) points the kata-qemu-snp config at:
+    kernel               = <dir>/vmlinuz
+    image                = <dir>/kata-rootfs.img
+    rootfs_type          = ${FS_TYPE}
+    kernel_verity_params = "${KERNEL_VERITY_PARAMS}"
+===============================
+EOF

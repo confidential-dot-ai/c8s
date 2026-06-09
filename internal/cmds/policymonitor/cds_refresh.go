@@ -1,0 +1,119 @@
+//go:build linux
+
+package policymonitor
+
+// Runtime half of the hybrid image-policy allowlist.
+//
+// The baked bootstrap-allowlist.json (on the dm-verity root) is the SEED:
+// it lets the guest enforce from t=0 with no network. This loop keeps the
+// in-VM allowlist current with operator additions CDS has accepted by
+// polling CDS's `/whitelist` over RA-TLS and merging the result on top of
+// the seed. It reuses exactly the mechanism the host nri-image-policy
+// worker uses (pkg/ratls RA-TLS client pinned to cds.measurements +
+// pkg/whitelistclient), so the in-guest enforcer and the host enforcer
+// pull from the same authenticated source. See docs/kata-image-policy.md.
+//
+// Gated on a configured CDS URL: with C8S_CDS_URL unset the monitor
+// stays baked-seed-only and never opens the network.
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/lunal-dev/c8s/pkg/whitelistclient"
+)
+
+// runWhitelistRefresh builds the RA-TLS-pinned CDS whitelist client and
+// polls it on cfg.RefreshInterval, merging each response into a. It runs
+// until ctx is cancelled. Construction failures (bad measurements, RA-TLS
+// setup) disable refresh but never crash the monitor — the baked seed
+// still enforces.
+func runWhitelistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist) {
+	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
+	if err != nil {
+		logger.Error("whitelist refresh disabled: invalid C8S_CDS_MEASUREMENTS", "error", err)
+		return
+	}
+	if len(measurements) == 0 {
+		// Fail closed: with C8S_CDS_URL set but no measurements pinned, the
+		// RA-TLS handshake would accept any CDS measurement. Disable refresh
+		// rather than open that hole — the baked seed keeps enforcing.
+		logger.Error("whitelist refresh disabled: C8S_CDS_URL set but C8S_CDS_MEASUREMENTS empty (refusing to accept any CDS measurement)")
+		return
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	if err != nil {
+		logger.Error("whitelist refresh disabled: build RA-TLS client failed", "error", err)
+		return
+	}
+	client := whitelistclient.NewClientWithHTTP(cfg.CDSURL, httpClient)
+
+	// Per-call deadline so a hung CDS can't wedge this goroutine. Capped at
+	// half the refresh interval (and never above refreshCallTimeoutMax) so
+	// a stuck call always returns before the next tick fires.
+	callTimeout := cfg.RefreshInterval / 2
+	if callTimeout > refreshCallTimeoutMax {
+		callTimeout = refreshCallTimeoutMax
+	}
+
+	logger.Info("whitelist refresh enabled", "cds_url", cfg.CDSURL, "interval", cfg.RefreshInterval, "call_timeout", callTimeout)
+	ticker := time.NewTicker(cfg.RefreshInterval)
+	defer ticker.Stop()
+	for {
+		refreshOnce(ctx, logger, client, a, callTimeout)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// refreshCallTimeoutMax bounds a single CDS round-trip. The refresh loop
+// further clamps to half the configured interval so the call can never
+// outlive the next tick.
+const refreshCallTimeoutMax = 15 * time.Second
+
+// refreshOnce pulls the current CDS whitelist and merges it into a. A
+// failed pull is logged and skipped — the existing allowlist (at minimum
+// the baked seed) keeps enforcing, so a CDS outage degrades to "stale but
+// no smaller", never "open".
+func refreshOnce(ctx context.Context, logger *slog.Logger, client whitelistclient.Client, a *allowlist, callTimeout time.Duration) {
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	resp, err := client.List(callCtx)
+	if err != nil {
+		logger.Warn("whitelist refresh from CDS failed (keeping current allowlist)", "error", err)
+		return
+	}
+	pulled := make([]string, 0, len(resp.Digests))
+	for d := range resp.Digests {
+		pulled = append(pulled, d.String())
+	}
+	added := a.MergePulled(pulled)
+	if added > 0 {
+		logger.Info("whitelist refreshed from CDS", "version", resp.Version, "pulled", len(pulled), "added", added, "total", a.Size())
+	} else {
+		logger.Debug("whitelist refresh from CDS: no new digests", "version", resp.Version, "pulled", len(pulled), "total", a.Size())
+	}
+}
+
+// splitCSV trims and splits a comma-separated env value into non-empty
+// fields. "" → nil.
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

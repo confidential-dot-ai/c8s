@@ -1,6 +1,11 @@
 # Build output
 build/
 
+# Local scratch: temporary kata bring-up scripts (see .local-kata/README.md).
+# Not for source control or CI; may reference a runtime-only GHCR PAT (passed
+# via $GHCR_PAT, never stored in-tree).
+.local-kata/
+
 # Stray root-level binaries from `go build ./cmd/<name>` without -o build/
 # (Makefile targets land artifacts in build/; anything matching a cmd/
 # subdir at repo root is an accidental compile output).
@@ -31,3 +36,5 @@ coverage.txt
 # Secrets
 *.pem
 *.key
+
+kata-guest-base/.build/

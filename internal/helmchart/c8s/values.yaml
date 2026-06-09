@@ -108,6 +108,12 @@ webhook:
 ## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
 ## and JWKS are in-process too, so there is no internal RA-TLS hop.
 cds:
+  ## Pin `image.digest` for production deployments. The kata-guest-base
+  ## bootstrap allowlist binds to the cds digest that was `:main` at the
+  ## moment of the kata-guest-base build (floating tag); pinning the deployed
+  ## cds by digest decouples the deployment from `:main`'s movement. Same
+  ## pattern applies to every c8s image with a `.image.digest` field — see
+  ## docs/pitfalls.md ("Bootstrap allowlist binds to floating :main digests").
   image:
     repository: ghcr.io/lunal-dev/cds
     tag: ""
@@ -218,6 +224,13 @@ cds:
 
 ## DaemonSet running the attestation-api image from github.com/lunal-dev/attestation-rs.
 attestationApi:
+  ## Render the host-side attestation-api DaemonSet/Service. Disable on
+  ## clusters where every workload pod runs as a kata-qemu-snp CVM — the
+  ## in-guest attestation-service is baked into kata-guest-base on loopback,
+  ## so the host DaemonSet is redundant (and crashloops on bare-metal nodes
+  ## that don't attest as a TEE). c8s.attestationApiURL then resolves to the
+  ## in-guest loopback endpoint for in-CVM consumers.
+  enabled: true
   image:
     repository: ghcr.io/lunal-dev/attestation-api
     tag: ""
@@ -349,6 +362,53 @@ kata:
   ## and Kubernetes 1.30+ (ValidatingAdmissionPolicy v1).
   enforce:
     enabled: false
+  ## In-guest image: the kata-image-puller DaemonSet fetches the published
+  ## kata-guest-base artifact onto each node and points kata-runtime's
+  ## configuration-qemu-snp.toml at it (the dm-verity guest rootfs + kernel).
+  guestImage:
+    ## Set false to skip the kata-image-puller DaemonSet — e.g. for local
+    ## testing where the kata-guest-base artifact isn't published to a
+    ## registry and you place it on the node + patch the kata config by hand.
+    ## Default true: under --kata the puller fetches the published artifact.
+    enabled: true
+    repository: ghcr.io/lunal-dev
+    tag: latest
+    ## Pull the kata-guest-base oras artifact over plain HTTP (no TLS). For a
+    ## local / in-cluster registry mirror only. Never set for a real registry.
+    insecure: false
+    ## In-guest workload registry auth source. When set, the puller appends
+    ## `agent.image_registry_auth=<this>` to the kata-qemu-snp guest kernel
+    ## cmdline so the in-guest CDH can authenticate private guest-pulls.
+    ##   - kbs:///<repo>/<type>/<tag>  PRODUCTION: CDH fetches the docker
+    ##     auth.json from the Key Broker Service after the guest attests, so
+    ##     no credential is ever baked into an image.
+    ##   - file:///etc/c8s/ghcr-auth.json  TEST ONLY: a docker auth.json baked
+    ##     into the dm-verity-measured rootfs. Acceptable for local guest-pull
+    ##     testing, NOT for anything shipped.
+    ##   - ""  anonymous pulls (public images only) — the default.
+    registryAuth: ""
+    ## puller image (oras + a shell). Pinned by digest — the puller writes
+    ## into a privileged host path so a repointed tag would be code execution
+    ## on the node. The `tag` is kept for human readability; the digest is
+    ## what's actually used (see kata-image-puller.yaml). Bump in pairs:
+    ##   oras manifest fetch ghcr.io/oras-project/oras:<new-tag>
+    pullerImage:
+      repository: ghcr.io/oras-project/oras
+      tag: "v1.2.0"
+      digest: "sha256:0087224dd0decc354b5b0689068fbbc40cd5dc3dbf65fcb3868dfbd363dc790b"
+      pullPolicy: IfNotPresent
+    ## Host directory the puller writes the guest image into. kata's
+    ## configuration-qemu-snp.toml references a subpath of this dir.
+    hostPath: /var/lib/c8s/kata-images
+    ## puller resource budget. Pulling the guest image is bandwidth-bound,
+    ## not CPU-bound; a tight CPU cap keeps it from starving the kata install.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
 
 ## RA-TLS service mesh: transparent L4 proxy with hardware-attested mTLS.
 ##
