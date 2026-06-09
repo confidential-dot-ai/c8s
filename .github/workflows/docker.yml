@@ -187,3 +187,59 @@ jobs:
           fail-build: false
       - name: Inspect action SARIF report
         run: cat ${{ steps.container-scan.outputs.sarif }}
+
+  # For each component image NOT in this run's build matrix, copy the
+  # `:main` tag's manifest under `:<short-sha>`. The downstream
+  # "Kata guest base" workflow resolves every component by `:<short-sha>`
+  # (kata-guest-base/scripts/fetch.sh: `oras manifest fetch
+  # ghcr.io/lunal-dev/{cds,get-cert}:${HEAD_SHA::7}`) to pin the
+  # bootstrap allowlist into the measured rootfs. Without this job, a
+  # push that only touched one component (say cmd/c8s/**) leaves cds,
+  # get-cert, ratls-mesh, nri-image-policy with no `:<short-sha>` tag at
+  # all — and kata-guest-base 404s.
+  #
+  # Source = `:main` always: on main this is the manifest just (or
+  # previously) published for an unchanged component; on side branches
+  # this is the manifest the branch implicitly inherits for components
+  # it didn't change. `oras tag` only mutates the registry's tag index —
+  # no layer upload, no manifest rewrite — so the digest of `:<short-sha>`
+  # is identical to whatever `:main` currently points at.
+  retag-unchanged:
+    name: Retag unchanged (${{ matrix.binary }})
+    runs-on: ubuntu-latest
+    needs: [changes, images]
+    # Run when `images` either succeeded or was skipped (has_images=false
+    # means nothing was rebuilt this run, so every component needs
+    # retagging). `always()` is required so the job isn't auto-skipped
+    # when `images` was skipped.
+    if: |
+      always()
+      && github.event_name == 'push'
+      && needs.changes.result == 'success'
+      && (needs.images.result == 'success' || needs.images.result == 'skipped')
+      && needs.changes.outputs.has_retag == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.retag_matrix) }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+      - name: Retag :main -> :${{ github.sha }} (short)
+        env:
+          IMAGE: ${{ matrix.image }}
+          # github.sha is the 40-char commit SHA; metadata-action's
+          # `type=sha,prefix=` emits the 7-char prefix. Match it.
+          FULL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${FULL_SHA:0:7}"
+          echo "==> oras tag ${IMAGE}:main ${SHORT_SHA}"
+          # Idempotent: re-runs of the same commit are no-ops if the
+          # tag already points at the same manifest.
+          oras tag "${IMAGE}:main" "${SHORT_SHA}"
