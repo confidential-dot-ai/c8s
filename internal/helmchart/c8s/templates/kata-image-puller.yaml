@@ -5,7 +5,15 @@
   to use it (guest-pull enabled). Rationale, threat model, ordering vs
   kata-deploy and the single-variant decision live in
   docs/kata-guest-base.md ("Puller DaemonSet").
+
+  The in-pod `oras pull` ignores kubelet imagePullSecrets, so the puller
+  needs its own dockerconfigjson mount. It defaults to the install-time
+  imagePullSecret — same dockerconfigjson shape, and the kata-guest-base
+  artifact lives in the same registry as the c8s images — so one
+  `c8s install --image-pull-secret` covers it; set pullerAuthSecret to use a
+  different credential.
 */}}
+{{- $pullerAuthSecret := .Values.kata.guestImage.pullerAuthSecret | default .Values.imagePullSecret -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -134,7 +142,7 @@ spec:
               readOnly: true
             - name: host
               mountPath: /host
-            {{- if .Values.kata.guestImage.pullerAuthSecret }}
+            {{- if $pullerAuthSecret }}
             # oras reads ~/.docker/config.json; the container runs as root
             # (privileged), so $HOME=/root. The projected volume below renames
             # the standard dockerconfigjson key (.dockerconfigjson) to the
@@ -154,12 +162,12 @@ spec:
         - name: host
           hostPath:
             path: /
-        {{- if .Values.kata.guestImage.pullerAuthSecret }}
+        {{- if $pullerAuthSecret }}
         - name: dockercfg
           projected:
             sources:
               - secret:
-                  name: {{ .Values.kata.guestImage.pullerAuthSecret }}
+                  name: {{ $pullerAuthSecret }}
                   items:
                     - key: .dockerconfigjson
                       path: config.json

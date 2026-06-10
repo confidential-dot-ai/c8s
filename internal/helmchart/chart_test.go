@@ -3657,3 +3657,77 @@ func TestChartDefaultRendersNoPullSecretRefs(t *testing.T) {
 		t.Errorf("default render carries an imagePullSecrets block\n%s", out)
 	}
 }
+
+// pullerDockercfgSecret returns the Secret name the kata-image-puller's
+// dockercfg projected volume references, or "" when the volume is absent
+// (anonymous oras pull). Fails the test if the puller DaemonSet is missing.
+func pullerDockercfgSecret(t *testing.T, helmOut string) string {
+	t.Helper()
+	name := ""
+	found := false
+	iterateManifests(t, helmOut, func(doc []byte) bool {
+		var ds appsv1.DaemonSet
+		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
+			return false
+		}
+		found = true
+		for _, v := range ds.Spec.Template.Spec.Volumes {
+			if v.Name != "dockercfg" || v.Projected == nil {
+				continue
+			}
+			for _, s := range v.Projected.Sources {
+				if s.Secret != nil {
+					name = s.Secret.Name
+				}
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
+	}
+	return name
+}
+
+// The puller's in-pod `oras pull` ignores kubelet imagePullSecrets, so the
+// install-time pull secret must also feed its dockercfg mount — otherwise
+// `c8s install --image-pull-secret` would cover every kubelet pull but leave
+// the kata-guest-base fetch anonymous (401 against a private registry).
+func TestChartImagePullSecretFeedsKataImagePuller(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "kata.enabled=true",
+		"--set-string", "imagePullSecret=ghcr-secret")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if got := pullerDockercfgSecret(t, out); got != "ghcr-secret" {
+		t.Errorf("puller dockercfg secret = %q, want ghcr-secret", got)
+	}
+}
+
+// An explicit pullerAuthSecret wins over the imagePullSecret default — the
+// guest-base artifact may need a different credential than the c8s images.
+func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "kata.enabled=true",
+		"--set-string", "imagePullSecret=ghcr-secret",
+		"--set-string", "kata.guestImage.pullerAuthSecret=other-creds")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if got := pullerDockercfgSecret(t, out); got != "other-creds" {
+		t.Errorf("puller dockercfg secret = %q, want other-creds", got)
+	}
+}
+
+// With neither value set the pull stays anonymous: no dockercfg volume at all
+// (the supported shape once the artifacts go public).
+func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "kata.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if got := pullerDockercfgSecret(t, out); got != "" {
+		t.Errorf("puller dockercfg secret = %q, want none (anonymous pull)", got)
+	}
+}

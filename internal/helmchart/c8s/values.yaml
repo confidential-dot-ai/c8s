@@ -396,9 +396,15 @@ kata:
     ## namespace whose `.dockerconfigjson` is projected to /root/.docker/config.json
     ## inside the puller pod so the host-side `oras pull` of kata-guest-base can
     ## authenticate against a PRIVATE registry (e.g. ghcr.io/lunal-dev today).
-    ## Empty/unset = anonymous pull (correct once the artifacts go public — drop
-    ## this value and the Secret then). See docs/pitfalls.md "Private
-    ## kata-guest-base puller credentials".
+    ## Defaults to the chart-wide imagePullSecret: the in-pod oras pull ignores
+    ## kubelet imagePullSecrets, but the credential shape is the same and the
+    ## artifact lives in the same registry as the c8s images, so one
+    ## `c8s install --image-pull-secret` covers both. Set this to use a
+    ## different credential (must be type kubernetes.io/dockerconfigjson — the
+    ## projection reads the `.dockerconfigjson` key). With both unset the pull
+    ## is anonymous (correct once the artifacts go public — drop the value and
+    ## the Secret then). See docs/pitfalls.md "Private kata-guest-base puller
+    ## credentials".
     ##
     ## NOTE: this is a HOST-SIDE operator credential — NOT in the TCB / SNP
     ## launch measurement, and unrelated to `registryAuth` below (which IS in

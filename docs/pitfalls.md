@@ -118,21 +118,23 @@ the same commit. Out of scope here; tracked as a follow-up.
 The kata-image-puller fetches the `kata-guest-base` oras artifact by shelling
 out to `oras pull` **inside the puller pod** (see `files/scripts/pull-and-configure.sh`).
 This is **not** a kubelet image pull: `oras` only reads `~/.docker/config.json`
-and is oblivious to Kubernetes `imagePullSecrets`. So patching the puller
-ServiceAccount's `imagePullSecrets` — including the Secret wired in by
-`c8s install --image-pull-secret`, which is kubelet-side only — only helps
-kubelet pull the puller's **own** image; the subsequent `kata-guest-base` pull
-stays anonymous and 401s against the private `ghcr.io/lunal-dev` artifact with:
+and is oblivious to Kubernetes `imagePullSecrets` — Secret references on the
+puller ServiceAccount only help kubelet pull the puller's **own** image.
+Without a projected credential the `kata-guest-base` pull is anonymous and
+401s against the private `ghcr.io/lunal-dev` artifact with:
 
 ```
 Error response from registry: failed to resolve <tag>: GET …/manifests/<tag>: unauthorized
 ```
 
-**Mitigation:** set `kata.guestImage.pullerAuthSecret` to the name of a
-`kubernetes.io/dockerconfigjson` Secret in the release namespace. The chart
-projects its `.dockerconfigjson` key to `/root/.docker/config.json` in the
-puller pod — exactly where `oras` looks (the container runs as root under
-`privileged: true`, so `$HOME=/root`).
+**Mitigation:** the chart projects a `kubernetes.io/dockerconfigjson` Secret's
+`.dockerconfigjson` key to `/root/.docker/config.json` in the puller pod —
+exactly where `oras` looks (the container runs as root under
+`privileged: true`, so `$HOME=/root`). That Secret defaults to the
+install-time `imagePullSecret`, so a plain
+`c8s install --kata --image-pull-secret ghcr-secret` covers the oras pull
+along with every kubelet pull. Set `kata.guestImage.pullerAuthSecret` only
+when the artifact needs a different credential than the c8s images:
 
 ```sh
 kubectl create secret docker-registry ghcr-puller-creds \

@@ -279,9 +279,11 @@ render guards then require those values.
 When the c8s images live in a registry that requires authentication, create a
 kubernetes.io/dockerconfigjson Secret in the release namespace and pass
 --image-pull-secret <name>: the chart wires it into every component's
-imagePullSecrets, so pods authenticate from first start. This is the
-cluster-side (kubelet) credential; digest resolution runs locally via crane
-and uses your local docker login.
+imagePullSecrets, so pods authenticate from first start. Under --kata the
+same Secret also authenticates the kata-image-puller's in-pod oras pull of
+the kata-guest-base artifact (override: kata.guestImage.pullerAuthSecret).
+This is the cluster-side (kubelet) credential; digest resolution runs locally
+via crane and uses your local docker login.
 
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 --resolve-digests=false.`,

@@ -76,6 +76,18 @@ kubectl create secret docker-registry ghcr-secret \
 c8s install --namespace c8s-system --image-pull-secret ghcr-secret
 ```
 
+`scripts/deploy-image-pull-secret.sh` wraps the secret-creation step
+idempotently (re-run it to rotate the credential in place):
+
+```sh
+IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
+c8s install --namespace c8s-system --image-pull-secret ghcr-pull-secret
+```
+
+Pass `NAMESPACE=c8s-system` explicitly — the script defaults to `default`,
+and `imagePullSecrets` references are namespace-local, so a Secret there is
+invisible to the c8s pods.
+
 The chart appends the Secret to every component's `imagePullSecrets` —
 including components that set their own local list — so all pods authenticate
 from their first start: no Secret references to patch in afterwards, no pods
@@ -92,10 +104,13 @@ Note this is the cluster-side (kubelet) credential: `--resolve-digests` runs
 `crane` on your workstation and uses your local docker login, not this
 Secret.
 
-Two pulls this does **not** cover (see docs/pitfalls.md): the
-kata-image-puller's in-pod `oras pull` of the kata-guest-base artifact
-(`kata.guestImage.pullerAuthSecret`) and guest-side workload image pulls
-inside kata CVMs (`agent.image_registry_auth`).
+Under `--kata`, the same Secret also feeds the kata-image-puller's in-pod
+`oras pull` of the kata-guest-base artifact, which reads
+`/root/.docker/config.json` rather than kubelet pull secrets (set
+`kata.guestImage.pullerAuthSecret` if that artifact needs a different
+credential). The one pull this does **not** cover (see docs/pitfalls.md):
+guest-side workload image pulls inside kata CVMs
+(`agent.image_registry_auth`).
 
 ## Certificate path
 

@@ -89,6 +89,33 @@ make clean
 ## Install and demos
 
 - [Quickstart](docs/QUICKSTART.md) is the supported install entry point.
+
+### Local clusters pulling from a private registry
+
+While the c8s images are private, a local cluster needs a registry credential
+in place **before** the install, in this order:
+
+```sh
+# 1. Create the release namespace (the Secret must live where the pods run;
+#    `c8s install` labels it pod-security=privileged later, so pre-creating
+#    it is fine).
+kubectl create namespace c8s-system
+
+# 2. Create the pull secret in that namespace (idempotent; re-run to rotate).
+#    Defaults: SECRET_NAME=ghcr-pull-secret, REGISTRY=ghcr.io.
+IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
+
+# 3. THEN install, referencing the Secret by name.
+c8s install --namespace c8s-system --image-pull-secret ghcr-pull-secret
+```
+
+The chart wires the Secret into every component's `imagePullSecrets`
+(kubelet pulls, and under `--kata` the kata-image-puller's oras pull too), so
+all pods authenticate from first start. The order matters: the install fails
+fast if the Secret is not already in the release namespace — note the
+script's `NAMESPACE` defaults to `default`, where kubelet cannot see it from
+`c8s-system` pods. See [Quickstart — private registry
+credentials](docs/QUICKSTART.md#private-registry-credentials) for details.
 - [Demo](docs/DEMO.md) shows the self-contained chart-managed CDS path.
 - [Kata runtime](docs/kata.md) covers `c8s install --kata[-enforce]`: Kata
   Containers installation and pod-as-kata-cvm enforcement.
