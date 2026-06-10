@@ -100,22 +100,23 @@ func TestAppendInstallCRDArgsLeavesStatusMirrorEnabledWithCRDs(t *testing.T) {
 }
 
 func TestAppendKataInstallArgsDisabledIsNoOp(t *testing.T) {
-	got := appendKataInstallArgs([]string{"upgrade"}, false, false)
+	got := appendKataInstallArgs([]string{"upgrade"}, false)
 	assertArgsEqual(t, got, []string{"upgrade"})
 }
 
-func TestAppendKataInstallArgsEnabled(t *testing.T) {
-	got := appendKataInstallArgs([]string{"upgrade"}, true, false)
-	assertArgsEqual(t, got, []string{"upgrade", "--set", "kata.enabled=true"})
-}
-
-func TestAppendKataInstallArgsEnforceImpliesEnabled(t *testing.T) {
-	// --kata-enforce alone (kata=false) must still install the kata stack.
-	got := appendKataInstallArgs([]string{"upgrade"}, false, true)
+func TestAppendKataInstallArgsEnabledIsEnforcing(t *testing.T) {
+	// --kata is enforcing: alongside the kata stack it must turn off the
+	// host-side components whose function runs inside the kata-guest-base
+	// image (the chart's enforce_host_components validation rejects them left
+	// on). Enforcement itself (webhook injection + ValidatingAdmissionPolicy)
+	// is keyed on kata.enabled in the chart — no separate value.
+	got := appendKataInstallArgs([]string{"upgrade"}, true)
 	assertArgsEqual(t, got, []string{
 		"upgrade",
 		"--set", "kata.enabled=true",
-		"--set", "kata.enforce.enabled=true",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
 	})
 }
 

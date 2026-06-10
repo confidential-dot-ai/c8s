@@ -6,11 +6,26 @@
 {{- if and $tlsLB.enabled $teeProxy.enabled (eq $tlsLB.upstream.protocol "https") (eq $tlsLB.upstream.address "c8s-tee-proxy:443") (not (or $teeProxy.certProvisioning.enabled $teeProxy.tls.enabled $teeProxy.domain)) -}}
 {{- fail "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.certProvisioning.enabled (default), teeProxy.tls.enabled, or teeProxy.domain to enable the HTTPS listener" -}}
 {{- end -}}
-{{- if and .Values.kata.enforce.enabled (not .Values.kata.enabled) -}}
-{{- fail "kata.enforce.enabled=true requires kata.enabled=true: enforcement injects and validates the kata RuntimeClasses that kata.enabled installs" -}}
+{{- if and .Values.kata.enabled (ne .Values.webhook.failurePolicy "Fail") -}}
+{{- fail (printf "kata.enabled=true requires webhook.failurePolicy=Fail (got %q): kata is enforcing — the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
 {{- end -}}
-{{- if and .Values.kata.enforce.enabled (ne .Values.webhook.failurePolicy "Fail") -}}
-{{- fail (printf "kata.enforce.enabled=true requires webhook.failurePolicy=Fail (got %q): the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
+{{- /*
+  kata.enabled is enforcing: every workload runs as a kata CVM, where these
+  host-side components are replaced by their in-guest counterparts baked into
+  kata-guest-base: ratls routing runs in-VM, attestation is served by the
+  in-guest agent on loopback :8400 (see c8s.attestationApiURL), and image
+  admission is the in-guest policy-monitor fed from CDS's served whitelist.
+  Deploying the host versions alongside is at best dead weight and at worst a
+  second, unattested enforcement path — require them off explicitly.
+*/ -}}
+{{- if .Values.kata.enabled -}}
+{{- $hostSide := list -}}
+{{- if .Values.ratlsMesh.enabled -}}{{- $hostSide = append $hostSide "ratlsMesh.enabled" -}}{{- end -}}
+{{- if .Values.attestationApi.enabled -}}{{- $hostSide = append $hostSide "attestationApi.enabled" -}}{{- end -}}
+{{- if .Values.nriImagePolicy.enabled -}}{{- $hostSide = append $hostSide "nriImagePolicy.enabled" -}}{{- end -}}
+{{- with $hostSide -}}
+{{- fail (printf "VALIDATION_ERROR kind=enforce_host_components: kata.enabled=true requires %s =false. kata is enforcing — every workload runs as a kata CVM, where these host-side components are replaced by their in-guest counterparts in the kata-guest-base image (in-VM ratls routing, in-guest attestation-api on loopback, in-guest policy-monitor image admission). `c8s install --kata` sets them for you." (join ", " .)) -}}
+{{- end -}}
 {{- end -}}
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
 {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}

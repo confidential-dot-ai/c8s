@@ -37,8 +37,8 @@ normal c8s components:
   kata-deploy's install binary does **not** create RuntimeClasses (only its
   own Helm chart does), so the c8s chart renders them itself.
 
-`c8s install --kata-enforce` additionally turns on **enforcement** (see
-[Enforcement](#enforcement)).
+`c8s install --kata` is **enforcing** — installing the Kata stack and
+enforcing it are one shape, not two (see [Enforcement](#enforcement)).
 
 | RuntimeClass | Hypervisor | Confidential? |
 |---|---|---|
@@ -49,12 +49,9 @@ normal c8s components:
 ## Installing
 
 ```bash
-# Install the Kata stack only — pods opt in with runtimeClassName.
+# Install the Kata stack and enforce it (see Enforcement below).
 # Works on RKE2 too: the host distro is detected from the cluster.
 c8s install --kata
-
-# Install the Kata stack and enforce it (see Enforcement below).
-c8s install --kata-enforce
 ```
 
 The host containerd config layout the installers target — it drives both
@@ -111,8 +108,9 @@ installed by c8s and one provisioned by Ansible or booted from the
 
 ## Enforcement
 
-`--kata-enforce` turns on two cooperating pieces. It implies `--kata`:
-enforcement is meaningless without the Kata stack it injects and validates.
+`--kata` is enforcing — there is no kata-without-enforcement shape: a
+workload that can dodge the CVM boundary makes the kata stack decorative.
+Enforcement is two cooperating pieces, installed together with the stack.
 
 1. **A mutating step in the c8s operator's pod webhook.** For every workload
    pod that does not already request a `runtimeClassName`, the webhook injects
@@ -134,6 +132,36 @@ no webhook server, no TLS) is the lighter equivalent, and it is what
 `bare-metal-infra-management` already uses for its `kata-cc-mode` policy.
 It requires **Kubernetes 1.30+** (`admissionregistration.k8s.io/v1`); the
 Kata stack install itself works on 1.29+.
+
+### The component set changes under enforcement
+
+Under enforcement every workload runs as a kata CVM, and three host-side
+components are replaced by their in-guest counterparts baked into the
+kata-guest-base image:
+
+| Host component (off under enforce) | In-guest counterpart |
+|---|---|
+| `ratls-mesh` DaemonSet | in-VM ratls routing |
+| `attestation-api` DaemonSet | in-guest attestation-api on loopback `:8400` (`c8s.attestationApiURL`) |
+| `nri-image-policy` (host NRI plugin) | in-guest policy-monitor, fed from CDS's served `/whitelist` |
+
+`c8s install --kata` sets `ratlsMesh.enabled=false`,
+`attestationApi.enabled=false`, and `nriImagePolicy.enabled=false` for you;
+the chart fails the render (`kind=enforce_host_components`) if any of them is
+left enabled alongside `kata.enabled`, since the host versions would be dead
+weight at best and a second, unattested enforcement path at worst.
+CDS still serves the whitelist seed in this shape — the in-guest
+policy-monitor consumes it even though the host NRI plugin is gone.
+
+### Chart-managed mesh components pin their own RuntimeClass
+
+The release namespace is excluded from the webhook (next section), so the
+chart-managed tee-proxy and tls-lb Deployments cannot rely on injection.
+Under `kata.enabled` the chart pins `runtimeClassName: kata-qemu-snp` on them
+directly, the same pattern as CDS: their get-cert containers dial the
+in-guest attestation-api on loopback, which only exists inside an SNP guest —
+and both terminate TLS with mesh-issued keys, so their plaintext must stay
+inside the TEE boundary.
 
 ### Host-namespace pods are exempt
 
@@ -199,10 +227,11 @@ kubectl get pod kata-smoketest -o jsonpath='{.spec.runtimeClassName}{"\n"}'
 # expect: kata-qemu
 ```
 
-If the field is empty, the operator is running without `--kata-enforce`
-(verify with `kubectl get deploy c8s-operator -n c8s-system -o yaml | grep
-kata-enforce`). The mutating webhook is wired in either way; injection is
-gated on the flag.
+If the field is empty, the operator is running without its `--kata-enforce`
+flag — i.e. the release was installed without `--kata` (verify with
+`kubectl get deploy c8s-operator -n c8s-system -o yaml | grep kata-enforce`).
+The mutating webhook is wired in either way; injection is gated on the flag,
+which the chart sets whenever `kata.enabled` is.
 
 **Negative — policy rejects a pod that asks for a non-Kata `runtimeClassName`:**
 
@@ -320,22 +349,22 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   (`modprobe vhost_vsock vhost_net`) and persist via `/etc/modules-load.d/`.
   Automatic module loading by the installer is future work.
 
-- **One-shot `--kata-enforce` has a brief bootstrap window.** `c8s install
-  --kata-enforce` brings up the webhook and the policy in the same release as
-  kata-deploy, but kata-deploy takes 1–2 minutes per node to install the
-  runtime. Pods created in that window are mutated to a Kata RuntimeClass and
-  stay `Pending` (not rejected — the RuntimeClass objects exist immediately)
-  until kata-deploy finishes. On a **live** cluster, prefer two steps: run
-  `c8s install --kata`, wait for `kubectl rollout status ds/c8s-kata-deploy
-  -n c8s-system`, then `c8s install --kata-enforce`.
+- **One-shot `--kata` has a brief bootstrap window.** `c8s install --kata`
+  brings up the webhook and the policy in the same release as kata-deploy,
+  but kata-deploy takes 1–2 minutes per node to install the runtime. Pods
+  created in that window are mutated to a Kata RuntimeClass and stay
+  `Pending` (not rejected — the RuntimeClass objects exist immediately) until
+  kata-deploy finishes; nothing is lost, only delayed. On a **live** cluster,
+  schedule the install for a window where a couple of minutes of deferred pod
+  starts is acceptable.
 
 - **`failurePolicy: Fail` blast radius.** The pod webhook is `Fail` (existing
   behavior). With enforcement on, if the c8s operator is down, workload pod
   creation is blocked cluster-wide until it recovers. This is unchanged from
   the get-cert webhook today; enforcement widens what a webhook outage stops
-  from "get-cert injection" to "all workload pod creation". The chart now
-  refuses to render `kata.enforce.enabled=true` with `webhook.failurePolicy`
-  set to anything other than `Fail` — the two halves must move together.
+  from "get-cert injection" to "all workload pod creation". The chart
+  refuses to render `kata.enabled=true` with `webhook.failurePolicy` set to
+  anything other than `Fail` — the two halves must move together.
 
 - **Enforcement assumes a cluster-wide PodSecurityAdmission floor on
   workload namespaces.** The webhook and the policy both exempt pods that
@@ -344,7 +373,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   only on its own namespace (`c8s-system`); it does **not** label tenant
   namespaces. If your cluster has no PSA floor (or sets `privileged` as the
   default), any namespace user with create-pod RBAC can opt out of kata
-  enforcement by setting `hostNetwork: true`. Treat `--kata-enforce` as a
+  enforcement by setting `hostNetwork: true`. Treat `--kata` as a
   cluster-operator gate that must be paired with PSA `restricted` or
   `baseline` on workload namespaces — without it, the host-namespace
   exemption is a tenant-accessible bypass, not just an operator carve-out.
@@ -389,7 +418,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   can read the pod's memory. Only `kata-qemu-snp` (pods annotated
   `confidential.ai/cw`) is a confidential VM. "Pod-as-kata-cvm by default" is
   a posture the operator opts into with `confidential.ai/cw`, not something a
-  bare `c8s install --kata-enforce` gives every pod.
+  bare `c8s install --kata` gives every pod.
 
 ## Uninstalling
 

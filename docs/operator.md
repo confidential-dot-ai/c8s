@@ -110,13 +110,15 @@ shim onto every node) and the `kata-qemu` / `kata-clh` / `kata-qemu-snp`
 RuntimeClass objects. The host containerd config path (`k8s` vs `rke2`
 layout) is detected from the cluster's kubelet versions.
 
-`c8s install --kata-enforce` also turns on enforcement (it implies `--kata`):
+`--kata` is **enforcing** — there is no kata-without-enforcement shape:
 
 - the operator's pod webhook injects a `runtimeClassName` into workload pods
   that don't request one — `kata-qemu`, or `kata-qemu-snp` for pods annotated
   `confidential.ai/cw`;
 - a `ValidatingAdmissionPolicy` rejects workload pods that request a non-kata
-  `runtimeClassName`.
+  `runtimeClassName`;
+- the host-side ratls-mesh, attestation-api, and nri-image-policy are
+  disabled — their function runs inside the kata-guest-base VM image.
 
 Host-namespace pods and system namespaces are exempt. The Kata stack is off
 by default — a plain `c8s install` is unchanged.

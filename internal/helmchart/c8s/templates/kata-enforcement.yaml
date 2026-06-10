@@ -1,6 +1,8 @@
-{{- if and .Values.kata.enabled .Values.kata.enforce.enabled }}
+{{- if .Values.kata.enabled }}
 {{- /*
   Kata enforcement — the cluster-side half of "workload pods run as kata VMs".
+  kata.enabled is enforcing: installing the kata stack without this policy is
+  not a supported shape (a workload could silently dodge the CVM boundary).
 
   Two pieces work together:
    - the c8s operator's pod webhook (operator.yaml passes --kata-enforce)

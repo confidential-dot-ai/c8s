@@ -17,13 +17,13 @@ c8sComponents:
     enabledPath: ""
     cdsExempt: true
   - valuePath: attestationApi.image
-    enabledPath: ""
+    enabledPath: attestationApi.enabled
     cdsExempt: false
   - valuePath: ratlsMesh.image
     enabledPath: ratlsMesh.enabled
     cdsExempt: false
   - valuePath: nriImagePolicy.image
-    enabledPath: ""
+    enabledPath: nriImagePolicy.enabled
     cdsExempt: false
   - valuePath: teeProxy.image
     enabledPath: teeProxy.enabled
@@ -240,7 +240,8 @@ attestationApi:
   ## in-guest attestation-service is baked into kata-guest-base on loopback,
   ## so the host DaemonSet is redundant (and crashloops on bare-metal nodes
   ## that don't attest as a TEE). c8s.attestationApiURL then resolves to the
-  ## in-guest loopback endpoint for in-CVM consumers.
+  ## in-guest loopback endpoint for in-CVM consumers. Must be false under
+  ## kata.enabled (`c8s install --kata` sets it).
   enabled: true
   image:
     repository: ghcr.io/lunal-dev/attestation-api
@@ -308,6 +309,20 @@ attestationApi:
 ## kata-deploy runs privileged with the host root filesystem mounted; the
 ## image is digest-pinned for that reason. See docs/kata.md for the design,
 ## threat model, and trade-offs.
+##
+## kata.enabled is ENFORCING — there is no kata-without-enforcement shape:
+##  - the c8s operator's pod webhook injects a runtimeClassName into
+##    workload pods that don't request one — kata-qemu, or kata-qemu-snp
+##    for pods annotated confidential.ai/cw;
+##  - a ValidatingAdmissionPolicy rejects workload pods that request a
+##    non-kata runtimeClassName.
+## Host-namespace pods (hostNetwork/hostPID/hostIPC) are exempt from both —
+## a VM cannot share the host's namespaces. System namespaces and any
+## namespace in webhook.extraExcluded are also exempt. Enforcement requires
+## Kubernetes 1.30+ (ValidatingAdmissionPolicy v1), and the host-side
+## ratls-mesh, attestation-api, and nriImagePolicy must be disabled — their
+## function runs inside the kata-guest-base image (the render fails
+## otherwise; `c8s install --kata` sets all of it).
 kata:
   enabled: false
   image:
@@ -361,18 +376,6 @@ kata:
     requests:
       cpu: 100m
       memory: 128Mi
-  ## Kata enforcement. When enforce.enabled is true:
-  ##  - the c8s operator's pod webhook injects a runtimeClassName into
-  ##    workload pods that don't request one — kata-qemu, or kata-qemu-snp
-  ##    for pods annotated confidential.ai/cw;
-  ##  - a ValidatingAdmissionPolicy rejects workload pods that request a
-  ##    non-kata runtimeClassName.
-  ## Host-namespace pods (hostNetwork/hostPID/hostIPC) are exempt from both —
-  ## a VM cannot share the host's namespaces. System namespaces and any
-  ## namespace in webhook.extraExcluded are also exempt. Requires kata.enabled
-  ## and Kubernetes 1.30+ (ValidatingAdmissionPolicy v1).
-  enforce:
-    enabled: false
   ## In-guest image: the kata-image-puller DaemonSet fetches the published
   ## kata-guest-base artifact onto each node and points kata-runtime's
   ## configuration-qemu-snp.toml at it (the dm-verity guest rootfs + kernel).
@@ -467,6 +470,9 @@ kata:
 ## any node-level NetworkPolicy/firewall posture is compatible before
 ## deploying.
 ratlsMesh:
+  ## Host-side mesh routing. Must be false under kata.enabled — the ratls
+  ## routing runs in-VM via kata-guest-base in that shape
+  ## (`c8s install --kata` sets it).
   enabled: true
 
   image:
@@ -616,6 +622,10 @@ ratlsMesh:
     monitoringNamespace: monitoring
 
 nriImagePolicy:
+  ## Host-side NRI image admission. Must be false under kata.enabled — image
+  ## admission is the in-guest policy-monitor in that shape, fed from CDS's
+  ## served whitelist (`c8s install --kata` sets it). The bootstrapWhitelist
+  ## below still feeds CDS's served seed when disabled.
   enabled: true
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
   ## Selects the containerd config layout it targets — see the subchart's

@@ -25,23 +25,21 @@ resources, `internal/helmchart/c8s/templates/`.
 
 ---
 
-## The three modes
+## The two modes
 
-`c8s install` runs `helm upgrade --install` against the embedded chart. A
-small set of flags select a **mode**, which is a fixed set of `--set` choices.
+`c8s install` runs `helm upgrade --install` against the embedded chart. One
+flag selects a **mode**, which is a fixed set of `--set` choices.
 
 | Mode | Flag | One-liner |
 |---|---|---|
 | **base** | *(none)* | Normal Kubernetes. No kata, no per-pod confidentiality. Host-side mesh + attestation + image policy. The dev/baseline shape. |
-| **kata** | `--kata` | Installs the kata runtime + RuntimeClasses. Pods run as kata VMs only if they opt in (`runtimeClassName`); the c8s CDS pod is pinned to a confidential VM. |
-| **kata-enforce** | `--kata-enforce` (implies `--kata`) | As kata, plus the webhook *injects* a kata RuntimeClass into every in-scope workload pod and a ValidatingAdmissionPolicy *rejects* non-kata pods. The production "pod-as-CVM" shape. |
+| **kata** | `--kata` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
 
 ```mermaid
 flowchart LR
     A["c8s install"] --> B{flags}
     B -->|none| BASE["base<br/>host-side everything<br/>no confidentiality"]
-    B -->|"--kata"| KATA["kata<br/>runtime available<br/>CDS as CVM"]
-    B -->|"--kata-enforce"| ENF["kata-enforce<br/>all workloads forced<br/>into kata VMs"]
+    B -->|"--kata"| KATA["kata (enforcing)<br/>all workloads forced<br/>into kata VMs"]
 ```
 
 There is no distro flag: the host distro (`k8s` vs `rke2`), which picks the
@@ -66,35 +64,33 @@ dedicated CLI flag for these.
 "CVM" = `kata-qemu-snp` confidential VM; "in-VM" = baked into the guest image,
 not a cluster resource.
 
-| Component | base | `--kata` | `--kata-enforce` | Runs on |
-|---|:--:|:--:|:--:|---|
-| c8s operator (webhook + controllers) | ✓ | ✓ | ✓ | host (runc; always webhook-exempt) |
-| MWC `pod-injector` | ✓ | ✓ | ✓ | cluster (pre-install hook) |
-| webhook-cleanup Job | ✓ | ✓ | ✓ | host (runc; runs on uninstall) |
-| **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
-| attestation-service | ✓ host | ✓ host ³ | ✓ host ³ | host DaemonSet (also baked into guest; host plane not yet gated off) |
-| ratls-mesh | ✓ host | ✓ host ³ | ✓ host ³ | host DaemonSet (also baked into guest; host plane not yet gated off) |
-| nri-image-policy | ✓ host | ✓ host ³ | ✓ host ³ | host NRI plugin (in-VM counterpart is `policy-monitor`; host plane not yet gated off) |
-| kata-deploy DaemonSet | ✗ | ✓ | ✓ | host (privileged, hostPID/hostNetwork) |
-| kata RuntimeClasses | ✗ | ✓ | ✓ | cluster |
-| kata-image-puller | ✗ | ✓¹ | ✓¹ | host (privileged) |
-| node-taint | ✗ | ✓² | ✓² | host (kata-deploy sidecar) |
-| kata-enforcement VAP | ✗ | ✗ | ✓ | cluster |
-| RuntimeClass injection (workloads) | ✗ | ✗ | ✓ | webhook (admission time) |
-| get-cert injection (`confidential.ai/cw` pods) | ✓ | ✓ | ✓ | webhook (admission time) |
-| tee-proxy / tls-lb (bundled workloads) | ✓ | ✓ | ✓ CVM | runc; CVM under enforce |
+| Component | base | `--kata` | Runs on |
+|---|:--:|:--:|---|
+| c8s operator (webhook + controllers) | ✓ | ✓ | host (runc; always webhook-exempt) |
+| MWC `pod-injector` | ✓ | ✓ | cluster (pre-install hook) |
+| webhook-cleanup Job | ✓ | ✓ | host (runc; runs on uninstall) |
+| **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
+| attestation-service | ✓ host | ✗ (in-VM) | host DaemonSet in base; baked into the guest image under kata |
+| ratls-mesh | ✓ host | ✗ (in-VM) | host DaemonSet in base; in-VM routing under kata |
+| nri-image-policy | ✓ host | ✗ (in-VM) | host NRI plugin in base; in-guest `policy-monitor` under kata (fed from CDS's served whitelist) |
+| kata-deploy DaemonSet | ✗ | ✓ | host (privileged, hostPID/hostNetwork) |
+| kata RuntimeClasses | ✗ | ✓ | cluster |
+| kata-image-puller | ✗ | ✓¹ | host (privileged) |
+| node-taint | ✗ | ✓² | host (kata-deploy sidecar) |
+| kata-enforcement VAP | ✗ | ✓ | cluster |
+| RuntimeClass injection (workloads) | ✗ | ✓ | webhook (admission time) |
+| get-cert injection (`confidential.ai/cw` pods) | ✓ | ✓ | webhook (admission time) |
+| tee-proxy / tls-lb (bundled workloads) | ✓ | ✓ CVM | runc in base; `kata-qemu-snp` CVM under kata (pinned by the chart) |
 
-¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)  ² on by default; disable via `-f` values (`kata.nodeTaint.enabled=false`)  ³ The in-VM counterpart is baked into the guest image, but the host-plane template is **not** yet gated on `kata.enabled`, so under `--kata*` both planes currently run. Gating these on `not .Values.kata.enabled` is follow-up work; until then treat the host plane as still authoritative.
+¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)  ² on by default; disable via `-f` values (`kata.nodeTaint.enabled=false`)
 
-The intended end state: **every host-side security component
-(attestation-service, ratls-mesh, nri-image-policy) moves *inside* the
-confidential guest under kata**, where the host (adversarial) cannot tamper
-with it. As of this PR that move is not yet wired: `appendKataInstallArgs`
-(`cmd/c8s/install.go`) only sets `kata.enabled=true`, and the
-attestation-api / ratls-mesh / nri-image-policy templates do not gate on it,
-so `--kata` currently runs both the host plane and the in-guest plane. See
-the ¹ note on the matrix above. Gating those templates on `not
-.Values.kata.enabled` is tracked as follow-up work.
+Under kata, **every host-side security component (attestation-service,
+ratls-mesh, nri-image-policy) moves *inside* the confidential guest**, where
+the host (adversarial) cannot tamper with it. `c8s install --kata` sets their
+`.enabled=false`, and the chart fails the render
+(`kind=enforce_host_components`, `templates/validations.yaml`) if any is left
+enabled alongside `kata.enabled` — the host versions would be a second,
+unattested enforcement path.
 
 ---
 
@@ -112,7 +108,7 @@ the node level; they do not hide pod memory from the host.
  └─────────┘ └────────┘ └────────────┘ └───────────────────┘
 ```
 
-**kata-enforce** — the host is adversarial. Workloads and the c8s CDS run
+**kata** — the host is adversarial. Workloads and the c8s CDS run
 inside `kata-qemu-snp` CVMs whose memory is SEV-SNP-encrypted; the security
 services they rely on are *baked into the guest image* (part of the launch
 measurement), not provided by the host.
@@ -200,7 +196,7 @@ flowchart TD
     EX -->|no| CW{"has confidential.ai/cw?"}
     CW -->|yes| GC["inject get-cert<br/>(c8s-init-cert + c8s-renew-cert)"]
     CW -->|no| RC
-    GC --> RC{"--kata-enforce<br/>AND no runtimeClass<br/>AND not hostNet/PID/IPC?"}
+    GC --> RC{"--kata<br/>AND no runtimeClass<br/>AND not hostNet/PID/IPC?"}
     RC -->|no| DONE["admit"]
     RC -->|yes| INJ["set runtimeClassName<br/>(kata-qemu-snp if cw, else kata-qemu)<br/>+ kata nodeSelector + toleration"]
     INJ --> DONE
@@ -214,8 +210,9 @@ Two independent injections, both keyed off the pod (not a CR):
 1. **get-cert** — driven by the `confidential.ai/cw=<id>` annotation, in
    **any** mode. Injects an init container (`c8s-init-cert`) that fetches a
    leaf cert from CDS, and a sidecar (`c8s-renew-cert`) that renews it.
-2. **runtimeClass** — only under `--kata-enforce`. `kata-qemu-snp` for
-   `cw`-annotated pods (confidential), `kata-qemu` otherwise.
+2. **runtimeClass** — only under `--kata` (which is enforcing).
+   `kata-qemu-snp` for `cw`-annotated pods (confidential), `kata-qemu`
+   otherwise.
 
 **Exemptions** (must stay in sync across `webhook.yaml` objectSelector and the
 `kata-enforcement.yaml` VAP binding):
@@ -314,14 +311,13 @@ a single kata-tainted node cannot strand it. kata-deploy separately runs
 # Base — normal cluster, host-side components, no confidentiality.
 c8s install
 
-# Kata available; pods opt in, CDS runs as a CVM.
+# Kata (enforcing): every workload pod becomes a kata VM, non-kata pods
+# rejected, host-side mesh/attestation/image-policy replaced by their
+# in-guest counterparts.
 c8s install --kata
 
-# Enforce: every workload pod becomes a kata VM, non-kata pods rejected.
-c8s install --kata-enforce
-
 # RKE2 host — the distro is detected from the cluster, no extra flag.
-c8s install --kata-enforce
+c8s install --kata
 
 # Single-node / local build (no registry artifact, don't starve the one node).
 # The puller + node-taint are on by default; switch them off via a values file:

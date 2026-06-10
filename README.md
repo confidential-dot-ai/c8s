@@ -117,8 +117,9 @@ script's `NAMESPACE` defaults to `default`, where kubelet cannot see it from
 `c8s-system` pods. See [Quickstart — private registry
 credentials](docs/QUICKSTART.md#private-registry-credentials) for details.
 - [Demo](docs/DEMO.md) shows the self-contained chart-managed CDS path.
-- [Kata runtime](docs/kata.md) covers `c8s install --kata[-enforce]`: Kata
-  Containers installation and pod-as-kata-cvm enforcement.
+- [Kata runtime](docs/kata.md) covers `c8s install --kata`: Kata Containers
+  installation and pod-as-kata-CVM enforcement — `--kata` is enforcing, there
+  is no kata-without-enforcement shape.
 - [Threat model](docs/THREAT_MODEL.md) documents what is enforced today and
   what chart-managed bootstrap means.
 - [Gaps](docs/GAPS.md) tracks the CDS-shaped follow-up work.

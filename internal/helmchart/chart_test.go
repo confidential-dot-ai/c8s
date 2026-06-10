@@ -2201,9 +2201,9 @@ func TestChartKataDisabledByDefault(t *testing.T) {
 }
 
 // TestChartKataEnabledRendersDeployStack: kata.enabled renders the
-// kata-deploy DaemonSet and the three RuntimeClasses, but no enforcement.
+// kata-deploy DaemonSet and the three RuntimeClasses.
 func TestChartKataEnabledRendersDeployStack(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true")
+	out, err := helmTemplateKata(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -2225,12 +2225,13 @@ func TestChartKataEnabledRendersDeployStack(t *testing.T) {
 		t.Errorf("kube-kata container must run privileged (it installs a runtime onto the host); got %+v", c.SecurityContext)
 	}
 
-	// kata.enabled on its own must not turn on enforcement.
-	if renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
-		t.Errorf("kata.enabled without kata.enforce.enabled should not render the enforcement policy")
+	// kata is enforcing: there is no kata-without-enforcement shape, so the
+	// stack and the enforcement policy must arrive together.
+	if !renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-kata-enforcement") {
+		t.Errorf("kata.enabled must render the enforcement policy — kata is enforcing")
 	}
-	if slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
-		t.Errorf("operator should not get --kata-enforce when enforcement is off")
+	if !slices.Contains(renderedOperatorArgs(t, out), "--kata-enforce=true") {
+		t.Errorf("operator must get --kata-enforce under kata.enabled — kata is enforcing")
 	}
 }
 
@@ -2245,7 +2246,7 @@ func TestChartKataDistroSelectsContainerdConfigDir(t *testing.T) {
 		{"rke2", "/var/lib/rancher/rke2/agent/etc/containerd"},
 	} {
 		t.Run(tc.distro, func(t *testing.T) {
-			out, err := helmTemplate(t, "--set", "kata.enabled=true", "--set-string", "kata.distro="+tc.distro)
+			out, err := helmTemplateKata(t, "--set-string", "kata.distro="+tc.distro)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
@@ -2258,7 +2259,7 @@ func TestChartKataDistroSelectsContainerdConfigDir(t *testing.T) {
 }
 
 func TestChartKataRejectsUnknownDistro(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true", "--set-string", "kata.distro=openshift")
+	out, err := helmTemplateKata(t, "--set-string", "kata.distro=openshift")
 	if err == nil {
 		t.Fatalf("helm template succeeded for an unknown kata.distro, want failure\n%s", out)
 	}
@@ -2270,7 +2271,7 @@ func TestChartKataRejectsUnknownDistro(t *testing.T) {
 // prep must be absent.
 func TestChartKataContainerdPrepInitContainer(t *testing.T) {
 	t.Run("rke2", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "kata.enabled=true", "--set-string", "kata.distro=rke2")
+		out, err := helmTemplateKata(t, "--set-string", "kata.distro=rke2")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -2293,7 +2294,7 @@ func TestChartKataContainerdPrepInitContainer(t *testing.T) {
 	})
 
 	t.Run("k8s", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "kata.enabled=true", "--set-string", "kata.distro=k8s")
+		out, err := helmTemplateKata(t, "--set-string", "kata.distro=k8s")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, out)
 		}
@@ -2304,11 +2305,26 @@ func TestChartKataContainerdPrepInitContainer(t *testing.T) {
 	})
 }
 
-// TestChartKataEnforceRendersPolicyAndOperatorFlag: kata.enforce.enabled
-// renders the ValidatingAdmissionPolicy + binding and flips the operator's
-// --kata-enforce flag — the two halves of enforcement must move together.
-func TestChartKataEnforceRendersPolicyAndOperatorFlag(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true", "--set", "kata.enforce.enabled=true")
+// helmTemplateKata renders the chart in the shape `c8s install --kata`
+// produces. kata is enforcing, so the host-side components whose function
+// moves into the kata-guest-base image are switched off (the chart validates
+// they are off — see TestChartKataRejectsHostSideComponents).
+func helmTemplateKata(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return helmTemplate(t, append([]string{
+		"--set", "kata.enabled=true",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+	}, args...)...)
+}
+
+// TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the
+// ValidatingAdmissionPolicy + binding and flips the operator's --kata-enforce
+// flag — the two halves of enforcement must move together, and kata is
+// enforcing by definition.
+func TestChartKataRendersPolicyAndOperatorFlag(t *testing.T) {
+	out, err := helmTemplateKata(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -2323,12 +2339,106 @@ func TestChartKataEnforceRendersPolicyAndOperatorFlag(t *testing.T) {
 	}
 }
 
-// TestChartKataEnforceRequiresEnabled: enforcement without the kata stack it
-// injects and validates is a misconfiguration — the chart must reject it.
-func TestChartKataEnforceRequiresEnabled(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enforce.enabled=true")
+// kata is enforcing: every workload is a kata CVM, where ratls routing,
+// attestation, and image admission run inside the kata-guest-base image. The
+// chart must refuse to deploy the host-side versions alongside — they would be
+// dead weight at best and a second, unattested enforcement path at worst.
+func TestChartKataRejectsHostSideComponents(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "kata.enabled=true")
 	if err == nil {
-		t.Fatalf("helm template succeeded with kata.enforce.enabled but kata.enabled=false, want failure\n%s", out)
+		t.Fatalf("helm template succeeded with kata and host-side components enabled, want failure\n%s", out)
+	}
+	msg := helmFailMessage(t, out)
+	if !strings.Contains(msg, "kind=enforce_host_components") {
+		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
+	}
+	for _, want := range []string{"ratlsMesh.enabled", "attestationApi.enabled", "nriImagePolicy.enabled"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("fail message %q should name %s", msg, want)
+		}
+	}
+}
+
+// The kata shape (what `c8s install --kata` renders) must drop the host-side
+// DaemonSets entirely — their in-guest counterparts ship in kata-guest-base.
+func TestChartKataShapeDropsHostSideComponents(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
+		t.Errorf("kata shape still renders the host attestation-api DaemonSet")
+	}
+	for _, component := range []string{"ratls-mesh", "nri-image-policy"} {
+		if strings.Contains(out, "app.kubernetes.io/name: "+component) {
+			t.Errorf("kata shape still renders %s manifests", component)
+		}
+	}
+}
+
+// Chart-managed mesh components live in the release namespace, which the
+// kata-enforcement webhook deliberately excludes — so the chart itself must
+// pin the confidential RuntimeClass on them under kata, exactly like cds.yaml.
+// kata-qemu-snp specifically: their get-cert containers dial the in-guest
+// attestation-api on loopback (c8s.attestationApiURL), which only exists
+// inside an SNP guest.
+func TestChartKataPinsRuntimeClassOnTeeProxyAndTLSLB(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
+		dep := renderedDeployment(t, out, name)
+		rc := dep.Spec.Template.Spec.RuntimeClassName
+		if rc == nil || *rc != "kata-qemu-snp" {
+			t.Errorf("%s runtimeClassName = %v, want kata-qemu-snp", name, rc)
+		}
+	}
+}
+
+// Without kata the same Deployments must carry no RuntimeClass — runc is the
+// only runtime on a plain cluster.
+func TestChartNoRuntimeClassOnTeeProxyAndTLSLBWithoutKata(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
+		dep := renderedDeployment(t, out, name)
+		if rc := dep.Spec.Template.Spec.RuntimeClassName; rc != nil {
+			t.Errorf("%s runtimeClassName = %q, want unset without kata", name, *rc)
+		}
+	}
+}
+
+// tee-proxy's --attestation-url must follow the same kata switch as everything
+// else (c8s.attestationApiURL): under kata the host attestation-api DaemonSet
+// is not deployed, so the old hardcoded Service URL would dial nothing — the
+// in-guest loopback agent serves attestation instead.
+func TestChartTeeProxyAttestationURLFollowsKata(t *testing.T) {
+	tests := []struct {
+		name string
+		kata bool
+		want string
+	}{
+		{name: "host shape", kata: false, want: "http://c8s-attestation-api.c8s-system.svc:8400"},
+		{name: "kata shape", kata: true, want: "http://127.0.0.1:8400"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			render := helmTemplate
+			if tt.kata {
+				render = helmTemplateKata
+			}
+			out, err := render(t)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			proxy := renderedDeploymentContainer(t, out, "c8s-tee-proxy", "proxy")
+			if got, ok := containerArgValue(proxy.Args, "--attestation-url"); !ok || got != tt.want {
+				t.Errorf("--attestation-url = %q (found=%t), want %q; args=%v", got, ok, tt.want, proxy.Args)
+			}
+		})
 	}
 }
 
@@ -3694,8 +3804,7 @@ func pullerDockercfgSecret(t *testing.T, helmOut string) string {
 // `c8s install --image-pull-secret` would cover every kubelet pull but leave
 // the kata-guest-base fetch anonymous (401 against a private registry).
 func TestChartImagePullSecretFeedsKataImagePuller(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "kata.enabled=true",
+	out, err := helmTemplateKata(t,
 		"--set-string", "imagePullSecret=ghcr-secret")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -3708,8 +3817,7 @@ func TestChartImagePullSecretFeedsKataImagePuller(t *testing.T) {
 // An explicit pullerAuthSecret wins over the imagePullSecret default — the
 // guest-base artifact may need a different credential than the c8s images.
 func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "kata.enabled=true",
+	out, err := helmTemplateKata(t,
 		"--set-string", "imagePullSecret=ghcr-secret",
 		"--set-string", "kata.guestImage.pullerAuthSecret=other-creds")
 	if err != nil {
@@ -3723,7 +3831,7 @@ func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
 // With neither value set the pull stays anonymous: no dockercfg volume at all
 // (the supported shape once the artifacts go public).
 func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "kata.enabled=true")
+	out, err := helmTemplateKata(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
