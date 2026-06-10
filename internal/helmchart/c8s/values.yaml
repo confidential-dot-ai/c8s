@@ -602,7 +602,8 @@ nriImagePolicy:
   enabled: true
   ## Host Kubernetes distro for the nri-image-policy installer: k8s | rke2.
   ## Selects the containerd config layout it targets — see the subchart's
-  ## values.yaml. `c8s install --distro` sets this.
+  ## values.yaml. `c8s install` sets this to the distro detected from the
+  ## cluster's kubelet versions (an install with -f values owns it instead).
   distro: k8s
   image:
     repository: ghcr.io/lunal-dev/nri-image-policy

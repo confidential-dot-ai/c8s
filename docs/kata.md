@@ -50,21 +50,22 @@ normal c8s components:
 
 ```bash
 # Install the Kata stack only — pods opt in with runtimeClassName.
+# Works on RKE2 too: the host distro is detected from the cluster.
 c8s install --kata
-
-# Install the Kata stack on an RKE2 cluster.
-c8s install --kata --distro rke2
 
 # Install the Kata stack and enforce it (see Enforcement below).
 c8s install --kata-enforce
 ```
 
-`--distro` selects the host containerd config layout the installers target —
-it drives both kata-deploy and the nri-image-policy installer:
+The host containerd config layout the installers target — it drives both
+kata-deploy and the nri-image-policy installer — is detected from the
+cluster's kubelet versions (RKE2 builds carry a `+rke2` suffix). A mixed
+cluster cannot be detected and requires explicit `kata.distro` /
+`nriImagePolicy.distro` values plus nodeSelectors via `-f`:
 
-| `--distro` | containerd config dir | Notes |
+| distro | containerd config dir | Notes |
 |---|---|---|
-| `k8s` (default) | `/etc/containerd` | Vanilla / kubeadm clusters |
+| `k8s` | `/etc/containerd` | Vanilla / kubeadm clusters |
 | `rke2` | `/var/lib/rancher/rke2/agent/etc/containerd` | RKE2 |
 
 kata-deploy auto-detects which service to restart; only the config directory

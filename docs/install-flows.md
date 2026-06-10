@@ -44,11 +44,13 @@ flowchart LR
     B -->|"--kata-enforce"| ENF["kata-enforce<br/>all workloads forced<br/>into kata VMs"]
 ```
 
-Modifier flags (only meaningful with `--kata*`):
-
-| Flag | Effect |
-|---|---|
-| `--distro k8s\|rke2` | Picks containerd config paths for kata-deploy and nri-image-policy. |
+There is no distro flag: the host distro (`k8s` vs `rke2`), which picks the
+containerd config paths for kata-deploy and nri-image-policy in every mode,
+is detected from the cluster's kubelet versions (`+rke2` build suffix →
+rke2). An install with `-f` values owns the distro instead: set
+`kata.distro` / `nriImagePolicy.distro` there if the chart default (`k8s`)
+doesn't fit — a mixed cluster cannot be detected and always needs that, plus
+nodeSelectors to partition the install.
 
 The kata-image-puller and node-taint sidecar are on by default under `--kata*`.
 A single-node / local build can switch either off, and pin the guest image
@@ -318,8 +320,8 @@ c8s install --kata
 # Enforce: every workload pod becomes a kata VM, non-kata pods rejected.
 c8s install --kata-enforce
 
-# RKE2 host.
-c8s install --kata-enforce --distro rke2
+# RKE2 host — the distro is detected from the cluster, no extra flag.
+c8s install --kata-enforce
 
 # Single-node / local build (no registry artifact, don't starve the one node).
 # The puller + node-taint are on by default; switch them off via a values file:

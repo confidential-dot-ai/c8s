@@ -41,7 +41,6 @@ var (
 
 	installKata        bool
 	installKataEnforce bool
-	installDistro      string
 	installCvmMode     string
 	installSingleNode  bool
 
@@ -52,7 +51,6 @@ var (
 // gate or an arg-builder call). Naming them once keeps the references from
 // drifting.
 const (
-	flagDistro  = "distro"
 	flagCvmMode = "cvm-mode"
 )
 
@@ -151,37 +149,38 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	return nil
 }
 
-// preflightDistro fails fast (before the helm install) when --distro disagrees
-// with the cluster's actual host distro. kata-deploy AND nri-image-policy both
-// bind containerd config paths derived from --distro (the latter installs
-// regardless of --kata), so a mismatch produces an opaque runtime failure
-// inside the on-host installer ("config doesn't have the right containerd
-// stanza") rather than anything actionable from helm.
+// clusterDistroNodes reads every node's kubeletVersion via kubectl and splits
+// the nodes into RKE2-built vs upstream-built buckets.
 //
 // Detection: RKE2's bundled kubelet stamps a "+rke2" build suffix onto
 // status.nodeInfo.kubeletVersion (e.g. v1.29.5+rke2r1); vanilla upstream
 // kubelet has no suffix. The suffix is the only reliable distro signal
 // kubectl can see without going on-host.
-//
-// It reads node KubeletVersion straight from kubectl, so it only guards the
-// default path; an operator who overrides kata.containerdConfigDir or the
-// nriImagePolicy containerd-* fields via -f is trusted to manage the layout
-// themselves (the caller skips this when -f is supplied).
-func preflightDistro(ctx context.Context, distro string) error {
+func clusterDistroNodes(ctx context.Context) (rke2, other []string, err error) {
 	out, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kubeletVersion}{"\n"}{end}`).Output()
 	if err != nil {
-		return fmt.Errorf("kubectl get nodes: %w", err)
+		return nil, nil, fmt.Errorf("kubectl get nodes: %w", err)
 	}
-	rke2Nodes, otherNodes := classifyDistroNodes(strings.Split(strings.TrimSpace(string(out)), "\n"))
-	return checkDistroMatch(distro, rke2Nodes, otherNodes)
+	rke2, other = classifyDistroNodes(strings.Split(strings.TrimSpace(string(out)), "\n"))
+	return rke2, other, nil
+}
+
+// detectDistro picks the host distro for an install, from the cluster's
+// kubelet versions.
+func detectDistro(ctx context.Context) (string, error) {
+	rke2Nodes, otherNodes, err := clusterDistroNodes(ctx)
+	if err != nil {
+		return "", err
+	}
+	return chooseDistro(rke2Nodes, otherNodes)
 }
 
 // classifyDistroNodes splits "name\tkubeletVersion" lines into RKE2-built vs
 // upstream-built buckets by the "+rke2" build-metadata suffix RKE2's kubelet
 // build carries. Lines without a tab (no kubeletVersion reported) are skipped
 // — a node Status with no kubeletVersion can't be classified either way, so
-// the preflight stays silent rather than guessing.
+// detection ignores it rather than guessing.
 func classifyDistroNodes(lines []string) (rke2, other []string) {
 	for _, l := range lines {
 		name, ver, ok := strings.Cut(l, "\t")
@@ -197,23 +196,21 @@ func classifyDistroNodes(lines []string) (rke2, other []string) {
 	return
 }
 
-// checkDistroMatch reports a distro mismatch. It is strict on both sides: a
-// single mis-matched node still breaks the install on that node, since
-// kata-deploy + nri-image-policy run on every selected node and patch a
-// distro-specific containerd path. Mixed clusters (some RKE2, some not) get
-// caught on whichever side the operator didn't pick.
-func checkDistroMatch(distro string, rke2Nodes, otherNodes []string) error {
-	switch distro {
-	case "rke2":
-		if len(otherNodes) > 0 {
-			return fmt.Errorf("--distro rke2 was selected, but %d node(s) have a non-RKE2 kubeletVersion (no +rke2 build suffix): %s. kata-deploy and nri-image-policy will patch RKE2's containerd path (/var/lib/rancher/rke2/agent/etc/containerd) on every selected node and fail on these. Re-run with --distro k8s, or restrict the install with kata.nodeSelector / nriImagePolicy.nodeSelector via -f", len(otherNodes), strings.Join(otherNodes, ", "))
-		}
-	case "k8s":
-		if len(rke2Nodes) > 0 {
-			return fmt.Errorf("--distro k8s was selected (the default), but %d node(s) have an RKE2 kubeletVersion (+rke2 build suffix): %s. RKE2 keeps containerd config under /var/lib/rancher/rke2/agent/etc/containerd, not /etc/containerd; without --distro rke2 the kata and nri-image-policy installers patch the wrong directory and fail at runtime when the expected containerd stanza is missing. Re-run with --distro rke2", len(rke2Nodes), strings.Join(rke2Nodes, ", "))
-		}
+// chooseDistro maps the node classification to a distro value: any RKE2 node
+// (and no upstream ones) selects rke2; otherwise k8s, which also covers an
+// empty or unclassifiable node list — the chart default and the only safe
+// guess. A mixed cluster has no single right answer — kata-deploy and
+// nri-image-policy patch a distro-specific containerd path on every selected
+// node — so it demands an explicit per-component choice via -f instead of
+// guessing.
+func chooseDistro(rke2Nodes, otherNodes []string) (string, error) {
+	if len(rke2Nodes) > 0 && len(otherNodes) > 0 {
+		return "", fmt.Errorf("cannot detect the host distro: the cluster mixes RKE2 nodes (%s) and non-RKE2 nodes (%s). Set kata.distro / nriImagePolicy.distro and restrict the install with kata.nodeSelector / nriImagePolicy.nodeSelector via -f", strings.Join(rke2Nodes, ", "), strings.Join(otherNodes, ", "))
 	}
-	return nil
+	if len(rke2Nodes) > 0 {
+		return "rke2", nil
+	}
+	return "k8s", nil
 }
 
 // nestedMap walks map keys and returns the map[string]any at the path.
@@ -264,8 +261,10 @@ var installCmd = &cobra.Command{
   - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
   - the ratls-mesh, nri-image-policy, tee-proxy, and tls-lb components
 
-On RKE2 (--distro rke2) the kata-deploy and nri-image-policy DaemonSets carry
-a containerd-prep initContainer that wires up the drop-in import; no node
+The host distro (k8s vs rke2) is detected from the cluster's kubelet versions;
+override kata.distro / nriImagePolicy.distro via -f for a layout detection
+cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
+containerd-prep initContainer that wires up the drop-in import; no node
 preparation is required beyond a running cluster.
 
 By default each component image tag is resolved to its registry digest (via the
@@ -310,9 +309,20 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			helmArgs = append(helmArgs, "--set", c.valuePrefix+".tag="+imageTag)
 		}
 		helmArgs = appendInstallCRDArgs(helmArgs, installCRDs)
-		helmArgs, err = appendDistroInstallArgs(helmArgs, installDistro)
-		if err != nil {
-			return err
+		// kata-deploy and nri-image-policy must bind the host's containerd
+		// layout in every install mode, so the distro is detected from the
+		// cluster's kubelet versions and plumbed; letting the chart default
+		// (k8s) stand would silently mis-target RKE2. With -f nothing is
+		// plumbed — helm gives --set precedence over -f, and the values-file
+		// owner owns the layout (kata.distro / nriImagePolicy.distro there if
+		// the chart default doesn't fit).
+		if len(installValues) == 0 {
+			distro, err := detectDistro(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
+			helmArgs = appendDistroInstallArgs(helmArgs, distro)
 		}
 		// Only emit --set when the operator passed --cvm-mode, so a value from
 		// -f (or the chart default) wins when the flag is unset; helm gives
@@ -363,17 +373,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// clears the selector so no node needs the label.
 		if len(installValues) == 0 && !installSingleNode {
 			if err := preflightCDSNode(cmd.Context(), chartPath); err != nil {
-				return err
-			}
-		}
-
-		// Fail fast when --distro disagrees with the cluster — kata-deploy and
-		// nri-image-policy both bind containerd paths from --distro, and a
-		// mismatch surfaces as an opaque on-host installer error rather than
-		// anything helm can attribute. Skipped when -f is supplied: the
-		// containerd path is overrideable, and the operator owns it in that case.
-		if len(installValues) == 0 {
-			if err := preflightDistro(cmd.Context(), installDistro); err != nil {
 				return err
 			}
 		}
@@ -482,39 +481,29 @@ func appendInstallCRDArgs(helmArgs []string, installCRDs bool) []string {
 	return append(helmArgs, "--skip-crds", "--set", "statusMirror.enabled=false")
 }
 
-// appendEnumSetArg validates value against allowed, then appends a
-// --set-string <path>=<value> for each path. Used by the enum install flags
-// (--distro, --cvm-mode) so they share one validate-then-set shape. The chart
-// re-validates, so the allowed check is a fast typo guard before shelling to
-// helm; flag names the offending flag in the error.
-func appendEnumSetArg(helmArgs []string, flag, value string, allowed, paths []string) ([]string, error) {
-	if !slices.Contains(allowed, value) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flag, strings.Join(allowed, ", "), value)
-	}
-	for _, path := range paths {
-		helmArgs = append(helmArgs, "--set-string", path+"="+value)
-	}
-	return helmArgs, nil
-}
-
-// appendDistroInstallArgs translates --distro into the per-component host-distro
-// values. It always applies: nri-image-policy installs regardless of --kata,
-// and both it and kata-deploy must bind the containerd config layout the host
-// distro uses.
-func appendDistroInstallArgs(helmArgs []string, distro string) ([]string, error) {
-	return appendEnumSetArg(helmArgs, flagDistro, distro,
-		[]string{"k8s", "rke2"},
-		[]string{"kata.distro", "nriImagePolicy.distro"})
+// appendDistroInstallArgs translates the detected host distro into the
+// per-component values. The two targets always travel together:
+// nri-image-policy installs regardless of --kata, and both it and kata-deploy
+// must bind the containerd config layout the host distro uses. No enum guard:
+// the value comes from chooseDistro, and the chart re-validates anyway.
+func appendDistroInstallArgs(helmArgs []string, distro string) []string {
+	return append(helmArgs,
+		"--set-string", "kata.distro="+distro,
+		"--set-string", "nriImagePolicy.distro="+distro,
+	)
 }
 
 // appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
 // value. managed renders a privileged attestation-api for managed-cloud
 // CVMs that gate TEE device access below the device/capability layer; baremetal
-// keeps the least-privilege securityContext.
+// keeps the least-privilege securityContext. The chart re-validates, so the
+// allowed check is a fast typo guard before shelling to helm.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
-	return appendEnumSetArg(helmArgs, flagCvmMode, cvmMode,
-		[]string{"baremetal", "managed"},
-		[]string{"attestationApi.cvmMode"})
+	allowed := []string{"baremetal", "managed"}
+	if !slices.Contains(allowed, cvmMode) {
+		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowed, ", "), cvmMode)
+	}
+	return append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode), nil
 }
 
 // appendKataInstallArgs translates the --kata / --kata-enforce flags into helm
@@ -626,7 +615,6 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
-	installCmd.Flags().StringVar(&installDistro, flagDistro, "k8s", "host Kubernetes distro: k8s (vanilla/kubeadm) or rke2 — selects containerd config paths for kata and nri-image-policy")
 	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape: baremetal (least-privilege device access) or managed (privileged attestation-service for managed-cloud CVMs that gate TEE device access)")
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses)")
 	installCmd.Flags().BoolVar(&installKataEnforce, "kata-enforce", false, "enable kata enforcement: inject runtimeClasses into workload pods and reject non-kata RuntimeClasses (implies --kata)")

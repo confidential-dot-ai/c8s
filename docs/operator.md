@@ -107,8 +107,8 @@ operator skips that controller rather than failing startup.
 the cluster: the embedded chart renders the upstream `kata-deploy` DaemonSet
 (which installs QEMU, the kata runtime, and the `containerd-shim-kata-v2`
 shim onto every node) and the `kata-qemu` / `kata-clh` / `kata-qemu-snp`
-RuntimeClass objects. `--distro` (`k8s` or `rke2`) selects the host
-containerd config path.
+RuntimeClass objects. The host containerd config path (`k8s` vs `rke2`
+layout) is detected from the cluster's kubelet versions.
 
 `c8s install --kata-enforce` also turns on enforcement (it implies `--kata`):
 
