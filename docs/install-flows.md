@@ -56,6 +56,12 @@ tag, through a `-f` values file (`kata.guestImage.enabled=false` /
 `kata.nodeTaint.enabled=false` / `kata.guestImage.tag=<tag>`) — there is no
 dedicated CLI flag for these.
 
+`--kata --debug` points the puller at the `<tag>-debug` guest image —
+identical except the baked guest policy allows host log/exec streams, so
+`kubectl logs` / `kubectl exec` work against kata pods. Container I/O becomes
+host-readable and the launch measurement differs from the locked image; dev
+only (see [`kata.md`](kata.md)).
+
 ---
 
 ## What runs where (feature matrix)

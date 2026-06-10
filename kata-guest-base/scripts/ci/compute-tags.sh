@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # CI-only: compute the GHCR image ref + tag list for the kata-guest-base oras
-# push in .github/workflows/kata-guest-base.yml. Writes `image` and `tags`
-# (comma-joined) to GITHUB_OUTPUT.
+# push in .github/workflows/kata-guest-base.yml. Writes `image`, `tags`, and
+# `debug_tags` (comma-joined) to GITHUB_OUTPUT. `debug_tags` is every tag
+# with a `-debug` suffix — the debug-policy variant (build.sh Step 5/5,
+# output-debug/) publishes under it in lockstep with the locked image, so
+# `kata.guestImage.debug=true` (`c8s install --kata --debug`) can derive the
+# debug ref from any locked tag.
 #
 # Always publish the immutable, commit-pinned short-SHA tag. Then add exactly one
 # human-friendly pointer, scoped to the ref class:
@@ -48,5 +52,7 @@ else
 fi
 
 joined=$(IFS=,; echo "${tags[*]}")
+debug_joined=$(IFS=,; echo "${tags[*]/%/-debug}")
 echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 echo "tags=${joined}" >> "$GITHUB_OUTPUT"
+echo "debug_tags=${debug_joined}" >> "$GITHUB_OUTPUT"

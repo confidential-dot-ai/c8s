@@ -3828,6 +3828,55 @@ func TestChartKataPullerAuthSecretOverridesImagePullSecret(t *testing.T) {
 	}
 }
 
+// pullerEnv returns the value of the named env var on the kata-image-puller's
+// container. Fails the test if the puller DaemonSet is missing.
+func pullerEnv(t *testing.T, helmOut, name string) string {
+	t.Helper()
+	val := ""
+	found := false
+	iterateManifests(t, helmOut, func(doc []byte) bool {
+		var ds appsv1.DaemonSet
+		if err := sigsyaml.Unmarshal(doc, &ds); err != nil || ds.Kind != "DaemonSet" || ds.Name != "c8s-kata-deploy-image-puller" {
+			return false
+		}
+		found = true
+		for _, c := range ds.Spec.Template.Spec.Containers {
+			for _, e := range c.Env {
+				if e.Name == name {
+					val = e.Value
+				}
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatalf("kata-image-puller DaemonSet not found in helm template output\n%s", helmOut)
+	}
+	return val
+}
+
+// kata.guestImage.debug must repoint the puller at the `<tag>-debug` artifact
+// — the variant whose guest policy allows host log/exec streams (published in
+// lockstep by the kata-guest-base workflow; `c8s install --kata --debug` sets
+// the value). Default off: a plain kata install pulls the locked image.
+func TestChartKataGuestImageDebugSelectsDebugTag(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if got := pullerEnv(t, out, "TAG"); got != "main" {
+		t.Errorf("default puller TAG = %q, want main (locked image)", got)
+	}
+
+	out, err = helmTemplateKata(t, "--set", "kata.guestImage.debug=true")
+	if err != nil {
+		t.Fatalf("helm template (debug): %v\n%s", err, out)
+	}
+	if got := pullerEnv(t, out, "TAG"); got != "main-debug" {
+		t.Errorf("debug puller TAG = %q, want main-debug", got)
+	}
+}
+
 // With neither value set the pull stays anonymous: no dockercfg volume at all
 // (the supported shape once the artifacts go public).
 func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {

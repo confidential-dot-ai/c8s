@@ -208,6 +208,13 @@ Operators pin the tag by setting `kata.guestImage.tag` in a values file
 see "How it's consumed in-cluster" in
 [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
+Every tag has a `-debug` sibling published from the same build whose guest
+policy allows the host log/exec stream RPCs (`kubectl logs`/`exec` work;
+container I/O becomes host-readable). `c8s install --kata --debug` selects
+it via `kata.guestImage.debug=true`; its launch measurement differs from
+the locked image, so locked-reference attestation rejects it. See "Debug
+variant" in [`kata-guest-base/README.md`](../kata-guest-base/README.md).
+
 ## Puller DaemonSet
 
 `internal/helmchart/c8s/templates/kata-image-puller.yaml`. Per node, the

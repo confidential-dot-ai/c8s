@@ -57,10 +57,10 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: kata-image-puller
       annotations:
-        # Re-run the puller when the tag or repository changes. Helm
-        # sees a different sha256 on the ConfigMap and rolls the
-        # DaemonSet.
-        checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository .Values.kata.guestImage.tag | sha256sum }}
+        # Re-run the puller when the tag (including the debug-variant
+        # suffix) or repository changes. Helm sees a different sha256 on
+        # the ConfigMap and rolls the DaemonSet.
+        checksum/config: {{ printf "%s|%s" .Values.kata.guestImage.repository (include "c8s.kataGuestImageTag" .) | sha256sum }}
     spec:
       serviceAccountName: {{ include "c8s.kataName" . }}-image-puller
       # Same node selector / tolerations as kata-deploy (templates/kata.yaml).
@@ -114,7 +114,7 @@ spec:
             - name: REGISTRY
               value: {{ .Values.kata.guestImage.repository | quote }}
             - name: TAG
-              value: {{ .Values.kata.guestImage.tag | quote }}
+              value: {{ include "c8s.kataGuestImageTag" . | quote }}
             - name: HOST_IMG_DIR
               value: "/host{{ .Values.kata.guestImage.hostPath }}"
             - name: REGISTRY_AUTH

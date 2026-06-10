@@ -29,10 +29,17 @@
 #   1. steep kernel              -> hardened vmlinuz             (kernel =)
 #   2. osbuilder rootfs (ubuntu) -> base rootfs + kata-agent
 #   3. overlay extra/            -> c8s bins + units + policy + allowlist
-#   4. osbuilder image (verity)  -> kata-rootfs.img + kernel_verity_params
-#   5. assemble output/          -> vmlinuz, kata-rootfs.img, manifest.json
+#   4. osbuilder image (verity)  -> locked image  -> output/
+#   5. debug re-seal             -> same rootfs with the host log/exec
+#                                   RPCs allowed in the kata-agent policy
+#                                   (kubectl logs/exec work) -> output-debug/
 #
-# Output: ${IMAGE_DIR}/output/{vmlinuz,kata-rootfs.img,manifest.json}
+# Steps 1-3 (the expensive parts) are shared; only the verity seal +
+# assembly runs per variant. The two variants differ in exactly one file:
+# /etc/kata-opa/default-policy.rego.
+#
+# Output: ${IMAGE_DIR}/output/        {vmlinuz,kata-rootfs.img,manifest.json,…}
+#         ${IMAGE_DIR}/output-debug/  same layout, debug-policy variant
 #
 # PREREQS (this CANNOT run in a user-namespaced dev container):
 #   - docker running        (osbuilder builds inside Docker; needs loop devices)
@@ -42,7 +49,8 @@
 #   - kata source at KATA_VERSION (fetched via `gh` if not already present)
 #
 # Override knobs (env): KATA_VERSION, FS_TYPE, BUILD_VARIANT, KATA_SRC,
-#   STEEP_DIR, OUTPUT_DIR, SKIP_KERNEL=1 (reuse an existing vmlinuz).
+#   STEEP_DIR, OUTPUT_DIR, DEBUG_OUTPUT_DIR, SKIP_KERNEL=1 (reuse an
+#   existing vmlinuz).
 #
 # NOTE (first-build validation): osbuilder's exact make-variable surface
 # (ROOTFS_BUILD_DEST / IMAGES_BUILD_DEST / AGENT_POLICY wiring) is pinned
@@ -73,6 +81,7 @@ OS_VERSION="${OS_VERSION:-noble}"
 
 STEEP_DIR="${STEEP_DIR:-${WORKSPACE}/steep}"
 OUTPUT_DIR="${OUTPUT_DIR:-${IMAGE_DIR}/output}"
+DEBUG_OUTPUT_DIR="${DEBUG_OUTPUT_DIR:-${IMAGE_DIR}/output-debug}"
 WORK_DIR="${WORK_DIR:-${IMAGE_DIR}/.build}"
 KATA_SRC="${KATA_SRC:-${WORK_DIR}/kata-${KATA_VERSION}}"
 
@@ -328,7 +337,13 @@ umoci unpack --rootless --image "${WORK_DIR}/pause-oci:${PAUSE_VER}" "${WORK_DIR
 sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
 sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 
-# --- Step 4/5: verity image (osbuilder) --------------------------------
+# --- Steps 4-5: seal each variant into a verity image ------------------
+# seal_and_assemble <variant> <outdir>: seals the CURRENT state of
+# ${TARGET_ROOTFS} into a dm-verity image and assembles the flat artifact
+# layout the puller expects (vmlinuz, kata-rootfs.img, sidecars,
+# manifest.json) into <outdir>. Called once per variant; the caller owns
+# what is in the rootfs tree at that point.
+#
 # MEASURED_ROOTFS=yes makes image_builder.sh lay out p1=rootfs / p2=hash
 # and run `veritysetup format --no-superblock` (exactly what kata's
 # dm-mod.create expects), writing the verity params to
@@ -337,82 +352,128 @@ sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 # We deliberately do NOT set USE_DOCKER here — image_builder runs on the
 # host so its losetup -P partition scan works (it doesn't inside a
 # container). The host-tool preflight above guarantees the deps are present.
-log "Step 4/5: sealing the rootfs into a dm-verity image (on host)"
-KATA_ROOTFS_IMG="${IMAGES_BUILD_DEST}/kata-rootfs-${BUILD_VARIANT}.img"
-sudo env \
-    MEASURED_ROOTFS=yes \
-    BUILD_VARIANT="${BUILD_VARIANT}" \
-    AGENT_INIT=no \
-    "${OSBUILDER}/image-builder/image_builder.sh" \
-    -o "${KATA_ROOTFS_IMG}" \
-    -f "${FS_TYPE}" \
-    "${TARGET_ROOTFS}"
-[[ -f "${KATA_ROOTFS_IMG}" ]] || die "image_builder did not produce ${KATA_ROOTFS_IMG}"
+seal_and_assemble() {
+    local variant="$1" outdir="$2"
+    local img="${IMAGES_BUILD_DEST}/kata-rootfs-${variant}.img"
+    sudo env \
+        MEASURED_ROOTFS=yes \
+        BUILD_VARIANT="${variant}" \
+        AGENT_INIT=no \
+        "${OSBUILDER}/image-builder/image_builder.sh" \
+        -o "${img}" \
+        -f "${FS_TYPE}" \
+        "${TARGET_ROOTFS}"
+    [[ -f "${img}" ]] || die "image_builder did not produce ${img}"
 
-# image_builder writes the verity params next to the image it created.
-ROOT_HASH_FILE="$(dirname "${KATA_ROOTFS_IMG}")/root_hash_${BUILD_VARIANT}.txt"
-[[ -f "${ROOT_HASH_FILE}" ]] || die "verity params file ${ROOT_HASH_FILE} not produced — was MEASURED_ROOTFS honoured?"
-KERNEL_VERITY_PARAMS="$(tr -d '\n' < "${ROOT_HASH_FILE}")"
-[[ "${KERNEL_VERITY_PARAMS}" == root_hash=* ]] || die "unexpected verity params: ${KERNEL_VERITY_PARAMS}"
+    # image_builder writes the verity params next to the image it created.
+    local hash_file
+    hash_file="$(dirname "${img}")/root_hash_${variant}.txt"
+    [[ -f "${hash_file}" ]] || die "verity params file ${hash_file} not produced — was MEASURED_ROOTFS honoured?"
+    local kvp
+    kvp="$(tr -d '\n' < "${hash_file}")"
+    [[ "${kvp}" == root_hash=* ]] || die "unexpected verity params: ${kvp}"
 
-# --- Step 5/5: assemble output -----------------------------------------
-log "Step 5/5: assembling output + manifest"
-sudo install -m 0644 "${KATA_ROOTFS_IMG}" "${OUTPUT_DIR}/kata-rootfs.img"
-sudo chown "$(id -u):$(id -g)" "${OUTPUT_DIR}/kata-rootfs.img"
+    mkdir -p "${outdir}"
+    sudo install -m 0644 "${img}" "${outdir}/kata-rootfs.img"
+    sudo chown "$(id -u):$(id -g)" "${outdir}/kata-rootfs.img"
+    # Step 1 writes the (shared) kernel straight into ${OUTPUT_DIR}; copy it
+    # for any other outdir so each artifact is self-contained.
+    [[ "${outdir}/vmlinuz" -ef "${VMLINUZ_OUT}" ]] \
+        || install -m 0644 "${VMLINUZ_OUT}" "${outdir}/vmlinuz"
 
-vmlinuz_sha="$(sha256sum "${VMLINUZ_OUT}" | awk '{print $1}')"
-image_sha="$(sha256sum "${OUTPUT_DIR}/kata-rootfs.img" | awk '{print $1}')"
+    local vmlinuz_sha image_sha
+    vmlinuz_sha="$(sha256sum "${VMLINUZ_OUT}" | awk '{print $1}')"
+    image_sha="$(sha256sum "${outdir}/kata-rootfs.img" | awk '{print $1}')"
 
-# The manifest carries everything the c8s side needs to (a) wire the kata
-# config (kernel/image/rootfs_type/kernel_verity_params) and (b) PREDICT
-# the SNP launch digest with sev-snp-measure (OVMF + this vmlinuz + the
-# kata-generated cmdline that embeds kernel_verity_params, at a pinned
-# vcpu count). The launch digest itself is computed downstream once the
-# exact kata cmdline is captured — see docs/kata-guest-base.md.
-jq -n \
-    --arg version "2" \
-    --arg kata_version "${KATA_VERSION}" \
-    --arg fs_type "${FS_TYPE}" \
-    --arg build_variant "${BUILD_VARIANT}" \
-    --arg kvp "${KERNEL_VERITY_PARAMS}" \
-    --arg vmlinuz_sha "${vmlinuz_sha}" \
-    --arg image_sha "${image_sha}" \
-    --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{
-       version: ($version|tonumber),
-       boot_model: "kata-direct-kernel",
-       kata_version: $kata_version,
-       built_at: $built_at,
-       rootfs_type: $fs_type,
-       build_variant: $build_variant,
-       kernel_verity_params: $kvp,
-       outputs: {
-         kernel:        { path: "vmlinuz",         sha256: $vmlinuz_sha },
-         rootfs_image:  { path: "kata-rootfs.img", sha256: $image_sha }
-       }
-     }' > "${OUTPUT_DIR}/manifest.json"
+    # The manifest carries everything the c8s side needs to (a) wire the kata
+    # config (kernel/image/rootfs_type/kernel_verity_params) and (b) PREDICT
+    # the SNP launch digest with sev-snp-measure (OVMF + this vmlinuz + the
+    # kata-generated cmdline that embeds kernel_verity_params, at a pinned
+    # vcpu count). The launch digest itself is computed downstream once the
+    # exact kata cmdline is captured — see docs/kata-guest-base.md.
+    jq -n \
+        --arg version "2" \
+        --arg kata_version "${KATA_VERSION}" \
+        --arg fs_type "${FS_TYPE}" \
+        --arg build_variant "${variant}" \
+        --arg kvp "${kvp}" \
+        --arg vmlinuz_sha "${vmlinuz_sha}" \
+        --arg image_sha "${image_sha}" \
+        --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+           version: ($version|tonumber),
+           boot_model: "kata-direct-kernel",
+           kata_version: $kata_version,
+           built_at: $built_at,
+           rootfs_type: $fs_type,
+           build_variant: $build_variant,
+           kernel_verity_params: $kvp,
+           outputs: {
+             kernel:        { path: "vmlinuz",         sha256: $vmlinuz_sha },
+             rootfs_image:  { path: "kata-rootfs.img", sha256: $image_sha }
+           }
+         }' > "${outdir}/manifest.json"
 
-# Plain-text sidecars so the in-cluster puller (a shell script in the
-# oras image, no jq) can read these without a JSON parser. They mirror
-# manifest.json exactly.
-printf '%s\n' "${KERNEL_VERITY_PARAMS}" > "${OUTPUT_DIR}/kernel_verity_params"
-printf '%s\n' "${FS_TYPE}" > "${OUTPUT_DIR}/rootfs_type"
+    # Plain-text sidecars so the in-cluster puller (a shell script in the
+    # oras image, no jq) can read these without a JSON parser. They mirror
+    # manifest.json exactly.
+    printf '%s\n' "${kvp}" > "${outdir}/kernel_verity_params"
+    printf '%s\n' "${FS_TYPE}" > "${outdir}/rootfs_type"
+
+    echo "    ${variant}: ${outdir}/kata-rootfs.img (${image_sha})"
+    echo "    ${variant}: ${kvp}"
+}
+
+log "Step 4/5: sealing the locked rootfs into a dm-verity image (on host)"
+seal_and_assemble "${BUILD_VARIANT}" "${OUTPUT_DIR}"
+
+# --- Step 5/5: debug variant -------------------------------------------
+# Same rootfs, one delta: the kata-agent OPA policy allows the host
+# Exec/ReadStream/WriteStream ttRPCs, so `kubectl logs` and `kubectl exec`
+# work against kata-qemu-snp pods. That is a deliberate hole in the TEE
+# boundary — container I/O becomes readable by the untrusted host — for
+# debugging only. SetPolicyRequest stays denied even here. The debug
+# image's verity root hash (and therefore its SNP launch measurement)
+# differs from the locked image, so attestation pinned to the locked
+# reference value rejects debug guests: the two cannot be confused.
+#
+# The debug policy is GENERATED from the canonical default-policy.rego
+# (single source of truth, no second copy to drift); the greps assert the
+# flips landed so a format change in the source fails the build instead of
+# silently shipping a locked-policy "debug" image.
+log "Step 5/5: sealing the DEBUG variant (host log/exec RPCs allowed)"
+DEBUG_POLICY="${WORK_DIR}/default-policy-debug.rego"
+{
+    printf '# DEBUG VARIANT — generated by build.sh from default-policy.rego.\n'
+    printf '# Host stream/exec RPCs are ALLOWED: container stdout/stderr and\n'
+    printf '# exec sessions are readable by the (untrusted) host. Never run\n'
+    printf '# production workloads on this image.\n'
+    sed -E 's/^default (ExecProcessRequest|ReadStreamRequest|WriteStreamRequest) := false$/default \1 := true/' \
+        "${EXTRA_DIR}/etc/kata-opa/default-policy.rego"
+} > "${DEBUG_POLICY}"
+for rpc in ExecProcessRequest ReadStreamRequest WriteStreamRequest; do
+    grep -q "^default ${rpc} := true$" "${DEBUG_POLICY}" \
+        || die "debug policy generation failed: ${rpc} not flipped — did default-policy.rego's rule format change?"
+done
+grep -q '^default SetPolicyRequest := false$' "${DEBUG_POLICY}" \
+    || die "debug policy generation failed: SetPolicyRequest must stay denied"
+sudo install -m 0644 "${DEBUG_POLICY}" "${TARGET_ROOTFS}/etc/kata-opa/default-policy.rego"
+seal_and_assemble "${BUILD_VARIANT}-debug" "${DEBUG_OUTPUT_DIR}"
 
 cat <<EOF
 
 ===============================
   kata-guest-base build complete
-  Output:        ${OUTPUT_DIR}
-  kernel:        vmlinuz          (${vmlinuz_sha})
-  rootfs image:  kata-rootfs.img  (${image_sha})
-  rootfs type:   ${FS_TYPE}
-  verity params: ${KERNEL_VERITY_PARAMS}
-  manifest:      ${OUTPUT_DIR}/manifest.json
+  locked: ${OUTPUT_DIR}
+  debug:  ${DEBUG_OUTPUT_DIR}   (host log/exec RPCs allowed — dev only)
+  rootfs type: ${FS_TYPE}
+  Each dir: vmlinuz, kata-rootfs.img, kernel_verity_params, rootfs_type,
+  manifest.json
 
   The puller (or a manual test) points the kata-qemu-snp config at:
     kernel               = <dir>/vmlinuz
     image                = <dir>/kata-rootfs.img
-    rootfs_type          = ${FS_TYPE}
-    kernel_verity_params = "${KERNEL_VERITY_PARAMS}"
+    rootfs_type          = <dir>/rootfs_type
+    kernel_verity_params = <dir>/kernel_verity_params
 ===============================
 EOF

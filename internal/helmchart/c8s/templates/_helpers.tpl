@@ -92,6 +92,21 @@
 {{- end -}}
 {{- end -}}
 
+{{- /*
+c8s.kataGuestImageTag — the kata-guest-base artifact tag the puller fetches.
+kata.guestImage.debug selects the `<tag>-debug` variant published alongside
+every locked tag (same build, but the baked kata-agent policy allows the host
+log/exec stream RPCs so kubectl logs/exec work — see values.yaml). The suffix
+convention is fixed by kata-guest-base/scripts/ci/compute-tags.sh.
+*/ -}}
+{{- define "c8s.kataGuestImageTag" -}}
+{{- if .Values.kata.guestImage.debug -}}
+{{- printf "%s-debug" .Values.kata.guestImage.tag -}}
+{{- else -}}
+{{- .Values.kata.guestImage.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
   kata-deploy reads the host's rendered containerd config at the literal
   in-container path /etc/containerd/config.toml and writes the runtime

@@ -8,6 +8,10 @@
 # land here, but be defensive).
 output/
 
+# Debug-variant build output (scripts/build.sh Step 5/5 — same artifact
+# layout as output/, guest policy allows host log/exec RPCs).
+output-debug/
+
 # Local-only marker dropped by fetch.sh — useful for "what version was
 # this image baked against" but not source-controlled.
 extra/usr/local/share/c8s/.kata-guest-base-baked

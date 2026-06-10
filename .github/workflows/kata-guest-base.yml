@@ -14,6 +14,13 @@ name: Kata guest base
 # Output: ghcr.io/lunal-dev/kata-guest-base:<tag> via `oras push`. Flat
 # at the org level matches every other c8s artifact
 # (ghcr.io/lunal-dev/{assam,cert-issuer,ratls-mesh,...}).
+#
+# Every build also publishes a DEBUG variant at <tag>-debug (build.sh
+# Step 5/5): the same rootfs except the baked kata-agent policy allows the
+# host log/exec stream RPCs, so `kubectl logs` / `kubectl exec` work
+# against kata-qemu-snp pods. Its launch measurement differs from the
+# locked image, so locked-reference attestation rejects it. Selected by
+# `c8s install --kata --debug` (kata.guestImage.debug=true). Dev only.
 
 on:
   # Run AFTER the Docker workflow finishes so the cds/get-cert image digests
@@ -439,5 +446,17 @@ jobs:
           # manifest.json. The puller pulls all of these (see
           # kata-image-puller.yaml).
           oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.tags }}" \
+            --artifact-type application/vnd.lunal.kata-guest.v2 \
+            ./*
+
+      - name: Push debug variant to GHCR
+        working-directory: c8s/kata-guest-base/output-debug
+        run: |
+          set -euo pipefail
+          # Same layout as the locked artifact, one delta: the guest policy
+          # allows host log/exec streams (kubectl logs / exec). Published in
+          # lockstep at <tag>-debug so kata.guestImage.debug=true can derive
+          # the ref from any locked tag (see workflow header).
+          oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.debug_tags }}" \
             --artifact-type application/vnd.lunal.kata-guest.v2 \
             ./*

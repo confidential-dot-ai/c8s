@@ -40,6 +40,7 @@ var (
 	installGetCertRunAsNonRoot  bool
 
 	installKata            bool
+	installKataDebug       bool
 	installCvmMode         string
 	installSingleNode      bool
 	installImagePullSecret string
@@ -266,6 +267,13 @@ Under --kata the install is ENFORCING: every workload pod runs as a kata VM
 attestation-api, and nri-image-policy are replaced by their in-guest
 counterparts baked into the kata-guest-base image.
 
+--debug (with --kata) selects the kata-guest-base DEBUG image variant, whose
+baked guest policy allows the host log/exec stream RPCs so 'kubectl logs' and
+'kubectl exec' work against kata pods. Container I/O then crosses the TEE
+boundary in plaintext, and the debug image's SNP launch measurement differs
+from the locked one (attestation pinned to the locked value rejects it).
+Development only.
+
 The host distro (k8s vs rke2) is detected from the cluster's kubelet versions;
 override kata.distro / nriImagePolicy.distro via -f for a layout detection
 cannot see. On RKE2 the kata-deploy and nri-image-policy DaemonSets carry a
@@ -292,6 +300,9 @@ via crane and uses your local docker login.
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 --resolve-digests=false.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateKataDebugFlags(installKata, installKataDebug); err != nil {
+			return err
+		}
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
 		}
@@ -347,7 +358,10 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 				return err
 			}
 		}
-		helmArgs = appendKataInstallArgs(helmArgs, installKata)
+		helmArgs = appendKataInstallArgs(helmArgs, installKata, installKataDebug)
+		if installKataDebug {
+			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
+		}
 		helmArgs = appendSingleNodeInstallArgs(helmArgs, installSingleNode)
 		if installImagePullSecret != "" {
 			helmArgs = append(helmArgs, "--set-string", "imagePullSecret="+installImagePullSecret)
@@ -530,6 +544,18 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, erro
 	return append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode), nil
 }
 
+// validateKataDebugFlags rejects --debug without --kata: the flag selects the
+// kata-guest-base debug image, which only exists under the kata stack, so a
+// bare --debug is meaningless and almost certainly a mistaken expectation
+// (e.g. hoping for verbose install output). Checked first in RunE, before
+// anything touches the cluster.
+func validateKataDebugFlags(kata, debug bool) error {
+	if debug && !kata {
+		return fmt.Errorf("--debug selects the kata-guest-base debug image, which only exists under --kata; add --kata or drop --debug")
+	}
+	return nil
+}
+
 // appendKataInstallArgs translates --kata into helm --set values. kata is
 // enforcing — there is no kata-without-enforcement shape: the chart renders
 // the runtime stack, the runtimeClass-injecting webhook behavior, and the
@@ -541,16 +567,25 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, erro
 // (in-VM ratls routing, in-guest attestation-api on loopback, in-guest
 // policy-monitor image admission). The chart fails the render if they are
 // left enabled alongside kata.enabled (see validations.yaml).
-func appendKataInstallArgs(helmArgs []string, kata bool) []string {
+//
+// debug selects the kata-guest-base debug image variant (--debug; the chart
+// derives the `<tag>-debug` artifact tag). RunE rejects --debug without
+// --kata before args are built; everything here still keys on kata so a
+// call-order change cannot emit a debug value for a non-kata install.
+func appendKataInstallArgs(helmArgs []string, kata, debug bool) []string {
 	if !kata {
 		return helmArgs
 	}
-	return append(helmArgs,
+	helmArgs = append(helmArgs,
 		"--set", "kata.enabled=true",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 	)
+	if debug {
+		helmArgs = append(helmArgs, "--set", "kata.guestImage.debug=true")
+	}
+	return helmArgs
 }
 
 // preflightImagePullSecret reads the Secret --image-pull-secret names (absent
@@ -691,6 +726,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
 	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape: baremetal (least-privilege device access) or managed (privileged attestation-service for managed-cloud CVMs that gate TEE device access)")
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses) and enforce it: workload pods are injected with kata RuntimeClasses and non-kata classes are rejected. Also disables the host-side ratls-mesh, attestation-api, and nri-image-policy — under kata their function runs inside the kata-guest-base VM image")
+	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (tag <tag>-debug, kata.guestImage.debug=true): its baked guest policy allows host log/exec streams so 'kubectl logs' and 'kubectl exec' work on kata pods — container I/O becomes readable by the untrusted host and the SNP launch measurement differs from the locked image. Requires --kata; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull private c8s images from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	rootCmd.AddCommand(installCmd)

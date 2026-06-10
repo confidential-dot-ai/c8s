@@ -52,7 +52,20 @@ enforcing it are one shape, not two (see [Enforcement](#enforcement)).
 # Install the Kata stack and enforce it (see Enforcement below).
 # Works on RKE2 too: the host distro is detected from the cluster.
 c8s install --kata
+
+# Dev only: use the -debug guest image so `kubectl logs` and `kubectl exec`
+# work against kata pods (host log/exec RPCs allowed in the guest policy).
+c8s install --kata --debug
 ```
+
+`--debug` switches the guest image to the `<tag>-debug` variant published in
+lockstep with every locked tag: the same build except the baked kata-agent
+policy allows the host `Exec`/`ReadStream`/`WriteStream` RPCs. Container
+stdout/stderr and exec sessions then cross the TEE boundary in plaintext —
+exactly what the locked policy exists to deny — and the debug image's SNP
+launch measurement differs from the locked one, so attestation pinned to the
+locked reference value rejects debug guests (the two cannot be confused).
+Never use it in production.
 
 The host containerd config layout the installers target — it drives both
 kata-deploy and the nri-image-policy installer — is detected from the
