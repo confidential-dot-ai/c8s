@@ -59,6 +59,44 @@ The cluster still runs without CRDs. CRDs only provide demo/status UX such as
 `kubectl get cwl`; pod injection is driven by pod annotations. In this mode the
 status-mirror controller is disabled.
 
+## Private registry credentials
+
+When the c8s images (or your mirrors of them) live in a registry that requires
+authentication, create a registry-credential Secret in the release namespace
+and pass its name at install time:
+
+```sh
+kubectl create namespace c8s-system
+kubectl create secret docker-registry ghcr-secret \
+  -n c8s-system \
+  --docker-server=ghcr.io \
+  --docker-username=<user-or-x-access-token> \
+  --docker-password="$GITHUB_TOKEN"
+
+c8s install --namespace c8s-system --image-pull-secret ghcr-secret
+```
+
+The chart appends the Secret to every component's `imagePullSecrets` —
+including components that set their own local list — so all pods authenticate
+from their first start: no Secret references to patch in afterwards, no pods
+to bounce. The install fails fast if the named Secret is missing from the
+namespace or is not a registry-credential type
+(`kubernetes.io/dockerconfigjson`). Helm-values consumers (e.g. a fleet
+HelmRelease) get the same behavior by setting `imagePullSecret`.
+
+The chart never creates or adopts the Secret itself, so it works equally with
+a kubectl-created Secret, external-secrets, or a previous manual rollout, and
+rotating the credential is a plain Secret update with no helm interaction.
+
+Note this is the cluster-side (kubelet) credential: `--resolve-digests` runs
+`crane` on your workstation and uses your local docker login, not this
+Secret.
+
+Two pulls this does **not** cover (see docs/pitfalls.md): the
+kata-image-puller's in-pod `oras pull` of the kata-guest-base artifact
+(`kata.guestImage.pullerAuthSecret`) and guest-side workload image pulls
+inside kata CVMs (`agent.image_registry_auth`).
+
 ## Certificate path
 
 The chart wires workload injection to chart-managed CDS. CDS generates its

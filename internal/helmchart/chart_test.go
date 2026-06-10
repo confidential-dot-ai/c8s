@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -3513,4 +3514,146 @@ func renderExampleTLSLBNginxConf() string {
 		lines[i] = strings.TrimRight(line, " \t")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// --- install-time image pull secret (imagePullSecret, a Secret name) ---
+
+// pullSecretNames flattens an imagePullSecrets list to the referenced names.
+func pullSecretNames(refs []corev1.LocalObjectReference) []string {
+	names := make([]string, 0, len(refs))
+	for _, r := range refs {
+		names = append(names, r.Name)
+	}
+	return names
+}
+
+// The invariant the value exists for: every pod the default chart ships can
+// authenticate its image pull from first start — either its pod spec lists the
+// install-time Secret or its ServiceAccount does (kubelet merges both). And
+// the chart must not render a Secret of its own: the named Secret pre-exists
+// (kubectl / external-secrets), and helm cannot adopt an object it does not
+// own, so rendering one would abort the install.
+func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "imagePullSecret=ghcr-secret")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	const secretName = "ghcr-secret"
+
+	if kinds := renderedKinds(t, out); kinds["Secret"] > 0 {
+		t.Errorf("imagePullSecret mode rendered %d Secret(s), want 0 (the Secret pre-exists)", kinds["Secret"])
+	}
+
+	sasWithSecret := map[string]bool{}
+	iterateManifests(t, out, func(doc []byte) bool {
+		var sa corev1.ServiceAccount
+		if err := sigsyaml.Unmarshal(doc, &sa); err != nil || sa.Kind != "ServiceAccount" {
+			return false
+		}
+		if slices.Contains(pullSecretNames(sa.ImagePullSecrets), secretName) {
+			sasWithSecret[sa.Name] = true
+		}
+		return false
+	})
+
+	type workload struct {
+		kind, name string
+		spec       corev1.PodSpec
+	}
+	var workloads []workload
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		switch obj.Kind {
+		case "Deployment", "DaemonSet", "Job":
+			workloads = append(workloads, workload{obj.Kind, obj.Metadata.Name, obj.Spec.Template.Spec})
+		}
+		return false
+	})
+	// The default render ships at least operator, cds, tee-proxy, and tls-lb
+	// Deployments plus the attestation-api, ratls-mesh, and nri-image-policy
+	// DaemonSets; fewer means the decode regressed and the loop below passes
+	// vacuously.
+	if len(workloads) < 7 {
+		t.Fatalf("decoded only %d pod-bearing workloads, want >= 7", len(workloads))
+	}
+
+	for _, w := range workloads {
+		if slices.Contains(pullSecretNames(w.spec.ImagePullSecrets), secretName) {
+			continue
+		}
+		if sasWithSecret[w.spec.ServiceAccountName] {
+			continue
+		}
+		t.Errorf("%s %q can't reach the pull secret: pod spec lists %v, serviceAccount %q",
+			w.kind, w.name, pullSecretNames(w.spec.ImagePullSecrets), w.spec.ServiceAccountName)
+	}
+}
+
+// A component-local imagePullSecrets override replaces the chart-wide list but
+// must NOT shed the install-time Secret — otherwise adding a credential for an
+// extra registry would silently break pulling the component's own image.
+func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "imagePullSecret=ghcr-secret",
+		"--set", "teeProxy.imagePullSecrets[0].name=extra")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var names []string
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil || obj.Kind != "Deployment" || obj.Metadata.Name != "c8s-tee-proxy" {
+			return false
+		}
+		names = pullSecretNames(obj.Spec.Template.Spec.ImagePullSecrets)
+		return true
+	})
+	for _, want := range []string{"extra", "ghcr-secret"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("tee-proxy imagePullSecrets = %v, missing %q", names, want)
+		}
+	}
+}
+
+// An operator who also lists the install-time Secret explicitly in the
+// chart-wide imagePullSecrets must not get a duplicate entry.
+func TestChartImagePullSecretDedupsExplicitReference(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "imagePullSecret=ghcr-secret",
+		"--set", "imagePullSecrets[0].name=ghcr-secret")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := findRATLSMeshDaemonSet(t, out)
+	names := pullSecretNames(ds.Spec.Template.Spec.ImagePullSecrets)
+	want := []string{"ghcr-secret"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("ratls-mesh imagePullSecrets = %v, want %v (no duplicate)", names, want)
+	}
+}
+
+// Without imagePullSecret (and with the imagePullSecrets lists empty), no
+// manifest may carry an imagePullSecrets block at all — the with-guard in the
+// c8s.imagePullSecrets helper must keep suppressing empty lists.
+func TestChartDefaultRendersNoPullSecretRefs(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "imagePullSecrets") {
+		t.Errorf("default render carries an imagePullSecrets block\n%s", out)
+	}
 }

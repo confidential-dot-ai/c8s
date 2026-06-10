@@ -136,6 +136,45 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 	})
 }
 
+func TestCheckImagePullSecret(t *testing.T) {
+	tests := []struct {
+		name    string
+		sec     *corev1.Secret
+		wantErr bool
+		wantIn  []string // substrings the error must carry (the fix, not just the failure)
+	}{
+		{name: "dockerconfigjson secret exists", sec: &corev1.Secret{Type: corev1.SecretTypeDockerConfigJson}, wantErr: false},
+		{name: "legacy dockercfg secret exists", sec: &corev1.Secret{Type: corev1.SecretTypeDockercfg}, wantErr: false},
+		{
+			name:    "missing secret",
+			sec:     nil,
+			wantErr: true,
+			wantIn:  []string{"kubectl create secret docker-registry"},
+		},
+		{
+			// kubelet silently skips non-registry Secret types, so this would
+			// otherwise only surface as ImagePullBackOff.
+			name:    "wrong secret type",
+			sec:     &corev1.Secret{Type: corev1.SecretTypeOpaque},
+			wantErr: true,
+			wantIn:  []string{string(corev1.SecretTypeDockerConfigJson)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkImagePullSecret(tt.sec, "c8s-system", "ghcr-secret")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %t", err, tt.wantErr)
+			}
+			for _, want := range tt.wantIn {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
 	// The detected distro feeds both the kata-deploy and nri-image-policy
 	// installers; nri-image-policy installs regardless of --kata, so the two

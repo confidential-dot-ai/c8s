@@ -58,6 +58,17 @@ operator:
 ## sets its own .imagePullSecrets. One entry here covers all c8s images.
 imagePullSecrets: []
 
+## Name of a pre-existing registry-credential Secret
+## (kubernetes.io/dockerconfigjson) in the release namespace, appended to
+## every component's imagePullSecrets — both the chart-wide list above and any
+## component-local override — so all pods pull private c8s images from first
+## start, with no manually wired Secret references and no pod restart. Unlike
+## the imagePullSecrets list, a component-local override does not shed it.
+## The chart never creates or adopts the Secret itself: create it with
+## kubectl/external-secrets and pass `c8s install --image-pull-secret <name>`,
+## which fails fast when the Secret is missing.
+imagePullSecret: ""
+
 ## Chart-wide get-cert behavior for the injected mesh-cert init containers.
 certProvisioning:
   ## How long an init get-cert container retries CDS in-process before failing.

@@ -26,9 +26,13 @@ image **before** kata guest-pulls it inside the VM. For a private image
 `serviceAccount.imagePullSecrets` supplies creds. So a guest-pull workload needs
 creds in **two** places: the host (an image-pull Secret) **and** the guest
 (`agent.image_registry_auth`, set by the puller — see
-`internal/helmchart/c8s/files/scripts/pull-and-configure.sh`). Adding a
-nydus-snapshotter would make the host pull metadata-only and remove the host-creds
-requirement.
+`internal/helmchart/c8s/files/scripts/pull-and-configure.sh`). For the c8s
+components themselves the host side is one flag: create the Secret once and
+pass `c8s install --image-pull-secret <name>` (or set `imagePullSecret` via
+values) to wire it into every component's `imagePullSecrets` at install time
+— see docs/QUICKSTART.md "Private registry credentials".
+Adding a nydus-snapshotter would make the host pull metadata-only and remove
+the host-creds requirement.
 
 ## cds cannot reach Ready as runc on a host that is not an SNP guest
 
@@ -115,9 +119,10 @@ The kata-image-puller fetches the `kata-guest-base` oras artifact by shelling
 out to `oras pull` **inside the puller pod** (see `files/scripts/pull-and-configure.sh`).
 This is **not** a kubelet image pull: `oras` only reads `~/.docker/config.json`
 and is oblivious to Kubernetes `imagePullSecrets`. So patching the puller
-ServiceAccount's `imagePullSecrets` only helps kubelet pull the puller's
-**own** image; the subsequent `kata-guest-base` pull stays anonymous and 401s
-against the private `ghcr.io/lunal-dev` artifact with:
+ServiceAccount's `imagePullSecrets` — including the Secret wired in by
+`c8s install --image-pull-secret`, which is kubelet-side only — only helps
+kubelet pull the puller's **own** image; the subsequent `kata-guest-base` pull
+stays anonymous and 401s against the private `ghcr.io/lunal-dev` artifact with:
 
 ```
 Error response from registry: failed to resolve <tag>: GET …/manifests/<tag>: unauthorized

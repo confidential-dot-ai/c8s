@@ -39,10 +39,11 @@ var (
 	installGetCertRunAsGroup    int64
 	installGetCertRunAsNonRoot  bool
 
-	installKata        bool
-	installKataEnforce bool
-	installCvmMode     string
-	installSingleNode  bool
+	installKata            bool
+	installKataEnforce     bool
+	installCvmMode         string
+	installSingleNode      bool
+	installImagePullSecret string
 
 	installResolveDigests bool
 )
@@ -275,6 +276,13 @@ plain install satisfy the floor with no hand-written values. Pass
 --resolve-digests=false when you supply the digests yourself via -f; the
 render guards then require those values.
 
+When the c8s images live in a registry that requires authentication, create a
+kubernetes.io/dockerconfigjson Secret in the release namespace and pass
+--image-pull-secret <name>: the chart wires it into every component's
+imagePullSecrets, so pods authenticate from first start. This is the
+cluster-side (kubelet) credential; digest resolution runs locally via crane
+and uses your local docker login.
+
 Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 --resolve-digests=false.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -335,6 +343,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		helmArgs = appendKataInstallArgs(helmArgs, installKata, installKataEnforce)
 		helmArgs = appendSingleNodeInstallArgs(helmArgs, installSingleNode)
+		if installImagePullSecret != "" {
+			helmArgs = append(helmArgs, "--set-string", "imagePullSecret="+installImagePullSecret)
+		}
 		if installResolveDigests {
 			helmArgs, err = appendResolvedDigestArgs(cmd.Context(), helmArgs, imageTag, components)
 			if err != nil {
@@ -373,6 +384,12 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// clears the selector so no node needs the label.
 		if len(installValues) == 0 && !installSingleNode {
 			if err := preflightCDSNode(cmd.Context(), chartPath); err != nil {
+				return err
+			}
+		}
+
+		if installImagePullSecret != "" {
+			if err := preflightImagePullSecret(cmd.Context(), installNamespace, installImagePullSecret); err != nil {
 				return err
 			}
 		}
@@ -520,6 +537,47 @@ func appendKataInstallArgs(helmArgs []string, kata, enforce bool) []string {
 	return helmArgs
 }
 
+// preflightImagePullSecret reads the Secret --image-pull-secret names (absent
+// is reported by checkImagePullSecret, not the kubectl error) and delegates to
+// checkImagePullSecret. A kubectl failure other than NotFound aborts: the
+// check cannot be made, and the states it guards fail late and opaquely if
+// installed blind.
+func preflightImagePullSecret(ctx context.Context, namespace, name string) error {
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "secret", name, "-n", namespace, "-o", "json").Output()
+	if err != nil {
+		var ee *exec.ExitError
+		// NotFound covers both a missing Secret and a not-yet-created release
+		// namespace; either way the Secret is not in the cluster.
+		if errors.As(err, &ee) && strings.Contains(string(ee.Stderr), "NotFound") {
+			return checkImagePullSecret(nil, namespace, name)
+		}
+		if errors.As(err, &ee) {
+			return fmt.Errorf("kubectl get secret %s -n %s: %w: %s", name, namespace, err, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return fmt.Errorf("kubectl get secret %s -n %s: %w", name, namespace, err)
+	}
+	var sec corev1.Secret
+	if err := json.Unmarshal(out, &sec); err != nil {
+		return fmt.Errorf("parse secret %s/%s: %w", namespace, name, err)
+	}
+	return checkImagePullSecret(&sec, namespace, name)
+}
+
+// checkImagePullSecret validates the Secret --image-pull-secret names
+// (sec == nil means it is not in the cluster). The Secret must exist and be a
+// registry-credential type: kubelet silently skips a missing pull secret and
+// ignores non-registry Secret types, so both states would otherwise surface
+// only as ImagePullBackOff after a successful-looking install.
+func checkImagePullSecret(sec *corev1.Secret, namespace, name string) error {
+	if sec == nil {
+		return fmt.Errorf("--image-pull-secret %q: no such Secret in namespace %q. Create it first: kubectl create namespace %s; kubectl create secret docker-registry %s -n %s --docker-server=<registry> --docker-username=<user> --docker-password=<token>", name, namespace, namespace, name, namespace)
+	}
+	if sec.Type != corev1.SecretTypeDockerConfigJson && sec.Type != corev1.SecretTypeDockercfg {
+		return fmt.Errorf("--image-pull-secret %q: Secret has type %q, want %s (or legacy %s) — kubelet ignores other Secret types for image pulls", name, sec.Type, corev1.SecretTypeDockerConfigJson, corev1.SecretTypeDockercfg)
+	}
+	return nil
+}
+
 // appendSingleNodeInstallArgs collapses the dedicated-CDS-node partition for a
 // single-node / single-CVM cluster: an empty cds.node.selector makes every node
 // CDS-eligible (one push-mode installer everywhere, no worker split), and the
@@ -619,5 +677,6 @@ func init() {
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses)")
 	installCmd.Flags().BoolVar(&installKataEnforce, "kata-enforce", false, "enable kata enforcement: inject runtimeClasses into workload pods and reject non-kata RuntimeClasses (implies --kata)")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
+	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull private c8s images from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	rootCmd.AddCommand(installCmd)
 }

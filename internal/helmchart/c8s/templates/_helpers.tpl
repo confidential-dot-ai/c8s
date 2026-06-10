@@ -376,10 +376,18 @@ app.kubernetes.io/managed-by: Helm
 {{- end -}}
 
 {{/* Emits an imagePullSecrets: block from .local, falling back to chart-wide
-  .Values.imagePullSecrets. Callers place it with nindent. Call with
+  .Values.imagePullSecrets. The install-time pull secret
+  (.Values.imagePullSecret, the name of a pre-existing Secret) is appended to
+  whichever list won, so it reaches every component even when a component
+  overrides its local list; uniq keeps an operator's explicit reference to the
+  same Secret from rendering twice. Callers place it with nindent. Call with
   (dict "root" $ "local" <list>). */}}
 {{- define "c8s.imagePullSecrets" -}}
-{{- with (.local | default .root.Values.imagePullSecrets) }}
+{{- $secrets := .local | default .root.Values.imagePullSecrets | default list -}}
+{{- with .root.Values.imagePullSecret -}}
+{{- $secrets = uniq (append $secrets (dict "name" .)) -}}
+{{- end -}}
+{{- with $secrets }}
 imagePullSecrets:
 {{ toYaml . }}
 {{- end -}}
