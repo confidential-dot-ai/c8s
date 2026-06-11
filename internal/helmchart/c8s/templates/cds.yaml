@@ -262,7 +262,20 @@ metadata:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: cds
 spec:
+  {{- if .Values.kata.enabled }}
+  # Headless under kata so cluster DNS returns the cds pod IP, not a Service
+  # ClusterIP. The in-guest ratls-mesh's outbound proxy reads the workload's
+  # SO_ORIGINAL_DST and dials <that-ip>:15006 (the peer mesh's inbound
+  # listener); a Service ClusterIP has no port-15006 endpoint, so the dial
+  # times out (see ratls_mesh_tls_dial_failures_total). A pod IP routes
+  # straight to the peer VM, where PREROUTING redirects port 15006 to the
+  # local mesh inbound. NodePort is unused under kata anyway — install --kata
+  # disables nriImagePolicy, the only consumer of cds NodePort.
+  type: ClusterIP
+  clusterIP: None
+  {{- else }}
   type: {{ .Values.cds.service.type }}
+  {{- end }}
   selector:
     app.kubernetes.io/name: c8s-operator
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -271,6 +284,6 @@ spec:
     - name: http
       port: {{ .Values.cds.port }}
       targetPort: https
-      {{- if and (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
+      {{- if and (not .Values.kata.enabled) (eq .Values.cds.service.type "NodePort") .Values.cds.service.nodePort }}
       nodePort: {{ .Values.cds.service.nodePort }}
       {{- end }}
