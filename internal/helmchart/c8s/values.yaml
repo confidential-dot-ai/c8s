@@ -565,8 +565,10 @@ ratlsMesh:
 
   # Iptables sync sidecar resources
   iptablesSync:
-    # Local source namespaces excluded from transparent mesh interception. The chart
-    # also appends its release namespace so ratls does not intercept its own control plane.
+    # Local source namespaces excluded from transparent mesh interception.
+    # The release namespace is intentionally NOT excluded: tee-proxy's egress
+    # to workload pod IPs must be intercepted to get attested mTLS, and
+    # control-plane traffic dials Service VIPs the mesh never intercepts.
     excludeSourceNamespaces:
       - kube-system
     resyncPeriod: 30s
@@ -842,7 +844,12 @@ teeProxy:
     certKey: tls.crt
     keyKey: tls.key
     mountPath: /tls
-  # Upstream service to proxy to
+  # Upstream service to proxy to. To get this hop wrapped in the node mesh's
+  # attested mTLS, point it at the operator-managed headless Service for the
+  # workload (c8s-<cw-id>.<namespace>.svc.cluster.local:<container-port>):
+  # headless DNS returns pod IPs, which the mesh intercepts — Service VIPs it
+  # cannot. Note the explicit container port: dialing pod IPs bypasses the
+  # Service's port mapping.
   upstream: vllm-router-service.vllm.svc.cluster.local
   # Attestation header name
   headerName: "Attestation-Report"

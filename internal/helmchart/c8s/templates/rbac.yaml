@@ -25,6 +25,17 @@ rules:
     # delete: the startup reinject sweep deletes un-injected cw pods so their
     # controllers recreate them through the webhook.
     verbs: [get, list, watch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    # The workload-service reconciler watches these for the confidential.ai/cw
+    # pod-template annotation.
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    # The operator provisions one headless Service per annotated workload in
+    # the workload's namespace — the only c8s-managed resource outside the
+    # release namespace.
+    verbs: [get, list, watch, create, update, delete]
   - apiGroups: [""]
     resources: [events]
     # The controller-runtime manager's event recorder (leader election,

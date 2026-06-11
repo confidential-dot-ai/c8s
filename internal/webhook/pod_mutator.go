@@ -28,6 +28,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -41,6 +42,11 @@ const (
 	// AnnotationInjected is stamped on pods after a successful mutation
 	// so re-invocations of the webhook are no-ops.
 	AnnotationInjected = "confidential.ai/c8s-injected"
+
+	// LabelWorkload mirrors AnnotationWorkload as a pod label so the
+	// operator-managed headless Service (one per annotated workload) can
+	// select the workload's pods — Service selectors match labels only.
+	LabelWorkload = AnnotationWorkload
 
 	AnnotationCertVolume             = "confidential.ai/c8s-cert-volume"
 	AnnotationCertDir                = "confidential.ai/c8s-cert-dir"
@@ -333,6 +339,10 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 }
 
 func (inj *injection) validate() error {
+	if errs := validation.IsValidLabelValue(inj.WorkloadID); len(errs) > 0 {
+		return fmt.Errorf("%w: %s must be a valid label value (mirrored as the %s pod label): %s",
+			errInvalidInjectionAnnotation, AnnotationWorkload, LabelWorkload, strings.Join(errs, "; "))
+	}
 	if inj.Cert.RenewInterval < 0 {
 		return fmt.Errorf("%w: %s must not be negative", errInvalidInjectionAnnotation, AnnotationRenewInterval)
 	}
@@ -411,6 +421,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
+	if err := validateWorkloadLabel(pod); err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
+	}
 	inj, err := parseAnnotations(pod)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
@@ -459,6 +472,23 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
+}
+
+// validateWorkloadLabel rejects pods that set the confidential.ai/cw label
+// out of band. The webhook stamps this label during injection and the
+// operator-managed headless Services select on it, so a pod carrying it must
+// also carry the matching opt-in annotation — otherwise an un-injected,
+// un-attested pod could join a confidential workload's Service endpoints.
+func validateWorkloadLabel(pod *corev1.Pod) error {
+	label, ok := pod.Labels[LabelWorkload]
+	if !ok {
+		return nil
+	}
+	if pod.Annotations[AnnotationWorkload] != label {
+		return fmt.Errorf("%w: pod label %s=%q must match the %s annotation (the webhook stamps this label during injection)",
+			errInvalidInjectionAnnotation, LabelWorkload, label, AnnotationWorkload)
+	}
+	return nil
 }
 
 // kataRuntimeClassFor returns the runtimeClassName the webhook should inject
@@ -523,6 +553,10 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[AnnotationInjected] = "true"
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[LabelWorkload] = inj.WorkloadID
 }
 
 // initCertContainer fetches the workload's leaf cert from CDS over HTTP

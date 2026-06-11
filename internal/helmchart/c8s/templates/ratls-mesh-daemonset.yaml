@@ -6,7 +6,14 @@
 */}}
 {{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
-{{- $excludeSourceNamespaces := append .Values.ratlsMesh.iptablesSync.excludeSourceNamespaces .Release.Namespace | uniq | join "," -}}
+{{- /*
+The release namespace is deliberately NOT excluded: tee-proxy's egress to
+workload pod IPs (via the operator-managed headless Services) must be
+interceptable so that hop gets attested mTLS. Control-plane traffic inside the
+release namespace dials Service VIPs, which are never in the pod-destination
+ipset, so it is unaffected either way.
+*/}}
+{{- $excludeSourceNamespaces := .Values.ratlsMesh.iptablesSync.excludeSourceNamespaces | uniq | join "," -}}
 {{- /*
 The iptables-cleanup preStop sleep fires last in the native-sidecar
 reverse-init order; its budget is what terminationGracePeriod leaves after

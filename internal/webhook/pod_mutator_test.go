@@ -255,6 +255,66 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 	}
 }
 
+func TestMutatePodStampsWorkloadLabel(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "app"}},
+		},
+	}
+
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage: "ghcr.io/lunal-dev/c8s-operator:test",
+		CDSURL:       "http://cds.c8s-system.svc:8443",
+	})
+
+	if got := pod.Labels[LabelWorkload]; got != "api" {
+		t.Fatalf("label %s = %q, want %q", LabelWorkload, got, "api")
+	}
+}
+
+func TestParseAnnotationsRejectsWorkloadIDInvalidAsLabelValue(t *testing.T) {
+	for _, id := range []string{
+		"has spaces",
+		"-leading-dash",
+		"waaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay-too-long-for-a-label-value",
+	} {
+		_, err := parseAnnotations(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationWorkload: id,
+			}},
+		})
+		if !errors.Is(err, errInvalidInjectionAnnotation) {
+			t.Fatalf("parseAnnotations(%q) error = %v, want invalid annotation", id, err)
+		}
+	}
+}
+
+func TestValidateWorkloadLabelRequiresMatchingAnnotation(t *testing.T) {
+	cases := []struct {
+		name    string
+		labels  map[string]string
+		ann     map[string]string
+		wantErr bool
+	}{
+		{"no label", nil, map[string]string{AnnotationWorkload: "api"}, false},
+		{"label matches annotation", map[string]string{LabelWorkload: "api"}, map[string]string{AnnotationWorkload: "api"}, false},
+		{"label without annotation", map[string]string{LabelWorkload: "api"}, nil, true},
+		{"label differs from annotation", map[string]string{LabelWorkload: "other"}, map[string]string{AnnotationWorkload: "api"}, true},
+	}
+	for _, tc := range cases {
+		err := validateWorkloadLabel(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Labels: tc.labels, Annotations: tc.ann},
+		})
+		if tc.wantErr && !errors.Is(err, errInvalidInjectionAnnotation) {
+			t.Fatalf("%s: err = %v, want invalid annotation", tc.name, err)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("%s: err = %v, want nil", tc.name, err)
+		}
+	}
+}
+
 func TestParseAnnotationsRejectsInvalidRenewInterval(t *testing.T) {
 	_, err := parseAnnotations(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{

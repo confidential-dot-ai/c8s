@@ -224,7 +224,9 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		{"--ipset-maxelem", "262144"},
 		{"--ready-file", "/tmp/ratls-iptables-ready"},
 		{"--iptables-metrics-file", "/tmp/ratls-iptables-metrics.json"},
-		{"--exclude-source-namespaces", "kube-system,c8s-system"},
+		// The release namespace must NOT be excluded: tee-proxy egress to
+		// workload pod IPs (headless-Service dials) needs mesh interception.
+		{"--exclude-source-namespaces", "kube-system"},
 	} {
 		if !argvContainsFlagValue(sync.Command, pair[0], pair[1]) {
 			t.Errorf("iptables-sync command missing %s %s; command=%q", pair[0], pair[1], sync.Command)
@@ -2117,9 +2119,19 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 	if got := operatorVerbsFor(role, "", "events"); !slices.Equal(got, []string{"create", "patch"}) {
 		t.Fatalf("operator events verbs = %v, want [create patch]", got)
 	}
+	// The workload-service reconciler reads workloads (never mutates them)
+	// and owns the headless Services it provisions in workload namespaces.
+	for _, resource := range []string{"deployments", "statefulsets", "daemonsets"} {
+		if got := operatorVerbsFor(role, "apps", resource); !slices.Equal(got, []string{"get", "list", "watch"}) {
+			t.Fatalf("operator %s verbs = %v, want read-only [get list watch]", resource, got)
+		}
+	}
+	if got := operatorVerbsFor(role, "", "services"); !slices.Equal(got, []string{"get", "list", "watch", "create", "update", "delete"}) {
+		t.Fatalf("operator services verbs = %v", got)
+	}
 	for _, unexpected := range []string{
 		"resources: [confidentialworkloads/finalizers]",
-		"resources: [deployments, statefulsets, daemonsets, replicasets]",
+		"resources: [replicasets]",
 		"resources: [secrets, configmaps]",
 		"resources: [nodes]",
 		"resources: [rolebindings]",

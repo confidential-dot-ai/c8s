@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -64,9 +67,10 @@ type Options struct {
 	GetCertRunAsGroup   int64
 	GetCertRunAsNonRoot bool
 
-	// ExcludeNamespaces are namespaces the startup reinject sweep skips, on
-	// top of the release namespace and the kube-system family. Mirrors
-	// webhook.extraExcluded so the sweep and the webhook config agree.
+	// ExcludeNamespaces are namespaces the startup reinject sweep and the
+	// workload-service reconciler skip, on top of the release namespace and
+	// the kube-system family. Mirrors webhook.extraExcluded so the sweep,
+	// the reconciler, and the webhook config agree.
 	ExcludeNamespaces []string
 
 	// KataEnforce makes the pod webhook inject a kata runtimeClassName into
@@ -96,6 +100,21 @@ func Run(ctx context.Context, opts Options) error {
 		LeaderElection:          opts.LeaderElection,
 		LeaderElectionID:        opts.LeaderElectionID,
 		LeaderElectionNamespace: opts.LeaderElectionNS,
+		Cache: cache.Options{
+			// managedFields routinely dominate cached object size and nothing
+			// here reads them.
+			DefaultTransform: cache.TransformStripManagedFields(),
+			// The workload-service reconciler only lists and owns Services it
+			// labeled itself; don't cache every Service in the cluster. A
+			// foreign Service is invisible through this cache — CreateOrUpdate
+			// then tries Create and the reconciler maps AlreadyExists to its
+			// not-adopting skip.
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Service{}: {
+					Label: labels.SelectorFromSet(labels.Set{managedByLabel: managedByValue}),
+				},
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
@@ -121,6 +140,27 @@ func Run(ctx context.Context, opts Options) error {
 			logger.Info("status-mirror controller enabled")
 		} else {
 			logger.Info("status-mirror controller disabled; ConfidentialWorkload CRD not found")
+		}
+	}
+
+	excluded := excludedNamespaceSet(opts.LeaderElectionNS, opts.ExcludeNamespaces)
+
+	// Headless-Service provisioning: one Service per annotated workload so
+	// in-cluster clients (tee-proxy) can dial pod IPs by DNS and get the
+	// node mesh's attested mTLS — the mesh cannot intercept Service VIPs.
+	// Gated on get-cert injection (not kata-only mode): without it no pod
+	// ever carries the cw label the Service selects on.
+	if opts.GetCertImage != "" {
+		for _, kind := range workloadServiceKinds {
+			if err := (&WorkloadServiceReconciler{
+				Client:   mgr.GetClient(),
+				Scheme:   mgr.GetScheme(),
+				Recorder: mgr.GetEventRecorder("c8s-operator"),
+				Kind:     kind,
+				Excluded: excluded,
+			}).SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("setup workload-service reconciler (%s): %w", kind, err)
+			}
 		}
 	}
 
@@ -160,7 +200,6 @@ func Run(ctx context.Context, opts Options) error {
 		// client, not the manager cache: a single cluster-wide List + targeted
 		// Deletes at startup must not pin a cluster-wide pod informer for the
 		// operator's lifetime.
-		excluded := excludedNamespaceSet(opts.LeaderElectionNS, opts.ExcludeNamespaces)
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 			c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
 			if err != nil {
