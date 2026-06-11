@@ -12,8 +12,7 @@
      a non-kata runtimeClassName.
 
   ValidatingAdmissionPolicy is built into Kubernetes (CEL, no webhook server,
-  no TLS) and is v1/GA from Kubernetes 1.30. The base chart requires >= 1.29;
-  enforcement additionally requires >= 1.30.
+  no TLS) and is v1/GA from Kubernetes 1.30, the chart's kubeVersion floor.
 
   Host-namespace pods (hostNetwork/hostPID/hostIPC) are exempt: a VM cannot
   share the host's namespaces, so the webhook does not inject a class for
@@ -79,14 +78,5 @@ spec:
     # reject every pod in it.
     namespaceSelector:
       matchExpressions:
-        - key: kubernetes.io/metadata.name
-          operator: NotIn
-          values:
-            - {{ .Release.Namespace }}
-            - kube-system
-            - kube-public
-            - kube-node-lease
-            {{- range .Values.webhook.extraExcluded }}
-            - {{ . }}
-            {{- end }}
+        {{- include "c8s.webhookExcludedNamespaces" . | nindent 8 }}
 {{- end }}

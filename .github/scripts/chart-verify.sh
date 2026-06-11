@@ -35,8 +35,11 @@ echo "::group::helm lint"
 helm lint "$CHART_DIR" "${common_set[@]}"
 echo "::endgroup::"
 
+# --kube-version: the chart's kubeVersion floor (1.30) is above helm 3.14's
+# default simulated capability (1.29), so template needs it pinned explicitly.
 echo "::group::helm template"
 helm template c8s "$CHART_DIR" \
+  --kube-version v1.30.0 \
   --namespace c8s-system \
   "${common_set[@]}" \
   > /dev/null
@@ -44,6 +47,7 @@ echo "::endgroup::"
 
 echo "::group::helm template (webhook enabled)"
 helm template c8s "$CHART_DIR" \
+  --kube-version v1.30.0 \
   --namespace c8s-system \
   "${common_set[@]}" \
   --set webhook.enabled=true \

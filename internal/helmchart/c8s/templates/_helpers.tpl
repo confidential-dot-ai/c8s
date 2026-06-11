@@ -426,3 +426,23 @@ imagePullSecrets:
 {{ $img.repository }}:{{ required (printf "image.tag or image.digest is required for %s" $img.repository) $img.tag }}
 {{- end -}}
 {{- end }}
+
+{{/*
+  Namespace exclusions of the pod-injection webhook, as namespaceSelector
+  matchExpressions. Shared by the webhook config and the admission policies
+  that mirror its scope (kata enforcement, cw-label integrity): a namespace
+  the webhook skips but a policy covers would fail closed on every pod in it,
+  so all consumers must render the identical list.
+*/}}
+{{- define "c8s.webhookExcludedNamespaces" -}}
+- key: kubernetes.io/metadata.name
+  operator: NotIn
+  values:
+    - {{ .Release.Namespace }}
+    - kube-system
+    - kube-public
+    - kube-node-lease
+    {{- range .Values.webhook.extraExcluded }}
+    - {{ . }}
+    {{- end }}
+{{- end }}

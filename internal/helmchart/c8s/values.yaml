@@ -98,6 +98,12 @@ webhook:
     port: 443
   failurePolicy: Fail
   extraExcluded: []
+  ## ValidatingAdmissionPolicy guarding the confidential.ai/cw pod label
+  ## (workload Service membership): at CREATE it must match the opt-in
+  ## annotation, and both keys are immutable on UPDATE. Enforced in the API
+  ## server, so it holds even when the injection webhook is down.
+  cwLabelPolicy:
+    enabled: true
   certVolume:
     fsGroup: 65532
     keyMode: "0640"

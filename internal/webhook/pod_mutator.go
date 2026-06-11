@@ -479,6 +479,13 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 // operator-managed headless Services select on it, so a pod carrying it must
 // also carry the matching opt-in annotation — otherwise an un-injected,
 // un-attested pod could join a confidential workload's Service endpoints.
+//
+// CREATE-time check only. Post-create label mutation is denied by the
+// cw-label-integrity ValidatingAdmissionPolicy (chart template
+// cw-label-integrity-policy.yaml), which encodes this invariant in CEL plus
+// UPDATE immutability. One deliberate difference: the CEL treats an empty
+// label value as absent (it can never match a managed Service selector),
+// while this check compares it against the annotation like any other value.
 func validateWorkloadLabel(pod *corev1.Pod) error {
 	label, ok := pod.Labels[LabelWorkload]
 	if !ok {

@@ -454,15 +454,15 @@ func TestChartRATLSNativeSidecarShape(t *testing.T) {
 	}
 }
 
-// TestChartRATLSKubeVersionPinned guards the lower bound that makes the
-// native-sidecar contract safe by default: Kubernetes 1.28 exposed
-// restartPolicy: Always on initContainers behind the SidecarContainers
-// feature gate, while 1.29 enables that gate by default. If the gate is off,
-// iptables-cleanup is invalid as a native sidecar, its preStop cannot run,
-// and the host can leak managed chains/ipsets across pod restarts. Helm
-// rejects older clusters via the kubeVersion constraint; after hoisting the
-// ratls-mesh subchart this constraint lives on the parent c8s chart, so keep
-// it pinned there against an accidental relaxation.
+// TestChartRATLSKubeVersionPinned guards the chart's Kubernetes floor
+// against accidental relaxation. Two contracts pin it:
+//   - native sidecars (SidecarContainers default-on from 1.29): with the
+//     gate off, iptables-cleanup is invalid as a native sidecar, its preStop
+//     cannot run, and the host leaks managed chains/ipsets across restarts;
+//   - ValidatingAdmissionPolicy v1 (GA from 1.30): the chart ships two
+//     default-on policies (deny-ratls-mesh-uid, cw-label-integrity), so a
+//     pre-1.30 apply fails mid-install on unknown kinds anyway — the
+//     kubeVersion constraint makes helm fail early and clearly instead.
 func TestChartRATLSKubeVersionPinned(t *testing.T) {
 	const path = "c8s/Chart.yaml"
 	raw, err := os.ReadFile(path)
@@ -475,9 +475,9 @@ func TestChartRATLSKubeVersionPinned(t *testing.T) {
 	if err := sigsyaml.Unmarshal(raw, &chart); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
 	}
-	const want = ">=1.29.0-0"
+	const want = ">=1.30.0-0"
 	if chart.KubeVersion != want {
-		t.Fatalf("c8s Chart.yaml kubeVersion = %q; want %q (native sidecars require SidecarContainers default-on behavior from k8s 1.29+; relaxing this leaks iptables/ipset state across pod restarts on older clusters)", chart.KubeVersion, want)
+		t.Fatalf("c8s Chart.yaml kubeVersion = %q; want %q (native sidecars need k8s 1.29+, and the default-on ValidatingAdmissionPolicies need v1/GA from 1.30)", chart.KubeVersion, want)
 	}
 }
 
@@ -2334,6 +2334,51 @@ func TestChartKataContainerdPrepInitContainer(t *testing.T) {
 	})
 }
 
+// TestChartCwLabelIntegrityPolicyRendersByDefault: the cw-label
+// ValidatingAdmissionPolicy guards Service-membership identity and must ship
+// on by default, with the immutability (oldObject) check present and the
+// webhook's namespace exclusions mirrored.
+func TestChartCwLabelIntegrityPolicyRendersByDefault(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "webhook.extraExcluded[0]=skip-me")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var policy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-cw-label-integrity", &policy) {
+		t.Fatalf("missing cw-label-integrity ValidatingAdmissionPolicy\n%s", out)
+	}
+	ops := policy.Spec.MatchConstraints.ResourceRules[0].Operations
+	if !slices.Contains(ops, admissionregv1.Update) {
+		t.Fatalf("policy operations = %v, must include UPDATE (post-create label mutation is the attack)", ops)
+	}
+	if !slices.ContainsFunc(policy.Spec.Validations, func(v admissionregv1.Validation) bool {
+		return strings.Contains(v.Expression, "oldObject")
+	}) {
+		t.Fatalf("policy has no oldObject immutability validation: %+v", policy.Spec.Validations)
+	}
+	var binding admissionregv1.ValidatingAdmissionPolicyBinding
+	if !findDoc(t, out, "ValidatingAdmissionPolicyBinding", "c8s-cw-label-integrity", &binding) {
+		t.Fatalf("missing cw-label-integrity ValidatingAdmissionPolicyBinding\n%s", out)
+	}
+	excluded := selectorExpressionValues(binding.Spec.MatchResources.NamespaceSelector,
+		"kubernetes.io/metadata.name", metav1.LabelSelectorOpNotIn)
+	for _, ns := range []string{"c8s-system", "kube-system", "kube-public", "kube-node-lease", "skip-me"} {
+		if !slices.Contains(excluded, ns) {
+			t.Fatalf("binding namespace exclusions %v missing %s (must mirror the webhook)", excluded, ns)
+		}
+	}
+}
+
+func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "webhook.cwLabelPolicy.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "ValidatingAdmissionPolicy", "c8s-cw-label-integrity") {
+		t.Fatalf("cw-label-integrity policy rendered while disabled\n%s", out)
+	}
+}
+
 // helmTemplateKata renders the chart in the shape `c8s install --kata`
 // produces. kata is enforcing, so the host-side components whose function
 // moves into the kata-guest-base image are switched off (the chart validates
@@ -2610,6 +2655,10 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 	}
 	base := []string{
 		"template", "c8s", "c8s",
+		// Pin the simulated cluster version at the chart's kubeVersion floor
+		// so the tests do not depend on the helm client's compiled default
+		// (helm 3.14 simulates 1.29, below the floor).
+		"--kube-version", "1.30.0",
 		"--namespace", "c8s-system",
 		"--set", "image.tag=dev",
 		"--set", "attestationApi.image.tag=dev",
@@ -3143,6 +3192,7 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 	}
 	base := []string{
 		"template", "c8s", "c8s",
+		"--kube-version", "1.30.0",
 		"--namespace", "c8s-system",
 		"--set", "image.tag=dev",
 		"--set", "attestationApi.image.tag=dev",

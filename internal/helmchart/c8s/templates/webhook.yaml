@@ -19,16 +19,7 @@ webhooks:
     # hostNetwork) as kata VMs. The reinject sweep excludes the same set.
     namespaceSelector:
       matchExpressions:
-        - key: kubernetes.io/metadata.name
-          operator: NotIn
-          values:
-            - {{ .Release.Namespace }}
-            - kube-system
-            - kube-public
-            - kube-node-lease
-            {{- range .Values.webhook.extraExcluded }}
-            - {{ . }}
-            {{- end }}
+        {{- include "c8s.webhookExcludedNamespaces" . | nindent 8 }}
     rules:
       - operations: [CREATE]
         apiGroups: [""]
