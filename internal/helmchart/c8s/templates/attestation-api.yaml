@@ -87,13 +87,18 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationApi.port }}
           securityContext:
-            {{- if eq .Values.attestationApi.cvmMode "managed" }}
+            {{- if eq .Values.attestationApi.cvmMode "aks" }}
+            # AKS gates the vTPM (/dev/tpm0) below the device/capability layer:
+            # access is denied even with the device mounted and SYS_RAWIO, so
+            # the attestation-api needs full privilege.
             privileged: true
             readOnlyRootFilesystem: true
-            {{- else if eq .Values.attestationApi.cvmMode "baremetal" }}
+            {{- else if has .Values.attestationApi.cvmMode (list "baremetal" "gke") }}
+            # baremetal and GKE both expose the native /dev/sev-guest ioctl, so
+            # the least-privilege context (device mount + SYS_RAWIO) suffices.
 {{ toYaml .Values.attestationApi.securityContext | indent 12 }}
             {{- else }}
-{{ fail (printf "attestationApi.cvmMode must be \"baremetal\" or \"managed\" (got %q)" .Values.attestationApi.cvmMode) }}
+{{ fail (printf "attestationApi.cvmMode must be one of baremetal, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
           volumeMounts:
             - name: config

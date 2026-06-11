@@ -257,14 +257,14 @@ attestationApi:
   ## the device node doesn't exist on the host, so disable for nodes that
   ## lack the corresponding hardware.
   ##
-  ## On Azure CVM nodes, SEV-SNP attestation goes through /dev/tpm0 (vTPM)
-  ## rather than the native /dev/sev-guest ioctl, so `tpm: true` is the
-  ## right default and `sevGuest`/`tdxGuest` should be left disabled
-  ## unless you're on a bare-metal CVM with the direct device node.
+  ## Default is the native /dev/sev-guest ioctl, which covers bare-metal SNP
+  ## and GKE SNP. Azure (AKS) attests through the vTPM at /dev/tpm0 instead, so
+  ## an AKS install flips to tpm (the `c8s install --cvm-mode aks` path sets
+  ## this automatically). tdxGuest is opt-in for TDX hosts via -f.
   teeDevices:
-    sevGuest: false
+    sevGuest: true
     tdxGuest: false
-    tpm: true
+    tpm: false
   platforms:
     - snp
     - tdx
@@ -272,16 +272,21 @@ attestationApi:
     - az-tdx
     - gcp-snp
     - gcp-tdx
-  ## CVM platform shape.
+  ## CVM platform shape — picks both the securityContext and (via the install
+  ## CLI) the TEE device. The privilege axis and the device axis don't line up
+  ## across clouds, so the three shapes are enumerated rather than a 2-way
+  ## managed/baremetal split:
   ##
-  ## baremetal (default): direct TEE device node. The least-privilege
-  ##   securityContext below (device mount + SYS_RAWIO) suffices.
-  ## managed: managed-cloud CVM that gates TEE device access below the
-  ##   LSM/device-capability layer (e.g. Azure SEV-SNP via the vTPM at
-  ##   /dev/tpm0, which returns "Operation not permitted" even with the device
-  ##   mounted and SYS_RAWIO granted). Renders privileged: true.
+  ## baremetal (default): bare-metal CVM, native /dev/sev-guest. Least-privilege
+  ##   securityContext (device mount + SYS_RAWIO).
+  ## gke: GKE confidential VM — also native /dev/sev-guest, also least-privilege.
+  ##   Same shape as baremetal; named for clarity at the install site.
+  ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0, which the
+  ##   platform gates below the device/capability layer ("Operation not
+  ##   permitted" even with the device mounted and SYS_RAWIO). Renders
+  ##   privileged: true.
   cvmMode: baremetal
-  ## Least-privilege device access, used only when cvmMode=baremetal.
+  ## Least-privilege device access, used for cvmMode baremetal and gke.
   securityContext:
     readOnlyRootFilesystem: true
     allowPrivilegeEscalation: false

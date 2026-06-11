@@ -292,16 +292,33 @@ func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
-	for _, mode := range []string{"baremetal", "managed"} {
+	// native /dev/sev-guest for baremetal AND gke (GKE confidential VMs use the
+	// native ioctl, not a vTPM); vTPM /dev/tpm0 only for aks.
+	native := func(mode string) []string {
+		return []string{
+			"upgrade",
+			"--set-string", "attestationApi.cvmMode=" + mode,
+			"--set", "attestationApi.teeDevices.sevGuest=true",
+			"--set", "attestationApi.teeDevices.tpm=false",
+		}
+	}
+	cases := map[string][]string{
+		"baremetal": native("baremetal"),
+		"gke":       native("gke"),
+		"aks": {
+			"upgrade",
+			"--set-string", "attestationApi.cvmMode=aks",
+			"--set", "attestationApi.teeDevices.sevGuest=false",
+			"--set", "attestationApi.teeDevices.tpm=true",
+		},
+	}
+	for mode, want := range cases {
 		t.Run(mode, func(t *testing.T) {
 			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			assertArgsEqual(t, got, []string{
-				"upgrade",
-				"--set-string", "attestationApi.cvmMode=" + mode,
-			})
+			assertArgsEqual(t, got, want)
 		})
 	}
 }

@@ -417,7 +417,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// The install always ships pods that exceed the restricted pod-security
 		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
 		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
-		// attestation-api needs SYS_RAWIO (baremetal) or privileged (managed).
+		// attestation-api needs SYS_RAWIO (baremetal/gke) or privileged (aks).
 		// --kata adds kata-deploy on top. No supported shape fits restricted, so
 		// the namespace is always labelled privileged (a CIS-hardened cluster, e.g.
 		// RKE2 with profile: cis, would otherwise reject those pods at admission).
@@ -532,16 +532,40 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 }
 
 // appendCvmModeInstallArgs translates --cvm-mode into the attestation-api
-// value. managed renders a privileged attestation-api for managed-cloud
+// values. managed renders a privileged attestation-api for managed-cloud
 // CVMs that gate TEE device access below the device/capability layer; baremetal
 // keeps the least-privilege securityContext. The chart re-validates, so the
 // allowed check is a fast typo guard before shelling to helm.
+//
+// cvm-mode also selects which TEE device gets mounted, because the privilege
+// shape and the device differ per cloud and don't collapse to a 2-way split:
+//
+//	baremetal, gke → native /dev/sev-guest, least-privilege securityContext
+//	aks            → vTPM /dev/tpm0, privileged (Azure gates the vTPM below the
+//	                 device/capability layer)
+//
+// GKE is the reason a plain managed→vTPM mapping is wrong: GKE confidential VMs
+// are a managed cloud but still expose the native /dev/sev-guest ioctl, not a
+// vTPM. The chart's teeDevices default is the native shape; this only flips it
+// to the vTPM for aks. Without it a `--cvm-mode aks` install would mount
+// /dev/sev-guest (absent on AKS), and the attestation-api pod would fail the
+// hostPath CharDevice check. Override individual teeDevices via -f for hosts
+// that don't fit the pairing (e.g. a TDX host needs tdxGuest).
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
-	allowed := []string{"baremetal", "managed"}
+	allowed := []string{"baremetal", "gke", "aks"}
 	if !slices.Contains(allowed, cvmMode) {
 		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowed, ", "), cvmMode)
 	}
-	return append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode), nil
+	helmArgs = append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode)
+	// aks → vTPM /dev/tpm0; baremetal and gke → native /dev/sev-guest.
+	sevGuest, tpm := "true", "false"
+	if cvmMode == "aks" {
+		sevGuest, tpm = "false", "true"
+	}
+	return append(helmArgs,
+		"--set", "attestationApi.teeDevices.sevGuest="+sevGuest,
+		"--set", "attestationApi.teeDevices.tpm="+tpm,
+	), nil
 }
 
 // validateKataDebugFlags rejects --debug without --kata: the flag selects the
@@ -724,7 +748,7 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape: baremetal (least-privilege device access) or managed (privileged attestation-service for managed-cloud CVMs that gate TEE device access)")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape: baremetal or gke (native /dev/sev-guest, least-privilege) or aks (vTPM /dev/tpm0, privileged — Azure gates the vTPM below the device/capability layer)")
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses) and enforce it: workload pods are injected with kata RuntimeClasses and non-kata classes are rejected. Also disables the host-side ratls-mesh, attestation-api, and nri-image-policy — under kata their function runs inside the kata-guest-base VM image")
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (tag <tag>-debug, kata.guestImage.debug=true): its baked guest policy allows host log/exec streams so 'kubectl logs' and 'kubectl exec' work on kata pods — container I/O becomes readable by the untrusted host and the SNP launch measurement differs from the locked image. Requires --kata; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")

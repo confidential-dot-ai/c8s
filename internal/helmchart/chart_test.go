@@ -1241,48 +1241,65 @@ func TestChartAttestationApiBaremetalLeastPrivilege(t *testing.T) {
 	}
 }
 
-// TestChartAttestationApiManagedPrivileged proves cvmMode=managed renders a
-// privileged container (managed CVM gates vTPM access below the capability
-// layer, so /dev/tpm0 needs full privilege) and drops the least-privilege
-// capabilities map — the two modes are strictly either/or, not merged.
-func TestChartAttestationApiManagedPrivileged(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=managed")
+// TestChartAttestationApiAksPrivileged proves cvmMode=aks renders a privileged
+// container (Azure gates vTPM access below the capability layer, so /dev/tpm0
+// needs full privilege) and drops the least-privilege capabilities map — the
+// modes are strictly either/or, not merged.
+func TestChartAttestationApiAksPrivileged(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=aks")
 	if err != nil {
-		t.Fatalf("helm template (cvmMode=managed): %v\n%s", err, out)
+		t.Fatalf("helm template (cvmMode=aks): %v\n%s", err, out)
 	}
 	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
 	sc := c.SecurityContext
 	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
-		t.Errorf("managed must be privileged for vTPM access; got %+v", sc)
+		t.Errorf("aks must be privileged for vTPM access; got %+v", sc)
 	}
 	if sc != nil && sc.Capabilities != nil {
-		t.Errorf("managed must not carry the least-privilege capabilities map; got %+v", sc.Capabilities)
+		t.Errorf("aks must not carry the least-privilege capabilities map; got %+v", sc.Capabilities)
+	}
+}
+
+// TestChartAttestationApiGkeLeastPrivilege proves cvmMode=gke renders the same
+// least-privilege context as baremetal — GKE confidential VMs use the native
+// /dev/sev-guest ioctl, not Azure's gated vTPM, so they must NOT be privileged.
+func TestChartAttestationApiGkeLeastPrivilege(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
+	if err != nil {
+		t.Fatalf("helm template (cvmMode=gke): %v\n%s", err, out)
+	}
+	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
+	sc := c.SecurityContext
+	if sc != nil && sc.Privileged != nil && *sc.Privileged {
+		t.Errorf("gke must not be privileged (native sev-guest, not Azure vTPM); got %+v", sc)
 	}
 }
 
 // TestChartAttestationApiInvalidCvmMode proves an unrecognized cvmMode fails
 // the render loudly rather than silently falling through to least-privilege
-// (which would fail closed at runtime on a managed CVM).
+// (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=bogus")
 	if err == nil {
 		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be "baremetal" or "managed" (got "bogus")`)
+	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of baremetal, gke, aks (got "bogus")`)
 }
 
 func TestChartRendersManagedClusterKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "serviceAccount.imagePullSecrets[0].name=ghcr-secret",
-		"--set", "attestationApi.cvmMode=managed",
+		"--set", "attestationApi.cvmMode=aks",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"imagePullSecrets:\n- name: ghcr-secret",
-		"securityContext:\n            privileged: true\n            readOnlyRootFilesystem: true",
-	} {
+	if !strings.Contains(out, "imagePullSecrets:\n- name: ghcr-secret") {
+		t.Fatalf("render missing chart-wide imagePullSecrets\n%s", out)
+	}
+	// aks → privileged attestation-api (assert the two fields without pinning
+	// the exact line spacing, which carries explanatory comments).
+	for _, want := range []string{"privileged: true", "readOnlyRootFilesystem: true"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("render missing %q\n%s", want, out)
 		}
