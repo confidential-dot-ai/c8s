@@ -76,10 +76,12 @@ env:
   KATA_VERSION: "3.30.0"
   # steep ref the guest kernel is built against. Single source of truth: the
   # checkout pins it and the kernel-output cache key below is scoped to it (a
-  # different steep => a potentially different kernel). Pinned to PR #13
-  # (feat/kernel-config) head — see the Checkout steep step for why. Switch to
-  # a main commit / release tag once that PR merges.
-  STEEP_REF: "0d36c190cbe39c856424efe5b9aa91d1e7b50f9f"
+  # different steep => a potentially different kernel). Pinned to a main
+  # commit now that PR #13 (feat/kernel-config) has merged. Bump deliberately:
+  # steep main's kernel fragments move (e.g. #16 added dm-crypt/AES-XTS, #21
+  # added VIRTIO_IOMMU to required.config), so a new pin means a new guest
+  # kernel and therefore a new SNP launch measurement.
+  STEEP_REF: "4b731634be9ae6a592f082a2501f8de95f3600ce"
 
 jobs:
   build:
@@ -127,11 +129,10 @@ jobs:
           token: ${{ secrets.ATTESTATION_REPO_TOKEN || github.token }}
 
       - name: Checkout steep
-        # Pinned to PR #13 (feat/kernel-config) head: it adds `steep kernel
-        # --kernel-config-fragment`, which build.sh needs to fold c8s's
-        # kernel/container.config into the guest kernel. steep `main` lacks it
-        # (the build dies at "unexpected argument --kernel-config-fragment").
-        # Switch this ref to a main commit / release tag once the PR merges.
+        # Pinned to a steep main commit — PR #13 (feat/kernel-config) merged
+        # 2026-06-03, so main carries `steep kernel --kernel-config-fragment`,
+        # which build.sh needs to fold c8s's kernel/container.config into the
+        # guest kernel. STEEP_REF above is the single source of truth.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: lunal-dev/steep
@@ -398,6 +399,45 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-
 
+      # Cache steep's mkosi kernel-builder tools tree (build.sh Step 1 →
+      # `steep kernel` Step 0a). The tools tree is the only part of this job
+      # that talks to snapshot.ubuntu.com — the point-in-time apt mirror
+      # pinned in steep's mkosi/kernel-builder/mkosi.conf — which 5xxes often
+      # enough to be the job's top flake source. A cache hit takes it off the
+      # network entirely: steep owns the reuse decision (it stamps
+      # mkosi.output/.steep-tools-stamp with the mkosi.conf hash and skips the
+      # `sudo mkosi --force` rebuild on a match — src/commands/kernel.rs
+      # ensure_tools_tree), so a restored tree short-circuits Step 0a and a
+      # stale one is merely rebuilt, never trusted.
+      #
+      # Like the base rootfs, the cache unit is a sudo-tar, NOT the directory:
+      # mkosi runs under sudo and leaves a root-owned tree, and actions/cache
+      # tars as the runner user, which would drop that ownership. The tarball
+      # contains mkosi.output itself (not just its contents) so the
+      # directory's own ownership/mode round-trip too — steep (running
+      # unprivileged) must still be able to manage the stamp file inside.
+      #
+      # Key: the mkosi.conf hash — the exact digest steep stamps the tree
+      # with (the snapshot mirror URL and package list are both in that file)
+      # — plus a mkosi version literal, because the stamp only covers the
+      # conf while the tree is built by whatever mkosi the Setup step
+      # installs. Keep "mkosi-v26" in lockstep with the Setup mkosi step
+      # above. No restore-keys: a prefix match could only restore a
+      # stamp-mismatched tree that steep would rebuild anyway.
+      - name: Restore kernel-builder tools tree
+        id: tools-tree-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/steep-tools-tree.tar.zst
+          key: ${{ runner.os }}-steep-tools-tree-mkosi-v26-${{ hashFiles('steep/mkosi/kernel-builder/mkosi.conf') }}
+
+      - name: Unpack kernel-builder tools tree
+        if: steps.tools-tree-cache.outputs.cache-hit == 'true'
+        run: |
+          sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
+            -xpf "${RUNNER_TEMP}/steep-tools-tree.tar.zst" \
+            -C steep/mkosi/kernel-builder
+
       # kata osbuilder's rootfs-builder Dockerfile fails its first RUN with
       # "apparmor failed to apply profile: ... /proc/thread-self/attr/apparmor/
       # exec: no such file or directory" on newer ubuntu runners. kata's own
@@ -462,6 +502,36 @@ jobs:
             steep/output/kernel
             steep/kernel/config-x86_64.snapshot
           key: ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+
+      # Pack + save the kernel-builder tools tree (see the Restore step
+      # above). The stamp file is the completeness witness: steep writes it
+      # only after a successful `mkosi --force` and wipes it before any
+      # rebuild, so stamp present ⇒ tree complete, and a Step-0a failure
+      # (e.g. snapshot.ubuntu.com 5xx mid-build) leaves nothing to save.
+      # if: always() for the usual reason — the historically flaky steps come
+      # later, and the tools tree is worth banking even when they fail. Note
+      # a kernel-cache HIT run skips Step 0a entirely and produces no tree;
+      # exists=false then skips the save, leaving the cold-build run to seed
+      # this cache.
+      - name: Pack kernel-builder tools tree
+        id: tools-tree-tar
+        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true'
+        run: |
+          if [[ -f steep/mkosi/kernel-builder/mkosi.output/.steep-tools-stamp ]]; then
+            sudo tar --zstd --numeric-owner --xattrs --xattrs-include='*' \
+              -cpf "${RUNNER_TEMP}/steep-tools-tree.tar.zst" \
+              -C steep/mkosi/kernel-builder mkosi.output
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Save kernel-builder tools tree
+        if: always() && steps.tools-tree-cache.outputs.cache-hit != 'true' && steps.tools-tree-tar.outputs.exists == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/steep-tools-tree.tar.zst
+          key: ${{ steps.tools-tree-cache.outputs.cache-primary-key }}
 
       # build.sh packs the tarball right after Step 2, before the later steps
       # that historically fail, so an always()-save still banks the ~4-min
