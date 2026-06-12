@@ -2652,6 +2652,28 @@ func TestChartNriImagePolicyRejectsUnknownDistro(t *testing.T) {
 	}
 }
 
+// TestChartNriImagePolicyDetachesContainerdRestart: the installer must hand the
+// host containerd restart to systemd-run (host PID 1), not run it in this pod's
+// process tree. A restart via `nsenter ... sh -c "$RESTART_COMMAND"` is killed
+// with the pod when containerd bounces, which on a sole control-plane node
+// interrupts the rke2 bootstrap and wedges it.
+func TestChartNriImagePolicyDetachesContainerdRestart(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "nriImagePolicy.distro=rke2")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-nri-image-policy-cds")
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	if !strings.Contains(script, "systemd-run") {
+		t.Fatalf("install script must detach the containerd restart via systemd-run\n%s", script)
+	}
+	// The bare in-pod form (nsenter ... -- sh -c "$RESTART_COMMAND") must be
+	// gone; the restart now goes nsenter ... -- systemd-run ... sh -c "...".
+	if strings.Contains(script, `-p -- sh -c "$RESTART_COMMAND"`) {
+		t.Fatalf("install script still runs RESTART_COMMAND in-pod (not detached)\n%s", script)
+	}
+}
+
 // TestChartNriImagePolicyContainerdPrepInitContainer: on rke2 the installer
 // DaemonSet must run a containerd-prep initContainer before `install`, so the
 // drop-in import exists by the time `install` writes its drop-in. On k8s the

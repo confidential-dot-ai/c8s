@@ -60,9 +60,16 @@ fi
 #    references plugin_path or default_validator; the host plugin process
 #    exits and is not re-launched.
 if [ "$config_changed" = "1" ]; then
-  echo "restarting containerd: ${RESTART_COMMAND}"
+  echo "restarting containerd (detached via systemd-run): ${RESTART_COMMAND}"
+  # Detach the restart to host PID 1: restarting rke2/containerd kills this
+  # pod's own shim, and a restart in the pod's process tree dies with it
+  # mid-restart, which on a sole control-plane node can wedge the rke2
+  # bootstrap. systemd-run runs it as a transient host unit that survives the
+  # pod. systemctl (hence systemd-run) is always present on the host.
   # shellcheck disable=SC2086
-  nsenter -t 1 -m -u -i -n -p -- sh -c "${RESTART_COMMAND}"
+  nsenter -t 1 -m -u -i -n -p -- \
+    systemd-run --collect --description="c8s nri-image-policy containerd restart" \
+    sh -c "${RESTART_COMMAND}"
 fi
 
 # 3. Remove host artifacts. Cache last so a partial-failure re-run still

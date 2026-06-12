@@ -130,9 +130,19 @@ fi
 # NRI does not respawn pre-registered plugins on exit. Binary, config, or
 # containerd registration changes therefore require a restart. Shims survive.
 if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_changed" = "1" ]; then
-  echo "restarting containerd: $RESTART_COMMAND"
+  echo "restarting containerd (detached via systemd-run): $RESTART_COMMAND"
+  # The restart tears down this pod's own containerd shim. Running it in this
+  # pod's process tree (nsenter ... sh -c) means it is killed together with the
+  # pod mid-restart — and on a sole control-plane node that interrupts the rke2
+  # bootstrap and wedges it (etcd/apiserver static manifests never rewritten,
+  # API server stays down). Hand the restart to host PID 1 via systemd-run so it
+  # runs as a transient unit and completes regardless of this pod's fate. The
+  # RESTART_COMMAND is `systemctl restart ...`, so systemd — and thus
+  # systemd-run — is always present on the host.
   # shellcheck disable=SC2086
-  nsenter -t 1 -m -u -i -n -p -- sh -c "$RESTART_COMMAND"
+  nsenter -t 1 -m -u -i -n -p -- \
+    systemd-run --collect --description="c8s nri-image-policy containerd restart" \
+    sh -c "$RESTART_COMMAND"
 fi
 
 i=0
