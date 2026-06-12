@@ -1498,6 +1498,62 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	}
 }
 
+// TestTLSLBProbesAvoidMTLSHandshakeUnderKata: under kata the RA-TLS mesh moves
+// into the guest, so the pod's serving port is fronted by the in-guest inbound
+// proxy that expects mutual attested TLS. The kubelet prober presents no
+// attested client cert, so an httpGet probe is rejected at the handshake ("tls:
+// certificate required") and the container CrashLoopBackOffs on failed probes.
+// The chart must fall back to a tcpSocket probe under kata (same pattern and
+// rationale as cds.yaml); the base shape — where the host-side mesh excludes
+// kubelet's UID and it reaches nginx directly — keeps the richer httpGet
+// /healthz check.
+func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
+	type namedProbe struct {
+		name  string
+		probe *corev1.Probe
+	}
+
+	base, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, base)
+	}
+	nginx := renderedDeploymentContainer(t, base, "c8s-tls-lb", "nginx")
+	for _, p := range []namedProbe{
+		{"readiness", nginx.ReadinessProbe},
+		{"liveness", nginx.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.HTTPGet == nil {
+			t.Fatalf("base shape: tls-lb %s probe should be httpGet; got %+v", p.name, p.probe)
+		}
+		if got := p.probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+			t.Errorf("base shape: tls-lb %s probe scheme = %q, want HTTPS", p.name, got)
+		}
+		if got := p.probe.HTTPGet.Path; got != "/healthz" {
+			t.Errorf("base shape: tls-lb %s probe path = %q, want /healthz", p.name, got)
+		}
+	}
+
+	kata, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template --kata: %v\n%s", err, kata)
+	}
+	nginx = renderedDeploymentContainer(t, kata, "c8s-tls-lb", "nginx")
+	for _, p := range []namedProbe{
+		{"readiness", nginx.ReadinessProbe},
+		{"liveness", nginx.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.TCPSocket == nil {
+			t.Fatalf("kata shape: tls-lb %s probe should be tcpSocket (an httpGet hits the in-guest mTLS handshake); got %+v", p.name, p.probe)
+		}
+		if got := p.probe.TCPSocket.Port.String(); got != "https" {
+			t.Errorf("kata shape: tls-lb %s probe tcpSocket port = %q, want https", p.name, got)
+		}
+		if p.probe.HTTPGet != nil {
+			t.Errorf("kata shape: tls-lb %s probe must not be httpGet under kata", p.name)
+		}
+	}
+}
+
 // TestChartTeeProxyHostPort covers the teeProxy.hostPort edge toggle. The
 // default publishes the node host ports (443/80). hostPort.enabled=false omits
 // them so the pod schedules where another controller already owns 80/443 (e.g.

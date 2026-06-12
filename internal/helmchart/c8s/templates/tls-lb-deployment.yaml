@@ -50,6 +50,26 @@ spec:
             capabilities:
               drop:
                 - ALL
+          {{- if .Values.kata.enabled }}
+          # Under kata the RA-TLS mesh moves into the guest, so the pod's
+          # serving port is fronted by the in-guest inbound proxy, which expects
+          # mutual attested TLS. The kubelet prober presents no attested client
+          # cert, so an httpGet handshake is rejected ("tls: certificate
+          # required"); a TCP accept is the correct "attested and serving"
+          # signal. Same pattern and rationale as cds.yaml. In the base shape
+          # the host-side mesh excludes kubelet's UID, so it reaches nginx
+          # directly and the richer httpGet /healthz check below applies.
+          readinessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          {{- else }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -64,6 +84,7 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 30
+          {{- end }}
           volumeMounts:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
