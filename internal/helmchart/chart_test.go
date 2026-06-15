@@ -1213,65 +1213,45 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	}
 }
 
-// TestChartAttestationApiBaremetalLeastPrivilege proves the default
-// (cvmMode=baremetal) renders the least-privilege securityContext — not
-// privileged — so a plain install does not over-privilege a host-device
-// DaemonSet. This is the over-privilege regression guard.
-func TestChartAttestationApiBaremetalLeastPrivilege(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
-	sc := c.SecurityContext
-	if sc == nil {
-		t.Fatal("attestation-api missing securityContext")
-	}
-	if sc.Privileged != nil && *sc.Privileged {
-		t.Errorf("default (baremetal) must not be privileged; got privileged=true")
-	}
-	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
-		t.Errorf("baremetal must set allowPrivilegeEscalation=false; got %+v", sc.AllowPrivilegeEscalation)
-	}
-	if !hasCapability(c, "SYS_RAWIO") {
-		t.Errorf("baremetal must add SYS_RAWIO; got %+v", sc.Capabilities)
-	}
-	if !slices.Contains(sc.Capabilities.Drop, "ALL") {
-		t.Errorf("baremetal must drop ALL; got %+v", sc.Capabilities)
-	}
-}
-
-// TestChartAttestationApiAksPrivileged proves cvmMode=aks renders a privileged
-// container (Azure gates vTPM access below the capability layer, so /dev/tpm0
-// needs full privilege) and drops the least-privilege capabilities map — the
-// modes are strictly either/or, not merged.
-func TestChartAttestationApiAksPrivileged(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=aks")
-	if err != nil {
-		t.Fatalf("helm template (cvmMode=aks): %v\n%s", err, out)
-	}
-	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
-	sc := c.SecurityContext
-	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
-		t.Errorf("aks must be privileged for vTPM access; got %+v", sc)
-	}
-	if sc != nil && sc.Capabilities != nil {
-		t.Errorf("aks must not carry the least-privilege capabilities map; got %+v", sc.Capabilities)
-	}
-}
-
-// TestChartAttestationApiGkeLeastPrivilege proves cvmMode=gke renders the same
-// least-privilege context as baremetal — GKE confidential VMs use the native
-// /dev/sev-guest ioctl, not Azure's gated vTPM, so they must NOT be privileged.
-func TestChartAttestationApiGkeLeastPrivilege(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
-	if err != nil {
-		t.Fatalf("helm template (cvmMode=gke): %v\n%s", err, out)
-	}
-	c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
-	sc := c.SecurityContext
-	if sc != nil && sc.Privileged != nil && *sc.Privileged {
-		t.Errorf("gke must not be privileged (native sev-guest, not Azure vTPM); got %+v", sc)
+// TestChartAttestationApiPrivileged proves every cvmMode renders privileged:
+// true. A hostPath device mount does not add a device-cgroup rule, so open() on
+// the TEE device (/dev/sev-guest, /dev/tpm0) is EPERM from an unprivileged
+// container regardless of SYS_RAWIO (cgroup v2 eBPF device controller); aks
+// additionally gates the vTPM below the capability layer. TODO: revert to
+// least-privilege once SNP attest goes through the TSM configfs report
+// interface.
+func TestChartAttestationApiPrivileged(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		// baremetal is the chart default, so render it via the no-arg path to
+		// also guard that a plain install is privileged.
+		useDefault bool
+		// aks renders the privilege axis only — it must NOT also carry the
+		// least-privilege capabilities map (the modes are either/or, not merged).
+		noCapabilities bool
+	}{
+		{mode: "baremetal", useDefault: true},
+		{mode: "gke"},
+		{mode: "aks", noCapabilities: true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			var args []string
+			if !tc.useDefault {
+				args = []string{"--set", "attestationApi.cvmMode=" + tc.mode}
+			}
+			out, err := helmTemplate(t, args...)
+			if err != nil {
+				t.Fatalf("helm template (cvmMode=%s): %v\n%s", tc.mode, err, out)
+			}
+			c := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
+			sc := c.SecurityContext
+			if sc == nil || sc.Privileged == nil || !*sc.Privileged {
+				t.Errorf("%s must be privileged for device access; got %+v", tc.mode, sc)
+			}
+			if tc.noCapabilities && sc != nil && sc.Capabilities != nil {
+				t.Errorf("%s must not carry the least-privilege capabilities map; got %+v", tc.mode, sc.Capabilities)
+			}
+		})
 	}
 }
 

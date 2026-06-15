@@ -278,21 +278,19 @@ attestationApi:
     - az-tdx
     - gcp-snp
     - gcp-tdx
-  ## CVM platform shape — picks both the securityContext and (via the install
-  ## CLI) the TEE device. The privilege axis and the device axis don't line up
-  ## across clouds, so the three shapes are enumerated rather than a 2-way
-  ## managed/baremetal split:
+  ## CVM platform shape — selects (via the install CLI) the TEE device:
   ##
-  ## baremetal (default): bare-metal CVM, native /dev/sev-guest. Least-privilege
-  ##   securityContext (device mount + SYS_RAWIO).
-  ## gke: GKE confidential VM — also native /dev/sev-guest, also least-privilege.
-  ##   Same shape as baremetal; named for clarity at the install site.
-  ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0, which the
-  ##   platform gates below the device/capability layer ("Operation not
-  ##   permitted" even with the device mounted and SYS_RAWIO). Renders
-  ##   privileged: true.
+  ## baremetal (default): bare-metal CVM, native /dev/sev-guest.
+  ## gke: GKE confidential VM — also native /dev/sev-guest.
+  ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0.
+  ##
+  ## All modes render privileged: true. A hostPath device mount does not add a
+  ## device-cgroup rule, so open() on the TEE device is EPERM from an unprivileged
+  ## container regardless of SYS_RAWIO. TODO: drop privileged by routing SNP attest
+  ## through the TSM configfs report interface (/sys/kernel/config/tsm/report).
   cvmMode: baremetal
-  ## Least-privilege device access, used for cvmMode baremetal and gke.
+  ## Unused while all modes render privileged: true (see cvmMode above). Retained
+  ## for the planned least-privilege configfs path.
   securityContext:
     readOnlyRootFilesystem: true
     allowPrivilegeEscalation: false
@@ -799,13 +797,18 @@ nriImagePolicy:
   # Resources for the install-DaemonSet pod itself (init container that
   # copies files and patches containerd, then sleeps idle). Not the host
   # plugin process, which runs outside K8s and has no resource limits.
+  # The install init enters all host namespaces (nsenter -t 1) and spawns a
+  # transient systemd unit (systemd-run) to restart containerd; that init peak
+  # OOM-kills under a 64Mi limit on confidential nodes, so the limit is
+  # generous. The request tracks the idle footprint the pod holds for its whole
+  # life after init, not that one-time peak.
   resources:
     requests:
       cpu: 50m
       memory: 32Mi
     limits:
       cpu: 200m
-      memory: 64Mi
+      memory: 256Mi
 
   # Priority class for the install-DaemonSet pod.
   priorityClassName: system-node-critical

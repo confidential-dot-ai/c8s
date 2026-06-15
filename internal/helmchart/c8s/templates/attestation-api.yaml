@@ -87,16 +87,16 @@ spec:
             - name: http
               containerPort: {{ .Values.attestationApi.port }}
           securityContext:
-            {{- if eq .Values.attestationApi.cvmMode "aks" }}
-            # AKS gates the vTPM (/dev/tpm0) below the device/capability layer:
-            # access is denied even with the device mounted and SYS_RAWIO, so
-            # the attestation-api needs full privilege.
+            {{- if has .Values.attestationApi.cvmMode (list "baremetal" "gke" "aks") }}
+            # All modes need privileged. A hostPath device mount does NOT add a
+            # device-cgroup rule, so open(/dev/sev-guest|/dev/tpm0) is EPERM from an
+            # unprivileged container regardless of SYS_RAWIO (cgroup v2 eBPF device
+            # controller; K8s has no securityContext field for a single device rule).
+            # TODO: drop privileged by routing SNP attest through the TSM configfs
+            # report interface (/sys/kernel/config/tsm/report), which is a filesystem
+            # and not device-cgroup gated.
             privileged: true
             readOnlyRootFilesystem: true
-            {{- else if has .Values.attestationApi.cvmMode (list "baremetal" "gke") }}
-            # baremetal and GKE both expose the native /dev/sev-guest ioctl, so
-            # the least-privilege context (device mount + SYS_RAWIO) suffices.
-{{ toYaml .Values.attestationApi.securityContext | indent 12 }}
             {{- else }}
 {{ fail (printf "attestationApi.cvmMode must be one of baremetal, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
