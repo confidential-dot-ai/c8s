@@ -378,8 +378,11 @@ jobs:
       # to the committed baseline, the fingerprint never matches, and the
       # "cached" kernel rebuilds every run — tools tree (~200s) + compile
       # (~150s) — which is exactly what happened before the -v2 key.
-      # (-v2 busts the old snapshot-less entries: cache keys are immutable, so
-      # an exact hit on an old entry would skip the save forever.)
+      # Bumping the version literal busts stale entries (cache keys are
+      # immutable, so an exact hit on a bad entry would skip the save forever).
+      # -v2 dropped the old snapshot-less entries; -v3 drops the incomplete
+      # ~30 KiB snapshot-only entries an unguarded always()-save once seeded
+      # when a build died mid-kernel (see the Save step's completeness guard).
       #
       # Key on STEEP_REF (a different steep can yield a different kernel) + the
       # c8s kernel config fragment; restore-keys falls back to the latest
@@ -395,9 +398,9 @@ jobs:
           path: |
             steep/output/kernel
             steep/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
           restore-keys: |
-            ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-
+            ${{ runner.os }}-kata-kernel-v3-${{ env.STEEP_REF }}-
 
       # Cache steep's mkosi kernel-builder tools tree (build.sh Step 1 →
       # `steep kernel` Step 0a). The tools tree is the only part of this job
@@ -492,8 +495,28 @@ jobs:
       # and re-pay the ~10-min compile next run. Skip only on an exact-key hit
       # (nothing new to store); a restore-keys-only (prefix) hit still saves
       # under the new fragment's key.
+      #
+      # COMPLETENESS GUARD: always() also fires when the build died DURING the
+      # kernel (a Step 0a tools-tree flake or a Step 0d compile error) — but by
+      # then Step 0c.5 has already written steep/kernel/config-x86_64.snapshot,
+      # so an unguarded save banks a snapshot-only ~30 KiB cache with no
+      # vmlinuz/manifest. That entry then exact-hits the key forever (this save
+      # only re-runs on a miss), so every later build recompiles against a cache
+      # that can never satisfy steep's fingerprint. Only save when output/kernel
+      # is actually complete — the same existence-probe the rootfs/tools-tree
+      # saves use.
+      - name: Check guest kernel output
+        id: kernel-out
+        if: always()
+        run: |
+          if [[ -f steep/output/kernel/vmlinuz && -f steep/output/kernel/manifest.json ]]; then
+            echo "complete=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "complete=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Save guest kernel build
-        if: always() && steps.kernel-cache.outputs.cache-hit != 'true'
+        if: always() && steps.kernel-cache.outputs.cache-hit != 'true' && steps.kernel-out.outputs.complete == 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           # Keep in lockstep with the Restore step: the snapshot must travel
@@ -501,7 +524,25 @@ jobs:
           path: |
             steep/output/kernel
             steep/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+
+      # Publish the resolved kernel-config snapshot build.sh wrote in Step 1
+      # (steep's required+hardening baseline + our container.config, merged) as
+      # a downloadable artifact — the runner-produced source of truth for the
+      # committed lockfile kata-guest-base/kernel/config-x86_64.snapshot and the
+      # reference a future drift gate diffs. Pulling it from the build (not the
+      # kernel cache) means it always matches THIS run's kernel; the cache can
+      # legitimately hold an earlier resolve. always() + warn: the snapshot is
+      # written early (Step 1), so it's captured even when a later
+      # osbuilder/publish step fails; a build that died before Step 1 has
+      # nothing to upload and the warn is harmless.
+      - name: Upload kernel-config snapshot
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: config-x86_64.snapshot
+          path: c8s/kata-guest-base/kernel/config-x86_64.snapshot
+          if-no-files-found: warn
 
       # Pack + save the kernel-builder tools tree (see the Restore step
       # above). The stamp file is the completeness witness: steep writes it
