@@ -1534,6 +1534,55 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 	}
 }
 
+// TestTeeProxyProbesAvoidMTLSHandshakeUnderKata: tee-proxy runs under kata
+// (runtimeClassName: kata-qemu-snp), so the in-guest RA-TLS mesh fronts its
+// serving port with mutual attested TLS and the kubelet's httpGet probe is
+// rejected at the handshake ("tls: certificate required"). The chart must fall
+// back to a tcpSocket probe under kata (same fix as tls-lb / cds.yaml). The
+// base shape keeps the httpGet /.well-known/health check — deliberately
+// httpGet rather than tcpSocket there, since a direct TCP probe to tee-proxy's
+// own TLS port logs a spurious "TLS handshake error: EOF".
+func TestTeeProxyProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
+	type namedProbe struct {
+		name  string
+		probe *corev1.Probe
+	}
+
+	base, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, base)
+	}
+	proxy := renderedDeploymentContainer(t, base, "c8s-tee-proxy", "proxy")
+	for _, p := range []namedProbe{
+		{"readiness", proxy.ReadinessProbe},
+		{"liveness", proxy.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.HTTPGet == nil {
+			t.Fatalf("base shape: tee-proxy %s probe should be httpGet; got %+v", p.name, p.probe)
+		}
+		if got := p.probe.HTTPGet.Path; got != "/.well-known/health" {
+			t.Errorf("base shape: tee-proxy %s probe path = %q, want /.well-known/health", p.name, got)
+		}
+	}
+
+	kata, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template --kata: %v\n%s", err, kata)
+	}
+	proxy = renderedDeploymentContainer(t, kata, "c8s-tee-proxy", "proxy")
+	for _, p := range []namedProbe{
+		{"readiness", proxy.ReadinessProbe},
+		{"liveness", proxy.LivenessProbe},
+	} {
+		if p.probe == nil || p.probe.TCPSocket == nil {
+			t.Fatalf("kata shape: tee-proxy %s probe should be tcpSocket (an httpGet hits the in-guest mTLS handshake); got %+v", p.name, p.probe)
+		}
+		if p.probe.HTTPGet != nil {
+			t.Errorf("kata shape: tee-proxy %s probe must not be httpGet under kata", p.name)
+		}
+	}
+}
+
 // TestChartTeeProxyHostPort covers the teeProxy.hostPort edge toggle. The
 // default publishes the node host ports (443/80). hostPort.enabled=false omits
 // them so the pod schedules where another controller already owns 80/443 (e.g.

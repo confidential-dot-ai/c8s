@@ -134,6 +134,29 @@ spec:
               {{- toYaml .Values.teeProxy.resources.requests | nindent 14 }}
             limits:
               {{- toYaml .Values.teeProxy.resources.limits | nindent 14 }}
+          {{- if .Values.kata.enabled }}
+          # Under kata the RA-TLS mesh moves into the guest, so the pod's
+          # serving port is fronted by the in-guest inbound proxy, which expects
+          # mutual attested TLS. The kubelet prober presents no attested client
+          # cert, so an httpGet handshake is rejected ("tls: certificate
+          # required"); a TCP accept is the correct "attested and serving"
+          # signal. The probe is accepted by the in-guest mesh proxy (which
+          # fronts the port), not tee-proxy's own TLS listener, so unlike a
+          # direct tcpSocket it does NOT provoke the spurious "TLS handshake
+          # error: EOF" noted in the else branch. Same pattern as cds.yaml /
+          # tls-lb. In the base shape the host-side mesh excludes kubelet's UID,
+          # so it reaches tee-proxy directly and the httpGet check below applies.
+          readinessProbe:
+            tcpSocket:
+              port: {{ $probePort }}
+            initialDelaySeconds: {{ .Values.teeProxy.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.probes.readiness.periodSeconds }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ $probePort }}
+            initialDelaySeconds: {{ .Values.teeProxy.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.teeProxy.probes.liveness.periodSeconds }}
+          {{- else }}
           {{- /* httpGet, not tcpSocket: a TCP probe to the TLS port logs a
                  spurious "TLS handshake error: EOF". */}}
           readinessProbe:
@@ -150,6 +173,7 @@ spec:
               scheme: {{ ternary "HTTPS" "HTTP" $tlsMode }}
             initialDelaySeconds: {{ .Values.teeProxy.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.teeProxy.probes.liveness.periodSeconds }}
+          {{- end }}
       volumes:
         - name: autocert-cache
           persistentVolumeClaim:
