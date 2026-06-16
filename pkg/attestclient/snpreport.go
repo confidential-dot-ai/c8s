@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // snpReportEnvelope holds the fields we care about inside the inner evidence

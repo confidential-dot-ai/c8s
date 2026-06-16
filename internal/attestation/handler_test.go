@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/attestation"
-	"github.com/lunal-dev/c8s/internal/ear"
-	"github.com/lunal-dev/c8s/internal/earclaims"
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/internal/attestation"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 func testKeyPEM() []byte {

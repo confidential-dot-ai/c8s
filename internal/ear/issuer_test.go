@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 )
 
 func testKeyPEM(t *testing.T) []byte {

@@ -9,7 +9,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 )
 
 // JWTClockSkew is the package-level leeway for EAR JWT time validation.

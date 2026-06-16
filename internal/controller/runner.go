@@ -23,10 +23,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	v1alpha2 "github.com/lunal-dev/c8s/api/v1alpha2"
-	"github.com/lunal-dev/c8s/internal/issuer"
-	"github.com/lunal-dev/c8s/internal/webhook"
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // Options configures the controller-manager runtime.

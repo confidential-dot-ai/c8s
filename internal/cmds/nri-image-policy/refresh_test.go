@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/cache"
-	"github.com/lunal-dev/c8s/pkg/types"
-	"github.com/lunal-dev/c8s/pkg/whitelist"
-	"github.com/lunal-dev/c8s/pkg/whitelistclient"
+	"github.com/confidential-dot-ai/c8s/internal/cache"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelistclient"
 )
 
 const (

@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"github.com/lunal-dev/c8s/internal/cmds/getcert"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/getcert"
 )
 
 func main() {

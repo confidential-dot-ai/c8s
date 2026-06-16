@@ -16,8 +16,8 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // HandoffEARSource produces CDS's own EAR token that handoff responses sign

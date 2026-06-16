@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lunal-dev/c8s/internal/whitelist"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/internal/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 func writeSeed(t *testing.T, body string) string {

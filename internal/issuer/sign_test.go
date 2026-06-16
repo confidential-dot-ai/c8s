@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/issuer"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 func mustCSR(t *testing.T, cn string, dnsNames []string, ips []net.IP, extraExtensions []pkix.Extension) (*x509.CertificateRequest, *ecdsa.PrivateKey) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	_ "modernc.org/sqlite"
 )
 

@@ -31,11 +31,11 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/lunal-dev/c8s/internal/cmds/cmdsutil"
-	"github.com/lunal-dev/c8s/internal/fileutil"
-	"github.com/lunal-dev/c8s/pkg/attestclient"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // config holds all CLI configuration for get-cert.

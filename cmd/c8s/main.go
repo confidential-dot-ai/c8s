@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lunal-dev/c8s/internal/version"
+	"github.com/confidential-dot-ai/c8s/internal/version"
 )
 
 var rootCmd = &cobra.Command{

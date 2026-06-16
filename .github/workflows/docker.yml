@@ -198,7 +198,7 @@ jobs:
   # `:main` tag's manifest under `:<short-sha>`. The downstream
   # "Kata guest base" workflow resolves every component by `:<short-sha>`
   # (kata-guest-base/scripts/fetch.sh: `oras manifest fetch
-  # ghcr.io/lunal-dev/{cds,get-cert}:${HEAD_SHA::7}`) to pin the
+  # ghcr.io/confidential-dot-ai/{cds,get-cert}:${HEAD_SHA::7}`) to pin the
   # bootstrap allowlist into the measured rootfs. Without this job, a
   # push that only touched one component (say cmd/c8s/**) leaves cds,
   # get-cert, ratls-mesh, nri-image-policy with no `:<short-sha>` tag at

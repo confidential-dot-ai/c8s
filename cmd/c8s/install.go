@@ -21,8 +21,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/lunal-dev/c8s/internal/helmchart"
-	"github.com/lunal-dev/c8s/internal/version"
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
+	"github.com/confidential-dot-ai/c8s/internal/version"
 )
 
 var (
@@ -492,7 +492,7 @@ func namespaceManifest(namespace string) ([]byte, error) {
 // fallbackImageTag is installed whenever the build is not stamped with a
 // release version. It is the branch every c8s component publishes; it is
 // deliberately not "latest", which cds does not publish (so
-// `crane digest ghcr.io/lunal-dev/cds:latest` under --resolve-digests would
+// `crane digest ghcr.io/confidential-dot-ai/cds:latest` under --resolve-digests would
 // abort with MANIFEST_UNKNOWN).
 const fallbackImageTag = "main"
 

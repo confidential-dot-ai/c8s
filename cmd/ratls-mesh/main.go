@@ -5,8 +5,8 @@
 package main
 
 import (
-	"github.com/lunal-dev/c8s/internal/cmds/cmdsutil"
-	"github.com/lunal-dev/c8s/internal/cmds/ratlsmesh"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/ratlsmesh"
 )
 
 func main() { cmdsutil.RunMain(ratlsmesh.Run) }

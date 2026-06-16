@@ -9,8 +9,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // SignCSRParams is the input to (*CA).SignCSR. The caller enforces all policy

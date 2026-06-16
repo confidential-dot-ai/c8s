@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/attestclient"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // Config for the CDS attestation client.
@@ -234,7 +234,7 @@ func (c *Client) createCSR(ctx context.Context, key *ecdsa.PrivateKey) (string, 
 	tmpl := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName:   cn,
-			Organization: []string{"Lunal"},
+			Organization: []string{"Confidential"},
 		},
 	}
 	// DNS SAN only — no IP SAN. CDS with --san-validation=false rejects IP

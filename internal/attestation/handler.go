@@ -12,10 +12,10 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/lunal-dev/c8s/internal/ear"
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Handler holds the dependencies for attestation HTTP handlers.

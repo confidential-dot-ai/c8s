@@ -23,18 +23,18 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/lunal-dev/c8s/internal/audit"
-	"github.com/lunal-dev/c8s/internal/cache"
-	"github.com/lunal-dev/c8s/internal/cmds/cmdsutil"
-	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
-	"github.com/lunal-dev/c8s/internal/fileutil"
-	"github.com/lunal-dev/c8s/internal/httputil"
-	"github.com/lunal-dev/c8s/internal/version"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
-	"github.com/lunal-dev/c8s/pkg/whitelist"
-	"github.com/lunal-dev/c8s/pkg/whitelistclient"
+	"github.com/confidential-dot-ai/c8s/internal/audit"
+	"github.com/confidential-dot-ai/c8s/internal/cache"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
+	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/internal/httputil"
+	"github.com/confidential-dot-ai/c8s/internal/version"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelistclient"
 )
 
 // Pull-startup retry parameters. Declared as vars so tests can shrink

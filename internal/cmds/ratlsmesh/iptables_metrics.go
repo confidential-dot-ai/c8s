@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/fileutil"
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 )
 
 const defaultIptablesMetricsFile = "/tmp/ratls-iptables-metrics.json"

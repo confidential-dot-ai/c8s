@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
-	"github.com/lunal-dev/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 
 func TestCheckMeasurementNormalizesLaunchDigestCase(t *testing.T) {

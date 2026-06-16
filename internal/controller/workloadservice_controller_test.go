@@ -16,8 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha2 "github.com/lunal-dev/c8s/api/v1alpha2"
-	"github.com/lunal-dev/c8s/internal/webhook"
+	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
 func cwTemplate(cwID string, ports ...corev1.ContainerPort) corev1.PodTemplateSpec {

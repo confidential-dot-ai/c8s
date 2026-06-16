@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/lunal-dev/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 
 // DefaultCertDir is controller-runtime's webhook-server default.

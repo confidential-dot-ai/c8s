@@ -7,7 +7,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 )
 
 // EARClaims is the subset of an Entity Attestation Result (EAR) JWT's claim

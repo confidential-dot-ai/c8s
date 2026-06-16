@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // writeConfigJSON synthesises an OCI spec config.json with the given
@@ -96,7 +96,7 @@ func TestHandleNewContainer_AllowedDigest(t *testing.T) {
 
 	cid := "abcdef0123"
 	writeConfigJSON(t, watchDir, cid, map[string]string{
-		"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam@sha256:" + digest,
+		"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
 	})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
@@ -199,7 +199,7 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		body, _ := json.Marshal(ociSpec{
 			Annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam@sha256:" + digest,
+				"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
 			},
 		})
 		_ = os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644)

@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	spb "github.com/google/go-sev-guest/proto/sevsnp"
-	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 // fakeSNPReport creates a minimal fake SEV-SNP attestation report (1184 bytes)

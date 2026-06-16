@@ -12,7 +12,7 @@ import (
 
 	"github.com/coreos/go-iptables/iptables"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 func parseExcludeUIDs(excludeUIDsStr string) ([]uint32, error) {

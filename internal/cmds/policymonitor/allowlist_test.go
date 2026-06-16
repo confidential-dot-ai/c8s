@@ -99,12 +99,12 @@ func TestNormalizeDigest(t *testing.T) {
 	}{
 		{"prefixed", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
 		{"bare", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"image-ref-with-digest", "ghcr.io/lunal-dev/assam@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
+		{"image-ref-with-digest", "ghcr.io/confidential-dot-ai/assam@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
 		{"uppercase-normalised", "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
 		{"empty", "", "", true},
 		{"too-short", "sha256:abc", "", true},
 		{"non-hex", "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "", true},
-		{"tag-only", "ghcr.io/lunal-dev/assam:v1.0.0", "", true},
+		{"tag-only", "ghcr.io/confidential-dot-ai/assam:v1.0.0", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := normalizeDigest(tc.in)
@@ -136,7 +136,7 @@ func TestExtractDigest_PrioritiesAndFallthrough(t *testing.T) {
 		{
 			name: "image-name-with-digest",
 			annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+				"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			},
 			want:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			wantOK: true,
@@ -144,7 +144,7 @@ func TestExtractDigest_PrioritiesAndFallthrough(t *testing.T) {
 		{
 			name: "fallback-to-image-id",
 			annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam:v1.0.0",
+				"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam:v1.0.0",
 				"io.kubernetes.cri.image-id":   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			},
 			want:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -153,7 +153,7 @@ func TestExtractDigest_PrioritiesAndFallthrough(t *testing.T) {
 		{
 			name: "fallback-to-ref-name",
 			annotations: map[string]string{
-				"io.kubernetes.cri.image-name":      "ghcr.io/lunal-dev/assam:v1.0.0",
+				"io.kubernetes.cri.image-name":      "ghcr.io/confidential-dot-ai/assam:v1.0.0",
 				"org.opencontainers.image.ref.name": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 			},
 			want:   "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -167,7 +167,7 @@ func TestExtractDigest_PrioritiesAndFallthrough(t *testing.T) {
 		{
 			name: "all-malformed",
 			annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "ghcr.io/lunal-dev/assam:v1.0.0",
+				"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam:v1.0.0",
 				"io.kubernetes.cri.image-id":   "not-a-digest",
 			},
 			wantOK: false,

@@ -11,9 +11,9 @@ name: Kata guest base
 # per-pod container images (assam, cert-issuer, workloads) are secondary
 # measurements the operator attests post-install.
 #
-# Output: ghcr.io/lunal-dev/kata-guest-base:<tag> via `oras push`. Flat
+# Output: ghcr.io/confidential-dot-ai/kata-guest-base:<tag> via `oras push`. Flat
 # at the org level matches every other c8s artifact
-# (ghcr.io/lunal-dev/{assam,cert-issuer,ratls-mesh,...}).
+# (ghcr.io/confidential-dot-ai/{assam,cert-issuer,ratls-mesh,...}).
 #
 # Every build also publishes a DEBUG variant at <tag>-debug (build.sh
 # Step 5/5): the same rootfs except the baked kata-agent policy allows the
@@ -25,7 +25,7 @@ name: Kata guest base
 on:
   # Run AFTER the Docker workflow finishes so the cds/get-cert image digests
   # we bake into the bootstrap allowlist (fetch.sh, via `oras manifest fetch
-  # ghcr.io/lunal-dev/{cds,get-cert}:<IMAGE_TAG>`) are the ones docker.yml
+  # ghcr.io/confidential-dot-ai/{cds,get-cert}:<IMAGE_TAG>`) are the ones docker.yml
   # just published — not whatever stale digests were on `main` at the moment
   # of a concurrent push. The job-level `if:` below gates on a successful
   # Docker push to main or a release tag (excludes Docker's own PR runs and
@@ -124,7 +124,7 @@ jobs:
       - name: Checkout attestation-rs
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: lunal-dev/attestation-rs
+          repository: confidential-dot-ai/attestation-rs
           path: attestation-rs
           token: ${{ secrets.ATTESTATION_REPO_TOKEN || github.token }}
 
@@ -135,7 +135,7 @@ jobs:
         # guest kernel. STEEP_REF above is the single source of truth.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: lunal-dev/steep
+          repository: confidential-dot-ai/steep
           ref: ${{ env.STEEP_REF }}
           path: steep
           token: ${{ secrets.STEEP_REPO_TOKEN || github.token }}
@@ -288,7 +288,7 @@ jobs:
           # succeeded on this same head_sha before we get here.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           # In-guest GHCR creds baked into the dm-verity rootfs so kata's
-          # experimental_force_guest_pull can fetch PRIVATE ghcr.io/lunal-dev
+          # experimental_force_guest_pull can fetch PRIVATE ghcr.io/confidential-dot-ai
           # workload images (fetch.sh -> /etc/c8s/ghcr-auth.json -> tmpfiles
           # copies it to /run/image-security/auth.json at boot). Classic
           # read:packages PAT in the repo secret READ_PRIVATE_GHCR_TOKEN; if it
@@ -631,7 +631,7 @@ jobs:
           # manifest.json. The puller pulls all of these (see
           # kata-image-puller.yaml).
           oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.tags }}" \
-            --artifact-type application/vnd.lunal.kata-guest.v2 \
+            --artifact-type application/vnd.confidential.kata-guest.v2 \
             ./*
 
       - name: Push debug variant to GHCR
@@ -643,5 +643,5 @@ jobs:
           # lockstep at <tag>-debug so kata.guestImage.debug=true can derive
           # the ref from any locked tag (see workflow header).
           oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.debug_tags }}" \
-            --artifact-type application/vnd.lunal.kata-guest.v2 \
+            --artifact-type application/vnd.confidential.kata-guest.v2 \
             ./*

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 func TestNewClientTrimsTrailingSlash(t *testing.T) {

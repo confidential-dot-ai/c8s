@@ -12,7 +12,7 @@
 # connection to CDS, the unit fails and the pod's CreateContainer
 # fails with it — kubelet sees CreateContainerError and retries.
 Description=c8s ratls-mesh (in-guest mode)
-Documentation=https://github.com/lunal-dev/c8s/tree/main/cmd/ratls-mesh
+Documentation=https://github.com/confidential-dot-ai/c8s/tree/main/cmd/ratls-mesh
 
 # Order. attestation-service.service must be up so ratls-mesh's
 # RA-TLS handshake can mint local evidence. c8s-cloudinit-env.service

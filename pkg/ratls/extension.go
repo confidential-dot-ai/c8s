@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // DefaultCertTTL is the default certificate lifetime used by both
@@ -43,10 +43,10 @@ const (
 // OID arc: 1.3.6.1.4.1.59888 is a placeholder PEN (Private Enterprise Number).
 // Replace with an IANA-registered PEN when available.
 //
-//	1.3.6.1.4.1.59888.1   - Lunal TEE attestation arc
+//	1.3.6.1.4.1.59888.1   - Confidential TEE attestation arc
 //	1.3.6.1.4.1.59888.1.1 - RA-TLS attestation extension
 var (
-	OIDLunalTEE         = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
+	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
 	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 1}
 )
 

@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 )
 
 // CSRPolicy describes the requested-name and source-IP constraints a CSR

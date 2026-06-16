@@ -368,7 +368,7 @@ yet.
 **Setup.** Operator deploys a workload pod. The c8s webhook injects
 `c8s-init-cert` (init container) and `c8s-renew-cert` (sidecar).
 These containers use `cfg.GetCertImage` from the chart
-(`ghcr.io/lunal-dev/get-cert:<tag>`).
+(`ghcr.io/confidential-dot-ai/get-cert:<tag>`).
 
 **Flow.** kata-runtime calls CreateContainer for the init container.
 kata-agent forks its init; policy-monitor sees the new bundle,

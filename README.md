@@ -132,13 +132,13 @@ per-role image names remain stable, but each image copies the same multi-mode
 
 | Image | Base | Notes |
 |---|---|---|
-| `ghcr.io/lunal-dev/c8s-operator` | distroless | Multi-mode `c8s` binary for operator/install and non-node roles |
-| `ghcr.io/lunal-dev/cds` | distroless | |
-| `ghcr.io/lunal-dev/get-cert` | distroless | |
-| `ghcr.io/lunal-dev/ratls-mesh` | debian-slim | Needs iptables |
-| `ghcr.io/lunal-dev/nri-image-policy` | debian-slim | |
+| `ghcr.io/confidential-dot-ai/c8s-operator` | distroless | Multi-mode `c8s` binary for operator/install and non-node roles |
+| `ghcr.io/confidential-dot-ai/cds` | distroless | |
+| `ghcr.io/confidential-dot-ai/get-cert` | distroless | |
+| `ghcr.io/confidential-dot-ai/ratls-mesh` | debian-slim | Needs iptables |
+| `ghcr.io/confidential-dot-ai/nri-image-policy` | debian-slim | |
 
 ## Related repos
 
-- [`lunal-dev/deployment-scripts`](https://github.com/lunal-dev/deployment-scripts) - Ansible roles for deploying these components
-- [`lunal-dev/attestation-rs`](https://github.com/lunal-dev/attestation-rs) - TEE attestation evidence verification service (publishes the `attestation-api` image)
+- [`confidential-dot-ai/deployment-scripts`](https://github.com/confidential-dot-ai/deployment-scripts) - Ansible roles for deploying these components
+- [`confidential-dot-ai/attestation-rs`](https://github.com/confidential-dot-ai/attestation-rs) - TEE attestation evidence verification service (publishes the `attestation-api` image)

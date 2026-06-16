@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	pkgwhitelist "github.com/lunal-dev/c8s/pkg/whitelist"
+	pkgwhitelist "github.com/confidential-dot-ai/c8s/pkg/whitelist"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -196,7 +196,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	}
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
-		"--get-cert-image=ghcr.io/lunal-dev/c8s-operator:dev",
+		"--get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator:dev",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--get-cert-renew-interval=6h",
 	} {
@@ -260,12 +260,12 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 
 	for _, c := range allContainers(ds) {
 		for name := range c.Resources.Requests {
-			if strings.Contains(string(name), "lunal.dev/tpm") {
+			if strings.Contains(string(name), "confidential.ai/tpm") {
 				t.Errorf("container %q requests local TPM resource %q by default", c.Name, name)
 			}
 		}
 		for name := range c.Resources.Limits {
-			if strings.Contains(string(name), "lunal.dev/tpm") {
+			if strings.Contains(string(name), "confidential.ai/tpm") {
 				t.Errorf("container %q limits local TPM resource %q by default", c.Name, name)
 			}
 		}
@@ -3142,7 +3142,7 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	// helm --set strips backslashes, so use a literal pattern that needs no
 	// escaping to prove plumbing without the assertion fighting --set parsing.
-	const public = "confidential-gke-lunal-dev"
+	const public = "confidential-gke-confidential-dot-ai"
 	out, err := helmTemplate(t, "--set", "cds.dnsSanPatterns[0]="+public)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -3563,7 +3563,7 @@ func TestChartSeedsCDSWhitelistFromFloor(t *testing.T) {
 	// The CDS self-entry, derived from cds.image (set by the test harness to
 	// digest ...0001); the reference is repository@digest.
 	const cdsDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
-	const cdsRef = "ghcr.io/lunal-dev/cds@" + cdsDigest
+	const cdsRef = "ghcr.io/confidential-dot-ai/cds@" + cdsDigest
 	if got := seed.Digests[cdsDigest]; got != cdsRef {
 		t.Errorf("seed CDS self-entry = %q, want %q\nseed: %v", got, cdsRef, seed.Digests)
 	}
@@ -3604,12 +3604,12 @@ func TestChartDerivesComponentDigestsIntoWhitelist(t *testing.T) {
 	// Each derived entry's reference must be repo@digest for the image the chart
 	// actually deploys (#51: refs match the rendered pod images).
 	want := map[string]string{
-		opD:  "ghcr.io/lunal-dev/c8s-operator@" + opD,
-		asD:  "ghcr.io/lunal-dev/attestation-api@" + asD,
-		cdsD: "ghcr.io/lunal-dev/cds@" + cdsD,
-		rmD:  "ghcr.io/lunal-dev/ratls-mesh@" + rmD,
-		nriD: "ghcr.io/lunal-dev/nri-image-policy@" + nriD,
-		tpD:  "ghcr.io/lunal-dev/tee-proxy@" + tpD,
+		opD:  "ghcr.io/confidential-dot-ai/c8s-operator@" + opD,
+		asD:  "ghcr.io/confidential-dot-ai/attestation-api@" + asD,
+		cdsD: "ghcr.io/confidential-dot-ai/cds@" + cdsD,
+		rmD:  "ghcr.io/confidential-dot-ai/ratls-mesh@" + rmD,
+		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
+		tpD:  "ghcr.io/confidential-dot-ai/tee-proxy@" + tpD,
 	}
 	for digest, ref := range want {
 		if got := seed.Digests[digest]; got != ref {
@@ -3840,7 +3840,7 @@ func TestChartRejectsUncoveredComponentInFailClosed(t *testing.T) {
 	}{
 		{"audit mode is non-blocking", []string{"--set", "nriImagePolicy.policy.mode=audit"}},
 		{"deriveComponents covers it", []string{"--set", "nriImagePolicy.policy.mode=fail-closed", "--set", "nriImagePolicy.bootstrapWhitelist.deriveComponents=true"}},
-		{"digest listed in floor", []string{"--set", "nriImagePolicy.policy.mode=fail-closed", "--set-string", "nriImagePolicy.bootstrapWhitelist.digests." + nriD + "=ghcr.io/lunal-dev/nri-image-policy@" + nriD}},
+		{"digest listed in floor", []string{"--set", "nriImagePolicy.policy.mode=fail-closed", "--set-string", "nriImagePolicy.bootstrapWhitelist.digests." + nriD + "=ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if out, err := helmTemplate(t, tc.args...); err != nil {

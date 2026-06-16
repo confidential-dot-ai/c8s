@@ -12,7 +12,7 @@
 
 [Unit]
 Description=Confidential AI attestation service (in-guest)
-Documentation=https://github.com/lunal-dev/attestation-rs
+Documentation=https://github.com/confidential-dot-ai/attestation-rs
 After=network.target
 Before=ratls-mesh.service
 # kata-qemu-snp passes /dev/sev-guest through; if it's missing the host

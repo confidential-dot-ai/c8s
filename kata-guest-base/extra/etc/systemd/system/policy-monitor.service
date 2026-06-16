@@ -33,7 +33,7 @@
 # and never blocks boot). `Restart=on-failure` below keeps a crashed
 # monitor retrying; while it is down, c8s-ready stays inactive.
 Description=c8s policy-monitor (in-guest container-digest enforcement)
-Documentation=https://github.com/lunal-dev/c8s/tree/main/cmd/policy-monitor
+Documentation=https://github.com/confidential-dot-ai/c8s/tree/main/cmd/policy-monitor
 
 # /etc must be readable so the baked allowlist seed is loadable; the
 # verity-protected /etc layer is mounted by the time local-fs.target

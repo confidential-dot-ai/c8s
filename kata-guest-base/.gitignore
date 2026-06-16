@@ -30,7 +30,7 @@ extra/usr/local/bin/
 extra/etc/c8s/bootstrap-allowlist.json
 
 # In-guest GHCR registry auth: a docker auth.json baked into the dm-verity
-# rootfs so the in-guest CDH can guest-pull PRIVATE ghcr.io/lunal-dev images.
+# rootfs so the in-guest CDH can guest-pull PRIVATE ghcr.io/confidential-dot-ai images.
 # GENERATED at build time by scripts/fetch.sh from the READ_PRIVATE_GHCR_TOKEN
 # env (CI passes the repo secret of the same name); a no-token build bakes an
 # empty auth set. It holds a credential and is build output, so it is NEVER

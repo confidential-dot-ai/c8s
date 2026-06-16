@@ -17,7 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // histogramSampleCount returns h's observation count via the dto protocol;

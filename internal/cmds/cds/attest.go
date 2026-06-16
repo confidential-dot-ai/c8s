@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/attestation"
-	"github.com/lunal-dev/c8s/internal/issuer"
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/internal/attestation"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // AttestHandler serves POST /attest by verifying TEE evidence and signing the

@@ -24,7 +24,7 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
-		GetCertImage:      "ghcr.io/lunal-dev/c8s-operator:test",
+		GetCertImage:      "ghcr.io/confidential-dot-ai/c8s-operator:test",
 		CDSURL:            "http://cds.c8s-system.svc:8443",
 		AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
 		CertDir:           "/etc/c8s/certs",
@@ -270,7 +270,7 @@ func TestMutatePodStampsWorkloadLabel(t *testing.T) {
 	}
 
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
-		GetCertImage: "ghcr.io/lunal-dev/c8s-operator:test",
+		GetCertImage: "ghcr.io/confidential-dot-ai/c8s-operator:test",
 		CDSURL:       "http://cds.c8s-system.svc:8443",
 	})
 
@@ -501,7 +501,7 @@ func TestHandleDerivesServiceSAN(t *testing.T) {
 	m := &podMutator{
 		decoder: admission.NewDecoder(scheme),
 		cfg: Config{
-			GetCertImage:      "ghcr.io/lunal-dev/c8s-operator:test",
+			GetCertImage:      "ghcr.io/confidential-dot-ai/c8s-operator:test",
 			CDSURL:            "http://cds.c8s-system.svc:8443",
 			AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
 			CertDir:           "/etc/c8s/certs",
@@ -583,7 +583,7 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 	m := &podMutator{
 		decoder: admission.NewDecoder(scheme),
 		cfg: Config{
-			GetCertImage:      "ghcr.io/lunal-dev/c8s-operator:test",
+			GetCertImage:      "ghcr.io/confidential-dot-ai/c8s-operator:test",
 			CDSURL:            "http://cds.c8s-system.svc:8443",
 			AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
 			CertDir:           "/etc/c8s/certs",

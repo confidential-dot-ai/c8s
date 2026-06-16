@@ -40,11 +40,11 @@ maybe_add() {
   fi
 }
 
-maybe_add "$C8S" c8s ghcr.io/lunal-dev/c8s-operator cmd/c8s/Dockerfile
-maybe_add "$CDS" cds ghcr.io/lunal-dev/cds cmd/cds/Dockerfile
-maybe_add "$GET_CERT" get-cert ghcr.io/lunal-dev/get-cert cmd/get-cert/Dockerfile
-maybe_add "$RATLS_MESH" ratls-mesh ghcr.io/lunal-dev/ratls-mesh cmd/ratls-mesh/Dockerfile
-maybe_add "$NRI_IMAGE_POLICY" nri-image-policy ghcr.io/lunal-dev/nri-image-policy cmd/nri-image-policy/Dockerfile
+maybe_add "$C8S" c8s ghcr.io/confidential-dot-ai/c8s-operator cmd/c8s/Dockerfile
+maybe_add "$CDS" cds ghcr.io/confidential-dot-ai/cds cmd/cds/Dockerfile
+maybe_add "$GET_CERT" get-cert ghcr.io/confidential-dot-ai/get-cert cmd/get-cert/Dockerfile
+maybe_add "$RATLS_MESH" ratls-mesh ghcr.io/confidential-dot-ai/ratls-mesh cmd/ratls-mesh/Dockerfile
+maybe_add "$NRI_IMAGE_POLICY" nri-image-policy ghcr.io/confidential-dot-ai/nri-image-policy cmd/nri-image-policy/Dockerfile
 
 if [[ ${#include[@]} -eq 0 ]]; then
   echo 'has_images=false' >> "$GITHUB_OUTPUT"

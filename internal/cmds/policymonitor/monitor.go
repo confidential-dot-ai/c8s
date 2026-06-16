@@ -37,7 +37,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // runMonitor is the long-running entry. It's package-private rather

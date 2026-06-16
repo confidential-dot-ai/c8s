@@ -14,9 +14,9 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"github.com/lunal-dev/c8s/internal/audit"
-	"github.com/lunal-dev/c8s/internal/cache"
-	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/internal/audit"
+	"github.com/confidential-dot-ai/c8s/internal/cache"
+	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 )
 
 const (

@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/crypto/cryptobyte"
 )

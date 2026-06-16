@@ -12,12 +12,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	sabi "github.com/google/go-sev-guest/abi"
 	spb "github.com/google/go-sev-guest/proto/sevsnp"
 	"github.com/google/go-sev-guest/validate"
 	"github.com/google/go-sev-guest/verify"
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 // VerifyPolicy defines what attestation claims are acceptable.

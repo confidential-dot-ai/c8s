@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // BundleManager maintains the public CA certificate bundle. Private CA keys

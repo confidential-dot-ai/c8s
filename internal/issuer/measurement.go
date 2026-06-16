@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lunal-dev/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 )
 
 // NormalizeMeasurement canonicalizes launch digest strings before allowlist

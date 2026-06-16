@@ -22,7 +22,7 @@ clobber. Verified: clobbering the config self-heals in ~24s.
 
 Without a nydus-snapshotter, containerd does a host-side CRI pull of the workload
 image **before** kata guest-pulls it inside the VM. For a private image
-(e.g. `ghcr.io/lunal-dev/cds`) the host pulls *anonymously* and gets `401` unless
+(e.g. `ghcr.io/confidential-dot-ai/cds`) the host pulls *anonymously* and gets `401` unless
 `serviceAccount.imagePullSecrets` supplies creds. So a guest-pull workload needs
 creds in **two** places: the host (an image-pull Secret) **and** the guest
 (`agent.image_registry_auth`, set by the puller — see
@@ -85,7 +85,7 @@ consequences worth knowing:
 `image.digest` field. Resolve it once at deploy time:
 
 ```sh
-oras manifest fetch --descriptor ghcr.io/lunal-dev/cds:<release-tag> \
+oras manifest fetch --descriptor ghcr.io/confidential-dot-ai/cds:<release-tag> \
   | jq -r .digest
 ```
 
@@ -121,7 +121,7 @@ This is **not** a kubelet image pull: `oras` only reads `~/.docker/config.json`
 and is oblivious to Kubernetes `imagePullSecrets` — Secret references on the
 puller ServiceAccount only help kubelet pull the puller's **own** image.
 Without a projected credential the `kata-guest-base` pull is anonymous and
-401s against the private `ghcr.io/lunal-dev` artifact with:
+401s against the private `ghcr.io/confidential-dot-ai` artifact with:
 
 ```
 Error response from registry: failed to resolve <tag>: GET …/manifests/<tag>: unauthorized
@@ -164,7 +164,7 @@ away entirely.
 
 `kata-guest-base/extra/etc/c8s/ghcr-auth.json` is a docker auth.json baked into
 the dm-verity guest rootfs so kata's `experimental_force_guest_pull` can fetch
-**private** `ghcr.io/lunal-dev` workload images from inside the guest. It is
+**private** `ghcr.io/confidential-dot-ai` workload images from inside the guest. It is
 **generated at build time** by `kata-guest-base/scripts/fetch.sh` from the
 `READ_PRIVATE_GHCR_TOKEN` env — a classic **read-only** (`read:packages`) PAT
 that CI passes from the repo secret of the same name. At boot, tmpfiles

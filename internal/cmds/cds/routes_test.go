@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/attestation"
-	"github.com/lunal-dev/c8s/internal/ear"
-	"github.com/lunal-dev/c8s/internal/issuer"
-	"github.com/lunal-dev/c8s/internal/whitelist"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/internal/attestation"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"golang.org/x/time/rate"
 )
 

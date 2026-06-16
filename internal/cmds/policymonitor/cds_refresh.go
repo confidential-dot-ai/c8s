@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/whitelistclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelistclient"
 )
 
 // runWhitelistRefresh builds the RA-TLS-pinned CDS whitelist client and

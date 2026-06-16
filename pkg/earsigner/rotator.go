@@ -16,8 +16,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/jwks"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/jwks"
 )
 
 // RotatorConfig configures the key rotation loop.

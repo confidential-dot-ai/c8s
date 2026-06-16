@@ -3,8 +3,8 @@ package server
 import (
 	"net/http"
 
-	"github.com/lunal-dev/c8s/internal/ear"
-	"github.com/lunal-dev/c8s/pkg/jwks"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
+	"github.com/confidential-dot-ai/c8s/pkg/jwks"
 )
 
 // HandleJWKS returns a handler that serves a JWKS document.

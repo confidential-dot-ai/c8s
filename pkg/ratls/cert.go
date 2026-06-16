@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // CertOptions configures RA-TLS certificate generation.
@@ -33,7 +33,7 @@ func (o *CertOptions) subject() pkix.Name {
 	if o.Subject.CommonName == "" {
 		return pkix.Name{
 			CommonName:   "RA-TLS Workload",
-			Organization: []string{"Lunal"},
+			Organization: []string{"Confidential"},
 		}
 	}
 	return o.Subject

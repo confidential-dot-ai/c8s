@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lunal-dev/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelist"
 )
 
 func TestGetWhitelist_NilByDefault(t *testing.T) {

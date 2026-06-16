@@ -11,7 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // healthServer exposes /live, /ready, and /metrics on a dedicated admin port.

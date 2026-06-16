@@ -4,7 +4,7 @@ package cache
 import (
 	"sync"
 
-	"github.com/lunal-dev/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelist"
 )
 
 // PolicyCache caches the whitelist fetched from KBS.

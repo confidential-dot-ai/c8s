@@ -43,7 +43,7 @@ the unstamped default) falls back to the `main` branch tag, the only other tag
 every component publishes.
 
 The chart itself is versioned separately. CI publishes it to
-`oci://ghcr.io/lunal-dev/charts` under a SemVer chart version (`1.2.3` for a
+`oci://ghcr.io/confidential-dot-ai/charts` under a SemVer chart version (`1.2.3` for a
 release tag, `<Chart.yaml version>-g<short-sha>` for a `main` build), never a
 `main` tag, because Helm chart versions must be SemVer. The chart carries no
 default image tag of its own, so the image tag above is supplied by

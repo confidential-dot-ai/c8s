@@ -1,6 +1,6 @@
 # kata-guest-base
 
-The Lunal kata guest image — the SEV-SNP-measured guest every c8s
+The Confidential kata guest image — the SEV-SNP-measured guest every c8s
 `kata-qemu-snp` pod boots into. `ratls-mesh` and `attestation-service`
 are baked into the dm-verity rootfs, so they are part of the guest's
 launch measurement; every workload, including CDS, runs inside a VM
@@ -34,7 +34,7 @@ config — **Status:** today a single fixed default baked into the rootfs
 was never built). The third — the in-guest attester staged
 under the `attestation-service` role name — is the `attestation-api`
 binary from the sibling
-[lunal-dev/attestation-rs](https://github.com/lunal-dev/attestation-rs)
+[confidential-dot-ai/attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
 repo (the former standalone attestation-service was folded into it),
 built static-musl and fetched at build time. Co-locating the recipe
 with the Go source it depends on lets a c8s PR that changes
@@ -171,7 +171,7 @@ This is the mechanism every reference to "guest-pull" in these docs
 points back to; the host-visibility limits during the transport are
 covered in [G3](kata-image-policy.md#g3--image-content-is-visible-to-the-host-during-the-guest-pull).
 
-For **private** `ghcr.io/lunal-dev` workload images the in-guest pull needs
+For **private** `ghcr.io/confidential-dot-ai` workload images the in-guest pull needs
 credentials of its own. The kata-agent reads them via
 `agent.image_registry_auth=file:///run/image-security/auth.json` on the
 guest kernel cmdline (the puller appends this from
@@ -196,7 +196,7 @@ the boot order and the dm-verity measurement described above.
 
 The [`kata-guest-base.yml`](../.github/workflows/kata-guest-base.yml)
 workflow builds the image and pushes it to
-`ghcr.io/lunal-dev/kata-guest-base` (flat at the org level, matching
+`ghcr.io/confidential-dot-ai/kata-guest-base` (flat at the org level, matching
 every other c8s artifact). It tags images as `<short-sha>` on every
 commit to `main` or `feat/**` branches that touches the recipe or the
 in-guest binaries. On a release tag (`v*`) the same image also gets the
@@ -220,7 +220,7 @@ variant" in [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 `internal/helmchart/c8s/templates/kata-image-puller.yaml`. Per node, the
 puller does two things:
 
-1. `oras pull ghcr.io/lunal-dev/kata-guest-base:<tag>` into
+1. `oras pull ghcr.io/confidential-dot-ai/kata-guest-base:<tag>` into
    `${hostPath}/base/` (default `/var/lib/c8s/kata-images/base/`). The
    artifact contains the hardened kernel (`vmlinuz`), the dm-verity
    rootfs image (`kata-rootfs.img`), the verity-params and rootfs-type

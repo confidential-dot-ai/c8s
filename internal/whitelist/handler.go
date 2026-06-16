@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/httputil"
+	"github.com/confidential-dot-ai/c8s/pkg/resources"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/lunal-dev/c8s/internal/earclaims"
-	"github.com/lunal-dev/c8s/internal/httputil"
-	"github.com/lunal-dev/c8s/pkg/resources"
-	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 // DefaultMaxWriteBodyBytes is the cap applied when Handler.MaxWriteBodyBytes

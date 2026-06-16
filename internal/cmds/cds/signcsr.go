@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lunal-dev/c8s/internal/attestation"
-	"github.com/lunal-dev/c8s/internal/issuer"
-	"github.com/lunal-dev/c8s/pkg/issuerapi"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/internal/attestation"
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/issuerapi"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // SignCSRHandler serves POST /sign-csr for external callers that hold an

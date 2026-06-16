@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 )
 
 // Checker periodically polls the attestation-api and exposes a readiness flag.

@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lunal-dev/c8s/pkg/types"
-	"github.com/lunal-dev/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/whitelist"
 )
 
 // Client is an HTTP client for the CDS whitelist API.

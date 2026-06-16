@@ -10,7 +10,7 @@
 # initContainer from .Values.kata.guestImage.* — there is no helm
 # interpolation inside this script.
 #
-#   REGISTRY        guest-image registry (e.g. ghcr.io/lunal-dev)   [required]
+#   REGISTRY        guest-image registry (e.g. ghcr.io/confidential-dot-ai)   [required]
 #   TAG             kata-guest-base tag                             [required]
 #   HOST_IMG_DIR    /host-prefixed dir the puller writes into       [required]
 #   REGISTRY_AUTH   in-guest workload registry auth source (file://

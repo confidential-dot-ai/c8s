@@ -39,7 +39,7 @@ set -euo pipefail
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT must be set}"
 
 SHORT_SHA="${HEAD_SHA::7}"
-IMAGE="${REGISTRY}/lunal-dev/kata-guest-base"
+IMAGE="${REGISTRY}/confidential-dot-ai/kata-guest-base"
 
 tags=("${SHORT_SHA}")
 if [[ "${HEAD_BRANCH}" == v* ]]; then

@@ -8,9 +8,9 @@ a manual per-node procedure.
 This document covers what the feature installs, the design decisions behind
 it, the threat model, and the constraints to read before shipping it.
 
-It implements [lunal-dev/c8s#97](https://github.com/lunal-dev/c8s/issues/97)
+It implements [confidential-dot-ai/c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97)
 (privileged Kata installation) and
-[lunal-dev/c8s#77](https://github.com/lunal-dev/c8s/issues/77) (RuntimeClass
+[confidential-dot-ai/c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) (RuntimeClass
 injection and enforcement).
 
 ## What it installs
@@ -139,7 +139,7 @@ Enforcement is two cooperating pieces, installed together with the stack.
    workload pod requesting a `runtimeClassName` that is not one of
    `kata-qemu` / `kata-clh` / `kata-qemu-snp`.
 
-[c8s#77](https://github.com/lunal-dev/c8s/issues/77) asked for a
+[c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) asked for a
 `ValidatingAdmissionWebhook`. A **`ValidatingAdmissionPolicy`** (built-in CEL,
 no webhook server, no TLS) is the lighter equivalent, and it is what
 `bare-metal-infra-management` already uses for its `kata-cc-mode` policy.
@@ -296,7 +296,7 @@ nsenters PID 1 to restart the runtime. That is inherent to installing a
 runtime onto a host — there is no less-privileged way to do it.
 
 For **pod-as-kata-cvm this does not weaken the threat model**, and that is the
-core reasoning of [c8s#97](https://github.com/lunal-dev/c8s/issues/97):
+core reasoning of [c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97):
 
 - The host (L0) is already outside the trust boundary. With `kata-qemu-snp`
   the trust boundary is the SEV-SNP guest, not the node.
@@ -419,7 +419,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   VFIO binding, no NVIDIA sandbox-device-plugin. Confidential-GPU support
   means porting the GPU half of the `bare-metal-infra-management` `kata` /
   `base` / `sandbox-device-plugin` roles — future work, tracked separately
-  per the [c8s#77](https://github.com/lunal-dev/c8s/issues/77) discussion.
+  per the [c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) discussion.
 
 - **No node attestation.** Pod-as-host means the node is not a CVM. Only each
   `kata-qemu-snp` pod carries its own SNP attestation. There is no launch

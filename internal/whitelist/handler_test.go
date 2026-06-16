@@ -10,16 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/attestation"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
+	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/readiness"
+	"github.com/confidential-dot-ai/c8s/internal/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/lunal-dev/c8s/internal/attestation"
-	"github.com/lunal-dev/c8s/internal/ear"
-	"github.com/lunal-dev/c8s/internal/earclaims"
-	"github.com/lunal-dev/c8s/internal/readiness"
-	"github.com/lunal-dev/c8s/internal/whitelist"
-	"github.com/lunal-dev/c8s/pkg/attestationclient"
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/earsigner"
-	"github.com/lunal-dev/c8s/pkg/types"
 )
 
 const (

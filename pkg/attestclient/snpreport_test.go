@@ -8,9 +8,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lunal-dev/c8s/pkg/attestclient"
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // hclEnvelope builds an AKS HCL envelope wrapping the given hardware report.

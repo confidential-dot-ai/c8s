@@ -15,7 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/lunal-dev/c8s/internal/helmchart"
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 var errTestResolve = errors.New("simulated resolve failure")
@@ -333,12 +333,12 @@ func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
 // which exercise buildDigestArgs without reading a real chart. The chart-read
 // path (chartComponents) is covered separately by TestChartComponentsFromValues.
 var testComponents = []c8sComponent{
-	{"image", "ghcr.io/lunal-dev/c8s-operator"},
-	{"attestationApi.image", "ghcr.io/lunal-dev/attestation-api"},
-	{"cds.image", "ghcr.io/lunal-dev/cds"},
-	{"ratlsMesh.image", "ghcr.io/lunal-dev/ratls-mesh"},
-	{"nriImagePolicy.image", "ghcr.io/lunal-dev/nri-image-policy"},
-	{"teeProxy.image", "ghcr.io/lunal-dev/tee-proxy"},
+	{"image", "ghcr.io/confidential-dot-ai/c8s-operator"},
+	{"attestationApi.image", "ghcr.io/confidential-dot-ai/attestation-api"},
+	{"cds.image", "ghcr.io/confidential-dot-ai/cds"},
+	{"ratlsMesh.image", "ghcr.io/confidential-dot-ai/ratls-mesh"},
+	{"nriImagePolicy.image", "ghcr.io/confidential-dot-ai/nri-image-policy"},
+	{"teeProxy.image", "ghcr.io/confidential-dot-ai/tee-proxy"},
 }
 
 func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
@@ -346,17 +346,17 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 	// component gets a distinct, predictable value.
 	resolve := func(ref string) (string, error) {
 		switch ref {
-		case "ghcr.io/lunal-dev/c8s-operator:v1":
+		case "ghcr.io/confidential-dot-ai/c8s-operator:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000aa", nil
-		case "ghcr.io/lunal-dev/attestation-api:v1":
+		case "ghcr.io/confidential-dot-ai/attestation-api:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000bb", nil
-		case "ghcr.io/lunal-dev/cds:v1":
+		case "ghcr.io/confidential-dot-ai/cds:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000cc", nil
-		case "ghcr.io/lunal-dev/ratls-mesh:v1":
+		case "ghcr.io/confidential-dot-ai/ratls-mesh:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000dd", nil
-		case "ghcr.io/lunal-dev/nri-image-policy:v1":
+		case "ghcr.io/confidential-dot-ai/nri-image-policy:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000ee", nil
-		case "ghcr.io/lunal-dev/tee-proxy:v1":
+		case "ghcr.io/confidential-dot-ai/tee-proxy:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000ff", nil
 		}
 		t.Fatalf("unexpected ref resolved: %q", ref)
@@ -371,17 +371,17 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 		"upgrade",
 		// Each component pins both repository and digest so an -f repository
 		// override cannot diverge from the digest resolved against it.
-		"--set-string", "image.repository=ghcr.io/lunal-dev/c8s-operator",
+		"--set-string", "image.repository=ghcr.io/confidential-dot-ai/c8s-operator",
 		"--set-string", "image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000aa",
-		"--set-string", "attestationApi.image.repository=ghcr.io/lunal-dev/attestation-api",
+		"--set-string", "attestationApi.image.repository=ghcr.io/confidential-dot-ai/attestation-api",
 		"--set-string", "attestationApi.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000bb",
-		"--set-string", "cds.image.repository=ghcr.io/lunal-dev/cds",
+		"--set-string", "cds.image.repository=ghcr.io/confidential-dot-ai/cds",
 		"--set-string", "cds.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000cc",
-		"--set-string", "ratlsMesh.image.repository=ghcr.io/lunal-dev/ratls-mesh",
+		"--set-string", "ratlsMesh.image.repository=ghcr.io/confidential-dot-ai/ratls-mesh",
 		"--set-string", "ratlsMesh.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000dd",
-		"--set-string", "nriImagePolicy.image.repository=ghcr.io/lunal-dev/nri-image-policy",
+		"--set-string", "nriImagePolicy.image.repository=ghcr.io/confidential-dot-ai/nri-image-policy",
 		"--set-string", "nriImagePolicy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ee",
-		"--set-string", "teeProxy.image.repository=ghcr.io/lunal-dev/tee-proxy",
+		"--set-string", "teeProxy.image.repository=ghcr.io/confidential-dot-ai/tee-proxy",
 		"--set-string", "teeProxy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ff",
 		// Resolving component digests enables their derivation into the NRI allowlist.
 		"--set", "nriImagePolicy.bootstrapWhitelist.deriveComponents=true",
@@ -411,7 +411,7 @@ func TestBuildDigestArgsResolvesEachComponentOnce(t *testing.T) {
 // missing digest.
 func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
 	resolve := func(ref string) (string, error) {
-		if ref == "ghcr.io/lunal-dev/cds:v1" {
+		if ref == "ghcr.io/confidential-dot-ai/cds:v1" {
 			return "", errTestResolve
 		}
 		return "sha256:2222222222222222222222222222222222222222222222222222222222222222", nil
@@ -444,12 +444,12 @@ func TestChartComponentsFromValues(t *testing.T) {
 		got[c.valuePrefix] = c.repository
 	}
 	want := map[string]string{
-		"image":                "ghcr.io/lunal-dev/c8s-operator",
-		"attestationApi.image": "ghcr.io/lunal-dev/attestation-api",
-		"cds.image":            "ghcr.io/lunal-dev/cds",
-		"ratlsMesh.image":      "ghcr.io/lunal-dev/ratls-mesh",
-		"nriImagePolicy.image": "ghcr.io/lunal-dev/nri-image-policy",
-		"teeProxy.image":       "ghcr.io/lunal-dev/tee-proxy",
+		"image":                "ghcr.io/confidential-dot-ai/c8s-operator",
+		"attestationApi.image": "ghcr.io/confidential-dot-ai/attestation-api",
+		"cds.image":            "ghcr.io/confidential-dot-ai/cds",
+		"ratlsMesh.image":      "ghcr.io/confidential-dot-ai/ratls-mesh",
+		"nriImagePolicy.image": "ghcr.io/confidential-dot-ai/nri-image-policy",
+		"teeProxy.image":       "ghcr.io/confidential-dot-ai/tee-proxy",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 )
 
 func newTestRotator(t *testing.T) (*earsigner.Rotator, *ecdsa.PrivateKey) {

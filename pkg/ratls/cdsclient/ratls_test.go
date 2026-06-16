@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
-	"github.com/lunal-dev/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // fakeASEvidence stands up a minimal attestation-api stub that returns

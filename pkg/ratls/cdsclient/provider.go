@@ -9,8 +9,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/lunal-dev/c8s/pkg/certutil"
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // Logger is a type alias for [ratls.Logger] to avoid requiring callers

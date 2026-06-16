@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/lunal-dev/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 func ExampleNewServerTLSConfig() {

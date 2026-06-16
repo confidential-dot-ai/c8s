@@ -35,7 +35,7 @@ c8sComponents:
 ## neither is set. TEE measurements depend on the exact binary running,
 ## so floating tags break attestation semantics; prefer `digest`.
 image:
-  repository: ghcr.io/lunal-dev/c8s-operator
+  repository: ghcr.io/confidential-dot-ai/c8s-operator
   tag: ""
   digest: ""
   pullPolicy: IfNotPresent
@@ -132,7 +132,7 @@ cds:
   ## pattern applies to every c8s image with a `.image.digest` field — see
   ## docs/pitfalls.md ("Bootstrap allowlist binds to floating :main digests").
   image:
-    repository: ghcr.io/lunal-dev/cds
+    repository: ghcr.io/confidential-dot-ai/cds
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -239,7 +239,7 @@ cds:
       cpu: 500m
       memory: 256Mi
 
-## DaemonSet running the attestation-api image from github.com/lunal-dev/attestation-rs.
+## DaemonSet running the attestation-api image from github.com/confidential-dot-ai/attestation-rs.
 attestationApi:
   ## Render the host-side attestation-api DaemonSet/Service. Disable on
   ## clusters where every workload pod runs as a kata-qemu-snp CVM — the
@@ -250,7 +250,7 @@ attestationApi:
   ## kata.enabled (`c8s install --kata` sets it).
   enabled: true
   image:
-    repository: ghcr.io/lunal-dev/attestation-api
+    repository: ghcr.io/confidential-dot-ai/attestation-api
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -394,7 +394,7 @@ kata:
     ## registry and you place it on the node + patch the kata config by hand.
     ## Default true: under --kata the puller fetches the published artifact.
     enabled: true
-    repository: ghcr.io/lunal-dev
+    repository: ghcr.io/confidential-dot-ai
     ## Default tracks the same floating tag c8s itself falls back to for
     ## non-release builds (see cmd/c8s/install.go fallbackImageTag). Release
     ## installs SHOULD override this to a specific `<short-sha>` digest-stand-in
@@ -418,7 +418,7 @@ kata:
     ## Optional Secret name (kubernetes.io/dockerconfigjson) in the release
     ## namespace whose `.dockerconfigjson` is projected to /root/.docker/config.json
     ## inside the puller pod so the host-side `oras pull` of kata-guest-base can
-    ## authenticate against a PRIVATE registry (e.g. ghcr.io/lunal-dev today).
+    ## authenticate against a PRIVATE registry (e.g. ghcr.io/confidential-dot-ai today).
     ## Defaults to the chart-wide imagePullSecret: the in-pod oras pull ignores
     ## kubelet imagePullSecrets, but the credential shape is the same and the
     ## artifact lives in the same registry as the c8s images, so one
@@ -442,7 +442,7 @@ kata:
     ##     baked into the dm-verity-measured rootfs at build time (from the
     ##     READ_PRIVATE_GHCR_TOKEN repo secret — a read-only GHCR PAT) and
     ##     copied to this tmpfs path early in boot. Lets every kata-qemu-snp
-    ##     pod guest-pull PRIVATE ghcr.io/lunal-dev images out of the box. The
+    ##     pod guest-pull PRIVATE ghcr.io/confidential-dot-ai images out of the box. The
     ##     credential lives in the measured rootfs — a deliberate tradeoff
     ##     while the repos/artifacts are private (see kata-guest-base/README.md
     ##     "Private guest-pull" + docs/pitfalls.md). NOTE: appending this moves
@@ -496,7 +496,7 @@ ratlsMesh:
   enabled: true
 
   image:
-    repository: ghcr.io/lunal-dev/ratls-mesh
+    repository: ghcr.io/confidential-dot-ai/ratls-mesh
     # -- Image tag. Required: the chart does not pin a default; the consumer
     #    (HelmRelease values or cluster overlay) must set tag or digest.
     tag: ""
@@ -655,7 +655,7 @@ nriImagePolicy:
   ## cluster's kubelet versions (an install with -f values owns it instead).
   distro: k8s
   image:
-    repository: ghcr.io/lunal-dev/nri-image-policy
+    repository: ghcr.io/confidential-dot-ai/nri-image-policy
     # -- Image tag. Required: the chart does not pin a default; the consumer
     #    (HelmRelease values or cluster overlay) must set tag or digest. The
     #    image must contain both the host plugin binary at
@@ -780,7 +780,7 @@ nriImagePolicy:
     # same sha256.
     deriveComponents: false
     digests: {}
-    # sha256:abc123...: "ghcr.io/lunal-dev/cds:v0.1.0"
+    # sha256:abc123...: "ghcr.io/confidential-dot-ai/cds:v0.1.0"
 
   # --- Uninstall hook ---
   # Pre-delete DaemonSet that reverts the containerd config patch and removes
@@ -825,7 +825,7 @@ nriImagePolicy:
 teeProxy:
   enabled: true
   image:
-    repository: ghcr.io/lunal-dev/tee-proxy
+    repository: ghcr.io/confidential-dot-ai/tee-proxy
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent

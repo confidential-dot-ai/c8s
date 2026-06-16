@@ -19,7 +19,7 @@
 # ratls-mesh + policy-monitor are produced by this c8s repo's
 # `make build-c8s-node` / `make build-policy-monitor`; the in-guest
 # attester is the `attestation-api` bin from the sibling
-# lunal-dev/attestation-rs repo's default (glibc) build (the former
+# confidential-dot-ai/attestation-rs repo's default (glibc) build (the former
 # standalone attestation-service was folded into that repo). The CI
 # workflow (.github/workflows/kata-guest-base.yml) runs the canonical
 # build steps for each before invoking this script.
@@ -156,7 +156,7 @@ mkdir -p "${EXTRA_DIR}/usr/local/share/c8s"
 #
 #   2. The digests we resolve here MUST match the c8s container images
 #      the chart deploys. The IMAGE_TAG variable below is the
-#      c8s release tag whose ghcr.io/lunal-dev/{cds,get-cert}:<tag>
+#      c8s release tag whose ghcr.io/confidential-dot-ai/{cds,get-cert}:<tag>
 #      images are pinned. CI passes this as an env
 #      var (.github/workflows/kata-guest-base.yml); locally the
 #      developer must set it explicitly — defaulting to "latest"
@@ -164,7 +164,7 @@ mkdir -p "${EXTRA_DIR}/usr/local/share/c8s"
 #      run, which is the opposite of what we want.
 
 IMAGE_TAG="${IMAGE_TAG:-}"
-IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/lunal-dev}"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/confidential-dot-ai}"
 ALLOWLIST_TEMPLATE="${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json.template"
 ALLOWLIST_DST="${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json"
 
@@ -283,7 +283,7 @@ echo "==> bootstrap allowlist: ${ALLOWLIST_DST}"
 # --- In-guest GHCR registry auth (private guest-pull) ------------------
 #
 # Bake a docker auth.json into the overlay so the in-guest CDH/image-rs can
-# guest-pull workload images from PRIVATE ghcr.io/lunal-dev repos. kata's
+# guest-pull workload images from PRIVATE ghcr.io/confidential-dot-ai repos. kata's
 # experimental_force_guest_pull pulls the workload OCI image INSIDE the
 # guest; without creds the agent only gets anonymous access and a private
 # image 401s. The kata-agent finds the file via
@@ -314,7 +314,7 @@ GHCR_AUTH_DST="${EXTRA_DIR}/etc/c8s/ghcr-auth.json"
 # must be non-empty. Default to the org; CI passes the repo owner. Override
 # GHCR_PULL_USER if a future GHCR change starts validating it (then it must
 # be the PAT owner's GitHub username).
-GHCR_PULL_USER="${GHCR_PULL_USER:-lunal-dev}"
+GHCR_PULL_USER="${GHCR_PULL_USER:-confidential-dot-ai}"
 GHCR_REGISTRY_HOST="${GHCR_REGISTRY_HOST:-ghcr.io}"
 mkdir -p "$(dirname "${GHCR_AUTH_DST}")"
 if [[ -n "${READ_PRIVATE_GHCR_TOKEN:-}" ]]; then

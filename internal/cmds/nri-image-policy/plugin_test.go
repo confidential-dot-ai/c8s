@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/audit"
+	"github.com/confidential-dot-ai/c8s/internal/cache"
+	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/containerd/nri/pkg/api"
-	"github.com/lunal-dev/c8s/internal/audit"
-	"github.com/lunal-dev/c8s/internal/cache"
-	ctrdresolver "github.com/lunal-dev/c8s/internal/containerd"
 )
 
 func newTestPlugin(cfg *config) *plugin {

@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/lunal-dev/c8s/internal/whitelist"
-	"github.com/lunal-dev/c8s/pkg/types"
-	pkgwhitelist "github.com/lunal-dev/c8s/pkg/whitelist"
+	"github.com/confidential-dot-ai/c8s/internal/whitelist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+	pkgwhitelist "github.com/confidential-dot-ai/c8s/pkg/whitelist"
 )
 
 // seedStore reads the JSON whitelist at path and seeds its digests into store.

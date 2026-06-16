@@ -1,4 +1,4 @@
-module github.com/lunal-dev/c8s
+module github.com/confidential-dot-ai/c8s
 
 go 1.26
 
