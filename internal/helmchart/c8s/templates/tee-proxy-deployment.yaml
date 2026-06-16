@@ -81,7 +81,7 @@ spec:
             - --host
             - {{ .Values.teeProxy.domain | quote }}
             - --upstream
-            - "http://{{ .Values.teeProxy.upstream }}"
+            - "http://{{ include "c8s.teeProxy.resolvedUpstream" . }}"
             - --header-name
             - {{ .Values.teeProxy.headerName | quote }}
             {{- if $attestationURL }}

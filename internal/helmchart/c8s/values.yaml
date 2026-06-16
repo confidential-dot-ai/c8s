@@ -829,6 +829,30 @@ nriImagePolicy:
   # plugin.health_addr config field (rendered as "unix://<path>").
   healthSocketName: health.sock
 
+# Inference-engine preset. A convenience that derives teeProxy.upstream from a
+# known engine's default port so callers need not know it. The derived upstream
+# is the operator-managed headless Service for the workload
+# (c8s-<workloadId>.<namespace>.svc.cluster.local:<port>): headless DNS returns
+# pod IPs, which the node mesh intercepts to wrap the hop in attested mTLS — a
+# Service VIP it cannot. Leaving name empty preserves teeProxy.upstream
+# verbatim; setting both is rejected (see validations.yaml).
+engine:
+  # Engine name -> default server port. Single source of truth: the helper and
+  # validations.yaml both read this, so adding an engine is one edit here.
+  presets:
+    vllm: "8000"
+    sglang: "30000"
+  # Engine to use. Empty: teeProxy.upstream is used as-is. Otherwise a key of
+  # presets above.
+  name: ""
+  # The confidential.ai/cw id on the engine pod. The headless Service the
+  # operator mints is c8s-<workloadId>; workloadId must form a DNS-1035 label
+  # once the c8s- prefix is added (start with a letter, [a-z0-9-]).
+  workloadId: ""
+  # Namespace the engine workload runs in (where its c8s-<workloadId> headless
+  # Service lives). Empty defaults to the release namespace.
+  namespace: ""
+
 teeProxy:
   enabled: true
   image:

@@ -4209,3 +4209,129 @@ func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
 		t.Errorf("puller dockercfg secret = %q, want none (anonymous pull)", got)
 	}
 }
+
+// teeProxyUpstream returns the host:port from tee-proxy's --upstream
+// http://<host:port> arg in the rendered deployment.
+func teeProxyUpstream(t *testing.T, manifest string) string {
+	t.Helper()
+	proxy := renderedDeploymentContainer(t, manifest, "c8s-tee-proxy", "proxy")
+	v, ok := containerArgValue(proxy.Args, "--upstream")
+	if !ok {
+		t.Fatalf("tee-proxy proxy container missing --upstream\nargs: %v", proxy.Args)
+	}
+	return strings.TrimPrefix(v, "http://")
+}
+
+func TestChartEngineUpstreamDefault(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	// No engine preset: teeProxy.upstream passes through verbatim.
+	if got, want := teeProxyUpstream(t, out), "vllm-router-service.vllm.svc.cluster.local"; got != want {
+		t.Fatalf("default upstream = %q, want %q", got, want)
+	}
+}
+
+func TestChartEnginePresetDerivesUpstream(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		port string
+	}{
+		{"vllm", "8000"},
+		{"sglang", "30000"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := helmTemplate(t,
+				"--set-string", "engine.name="+tt.name,
+				"--set-string", "engine.workloadId=infer",
+			)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			// Derives the operator-managed headless Service in the release
+			// namespace (c8s-system), with the preset's port appended.
+			want := "c8s-infer.c8s-system.svc.cluster.local:" + tt.port
+			if got := teeProxyUpstream(t, out); got != want {
+				t.Fatalf("%s upstream = %q, want %q", tt.name, got, want)
+			}
+		})
+	}
+}
+
+func TestChartEnginePresetHonorsNamespace(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "engine.name=sglang",
+		"--set-string", "engine.workloadId=infer",
+		"--set-string", "engine.namespace=workloads",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if got, want := teeProxyUpstream(t, out), "c8s-infer.workloads.svc.cluster.local:30000"; got != want {
+		t.Fatalf("upstream = %q, want %q", got, want)
+	}
+}
+
+func TestChartEnginePresetValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		kind string
+	}{
+		{
+			name: "unknown-engine",
+			args: []string{"--set-string", "engine.name=tgi", "--set-string", "engine.workloadId=infer"},
+			kind: "unknown_engine",
+		},
+		{
+			name: "missing-workload-id",
+			args: []string{"--set-string", "engine.name=sglang"},
+			kind: "engine_missing_workload_id",
+		},
+		{
+			name: "upstream-conflict",
+			args: []string{
+				"--set-string", "engine.name=sglang",
+				"--set-string", "engine.workloadId=infer",
+				"--set-string", "teeProxy.upstream=my-router.ns.svc:9000",
+			},
+			kind: "engine_upstream_conflict",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tt.args...)
+			if err == nil {
+				t.Fatalf("helm template succeeded, want %s failure\n%s", tt.kind, out)
+			}
+			if got := parseValidationErrorKind(out); got != tt.kind {
+				t.Fatalf("validation kind = %q, want %q\n%s", got, tt.kind, out)
+			}
+		})
+	}
+}
+
+// TestChartEngineConflictDefaultMatchesValues guards the engine_upstream_conflict
+// check in validations.yaml: it hardcodes the default teeProxy.upstream so it
+// can tell "user left the default" from "user set a custom upstream". If
+// values.yaml drifts, the conflict check would either fire on the default or
+// miss a real conflict — pin the two together.
+func TestChartEngineConflictDefaultMatchesValues(t *testing.T) {
+	const defaultInValidations = "vllm-router-service.vllm.svc.cluster.local"
+	data, err := os.ReadFile("c8s/values.yaml")
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var values struct {
+		TeeProxy struct {
+			Upstream string `yaml:"upstream"`
+		} `yaml:"teeProxy"`
+	}
+	if err := yaml.Unmarshal(data, &values); err != nil {
+		t.Fatalf("unmarshal values.yaml: %v", err)
+	}
+	if values.TeeProxy.Upstream != defaultInValidations {
+		t.Fatalf("teeProxy.upstream default = %q, but validations.yaml engine_upstream_conflict pins %q; keep them in sync",
+			values.TeeProxy.Upstream, defaultInValidations)
+	}
+}

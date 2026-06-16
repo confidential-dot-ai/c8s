@@ -53,3 +53,22 @@
 {{- if and $nri.enabled (or (lt $attestationNodePort 30000) (gt $attestationNodePort 32767)) -}}
 {{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got %d)" $attestationNodePort) -}}
 {{- end -}}
+{{- /*
+  engine preset checks. The resolvedUpstream helper fails closed on these too,
+  but validate here so they surface independent of whether tee-proxy is enabled
+  or the helper is reached, with stable kind= markers for the tests.
+  defaultUpstream must track values.yaml teeProxy.upstream.
+*/ -}}
+{{- $engine := .Values.engine -}}
+{{- if $engine.name -}}
+{{- if not (hasKey $engine.presets $engine.name) -}}
+{{- fail (printf "VALIDATION_ERROR kind=unknown_engine: engine.name=%q is not in engine.presets (%s)" $engine.name (join ", " (keys $engine.presets))) -}}
+{{- end -}}
+{{- if not $engine.workloadId -}}
+{{- fail "VALIDATION_ERROR kind=engine_missing_workload_id: engine.name selects a preset but engine.workloadId is empty; set the confidential.ai/cw id of the engine pod" -}}
+{{- end -}}
+{{- $defaultUpstream := "vllm-router-service.vllm.svc.cluster.local" -}}
+{{- if and $teeProxy.upstream (ne $teeProxy.upstream $defaultUpstream) -}}
+{{- fail (printf "VALIDATION_ERROR kind=engine_upstream_conflict: engine.name=%q derives teeProxy.upstream, but teeProxy.upstream is also set to %q; set one, not both" $engine.name $teeProxy.upstream) -}}
+{{- end -}}
+{{- end -}}
