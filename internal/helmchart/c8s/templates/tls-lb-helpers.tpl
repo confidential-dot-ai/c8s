@@ -13,12 +13,39 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
-Default the CDS certificate SAN to the chart-managed Service DNS name. Public
-deployments should set .Values.tlsLb.san to the externally routed hostname.
+The tlsLb.san list, defaulted. Empty -> the chart-managed Service DNS name
+(<release>-tls-lb.<namespace>.svc) as a single entry. The first entry is the
+CDS mesh-cert identity (see tls-lb.san); the whole list becomes nginx
+server_name (see tls-lb.serverNames). Fails if san is set but not a list.
+*/}}
+{{- define "tls-lb.sanList" -}}
+{{- $san := .Values.tlsLb.san -}}
+{{- if not (kindIs "slice" $san) -}}
+{{- fail (printf "tlsLb.san must be a list of hostnames, got %s: %v" (kindOf $san) $san) -}}
+{{- end -}}
+{{- if $san -}}
+{{- toJson $san -}}
+{{- else -}}
+{{- toJson (list (printf "%s.%s.svc" (include "tls-lb.fullname" .) .Release.Namespace)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The single identity baked into the CDS-issued mesh cert (get-cert) and validated
+by cds.dnsSanPatterns: the first entry of tls-lb.sanList. Extra san entries
+widen only nginx server_name, not the mesh cert.
 */}}
 {{- define "tls-lb.san" -}}
-{{- default (printf "%s.%s.svc" (include "tls-lb.fullname" .) .Release.Namespace) .Values.tlsLb.san }}
-{{- end }}
+{{- first (include "tls-lb.sanList" . | fromJsonArray) -}}
+{{- end -}}
+
+{{/*
+Space-separated nginx server_name value: every entry of tls-lb.sanList. Lets one
+front door answer on several public hostnames the serving cert covers.
+*/}}
+{{- define "tls-lb.serverNames" -}}
+{{- join " " (include "tls-lb.sanList" . | fromJsonArray) -}}
+{{- end -}}
 
 {{/*
 Common labels.

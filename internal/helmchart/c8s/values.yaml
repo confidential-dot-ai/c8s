@@ -191,9 +191,11 @@ cds:
   ##
   ## The mesh's own CSRs (tls-lb, c8s-tee-proxy.<ns>.svc, ratls-mesh.<ns>.svc)
   ## always validate against the built-in Service pattern, so leave this empty
-  ## for purely in-cluster deployments. When tls-lb fronts a routed domain, set
-  ## tlsLb.san to that hostname and add the same hostname here so CDS signs it
-  ## onto the tls-lb leaf — appending here never shadows the in-cluster pattern.
+  ## for purely in-cluster deployments. When tls-lb fronts a routed domain, make
+  ## that hostname the first tlsLb.san entry and add it here so CDS signs it onto
+  ## the tls-lb leaf — appending here never shadows the in-cluster pattern. Only
+  ## the first tlsLb.san is the mesh-cert identity; extra entries widen nginx
+  ## server_name only and need no pattern here.
   dnsSanPatterns: []
   cnPattern: ""
   ## The single flat allowlist of SHA-384 hex launch digests, used two ways:
@@ -955,9 +957,13 @@ tlsLb:
       maxSurge: 1
       maxUnavailable: 0
 
-  # -- Subject Alternative Name for the CDS certificate. Empty defaults to the
-  # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc.
-  san: ""
+  # -- Public hostnames for the front door, as a list. Empty defaults to the
+  # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc. Every entry
+  # becomes an nginx server_name, so one tls-lb can answer on several hostnames
+  # the serving cert (publicTLS) covers. The FIRST entry is the single identity
+  # on the CDS-issued mesh cert — pin it in cds.dnsSanPatterns; the rest widen
+  # only server_name and need no dnsSanPatterns entry.
+  san: []
 
   # -- Upstream backend service to proxy traffic to. Defaults to the
   # chart-managed tee-proxy over mutual attested TLS: tee-proxy serves a

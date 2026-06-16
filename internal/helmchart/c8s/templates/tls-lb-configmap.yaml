@@ -1,6 +1,8 @@
 {{- if .Values.tlsLb.enabled }}
-{{- $san := include "tls-lb.san" . -}}
-{{- include "tls-lb.validateSan" $san -}}
+{{- $serverNames := include "tls-lb.serverNames" . -}}
+{{- range $s := include "tls-lb.sanList" . | fromJsonArray -}}
+{{- include "tls-lb.validateSan" $s -}}
+{{- end -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
 {{- include "tls-lb.validateUpstreamAddress" .Values.tlsLb.upstream -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
@@ -63,7 +65,7 @@ data:
         {{- end }}
         server {
             listen {{ .Values.tlsLb.nginx.httpsPort }} ssl;
-            server_name "{{ $san }}";
+            server_name {{ $serverNames }};
 
             ssl_certificate     {{ include "tls-lb.publicCertPath" . }};
             ssl_certificate_key {{ include "tls-lb.publicKeyPath" . }};

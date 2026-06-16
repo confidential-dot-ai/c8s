@@ -165,7 +165,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		"app.kubernetes.io/name: tee-proxy",
 		"port: 443\n      targetPort: 443\n      protocol: TCP\n      name: https",
 		"app.kubernetes.io/name: tls-lb",
-		"server_name \"c8s-tls-lb.c8s-system.svc\";",
+		"server_name c8s-tls-lb.c8s-system.svc;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("default chart missing %q\n%s", want, out)
@@ -3514,7 +3514,7 @@ func Example_tlsLBConfig() {
 	//     }
 	//     server {
 	//         listen 8443 ssl;
-	//         server_name "c8s-tls-lb.c8s-system.svc";
+	//         server_name c8s-tls-lb.c8s-system.svc;
 	//
 	//         ssl_certificate     /tls/cert.pem;
 	//         ssl_certificate_key /tls/key.pem;
