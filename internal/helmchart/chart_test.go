@@ -931,6 +931,63 @@ func TestChartWebhookExtraExcludedFlowsToWebhookAndSweep(t *testing.T) {
 	}
 }
 
+// TestChartWebhookOptsOutOfAKSAdmissionsEnforcer proves the AKS workaround:
+// with attestationApi.cvmMode=aks (what `c8s install --cvm-mode aks` sets) the
+// pod-injector MutatingWebhookConfiguration carries
+// admissions.enforcer/disabled=true, so AKS's admissionsenforcer controller
+// stops rewriting the webhook namespaceSelector and conflicting with helm
+// re-applies. The default (baremetal) must NOT carry it — the annotation is
+// pure AKS plumbing and shouldn't appear on other platforms. A user-set
+// webhook.annotations value flows through alongside it.
+func TestChartWebhookOptsOutOfAKSAdmissionsEnforcer(t *testing.T) {
+	const annotation = "admissions.enforcer/disabled"
+
+	// Default (baremetal): no AKS opt-out annotation.
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var def admissionregv1.MutatingWebhookConfiguration
+	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &def) {
+		t.Fatalf("default chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
+	}
+	if _, ok := def.Annotations[annotation]; ok {
+		t.Errorf("default (baremetal) webhook must not carry %s; got %v", annotation, def.Annotations)
+	}
+
+	// aks: opt-out annotation present and "true".
+	out, err = helmTemplate(t, "--set-string", "attestationApi.cvmMode=aks")
+	if err != nil {
+		t.Fatalf("helm template --set attestationApi.cvmMode=aks: %v\n%s", err, out)
+	}
+	var aks admissionregv1.MutatingWebhookConfiguration
+	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &aks) {
+		t.Fatalf("aks chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
+	}
+	if got := aks.Annotations[annotation]; got != "true" {
+		t.Errorf("aks webhook %s = %q, want \"true\"; annotations=%v", annotation, got, aks.Annotations)
+	}
+
+	// A user-supplied annotation coexists with the automatic AKS opt-out.
+	out, err = helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=aks",
+		"--set-string", "webhook.annotations.team=platform",
+	)
+	if err != nil {
+		t.Fatalf("helm template with extra webhook annotation: %v\n%s", err, out)
+	}
+	var both admissionregv1.MutatingWebhookConfiguration
+	if !findDoc(t, out, "MutatingWebhookConfiguration", "c8s-pod-injector", &both) {
+		t.Fatalf("override chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
+	}
+	if got := both.Annotations["team"]; got != "platform" {
+		t.Errorf("user webhook.annotations.team = %q, want \"platform\"; annotations=%v", got, both.Annotations)
+	}
+	if got := both.Annotations[annotation]; got != "true" {
+		t.Errorf("AKS opt-out must still apply alongside user annotations: %s = %q, want \"true\"", annotation, got)
+	}
+}
+
 func TestChartManagedRATLSServiceTargetPortsMatchContainerPorts(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {

@@ -94,6 +94,13 @@ statusMirror:
 ## annotated with confidential.ai/cw.
 webhook:
   caBundle: ""
+  ## -- Extra annotations for the MutatingWebhookConfiguration. When
+  ## attestationApi.cvmMode=aks (i.e. `c8s install --cvm-mode aks`) the chart
+  ## also adds `admissions.enforcer/disabled: "true"` automatically, so AKS's
+  ## Admissions Enforcer stops rewriting the webhook's namespaceSelector and
+  ## conflicting with `helm upgrade` re-applies. A value set here for the same
+  ## key takes precedence over that automatic default.
+  annotations: {}
   service:
     port: 443
   failurePolicy: Fail

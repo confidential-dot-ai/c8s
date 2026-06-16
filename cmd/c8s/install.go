@@ -549,6 +549,13 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // /dev/sev-guest (absent on AKS), and the attestation-api pod would fail the
 // hostPath CharDevice check. Override individual teeDevices via -f for hosts
 // that don't fit the pairing (e.g. a TDX host needs tdxGuest).
+//
+// aks also opts the pod-injector MutatingWebhookConfiguration out of AKS's
+// "admissionsenforcer" controller (annotation admissions.enforcer/disabled),
+// which otherwise rewrites the webhook namespaceSelector and makes every helm
+// re-apply conflict. That is rendered chart-side off attestationApi.cvmMode (so
+// GitOps/HelmRelease installs get it too), not emitted as a --set here; see
+// internal/helmchart/c8s/templates/webhook.yaml.
 func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
 	allowed := []string{"baremetal", "gke", "aks"}
 	if !slices.Contains(allowed, cvmMode) {
