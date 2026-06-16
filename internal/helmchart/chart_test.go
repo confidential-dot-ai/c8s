@@ -4290,6 +4290,11 @@ func TestChartEnginePresetValidation(t *testing.T) {
 			kind: "engine_missing_workload_id",
 		},
 		{
+			name: "invalid-workload-id",
+			args: []string{"--set-string", "engine.name=sglang", "--set-string", "engine.workloadId=Bad_ID"},
+			kind: "engine_invalid_workload_id",
+		},
+		{
 			name: "upstream-conflict",
 			args: []string{
 				"--set-string", "engine.name=sglang",

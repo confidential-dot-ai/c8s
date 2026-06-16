@@ -16,9 +16,10 @@ c8s.teeProxy.resolvedUpstream is teeProxy's --upstream host:port.
                         operator provisions and CDS signs. namespace defaults
                         to the release namespace.
 
-validations.yaml rejects an unknown engine or missing workloadId earlier with
-stable kind= markers; the index guard here only keeps a typo from rendering a
-portless upstream if the helper is ever reached directly.
+validations.yaml rejects an unknown engine, a missing workloadId, and an
+invalid one earlier with stable kind= markers; the index guard here only keeps
+a typo'd engine.name from rendering a portless upstream if the helper is ever
+reached directly.
 */}}
 {{- define "c8s.teeProxy.resolvedUpstream" -}}
 {{- $engine := .Values.engine -}}

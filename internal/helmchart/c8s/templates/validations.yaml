@@ -54,10 +54,9 @@
 {{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got %d)" $attestationNodePort) -}}
 {{- end -}}
 {{- /*
-  engine preset checks. The resolvedUpstream helper fails closed on these too,
-  but validate here so they surface independent of whether tee-proxy is enabled
-  or the helper is reached, with stable kind= markers for the tests.
-  defaultUpstream must track values.yaml teeProxy.upstream.
+  engine preset checks. The resolvedUpstream helper fails closed on the unknown
+  engine too, but validate here so they surface independent of whether tee-proxy
+  is enabled or the helper is reached, with stable kind= markers for the tests.
 */ -}}
 {{- $engine := .Values.engine -}}
 {{- if $engine.name -}}
@@ -67,6 +66,17 @@
 {{- if not $engine.workloadId -}}
 {{- fail "VALIDATION_ERROR kind=engine_missing_workload_id: engine.name selects a preset but engine.workloadId is empty; set the confidential.ai/cw id of the engine pod" -}}
 {{- end -}}
+{{- /*
+  c8s-<workloadId> must be a DNS-1035 label, mirroring
+  webhook.WorkloadServiceName: the operator refuses to mint a Service with an
+  invalid name, so an unchecked id would render an upstream that resolves to
+  nothing. validation.IsDNS1035Label = ^[a-z]([-a-z0-9]*[a-z0-9])?$, max 63.
+*/ -}}
+{{- $svc := printf "c8s-%s" $engine.workloadId -}}
+{{- if or (gt (len $svc) 63) (not (regexMatch "^[a-z]([-a-z0-9]*[a-z0-9])?$" $svc)) -}}
+{{- fail (printf "VALIDATION_ERROR kind=engine_invalid_workload_id: engine.workloadId=%q makes Service name %q, not a DNS-1035 label (start with a letter, then [a-z0-9-], end alphanumeric, <=63 chars)" $engine.workloadId $svc) -}}
+{{- end -}}
+{{- /* defaultUpstream must track values.yaml teeProxy.upstream. */ -}}
 {{- $defaultUpstream := "vllm-router-service.vllm.svc.cluster.local" -}}
 {{- if and $teeProxy.upstream (ne $teeProxy.upstream $defaultUpstream) -}}
 {{- fail (printf "VALIDATION_ERROR kind=engine_upstream_conflict: engine.name=%q derives teeProxy.upstream, but teeProxy.upstream is also set to %q; set one, not both" $engine.name $teeProxy.upstream) -}}

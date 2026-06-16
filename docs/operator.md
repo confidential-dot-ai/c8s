@@ -268,6 +268,66 @@ webhook rejects incomplete reload-watch or discovery annotation sets during pod
 admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.
 
+## Engine upstream preset
+
+tee-proxy forwards to one upstream, `teeProxy.upstream`, an opaque `host:port`
+the chart never interprets. For a workload run as the operator-managed headless
+Service (annotated `confidential.ai/cw`, see [Injection contract](#injection-contract)),
+that upstream must be the headless Service's own DNS name and container port,
+`c8s-<workloadId>.<namespace>.svc.cluster.local:<port>`. Headless DNS resolves
+to pod IPs, which the node mesh intercepts to wrap the hop in attested mTLS; a
+regular Service VIP it cannot intercept, so dialing one leaves the hop in
+plaintext. Dialing the pod IP also bypasses the Service's port remapping, which
+is why the explicit container port is required.
+
+The `engine` preset derives that string for known inference engines so you do
+not hand-write it or look up the port:
+
+```yaml
+engine:
+  name: sglang        # "" | vllm | sglang
+  workloadId: infer   # the confidential.ai/cw id on the engine pod
+  namespace: ""       # where the engine runs; empty = release namespace
+```
+
+`engine.presets` maps each engine to its default server port and is the single
+source of truth (both the resolver and validation read it); adding an engine is
+one edit there:
+
+```yaml
+engine:
+  presets:
+    vllm: "8000"
+    sglang: "30000"
+```
+
+With `engine.name=sglang` and `engine.workloadId=infer` in namespace
+`c8s-system`, tee-proxy's `--upstream` resolves to
+`c8s-infer.c8s-system.svc.cluster.local:30000`. Leaving `engine.name` empty
+preserves `teeProxy.upstream` verbatim, so an upstream that is not a c8s-managed
+workload (an existing Service, an external address) is set directly:
+
+```bash
+helm template c8s internal/helmchart/c8s \
+  --set-string engine.name=sglang \
+  --set-string engine.workloadId=infer \
+  ...
+```
+
+The chart rejects, at render time, with stable `kind=` markers (the same the
+chart tests assert on):
+
+- `engine_upstream_conflict`: both `engine.name` and a custom `teeProxy.upstream`
+  are set. They are two ways to say the same thing; set one.
+- `engine_missing_workload_id`: `engine.name` is set but `engine.workloadId` is
+  empty.
+- `engine_invalid_workload_id`: `c8s-<workloadId>` is not a DNS-1035 label
+  (start with a letter, then `[a-z0-9-]`, end alphanumeric; the `c8s-` prefix
+  caps `workloadId` at 59 chars), so the operator would refuse to mint the
+  Service and tee-proxy would dial a name that resolves to nothing. The rule
+  mirrors `webhook.WorkloadServiceName`.
+- `unknown_engine`: `engine.name` is not a key of `engine.presets`.
+
 ## Certificate file permissions
 
 `get-cert` writes the private key with the mode passed by `--key-mode`. The
