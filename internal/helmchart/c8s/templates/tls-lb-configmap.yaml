@@ -1,8 +1,7 @@
 {{- if .Values.tlsLb.enabled }}
-{{- $serverNames := include "tls-lb.serverNames" . -}}
-{{- range $s := include "tls-lb.sanList" . | fromJsonArray -}}
-{{- include "tls-lb.validateSan" $s -}}
-{{- end -}}
+{{- $sans := include "tls-lb.sanList" . | fromJsonArray -}}
+{{- range $s := $sans -}}{{- include "tls-lb.validateSan" $s -}}{{- end -}}
+{{- $serverNames := join " " $sans -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
 {{- include "tls-lb.validateUpstreamAddress" .Values.tlsLb.upstream -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}

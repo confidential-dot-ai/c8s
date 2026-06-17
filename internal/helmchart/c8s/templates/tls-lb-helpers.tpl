@@ -15,8 +15,8 @@ Create a default fully qualified app name.
 {{/*
 The tlsLb.san list, defaulted. Empty -> the chart-managed Service DNS name
 (<release>-tls-lb.<namespace>.svc) as a single entry. The first entry is the
-CDS mesh-cert identity (see tls-lb.san); the whole list becomes nginx
-server_name (see tls-lb.serverNames). Fails if san is set but not a list.
+CDS mesh-cert identity (see tls-lb.san); the whole list is joined into nginx
+server_name by tls-lb-configmap.yaml. Fails if san is set but not a list.
 */}}
 {{- define "tls-lb.sanList" -}}
 {{- $san := .Values.tlsLb.san -}}
@@ -37,14 +37,6 @@ widen only nginx server_name, not the mesh cert.
 */}}
 {{- define "tls-lb.san" -}}
 {{- first (include "tls-lb.sanList" . | fromJsonArray) -}}
-{{- end -}}
-
-{{/*
-Space-separated nginx server_name value: every entry of tls-lb.sanList. Lets one
-front door answer on several public hostnames the serving cert covers.
-*/}}
-{{- define "tls-lb.serverNames" -}}
-{{- join " " (include "tls-lb.sanList" . | fromJsonArray) -}}
 {{- end -}}
 
 {{/*
