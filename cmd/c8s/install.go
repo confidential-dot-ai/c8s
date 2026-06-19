@@ -44,6 +44,7 @@ var (
 	installCvmMode         string
 	installSingleNode      bool
 	installImagePullSecret string
+	installImageTag        string
 
 	installResolveDigests bool
 )
@@ -321,78 +322,54 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if err != nil {
 			return fmt.Errorf("read chart components: %w", err)
 		}
-		imageTag := defaultInstallImageTag(version.Version)
-		helmArgs := []string{
-			"upgrade", "--install", installRelease, chartPath,
-			"--namespace", installNamespace,
-		}
-		// Chart has no default image tags; chart images are released in lockstep
-		// with the CLI, so pass the CLI's build version for every component.
-		// A non-release build has no published image tag and falls back to the
-		// main branch tag (see defaultInstallImageTag).
-		for _, c := range components {
-			helmArgs = append(helmArgs, "--set", c.valuePrefix+".tag="+imageTag)
-		}
-		helmArgs = appendInstallCRDArgs(helmArgs, installCRDs)
+		imageTag := resolveImageTag()
 		// kata-deploy and nri-image-policy must bind the host's containerd
 		// layout in every install mode, so the distro is detected from the
 		// cluster's kubelet versions and plumbed; letting the chart default
 		// (k8s) stand would silently mis-target RKE2. With -f nothing is
 		// plumbed — helm gives --set precedence over -f, and the values-file
 		// owner owns the layout (kata.distro / nriImagePolicy.distro there if
-		// the chart default doesn't fit).
+		// the chart default doesn't fit). buildValueArgs skips the distro when
+		// it is empty.
+		distro := ""
 		if len(installValues) == 0 {
-			distro, err := detectDistro(cmd.Context())
+			distro, err = detectDistro(cmd.Context())
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(os.Stdout, "+ detected host distro: %s\n", distro)
-			helmArgs = appendDistroInstallArgs(helmArgs, distro)
 		}
-		// Only emit --set when the operator passed --cvm-mode, so a value from
-		// -f (or the chart default) wins when the flag is unset; helm gives
-		// --set strict precedence over -f.
-		if cmd.Flags().Changed(flagCvmMode) {
-			helmArgs, err = appendCvmModeInstallArgs(helmArgs, installCvmMode)
-			if err != nil {
-				return err
-			}
-		}
-		helmArgs = appendKataInstallArgs(helmArgs, installKata, installKataDebug)
 		if installKataDebug {
 			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
 		}
-		helmArgs = appendSingleNodeInstallArgs(helmArgs, installSingleNode)
-		if installImagePullSecret != "" {
-			helmArgs = append(helmArgs, "--set-string", "imagePullSecret="+installImagePullSecret)
+		// The computed values are shared with `c8s render-values` via
+		// buildValueArgs, then written to one values file rather than passed as a
+		// pile of --set flags. The contract that the CLI's flag-derived values
+		// override an operator's -f is preserved by ordering: the computed file
+		// is the LAST -f, so it wins on the keys it sets (matching the previous
+		// "--set beats -f" precedence) while the operator's files supply the rest.
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, components, imageTag, distro)
+		if err != nil {
+			return err
 		}
-		if installResolveDigests {
-			helmArgs, err = appendResolvedDigestArgs(cmd.Context(), helmArgs, imageTag, components)
-			if err != nil {
-				return err
-			}
+		computedValues, err := writeComputedValues(setArgs)
+		if err != nil {
+			return err
 		}
-		if cmd.Flags().Changed("webhook-cert-fs-group") {
-			helmArgs = append(helmArgs, "--set", fmt.Sprintf("webhook.certVolume.fsGroup=%d", installCertFSGroup))
+		defer os.Remove(computedValues)
+		helmArgs := []string{
+			"upgrade", "--install", installRelease, chartPath,
+			"--namespace", installNamespace,
 		}
-		if cmd.Flags().Changed("webhook-cert-key-mode") {
-			helmArgs = append(helmArgs, "--set-string", "webhook.certVolume.keyMode="+installCertKeyMode)
-		}
-		if cmd.Flags().Changed("webhook-get-cert-renew-interval") {
-			helmArgs = append(helmArgs, "--set-string", "webhook.getCert.renewInterval="+installGetCertRenewInterval.String())
-		}
-		if cmd.Flags().Changed("webhook-get-cert-run-as-user") {
-			helmArgs = append(helmArgs, "--set", fmt.Sprintf("webhook.getCert.runAsUser=%d", installGetCertRunAsUser))
-		}
-		if cmd.Flags().Changed("webhook-get-cert-run-as-group") {
-			helmArgs = append(helmArgs, "--set", fmt.Sprintf("webhook.getCert.runAsGroup=%d", installGetCertRunAsGroup))
-		}
-		if cmd.Flags().Changed("webhook-get-cert-run-as-non-root") {
-			helmArgs = append(helmArgs, "--set", fmt.Sprintf("webhook.getCert.runAsNonRoot=%t", installGetCertRunAsNonRoot))
+		if !installCRDs {
+			// helm-invocation flag, not a value: skip applying the chart's crds/
+			// dir (appendInstallCRDArgs emits the matching statusMirror value).
+			helmArgs = append(helmArgs, "--skip-crds")
 		}
 		for _, vf := range installValues {
 			helmArgs = append(helmArgs, "-f", vf)
 		}
+		helmArgs = append(helmArgs, "-f", computedValues)
 		if installWait {
 			helmArgs = append(helmArgs, "--wait", "--timeout=5m")
 		}
@@ -511,11 +488,61 @@ func defaultInstallImageTag(buildVersion string) string {
 	return fallbackImageTag
 }
 
-func appendInstallCRDArgs(helmArgs []string, installCRDs bool) []string {
-	if installCRDs {
-		return helmArgs
+// writeComputedValues turns the buildValueArgs --set/--set-string pairs into a
+// values.yaml in a tmpfile and returns its path (caller removes it). install
+// passes it as a -f instead of shelling a pile of --set flags; the conversion
+// is the same one `c8s render-values` uses for its output.
+func writeComputedValues(setArgs []string) (string, error) {
+	values, err := valueArgsToTree(setArgs)
+	if err != nil {
+		return "", err
 	}
-	return append(helmArgs, "--skip-crds", "--set", "statusMirror.enabled=false")
+	out, err := yaml.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("marshal computed values: %w", err)
+	}
+	// Echo the computed values so the install is still legible now that they are
+	// a -f file rather than inline --set flags (stderr; helm's own output stays
+	// on stdout).
+	fmt.Fprintf(os.Stderr, "+ computed values:\n%s", out)
+	f, err := os.CreateTemp("", "c8s-install-values-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("create computed values file: %w", err)
+	}
+	if _, err := f.Write(out); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("write computed values: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("close computed values: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// resolveImageTag returns the tag to resolve component images at: the explicit
+// --image-tag when set, otherwise the build-version default. The CLI and its
+// component images publish in lockstep, so the default is correct for a normal
+// install; --image-tag overrides it to pin a specific branch/tag/release —
+// e.g. a fleet promoting `main` from a release-stamped CLI build.
+func resolveImageTag() string {
+	if installImageTag != "" {
+		return installImageTag
+	}
+	return defaultInstallImageTag(version.Version)
+}
+
+// appendInstallCRDArgs emits the value that disables the CRD-dependent
+// status-mirror when CRDs are skipped. It returns value args only — the helm
+// `--skip-crds` invocation flag is added at the helm call site (install), not
+// here, since these args are converted to a values tree and `--skip-crds` is
+// not a value.
+func appendInstallCRDArgs(setArgs []string, installCRDs bool) []string {
+	if installCRDs {
+		return setArgs
+	}
+	return append(setArgs, "--set", "statusMirror.enabled=false")
 }
 
 // appendDistroInstallArgs translates the detected host distro into the
@@ -706,7 +733,9 @@ func appendResolvedDigestArgs(ctx context.Context, helmArgs []string, tag string
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(os.Stdout, "+ resolved %s -> %s\n", ref, digest)
+		// Progress to stderr: render-values writes the values bundle to stdout,
+		// so stdout must stay clean. Install's stdout is diagnostic too.
+		fmt.Fprintf(os.Stderr, "+ resolved %s -> %s\n", ref, digest)
 		return digest, nil
 	})
 }
@@ -758,5 +787,6 @@ func init() {
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (tag <tag>-debug, kata.guestImage.debug=true): its baked guest policy allows host log/exec streams so 'kubectl logs' and 'kubectl exec' work on kata pods — container I/O becomes readable by the untrusted host and the SNP launch measurement differs from the locked image. Requires --kata; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull private c8s images from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
+	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	rootCmd.AddCommand(installCmd)
 }

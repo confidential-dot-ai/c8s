@@ -45,6 +45,24 @@ func TestDefaultInstallImageTag(t *testing.T) {
 	}
 }
 
+func TestResolveImageTag(t *testing.T) {
+	prev := installImageTag
+	defer func() { installImageTag = prev }()
+
+	// --image-tag set wins over the build-version default.
+	installImageTag = "v9.9.9"
+	if got := resolveImageTag(); got != "v9.9.9" {
+		t.Errorf("with --image-tag set: got %q, want v9.9.9", got)
+	}
+
+	// Unset falls back to the build-version default. An unstamped test build is
+	// not a release tag, so that default is the fallback tag.
+	installImageTag = ""
+	if got := resolveImageTag(); got != fallbackImageTag {
+		t.Errorf("unset: got %q, want the fallback tag %q", got, fallbackImageTag)
+	}
+}
+
 func TestNamespaceManifestSetsPrivilegedPodSecurityLabels(t *testing.T) {
 	data, err := namespaceManifest("c8s-system")
 	if err != nil {
@@ -74,8 +92,10 @@ func TestNamespaceManifestSetsPrivilegedPodSecurityLabels(t *testing.T) {
 }
 
 func TestAppendInstallCRDArgsDisablesStatusMirrorWhenSkippingCRDs(t *testing.T) {
-	got := appendInstallCRDArgs([]string{"upgrade"}, false)
-	want := []string{"upgrade", "--skip-crds", "--set", "statusMirror.enabled=false"}
+	// Emits the value only; helm's --skip-crds invocation flag is added at the
+	// install call site, not here (these args become a values tree).
+	got := appendInstallCRDArgs([]string{"--set", "image.tag=main"}, false)
+	want := []string{"--set", "image.tag=main", "--set", "statusMirror.enabled=false"}
 	if len(got) != len(want) {
 		t.Fatalf("args length = %d, want %d: %v", len(got), len(want), got)
 	}
@@ -87,8 +107,8 @@ func TestAppendInstallCRDArgsDisablesStatusMirrorWhenSkippingCRDs(t *testing.T) 
 }
 
 func TestAppendInstallCRDArgsLeavesStatusMirrorEnabledWithCRDs(t *testing.T) {
-	got := appendInstallCRDArgs([]string{"upgrade"}, true)
-	want := []string{"upgrade"}
+	got := appendInstallCRDArgs([]string{"--set", "image.tag=main"}, true)
+	want := []string{"--set", "image.tag=main"}
 	if len(got) != len(want) {
 		t.Fatalf("args length = %d, want %d: %v", len(got), len(want), got)
 	}
