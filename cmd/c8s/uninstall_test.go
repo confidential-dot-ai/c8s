@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/lunal-dev/c8s/internal/helmchart"
+	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 )
 
 func TestBuildHelmUninstallArgs(t *testing.T) {

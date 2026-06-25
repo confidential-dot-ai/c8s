@@ -127,6 +127,43 @@ See [`docs/kata.md`](kata.md) for the design (why it wraps upstream
 kata-deploy), the threat model, distro support, the one-shot bootstrap-window
 caveat, and the SEV-SNP-host / GPU constraints.
 
+## Uninstall
+
+`c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
+release (operator, CDS, attestation-api, ratls-mesh, tee-proxy, tls-lb, the
+webhook configuration, RuntimeClasses, and the enforcement policy). The chart's
+`pre-delete` hook deletes the `MutatingWebhookConfiguration` by name first, so a
+`failurePolicy: Fail` webhook can never outlive the operator Service and block
+pod creation cluster-wide.
+
+For a `--kata` install it then **sweeps the host-side kata artifacts** that the
+`kata-deploy` preStop cleanup cannot guarantee: a short-lived privileged
+DaemonSet removes `/opt/kata`, the containerd runtime drop-in (restarting the
+runtime only when the drop-in was still registered), the pulled
+`kata-guest-base` image, the RKE2 containerd-prep template, and the
+`katacontainers.io/kata-runtime` node labels. The sweep set and host paths are
+read from the release's computed values *before* deletion, so install-time `-f`
+overrides are honored; it is skipped automatically for a non-kata install.
+
+Guardrails:
+
+- Uninstall **refuses to run while pods with a kata RuntimeClass are still
+  scheduled** — pulling the runtime out from under a confidential workload kills
+  it without cleanup. Delete those workloads first, or pass `--force` (the kata
+  VMs keep running unmanaged but cannot restart).
+- `--host-sweep-only` runs only the kata sweep, for a cluster whose release a
+  bare `helm uninstall` already removed but whose nodes still carry artifacts;
+  it uses the chart defaults and the distro detected from the cluster.
+- `--delete-crds` and `--delete-namespace` are **off by default** and
+  destructive: the former deletes the `ConfidentialWorkload` CRD and every
+  `ConfidentialWorkload` object with it; the latter deletes the release
+  namespace and everything left in it.
+
+Requires the `helm` and `kubectl` CLIs on `PATH`. See
+[`docs/install-flows.md`](install-flows.md#uninstall-flow) for the uninstall
+sequence (and the `webhook-cleanup` hook) and
+[`docs/kata.md`](kata.md#uninstalling) for the host sweep in full.
+
 ## Chart-managed CDS
 
 The supported deployment is chart-managed CDS running inside the intended CVM
