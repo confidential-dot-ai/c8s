@@ -4,9 +4,13 @@
 FROM ghcr.io/actions/actions-runner:latest
 
 USER root
+# Base CI toolchain (what ubuntu-latest provides) so workflows need only a
+# runs-on change: compiler/linker, pkg-config, git, plus libtss2 for the TEE
+# attest path (tss-esapi-sys). Rust itself is installed per-job (dtolnay).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       curl ca-certificates gnupg python3 xz-utils apt-transport-https \
+      build-essential pkg-config git libtss2-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # kubectl + helm
