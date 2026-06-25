@@ -23,14 +23,18 @@ Repos then opt in with `runs-on: confidential-e2e-gcp`.
 ```
 confidential-ci/
 ├── README.md            you are here
+├── RUNNER-MATRIX.md     which CI jobs run on confidential; arm/macOS scoping
+├── MONITORING.md        ops/monitoring commands + gotchas + teardown
 ├── deploy-plan.md       bare-metal + GCP + Azure plan; Model B; Nix vs Bazel
 ├── org-setup.md         org-wide rollout (GitHub App, runner group, install)
 ├── host/                always-on host that runs ARC (GKE; NOT confidential)
-│   ├── create-host-cluster.sh   small zonal GKE cluster (e2-medium)
-│   └── install-arc.sh           ARC controller + org-wide scale set
+│   ├── create-host-cluster.sh   small zonal GKE cluster (e2-medium, autoscaling)
+│   ├── install-arc.sh           ARC controller + org-wide scale set
+│   └── wire-wif.sh              Workload Identity → keyless GCP (no static keys)
 ├── register.sh          one-command repo/org scale-set registration
 ├── runner-image/
-│   ├── Dockerfile.gcp   runner image (amd64): gcloud+kubectl+helm+kettle+ccvm
+│   ├── Dockerfile.gcp   runner image (amd64): build-essential+gcloud+kubectl+helm+kettle+ccvm
+│   ├── cloudbuild.yaml  native-amd64 build → Artifact Registry
 │   ├── values-gcp.yaml  scale set values (repo/proj demo)
 │   └── values-org.yaml  scale set values (ORG-scoped, GitHub App, runner group)
 ├── e2e/                 the confidential E2E body (Model B: ephemeral cluster/run)
@@ -97,8 +101,23 @@ into the runner image** so `provision-gcp.sh` etc. are on PATH and the workflow
 calls them directly. The workflows here assume repo-root-relative `./e2e/…`;
 adjust to taste when you split this into its own repo.
 
-## Status
+## Status — proven end-to-end
 
-GCP path live-run verified (real SEV Confidential GKE in conf-500518; see
-`e2e/README.md`). Azure + bare-metal are planned (`deploy-plan.md`). Runner
-orchestration (ARC, ephemeral, push-triggered) proven end-to-end.
+- **Real CI on confidential, green:** attestation-rs `check` (fmt/clippy) + `test`
+  (`cargo test --workspace`) run on the GKE-hosted self-hosted runner. With the
+  baked runner image, the CI diff vs upstream is **only** `runs-on:
+  ubuntu-latest → confidential-e2e` (no apt lines).
+- **Keyless:** runner pods use Workload Identity (`arc-e2e` KSA → GCP SA with
+  `container.admin`) — verified able to provision/list Confidential GKE clusters
+  with no static keys.
+- **Model-B GCP path verified:** ephemeral SEV Confidential GKE cluster created,
+  asserted confidential, torn down (see `e2e/README.md`).
+- **Org-wide:** registered to a GitHub org; any non-fork org repo opts in via
+  `runs-on`.
+
+### Coverage & caveats
+- Which jobs run where (and why macOS is verify-only / arm has no confidential
+  VM): see **`RUNNER-MATRIX.md`**.
+- Ops, monitoring, and the gotchas (forks/detached-forks can't use self-hosted
+  runners, version pinning, AR read, the YAML colon trap): see **`MONITORING.md`**.
+- Azure + bare-metal: planned (`deploy-plan.md`).
