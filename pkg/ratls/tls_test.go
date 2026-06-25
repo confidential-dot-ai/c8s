@@ -757,7 +757,7 @@ func TestDualVerifyPeerCallback_RATLSSelfSigned(t *testing.T) {
 
 	// (3) The attestation extension can be extracted from the cert —
 	// this is the first step dualVerifyPeerCallback takes in the RA-TLS fallback.
-	extractedAtt, err := extractAttestation(ratlsCert)
+	extractedAtt, err := ExtractAttestation(ratlsCert)
 	if err != nil {
 		t.Fatalf("failed to extract attestation from RA-TLS cert: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 
@@ -80,6 +81,16 @@ func NewCmd() *cobra.Command {
 
 	_ = cmd.MarkFlagRequired("attestation-api-url")
 	_ = cmd.MarkFlagRequired("allowlist-db")
+
+	// `c8s cds verify` — a shorthand for `c8s verify --kind cds`, sharing the
+	// same implementation. Running CDS (the server) stays `c8s cds`.
+	cmd.AddCommand(verify.NewCmd(verify.Defaults{
+		Use:         "verify [target]",
+		Short:       "Verify a CDS endpoint's TEE attestation",
+		Kind:        "cds",
+		Mode:        "ratls-cert",
+		DefaultPort: 8443,
+	}))
 
 	return cmd
 }

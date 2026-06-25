@@ -36,6 +36,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // config holds all CLI configuration for get-cert.
@@ -69,32 +70,6 @@ var (
 	errReloadWatchRequiresRenewInterval          = errors.New("reload watch requires renew interval")
 	errContinueOnInitialErrorRequiresRenewalLoop = errors.New("continue on initial error requires renewal loop")
 )
-
-type discoveryDocument struct {
-	Version     string               `json:"version"`
-	GeneratedAt string               `json:"generated_at"`
-	PublicTLS   publicTLSDiscovery   `json:"public_tls"`
-	CDSTLS      cdsTLSDiscovery      `json:"cds_tls"`
-	Attestation attestationDiscovery `json:"attestation"`
-}
-
-type publicTLSDiscovery struct {
-	Hostname string `json:"hostname"`
-	Mode     string `json:"mode"`
-}
-
-type cdsTLSDiscovery struct {
-	CertificatePEM    string `json:"certificate_pem"`
-	CertificateSHA256 string `json:"certificate_sha256"`
-	CertificateURL    string `json:"certificate_url,omitempty"`
-	MeshCAURL         string `json:"mesh_ca_url,omitempty"`
-}
-
-type attestationDiscovery struct {
-	Challenge string          `json:"challenge"`
-	Platform  string          `json:"platform"`
-	Evidence  json.RawMessage `json:"evidence"`
-}
 
 // NewCmd returns the cobra subcommand. It is registered as a child of
 // `c8s` and as the root command of the standalone binary.
@@ -619,27 +594,27 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 	return nil
 }
 
-func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (discoveryDocument, error) {
+func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (types.DiscoveryDocument, error) {
 	cert, err := certutil.ParseCertificatePEM([]byte(result.Certificate))
 	if err != nil {
-		return discoveryDocument{}, fmt.Errorf("parse issued certificate for discovery: %w", err)
+		return types.DiscoveryDocument{}, fmt.Errorf("parse issued certificate for discovery: %w", err)
 	}
 	fingerprint := sha256.Sum256(cert.Raw)
 
-	return discoveryDocument{
+	return types.DiscoveryDocument{
 		Version:     "v1",
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		PublicTLS: publicTLSDiscovery{
+		PublicTLS: types.PublicTLSDiscovery{
 			Hostname: cfg.SAN,
 			Mode:     discoveryPublicTLSMode(cfg.DiscoveryPublicTLSMode),
 		},
-		CDSTLS: cdsTLSDiscovery{
+		CDSTLS: types.CDSTLSDiscovery{
 			CertificatePEM:    result.Certificate,
 			CertificateSHA256: hex.EncodeToString(fingerprint[:]),
 			CertificateURL:    cfg.DiscoveryCDSCertURL,
 			MeshCAURL:         cfg.DiscoveryMeshCAURL,
 		},
-		Attestation: attestationDiscovery{
+		Attestation: types.AttestationDiscovery{
 			Challenge: result.Challenge,
 			Platform:  result.Platform,
 			Evidence:  result.Evidence,

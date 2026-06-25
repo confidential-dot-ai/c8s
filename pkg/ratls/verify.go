@@ -134,7 +134,7 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 // Trust comes from the hardware attestation chain (AMD ARK → ASK → VCEK),
 // not from any certificate authority signature.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
-	att, err := extractAttestation(cert)
+	att, err := ExtractAttestation(cert)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +147,8 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	return VerifyAttestation(pub, att, policy, nonce)
 }
 
-// extractAttestation finds and parses the RA-TLS extension from a certificate.
-func extractAttestation(cert *x509.Certificate) (*Attestation, error) {
+// ExtractAttestation finds and parses the RA-TLS extension from a certificate.
+func ExtractAttestation(cert *x509.Certificate) (*Attestation, error) {
 	for _, ext := range cert.Extensions {
 		if ext.Id.Equal(OIDRATLSAttestation) {
 			return UnmarshalExtension(ext.Value)
@@ -266,7 +266,7 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 			return nil, fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidReport, len(measurement), SNPMeasurementSize)
 		}
 		copy(result.Measurement[:], measurement)
-		if len(policy.Measurements) > 0 && !measurementAllowed(measurement, policy.Measurements) {
+		if len(policy.Measurements) > 0 && !MeasurementAllowed(measurement, policy.Measurements) {
 			return nil, fmt.Errorf("%w: launch measurement not in allowed set", ErrPolicyViolation)
 		}
 	} else if len(policy.Measurements) > 0 {
@@ -350,7 +350,7 @@ func verifySEVSNP(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 
 	// Check measurement against allowed list.
 	if len(policy.Measurements) > 0 {
-		if !measurementAllowed(report.Measurement, policy.Measurements) {
+		if !MeasurementAllowed(report.Measurement, policy.Measurements) {
 			return nil, fmt.Errorf("%w: launch measurement not in allowed set", ErrPolicyViolation)
 		}
 	}
@@ -420,7 +420,9 @@ func parseSEVCertChain(chainDER []byte) (*spb.CertificateChain, error) {
 	return chain, nil
 }
 
-func measurementAllowed(measurement []byte, allowed [][]byte) bool {
+// MeasurementAllowed reports whether measurement byte-equals one of the allowed
+// launch digests (an empty allowed set means "no pin" and is handled by callers).
+func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
 	for _, m := range allowed {
 		if bytes.Equal(measurement, m) {
 			return true

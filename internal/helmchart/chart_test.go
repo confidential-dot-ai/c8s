@@ -4092,6 +4092,9 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 		"--set", "teeProxy.enabled=false",
+		// discovery defaults to enabled; scope this example to route rendering
+		// (discovery's own locations are covered by a dedicated test above).
+		"--set", "tlsLb.discovery.enabled=false",
 		"--set-string", "tlsLb.upstream.address=vllm:8000",
 		"--set", "tlsLb.upstream.protocol=http",
 		"--set", "tlsLb.nginx.image.tag=dev",

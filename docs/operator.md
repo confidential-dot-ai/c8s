@@ -239,6 +239,59 @@ without crashing the binary; the handoff handler stays unregistered and the
 restart-fragility window above applies until the operator fixes the
 underlying issue.
 
+## Verifying attestation after install
+
+`c8s verify` (and `c8s cds verify`, shorthand for `c8s verify --kind cds`) fetches
+a component's TEE attestation evidence — AMD SEV-SNP or Intel TDX — and verifies it
+against the hardware signature chain plus a pinned launch measurement. Use it to
+confirm CDS — or the load balancer — is a genuine TEE running the expected code
+after install.
+
+It verifies **in-process** with `attestation-go` — the Go port of the same
+attestation-rs engine the cluster runs. That engine auto-detects the platform and
+AMD product, including Zen4c (Siena/Bergamo) which stock `go-sev-guest` cannot
+classify. The only requirement on the machine running `c8s verify` is outbound
+HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
+report; no container runtime is needed.
+
+```bash
+# CDS's RA-TLS endpoint is reachable by unattested clients, but it runs as a
+# locked kata guest: `kubectl port-forward` / `exec` are denied by the guest
+# policy (only the --debug guest image enables them), so localhost forwarding
+# won't work. Dial the pod IP directly from somewhere with cluster-network reach
+# (a node, or over a VPN). c8s-cds is a headless Service, so read its endpoint:
+CDS_IP=$(kubectl get endpoints c8s-cds -n c8s-system -o jsonpath='{.subsets[0].addresses[0].ip}')
+
+c8s cds verify "https://$CDS_IP:8443" --measurements <sha384-launch-digest>
+
+# JSON + exit codes for CI:
+c8s cds verify "https://$CDS_IP:8443" --measurements-file digests.txt -o json
+```
+
+PKI/SAN mismatch when dialing the IP is fine — `verify` trusts the attestation
+embedded in the serving cert, not the certificate chain.
+
+The launch digest(s) to pin are the same values discussed under measurement
+pinning (kata guest digest via `sev-snp-measure`, or the node CVM digest). They
+are enforced client-side against the report's launch measurement; with no
+`--measurements` the command still runs but prints an UNSAFE warning — any
+genuine TEE is accepted.
+
+Exit codes are a CI contract: `0` verified, `2` verification/policy failed
+(e.g. wrong measurement), `3` evidence unavailable (unreachable/unparseable).
+
+Caveats the output surfaces:
+
+- **Freshness.** Verifying an RA-TLS serving cert binds REPORTDATA to the
+  certificate key, not a per-request nonce, so it proves "this key was born in a
+  TEE with this measurement" but not "freshly now" (`fresh: false`).
+- **Reachability under kata.** Reach each component on its public/host address,
+  not the in-cluster ClusterIP — the ClusterIP path goes through the mesh and
+  demands an attested client cert (`tls: certificate required`). CDS's RA-TLS
+  endpoint and the tls-lb's nginx serving port both answer unattested clients on
+  their public address (the tls-lb serves `/v1/discovery` there with no client
+  cert), so `c8s cds verify` and `c8s verify <lb>` work without any mesh changes.
+
 ## Injection contract
 
 The webhook only reads pod metadata. A `ConfidentialWorkload` CR is not

@@ -1060,10 +1060,14 @@ tlsLb:
     keyKey: tls.key
     mountPath: "/public-tls"
 
-  # -- Discovery/preflight metadata served by nginx. The chart-rendered
-  # get-cert containers write it with the matching --discovery-* args.
+  # -- Discovery/preflight metadata (the issued cert + attestation evidence
+  # with the VCEK chain) served by nginx at `path`. The chart-rendered get-cert
+  # containers write it with the matching --discovery-* args. nginx serves it
+  # over the public serving port with no client cert, so an unattested client
+  # (`c8s verify <lb>`, c8s-verify-js) can fetch it — reach it on the public
+  # LoadBalancer/host address, not the meshed in-cluster ClusterIP.
   discovery:
-    enabled: false
+    enabled: true
     path: "/v1/discovery"
     mountPath: "/discovery"
     fileName: "discovery.json"

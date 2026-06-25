@@ -167,6 +167,18 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 	return att, nil
 }
 
+// EmbeddedEvidence returns the parsed attestation-api envelope (platform +
+// platform-specific evidence) embedded in the certificate, and true, when the
+// Report carries a JSON envelope rather than a raw hardware report (e.g. az-snp,
+// where verification forwards the envelope to the attestation-api). It returns
+// false when the Report holds a raw offline-verifiable report.
+func (a *Attestation) EmbeddedEvidence() (types.AttestationEvidence, bool) {
+	if a.embedded == nil {
+		return types.AttestationEvidence{}, false
+	}
+	return *a.embedded, true
+}
+
 // parseEmbeddedEvidence returns the parsed attestation-api envelope when
 // raw is a JSON-encoded types.AttestationEvidence, or nil when raw is a raw
 // hardware report. Callers use the non-nil return as a signal to take the

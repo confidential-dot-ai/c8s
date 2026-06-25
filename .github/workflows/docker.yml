@@ -1,16 +1,12 @@
 name: Docker
 
 on:
-  # Build on every branch, and *publish* on every branch push — not just main.
-  # Side branches publish their component images so the downstream "Kata guest
-  # base" workflow (triggered via workflow_run on Docker's *push* completion)
-  # can resolve and bake their digests on feature branches too. main and v*
-  # tags keep their existing official tags; side branches only ever publish the
-  # opaque short-SHA + sanitized branch-name tags — never latest/main/vX, since
-  # latest is gated to is_default_branch and semver/tag tags only apply on tag
-  # pushes (see the metadata-action tag list below).
+  # Publish component images on pushes to main and on v* release tags. Feature
+  # branches don't publish: the kata-guest-base pipeline only builds for main /
+  # release tags (its job if: gates on head_branch == main || v*), so per-branch
+  # images had no consumer.
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
     paths: &docker-paths
       - "**.go"
@@ -50,26 +46,18 @@ env:
 jobs:
   # Per-image jobs run only when the component's own cmd/<X> or
   # internal/cmds/<X> changed (this applies to both PR events and
-  # branch pushes). Shared code (pkg/**, root internal/** minus
+  # pushes to main). Shared code (pkg/**, root internal/** minus
   # cmds/helmchart, go.mod/sum, Makefile, this workflow) fans out to
   # every image. Tag pushes (v*) always fan out so semver release
   # tags land on every image.
   #
-  # On branch pushes, unchanged components keep their existing
+  # On a push to main, unchanged components keep their existing
   # `latest` / `main` tag pointing at the previous build's manifest —
   # which is the correct state, since nothing changed for them.
   # Deploys pinned to `latest` or to a release tag work without any
   # CI-side tag aliasing.
   changes:
     name: Detect changed components
-    # With push broadened to all branches, a same-repo PR branch would
-    # otherwise run Docker twice: once for its push (which publishes) and once
-    # for the pull_request event (which doesn't). Run the push copy and skip the
-    # redundant same-repo PR copy; still run for PRs opened from forks, which
-    # can't push to this repo and so have no push run to cover them. The
-    # dependent jobs (needs: changes) cascade-skip when this one is skipped.
-    # workflow_dispatch always runs (manual rebuild of every component).
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.docker-matrix.outputs.matrix }}
@@ -196,12 +184,11 @@ jobs:
           # `type=sha,prefix=` (the 7-char short SHA), and the "Kata guest base"
           # build resolves cds/get-cert by that short SHA (IMAGE_TAG=${HEAD_SHA::7})
           # to pin their digests into the measured bootstrap allowlist. tags[0]
-          # is the highest-priority *human* tag (main / branch name / semver),
-          # so with the old single-tag push the short-SHA tag never reached GHCR
-          # and that lookup could not resolve — on any branch, main included.
-          # Pushing the full set also makes `latest` real on main (deploys pin
-          # it). Side branches still only get short-SHA + sanitized branch name;
-          # latest/semver/tag tags are gated to the default branch / tag pushes.
+          # is the highest-priority *human* tag (main / semver), so with the old
+          # single-tag push the short-SHA tag never reached GHCR and that lookup
+          # could not resolve. Pushing the full set also makes `latest` real on
+          # main (deploys pin it); latest/semver/tag tags are gated to the
+          # default branch / tag pushes.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Enable GHA caching for Docker layers
@@ -227,12 +214,10 @@ jobs:
   # get-cert, ratls-mesh, nri-image-policy with no `:<short-sha>` tag at
   # all — and kata-guest-base 404s.
   #
-  # Source = `:main` always: on main this is the manifest just (or
-  # previously) published for an unchanged component; on side branches
-  # this is the manifest the branch implicitly inherits for components
-  # it didn't change. `oras tag` only mutates the registry's tag index —
-  # no layer upload, no manifest rewrite — so the digest of `:<short-sha>`
-  # is identical to whatever `:main` currently points at.
+  # Source = `:main` always: the manifest just (or previously) published
+  # for an unchanged component. `oras tag` only mutates the registry's tag
+  # index — no layer upload, no manifest rewrite — so the digest of
+  # `:<short-sha>` is identical to whatever `:main` currently points at.
   retag-unchanged:
     name: Retag unchanged (${{ matrix.binary }})
     runs-on: ubuntu-latest
