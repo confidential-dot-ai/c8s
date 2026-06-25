@@ -56,6 +56,23 @@ gcloud logging read \
 
 ## Gotchas (learned the hard way)
 
+- **PUBLIC repo + runner group `allows_public_repositories: false` = silent no
+  dispatch.** This is the #1 cause of "queued forever, `assigned job=0`, runner
+  idle and Listening." GitHub blocks self-hosted runners on public repos by
+  default (a fork PR could run code on your TEE infra). The runner connects fine,
+  the listener is healthy — GitHub just never assigns the job. For a
+  confidential-compute runner this policy is *correct*; the fix is to make CI
+  repos **private** (or internal), NOT to flip `allows_public_repositories` on.
+  Check both:
+  ```bash
+  gh repo view <org>/<repo> --json visibility,isPrivate
+  gh api orgs/<org>/actions/runner-groups --jq '.runner_groups[]|{name,allows_public_repositories}'
+  ```
+  Symptom is identical to the fork case below, so check visibility FIRST — it's
+  the more common trap and easy to miss after a repo is flipped public.
+- **Warm pool for consistent pickup.** Scale-from-zero dispatch can lag or stall.
+  Set `minRunners: 1` so a runner is always registered and Listening; GitHub then
+  routes jobs to it immediately. `helm upgrade … --reuse-values --set minRunners=1`.
 - **Forks can't use self-hosted runners** — and **detaching a fork doesn't fix
   it** (GitHub's Actions backend keeps the fork's runner-ineligibility cached;
   `assigned job=0` forever). Use a **born-non-fork** repo. Symptom: jobs queued,
@@ -71,10 +88,21 @@ gcloud logging read \
 - **YAML:** a colon-space in an unquoted `run:` one-liner is a startup_failure
   (0 jobs). Use `run: |` blocks.
 
+## Node sizing
+
+`e2-medium` (2 vCPU / ~2.8 GiB allocatable) is fine for `check`/`test` but
+**too small for release builds**: a `cargo build --release --features attest`
+needs >2 GiB for codegen+link, and at `maxRunners: 2` two builds share one node
+and thrash (node hits ~90% mem, x86 release build crawls to ~20 min, no OOMKill
+but very slow). For production use `e2-standard-4` (4 vCPU / 16 GiB) so release
+builds finish in a few minutes and two can run concurrently. GKE machine type is
+immutable per node pool — add a bigger pool and migrate, or recreate the host.
+
 ## Cost / teardown
 
-The host bills continuously (~$25-35/mo for `e2-medium` + autoscaling). Tear down
-when idle:
+The host bills continuously (~$25-35/mo for `e2-medium` + autoscaling; more for
+`e2-standard-4`). With `minRunners: 1` one runner pod stays warm (small idle
+cost). Tear down when idle:
 
 ```bash
 helm uninstall confidential-e2e -n arc-runners

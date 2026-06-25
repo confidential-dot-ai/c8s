@@ -14,9 +14,12 @@
 #
 # Repos in the org then use:  runs-on: confidential-e2e
 
-minRunners: 0
+minRunners: 1                      # warm pool: keep one runner Listening so GitHub
+                                   # dispatches immediately (scale-from-zero stalls)
 maxRunners: 5
 runnerGroup: confidential          # the org runner group that scopes access
+# NOTE: repos using this scale set must be PRIVATE/internal — GitHub won't
+# dispatch self-hosted runners on public repos (see MONITORING.md).
 
 template:
   spec:

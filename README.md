@@ -103,17 +103,23 @@ adjust to taste when you split this into its own repo.
 
 ## Status — proven end-to-end
 
-- **Real CI on confidential, green:** attestation-rs `check` (fmt/clippy) + `test`
-  (`cargo test --workspace`) run on the GKE-hosted self-hosted runner. With the
-  baked runner image, the CI diff vs upstream is **only** `runs-on:
-  ubuntu-latest → confidential-e2e` (no apt lines).
+- **Full real CI matrix, green:** attestation-rs `check`, `test`, `audit`, and
+  `release-build · x86_64-linux` run on the GKE-hosted confidential runner;
+  `release-build` for arm64-linux + macOS and `docker-build` run on GitHub-hosted
+  runners — all green on a live push. Per-job routing in `RUNNER-MATRIX.md`.
+- **Eligibility (don't skip):** the CI repo must be **private/internal** — GitHub
+  silently refuses self-hosted runners on public repos (`assigned job=0`, runner
+  idle). This was the real cause of "runs queued, nothing picked up." See
+  `MONITORING.md`.
+- **Consistent pickup:** `minRunners: 1` keeps a warm runner Listening so GitHub
+  dispatches immediately (scale-from-zero can stall).
 - **Keyless:** runner pods use Workload Identity (`arc-e2e` KSA → GCP SA with
   `container.admin`) — verified able to provision/list Confidential GKE clusters
   with no static keys.
 - **Model-B GCP path verified:** ephemeral SEV Confidential GKE cluster created,
   asserted confidential, torn down (see `e2e/README.md`).
-- **Org-wide:** registered to a GitHub org; any non-fork org repo opts in via
-  `runs-on`.
+- **Org-wide:** registered to a GitHub org; any non-fork **private** org repo
+  opts in via `runs-on`.
 
 ### Coverage & caveats
 - Which jobs run where (and why macOS is verify-only / arm has no confidential

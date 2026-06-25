@@ -6,16 +6,25 @@ needs. The short version: the security-relevant **build + test of the Linux,
 attest-capable binaries** runs on confidential now; the remaining jobs are
 gaps in runner *type* (arm node, macOS, docker), not a redesign.
 
-| CI job | Platform / target | Runner needed | On confidential now | Confidential relevant? |
+All jobs are **enabled** (no `if: false`) and routed to the right runner. Every
+row below was proven green on a live push to `cifrai/attestation-rs-ci`:
+
+| CI job | Platform / target | `runs-on` | Status (live) | Confidential relevant? |
 |---|---|---|---|---|
-| `check` (fmt/clippy) | x86-64 Linux | x86-64 Linux self-hosted (`confidential-e2e`) | ✅ green | yes — compiles the attest path |
-| `test` (`cargo test --workspace`) | x86-64 Linux | same | ✅ green | yes* |
-| `audit` (cargo-audit) | x86-64 Linux | same | ✅ works | yes |
-| `release-build` · `x86_64-unknown-linux-gnu` | x86-64 Linux | same | ✅ | yes — `--features attest`, full generate+verify binary |
-| `release-build` · `aarch64-unknown-linux-gnu` | arm64 Linux | arm64 Linux runner | ➕ add ARM node pool | builds attest; **GCP has no ARM confidential VM**, so a plain ARM node is fine to *build* |
-| `release-build` · `aarch64-apple-darwin` | macOS arm64 | macOS runner | ➕ macOS runner | **N/A — verify-only** (attest path compiles out on macOS) |
-| `docker-build` | x86-64 Linux | Linux + Docker (dind) | ➕ dind or hosted | not confidential per se |
-| `publish` / `release` | x86-64 Linux | any (main-only) | optional | — |
+| `check` (fmt/clippy) | x86-64 Linux | `confidential-e2e` (self-hosted) | ✅ green | yes — compiles the attest path |
+| `test` (`cargo test --workspace`) | x86-64 Linux | `confidential-e2e` | ✅ green | yes* |
+| `audit` (cargo-audit) | x86-64 Linux | `confidential-e2e` | ✅ green** | yes |
+| `release-build` · `x86_64-unknown-linux-gnu` | x86-64 Linux | `confidential-e2e` | ✅ green | yes — `--features attest`, full generate+verify binary |
+| `release-build` · `aarch64-unknown-linux-gnu` | arm64 Linux | `ubuntu-24.04-arm` (hosted) | ✅ green | builds attest; **GCP has no ARM confidential VM**, so a hosted ARM node is fine to *build* |
+| `release-build` · `aarch64-apple-darwin` | macOS arm64 | `macos-14` (hosted) | ✅ green | **N/A — verify-only** (attest path compiles out on macOS) |
+| `docker-build` | x86-64 Linux | `ubuntu-latest` (hosted) | ✅ green | not confidential per se (ARC has no Docker daemon → hosted, or dind) |
+| `publish` / `release` | x86-64 Linux | `ubuntu-latest` (hosted) | guarded to source repo | — |
+
+\*\* `audit` needs a toolchain: the self-hosted runner image bakes build deps but
+not `rustup`, so the job installs the toolchain (`dtolnay/rust-toolchain`) like
+`check`/`test` do — GitHub-hosted runners ship `cargo` pre-installed, self-hosted
+don't. `publish`/`release` carry `&& github.repository == '<source>'` so copies
+and forks never push images or cut releases.
 
 \* `test` runs `cargo test --workspace`, i.e. the offline/verification tests
 (against captured quotes in testdata). The tests that *generate* a hardware
@@ -64,14 +73,19 @@ ARC runners have no Docker. Either enable `containerMode: dind` (privileged) on 
 dedicated scale set, or keep `docker-build` on GitHub-hosted. For confidential
 parity you'd use dind; for now hosted is fine.
 
-## Recommended production split
+## Production split (shipped — all jobs enabled)
 
 - **Confidential self-hosted (`confidential-e2e`):** `check`, `test`, `audit`,
   `release-build · x86_64-linux` — the attest-capable Linux build + test.
-- **Add later as runner types:** `release-build · aarch64-linux` (ARM node pool),
-  `docker-build` (dind).
-- **Stays GitHub-hosted forever:** `release-build · aarch64-apple-darwin`
-  (verify-only; no confidential anything).
+- **GitHub-hosted (correct, not a gap):** `release-build · aarch64-linux`
+  (`ubuntu-24.04-arm` — no ARM confidential VM exists), `release-build ·
+  aarch64-apple-darwin` (`macos-14` — verify-only), `docker-build`
+  (`ubuntu-latest` — ARC has no Docker daemon).
+- **Optional self-host upgrades:** ARM node pool for the arm leg, a dind scale
+  set for `docker-build` — neither is confidential, so hosted is fine.
 
-This is exactly the set we disabled with `if: false` during validation; for
-production, re-enable each with the `runs-on` from the table above.
+Nothing is `if: false`. The diff vs upstream is just per-job `runs-on` (plus a
+toolchain step in `audit` and a `github.repository` guard on publish/release so
+copies/forks don't ship). **Eligibility prerequisite:** the repo must be
+**private/internal** — GitHub won't dispatch self-hosted runners on public repos
+(see `MONITORING.md`).

@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: confidential-dot-ai/attestation-api
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: confidential-e2e   # cifrai org self-hosted confidential runner
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: confidential-e2e   # cifrai org self-hosted confidential runner
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace
+
+  # Cross-platform release binaries for attestation-cli and attestation-api.
+  # macOS targets compile to verify-only binaries automatically.
+  #
+  # Only runs on push to main, so PRs don't pay the matrix cost.
+  release-build:
+    name: Release Build ${{ matrix.target }}
+    needs: [check, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Runner per target (see RUNNER-MATRIX.md):
+    #  - x86_64-linux  -> confidential self-hosted (the attest-capable artifact)
+    #  - aarch64-linux -> GitHub-hosted arm (no ARM confidential VM exists)
+    #  - aarch64-macOS -> GitHub-hosted mac (verify-only; attest path compiles out)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: confidential-e2e
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-14
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      # libtss2 is needed for the attest path (az-cvm-vtpm → tss-esapi-sys, a
+      # pkg-config -sys crate). The confidential self-hosted runner image already
+      # bakes libtss2-dev, so only GitHub-hosted Linux runners need the apt step
+      # (the aarch64 leg, where apt pulls the right arch — no cross-sysroot).
+      # (macOS isn't Linux, so the attest path compiles out there entirely.)
+      - name: Install libtss2 (GitHub-hosted Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+
+      - uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # attestation-cli: all features via --features attest.
+      # attestation-api: built plain (--features would error — the crate has no
+      # features table; `attest` is baked in via its hardcoded dep). --bin
+      # attestation-api skips the loadtest binary the package also defines.
+      - name: Build binaries
+        shell: bash
+        run: |
+          cargo build -p attestation-cli --release --target ${{ matrix.target }} --features attest --bin attestation-cli
+          cargo build -p attestation-api --release --target ${{ matrix.target }} --bin attestation-api
+
+      - name: Strip binaries
+        shell: bash
+        run: |
+          BIN_DIR="target/${{ matrix.target }}/release"
+          strip "$BIN_DIR/attestation-cli" "$BIN_DIR/attestation-api"
+
+      - name: Package tarballs
+        id: package
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' crates/attestation-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TARGET="${{ matrix.target }}"
+          BIN_DIR="target/${TARGET}/release"
+          OUT_DIR="dist"
+          mkdir -p "$OUT_DIR"
+          for bin in attestation-cli attestation-api; do
+            STAGE_PARENT="$(mktemp -d)"
+            STAGE="$STAGE_PARENT/${bin}-${VERSION}-${TARGET}"
+            mkdir -p "$STAGE"
+            cp "$BIN_DIR/$bin" "$STAGE/"
+            [ -f LICENSE ] && cp LICENSE "$STAGE/"
+            tar -C "$STAGE_PARENT" -czf "$OUT_DIR/${bin}-${VERSION}-${TARGET}.tar.gz" "$(basename "$STAGE")"
+          done
+          ls -la "$OUT_DIR"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  docker-build:
+    name: Docker Build
+    needs: [check, test]
+    # GitHub-hosted: ARC runners have no Docker daemon. For a self-hosted build
+    # use a dind-enabled scale set (containerMode: dind) — see RUNNER-MATRIX.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+
+  publish-service-image:
+    name: Publish Service Image
+    needs: [docker-build]
+    # Only the source-of-truth repo publishes images; copies/forks (e.g. the
+    # CI-validation copy) skip this so they never push to the real registry.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'confidential-dot-ai/attestation-rs'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=raw,value=main
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # Cuts a GitHub Release named v{attestation-cli version} when that tag does
+  # not already exist. Bump the version in crates/attestation-cli/Cargo.toml and
+  # merge to main to release; re-merges with an unchanged version are no-ops.
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [release-build]
+    # Only the source-of-truth repo cuts releases (copies/forks skip).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'confidential-dot-ai/attestation-rs'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Get version from CLI Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' crates/attestation-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Check if release already exists
+        id: check_tag
+        run: |
+          if gh release view "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: steps.check_tag.outputs.exists == 'false'
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  audit:
+    name: Security Audit
+    runs-on: confidential-e2e   # cifrai org self-hosted confidential runner
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      # Self-hosted runner image bakes build deps but not rustup; install the
+      # toolchain like check/test do (GitHub-hosted runners ship cargo already).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - run: cargo install cargo-audit
+      # FIXME: Remove these ignores once upstream attestation-rs/sev updates deps.
+      # RUSTSEC-2023-0071: rsa (Marvin attack, no patched version available)
+      # RUSTSEC-2025-0141: bincode (unmaintained, used by sev crate)
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0141

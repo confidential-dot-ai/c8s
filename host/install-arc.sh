@@ -17,7 +17,7 @@ helm install confidential-e2e \
   --version 0.14.2 -n arc-runners --create-namespace --kube-context "$CTX" \
   --set githubConfigUrl="$ORG_URL" \
   --set githubConfigSecret.github_token="$GH_RUNNER_TOKEN" \
-  --set minRunners=0 --set maxRunners=3 --wait
+  --set minRunners=1 --set maxRunners=3 --wait   # minRunners=1 = warm pool for instant dispatch
 
 echo "ARC + confidential-e2e installed on $CTX (org: $ORG_URL)"
 kubectl --context "$CTX" -n arc-runners get autoscalingrunnerset
