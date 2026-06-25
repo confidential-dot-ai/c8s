@@ -55,10 +55,18 @@ provision per E2E (Model B).
 ```bash
 GCP_PROJECT=conf-500518 bash host/create-host-cluster.sh        # ~1x e2-medium, zonal
 ORG_URL=https://github.com/<org> GH_RUNNER_TOKEN="$(gh auth token)" bash host/install-arc.sh
+bash host/wire-wif.sh                                           # keyless GCP creds (Workload Identity)
+# build the gcloud-equipped runner image (native amd64) and point the scale set at it:
+gcloud builds submit runner-image --config runner-image/cloudbuild.yaml --project conf-500518
+helm upgrade confidential-e2e oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+  --version 0.14.2 -n arc-runners --reuse-values \
+  --set template.spec.containers[0].name=runner \
+  --set template.spec.containers[0].image=us-central1-docker.pkg.dev/conf-500518/confidential-ci/confidential-runner-gcp:latest
 ```
 
-For production, bind the runner's K8s SA to a GCP SA via Workload Identity
-Federation (see `e2e/README.md`) so Model-B provisioning needs no static keys.
+`wire-wif.sh` binds the runner's K8s SA (`arc-e2e`) to a GCP SA with
+`container.admin`, so Model-B provisioning needs **no static keys**. The runner
+image carries gcloud/kubectl/helm/kettle/ccvm so jobs run the e2e scripts directly.
 
 ## Quickstart (org-wide)
 

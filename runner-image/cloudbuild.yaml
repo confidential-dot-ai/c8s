@@ -1,0 +1,14 @@
+# Build the gcloud-equipped runner image natively (amd64) in Cloud Build and
+# push to Artifact Registry — no local emulation. The GKE host's nodes pull it.
+#   gcloud builds submit runner-image --config runner-image/cloudbuild.yaml --project conf-500518
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.gcp
+      - -t
+      - us-central1-docker.pkg.dev/conf-500518/confidential-ci/confidential-runner-gcp:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/conf-500518/confidential-ci/confidential-runner-gcp:latest
