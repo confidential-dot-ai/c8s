@@ -1,0 +1,47 @@
+# Confidential build + attest workflow (slice A).
+# Copy to .github/workflows/ in the target repo. `runs-on` matches the ARC
+# runner scale set installed by register.sh, so this runs on YOUR self-hosted
+# ephemeral runner (fresh pod per job — the K8s analog of "fresh CVM per build,
+# no cross-build contamination").
+name: confidential-build
+on: [push, workflow_dispatch]
+
+jobs:
+  attested-build:
+    runs-on: confidential-builders   # the ARC scale set name
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + Kettle
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          . "$HOME/.cargo/env"
+          cargo install --git https://github.com/lunal-dev/kettle kettle
+
+      - name: Kettle build (SLSA provenance)
+        run: |
+          . "$HOME/.cargo/env"
+          kettle build examples/model-server
+          cat examples/model-server/kettle-build/provenance.json
+
+      # On a real TEE node (confidential runtime class), swap `build` for `attest`
+      # to produce evidence.json, then `kettle verify` checks the hardware
+      # signature, the allow-listed launch measurement, and the provenance digest
+      # bound in report_data. Off-TEE this step is skipped (no quote possible).
+      - name: Kettle attest + verify (TEE nodes only)
+        if: ${{ vars.HAVE_TEE == 'true' }}
+        run: |
+          . "$HOME/.cargo/env"
+          kettle attest examples/model-server
+          kettle verify examples/model-server/kettle-build
+
+      - name: Publish provenance + handoff digest to deploy allow-list
+        run: |
+          ROOT=$(python3 -c "import json;print(json.load(open('examples/model-server/kettle-build/provenance.json'))['predicate']['runDetails']['byproducts'][0]['digest']['sha256'])")
+          echo "input_merkle_root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "Kettle measurement $ROOT -> append to CDS/deploy allow-list (task 1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kettle-provenance
+          path: examples/model-server/kettle-build/

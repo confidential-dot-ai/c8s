@@ -1,0 +1,3 @@
+/examples/model-server/target/
+/examples/model-server/kettle-build/artifacts/
+.DS_Store

@@ -1,0 +1,71 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://lunal.dev/kettle/cargo@v1",
+      "externalParameters": {
+        "buildCommand": "cargo build",
+        "source": {
+          "digest": {
+            "gitCommit": "616268dd43f797a9070bcf8f7c5f02da8cfa38ff",
+            "gitTree": "27fb09a69c1622032aad5b5ad741fbee649ee167"
+          },
+          "uri": ""
+        }
+      },
+      "internalParameters": {
+        "lockfileHash": {
+          "sha256": "e7c32f67c29b6fc742757381b24e5aad24d9c2383551992e3cc771c5ea46290d"
+        },
+        "toolchain": {
+          "cargo": {
+            "digest": {
+              "sha256": "03e381389f5b7b8e695a744362f3866478f99034b2cf2df6afd4d42cfdab6f67"
+            },
+            "version": "cargo 1.92.0 (344c4567c 2025-10-21)"
+          },
+          "rustc": {
+            "digest": {
+              "sha256": "12cab30aa9890d54445e29149a1e82d18fbe457de12801bd11bbe7e5e7fe33a0"
+            },
+            "version": "rustc 1.92.0 (ded5c06cf 2025-12-08)"
+          },
+          "kettle": {
+            "digest": {
+              "sha256": "\npkg_version:1.0.0\nbranch:main\ncommit_hash:d2439dca\nbuild_time:2026-06-24 22:32:43 -07:00\nbuild_env:rustc 1.92.0 (ded5c06cf 2025-12-08),stable-aarch64-apple-darwin"
+            },
+            "version": "\npkg_version:1.0.0\nbranch:main\ncommit_hash:d2439dca\nbuild_time:2026-06-24 22:32:43 -07:00\nbuild_env:rustc 1.92.0 (ded5c06cf 2025-12-08),stable-aarch64-apple-darwin"
+          }
+        }
+      },
+      "resolvedDependencies": []
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://lunal.dev/kettle-tee/v1"
+      },
+      "byproducts": [
+        {
+          "digest": {
+            "sha256": "99d6a22e452aff5ae59dd804350f4669e1c99bf2011014997880d28f17d39c8d"
+          },
+          "name": "input_merkle_root"
+        }
+      ],
+      "metadata": {
+        "invocationId": "build-20260625-053709-19db7627",
+        "startedOn": "2026-06-25T05:37:09.204290+00:00",
+        "finishedOn": "2026-06-25T05:37:09.238147+00:00"
+      }
+    }
+  },
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [
+    {
+      "digest": {
+        "sha256": "a60c377c52d5b1b34cdd3dd4e8ac40b791a7f46c6bce0a5ce8956a787ce36eab"
+      },
+      "name": "model-server"
+    }
+  ]
+}

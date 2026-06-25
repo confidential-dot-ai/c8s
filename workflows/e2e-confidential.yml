@@ -1,0 +1,42 @@
+# Confidential E2E: on push, spin up an ephemeral confidential cluster, attest
+# it, run the E2E, tear it down. Copy to the stack repo's .github/workflows/.
+# v1 = GCP; azure/baremetal join the matrix as they land (see deploy-plan.md).
+name: confidential-e2e
+on:
+  push: { branches: [main] }
+  workflow_dispatch: {}
+
+concurrency:                      # one confidential cluster per target at a time
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [gcp]            # add: azure, baremetal
+    runs-on: confidential-e2e-${{ matrix.target }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision confidential cluster
+        run: ./e2e/provision-${{ matrix.target }}.sh
+
+      - name: Run attested E2E
+        run: ./e2e/run.sh
+
+      - name: Collect artifacts
+        if: always()
+        run: ./e2e/collect.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ matrix.target }}-artifacts
+          path: e2e-artifacts/
+
+      - name: Tear down confidential cluster
+        if: always()             # never leak a confidential cluster
+        run: ./e2e/teardown-${{ matrix.target }}.sh

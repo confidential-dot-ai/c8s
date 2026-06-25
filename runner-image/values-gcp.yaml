@@ -1,0 +1,35 @@
+# ARC runner scale set for GCP confidential E2E (Model B: the runner provisions
+# an ephemeral Confidential GKE cluster per run). The runner pods themselves run
+# on a cheap normal pool; the cluster they create is the confidential one.
+#
+# Install (chart version must match the controller, e.g. 0.14.2):
+#   helm install confidential-e2e-gcp \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     --version 0.14.2 -n arc-runners --create-namespace \
+#     --set githubConfigUrl="https://github.com/<org>" \
+#     --set githubConfigSecret.github_token="$(gh auth token)" \
+#     -f values-gcp.yaml
+#
+# runs-on: confidential-e2e-gcp   (the install name)
+
+minRunners: 0
+maxRunners: 3
+
+template:
+  spec:
+    # K8s SA federated to a GCP service account via Workload Identity Federation
+    # (no long-lived keys). The GCP SA needs roles/container.admin scoped to the
+    # dedicated CI project so the job can create/delete clusters. See README.
+    serviceAccountName: arc-gcp-e2e
+    containers:
+      - name: runner
+        image: REGISTRY/confidential-runner-gcp:latest   # build from Dockerfile.gcp + push
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: GCP_PROJECT
+            value: "YOUR_CI_PROJECT"
+          - name: GCP_REGION
+            value: "us-central1"
+          - name: CONF_TYPE
+            value: "sev_snp"   # or tdx

@@ -1,0 +1,32 @@
+# Org-wide confidential runner scale set. githubConfigUrl = the ORG (not a repo)
+# is what makes these runners available across every repo in the org (scoped by
+# the runner group). Auth is a GitHub App installed on the org.
+#
+# helm install confidential-e2e \
+#   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#   --version 0.14.2 -n arc-runners --create-namespace \
+#   --set githubConfigUrl="https://github.com/<ORG>" \
+#   --set githubConfigSecret.github_app_id="<APP_ID>" \
+#   --set githubConfigSecret.github_app_installation_id="<INSTALL_ID>" \
+#   --set-file githubConfigSecret.github_app_private_key="<path/to/app-private-key.pem>" \
+#   --set runnerGroup="confidential" \
+#   -f values-org.yaml
+#
+# Repos in the org then use:  runs-on: confidential-e2e
+
+minRunners: 0
+maxRunners: 5
+runnerGroup: confidential          # the org runner group that scopes access
+
+template:
+  spec:
+    serviceAccountName: arc-gcp-e2e        # WIF → GCP SA for Model B provisioning
+    containers:
+      - name: runner
+        image: REGISTRY/confidential-runner-gcp:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        env:
+          - { name: GCP_PROJECT, value: "conf-500518" }
+          - { name: GCP_REGION,  value: "us-central1" }
+          - { name: CONF_TYPE,   value: "sev" }   # sev (broad) | sev_snp | tdx

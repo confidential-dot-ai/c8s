@@ -1,0 +1,34 @@
+# GCP confidential-E2E runner image (built for the cloud target: linux/amd64).
+# Bakes the provisioning + attestation toolchain so jobs need no per-run installs.
+# Build + push to your registry, then reference it from values-gcp.yaml.
+FROM ghcr.io/actions/actions-runner:latest
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      curl ca-certificates gnupg python3 xz-utils apt-transport-https \
+ && rm -rf /var/lib/apt/lists/*
+
+# kubectl + helm
+RUN curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+ && chmod +x /usr/local/bin/kubectl \
+ && curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Google Cloud SDK + GKE auth plugin (cluster create/get-credentials)
+RUN curl -fsSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=/opt \
+ && /opt/google-cloud-sdk/bin/gcloud components install gke-gcloud-auth-plugin --quiet \
+ && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
+ && ln -s /opt/google-cloud-sdk/bin/gke-gcloud-auth-plugin /usr/local/bin/gke-gcloud-auth-plugin
+
+# Kettle (attested builds) + ccvm/attestation-cli (real TEE verification)
+RUN curl -fsSL -o /tmp/k.tar.xz \
+      https://github.com/lunal-dev/kettle/releases/latest/download/kettle-x86_64-unknown-linux-gnu.tar.xz \
+ && mkdir -p /tmp/kd && tar xf /tmp/k.tar.xz -C /tmp/kd \
+ && install -m755 "$(find /tmp/kd -type f -name kettle | head -1)" /usr/local/bin/kettle \
+ && rm -rf /tmp/k.tar.xz /tmp/kd \
+ && curl -fsSL https://github.com/lunal-dev/confidential-cvm-cli/releases/latest/download/install.sh | bash || \
+      echo "WARN: ccvm install best-effort; pin a release in production"
+
+ENV USE_GKE_GCLOUD_AUTH_PLUGIN=True
+USER runner
