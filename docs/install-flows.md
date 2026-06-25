@@ -200,7 +200,7 @@ flowchart TD
     P["Pod CREATE"] --> EX{"component in<br/>operator / webhook-cleanup /<br/>kata-image-puller?"}
     EX -->|yes| PASS["pass through (runc)<br/>— host infrastructure"]
     EX -->|no| CW{"has confidential.ai/cw?"}
-    CW -->|yes| GC["inject get-cert<br/>(c8s-init-cert + c8s-renew-cert)"]
+    CW -->|yes| GC["inject get-cert<br/>(c8s-cert sidecar)"]
     CW -->|no| RC
     GC --> RC{"--kata<br/>AND no runtimeClass<br/>AND not hostNet/PID/IPC?"}
     RC -->|no| DONE["admit"]
@@ -214,8 +214,9 @@ flowchart TD
 Two independent injections, both keyed off the pod (not a CR):
 
 1. **get-cert** — driven by the `confidential.ai/cw=<id>` annotation, in
-   **any** mode. Injects an init container (`c8s-init-cert`) that fetches a
-   leaf cert from CDS, and a sidecar (`c8s-renew-cert`) that renews it.
+   **any** mode. Injects a single `c8s-cert` native sidecar that fetches the
+   leaf cert from CDS on startup and renews it on a ticker; downstream
+   containers wait for its startupProbe before launching.
 2. **runtimeClass** — only under `--kata` (which is enforcing).
    `kata-qemu-snp` for `cw`-annotated pods (confidential), `kata-qemu`
    otherwise.

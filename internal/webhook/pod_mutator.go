@@ -606,9 +606,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	}
 
 	pod.Spec.InitContainers = ensureInitContainer(pod.Spec.InitContainers,
-		renewCertContainer(&effective, cfg))
-	pod.Spec.InitContainers = ensureInitContainer(pod.Spec.InitContainers,
-		initCertContainer(&effective, cfg))
+		certContainer(&effective, cfg))
 
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -620,9 +618,24 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	pod.Labels[LabelWorkload] = inj.WorkloadID
 }
 
-// initCertContainer fetches the workload's leaf cert from CDS over HTTP
-// using the existing get-cert subcommand.
-func initCertContainer(inj *injection, cfg Config) corev1.Container {
+// certContainer is the workload's mesh-cert sidecar. It bootstraps the leaf
+// cert from CDS on startup and keeps it fresh on a --renew-interval, SIGHUP-ing
+// nginx after each renewal when --reload-nginx is on.
+//
+// Native sidecar (restartPolicy: Always) so it stays resident — that's what
+// makes nginx reload work under kata. Kata has no in-guest pause container,
+// so the kata-agent anchors shareProcessNamespace on the first container's
+// pidns (sandbox.rs:update_shared_pidns), and a PID namespace dies the
+// moment its last process exits (kata's namespace.rs explicitly rejects
+// persisting pidns via bind mount). A run-once init container would let the
+// anchor die before the workload joined it, and the SIGHUP-by-PID path
+// would never see nginx in /proc. As the sole, long-lived first init
+// container the sidecar plays the same role runc's pause container does.
+//
+// --key-out is idempotent (load if a key already exists at the path, else
+// generate-and-write); a fresh key on every restart would invalidate every
+// cert CDS has previously issued for it.
+func certContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
 		"--cds-url=" + cfg.CDSURL,
@@ -631,35 +644,6 @@ func initCertContainer(inj *injection, cfg Config) corev1.Container {
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key-out=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 		"--key-mode=" + cfg.CertKeyMode,
-	}
-	args = append(args, discoveryArgs(inj.Discovery)...)
-	if inj.Verbose {
-		args = append(args, "--verbose")
-	}
-
-	c := corev1.Container{
-		Name:            "c8s-init-cert",
-		Image:           cfg.GetCertImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Args:            args,
-		Env:             getCertEnv(inj),
-		VolumeMounts:    getCertVolumeMounts(inj, false),
-		SecurityContext: getCertSecurityContext(inj),
-	}
-	return c
-}
-
-// renewCertContainer keeps the workload leaf cert fresh after the pod starts.
-// It reuses the private key written by c8s-init-cert and only rewrites tls.crt.
-func renewCertContainer(inj *injection, cfg Config) corev1.Container {
-	always := corev1.ContainerRestartPolicyAlways
-	args := []string{
-		"get-cert",
-		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
-		"--san=" + inj.SAN,
-		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
-		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
@@ -672,8 +656,9 @@ func renewCertContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--verbose")
 	}
 
+	always := corev1.ContainerRestartPolicyAlways
 	return corev1.Container{
-		Name:            "c8s-renew-cert",
+		Name:            "c8s-cert",
 		Image:           cfg.GetCertImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &always,
@@ -681,6 +666,23 @@ func renewCertContainer(inj *injection, cfg Config) corev1.Container {
 		Env:             getCertEnv(inj),
 		VolumeMounts:    getCertVolumeMounts(inj, true),
 		SecurityContext: getCertSecurityContext(inj),
+		// Gate the workload on the initial cert being written. Without
+		// this, native-sidecar semantics consider c8s-cert "started" as
+		// soon as the process launches, so the workload would race the
+		// initial fetch. The probe uses `c8s probe-file` because the
+		// image is gcr.io/distroless/static and has no `test`.
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{
+						"/c8s", "probe-file",
+						certPath(inj.Cert.Dir, inj.Cert.CertFile),
+					},
+				},
+			},
+			PeriodSeconds:    1,
+			FailureThreshold: 180,
+		},
 	}
 }
 

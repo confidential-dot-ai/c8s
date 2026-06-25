@@ -204,6 +204,42 @@ func TestValidateConfigRejectsContinueOnInitialErrorWithoutRenewInterval(t *test
 	}
 }
 
+// --key-out reuses an existing key at the path instead of overwriting it.
+// This is what makes a single long-running cert sidecar safe across
+// container restarts — a fresh key would invalidate any cert CDS has
+// already issued for the previous key.
+func TestLoadOrGenerateKeyReusesExistingKeyOutFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tls.key")
+
+	first, firstPEM, err := loadOrGenerateKey(config{KeyOutPath: path})
+	if err != nil {
+		t.Fatalf("loadOrGenerateKey(initial): %v", err)
+	}
+	if err := fileutil.WriteAtomic(path, firstPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	second, _, err := loadOrGenerateKey(config{KeyOutPath: path})
+	if err != nil {
+		t.Fatalf("loadOrGenerateKey(reuse): %v", err)
+	}
+	if !first.Equal(second) {
+		t.Fatal("loadOrGenerateKey returned a different key on the second call; key-out must be reused once written")
+	}
+}
+
+func TestLoadOrGenerateKeyGeneratesWhenKeyOutFileMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.key")
+	key, pem, err := loadOrGenerateKey(config{KeyOutPath: path})
+	if err != nil {
+		t.Fatalf("loadOrGenerateKey: %v", err)
+	}
+	if key == nil || len(pem) == 0 {
+		t.Fatal("expected freshly generated key + PEM")
+	}
+}
+
 func TestWriteFileAtomicReplacesFileAndCleansTemp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cert.pem")

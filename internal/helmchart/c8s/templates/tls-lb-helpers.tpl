@@ -380,21 +380,22 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 {{- end }}
 
 {{/*
-get-cert init + renew containers. c8s-init-cert obtains the leaf once and
-exits; c8s-renew-cert runs as a native sidecar (restartPolicy: Always) that
-reuses the key and SIGHUPs nginx on renewal. Caller nindents into the Pod
-spec's initContainers list.
+c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
+and renews it on a ticker, SIGHUP-ing nginx after each renewal. Long-lived so
+its PID namespace can anchor shareProcessNamespace under kata (see
+c8s.getCertContainers). Caller nindents into the Pod spec's initContainers
+list.
 */}}
 {{- define "tls-lb.getCertContainers" -}}
-{{- $discoveryMount := "" -}}
+{{- $mounts := list -}}
 {{- if .Values.tlsLb.discovery.enabled -}}
-{{- $discoveryMount = printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath -}}
+{{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
-{{- $reloadWatchMount := "" -}}
-{{- $renewExtraArgs := list -}}
+{{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
 {{- if .Values.tlsLb.publicTLS.secretName -}}
-{{- $reloadWatchMount = printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath -}}
-{{- $renewExtraArgs = list (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) (printf "--reload-watch=%s" (include "tls-lb.publicKeyPath" .)) -}}
+{{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath) -}}
+{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) -}}
+{{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicKeyPath" .)) -}}
 {{- end -}}
 {{- include "c8s.getCertContainers" (dict
   "root" .
@@ -410,9 +411,7 @@ spec's initContainers list.
   "runAsGroup" .Values.tlsLb.nginx.runAsGroup
   "runAsNonRoot" .Values.tlsLb.nginx.runAsNonRoot
   "reloadNginx" "true"
-  "extraArgs" (include "tls-lb.getCertCommonArgs" . | fromYamlArray)
-  "renewExtraArgs" $renewExtraArgs
-  "extraMounts" $discoveryMount
-  "renewExtraMounts" $reloadWatchMount
+  "extraArgs" $extraArgs
+  "extraMounts" (join "\n" $mounts)
 ) -}}
 {{- end }}

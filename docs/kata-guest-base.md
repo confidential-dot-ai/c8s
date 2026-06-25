@@ -123,7 +123,7 @@ chart aligned with it.
 | Layer | Measurement | Verifier |
 |---|---|---|
 | Kata guest image | SNP launch digest over OVMF + `vmlinuz` + the kata cmdline (which embeds the dm-verity `root_hash`), at 1 vCPU; predicted with `sev-snp-measure`, published in `manifest.json`. | Operator pre-attests this; the value is pinned in c8s's `kata.guestImage.tag`. |
-| Container image inside the VM (CDS / workload) | OCI image digest | Operator attests post-install via the existing `confidential.ai/cw` flow. The pod webhook injects `c8s-init-cert`, which obtains a leaf cert from CDS — CDS verifies the container's measurement and signs in one process. |
+| Container image inside the VM (CDS / workload) | OCI image digest | Operator attests post-install via the existing `confidential.ai/cw` flow. The pod webhook injects `c8s-cert`, which obtains a leaf cert from CDS — CDS verifies the container's measurement and signs in one process. |
 | Workload identity (leaf cert) | RA-TLS cert with attestation evidence as a SAN extension | Peer pods in the mesh verify on the mTLS handshake. |
 
 The first layer is what `kata-guest-base` adds. Were the guest the

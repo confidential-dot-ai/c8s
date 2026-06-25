@@ -172,28 +172,29 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 			t.Fatalf("default chart missing %q\n%s", want, out)
 		}
 	}
-	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
-	assertContainerArgs(t, initCert,
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert,
 		"get-cert",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
 		"--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400",
 		"--san=c8s-tls-lb.c8s-system.svc",
 		"--out=/tls/cert.pem",
 		"--key-out=/tls/key.pem",
-	)
-	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
-	assertContainerArgs(t, renewCert,
-		"--key=/tls/key.pem",
-		"--out=/tls/cert.pem",
 		"--renew-interval=1h",
 		"--reload-nginx=true",
 		"--continue-on-initial-error",
 	)
-	if renewCert.RestartPolicy == nil || *renewCert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		t.Fatalf("c8s-renew-cert restartPolicy = %v, want Always", renewCert.RestartPolicy)
+	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("c8s-cert restartPolicy = %v, want Always (single long-lived sidecar so its pidns anchors shareProcessNamespace under kata)", cert.RestartPolicy)
 	}
-	if got := initCert.SecurityContext.RunAsUser; got == nil || *got != 101 {
-		t.Fatalf("c8s-init-cert runAsUser = %v, want 101", got)
+	if cert.StartupProbe == nil || cert.StartupProbe.Exec == nil {
+		t.Fatalf("c8s-cert must expose a startupProbe so nginx waits for the initial cert; got %+v", cert.StartupProbe)
+	}
+	if got := strings.Join(cert.StartupProbe.Exec.Command, " "); !strings.Contains(got, "probe-file") || !strings.Contains(got, "/tls/cert.pem") {
+		t.Fatalf("c8s-cert startupProbe command = %q, want `/c8s probe-file /tls/cert.pem` (distroless: no /bin/test available)", got)
+	}
+	if got := cert.SecurityContext.RunAsUser; got == nil || *got != 101 {
+		t.Fatalf("c8s-cert runAsUser = %v, want 101", got)
 	}
 	args := renderedOperatorArgs(t, out)
 	for _, want := range []string{
@@ -590,7 +591,7 @@ func containerNames(containers []corev1.Container) []string {
 }
 
 // tlsLBGetCertContainer returns the named tls-lb get-cert init container
-// (c8s-init-cert or c8s-renew-cert), failing if absent.
+// (c8s-cert), failing if absent.
 func tlsLBGetCertContainer(t *testing.T, manifest, name string) corev1.Container {
 	t.Helper()
 	init := renderedDeploymentInitContainers(t, manifest, "c8s-tls-lb")
@@ -606,17 +607,6 @@ func assertContainerArgs(t *testing.T, c corev1.Container, want ...string) {
 	t.Helper()
 	for _, w := range want {
 		assertContainerHasArg(t, c.Name, c.Args, w)
-	}
-}
-
-// assertContainerArgsAbsent fails if any listed exact arg is present on the
-// container (assertContainerNoArgPrefix covers the prefix case).
-func assertContainerArgsAbsent(t *testing.T, c corev1.Container, absent ...string) {
-	t.Helper()
-	for _, a := range absent {
-		if slices.Contains(c.Args, a) {
-			t.Fatalf("%s container should not contain arg %q\nargs: %v", c.Name, a, c.Args)
-		}
 	}
 }
 
@@ -1479,19 +1469,14 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 			t.Fatalf("render missing %q\n%s", want, out)
 		}
 	}
-	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
-	assertContainerArgs(t, initCert,
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert,
 		"--discovery-out=/discovery/discovery.json",
 		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
 		"--discovery-public-tls-mode=webpki",
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
-	)
-	assertContainerArgsAbsent(t, initCert, "--reload-watch=/edge-tls/public.crt")
-	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
-	assertContainerArgs(t, renewCert,
 		"--reload-watch=/edge-tls/public.crt",
 		"--reload-watch=/edge-tls/public.key",
-		"--discovery-public-tls-mode=webpki",
 	)
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
@@ -1679,19 +1664,17 @@ func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	initCert := tlsLBGetCertContainer(t, out, "c8s-init-cert")
-	assertContainerArgs(t, initCert, "--verbose")
-	if got := initCert.SecurityContext.RunAsUser; got == nil || *got != 201 {
-		t.Fatalf("c8s-init-cert runAsUser = %v, want 201", got)
+	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
+	assertContainerArgs(t, cert, "--verbose", "--renew-interval=30m")
+	if got := cert.SecurityContext.RunAsUser; got == nil || *got != 201 {
+		t.Fatalf("c8s-cert runAsUser = %v, want 201", got)
 	}
-	if got := initCert.SecurityContext.RunAsGroup; got == nil || *got != 202 {
-		t.Fatalf("c8s-init-cert runAsGroup = %v, want 202", got)
+	if got := cert.SecurityContext.RunAsGroup; got == nil || *got != 202 {
+		t.Fatalf("c8s-cert runAsGroup = %v, want 202", got)
 	}
-	if got := initCert.SecurityContext.RunAsNonRoot; got == nil || *got {
-		t.Fatalf("c8s-init-cert runAsNonRoot = %v, want false", got)
+	if got := cert.SecurityContext.RunAsNonRoot; got == nil || *got {
+		t.Fatalf("c8s-cert runAsNonRoot = %v, want false", got)
 	}
-	renewCert := tlsLBGetCertContainer(t, out, "c8s-renew-cert")
-	assertContainerArgs(t, renewCert, "--renew-interval=30m", "--verbose")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.SecurityContext.FSGroup; got == nil || *got != 202 {
 		t.Fatalf("tls-lb fsGroup = %v, want 202", got)
@@ -2448,23 +2431,20 @@ func TestTLSLBDiscoveryRequiresAdvertisedMeshCA(t *testing.T) {
 	cfg := renderedTLSLBNginxConfig(t, out)
 	meshCA := cfg.location(t, "exact", "/.well-known/mesh-ca.pem")
 	meshCA.assertDirective(t, "alias", "/tls/ca.pem")
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
-		"--ca-out=/tls/ca.pem")
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
+		"--ca-out=/tls/ca.pem",
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem")
 }
 
 // TestTLSLBGetCertWritesMeshCABundle pins the mechanism that replaced the
-// c8s-cds-mesh-ca ConfigMap mount: both get-cert sidecars write the mesh CA
+// c8s-cds-mesh-ca ConfigMap mount: the c8s-cert sidecar writes the mesh CA
 // bundle to /tls/ca.pem (the tls-certs volume that already holds the leaf).
 func TestTLSLBGetCertWritesMeshCABundle(t *testing.T) {
 	out, err := helmTemplateTLSLB(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
-		"--ca-out=/tls/ca.pem")
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-renew-cert"),
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
 		"--ca-out=/tls/ca.pem")
 }
 
@@ -2475,7 +2455,7 @@ func TestTLSLBDiscoveryReportsCDSModeWithoutPublicTLSSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-init-cert"),
+	assertContainerArgs(t, tlsLBGetCertContainer(t, out, "c8s-cert"),
 		"--discovery-public-tls-mode=cds")
 }
 
@@ -3412,25 +3392,26 @@ func TestChartCertDependentPodStrategies(t *testing.T) {
 	}
 }
 
-// TestChartGetCertInitRetriesInProcess proves the injected init get-cert
-// container retries CDS in-process (--initial-retry-timeout) instead of exiting
-// into kubelet CrashLoopBackOff on a transient CDS/mesh outage during a roll.
-func TestChartGetCertInitRetriesInProcess(t *testing.T) {
+// TestChartGetCertRetriesInProcess proves the injected c8s-cert sidecar retries
+// CDS in-process (--initial-retry-timeout) on the bootstrap fetch instead of
+// exiting into kubelet CrashLoopBackOff on a transient CDS/mesh outage during
+// a roll.
+func TestChartGetCertRetriesInProcess(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	inits := renderedDeploymentInitContainers(t, out, "c8s-tee-proxy")
-	var initCert *corev1.Container
+	var cert *corev1.Container
 	for i := range inits {
-		if inits[i].Name == "c8s-init-cert" {
-			initCert = &inits[i]
+		if inits[i].Name == "c8s-cert" {
+			cert = &inits[i]
 		}
 	}
-	if initCert == nil {
-		t.Fatalf("tee-proxy has no c8s-init-cert init container\n%s", out)
+	if cert == nil {
+		t.Fatalf("tee-proxy has no c8s-cert init container\n%s", out)
 	}
-	assertContainerHasArg(t, "c8s-init-cert", initCert.Args, "--initial-retry-timeout=2m")
+	assertContainerHasArg(t, "c8s-cert", cert.Args, "--initial-retry-timeout=2m")
 }
 
 // TestChartCDSMeasurementsPlumbFlatAllowlist proves the flat cds.measurements

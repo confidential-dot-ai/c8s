@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
+func TestMutatePodInjectsCertSidecar(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
 		Spec: corev1.PodSpec{
@@ -30,8 +30,8 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 		CertDir:           "/etc/c8s/certs",
 	})
 
-	if len(pod.Spec.InitContainers) != 2 {
-		t.Fatalf("init containers = %d, want bootstrap + renew", len(pod.Spec.InitContainers))
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
 	}
 	if len(pod.Spec.Containers) != 1 {
 		t.Fatalf("containers = %d, want app container only", len(pod.Spec.Containers))
@@ -43,59 +43,58 @@ func TestMutatePodInjectsCertBootstrapAndRenewal(t *testing.T) {
 	if got := *pod.Spec.SecurityContext.FSGroup; got != defaultCertFSGroup {
 		t.Fatalf("fsGroup = %d, want %d", got, defaultCertFSGroup)
 	}
-	init := pod.Spec.InitContainers[0]
-	if !hasArg(init.Args, "--cds-url=http://cds.c8s-system.svc:8443") {
-		t.Fatalf("init args %v missing --cds-url", init.Args)
+	cert := pod.Spec.InitContainers[0]
+	if cert.Name != "c8s-cert" {
+		t.Fatalf("init container[0] name = %q, want c8s-cert (single sidecar that anchors shareProcessNamespace under kata)", cert.Name)
 	}
-	if !hasArg(init.Args, "--key-mode=0640") {
-		t.Fatalf("init args %v missing --key-mode=0640", init.Args)
+	for _, want := range []string{
+		"--cds-url=http://cds.c8s-system.svc:8443",
+		"--san=api",
+		"--out=/etc/c8s/certs/tls.crt",
+		"--key-out=/etc/c8s/certs/tls.key",
+		"--key-mode=0640",
+		"--renew-interval=6h0m0s",
+		"--reload-nginx=false",
+		"--continue-on-initial-error",
+	} {
+		if !hasArg(cert.Args, want) {
+			t.Fatalf("c8s-cert args %v missing %s", cert.Args, want)
+		}
 	}
-	if !hasArg(init.Args, "--key-out=/etc/c8s/certs/tls.key") {
-		t.Fatalf("init args %v missing key output", init.Args)
+	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("c8s-cert restartPolicy = %#v, want Always (native sidecar so the pidns anchor stays alive under kata)", cert.RestartPolicy)
 	}
-	if init.SecurityContext == nil {
-		t.Fatalf("missing init security context")
+	if cert.StartupProbe == nil || cert.StartupProbe.Exec == nil {
+		t.Fatalf("c8s-cert must expose a startupProbe so the workload waits for the initial cert; got %#v", cert.StartupProbe)
 	}
-	if init.SecurityContext.AllowPrivilegeEscalation == nil || *init.SecurityContext.AllowPrivilegeEscalation {
-		t.Fatalf("init container allows privilege escalation")
+	if got := cert.StartupProbe.Exec.Command; len(got) != 3 || got[0] != "/c8s" || got[1] != "probe-file" || got[2] != "/etc/c8s/certs/tls.crt" {
+		t.Fatalf("c8s-cert startupProbe command = %v, want [/c8s probe-file /etc/c8s/certs/tls.crt]", got)
 	}
-	if init.SecurityContext.RunAsNonRoot == nil || !*init.SecurityContext.RunAsNonRoot {
-		t.Fatalf("init container does not require non-root")
+	if cert.SecurityContext == nil {
+		t.Fatalf("missing c8s-cert security context")
 	}
-	if init.SecurityContext.RunAsUser == nil || *init.SecurityContext.RunAsUser != defaultGetCertRunAsUser {
-		t.Fatalf("init runAsUser = %v", init.SecurityContext.RunAsUser)
+	if cert.SecurityContext.AllowPrivilegeEscalation == nil || *cert.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("c8s-cert allows privilege escalation")
 	}
-	if init.SecurityContext.RunAsGroup == nil || *init.SecurityContext.RunAsGroup != defaultGetCertRunAsGroup {
-		t.Fatalf("init runAsGroup = %v", init.SecurityContext.RunAsGroup)
+	if cert.SecurityContext.RunAsNonRoot == nil || !*cert.SecurityContext.RunAsNonRoot {
+		t.Fatalf("c8s-cert does not require non-root")
 	}
-	if init.SecurityContext.SeccompProfile == nil || init.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
-		t.Fatalf("init seccomp profile = %#v", init.SecurityContext.SeccompProfile)
+	if cert.SecurityContext.RunAsUser == nil || *cert.SecurityContext.RunAsUser != defaultGetCertRunAsUser {
+		t.Fatalf("c8s-cert runAsUser = %v", cert.SecurityContext.RunAsUser)
+	}
+	if cert.SecurityContext.RunAsGroup == nil || *cert.SecurityContext.RunAsGroup != defaultGetCertRunAsGroup {
+		t.Fatalf("c8s-cert runAsGroup = %v", cert.SecurityContext.RunAsGroup)
+	}
+	if cert.SecurityContext.SeccompProfile == nil || cert.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("c8s-cert seccomp profile = %#v", cert.SecurityContext.SeccompProfile)
+	}
+	if len(cert.VolumeMounts) != 1 || cert.VolumeMounts[0].ReadOnly {
+		t.Fatalf("c8s-cert mounts = %#v, want writable c8s cert mount", cert.VolumeMounts)
 	}
 
 	app := pod.Spec.Containers[0]
 	if len(app.VolumeMounts) != 1 || !app.VolumeMounts[0].ReadOnly {
 		t.Fatalf("app mounts = %#v, want read-only c8s cert mount", app.VolumeMounts)
-	}
-	renew := pod.Spec.InitContainers[1]
-	if renew.Name != "c8s-renew-cert" {
-		t.Fatalf("renew sidecar name = %q", renew.Name)
-	}
-	if renew.RestartPolicy == nil || *renew.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		t.Fatalf("renew restartPolicy = %#v, want Always", renew.RestartPolicy)
-	}
-	for _, want := range []string{
-		"--key=/etc/c8s/certs/tls.key",
-		"--out=/etc/c8s/certs/tls.crt",
-		"--renew-interval=6h0m0s",
-		"--reload-nginx=false",
-		"--continue-on-initial-error",
-	} {
-		if !hasArg(renew.Args, want) {
-			t.Fatalf("renew args %v missing %s", renew.Args, want)
-		}
-	}
-	if len(renew.VolumeMounts) != 1 || renew.VolumeMounts[0].ReadOnly {
-		t.Fatalf("renew mounts = %#v, want writable c8s cert mount", renew.VolumeMounts)
 	}
 }
 
@@ -145,21 +144,23 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 	if got := *pod.Spec.SecurityContext.FSGroup; got != 4242 {
 		t.Fatalf("fsGroup = %d, want 4242", got)
 	}
-	init := pod.Spec.InitContainers[0]
-	if !hasArg(init.Args, "--key-mode=0440") {
-		t.Fatalf("init args %v missing --key-mode=0440", init.Args)
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
 	}
-	renew := pod.Spec.InitContainers[1]
-	if !hasArg(renew.Args, "--renew-interval=1h0m0s") {
-		t.Fatalf("renew args %v missing configured renewal interval", renew.Args)
+	cert := pod.Spec.InitContainers[0]
+	if !hasArg(cert.Args, "--key-mode=0440") {
+		t.Fatalf("c8s-cert args %v missing --key-mode=0440", cert.Args)
 	}
-	if got := *init.SecurityContext.RunAsUser; got != 0 {
+	if !hasArg(cert.Args, "--renew-interval=1h0m0s") {
+		t.Fatalf("c8s-cert args %v missing configured renewal interval", cert.Args)
+	}
+	if got := *cert.SecurityContext.RunAsUser; got != 0 {
 		t.Fatalf("runAsUser = %d, want 0", got)
 	}
-	if got := *init.SecurityContext.RunAsGroup; got != 0 {
+	if got := *cert.SecurityContext.RunAsGroup; got != 0 {
 		t.Fatalf("runAsGroup = %d, want 0", got)
 	}
-	if got := *init.SecurityContext.RunAsNonRoot; got {
+	if got := *cert.SecurityContext.RunAsNonRoot; got {
 		t.Fatalf("runAsNonRoot = %t, want false", got)
 	}
 }
@@ -218,46 +219,38 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 	if len(pod.Spec.Volumes) != 3 {
 		t.Fatalf("volumes = %#v, want existing tls-lb volumes only", pod.Spec.Volumes)
 	}
-	init := pod.Spec.InitContainers[0]
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
+	}
+	cert := pod.Spec.InitContainers[0]
 	for _, want := range []string{
 		"--out=/tls/cert.pem",
 		"--key-out=/tls/key.pem",
+		"--renew-interval=1h0m0s",
+		"--reload-nginx=true",
+		"--reload-watch=/edge-tls/public.crt",
+		"--reload-watch=/edge-tls/public.key",
 		"--discovery-out=/discovery/discovery.json",
 		"--discovery-cds-cert-url=/.well-known/cds-cert.pem",
 		"--discovery-public-tls-mode=webpki",
 		"--discovery-mesh-ca-url=/.well-known/mesh-ca.pem",
 		"--verbose",
 	} {
-		if !hasArg(init.Args, want) {
-			t.Fatalf("init args %v missing %s", init.Args, want)
+		if !hasArg(cert.Args, want) {
+			t.Fatalf("c8s-cert args %v missing %s", cert.Args, want)
 		}
 	}
-	renew := pod.Spec.InitContainers[1]
-	for _, want := range []string{
-		"--key=/tls/key.pem",
-		"--out=/tls/cert.pem",
-		"--renew-interval=1h0m0s",
-		"--reload-nginx=true",
-		"--reload-watch=/edge-tls/public.crt",
-		"--reload-watch=/edge-tls/public.key",
-		"--discovery-out=/discovery/discovery.json",
-		"--verbose",
-	} {
-		if !hasArg(renew.Args, want) {
-			t.Fatalf("renew args %v missing %s", renew.Args, want)
-		}
+	if got := *cert.SecurityContext.RunAsUser; got != 101 {
+		t.Fatalf("c8s-cert runAsUser = %d, want 101", got)
 	}
-	if got := *renew.SecurityContext.RunAsUser; got != 101 {
-		t.Fatalf("renew runAsUser = %d, want 101", got)
+	if !hasMount(cert.VolumeMounts, "tls-certs", "/tls", false) {
+		t.Fatalf("c8s-cert mounts %v missing writable tls-certs", cert.VolumeMounts)
 	}
-	if !hasMount(renew.VolumeMounts, "tls-certs", "/tls", false) {
-		t.Fatalf("renew mounts %v missing writable tls-certs", renew.VolumeMounts)
+	if !hasMount(cert.VolumeMounts, "public-tls", "/edge-tls", true) {
+		t.Fatalf("c8s-cert mounts %v missing read-only public-tls", cert.VolumeMounts)
 	}
-	if !hasMount(renew.VolumeMounts, "public-tls", "/edge-tls", true) {
-		t.Fatalf("renew mounts %v missing read-only public-tls", renew.VolumeMounts)
-	}
-	if !hasMount(renew.VolumeMounts, "discovery", "/discovery", false) {
-		t.Fatalf("renew mounts %v missing writable discovery", renew.VolumeMounts)
+	if !hasMount(cert.VolumeMounts, "discovery", "/discovery", false) {
+		t.Fatalf("c8s-cert mounts %v missing writable discovery", cert.VolumeMounts)
 	}
 }
 
@@ -526,13 +519,11 @@ func TestHandleDerivesServiceSAN(t *testing.T) {
 	}
 
 	initContainers := initContainersPatch(t, resp)
-	if len(initContainers) != 2 {
-		t.Fatalf("initContainers patch = %d containers, want bootstrap + renew", len(initContainers))
+	if len(initContainers) != 1 {
+		t.Fatalf("initContainers patch = %d containers, want a single c8s-cert sidecar", len(initContainers))
 	}
-	for _, c := range initContainers {
-		if !hasArg(c.Args, "--san=c8s-api.default.svc") {
-			t.Fatalf("%s args %v missing --san=c8s-api.default.svc", c.Name, c.Args)
-		}
+	if !hasArg(initContainers[0].Args, "--san=c8s-api.default.svc") {
+		t.Fatalf("%s args %v missing --san=c8s-api.default.svc", initContainers[0].Name, initContainers[0].Args)
 	}
 }
 
@@ -610,12 +601,10 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 		t.Fatalf("Handle denied: %v", resp.Result)
 	}
 	initContainers := initContainersPatch(t, resp)
-	if len(initContainers) != 2 {
-		t.Fatalf("initContainers patch = %d containers, want bootstrap + renew", len(initContainers))
+	if len(initContainers) != 1 {
+		t.Fatalf("initContainers patch = %d containers, want a single c8s-cert sidecar", len(initContainers))
 	}
-	for _, c := range initContainers {
-		if !hasArg(c.Args, "--san=api.default.svc") {
-			t.Fatalf("%s args %v missing --san=api.default.svc", c.Name, c.Args)
-		}
+	if !hasArg(initContainers[0].Args, "--san=api.default.svc") {
+		t.Fatalf("%s args %v missing --san=api.default.svc", initContainers[0].Name, initContainers[0].Args)
 	}
 }

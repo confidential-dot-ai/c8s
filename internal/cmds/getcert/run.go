@@ -276,7 +276,7 @@ func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Cl
 }
 
 func obtainCert(ctx context.Context, cfg config, client attestclient.Client) error {
-	privateKey, keyPEM, err := loadOrGenerateKey(cfg.KeyPath)
+	privateKey, keyPEM, err := loadOrGenerateKey(cfg)
 	if err != nil {
 		return err
 	}
@@ -449,11 +449,28 @@ func validateOutputPaths(paths ...string) error {
 	return nil
 }
 
-// loadOrGenerateKey either reads a key from disk or generates a fresh P-256 key.
-func loadOrGenerateKey(keyPath string) (*ecdsa.PrivateKey, []byte, error) {
-	if keyPath != "" {
-		slog.Debug("loading existing private key", "path", keyPath)
-		return loadKey(keyPath)
+// loadOrGenerateKey resolves the workload's private key.
+//
+//   - --key <path>  : load (path must exist).
+//   - --key-out <path> : reuse if a key already exists at <path>, else
+//     generate one. The reuse case keeps the same keypair across container
+//     restarts inside a pod — a fresh key would invalidate every cert CDS
+//     has previously issued for it.
+//   - neither      : generate an ephemeral key (lost on exit).
+func loadOrGenerateKey(cfg config) (*ecdsa.PrivateKey, []byte, error) {
+	if cfg.KeyPath != "" {
+		slog.Debug("loading existing private key", "path", cfg.KeyPath)
+		return loadKey(cfg.KeyPath)
+	}
+	if cfg.KeyOutPath != "" {
+		switch info, err := os.Stat(cfg.KeyOutPath); {
+		case err == nil && !info.IsDir() && info.Size() > 0:
+			slog.Debug("reusing existing private key from --key-out path", "path", cfg.KeyOutPath)
+			return loadKey(cfg.KeyOutPath)
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			return nil, nil, fmt.Errorf("stat %s: %w", cfg.KeyOutPath, err)
+		}
+		// Fall through: generate and let writeOutputs persist it.
 	}
 	slog.Debug("generating ephemeral P-256 key pair")
 	return generateKey()

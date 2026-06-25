@@ -155,38 +155,47 @@ https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cd
 {{- end -}}
 
 {{/*
-c8s.getCertContainers renders the c8s-init-cert (run-once) + c8s-renew-cert
-(restartPolicy: Always sidecar) get-cert containers a chart-owned component
-uses to self-provision a CDS-issued cert, instead of depending on webhook
-injection. Both run the same c8s image and talk to CDS over RA-TLS.
+c8s.getCertContainers renders the c8s-cert native sidecar (restartPolicy:
+Always) a chart-owned component uses to self-provision and renew a CDS-issued
+mesh cert, instead of depending on webhook injection. Talks to CDS over RA-TLS.
+
+Long-lived (not a run-once init) so its PID namespace can anchor
+shareProcessNamespace. Under kata there is no in-guest pause container —
+the agent uses the first container's pidns as the sandbox anchor
+(sandbox.rs:update_shared_pidns), and pidns cannot be bind-mount-persisted
+(namespace.rs explicitly rejects it). A short-lived bootstrap container
+would let the anchor die before downstream containers joined it, and the
+renew sidecar's /proc would never show nginx — SIGHUP-by-PID stops working.
+Harmless under runc, where the pause container plays the same role.
+
+--key-out is idempotent (load-or-generate); kubelet restarts of this
+container reuse the existing key so the cert chain stays valid.
 
 Caller passes a dict:
-  root          - the root context (for c8s.image / c8s.cdsURL / c8s.attestationApiURL)
-  san           - --san for the cert (the workload identity / Service DNS name)
-  certOut       - --out path (also --out for the renew container)
-  keyOut        - --key-out path for init; --key for renew
-  caOut         - optional --ca-out path: write just the mesh CA bundle (the
-                  issuer certs trailing the leaf in the CDS chain) so nginx can
-                  serve it at the discovery endpoint without a separate ConfigMap
-  volume        - name of the writable cert volume to mount
-  mountPath     - where to mount it (the cert dir)
-  renewInterval - --renew-interval for the sidecar
-  keyMode       - --key-mode (octal)
+  root            - the root context (for c8s.image / c8s.cdsURL / c8s.attestationApiURL)
+  san             - --san for the cert (the workload identity / Service DNS name)
+  certOut         - --out path
+  keyOut          - --key-out path
+  caOut           - optional --ca-out path: write just the mesh CA bundle (the
+                    issuer certs trailing the leaf in the CDS chain) so nginx can
+                    serve it at the discovery endpoint without a separate ConfigMap
+  volume          - name of the writable cert volume to mount
+  mountPath       - where to mount it (the cert dir)
+  renewInterval   - --renew-interval (Go time.Duration string, e.g. "6h", "30m", "1h30m")
+  keyMode         - --key-mode (octal)
   runAsUser/runAsGroup/runAsNonRoot - securityContext (match the consumer so the
-                  shared cert volume is readable by it)
-  reloadNginx   - "true"/"false": SIGHUP nginx on renewal (tls-lb only)
-  extraArgs     - optional list of additional get-cert args (e.g. discovery),
-                  applied to both containers
-  renewExtraArgs- optional list applied to the renew container only (e.g. tls-lb
-                  --reload-watch)
-  extraMounts   - optional rendered volumeMount YAML, applied to both
-  renewExtraMounts - optional rendered volumeMount YAML, renew container only
+                    shared cert volume is readable by it)
+  reloadNginx     - "true"/"false": SIGHUP nginx on renewal (tls-lb only)
+  extraArgs       - optional list of additional get-cert args (e.g. discovery,
+                    --reload-watch)
+  extraMounts     - optional rendered volumeMount YAML
 */}}
 {{- define "c8s.getCertContainers" -}}
 {{- $root := .root -}}
-- name: c8s-init-cert
+- name: c8s-cert
   image: {{ include "c8s.image" $root }}
   imagePullPolicy: IfNotPresent
+  restartPolicy: Always
   args:
     - get-cert
     - --cds-url={{ include "c8s.cdsURL" $root }}
@@ -201,37 +210,9 @@ Caller passes a dict:
     # Retry CDS in-process during a roll instead of exiting into kubelet
     # CrashLoopBackOff; still fails closed once the timeout elapses.
     - --initial-retry-timeout={{ $root.Values.certProvisioning.initialRetryTimeout }}
-    {{- range .extraArgs }}
-    - {{ . }}
-    {{- end }}
-  volumeMounts:
-    - name: {{ .volume }}
-      mountPath: {{ .mountPath }}
-    {{- with .extraMounts }}
-    {{- . | nindent 4 }}
-    {{- end }}
-  securityContext:
-    {{- include "c8s.getCertSecurityContext" . | nindent 4 }}
-- name: c8s-renew-cert
-  image: {{ include "c8s.image" $root }}
-  imagePullPolicy: IfNotPresent
-  restartPolicy: Always
-  args:
-    - get-cert
-    - --cds-url={{ include "c8s.cdsURL" $root }}
-    - --attestation-api-url={{ include "c8s.attestationApiURL" $root }}
-    - --san={{ .san }}
-    - --key={{ .keyOut }}
-    - --out={{ .certOut }}
-    {{- with .caOut }}
-    - --ca-out={{ . }}
-    {{- end }}
     - --renew-interval={{ .renewInterval }}
     - --reload-nginx={{ default "false" .reloadNginx }}
     - --continue-on-initial-error
-    {{- range .renewExtraArgs }}
-    - {{ . }}
-    {{- end }}
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
@@ -241,9 +222,23 @@ Caller passes a dict:
     {{- with .extraMounts }}
     {{- . | nindent 4 }}
     {{- end }}
-    {{- with .renewExtraMounts }}
-    {{- . | nindent 4 }}
-    {{- end }}
+  # Gate the workload on the initial cert being written. Native sidecars
+  # are considered "started" as soon as the process launches, so without
+  # this probe the workload would race the initial fetch. `c8s probe-file`
+  # is used because the image is gcr.io/distroless/static and has no `test`.
+  #
+  # The `/c8s` path is the binary location set by cmd/c8s/Dockerfile
+  # (`COPY build/c8s /c8s`). If that COPY target or the ENTRYPOINT changes,
+  # update this command — startupProbe.exec bypasses the ENTRYPOINT so the
+  # full path must match.
+  startupProbe:
+    exec:
+      command:
+        - /c8s
+        - probe-file
+        - {{ .certOut }}
+    periodSeconds: 1
+    failureThreshold: 180
   securityContext:
     {{- include "c8s.getCertSecurityContext" . | nindent 4 }}
 {{- end -}}

@@ -363,14 +363,14 @@ yet.
 
 **Outcome.** No exposure window before policy load.
 
-### S9 — Bootstrap: get-cert containers, which the webhook injects
+### S9 — Bootstrap: c8s-cert sidecar, which the webhook injects
 
-**Setup.** Operator deploys a workload pod. The c8s webhook injects
-`c8s-init-cert` (init container) and `c8s-renew-cert` (sidecar).
-These containers use `cfg.GetCertImage` from the chart
+**Setup.** Operator deploys a workload pod. The c8s webhook injects a
+single `c8s-cert` native sidecar (init container with
+`restartPolicy: Always`). It uses `cfg.GetCertImage` from the chart
 (`ghcr.io/confidential-dot-ai/get-cert:<tag>`).
 
-**Flow.** kata-runtime calls CreateContainer for the init container.
+**Flow.** kata-runtime calls CreateContainer for the sidecar.
 kata-agent forks its init; policy-monitor sees the new bundle,
 extracts the digest, the get-cert digest IS in the allowlist (the
 bake-time substitution at guest-image build time put it in the seed

@@ -90,9 +90,9 @@ func (r *ConfidentialWorkloadReconciler) Reconcile(ctx context.Context, req ctrl
 }
 
 // isPodReady is the heuristic for "this pod has attested": the kubelet has
-// reported PodReady, which means c8s-init-cert (the init container) exited
-// 0 — and that only happens after a successful attestation round-trip with
-// CDS.
+// reported PodReady, which means the c8s-cert sidecar's startupProbe passed
+// — and that only happens after a successful attestation round-trip with
+// CDS (the probe checks for the issued cert on disk).
 func isPodReady(pod *corev1.Pod) bool {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {

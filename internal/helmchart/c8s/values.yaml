@@ -875,11 +875,11 @@ teeProxy:
   # Domain for autocert TLS
   domain: ""
   # -- Self-provision a CDS-issued serving cert via get-cert (like tls-lb),
-  #    instead of a static secret. When enabled, chart-rendered c8s-init-cert /
-  #    c8s-renew-cert containers write localhost+2.pem/-key.pem into tls.mountPath
-  #    and tee-proxy serves HTTPS from there, hot-reloading on renewal. This is
-  #    how tls-lb reaches tee-proxy over mutual attested TLS rather than plain
-  #    HTTP. Mutually exclusive with tls.enabled (a static secret).
+  #    instead of a static secret. When enabled, the chart-rendered c8s-cert
+  #    sidecar writes localhost+2.pem/-key.pem into tls.mountPath and tee-proxy
+  #    serves HTTPS from there, hot-reloading on renewal. This is how tls-lb
+  #    reaches tee-proxy over mutual attested TLS rather than plain HTTP.
+  #    Mutually exclusive with tls.enabled (a static secret).
   certProvisioning:
     enabled: true
     # -- Renewal interval for the get-cert sidecar. Must be shorter than the
@@ -1086,10 +1086,10 @@ tlsLb:
   imagePullSecrets: []
 
   certProvisioning:
-    # -- Enable verbose (debug) logging for the chart-rendered get-cert containers.
+    # -- Enable verbose (debug) logging for the chart-rendered c8s-cert sidecar.
     verbose: false
-    # -- How often the c8s-renew-cert sidecar renews the TLS certificate and
-    #    SIGHUPs nginx. Must be shorter than the cert TTL issued by CDS.
+    # -- How often the c8s-cert sidecar renews the TLS certificate and SIGHUPs
+    #    nginx. Must be shorter than the cert TTL issued by CDS.
     renewInterval: "1h"
 
   # -- Attestation + over-encryption sidecar (c8s-verify/v1). When enabled, an

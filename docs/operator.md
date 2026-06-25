@@ -325,13 +325,13 @@ For opted-in pods, the webhook:
 - adds an in-memory `emptyDir` volume named `c8s-certs`;
 - mounts that volume read-only into application containers at
   `/etc/c8s/certs`;
-- prepends a `c8s-init-cert` init container that fetches the first cert before
-  application containers start;
-- adds a native `c8s-renew-cert` sidecar init container that refreshes
-  `tls.crt` every `webhook.getCert.renewInterval`;
+- prepends a `c8s-cert` native sidecar (init container with
+  `restartPolicy: Always`) that fetches the first cert before application
+  containers start and then renews `tls.crt` every
+  `webhook.getCert.renewInterval`;
 - stamps `confidential.ai/c8s-injected=true` to make reinvocation a no-op.
 
-The init container runs:
+The sidecar runs:
 
 ```bash
 get-cert \
@@ -340,14 +340,22 @@ get-cert \
   --san=<derived from confidential.ai/cw, e.g. c8s-api.default.svc> \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
-  --key-mode=<webhook.certVolume.keyMode>
+  --key-mode=<webhook.certVolume.keyMode> \
+  --renew-interval=<webhook.getCert.renewInterval> \
+  --reload-nginx=<from annotation> \
+  --continue-on-initial-error
 ```
 
-The renewal sidecar runs the same flow with `--key=/etc/c8s/certs/tls.key`,
-`--renew-interval=<webhook.getCert.renewInterval>`, and
-`--reload-nginx=false`. It renews the file on disk; application-level TLS
-reload remains the workload's responsibility unless the pod opts into one of
-the c8s reload annotations.
+`--key-out` is idempotent: on a kubelet restart of the sidecar it reuses the
+key that's already on disk, so the previously-issued cert chain stays valid.
+A `startupProbe` (`/c8s probe-file /etc/c8s/certs/tls.crt`) gates the
+application containers on the initial cert being written. Renewals rewrite
+the file on disk; application-level TLS reload remains the workload's
+responsibility unless the pod opts into one of the c8s reload annotations.
+
+The sidecar is long-lived rather than a run-once init container because under
+kata it doubles as the pidns anchor for `shareProcessNamespace` — see
+`docs/kata.md` for the underlying constraint.
 
 Platform-owned workloads can specialize the same webhook behavior with typed
 c8s annotations for the cert volume, cert/key filenames, renewal interval,
