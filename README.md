@@ -25,6 +25,9 @@ confidential-ci/
 ├── README.md            you are here
 ├── deploy-plan.md       bare-metal + GCP + Azure plan; Model B; Nix vs Bazel
 ├── org-setup.md         org-wide rollout (GitHub App, runner group, install)
+├── host/                always-on host that runs ARC (GKE; NOT confidential)
+│   ├── create-host-cluster.sh   small zonal GKE cluster (e2-medium)
+│   └── install-arc.sh           ARC controller + org-wide scale set
 ├── register.sh          one-command repo/org scale-set registration
 ├── runner-image/
 │   ├── Dockerfile.gcp   runner image (amd64): gcloud+kubectl+helm+kettle+ccvm
@@ -41,6 +44,21 @@ confidential-ci/
 │   └── confidential-build.yml kettle attested build
 └── examples/model-server/     sample project the build/e2e use
 ```
+
+## Always-on host (GKE)
+
+The runners need a persistent cluster to live on (a laptop kind cluster only
+works while it's awake). The host is a small **non-confidential** GKE cluster —
+it just runs ARC; the confidential clusters are the ephemeral ones the runners
+provision per E2E (Model B).
+
+```bash
+GCP_PROJECT=conf-500518 bash host/create-host-cluster.sh        # ~1x e2-medium, zonal
+ORG_URL=https://github.com/<org> GH_RUNNER_TOKEN="$(gh auth token)" bash host/install-arc.sh
+```
+
+For production, bind the runner's K8s SA to a GCP SA via Workload Identity
+Federation (see `e2e/README.md`) so Model-B provisioning needs no static keys.
 
 ## Quickstart (org-wide)
 
