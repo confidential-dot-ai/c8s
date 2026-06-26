@@ -1,0 +1,29 @@
+# Egress hardening for bare-metal runner pods (Cilium / #6).
+#
+# CI runners legitimately need broad INTERNET egress (crates.io, ghcr, github,
+# dl.k8s.io, arbitrary deps), so a tight FQDN allowlist would break builds. The
+# value here is cutting LATERAL movement: a job may reach DNS, the kube-apiserver
+# (the E2E uses kubectl), and the public internet — but NOT other in-cluster pods
+# /services or node-local endpoints. Default-deny applies once this selects a pod.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: runner-egress
+  namespace: arc-runners
+spec:
+  endpointSelector: {}            # all runner pods in arc-runners
+  egress:
+    - toEndpoints:                # DNS only to kube-dns/CoreDNS
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+    - toEntities:                 # K8s API server (kubectl in the E2E job)
+        - kube-apiserver
+    - toEntities:                 # the public internet (CI dependency fetches)
+        - world
+  # NOT allowed (default-deny): other pods/services in-cluster, remote nodes,
+  # host-local endpoints → blocks east-west / lateral movement from a CI job.

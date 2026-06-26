@@ -106,6 +106,7 @@ GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
 ## Files
 - `install-arc-rancher.sh` — proxy-safe ARC install + scale-set registration + RBAC
 - `kubevirt-rbac.yaml` — scoped SA/Role/RoleBinding for VM lifecycle in confai-images
+- `runner-egress.cnp.yaml` — Cilium egress policy: deny lateral movement; allow DNS/API/internet (#6)
 - `snp-vm-e2e.yaml` — the confidential SNP target VM (confirmed working values)
 - `snp-e2e.yml` — the SNP-VM E2E workflow (launch → assert sev-snp-guest → teardown)
 - `smoke.yml` — the trivial `runs-on: confidential-bm` proof workflow

@@ -68,8 +68,44 @@ it does the clean cycle (uninstall old → purge its `autoscalingrunnerset` /
 new). Skipping that purge is what left the listener crash-looping on a stale
 `ephemeralrunnerset` (`… not found`, `assigned job=0`) during the GKE rename.
 
-## Related hardening (tracked, not yet done)
-- #6 PAT → GitHub App (the real fix for "dedicated credential").
-- #7 runner egress NetworkPolicy + least-privilege WIF + no long-lived secrets on
-  the runner. The credential here is for *registration*; jobs should get cloud
-  access via short-lived WIF/OIDC, never a static key on the runner.
+## Runner blast-radius hardening (#6)
+
+### Egress — done on bare-metal, staged on gcp
+CI runners legitimately need broad **internet** egress (crates.io, ghcr, github,
+dl.k8s.io, arbitrary deps), so a tight FQDN allowlist would break builds. The
+value is cutting **lateral movement**, not internet access.
+
+- **bare-metal (Cilium): applied + verified.** `baremetal/runner-egress.cnp.yaml`
+  allows DNS + the kube-apiserver + the public internet, and default-denies
+  everything else — so a CI job can fetch deps and (for the E2E) talk to the API
+  server, but **cannot reach other in-cluster pods/services, remote nodes, or
+  host-local endpoints**. Verified non-breaking: the matrix bm leg (`cargo build`)
+  and `snp-e2e` (kubectl path) both stay green under it.
+- **gcp: not enforceable as-is.** `arc-host` has no network-policy datapath
+  (no Dataplane V2). Enabling it is a cluster change, and gcp is kept as-is — so
+  this is staged. The high-value gcp control would be blocking the **metadata
+  endpoint** (`169.254.169.254`) from runner pods to stop WIF/credential SSRF;
+  apply it when/if Dataplane V2 is enabled.
+
+### WIF least-privilege — staged (needs a Model-B re-test)
+The GKE runner SA (`arc-e2e`) holds **`roles/container.admin`** — project-wide
+GKE admin (read/write *every* cluster + its workloads). For Model B it only needs
+to create/delete *ephemeral* confidential clusters and operate inside them.
+
+Proposed replacement (validate before cutover):
+- a **custom role** with `container.clusters.{create,delete,get,list,update}` +
+  `container.operations.{get,list}` for the lifecycle, plus
+- **`roles/container.developer`** for the in-cluster (kubectl) access the E2E needs
+  (a pure cluster-lifecycle role grants `getCredentials` but no RBAC → kubectl
+  Forbidden — which is exactly why this must be tested with a real Model-B run, not
+  cut over blind), then remove `container.admin`.
+
+Not applied: it touches gcp and a wrong permission set silently breaks Model-B
+provisioning (slow/costly to discover). Stage it with a Model-B verification +
+rollback to `container.admin`.
+
+### No static secrets on the runner — current state
+Jobs get cloud access via short-lived **WIF/OIDC**, never a static key on the
+runner. The only credential on the fabric is the **registration** secret (now
+by-reference, above) — keep it that way; never add a long-lived cloud key to a
+runner image or job env.

@@ -29,8 +29,9 @@ kubectl apply --server-side -f "$WORK"/gha-runner-scale-set-controller/crds/
 helm template arc "$WORK"/gha-runner-scale-set-controller -n arc-systems | kubectl apply --server-side -f -
 kubectl -n arc-systems rollout status deploy/arc-gha-rs-controller --timeout=180s
 
-echo "== KubeVirt RBAC (bm-e2e SA) =="
+echo "== KubeVirt RBAC (bm-e2e SA) + runner egress policy =="
 kubectl apply -f "$(dirname "$0")/kubevirt-rbac.yaml"
+kubectl apply -f "$(dirname "$0")/runner-egress.cnp.yaml"   # Cilium: deny lateral, allow DNS+API+internet
 
 echo "== scale set $SCALE_SET -> $ORG_URL via register.sh (MODE=template, secret-by-reference) =="
 # register.sh handles the credential BY REFERENCE (no token in helm values — see
