@@ -26,6 +26,7 @@ confidential-ci/
 ├── config.env.example   all per-account knobs (project/region/registry/org) in one place
 ├── RUNNER-MATRIX.md     which CI jobs run on confidential; arm/macOS scoping
 ├── OPEN-SOURCE.md       fork/public-repo safety model for OSS repos
+├── SECURITY.md          runner credential handling (secret-by-reference) + rotation
 ├── MONITORING.md        ops/monitoring commands + gotchas + teardown
 ├── deploy-plan.md       bare-metal + GCP + Azure plan; Model B; Nix vs Bazel
 ├── org-setup.md         org-wide rollout (GitHub App, runner group, install)

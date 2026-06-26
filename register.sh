@@ -1,30 +1,133 @@
 #!/usr/bin/env bash
-# Register the self-hosted runner scale set with GitHub.
-# The ARC *controller* is already installed (see ../README). This is the one
-# step that touches your GitHub account, so it's separate and explicit.
+# Idempotent register / rename of a confidential runner scale set, with the
+# GitHub credential handled BY REFERENCE (never inlined into helm values).
 #
-# Needs: a repo (or org) URL and a token. A classic PAT with `repo` scope works
-# for repo-level; a GitHub App is preferred for org/enterprise + production.
+# Tier-1 hardening this script encodes:
+#  - #2 secret-by-reference: the token is written to a K8s Secret and referenced
+#    by name (githubConfigSecret=<name>), so it never lands in `helm get values`
+#    (which is how it leaked before). Supply it via $GH_RUNNER_TOKEN — it is
+#    never echoed. For git/GitOps storage, seal that Secret (see SECURITY.md);
+#    this script never writes the token to disk.
+#  - #3 idempotent rename: renaming an ARC scale set without purging leftover CRs
+#    leaves the listener crash-looping on a stale ephemeralrunnerset
+#    ("... not found", assigned job=0). RENAME_FROM does the clean cycle:
+#    uninstall/delete old -> purge its CRs -> restart controller -> install new.
 #
-#   GITHUB_CONFIG_URL=https://github.com/<you>/<repo> \
-#   GITHUB_PAT=ghp_xxx \
-#   ./register.sh
+# Rotation (#1) is a GitHub-account action (revoke + mint a fresh credential) —
+# see SECURITY.md. Once you have a new credential, re-run with $GH_RUNNER_TOKEN.
 #
-# `runs-on: confidential-builders` in the workflow targets this scale set.
+# Examples:
+#   # bare-metal (Rancher proxy -> template mode):
+#   GH_RUNNER_TOKEN=*** ORG_URL=https://github.com/cifrai SCALE_SET=confidential-bm \
+#     MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
+#   # GKE:
+#   GH_RUNNER_TOKEN=*** ORG_URL=https://github.com/cifrai SCALE_SET=confidential-gcp \
+#     SA=arc-e2e RUNNER_IMAGE=us-central1-docker.pkg.dev/.../confidential-runner-gcp:v2 \
+#     KUBE_CONTEXT=gke_conf-500518_us-central1-a_arc-host ./register.sh
+#   # rename (clean): RENAME_FROM=confidential-e2e SCALE_SET=confidential-gcp ... ./register.sh
 set -euo pipefail
-: "${GITHUB_CONFIG_URL:?set GITHUB_CONFIG_URL=https://github.com/<you>/<repo>}"
-: "${GITHUB_PAT:?set GITHUB_PAT=<classic PAT with repo scope>}"
-NAME="${NAME:-confidential-builders}"
+
+: "${GH_RUNNER_TOKEN:?set GH_RUNNER_TOKEN=<runner registration credential> (never committed/printed)}"
+: "${ORG_URL:?set ORG_URL=https://github.com/<org>  (or a repo URL)}"
+SCALE_SET="${SCALE_SET:-confidential-bm}"
 NS="${NS:-arc-runners}"
+SYS_NS="${SYS_NS:-arc-systems}"
+SECRET="${SECRET:-runner-github}"
+MODE="${MODE:-helm}"                  # helm | template (template = Rancher-proxy clusters)
+CHART_VER="${CHART_VER:-0.14.2}"
+MIN_RUNNERS="${MIN_RUNNERS:-0}"
+MAX_RUNNERS="${MAX_RUNNERS:-2}"
+RUNNER_IMAGE="${RUNNER_IMAGE:-}"      # optional container image override
+SA="${SA:-}"                          # optional template.spec.serviceAccountName
+RENAME_FROM="${RENAME_FROM:-}"        # optional old scale-set name to purge first
+CTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && CTX_ARG=(--kube-context "$KUBE_CONTEXT")
+KCTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && KCTX_ARG=(--context "$KUBE_CONTEXT")
+CHART_SS=oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+CHART_CTL=oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+WORK="$(mktemp -d)"
 
-helm install "$NAME" \
-  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-  --namespace "$NS" --create-namespace \
-  --set githubConfigUrl="$GITHUB_CONFIG_URL" \
-  --set githubConfigSecret.github_token="$GITHUB_PAT" \
-  --set minRunners=0 --set maxRunners=3 \
-  --set containerMode.type="kubernetes"
+k(){ kubectl "${KCTX_ARG[@]}" "$@"; }
+h(){ helm "${CTX_ARG[@]}" "$@"; }
+ensure_ns(){ k create ns "$1" --dry-run=client -o yaml | k apply -f - >/dev/null; }
 
-echo "Registered scale set '$NAME' in ns '$NS'. Runners are ephemeral (min 0)."
-echo "Verify: kubectl -n $NS get pods,autoscalingrunnerset"
-echo "Then push the workflow and watch a runner pod spin up per job."
+ensure_controller(){
+  if k -n "$SYS_NS" get deploy arc-gha-rs-controller >/dev/null 2>&1; then
+    echo "controller: present"; return
+  fi
+  echo "controller: installing ($MODE)"
+  ensure_ns "$SYS_NS"
+  if [ "$MODE" = template ]; then
+    h pull "$CHART_CTL" --version "$CHART_VER" --untar -d "$WORK" >/dev/null
+    k apply --server-side -f "$WORK"/gha-runner-scale-set-controller/crds/ >/dev/null
+    h template arc "$WORK"/gha-runner-scale-set-controller -n "$SYS_NS" | k apply --server-side -f - >/dev/null
+  else
+    h install arc "$CHART_CTL" --version "$CHART_VER" -n "$SYS_NS" --wait
+  fi
+  k -n "$SYS_NS" rollout status deploy/arc-gha-rs-controller --timeout=180s
+}
+
+upsert_secret(){
+  ensure_ns "$NS"
+  k create secret generic "$SECRET" -n "$NS" \
+    --from-literal=github_token="$GH_RUNNER_TOKEN" \
+    --dry-run=client -o yaml | k apply -f - >/dev/null
+  echo "secret: $NS/$SECRET upserted (token by reference — not in helm values)"
+}
+
+purge(){  # $1 = scale-set name to remove cleanly
+  local n="$1"; [ -z "$n" ] && return 0
+  echo "purge: $n (clean cycle to avoid the stale-listener crashloop)"
+  h uninstall "$n" -n "$NS" 2>/dev/null || true
+  k -n "$NS" delete autoscalingrunnerset "$n" --ignore-not-found >/dev/null 2>&1 || true
+  for ers in $(k -n "$NS" get ephemeralrunnerset -o name 2>/dev/null | grep "/$n-" || true); do
+    k -n "$NS" delete "$ers" --ignore-not-found >/dev/null 2>&1 || true
+  done
+  for l in $(k -n "$SYS_NS" get autoscalinglistener -o name 2>/dev/null | grep "/$n-" || true); do
+    k -n "$SYS_NS" delete "$l" --ignore-not-found >/dev/null 2>&1 || true
+  done
+  k -n "$SYS_NS" rollout restart deploy/arc-gha-rs-controller >/dev/null 2>&1 || true
+  k -n "$SYS_NS" rollout status deploy/arc-gha-rs-controller --timeout=120s >/dev/null 2>&1 || true
+}
+
+install(){
+  local sets=(
+    --set githubConfigUrl="$ORG_URL"
+    --set githubConfigSecret="$SECRET"
+    --set minRunners="$MIN_RUNNERS" --set maxRunners="$MAX_RUNNERS"
+  )
+  [ -n "$RUNNER_IMAGE" ] && sets+=(--set "template.spec.containers[0].name=runner" --set "template.spec.containers[0].image=$RUNNER_IMAGE")
+  [ -n "$SA" ] && sets+=(--set "template.spec.serviceAccountName=$SA")
+  if [ "$MODE" = template ]; then
+    h template "$SCALE_SET" "$CHART_SS" --version "$CHART_VER" -n "$NS" \
+      "${sets[@]}" \
+      --set controllerServiceAccount.name=arc-gha-rs-controller \
+      --set controllerServiceAccount.namespace="$SYS_NS" \
+      | k apply --server-side -f -
+  elif h status "$SCALE_SET" -n "$NS" >/dev/null 2>&1; then
+    h upgrade "$SCALE_SET" "$CHART_SS" --version "$CHART_VER" -n "$NS" "${sets[@]}"
+  else
+    h install "$SCALE_SET" "$CHART_SS" --version "$CHART_VER" -n "$NS" "${sets[@]}"
+  fi
+}
+
+verify(){
+  echo "verify: waiting for the listener to reach 'Getting next message'..."
+  local pod
+  for _ in $(seq 1 20); do
+    sleep 6
+    pod=$(k -n "$SYS_NS" get pods -o name 2>/dev/null | grep "$SCALE_SET-.*-listener" | head -1 || true)
+    [ -z "$pod" ] && continue
+    if k -n "$SYS_NS" logs "$pod" --tail=20 2>/dev/null | grep -q "Getting next message"; then
+      echo "listener: healthy ($pod)"; return 0
+    fi
+  done
+  echo "WARN: listener not healthy yet — inspect: kubectl -n $SYS_NS logs <listener>"
+}
+
+echo "== register '$SCALE_SET' -> $ORG_URL  (mode=$MODE ns=$NS) =="
+ensure_controller
+upsert_secret
+[ -n "$RENAME_FROM" ] && purge "$RENAME_FROM"
+install
+verify
+echo "done. runs-on: $SCALE_SET   (repos must be PRIVATE — see OPEN-SOURCE.md)"

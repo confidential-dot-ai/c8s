@@ -29,20 +29,15 @@ kubectl apply --server-side -f "$WORK"/gha-runner-scale-set-controller/crds/
 helm template arc "$WORK"/gha-runner-scale-set-controller -n arc-systems | kubectl apply --server-side -f -
 kubectl -n arc-systems rollout status deploy/arc-gha-rs-controller --timeout=180s
 
-echo "== scale set $SCALE_SET -> $ORG_URL (template|apply; explicit controller SA skips the cluster lookup) =="
-helm template "$SCALE_SET" \
-  oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-  --version "$CHART_VER" -n arc-runners \
-  --set githubConfigUrl="$ORG_URL" \
-  --set githubConfigSecret.github_token="$GH_TOKEN" \
-  --set controllerServiceAccount.name=arc-gha-rs-controller \
-  --set controllerServiceAccount.namespace=arc-systems \
-  --set minRunners=0 --set maxRunners=2 | kubectl apply --server-side -f -
-
-echo "== bind runner pods to the KubeVirt SA (see kubevirt-rbac.yaml) =="
+echo "== KubeVirt RBAC (bm-e2e SA) =="
 kubectl apply -f "$(dirname "$0")/kubevirt-rbac.yaml"
-kubectl -n arc-runners patch autoscalingrunnerset "$SCALE_SET" --type=merge \
-  -p '{"spec":{"template":{"spec":{"serviceAccountName":"bm-e2e"}}}}'
+
+echo "== scale set $SCALE_SET -> $ORG_URL via register.sh (MODE=template, secret-by-reference) =="
+# register.sh handles the credential BY REFERENCE (no token in helm values — see
+# ../SECURITY.md), the Rancher-proxy-safe template|apply path, and binds the SA.
+ORG_URL="$ORG_URL" SCALE_SET="$SCALE_SET" MODE=template SA=bm-e2e \
+  CHART_VER="$CHART_VER" GH_RUNNER_TOKEN="$GH_TOKEN" \
+  bash "$(cd "$(dirname "$0")/.." && pwd)/register.sh"
 
 echo "done. listener: kubectl -n arc-systems get pods | grep listener"
 echo "repos using '$SCALE_SET' must be PRIVATE (see ../OPEN-SOURCE.md)."
