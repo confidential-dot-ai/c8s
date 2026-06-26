@@ -1,8 +1,50 @@
 # In-guest attestation — design (scope #4)
 
-> **Status: design only. Nothing here is implemented yet.** This documents the
-> plan to turn the E2E's platform-level checks into real, verified attestation.
-> No code, scripts, or cluster changes have been made for this.
+> **Status: Phase-1 evidence flow VERIFIED LIVE (2026-06-26); not yet wired into
+> CI.** Big finding: the full attestation flow already exists in the company's
+> `confai` CLI — we **integrate it, not rebuild**. We pulled a real, nonce-bound
+> SEV-SNP report from the confidential guest end-to-end (details below).
+
+## Phase 1 — what we found (verified live on `github-runner-dev`)
+
+The earlier "we'll bake our own attester" plan is **moot** — the bare-metal base
+image and `confai` already implement RATS end-to-end:
+
+- **Attester is in the guest, on by default.** `base-cpu-image` runs
+  `attestation-api` on **:8400**; `POST /attest` with `{"report_data":
+  "<base64(32-byte nonce)>"}` returns `{"platform":"snp","evidence":
+  {"attestation_report":"…"}}`. Verified live: **HTTP 200, 1653-byte SNP report,
+  with our nonce embedded in `report_data`** (freshness proven). No base-image
+  change needed.
+- **Verifier exists:** `confai verify --vm <name> --image-dir <dir> --smp N`
+  (`pkg/confai/verify.go` `VerifyLive`): computes the expected launch digest
+  (`confai measure`), resolves the VM's LB IP, generates a nonce, POSTs `/attest`,
+  shells out to `attestation-cli verify` (attestation-rs) for signature + report_data,
+  then asserts `claims.launch_digest == expected`. Offline variant compares an
+  IGVM file's digest instead.
+- **Golden measurement exists:** `confai measure --smp N <image-dir>` — so the
+  reference value is computed from source, not pinned.
+
+So **Phase 1 = wire `confai verify` into `snp-e2e`, fail closed on `!Pass`.** What
+remains (all mechanical):
+1. `confai` + `attestation-cli` on the runner — `make` in `cmd/confai` (clones
+   steep + attestation-rs, `cargo build --features attest`; Linux + libtss2 — the
+   bm runner has these). Build in-job first; bake into the runner image later (#7).
+2. **Network path runner → guest `/attest`.** The runner's egress policy (#6)
+   blocks east-west, and our bare VM has only a pod IP. Use `confai launch` (it
+   creates the LB service `VerifyLive` resolves) and allow the runner egress to
+   that LB IP — or run the verify step from a `confai-images` Job.
+3. **`--image-dir` / golden digest** — the base rootfs dir for `confai measure`
+   (or the offline `--igvm` variant against `igvm-files`).
+
+Decisions from below, now settled by this finding: **#1 (bm attester tooling)** —
+already in the base image, don't bake our own. **#3 (verifier)** — use
+`attestation-cli`/`confai verify` in-step (CDS later). **#2 (gcp)** still open (Phase 2).
+
+---
+
+> Historical scope (pre-finding) below — kept for the gcp/azure phases and the
+> general RATS framing.
 
 ## The gap, precisely
 
