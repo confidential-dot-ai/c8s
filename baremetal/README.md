@@ -36,7 +36,19 @@ rename migration gap:
 | `igvm-files` PVC | present | ✅ present |
 | base rootdisk PVC | present | ✅ `cpu-image-rootdisk-0df2ca7d5549` |
 
-**Hand-off to the bare-metal owners (Ameen):** to finish the SNP path on this box —
+### Workaround we use (no repo PR needed)
+
+We don't wait on the repo fix: our runner authors its **own** VM spec, so
+`snp-vm-e2e.yaml` pins the sidecar at **`ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:7450bb…`**
+directly. **Proven 2026-06-26:** that VM reaches `Running` and is a *genuine*
+SEV-SNP guest — qemu runs `/usr/local/qemu-igvm/bin/qemu-system-x86_64` with
+`confidential-guest-support` + a `{"qom-type":"sev-snp-guest",…}` object and
+`igvm-cfg file=guest-smp2.igvm`. (The stock `virt-launcher:v1.7.0` *image label*
+is a red herring — the custom IGVM qemu is mounted in, so the guest is really
+confidential.) So the only thing the repo PR (#58/#60) buys us is fixing the
+chart default for *other* consumers; our E2E is unblocked today.
+
+**Hand-off to the bare-metal owners (Ameen):** to fix it for chart/CLI consumers —
 1. Publish/point the **IGVM hook sidecar** to the `confidential-dot-ai` org (match
    the launcher), and update the dev-vm chart / `group_vars` (`igvm_sidecar_image`)
    off the stale `lunal-dev` digest.

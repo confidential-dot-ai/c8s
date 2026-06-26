@@ -1,15 +1,15 @@
 # Confidential SEV-SNP target VM for the Model-A bare-metal E2E. The runner
 # applies this into confai-images, waits for the VMI to reach Running, asserts
-# launchSecurity.snp + placement on the SNP node, then deletes it.
+# the guest is a real sev-snp-guest (+ IGVM measured boot), then deletes it.
 #
-# PLACEHOLDERS to set from the cluster before use:
-#   SIDECAR_IMAGE  the IGVM hook sidecar that's ACTUALLY in this cluster's registry.
-#                  NOTE: the bare-metal repo still pins lunal-dev (stale); this
-#                  cluster's launcher is ghcr.io/confidential-dot-ai/virt-launcher-snp,
-#                  so the sidecar is almost certainly under confidential-dot-ai too.
-#                  Get it from the KubeVirt CR / images role, not the dev-vm chart default.
-#   ROOT_PVC       verity base rootdisk PVC (kubectl get pvc -n confai-images), digest-suffixed.
-#   IGVM_FILE      guest-smp<cores>.igvm present in the igvm-files PVC (cores must be power of 2).
+# CONFIRMED WORKING on github-runner-dev (2026-06-26): this exact spec boots a
+# genuine SEV-SNP guest — qemu runs with confidential-guest-support + a
+# {"qom-type":"sev-snp-guest",...} object and igvm-cfg file guest-smp2.igvm.
+#
+# KEY: we pin the sidecar to the confidential-dot-ai org DIRECTLY here, so this is
+# independent of the bare-metal repo's stale dev-vm chart (lunal-dev). No repo PR
+# (#58/#60) needed for our E2E — we author our own VM spec. Values below are the
+# live cluster's (kubectl get pvc -n confai-images; igvm file = guest-smp<cores>.igvm).
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -21,8 +21,8 @@ spec:
     metadata:
       labels: { vm.kubevirt.io/name: bm-e2e-snp }
       annotations:
-        igvm.lunal.dev/file: "IGVM_FILE"          # e.g. guest-smp2.igvm
-        hooks.kubevirt.io/hookSidecars: '[{"image":"SIDECAR_IMAGE","imagePullPolicy":"Always","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
+        igvm.lunal.dev/file: "guest-smp2.igvm"          # e.g. guest-smp2.igvm
+        hooks.kubevirt.io/hookSidecars: '[{"image":"ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:7450bb136bfc4d9434a7c1eb9e478ab3237e7d9acf5c211e7d080f2008b01ba0","imagePullPolicy":"Always","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
     spec:
       nodeSelector: { lunal.dev/sev-snp: "true" }
       domain:
@@ -38,4 +38,4 @@ spec:
       networks: [ { name: default, pod: {} } ]
       volumes:
         - name: rootdisk
-          persistentVolumeClaim: { claimName: ROOT_PVC }   # verity rootfs; no cloud-init on SNP
+          persistentVolumeClaim: { claimName: cpu-image-rootdisk-0df2ca7d5549 }   # verity rootfs; no cloud-init on SNP
