@@ -43,6 +43,23 @@ jobs:
           echo "$cmd" | grep -Eq 'guest-smp[0-9]+\.igvm'
           kubectl -n confai-images get vmi "$VM" -o jsonpath='{.spec.volumes[?(@.name=="rootdisk")].dataVolume.name}' | grep -q "${VM}-root"
           echo "PASS: genuine SEV-SNP + IGVM, per-run clone of the live base"
+      - name: attest + verify (real SNP report -> attestation-cli)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev ca-certificates
+          curl -fsSL https://github.com/confidential-dot-ai/attestation-rs/releases/download/v0.4.0/attestation-cli -o attestation-cli
+          chmod +x attestation-cli
+          IP=$(kubectl -n confai-images get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}')
+          echo "guest /attest endpoint: $IP:8400"
+          head -c 32 /dev/urandom > n.bin
+          B64=$(base64 -w0 n.bin); HEX=$(od -An -tx1 n.bin | tr -d ' \n')
+          echo "nonce(hex)=$HEX"
+          curl -s -m20 -H 'Content-Type: application/json' -d "{\"report_data\":\"$B64\"}" "http://$IP:8400/attest" -o att.json -w 'POST /attest -> HTTP %{http_code}, %{size_download} bytes\n'
+          echo "=== attestation-cli verify ==="
+          ./attestation-cli verify --expected-report-data "$HEX" < att.json | tee claims.json
+          grep -Eq '"platform"[: ]+"snp"' claims.json
+          grep -Eq '"signature_valid"[: ]+true' claims.json
+          echo "ATTESTED: genuine SEV-SNP report, signature valid, report_data == our nonce"
       - name: teardown (VM owns the clone -> GC'd)
         if: always()
         run: kubectl -n confai-images delete vm "${VM:-bm-e2e-snp-$GITHUB_RUN_ID}" --ignore-not-found --wait=false

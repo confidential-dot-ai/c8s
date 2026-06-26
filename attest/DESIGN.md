@@ -1,9 +1,11 @@
 # In-guest attestation — design (scope #4)
 
-> **Status: Phase-1 evidence flow VERIFIED LIVE (2026-06-26); not yet wired into
-> CI.** Big finding: the full attestation flow already exists in the company's
-> `confai` CLI — we **integrate it, not rebuild**. We pulled a real, nonce-bound
-> SEV-SNP report from the confidential guest end-to-end (details below).
+> **Status: Phase 1a DONE (2026-06-26) — attested confidential CI runs GREEN on
+> `confidential-bm`.** `snp-e2e` pulls a genuine SEV-SNP report from the guest
+> (`/attest`) and verifies it with `attestation-cli`: **signature valid, report_data
+> == our nonce, debug_allowed=false** — fail-closed. We integrate the company's
+> tooling, we did not build an attester. Phase 1b (assert `launch_digest` == golden
+> + cert-chain collateral) is below.
 
 ## Phase 1 — what we found (verified live on `github-runner-dev`)
 
@@ -25,17 +27,24 @@ image and `confai` already implement RATS end-to-end:
 - **Golden measurement exists:** `confai measure --smp N <image-dir>` — so the
   reference value is computed from source, not pinned.
 
-So **Phase 1 = wire `confai verify` into `snp-e2e`, fail closed on `!Pass`.** What
-remains (all mechanical):
-1. `confai` + `attestation-cli` on the runner — `make` in `cmd/confai` (clones
-   steep + attestation-rs, `cargo build --features attest`; Linux + libtss2 — the
-   bm runner has these). Build in-job first; bake into the runner image later (#7).
-2. **Network path runner → guest `/attest`.** The runner's egress policy (#6)
-   blocks east-west, and our bare VM has only a pod IP. Use `confai launch` (it
-   creates the LB service `VerifyLive` resolves) and allow the runner egress to
-   that LB IP — or run the verify step from a `confai-images` Job.
-3. **`--image-dir` / golden digest** — the base rootfs dir for `confai measure`
-   (or the offline `--igvm` variant against `igvm-files`).
+### Phase 1a — DONE (how it's wired)
+We bypassed `confai` (its `measure` step needs `steep`/igvm-tools, which is
+**inaccessible** — `lunal-dev/steep` 404s) and went straight to the verifier:
+1. **`attestation-cli` on the runner — prebuilt, no build.** Download the public
+   release asset `confidential-dot-ai/attestation-rs` v0.4.0 `attestation-cli`
+   (x86-64 linux); the runner `apt`-installs `libtss2-dev` (the binary links it).
+2. **Network path runner → guest `/attest`** — narrow egress carve-out in
+   `runner-egress.cnp.yaml` (allow `arc-runners` → `confai-images:8400` only).
+3. **Evidence + verify:** nonce (32B) → `POST /attest {"report_data": b64}` →
+   `attestation-cli verify --expected-report-data <hex>` (stdin), assert
+   `platform=snp` + `signature_valid` + `report_data_match`. Fail-closed.
+
+### Phase 1b — remaining
+- **Assert `launch_digest` == golden** (today we record it: `d300bd58…`). Needs a
+  measurement tool: `confai measure`/`steep` (blocked) or `sev-snp-measure` against
+  the IGVM. Until then it's recorded, not enforced.
+- **Cert-chain collateral:** verify reports `collateral_verified: false` — enable
+  VCEK→ASK→ARK chain verification (KDS is reachable via `world` egress).
 
 Decisions from below, now settled by this finding: **#1 (bm attester tooling)** —
 already in the base image, don't bake our own. **#3 (verifier)** — use

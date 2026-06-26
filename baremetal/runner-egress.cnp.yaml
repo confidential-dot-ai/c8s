@@ -25,5 +25,12 @@ spec:
         - kube-apiserver
     - toEntities:                 # the public internet (CI dependency fetches)
         - world
-  # NOT allowed (default-deny): other pods/services in-cluster, remote nodes,
-  # host-local endpoints → blocks east-west / lateral movement from a CI job.
+    - toEndpoints:                # narrow carve-out: the confidential VM's /attest
+        - matchLabels:            # endpoint (attestation-api) so the E2E can verify
+            k8s:io.kubernetes.pod.namespace: confai-images   # the VM it just launched
+      toPorts:
+        - ports:
+            - { port: "8400", protocol: TCP }
+  # NOT allowed (default-deny): other in-cluster pods/services/ports, remote nodes,
+  # host-local endpoints → blocks east-west / lateral movement from a CI job. The
+  # only east-west exception is confai-images:8400 (the attestation endpoint).
