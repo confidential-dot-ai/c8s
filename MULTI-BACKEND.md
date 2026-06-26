@@ -11,6 +11,66 @@ Run the same CI steps across every confidential backend in one workflow:
 The workflow is [`workflows/confidential-matrix.yml`](workflows/confidential-matrix.yml).
 Proven green on `confidential-gcp` + `confidential-bm` simultaneously.
 
+## Use it in your repo
+
+Once the runners are live org-wide, opt your CI into confidential compute one of
+three ways. **Prerequisite: the repo must be private/internal** — GitHub won't
+dispatch self-hosted runners to public repos (see [`OPEN-SOURCE.md`](OPEN-SOURCE.md)).
+
+### Option 1 — run your whole CI across every confidential backend
+Copy [`workflows/confidential-matrix.yml`](workflows/confidential-matrix.yml) into
+your repo's `.github/workflows/` and replace the example build step with yours.
+Every live backend runs the identical steps in parallel; a new backend (e.g. azure)
+starts running automatically once it's added to `CONFIDENTIAL_BACKENDS` — no edit
+to your workflow.
+
+### Option 2 — pin a single job to a confidential runner
+In any workflow, target a backend by its label:
+```yaml
+jobs:
+  build:
+    runs-on: confidential-bm        # or confidential-gcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: build deps (self-hosted, minimal runner image)
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev
+      - run: make test
+```
+
+### Option 3 — matrix an existing CI across backends
+Add a small `set-backends` job that emits the live list, then fan your job over it:
+```yaml
+jobs:
+  set-backends:
+    runs-on: ubuntu-latest
+    outputs: { list: "${{ steps.s.outputs.list }}" }
+    steps:
+      - id: s
+        run: echo "list=${{ vars.CONFIDENTIAL_BACKENDS || '[\"confidential-gcp\",\"confidential-bm\"]' }}" >> "$GITHUB_OUTPUT"
+  ci:
+    needs: set-backends
+    strategy:
+      fail-fast: false
+      matrix: { backend: "${{ fromJSON(needs.set-backends.outputs.list) }}" }
+    runs-on: ${{ matrix.backend }}
+    steps: [ ]   # your steps
+```
+This is exactly how `cifrai/attestation-rs-ci` runs `check`/`test` on every backend
+(see `workflows/confidential-matrix.yml` for the exact `set-backends` job).
+
+### Good to know
+- **Which backends run** is the org variable `CONFIDENTIAL_BACKENDS` (default
+  `["confidential-gcp","confidential-bm"]`), managed centrally — you don't set it
+  unless you want a subset.
+- **Runners are minimal + ephemeral** (one fresh pod per job, scale-to-zero).
+  Install build deps in-job gated `runner.environment == 'self-hosted'`; on gcp the
+  baked image already carries the common toolchain.
+- **`runs-on` = the backend label**: `confidential-gcp` = Confidential GKE node,
+  `confidential-bm` = bare-metal SEV-SNP KubeVirt host (see the table above).
+- Spinning up a confidential *VM/cluster* as the test target (vs running build/test
+  *on* the runner) is the per-backend E2E — see `baremetal/snp-e2e.yml` and `e2e/`.
+
 ## The pattern
 
 ```yaml

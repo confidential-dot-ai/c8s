@@ -25,6 +25,7 @@ confidential-ci/
 ├── README.md            you are here
 ├── config.env.example   all per-account knobs (project/region/registry/org) in one place
 ├── RUNNER-MATRIX.md     which CI jobs run on confidential; arm/macOS scoping
+├── MULTI-BACKEND.md     run CI across [gcp, azure, bm]; how to adopt it in your repo
 ├── OPEN-SOURCE.md       fork/public-repo safety model for OSS repos
 ├── SECURITY.md          runner credential handling (secret-by-reference) + rotation
 ├── MONITORING.md        ops/monitoring commands + gotchas + teardown
