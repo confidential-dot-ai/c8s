@@ -1,0 +1,55 @@
+name: confidential-matrix
+# Run the same CI steps across every confidential backend.
+# Target trio: confidential-gcp (Confidential GKE), confidential-azure (Azure CVM),
+# confidential-bm (bare-metal RKE2 SEV-SNP). Only list backends that have a LIVE
+# runner — a matrix label with no runner hangs queued forever (job timeout-minutes
+# only counts once a job is RUNNING, not while it waits for a runner).
+on:
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: 'JSON array of confidential runner labels'
+        default: '["confidential-gcp","confidential-bm"]'
+        type: string
+  push:
+    branches: [main]
+
+jobs:
+  set-backends:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.s.outputs.list }}
+    steps:
+      - id: s
+        env:
+          INPUT: ${{ inputs.backends }}
+          VAR: ${{ vars.CONFIDENTIAL_BACKENDS }}   # repo variable: enable backends as they come online
+        run: |
+          LIST="${INPUT:-}"; [ -z "$LIST" ] && LIST="${VAR:-}"
+          [ -z "$LIST" ] && LIST='["confidential-gcp","confidential-bm"]'
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "Confidential backends under test: $LIST"
+
+  ci:
+    needs: set-backends
+    strategy:
+      fail-fast: false        # one backend's failure must not cancel the others
+      matrix:
+        backend: ${{ fromJSON(needs.set-backends.outputs.list) }}
+    runs-on: ${{ matrix.backend }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: platform identity
+        run: |
+          echo "=== backend: ${{ matrix.backend }} ==="
+          uname -srm; grep -m1 'model name' /proc/cpuinfo || true
+          echo "SEV flags: $(grep -o 'sev[_a-z]*' /proc/cpuinfo | sort -u | paste -sd, - || echo none)"
+      - name: build deps (self-hosted confidential)
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libtss2-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build step (identical on every backend)
+        run: |
+          d=$(mktemp -d); cd "$d"; cargo init --name probe -q .
+          cargo build -q && echo "PASS: cargo build on ${{ matrix.backend }}"
