@@ -103,6 +103,29 @@ gh workflow run snp-e2e --repo cifrai/confidential-bm-smoke      # launches the 
 `-o wide` shows the node (`sev-snp-gh-runner`) and pod IP. Job/run status from the
 GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
 
+## Multi-CVM attestation — the C8s testing primitive
+
+`multi-cvm-attest.yml` is the seed of confidential-Kubernetes (C8s) integration
+testing: **one CI job orchestrates multiple CVMs and attests each.** Proven green
+on `confidential-bm` — the job spins up two SEV-SNP CVMs (per-run CDI clones),
+waits each `/attest` endpoint ready, then verifies a genuine, fresh report from
+each (`signature_valid`, `report_data_match`, `platform: snp`), fail-closed, and
+tears both down. Generalizes to N CVMs.
+
+Two gotchas it handles: a readiness race (VMI `Running` ≠ `attestation-api`
+listening — poll `/attest` first) and **AMD KDS rate-limiting the VCEK fetch
+(HTTP 429)** — the CLI's VCEK cache is per-process, so each `verify` re-fetches;
+we retry with backoff and space the fetches between CVMs. Production fix: a local
+VCEK cache/mirror (or bake the cert into the runner image).
+
+### Where this goes (Ameen's C8s roadmap, for later)
+The eventual product is C8s, where a **coordinator/CDS** (cert-distribution
+server, itself a CVM) attests the cluster and only **whitelisted digests** may
+run: each pod is a CVM; a **SHIM baked into the node image** intercepts CRI
+pod-start, the new pod must **attest** and receive the digest whitelist from CDS
+(over raTLS / TLS-EKM) before it's allowed to run. Out of scope for now — Ameen
+said start with this multi-CVM attest job; C8s is shipping separately.
+
 ## Staying in sync with the base image (no drift)
 
 The bare-metal team rebuilds the confidential base image; its digest-suffixed PVC
@@ -142,7 +165,8 @@ producer ConfigMap (proposed) with a drift check as the stopgap.
 - `kubevirt-rbac.yaml` — scoped SA/Role/RoleBinding for VM lifecycle in confai-images
 - `runner-egress.cnp.yaml` — Cilium egress policy: deny lateral movement; allow DNS/API/internet (#6)
 - `snp-vm-e2e.yaml` — the confidential SNP target VM (confirmed working values)
-- `snp-e2e.yml` — the SNP-VM E2E workflow (launch → assert sev-snp-guest → teardown)
+- `snp-e2e.yml` — the SNP-VM E2E workflow (launch → assert sev-snp-guest → attest → teardown)
+- `multi-cvm-attest.yml` — one job spins up 2 CVMs and attests both (C8s primitive)
 - `smoke.yml` — the trivial `runs-on: confidential-bm` proof workflow
 
 ## Production hardening (when wiring the real E2E)

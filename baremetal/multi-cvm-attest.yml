@@ -1,0 +1,91 @@
+name: multi-cvm-attest
+# Ameen's C8s testing primitive: a single CI job orchestrates MULTIPLE CVMs and
+# attests each. Spins up two SEV-SNP CVMs (per-run CDI clones of the base) and the
+# job verifies a genuine, fresh report from each via /attest + attestation-cli.
+# (The seed for C8s, where a coordinator attests the cluster.)
+on: [push, workflow_dispatch]
+jobs:
+  multi-cvm:
+    runs-on: confidential-bm
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools (kubectl + attestation-cli)
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          curl -fsSL https://github.com/confidential-dot-ai/attestation-rs/releases/download/v0.4.0/attestation-cli -o bin/attestation-cli
+          chmod +x bin/*; echo "$PWD/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev ca-certificates
+      - name: spin up two CVMs
+        run: |
+          set -euo pipefail
+          echo "CVM_A=cvm-a-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+          echo "CVM_B=cvm-b-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+          ROOTPVC=$(kubectl -n confai-images get pvc -o name --sort-by=.metadata.creationTimestamp | grep -o 'cpu-image-rootdisk-[a-z0-9]*' | tail -1)
+          echo "base rootdisk: $ROOTPVC"
+          for n in a b; do
+            VM="cvm-$n-${GITHUB_RUN_ID}"
+            echo "launching $VM"
+            sed "s/bm-e2e-snp/${VM}/g; s/cpu-image-rootdisk-0df2ca7d5549/${ROOTPVC}/" snp-vm-e2e.yaml | kubectl apply -f -
+          done
+      - name: wait both CVMs Running
+        run: |
+          set -uo pipefail
+          for VM in "$CVM_A" "$CVM_B"; do
+            ok=
+            for i in $(seq 1 70); do
+              p=$(kubectl -n confai-images get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              echo "[$VM] $p"; [ "$p" = Running ] && { ok=1; break; }; sleep 6
+            done
+            [ -n "$ok" ] || { echo "::error::$VM never reached Running"; exit 1; }
+          done
+      - name: job attests BOTH CVMs
+        run: |
+          set -euo pipefail
+          attest() {
+            VM="$1"
+            IP=$(kubectl -n confai-images get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}')
+            # VMI Running != attestation-api listening yet — poll /attest readiness
+            # (GET / returns 404 once the server is up; curl exit/HTTP 000 = not yet).
+            ready=
+            for i in $(seq 1 30); do
+              code=$(curl -s -m5 -o /dev/null -w '%{http_code}' "http://$IP:8400/" 2>/dev/null || echo 000)
+              [ "$code" != "000" ] && { ready=1; break; }
+              echo "  [$VM] waiting for attestation-api @ $IP:8400 ... [$i]"; sleep 5
+            done
+            [ -n "$ready" ] || { echo "::error::$VM attestation-api never came up"; return 1; }
+            echo "=== attest $VM @ $IP:8400 ==="
+            # POST /attest with retries — report generation can be slow / reset
+            # under concurrent CVMs. Fresh nonce each attempt so HEX matches att.json.
+            acode=000
+            for j in $(seq 1 6); do
+              head -c 32 /dev/urandom > n.bin
+              B64=$(base64 -w0 n.bin); HEX=$(od -An -tx1 n.bin | tr -d ' \n')
+              acode=$(curl -s -m60 -H 'Content-Type: application/json' -d "{\"report_data\":\"$B64\"}" "http://$IP:8400/attest" -o att.json -w '%{http_code}' || echo 000)
+              [ "$acode" = "200" ] && break
+              echo "  [$VM] /attest attempt $j -> HTTP $acode, retrying"; sleep 5
+            done
+            [ "$acode" = "200" ] || { echo "::error::$VM /attest failed (HTTP $acode)"; return 1; }
+            echo "  /attest -> HTTP 200 (nonce=$HEX)"
+            # verify with retry — AMD KDS rate-limits the VCEK fetch (HTTP 429);
+            # the CLI's VCEK cache is per-process so each call re-fetches.
+            vok=
+            for j in $(seq 1 6); do
+              if attestation-cli verify --expected-report-data "$HEX" < att.json >claims.json 2>verr.txt; then vok=1; break; fi
+              if grep -qiE '429|rate' verr.txt; then echo "  [$VM] KDS 429, backing off (attempt $j)..."; sleep 40; else cat verr.txt; break; fi
+            done
+            [ -n "$vok" ] || { echo "::error::$VM verify failed"; cat verr.txt; return 1; }
+            cat claims.json
+            grep -Eq '"platform"[: ]+"snp"' claims.json
+            grep -Eq '"signature_valid"[: ]+true' claims.json
+            grep -Eq '"report_data_match"[: ]+true' claims.json
+            echo "  OK: $VM is a genuine, fresh SEV-SNP CVM"
+          }
+          attest "$CVM_A"
+          sleep 20   # space the VCEK fetches so KDS doesn't 429 the second CVM
+          attest "$CVM_B"
+          echo "MULTI-CVM ATTESTED: one job spun up 2 CVMs and verified both"
+      - name: teardown both CVMs
+        if: always()
+        run: kubectl -n confai-images delete vm "${CVM_A:-cvm-a-$GITHUB_RUN_ID}" "${CVM_B:-cvm-b-$GITHUB_RUN_ID}" --ignore-not-found --wait=false
