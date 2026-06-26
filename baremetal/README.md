@@ -103,6 +103,40 @@ gh workflow run snp-e2e --repo cifrai/confidential-bm-smoke      # launches the 
 `-o wide` shows the node (`sev-snp-gh-runner`) and pod IP. Job/run status from the
 GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
 
+## Staying in sync with the base image (no drift)
+
+The bare-metal team rebuilds the confidential base image; its digest-suffixed PVC
+(`cpu-image-rootdisk-<digest>`), the IGVM hook sidecar digest, and the IGVM
+measurement all change on a bump. Anything we *copy* will silently drift. Rules:
+
+1. **Resolve, don't hardcode (done for the PVC).** `snp-e2e.yml` looks up the
+   current `cpu-image-rootdisk-*` PVC from the cluster at run time (newest; fails
+   loudly if missing/ambiguous) — the cluster is the live source of truth for
+   which base is materialized. A new base is picked up automatically; no digest in
+   our manifest to go stale. (The PVC carries `confai.lunal.dev/source-digest-sha256`
+   if you need to assert a specific base.)
+2. **Single source of truth for producer-owned refs (sidecar / base digest).**
+   These aren't cluster objects, so they can't be auto-resolved the same way. Two
+   options, best first:
+   - **Producer-published ConfigMap (recommended).** Ask the bare-metal repo's
+     `base-image-rootdisk` role to publish `confai-images/base-image-refs`
+     (`rootPvc`, `igvm_sidecar_image`, `igvm_file`, `igvm_measurement` per cores).
+     Our E2E reads it → zero divergence by construction. Small addition on their
+     side; the clean long-term fix.
+   - **Drift check (interim).** A scheduled job that compares our pinned sidecar /
+     expected measurement against the bare-metal repo's `group_vars`
+     (`igvm_sidecar_image`, `base_cpu_image`) at a pinned ref (and the live
+     KubeVirt CR) and fails/alerts on mismatch — so a bump is a visible, deliberate
+     update, never a silent break. Pairs with #11 (Renovate).
+3. **Attestation measurement (#4) must track the base, not pin a stale constant.**
+   Derive the golden IGVM measurement from the *current* `guest-smp<cores>.igvm`
+   (`sev-snp-measure`) at verify time, or consume it from the producer ConfigMap
+   above. A pinned measurement would fail-closed (safe) but break the E2E on every
+   bump.
+
+Net: the PVC drift is closed today; the sidecar/measurement drift is closed by the
+producer ConfigMap (proposed) with a drift check as the stopgap.
+
 ## Files
 - `install-arc-rancher.sh` — proxy-safe ARC install + scale-set registration + RBAC
 - `kubevirt-rbac.yaml` — scoped SA/Role/RoleBinding for VM lifecycle in confai-images

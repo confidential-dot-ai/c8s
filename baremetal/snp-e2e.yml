@@ -2,18 +2,26 @@ name: snp-e2e
 on: [push, workflow_dispatch]
 jobs:
   snp-e2e:
-    runs-on: confidential-bm        # bare-metal confidential runner (RKE2 @ sev-snp-gh-runner)
+    runs-on: confidential-bm
     steps:
       - uses: actions/checkout@v4
       - name: install kubectl
         run: |
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o kubectl
           chmod +x kubectl && echo "$PWD" >> "$GITHUB_PATH"
-      - name: launch confidential SEV-SNP VM (per-run CDI clone of the base)
+      - name: launch confidential SEV-SNP VM (per-run clone; base resolved from cluster)
         run: |
-          VM="bm-e2e-snp-${GITHUB_RUN_ID}"
-          echo "VM=$VM" >> "$GITHUB_ENV"
-          sed "s/bm-e2e-snp/${VM}/g" snp-vm-e2e.yaml | kubectl apply -f -
+          set -euo pipefail
+          VM="bm-e2e-snp-${GITHUB_RUN_ID}"; echo "VM=$VM" >> "$GITHUB_ENV"
+          # Resolve the CURRENT base rootdisk PVC (digest-suffixed) live — never
+          # hardcode it, so a new base image can't silently drift us. Fail loudly
+          # if missing/ambiguous.
+          mapfile -t PVCS < <(kubectl -n confai-images get pvc -o name --sort-by=.metadata.creationTimestamp | grep -o 'cpu-image-rootdisk-[a-z0-9]*')
+          [ "${#PVCS[@]}" -ge 1 ] || { echo "::error::no cpu-image-rootdisk-* PVC in confai-images"; exit 1; }
+          ROOTPVC="${PVCS[-1]}"
+          [ "${#PVCS[@]}" -gt 1 ] && echo "::warning::multiple base PVCs (${PVCS[*]}); using newest $ROOTPVC"
+          echo "resolved base rootdisk: $ROOTPVC"
+          sed "s/bm-e2e-snp/${VM}/g; s/cpu-image-rootdisk-0df2ca7d5549/${ROOTPVC}/" snp-vm-e2e.yaml | kubectl apply -f -
       - name: wait for VMI Running (clone then boot)
         run: |
           set -uo pipefail
@@ -33,9 +41,8 @@ jobs:
           cmd=$(kubectl -n confai-images exec "$pod" -c compute -- bash -lc "cat /proc/*/cmdline 2>/dev/null | tr '\0' '\n'")
           echo "$cmd" | grep -q 'sev-snp-guest'
           echo "$cmd" | grep -Eq 'guest-smp[0-9]+\.igvm'
-          # confirm the rootdisk is the per-run clone, not the shared base
           kubectl -n confai-images get vmi "$VM" -o jsonpath='{.spec.volumes[?(@.name=="rootdisk")].dataVolume.name}' | grep -q "${VM}-root"
-          echo "PASS: genuine SEV-SNP + IGVM, running off the per-run clone ${VM}-root"
+          echo "PASS: genuine SEV-SNP + IGVM, per-run clone of the live base"
       - name: teardown (VM owns the clone -> GC'd)
         if: always()
         run: kubectl -n confai-images delete vm "${VM:-bm-e2e-snp-$GITHUB_RUN_ID}" --ignore-not-found --wait=false
