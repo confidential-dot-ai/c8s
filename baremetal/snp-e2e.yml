@@ -9,27 +9,33 @@ jobs:
         run: |
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o kubectl
           chmod +x kubectl && echo "$PWD" >> "$GITHUB_PATH"
-      - name: launch confidential SEV-SNP VM (KubeVirt)
-        run: kubectl apply -f snp-vm-e2e.yaml
-      - name: wait for VMI Running
+      - name: launch confidential SEV-SNP VM (per-run CDI clone of the base)
+        run: |
+          VM="bm-e2e-snp-${GITHUB_RUN_ID}"
+          echo "VM=$VM" >> "$GITHUB_ENV"
+          sed "s/bm-e2e-snp/${VM}/g" snp-vm-e2e.yaml | kubectl apply -f -
+      - name: wait for VMI Running (clone then boot)
         run: |
           set -uo pipefail
-          for i in $(seq 1 50); do
-            phase=$(kubectl -n confai-images get vmi bm-e2e-snp -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            echo "[$i] VMI phase=$phase"
+          for i in $(seq 1 60); do
+            phase=$(kubectl -n confai-images get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            dv=$(kubectl -n confai-images get dv "${VM}-root" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            echo "[$i] clone=$dv VMI=$phase"
             [ "$phase" = Running ] && break
             sleep 6
           done
           test "$phase" = Running
-      - name: assert it is a GENUINE SEV-SNP guest (IGVM measured boot)
+      - name: assert GENUINE SEV-SNP guest on the clone
         run: |
           set -euo pipefail
-          pod=$(kubectl -n confai-images get pods --no-headers | grep 'virt-launcher-bm-e2e-snp' | awk '{print $1}' | head -1)
+          pod=$(kubectl -n confai-images get pods --no-headers | grep "virt-launcher-${VM}" | awk '{print $1}' | head -1)
           echo "launcher pod: $pod"
           cmd=$(kubectl -n confai-images exec "$pod" -c compute -- bash -lc "cat /proc/*/cmdline 2>/dev/null | tr '\0' '\n'")
           echo "$cmd" | grep -q 'sev-snp-guest'
           echo "$cmd" | grep -Eq 'guest-smp[0-9]+\.igvm'
-          echo "PASS: confidential-guest-support=sev-snp-guest + IGVM measured boot confirmed"
-      - name: teardown
+          # confirm the rootdisk is the per-run clone, not the shared base
+          kubectl -n confai-images get vmi "$VM" -o jsonpath='{.spec.volumes[?(@.name=="rootdisk")].dataVolume.name}' | grep -q "${VM}-root"
+          echo "PASS: genuine SEV-SNP + IGVM, running off the per-run clone ${VM}-root"
+      - name: teardown (VM owns the clone -> GC'd)
         if: always()
-        run: kubectl -n confai-images delete vm bm-e2e-snp --ignore-not-found --wait=false
+        run: kubectl -n confai-images delete vm "${VM:-bm-e2e-snp-$GITHUB_RUN_ID}" --ignore-not-found --wait=false

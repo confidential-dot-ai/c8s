@@ -112,8 +112,12 @@ GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
 - `smoke.yml` — the trivial `runs-on: confidential-bm` proof workflow
 
 ## Production hardening (when wiring the real E2E)
-- **CDI-clone** the base rootdisk per run instead of mounting the shared PVC
-  directly (RWO serializes runs; avoids touching the canonical base image).
+- **CDI-clone the base rootdisk per run — done (#8).** `snp-vm-e2e.yaml` uses
+  `dataVolumeTemplates` to clone the verity base into a fresh per-run PVC (unique
+  VM name per run), so the VM never mounts the shared RWO base (no Multi-Attach,
+  no risk to the canonical image) and concurrent runs don't serialize. The clone
+  is byte-preserving — verified the cloned VM still boots as a genuine
+  sev-snp-guest — and is owned by the VM, so teardown GCs it (no orphans).
 - Bake `kubectl`/`helm`/`virtctl` into a runner image (push to the cluster's GHCR
   org) rather than installing in-job.
 - In-guest attestation: fetch the SNP report bound to a nonce and verify with

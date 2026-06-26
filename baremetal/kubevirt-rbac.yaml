@@ -29,6 +29,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]          # E2E assert: read qemu cmdline in the launcher
     verbs: ["create", "get"]
+  - apiGroups: ["cdi.kubevirt.io"]    # per-run CDI clone of the base rootdisk
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["cdi.kubevirt.io"]    # authorize cloning FROM this namespace's PVCs
+    resources: ["datavolumes/source"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
