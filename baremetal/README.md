@@ -60,7 +60,7 @@ is a red herring — the custom IGVM qemu is mounted in, so the guest is really
 confidential.) So the only thing the repo PR (#58/#60) buys us is fixing the
 chart default for *other* consumers; our E2E is unblocked today.
 
-**Hand-off to the bare-metal owners (Ameen):** to fix it for chart/CLI consumers —
+**Hand-off to the bare-metal owners:** to fix it for chart/CLI consumers —
 1. Publish/point the **IGVM hook sidecar** to the `confidential-dot-ai` org (match
    the launcher), and update the dev-vm chart / `group_vars` (`igvm_sidecar_image`)
    off the stale `lunal-dev` digest.
@@ -118,13 +118,12 @@ listening — poll `/attest` first) and **AMD KDS rate-limiting the VCEK fetch
 we retry with backoff and space the fetches between CVMs. Production fix: a local
 VCEK cache/mirror (or bake the cert into the runner image).
 
-### Where this goes (Ameen's C8s roadmap, for later)
+### Where this goes (C8s roadmap, for later)
 The eventual product is C8s, where a **coordinator/CDS** (cert-distribution
 server, itself a CVM) attests the cluster and only **whitelisted digests** may
 run: each pod is a CVM; a **SHIM baked into the node image** intercepts CRI
 pod-start, the new pod must **attest** and receive the digest whitelist from CDS
-(over raTLS / TLS-EKM) before it's allowed to run. Out of scope for now — Ameen
-said start with this multi-CVM attest job; C8s is shipping separately.
+(over raTLS / TLS-EKM) before it's allowed to run. Out of scope for now — the steer was to start with this multi-CVM attest job; C8s is shipping separately.
 
 ## Staying in sync with the base image (no drift)
 

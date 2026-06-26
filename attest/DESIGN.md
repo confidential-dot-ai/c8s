@@ -117,7 +117,7 @@ The in-guest attester (the report tool) must live **inside the confidential imag
 
 - **bm:** the verity-immutable `confidential-dot-ai/base-cpu-image` must ship
   `configfs-tsm` / `snpguest` (or our attestation-rs CLI). Either coordinate with
-  the bare-metal owners (Ameen) to add it, or we bake a minimal attester image.
+  the bare-metal owners to add it, or we bake a minimal attester image.
   **This is the gating decision for Phase 1** — the rootfs is verity-immutable and
   has no cloud-init, so the tool has to be baked, not installed at boot.
 - **gcp:** ship the attester as a privileged DaemonSet/pod — no base-image change.
@@ -165,7 +165,7 @@ nonce, `debug=1`, TCB < floor, or missing evidence. Notes:
 ## Decisions needed before any build starts
 
 1. **bm attester tooling:** add the SNP report tool to `base-cpu-image`
-   (coordinate w/ Ameen) **or** bake our own minimal attester? (P1 is gated on this.)
+   (coordinate w/ the bare-metal owners) **or** bake our own minimal attester? (P1 is gated on this.)
 2. **gcp model:** Confidential GKE **Nodes** (raw report — what we provision today)
    vs **Confidential Space** (signed JWT token — easier verify, different
    provisioning model)?

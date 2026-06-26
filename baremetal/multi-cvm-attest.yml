@@ -1,5 +1,5 @@
 name: multi-cvm-attest
-# Ameen's C8s testing primitive: a single CI job orchestrates MULTIPLE CVMs and
+# C8s testing primitive: a single CI job orchestrates MULTIPLE CVMs and
 # attests each. Spins up two SEV-SNP CVMs (per-run CDI clones of the base) and the
 # job verifies a genuine, fresh report from each via /attest + attestation-cli.
 # (The seed for C8s, where a coordinator attests the cluster.)

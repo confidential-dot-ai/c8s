@@ -1,6 +1,6 @@
 # Plan: confidential CI runners for E2E on bare metal + GCP + Azure
 
-Scope (Ameen's use case, nothing more): self-hosted GitHub runners that **have
+Scope (the core use case, nothing more): self-hosted GitHub runners that **have
 access to confidential-computing machinery**, so that on push to a
 confidential-stack repo (attestation-rs / C8s) CI can **spin up a confidential
 cluster, attest it, run the E2E, tear it down**. Today's runners (and
