@@ -1,0 +1,35 @@
+name: snp-e2e
+on: [push, workflow_dispatch]
+jobs:
+  snp-e2e:
+    runs-on: confidential-bm        # bare-metal confidential runner (RKE2 @ sev-snp-gh-runner)
+    steps:
+      - uses: actions/checkout@v4
+      - name: install kubectl
+        run: |
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o kubectl
+          chmod +x kubectl && echo "$PWD" >> "$GITHUB_PATH"
+      - name: launch confidential SEV-SNP VM (KubeVirt)
+        run: kubectl apply -f snp-vm-e2e.yaml
+      - name: wait for VMI Running
+        run: |
+          set -uo pipefail
+          for i in $(seq 1 50); do
+            phase=$(kubectl -n confai-images get vmi bm-e2e-snp -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            echo "[$i] VMI phase=$phase"
+            [ "$phase" = Running ] && break
+            sleep 6
+          done
+          test "$phase" = Running
+      - name: assert it is a GENUINE SEV-SNP guest (IGVM measured boot)
+        run: |
+          set -euo pipefail
+          pod=$(kubectl -n confai-images get pods --no-headers | grep 'virt-launcher-bm-e2e-snp' | awk '{print $1}' | head -1)
+          echo "launcher pod: $pod"
+          cmd=$(kubectl -n confai-images exec "$pod" -c compute -- bash -lc "cat /proc/*/cmdline 2>/dev/null | tr '\0' '\n'")
+          echo "$cmd" | grep -q 'sev-snp-guest'
+          echo "$cmd" | grep -Eq 'guest-smp[0-9]+\.igvm'
+          echo "PASS: confidential-guest-support=sev-snp-guest + IGVM measured boot confirmed"
+      - name: teardown
+        if: always()
+        run: kubectl -n confai-images delete vm bm-e2e-snp --ignore-not-found --wait=false

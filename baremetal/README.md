@@ -21,7 +21,19 @@ measured boot) — not a confidential node. So **Model A** is the fit:
   `AMD EPYC 8224P`, kernel flags `sev / sev_es / sev_snp` present. The runner
   picks up cifrai jobs and tears the ephemeral pod down.
 - **KubeVirt RBAC** (`kubevirt-rbac.yaml`): `bm-e2e` SA, scoped to launch VMs in
-  `confai-images`; runner pods bound to it.
+  `confai-images` (incl. `pods/exec` for in-guest assertion); runner pods bound to it.
+- **SNP-VM E2E green** (`snp-e2e.yml`): a `runs-on: confidential-bm` job launches
+  the SEV-SNP VM, waits `Pending→Scheduled→Running`, **asserts a genuine
+  `sev-snp-guest` + IGVM measured boot** by reading the qemu cmdline inside the
+  launcher, then tears down. End-to-end confidential-VM CI on bare metal.
+- **Full attestation-rs CI matrix green** — `cifrai/attestation-rs-ci` run with
+  `check`, `test`, `release-build·x86_64`, `audit` on **`confidential-bm`** (arm64
+  /macOS/docker on GitHub-hosted). Functionally identical to the GKE run, and far
+  faster on the 24-core EPYC: x86 release ~3 min (vs ~20 on the GKE e2-medium),
+  `cargo-audit` compile ~1 min (vs ~23). `audit` correctly flags the same real CVE
+  (`RUSTSEC-2026-0185`, quinn-proto) — the attestation-rs team's triage call.
+  Diff vs the GKE workflow: `runs-on` + an in-job apt step (stock runner image,
+  no baked deps — a baked image needs a registry we can push to).
 
 ## What's blocked (cluster provisioning, not this infra)
 
