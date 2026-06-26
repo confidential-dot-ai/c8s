@@ -14,8 +14,9 @@
 #
 # Repos in the org then use:  runs-on: confidential-e2e
 
-minRunners: 1                      # warm pool: keep one runner Listening so GitHub
-                                   # dispatches immediately (scale-from-zero stalls)
+minRunners: 0                      # scale to zero when idle (no warm-runner cost).
+                                   # set 1 for a warm pool if you want instant dispatch
+                                   # (scale-from-zero adds a little latency, not a blocker).
 maxRunners: 5
 runnerGroup: confidential          # the org runner group that scopes access
 # NOTE: repos using this scale set must be PRIVATE/internal — GitHub won't
@@ -24,12 +25,22 @@ runnerGroup: confidential          # the org runner group that scopes access
 template:
   spec:
     serviceAccountName: arc-gcp-e2e        # WIF → GCP SA for Model B provisioning
+    # Pin runner pods to the builder node pool (size for Rust release builds —
+    # e2-standard-4+, see MONITORING.md). e2-medium is too small for release/audit.
+    nodeSelector:
+      cloud.google.com/gke-nodepool: builders
     containers:
       - name: runner
+        # Set per account — see config.env.example ($RUNNER_IMAGE), or pass via
+        # --set template.spec.containers[0].image=...
         image: REGISTRY/confidential-runner-gcp:latest
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
+        # Right-size so two builds don't thrash one node. Tune to the node pool.
+        resources:
+          requests: { cpu: "2",  memory: 4Gi }
+          limits:   { cpu: "4",  memory: 8Gi }
         env:
-          - { name: GCP_PROJECT, value: "conf-500518" }
-          - { name: GCP_REGION,  value: "us-central1" }
+          - { name: GCP_PROJECT, value: "conf-500518" }   # set per account (config.env)
+          - { name: GCP_REGION,  value: "us-central1" }    # set per account (config.env)
           - { name: CONF_TYPE,   value: "sev" }   # sev (broad) | sev_snp | tdx

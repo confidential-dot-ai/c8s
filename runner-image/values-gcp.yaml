@@ -12,7 +12,7 @@
 #
 # runs-on: confidential-e2e-gcp   (the install name)
 
-minRunners: 1   # warm pool: a runner stays Listening for immediate dispatch
+minRunners: 0   # scale to zero when idle; set 1 for a warm pool (instant dispatch)
 maxRunners: 3
 
 template:

@@ -1,6 +1,21 @@
 # Build the gcloud-equipped runner image natively (amd64) in Cloud Build and
 # push to Artifact Registry — no local emulation. The GKE host's nodes pull it.
-#   gcloud builds submit runner-image --config runner-image/cloudbuild.yaml --project conf-500518
+# Portable: the image path is derived from the build's own $PROJECT_ID + the
+# substitutions below, so it targets whatever GCP project you run it in (no
+# hardcoded project).
+#
+#   gcloud builds submit runner-image --config runner-image/cloudbuild.yaml \
+#     --project "$GCP_PROJECT" \
+#     --substitutions=_REGION=us-central1,_REPO=confidential-ci,_IMAGE=confidential-runner-gcp,_TAG=latest
+#
+# (the AR repo must exist first:
+#   gcloud artifacts repositories create "$_REPO" \
+#     --repository-format=docker --location="$_REGION" --project "$GCP_PROJECT")
+substitutions:
+  _REGION: us-central1
+  _REPO: confidential-ci
+  _IMAGE: confidential-runner-gcp
+  _TAG: latest
 steps:
   - name: gcr.io/cloud-builders/docker
     args:
@@ -8,7 +23,7 @@ steps:
       - -f
       - Dockerfile.gcp
       - -t
-      - us-central1-docker.pkg.dev/conf-500518/confidential-ci/confidential-runner-gcp:latest
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}
       - .
 images:
-  - us-central1-docker.pkg.dev/conf-500518/confidential-ci/confidential-runner-gcp:latest
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}

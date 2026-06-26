@@ -23,7 +23,9 @@ Repos then opt in with `runs-on: confidential-e2e-gcp`.
 ```
 confidential-ci/
 ├── README.md            you are here
+├── config.env.example   all per-account knobs (project/region/registry/org) in one place
 ├── RUNNER-MATRIX.md     which CI jobs run on confidential; arm/macOS scoping
+├── OPEN-SOURCE.md       fork/public-repo safety model for OSS repos
 ├── MONITORING.md        ops/monitoring commands + gotchas + teardown
 ├── deploy-plan.md       bare-metal + GCP + Azure plan; Model B; Nix vs Bazel
 ├── org-setup.md         org-wide rollout (GitHub App, runner group, install)
@@ -72,6 +74,40 @@ helm upgrade confidential-e2e oci://ghcr.io/actions/actions-runner-controller-ch
 `container.admin`, so Model-B provisioning needs **no static keys**. The runner
 image carries gcloud/kubectl/helm/kettle/ccvm so jobs run the e2e scripts directly.
 
+## Deploy into another GCP account (e.g. the company's main project)
+
+Nothing is fundamentally tied to the demo project — the host scripts read env
+vars (defaulting to the demo), `cloudbuild.yaml` derives its image path from the
+build's own `$PROJECT_ID` + substitutions, and the runner image is set per
+account. To retarget:
+
+```bash
+cp config.env.example config.env        # edit GCP_PROJECT/ZONE/REGION/ORG_URL/...
+set -a; source config.env; set +a
+
+# 1. AR repo + runner image in the target project
+gcloud artifacts repositories create "$AR_REPO" --repository-format=docker \
+  --location="$GCP_REGION" --project "$GCP_PROJECT"
+gcloud builds submit runner-image --config runner-image/cloudbuild.yaml \
+  --project "$GCP_PROJECT" \
+  --substitutions=_REGION=$GCP_REGION,_REPO=$AR_REPO,_IMAGE=$IMAGE,_TAG=$IMAGE_TAG
+
+# 2. host cluster + ARC + WIF (all read config.env)
+bash host/create-host-cluster.sh
+ORG_URL="$ORG_URL" GH_RUNNER_TOKEN="$(gh auth token)" bash host/install-arc.sh
+bash host/wire-wif.sh
+
+# 3. point the scale set at the new image
+helm upgrade confidential-e2e oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+  --version 0.14.2 -n arc-runners --reuse-values \
+  --set template.spec.containers[0].image="$RUNNER_IMAGE"
+```
+
+For org-wide prod, swap the PAT for a **GitHub App** (see `org-setup.md` /
+`values-org.yaml`). The only non-negotiable: the repos that use these runners must
+be **private/internal** (`OPEN-SOURCE.md`). Terraform-ising this (cluster + AR +
+IAM + WIF) is the natural next step for a repeatable company rollout.
+
 ## Quickstart (org-wide)
 
 ```bash
@@ -111,8 +147,9 @@ adjust to taste when you split this into its own repo.
   silently refuses self-hosted runners on public repos (`assigned job=0`, runner
   idle). This was the real cause of "runs queued, nothing picked up." See
   `MONITORING.md`.
-- **Consistent pickup:** `minRunners: 1` keeps a warm runner Listening so GitHub
-  dispatches immediately (scale-from-zero can stall).
+- **Dispatch latency (optional):** default `minRunners: 0` (scale to zero, no idle
+  cost). Once eligibility is correct, scale-from-zero works; set `minRunners: 1`
+  only if you want instant pickup.
 - **Keyless:** runner pods use Workload Identity (`arc-e2e` KSA → GCP SA with
   `container.admin`) — verified able to provision/list Confidential GKE clusters
   with no static keys.

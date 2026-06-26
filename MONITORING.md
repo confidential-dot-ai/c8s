@@ -70,9 +70,10 @@ gcloud logging read \
   ```
   Symptom is identical to the fork case below, so check visibility FIRST — it's
   the more common trap and easy to miss after a repo is flipped public.
-- **Warm pool for consistent pickup.** Scale-from-zero dispatch can lag or stall.
-  Set `minRunners: 1` so a runner is always registered and Listening; GitHub then
-  routes jobs to it immediately. `helm upgrade … --reuse-values --set minRunners=1`.
+- **Warm pool is optional latency tuning, not the dispatch fix.** Once the
+  eligibility above is correct, scale-from-zero works fine — it just adds a little
+  startup latency. Default `minRunners: 0` (no idle cost). If you want instant
+  pickup, set `minRunners: 1` so a runner stays Listening: `helm upgrade … --reuse-values --set minRunners=1`.
 - **Forks can't use self-hosted runners** — and **detaching a fork doesn't fix
   it** (GitHub's Actions backend keeps the fork's runner-ineligibility cached;
   `assigned job=0` forever). Use a **born-non-fork** repo. Symptom: jobs queued,
@@ -97,6 +98,19 @@ and thrash (node hits ~90% mem, x86 release build crawls to ~20 min, no OOMKill
 but very slow). For production use `e2-standard-4` (4 vCPU / 16 GiB) so release
 builds finish in a few minutes and two can run concurrently. GKE machine type is
 immutable per node pool — add a bigger pool and migrate, or recreate the host.
+Pin runners to the big pool with a `nodeSelector` (see `values-org.yaml`).
+
+**Don't compile tools from source on the runner.** `cargo install cargo-audit`
+compiled `rustsec` from source for ~23 min on `e2-medium`. Use a prebuilt binary
+instead — `taiki-e/install-action` (`tool: cargo-audit`) or `cargo binstall` — or
+bake `cargo-audit` into the runner image. Same goes for any heavy build tool.
+
+## Further reading / credits
+
+Production hardening ideas (egress NetworkPolicy, RBAC scoping, DinD sidecar for
+`docker-build`, PVC docker-layer cache, resource requests/limits) are summarized
+in `OPEN-SOURCE.md` and `values-org.yaml`; a good walkthrough is
+<https://blog.easecloud.io/containers/deploy-github-arc-on-kubernetes/>.
 
 ## Cost / teardown
 
