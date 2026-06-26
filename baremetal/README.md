@@ -72,10 +72,42 @@ Once VMs launch, fill the placeholders in `snp-vm-e2e.yaml` (sidecar image, root
 apply → wait VMI `Running` → assert `launchSecurity.snp` + SNP-node placement →
 (then in-guest SNP report verification) → delete.
 
+## Watching it run
+
+All against the Rancher kubeconfig (the bare-metal cluster):
+
+```bash
+export KUBECONFIG=~/dev/conf/github-runner.yaml
+```
+
+Runners are **ephemeral** — with `minRunners: 0` they only exist *while a job
+runs*, so `arc-runners` is empty when idle. Start a watch, then trigger a job:
+
+```bash
+# the CI job's runner pod (one per job; name = confidential-bm-<id>-runner-<id>)
+kubectl get pods -n arc-runners -o wide -w
+
+# trigger something to watch (any runs-on: confidential-bm job)
+gh workflow run smoke   --repo cifrai/confidential-bm-smoke      # trivial job
+gh workflow run snp-e2e --repo cifrai/confidential-bm-smoke      # launches the SNP VM
+```
+
+| Want to see | Command |
+|---|---|
+| Runner pod (the CI job), with node | `kubectl get pods -n arc-runners -o wide -w` |
+| Scaler/listener (always on — why a runner did/didn't start) | `kubectl logs -n arc-systems -l app.kubernetes.io/component=runner-scale-set-listener -f` |
+| Controller + listener health | `kubectl get pods -n arc-systems -o wide` |
+| The confidential VM (only during `snp-e2e`) | `kubectl get pods,vmi -n confai-images -o wide -w` |
+| Prove the guest is really SNP | `kubectl exec -n confai-images <virt-launcher-bm-e2e-snp-…> -c compute -- bash -lc "cat /proc/*/cmdline \| tr '\0' '\n' \| grep -E 'sev-snp-guest\|igvm'"` |
+
+`-o wide` shows the node (`sev-snp-gh-runner`) and pod IP. Job/run status from the
+GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
+
 ## Files
 - `install-arc-rancher.sh` — proxy-safe ARC install + scale-set registration + RBAC
 - `kubevirt-rbac.yaml` — scoped SA/Role/RoleBinding for VM lifecycle in confai-images
-- `snp-vm-e2e.yaml` — the confidential SNP target VM (placeholders to fill)
+- `snp-vm-e2e.yaml` — the confidential SNP target VM (confirmed working values)
+- `snp-e2e.yml` — the SNP-VM E2E workflow (launch → assert sev-snp-guest → teardown)
 - `smoke.yml` — the trivial `runs-on: confidential-bm` proof workflow
 
 ## Production hardening (when wiring the real E2E)
