@@ -1,0 +1,42 @@
+# Least-privilege RBAC so Model-A runner pods (arc-runners) can launch/tear down
+# confidential SEV-SNP KubeVirt VMs in the namespace that holds the verity base
+# rootdisk PVC (confai-images — SNP VMs must run in the PVC's namespace).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bm-e2e
+  namespace: arc-runners
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bm-e2e-kubevirt
+  namespace: confai-images        # scope the blast radius to the VM namespace only
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources: ["virtualmachineinstances/console", "virtualmachineinstances/vnc",
+                "virtualmachines/start", "virtualmachines/stop"]
+    verbs: ["get", "update", "create"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bm-e2e-kubevirt
+  namespace: confai-images
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bm-e2e-kubevirt
+subjects:
+  - kind: ServiceAccount
+    name: bm-e2e
+    namespace: arc-runners

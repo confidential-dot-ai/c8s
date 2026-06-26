@@ -1,0 +1,41 @@
+# Confidential SEV-SNP target VM for the Model-A bare-metal E2E. The runner
+# applies this into confai-images, waits for the VMI to reach Running, asserts
+# launchSecurity.snp + placement on the SNP node, then deletes it.
+#
+# PLACEHOLDERS to set from the cluster before use:
+#   SIDECAR_IMAGE  the IGVM hook sidecar that's ACTUALLY in this cluster's registry.
+#                  NOTE: the bare-metal repo still pins lunal-dev (stale); this
+#                  cluster's launcher is ghcr.io/confidential-dot-ai/virt-launcher-snp,
+#                  so the sidecar is almost certainly under confidential-dot-ai too.
+#                  Get it from the KubeVirt CR / images role, not the dev-vm chart default.
+#   ROOT_PVC       verity base rootdisk PVC (kubectl get pvc -n confai-images), digest-suffixed.
+#   IGVM_FILE      guest-smp<cores>.igvm present in the igvm-files PVC (cores must be power of 2).
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: bm-e2e-snp
+  namespace: confai-images
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels: { vm.kubevirt.io/name: bm-e2e-snp }
+      annotations:
+        igvm.lunal.dev/file: "IGVM_FILE"          # e.g. guest-smp2.igvm
+        hooks.kubevirt.io/hookSidecars: '[{"image":"SIDECAR_IMAGE","imagePullPolicy":"Always","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
+    spec:
+      nodeSelector: { lunal.dev/sev-snp: "true" }
+      domain:
+        cpu: { model: EPYC-Genoa, cores: 2 }       # cores power-of-2 for SNP
+        memory: { guest: 4Gi }
+        resources: { requests: { memory: 4Gi } }
+        firmware: { bootloader: { efi: { secureBoot: false } } }
+        launchSecurity: { snp: {} }                # the confidential bit
+        devices:
+          disks: [ { disk: { bus: virtio }, name: rootdisk } ]
+          interfaces: [ { bridge: {}, name: default } ]   # masquerade is broken under SNP
+          rng: {}
+      networks: [ { name: default, pod: {} } ]
+      volumes:
+        - name: rootdisk
+          persistentVolumeClaim: { claimName: ROOT_PVC }   # verity rootfs; no cloud-init on SNP

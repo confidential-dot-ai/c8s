@@ -29,6 +29,7 @@ confidential-ci/
 ├── MONITORING.md        ops/monitoring commands + gotchas + teardown
 ├── deploy-plan.md       bare-metal + GCP + Azure plan; Model B; Nix vs Bazel
 ├── org-setup.md         org-wide rollout (GitHub App, runner group, install)
+├── baremetal/           bare-metal path: ARC on RKE2 + KubeVirt SEV-SNP VMs (Model A)
 ├── host/                always-on host that runs ARC (GKE; NOT confidential)
 │   ├── create-host-cluster.sh   small zonal GKE cluster (e2-medium, autoscaling)
 │   ├── install-arc.sh           ARC controller + org-wide scale set

@@ -1,0 +1,14 @@
+name: bm-smoke
+on: [push, workflow_dispatch]
+jobs:
+  smoke:
+    runs-on: confidential-bm
+    steps:
+      - name: where am I
+        run: |
+          echo "=== bare-metal confidential runner (RKE2 @ sev-snp-gh-runner) ==="
+          echo "pod host: $(hostname)"
+          uname -a
+          echo "kube node: ${NODE_NAME:-<unset>}"
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "SEV in cpuinfo flags?"; grep -o 'sev[_a-z]*' /proc/cpuinfo | sort -u | head || echo none
