@@ -1,5 +1,12 @@
 # Confidential conformance harness — design
 
+> **P0 BUILT & GREEN (2026-06-27).** `confidential-conformance.yml` on
+> `confidential-bm` spun **3 SEV-SNP CVMs from one CI job** (per-run CDI clones) and
+> verified each is a genuine, fresh, non-debug TEE — `platform=snp`,
+> `signature_valid`, `report_data_match`, `debug_allowed:false` — **fail-closed**,
+> then tore them all down (cluster verified clean, no leftovers). Run
+> `28301387338`. This is proof point #1 (multi-CVM-from-CI), now a reusable harness.
+
 > **Thesis: the host we have access to *today* (`sev-snp-gh-runner`) can test *all*
 > of c8s — using KubeVirt SNP VMs, deferring kata until the one test that truly
 > requires it.** Two proof points:
@@ -92,13 +99,18 @@ Asserted by the same `attestation-rs/go` engine everything else already uses.
 ## Phases — KubeVirt first, kata last
 | Phase | Scope | kata? | Substrate |
 |---|---|---|---|
-| **P0** | KubeVirt spine + the common harness — **spin N SNP VMs from CI**, attest each, conformance, `Lease`, guaranteed teardown | no | `sev-snp-gh-runner` (have it now) |
+| **P0 ✅ DONE** | KubeVirt spine + the common harness — **spin N SNP VMs from CI**, attest each, conformance, serialize (concurrency group), guaranteed teardown — `confidential-conformance.yml`, green at N=3 | no | `sev-snp-gh-runner` (have it now) |
 | **P1** | **c8s node-as-CVM** in a KubeVirt SNP VM — bring-up + CDS-as-TEE + identity + **host-side allowlist enforcement** + mesh + node attestation (~all of c8s) | **no** | same host |
 | **LAST** | the one kata-only thing: **per-pod-as-CVM** enforcement (in-guest `policy-monitor`) | yes | our node + kata role |
 | **later** | cloud KubeVirt adapter (GCP/Azure) — own scoping (vTPM/TDX measurement model) | no | cloud |
 
-## P0 — concrete (build now, KubeVirt, on the host we have)
-Build on what's green (`multi-cvm-attest`):
+## P0 — concrete ✅ DONE (KubeVirt, on the host we have)
+Shipped as `confidential-conformance.yml` (in `cifrai/confidential-bm-smoke` +
+mirrored to `baremetal/`). Built on `multi-cvm-attest`; green at N=3 (run
+`28301387338`): 3 SEV-SNP CVMs spun from one CI job, each verified fail-closed, all
+torn down, cluster clean. `launch`/`teardown` are the KubeVirt seam; `attest+assert`
+is backend-agnostic (consumes name+IP), ready for the kata adapter to swap in.
+What it does:
 1. **Common harness skeleton** with the `launch/attest/assert/teardown` seam (so the
    kata adapter slots in later without rework) — simple, not a heavyweight abstraction.
 2. **KubeVirt adapter:** parameterized launch of N SNP VMs (per-run CDI clones,

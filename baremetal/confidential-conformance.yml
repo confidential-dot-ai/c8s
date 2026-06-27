@@ -1,0 +1,138 @@
+name: confidential-conformance
+# P0 of the confidential conformance harness (KubeVirt backend).
+# Proves: THIS host can spin N SEV-SNP VMs from a CI job and verify each is a
+# genuine, fresh TEE — fail-closed. Structured as a swappable seam:
+#   launch (KubeVirt adapter)  →  attest+assert (backend-agnostic)  →  teardown.
+# A kata adapter later replaces only launch+teardown. Real-only; no kata in P0.
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: number of SEV-SNP CVMs to spin
+        default: "3"
+        required: false
+  push:
+    paths: [".github/workflows/confidential-conformance.yml"]
+
+# Serialize on the single SNP node so runs don't collide (KDS-429 / resources).
+concurrency:
+  group: confidential-bm-conformance
+  cancel-in-progress: false
+
+env:
+  COUNT: ${{ github.event.inputs.count || '3' }}
+  NS: confai-images
+  PREFIX: conf
+
+jobs:
+  conformance:
+    runs-on: confidential-bm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tools (kubectl + attestation-cli)
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          curl -fsSL https://github.com/confidential-dot-ai/attestation-rs/releases/download/v0.4.0/attestation-cli -o bin/attestation-cli
+          chmod +x bin/*; echo "$PWD/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev ca-certificates
+
+      # ── launch (KubeVirt adapter — the swappable seam) ───────────────────────
+      - name: 'launch: spin N SEV-SNP CVMs (per-run CDI clones)'
+        run: |
+          set -euo pipefail
+          RUN="${PREFIX}-${GITHUB_RUN_ID}"; echo "RUN=$RUN" >> "$GITHUB_ENV"
+          # Resolve the CURRENT base rootdisk PVC live (never hardcode → no drift).
+          mapfile -t PVCS < <(kubectl -n "$NS" get pvc -o name --sort-by=.metadata.creationTimestamp | grep -o 'cpu-image-rootdisk-[a-z0-9]*')
+          [ "${#PVCS[@]}" -ge 1 ] || { echo "::error::no cpu-image-rootdisk-* PVC in $NS"; exit 1; }
+          ROOTPVC="${PVCS[-1]}"
+          [ "${#PVCS[@]}" -gt 1 ] && echo "::warning::multiple base PVCs (${PVCS[*]}); using newest $ROOTPVC"
+          echo "base rootdisk: $ROOTPVC   count: $COUNT"
+          : > vms.txt
+          for i in $(seq 1 "$COUNT"); do
+            VM="${RUN}-${i}"
+            sed "s/bm-e2e-snp/${VM}/g; s/cpu-image-rootdisk-0df2ca7d5549/${ROOTPVC}/" snp-vm-e2e.yaml | kubectl apply -f -
+            echo "$VM" >> vms.txt
+          done
+          echo "launched: $(tr '\n' ' ' < vms.txt)"
+
+      - name: 'launch: wait all CVMs Running + collect targets (name IP)'
+        run: |
+          set -uo pipefail
+          : > targets.txt; rc=0
+          while read -r VM; do
+            ok=
+            for i in $(seq 1 80); do
+              p=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              echo "[$VM] $p"; [ "$p" = Running ] && { ok=1; break; }; sleep 6
+            done
+            [ -n "$ok" ] || { echo "::error::$VM never reached Running"; rc=1; continue; }
+            IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || true)
+            [ -n "$IP" ] || { echo "::error::$VM has no IP"; rc=1; continue; }
+            echo "$VM $IP" >> targets.txt
+          done < vms.txt
+          echo "=== targets ==="; cat targets.txt
+          # Require every requested CVM to be up — fail-closed on "multiple".
+          [ "$(wc -l < targets.txt)" -eq "$COUNT" ] || { echo "::error::only $(wc -l < targets.txt)/$COUNT CVMs up"; exit 1; }
+          exit $rc
+
+      # ── attest + assert (backend-agnostic: consumes name+IP) ─────────────────
+      - name: 'attest + assert each CVM (fail-closed)'
+        run: |
+          set -euo pipefail
+          attest() {
+            local VM="$1" IP="$2" HEX acode=000 ready= vok=
+            # readiness: VMI Running != attestation-api listening
+            for i in $(seq 1 30); do
+              code=$(curl -s -m5 -o /dev/null -w '%{http_code}' "http://$IP:8400/" 2>/dev/null || echo 000)
+              [ "$code" != "000" ] && { ready=1; break; }
+              echo "  [$VM] waiting attestation-api @ $IP:8400 [$i]"; sleep 5
+            done
+            [ -n "$ready" ] || { echo "::error::$VM attestation-api never came up"; return 1; }
+            # POST /attest with retries (report-gen slow under concurrency); fresh nonce each try
+            for j in $(seq 1 6); do
+              head -c 32 /dev/urandom > n.bin
+              B64=$(base64 -w0 n.bin); HEX=$(od -An -tx1 n.bin | tr -d ' \n')
+              acode=$(curl -s -m60 -H 'Content-Type: application/json' -d "{\"report_data\":\"$B64\"}" "http://$IP:8400/attest" -o att.json -w '%{http_code}' || echo 000)
+              [ "$acode" = "200" ] && break
+              echo "  [$VM] /attest $j -> $acode, retry"; sleep 5
+            done
+            [ "$acode" = "200" ] || { echo "::error::$VM /attest failed ($acode)"; return 1; }
+            # verify with KDS-429 backoff (VCEK cache is per-process)
+            for j in $(seq 1 6); do
+              if attestation-cli verify --expected-report-data "$HEX" < att.json >claims.json 2>verr.txt; then vok=1; break; fi
+              if grep -qiE '429|rate' verr.txt; then echo "  [$VM] KDS 429 backoff $j"; sleep 40; else cat verr.txt; break; fi
+            done
+            [ -n "$vok" ] || { echo "::error::$VM verify failed"; cat verr.txt; return 1; }
+            echo "  --- $VM claims ---"; cat claims.json; echo
+            # conformance assertions — fail-closed
+            grep -Eq '"platform"[: ]+"snp"' claims.json         || { echo "::error::$VM platform != snp"; return 1; }
+            grep -Eq '"signature_valid"[: ]+true' claims.json   || { echo "::error::$VM signature invalid"; return 1; }
+            grep -Eq '"report_data_match"[: ]+true' claims.json || { echo "::error::$VM report_data != nonce"; return 1; }
+            grep -Eq '"debug_allowed"[: ]+false' claims.json    || { echo "::error::$VM debug not disabled"; return 1; }
+            echo "  OK: $VM = genuine, fresh, non-debug SEV-SNP CVM"
+          }
+          n=0
+          while read -r VM IP; do
+            [ "$n" -gt 0 ] && sleep 20    # space VCEK fetches so KDS doesn't 429
+            attest "$VM" "$IP"
+            n=$((n+1))
+          done < targets.txt
+          echo "✅ CONFORMANCE PASS: spun $n SEV-SNP CVMs from CI; each a genuine fresh TEE (fail-closed)"
+
+      # ── teardown (KubeVirt adapter) ──────────────────────────────────────────
+      - name: 'teardown: delete all CVMs (always)'
+        if: always()
+        run: |
+          set -uo pipefail
+          RUN="${RUN:-${PREFIX}-${GITHUB_RUN_ID}}"
+          for VM in $(kubectl -n "$NS" get vm -o name 2>/dev/null | sed 's#.*/##' | grep "^${RUN}-"); do
+            kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=false
+          done
+          echo "torn down ${RUN}-* (CDI clones GC'd with the VMs)"
+          # confirm no leftovers for this run
+          left=$(kubectl -n "$NS" get vm,vmi,dv -o name 2>/dev/null | grep "${RUN}-" || true)
+          [ -z "$left" ] && echo "no leftovers" || echo "::warning::leftovers: $left"
