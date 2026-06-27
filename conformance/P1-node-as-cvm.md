@@ -37,10 +37,22 @@ channel, packaged into an IGVM by `igvm-tools Build`.
    `dev-c8s-integration` workload they're already building) or steep itself. These are
    **private** (anon GHCR → 403, like `base-cpu-image`), so this needs a pull cred / the
    platform sharing — a small ask, and the image is already on their roadmap.
-2. **Replicate steep ourselves (our own, harder).** `mkosi` (open) + kettle's
-   `igvm-tools Build` (public) + an RKE2 cloud-init spec. Fully in our control but a
-   multi-day build (privileged mkosi builder, OVMF/kernel sourcing, verity + IGVM, RKE2's
-   kernel prereqs: cgroups v2 / overlay / br_netfilter / nft).
+2. **Get steep access + build it ourselves (precise now).** **steep is a real repo:
+   `confidential-dot-ai/steep`** (PRIVATE; pinned ref `4b731634…`; c8s CI clones it via
+   `secrets.STEEP_REPO_TOKEN` — `c8s/.github/workflows/kata-guest-base.yml`). The earlier
+   404 was *no access*, not nonexistence. So the unblock is **access to that one repo**
+   (a token / SSO-authorize our PAT for `confidential-dot-ai`), then mirror kettle's
+   `bin/image-build` — `steep build target/image --cloud-init <rke2 user-data> --package
+   rke2…` — swapping `kettle-server` → RKE2. With steep this is ~1 day, not multi-day.
+3. **Replicate steep from scratch (last resort).** mkosi (open) + kettle's public
+   `igvm-tools Build` + an RKE2 cloud-init. Only if steep access is denied — multi-day,
+   re-derives steep's verity/IGVM glue.
+
+**Also found (bonus):** the kata path's *full* build recipe is in c8s
+(`kata-guest-base/`, osbuilder-based; steep only compiles the kernel, and `SKIP_KERNEL=1`
+reuses a `vmlinuz`). But that's the **direct-kernel** boot model (no IGVM) for the kata
+runtime — it does NOT produce a KubeVirt/IGVM-bootable node image, so it helps the kata
+(pod-as-CVM) path, not our node-as-CVM harness.
 
 **Net: P1 is no longer hard-blocked** — it's a route choice. **OQ2 (control channel) is
 solved** by the build's cloud-init; **OQ1 (node image)** is route 1 (ask) or route 2
