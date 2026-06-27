@@ -1,10 +1,19 @@
 # c8s e2e in CI — design (scoping)
 
-> **Status: SCOPING — not built.** This is the design + the open questions to pin
-> before any build, mirroring how we did `kettle-e2e`. The headline risk is
-> **blast radius** (OQ1): `c8s install` is a cluster-wide platform mutation and our
-> bare-metal is a single node that also hosts the ARC runners. Pin OQ1 + OQ3
-> (private-image cred) first.
+> **SUPERSEDED-IN-PART by [`../conformance/DESIGN.md`](../conformance/DESIGN.md).**
+> The approach is now: prove the host we have today (`sev-snp-gh-runner`) can test
+> all of c8s **via KubeVirt SNP VMs, deferring kata to the very last test.** c8s has
+> two deployment shapes — **node-as-CVM** (the node is a confidential VM; runc pods;
+> host-side `nri-image-policy`; **no kata**) and **pod-as-CVM** (kata). We test
+> ~all of c8s in node-as-CVM mode on a KubeVirt SNP VM; **kata only covers the final
+> per-pod-as-CVM enforcement test.** This dissolves the old blast-radius worry (OQ1)
+> for everything but that last step, and removes the dependency on `dev-c8s-integration`.
+> The detail below (bring-up, allowlist, mesh) still applies — just read it as
+> running on a node-as-CVM KubeVirt node first, kata last.
+>
+> **Original scoping (kata-first framing) kept for reference:** SCOPING — not built;
+> the headline risk was **blast radius** (OQ1) of `c8s install --kata` on the shared
+> runner node, and the private-image cred (OQ3).
 
 ## Goal / definition of done
 
