@@ -126,9 +126,19 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
    (base64 ZIP/tarball) — deterministic, fast, no external repo dependency.
    Fallback: `repo_url=https://github.com/burntsushi/ripgrep` (kettle's own example).
 
-### Remaining (P2-only, non-blocking for P1)
-- Whether the `kettle-build` OCI image needs a **GHCR pull cred** for `oras pull`
-  (private `confidential-dot-ai` org → probably yes). Only affects P2's `--igvm`.
+### P2 blocker — CONFIRMED (2026-06-26): a GHCR pull credential
+- The pinned `ghcr.io/confidential-dot-ai/kettle-build` image is **private**
+  (anonymous GHCR token → `HTTP 403` on the manifest), and there is **no other
+  source** for the IGVM (kettle releases ship only CLI binaries; the cluster's
+  `igvm-files` PVC holds a *different* image — `guest-smp2`, not the orchestrator's
+  `guest-smp10`). So P2's `oras pull` needs auth.
+- P2 is therefore blocked **only** on a credential with **`read:packages`** + pull
+  access to `confidential-dot-ai/kettle-build` (classic/fine-grained PAT or a
+  GitHub App token; **SSO-authorized** for the org if it enforces SAML). Store as
+  an Actions secret (e.g. `GHCR_PULL_TOKEN`); workflow does `oras login ghcr.io`
+  before pulling. Matches the steer: mint a dedicated cred at org rollout.
+- Everything else for P2 is ready: digest from `/config`, `--igvm`/`--image` flags
+  confirmed in `verify.rs`, `oras` installs in-job.
 - `/build` rate-limiting (unconfirmed; not auth).
 
 ## Chase-down: is the orchestrator deployed? — YES
