@@ -1,8 +1,9 @@
 # Kettle e2e roundtrip in CI — design
 
-> **Status: design (not built). Orchestrator confirmed LIVE** at
-> `https://build.confidential.ai` — so the CI job is a pure **client**; nothing to
-> deploy. Chase-down notes at the bottom.
+> **Status: design (not built); ready to build P1.** Orchestrator confirmed LIVE
+> at `https://build.confidential.ai` (CI job is a pure **client**; nothing to
+> deploy), and all four open questions are **resolved** (see "Resolved" below).
+> P1 has no blockers; P2 (`--igvm`) has one P2-only TBD (a GHCR pull cred).
 
 ## Goal / definition of done
 
@@ -64,10 +65,10 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
    (a small fixture repo) → capture `job_id`.
 4. poll `GET /build/{job_id}/events` until `complete` (fail on error event).
 5. `GET /build/{job_id}/result` → `build.tar.gz`; `tar xzf`.
-6. `kettle verify <dir>` (P2: `--igvm <pinned guest-smp10.igvm>`) → **fail-closed**.
-7. "check the output": assert the binary checksum + that `provenance.json` lists
-   the expected source/ref/toolchain, and that `evidence.json`'s report_data
-   carries our `nonce` (freshness).
+6. `kettle verify <dir> --nonce <NONCE>` (P2 adds `--igvm <guest-smp10.igvm>`) —
+   verifies signature + provenance predicate + provenance match + artifact
+   checksums + nonce/freshness; **fail-closed**.
+7. (optional) assert `provenance.json` lists the expected source/ref/toolchain.
 
 ## Where it runs / networking
 
@@ -82,21 +83,33 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
 | Phase | Scope |
 |---|---|
 | **P1** | roundtrip + `kettle verify` (signature + provenance + checksum) + nonce freshness, fail-closed |
-| **P2** | `--igvm` (and `--image` dm-verity) binding to the pinned VM image — the strongest form; needs the IGVM file (see open Qs) |
+| **P2** | `--igvm` (and `--image` dm-verity) binding to the pinned VM image — the strongest form; get the IGVM via `oras pull` of the pinned digest (see resolved Q2) |
 | **P3** | source matrix: Cargo + Nix fixtures (kettle supports both today) |
 
-## Open questions / details to confirm
+## Resolved (pinned against the live service + kettle source)
 
-1. **Auth on `POST /build`?** `/health` + `/config` are open; the docs show a plain
-   `curl` to `/build`. Confirm whether builds need a token / are rate-limited.
-2. **IGVM file for `--igvm` (P2).** `kettle verify --igvm` needs the pinned
-   `guest-smp10.igvm`. Where to fetch it — from the `kettle-build` OCI image
-   (`/config.image.reference`), or a release artifact? Until then P1 skips `--igvm`.
-3. **Nonce check.** Does `kettle verify` expose an `--expected-nonce`, or do we
-   assert the nonce against `evidence.json`'s report_data ourselves? (Confirm the
-   field.)
-4. **Source fixture.** A tiny Cargo fixture (fast, deterministic) vs the `ripgrep`
-   example from kettle's docs. Recommend a small fixture for speed.
+1. **Auth on `POST /build`: none.** `POST /build {}` → `HTTP 422 "missing field
+   nonce"` (not 401/403) — open endpoint, body-validated only. The job needs no
+   token. (Rate-limiting unconfirmed, but it's not auth.)
+2. **IGVM for `--igvm` (P2): `oras pull`.** The pinned image (`/config`'s
+   `image.reference` = `ghcr.io/confidential-dot-ai/kettle-build@sha256:…`) is an
+   **`oras`-pushed OCI artifact** of `target/image/` — i.e. the `.igvm` +
+   `disk.raw` files. So P2 = `oras pull <that digest>` → `guest-smp10.igvm` (+
+   `disk.raw` for `--image`).
+3. **Nonce + verify: `kettle verify --nonce <hex>`** (confirmed in
+   `src/commands/verify.rs`). Args: `--nonce` (≤16 bytes, "checked against the
+   attestation"), `--igvm`, `--image` (requires `--igvm`). verify runs signature
+   + provenance predicate + provenance match + artifact checksums, plus nonce /
+   igvm / image when set. **Freshness is a first-class flag → P1 uses `--nonce`**;
+   no manual report_data parsing.
+4. **Source fixture:** a tiny self-contained **Cargo crate via `source_data`**
+   (base64 ZIP/tarball) — deterministic, fast, no external repo dependency.
+   Fallback: `repo_url=https://github.com/burntsushi/ripgrep` (kettle's own example).
+
+### Remaining (P2-only, non-blocking for P1)
+- Whether the `kettle-build` OCI image needs a **GHCR pull cred** for `oras pull`
+  (private `confidential-dot-ai` org → probably yes). Only affects P2's `--igvm`.
+- `/build` rate-limiting (unconfirmed; not auth).
 
 ## Chase-down: is the orchestrator deployed? — YES
 
