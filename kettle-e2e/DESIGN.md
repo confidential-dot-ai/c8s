@@ -1,9 +1,14 @@
 # Kettle e2e roundtrip in CI — design
 
-> **Status: design (not built); ready to build P1.** Orchestrator confirmed LIVE
-> at `https://build.confidential.ai` (CI job is a pure **client**; nothing to
-> deploy), and all four open questions are **resolved** (see "Resolved" below).
-> P1 has no blockers; P2 (`--igvm`) has one P2-only TBD (a GHCR pull cred).
+> **Status: P1 BUILT & GREEN** (2026-06-26). [`kettle-e2e.yml`](kettle-e2e.yml)
+> runs on `confidential-bm` in `cifrai/confidential-bm-smoke`: it submits a build
+> to the orchestrator (`build.confidential.ai`), which launches a CVM, builds
+> ripgrep (pinned commit `4649aa97`) + hardware-signs SLSA provenance, then
+> `kettle verify --nonce` passes **signature + provenance + binary checksum +
+> nonce/freshness**, fail-closed. One green run = a build ran in a real TEE and
+> the artifact is cryptographically tied to its source, toolchain, and a fresh
+> nonce. P2 (`--igvm` launch-measurement bind) is next; one P2-only TBD (a GHCR
+> pull cred for `oras pull`).
 
 ## Goal / definition of done
 
@@ -62,7 +67,7 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
    (verify links it, like `attestation-cli`).
 2. `NONCE=$(openssl rand -hex 16)`.
 3. `POST https://build.confidential.ai/build` with `{nonce, repo_url, repo_ref}`
-   (a small fixture repo) → capture `job_id`.
+   (ripgrep, pinned commit) → capture `job_id`.
 4. poll `GET /build/{job_id}/events` until `complete` (fail on error event).
 5. `GET /build/{job_id}/result` → `build.tar.gz`; `tar xzf`.
 6. `kettle verify <dir> --nonce <NONCE>` (P2 adds `--igvm <guest-smp10.igvm>`) —
@@ -85,6 +90,21 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
 | **P1** | roundtrip + `kettle verify` (signature + provenance + checksum) + nonce freshness, fail-closed |
 | **P2** | `--igvm` (and `--image` dm-verity) binding to the pinned VM image — the strongest form; get the IGVM via `oras pull` of the pinned digest (see resolved Q2) |
 | **P3** | source matrix: Cargo + Nix fixtures (kettle supports both today) |
+
+## Build gotchas (learned wiring P1 — both cost a red run)
+
+1. **The source must be a git repo with a commit.** kettle records
+   `git rev-parse HEAD` in the provenance, so a plain `source_data` tarball with
+   no `.git` fails inside the CVM with
+   `BuildFailed: git rev-parse HEAD failed: not a git repository`. P1 uses
+   `repo_url` (cloned with `git clone --revision <ref>`, git ≥2.49, so a full
+   commit SHA works). A `source_data` path would have to ship a real `.git`.
+2. **`kettle verify` exits 0 even on a FAILED verdict.** `verify()` returns
+   `Ok(())` unconditionally and only prints `Verification PASSED` / `FAILED` in
+   the table. So the CI step must assert on the verdict **text** ("Verification
+   PASSED", and no "Verification FAILED"), **not** `$?` — relying on the exit code
+   alone would let a forged build pass silently. Set `NO_COLOR=1` so the grep is
+   stable. (This is a fail-open footgun in the verifier; flagged upstream.)
 
 ## Resolved (pinned against the live service + kettle source)
 

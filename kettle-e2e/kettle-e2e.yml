@@ -1,0 +1,93 @@
+name: kettle-e2e
+# Attested-build roundtrip against the kettle-orchestrator (build.confidential.ai):
+#   submit a build -> the orchestrator launches a CVM, builds + hardware-signs SLSA
+#   provenance -> download the output -> `kettle verify --nonce` (signature +
+#   provenance + artifact checksums + nonce/freshness), FAIL-CLOSED.
+# The TEE is REMOTE (the orchestrator's CVM), so this job is a pure HTTP client;
+# it runs on confidential-bm only for dogfooding — any runner would do.
+on:
+  push:
+    paths: [".github/workflows/kettle-e2e.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ORCH: https://build.confidential.ai
+  KETTLE_VER: v1.1.0
+  # A real Cargo project with a committed Cargo.lock (required for auto-detection)
+  # and git history (kettle records `git rev-parse HEAD` in the provenance).
+  # Pinned to ripgrep 14.1.1's commit so the build + provenance are reproducible.
+  REPO_URL: https://github.com/BurntSushi/ripgrep
+  REPO_REF: 4649aa9700619f94cf9c66876e9549d83420e16c
+
+jobs:
+  roundtrip:
+    runs-on: confidential-bm
+    timeout-minutes: 45
+    steps:
+      - name: tools (kettle CLI + deps)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends jq xz-utils libtss2-dev ca-certificates
+          mkdir -p bin
+          curl -fsSL "https://github.com/confidential-dot-ai/kettle/releases/download/${KETTLE_VER}/kettle-x86_64-unknown-linux-gnu.tar.xz" -o kettle.tar.xz
+          tar -xf kettle.tar.xz
+          install -m 0755 "$(find . -type f -name kettle | head -1)" bin/kettle
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+          NO_COLOR=1 bin/kettle --version
+
+      - name: submit attested build (nonce-bound)
+        run: |
+          set -euo pipefail
+          NONCE=$(openssl rand -hex 16)
+          echo "NONCE=$NONCE" >> "$GITHUB_ENV"
+          echo "nonce=$NONCE  source=$REPO_URL @ $REPO_REF"
+          printf '{"nonce":"%s","repo_url":"%s","repo_ref":"%s"}' \
+            "$NONCE" "$REPO_URL" "$REPO_REF" > body.json
+          http=$(curl -sS -m 60 -o post.json -w '%{http_code}' \
+            -X POST "$ORCH/build" -H 'content-type: application/json' --data @body.json)
+          echo "POST /build -> $http"; cat post.json; echo
+          [ "$http" = "200" ] || { echo "::error::POST /build failed ($http)"; exit 1; }
+          JOB=$(jq -r '.job_id' post.json)
+          [ -n "$JOB" ] && [ "$JOB" != "null" ] || { echo "::error::no job_id in response"; exit 1; }
+          echo "JOB=$JOB" >> "$GITHUB_ENV"
+          echo "job_id=$JOB"
+
+      - name: wait for the CVM build to complete
+        run: |
+          set -uo pipefail
+          # /events is an SSE stream that does NOT auto-close on completion, so we
+          # POLL: each iteration grabs the event backlog (a terminal job returns it
+          # and closes immediately; a running job yields the backlog in the first
+          # seconds) to fail fast on a build error, and treats /result 200 as the
+          # authoritative "done + artifact ready" gate.
+          code=000
+          for i in $(seq 1 140); do
+            curl -sS -N --max-time 6 "$ORCH/build/$JOB/events?from=0" > events.log 2>/dev/null || true
+            if grep -q '"status":"failed"' events.log; then
+              echo "::error::orchestrator reported the build FAILED"
+              grep -oE '"error[^"]*":"[^"]*"' events.log | head; exit 1
+            fi
+            code=$(curl -sS -o build.tar.gz -w '%{http_code}' "$ORCH/build/$JOB/result")
+            [ "$code" = "200" ] && { echo "[$i] /result ready (200)"; break; }
+            echo "[$i] /result=$code  last events:"; tail -n 3 events.log
+            sleep 10
+          done
+          [ "$code" = "200" ] || { echo "::error::build did not produce a result in time ($code)"; tail -n 30 events.log; exit 1; }
+
+      - name: verify the attested output (fail-closed)
+        run: |
+          set -euo pipefail
+          mkdir -p out && tar -xzf build.tar.gz -C out
+          DIR=$(dirname "$(find out -name evidence.json | head -1)")
+          [ -n "$DIR" ] && [ -d "$DIR" ] || { echo "::error::no evidence.json in the result tarball"; find out | head -40; exit 1; }
+          echo "build dir: $DIR"; ls -la "$DIR"
+          # NOTE: `kettle verify` EXITS 0 even on a FAILED verdict (it only prints
+          # the result table), so we MUST assert on the verdict text, not $?.
+          NO_COLOR=1 kettle verify "$DIR" --nonce "$NONCE" 2>&1 | tee verify.out
+          grep -q "Verification PASSED" verify.out || { echo "::error::kettle verify did not report PASSED"; exit 1; }
+          if grep -q "Verification FAILED" verify.out; then echo "::error::kettle verify reported FAILED"; exit 1; fi
+          echo "✅ KETTLE E2E ROUNDTRIP VERIFIED — a build ran in a real TEE; signature + provenance + checksum + nonce(freshness) all pass."
