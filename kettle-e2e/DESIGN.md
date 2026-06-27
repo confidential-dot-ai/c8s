@@ -8,9 +8,11 @@
 > nonce/freshness**, fail-closed. One green run = a build ran in a real TEE and
 > the artifact is cryptographically tied to its source, toolchain, and a fresh
 > nonce. P2 (`--igvm` launch-measurement bind) is wired but **parked**: the image
-> is now public (no cred needed), but the live orchestrator's attested launch
-> measurement does not match the image its `/config` advertises — a server-side
-> deployment mismatch, not a CI/kettle bug. See "P2 finding" below.
+> is now public (no cred needed), but kettle's `measure_snp` golden (`82e291e0`,
+> a QEMU+KVM-specific *replication*) does not match the production hypervisor's
+> attested measurement (`1932a2f5`) — and the orchestrator never checks it. A
+> measurement-tooling vs deployed-VMM gap, not a wrong image and not our CI. See
+> "P2 finding" below.
 
 ## Goal / definition of done
 
@@ -163,21 +165,42 @@ the image's own `manifest.json` and kettle's `measure_snp` — measures to
 the image it advertises.** That inconsistency is the finding; P2 can't pass against
 this deployment regardless. The H1/H2 split below only decides *who* fixes it.
 
-- **H1 (most likely): deployment drift** — the service boots an older on-disk image
-  than `/config` reports. Supports it: the vendor *documents* `kettle verify
-  --igvm` as the verification method, which can only hold if a correctly-deployed
-  image's attestation equals `measure_snp`'s output (`82e291e0`) — i.e. measure_snp
-  is correct and `82e291e0` is the true measurement of `8c1a825`. Fix: redeploy /
-  realign the orchestrator (or its `/config`).
-- **H2 (less likely): `measure_snp` bug** — it + the producer `manifest.json` share
-  the vendored `igvm-tools` code, so they agree trivially and might both miss real
-  hardware (then `1932a2f5` is the true measurement of `8c1a825`). Fix: kettle.
+**Determination after reading both repos: H2 — the measurement TOOLING doesn't
+reproduce the production hypervisor (not a stale image, not CI).** Evidence:
 
-**Decisive confirmation:** check what image `build.confidential.ai` actually boots
-(its `/usr/share/kettle/image` / deployed manifest). An offline cross-check was
-attempted but didn't pan out: `sev-snp-measure` has no IGVM mode (QEMU direct-boot
-only), and COCONUT `igvmmeasure` doesn't build from current HEAD (drifted from its
-`igvm`-crate dep). The server-side check is faster and definitive.
+1. **`/config` derives from the on-disk image.** `image_config::load_image_config`
+   sets `reference = sha256(on-disk ghcr-manifest.json)`, so the orchestrator's
+   local image genuinely *is* `8c1a825`, and it boots *that* image's
+   `guest-smp10.igvm`. So it is **not** booting a stale/different image.
+2. **`measure_snp` is a hand-rolled, VMM-specific replication.** kettle's vendored
+   `crates/igvm-tools/src/measure.rs` header: *"no crate computes SNP LAUNCH_DIGEST
+   from an IgvmFile… We must exactly replicate QEMU+KVM's measurement behavior…
+   This module is QEMU+KVM-specific… A different VMM … may produce a different
+   launch digest."* So `82e291e0` is a reverse-engineered value, not a
+   hardware-sourced one; if the production qemu/kvm/firmware differs from what the
+   module assumes (page batching, VMSA-override timing, ParameterInsert timing),
+   it won't match the real `1932a2f5`. `steep` (the image builder, artifactType
+   `vnd.steep.base.v1`) produced the same `82e291e0`, but "no crate computes" this
+   — i.e. both are independent replications of the same QEMU+KVM assumptions and
+   can share the same blind spot vs the deployed VMM.
+3. **The orchestrator never verifies the measurement.** Its `ImageManifest` parses
+   only `smp`/`memory`/`disk_path`/`igvm_path` — **no `measurement` field** — so it
+   never compares attested vs expected. The mismatch is invisible server-side,
+   which is why builds attesting `1932a2f5` ship unnoticed.
+
+So the live hardware's `1932a2f5` is almost certainly the TRUE measurement of the
+booted image; `measure_snp`/`steep`'s `82e291e0` don't reproduce the production
+hypervisor. `kettle verify --igvm` therefore cannot pass against
+`build.confidential.ai` today — not a wrong image, not our CI.
+
+**Fix paths (vendor-side):** (a) reconcile `igvm-tools::measure_snp` (+ steep) with
+the production qemu/kvm/firmware version, or (b) publish the **hardware-true** golden
+(captured from an attested boot) so verifiers compare against reality, not a
+replication — and (c) have the orchestrator actually verify attested == expected so
+this drift is caught. **Residual:** to be 100% we'd want a known-correct measurer to
+emit `1932a2f5` (COCONUT `igvmmeasure` wouldn't build from HEAD; `sev-snp-measure`
+has no IGVM mode), or to confirm the prod qemu/kvm version vs measure.rs's
+assumptions — but the repo evidence strongly favors H2.
 
 `/build` rate-limiting (unconfirmed; not auth).
 
