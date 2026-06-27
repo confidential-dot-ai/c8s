@@ -100,7 +100,7 @@ Asserted by the same `attestation-rs/go` engine everything else already uses.
 | Phase | Scope | kata? | Substrate |
 |---|---|---|---|
 | **P0 ✅ DONE** | KubeVirt spine + the common harness — **spin N SNP VMs from CI**, attest each, conformance, serialize (concurrency group), guaranteed teardown — `confidential-conformance.yml`, green at N=3 | no | `sev-snp-gh-runner` (have it now) |
-| **P1** | **c8s node-as-CVM** in a KubeVirt SNP VM — bring-up + CDS-as-TEE + identity + **host-side allowlist enforcement** + mesh + node attestation (~all of c8s) | **no** | same host |
+| **P1** (scoping → [P1-node-as-cvm.md](P1-node-as-cvm.md)) | **c8s node-as-CVM** in a KubeVirt SNP VM — bring-up + CDS-as-TEE + identity + **host-side allowlist enforcement** + mesh + node attestation (~all of c8s). Critical path: a confidential RKE2 node image (none in hand yet) | **no** | same host |
 | **LAST** | the one kata-only thing: **per-pod-as-CVM** enforcement (in-guest `policy-monitor`) | yes | our node + kata role |
 | **later** | cloud KubeVirt adapter (GCP/Azure) — own scoping (vTPM/TDX measurement model) | no | cloud |
 
