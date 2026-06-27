@@ -4,10 +4,12 @@ Self-hosted, **confidential-computing** GitHub Actions runners + the confidentia
 E2E pipeline they run. This folder is self-contained — lift it into its own repo
 (`confidential-ci`) and it's the single source of truth for the CI infra.
 
-It exists because GitHub-hosted runners have no TEE access, so confidential-stack
-tests (spin up a confidential K8s cluster, attest it, test it) can't run on them.
-These runners do. See `deploy-plan.md` for the multi-platform plan and the
-Nix-over-Bazel decision; `org-setup.md` for org-wide rollout.
+It exists because GitHub-hosted runners have no TEE access, so **local-TEE** tests
+— spin up a confidential VM/K8s cluster on the runner and attest it — can't run on
+them. These runners can. (Tests that only **verify a remote** TEE, like the
+`kettle-e2e` attested-build roundtrip against the build service, are pure clients
+and run fine on stock hosted runners.) See `deploy-plan.md` for the multi-platform
+plan and the Nix-over-Bazel decision; `org-setup.md` for org-wide rollout.
 
 ## What you deploy (it's infra, not a repo)
 
