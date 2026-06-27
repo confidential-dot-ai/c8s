@@ -156,15 +156,28 @@ cause is server-side, not ours:
 mechanically ready (pull is anonymous; flags confirmed) and re-enables the moment
 the deployed orchestrator's attested measurement matches its advertised image.
 
-**Decisive next check (to confirm H1 vs H2):**
-- H1 (likely): live service runs a different/older image → a build on the *correct*
-  image would verify. Confirm by asking what image/smp `build.confidential.ai`
-  actually boots (its `/usr/share/kettle/image`), or by an independent
-  `sev-snp-measure --igvm guest-smp10.igvm` (expect `82e291e0`).
-- H2 (less likely): `measure_snp` + the producer `manifest.json` were both produced
-  by the same code and neither matches real hardware (then `1932a2f5` is the true
-  measurement). Same independent-tool check distinguishes it: if `sev-snp-measure`
-  yields `1932a2f5`, it's H2.
+**Sharper framing (independent of which tool is "right"):** the orchestrator's
+`/config` *advertises* image `8c1a825` (which, by every computation we have —
+the image's own `manifest.json` and kettle's `measure_snp` — measures to
+`82e291e0`), yet its CVM *attests* `1932a2f5`. So **the live service is not booting
+the image it advertises.** That inconsistency is the finding; P2 can't pass against
+this deployment regardless. The H1/H2 split below only decides *who* fixes it.
+
+- **H1 (most likely): deployment drift** — the service boots an older on-disk image
+  than `/config` reports. Supports it: the vendor *documents* `kettle verify
+  --igvm` as the verification method, which can only hold if a correctly-deployed
+  image's attestation equals `measure_snp`'s output (`82e291e0`) — i.e. measure_snp
+  is correct and `82e291e0` is the true measurement of `8c1a825`. Fix: redeploy /
+  realign the orchestrator (or its `/config`).
+- **H2 (less likely): `measure_snp` bug** — it + the producer `manifest.json` share
+  the vendored `igvm-tools` code, so they agree trivially and might both miss real
+  hardware (then `1932a2f5` is the true measurement of `8c1a825`). Fix: kettle.
+
+**Decisive confirmation:** check what image `build.confidential.ai` actually boots
+(its `/usr/share/kettle/image` / deployed manifest). An offline cross-check was
+attempted but didn't pan out: `sev-snp-measure` has no IGVM mode (QEMU direct-boot
+only), and COCONUT `igvmmeasure` doesn't build from current HEAD (drifted from its
+`igvm`-crate dep). The server-side check is faster and definitive.
 
 `/build` rate-limiting (unconfirmed; not auth).
 
