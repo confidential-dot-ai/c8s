@@ -1,6 +1,8 @@
 # P1 — c8s node-as-CVM on the conformance harness (scoping)
 
-> **Status: SCOPING COMPLETE; BUILD BLOCKED (2026-06-27) — see "Build status" below.**
+> **Status: SCOPING COMPLETE; node image BUILDABLE — route decision needed (2026-06-27).**
+> Looking at kettle revealed the image pipeline (steep = mkosi + kettle's public
+> `igvm-tools Build` + cloud-init), so P1 is no longer hard-blocked — see "Build status".
 > Reuses the P0 harness (launch/attest/teardown).
 > **Critical path = the node image: no confidential RKE2 node image exists in our
 > hands yet** (bare-metal `images/` has only KubeVirt *infra* images; the "measured
@@ -10,29 +12,47 @@
 > **confidential RKE2 cluster** to install into (OQ1) + a **control channel** to drive
 > it (OQ2) + a pull secret. Pin OQ1 + OQ2 first. Don't build until pinned.
 
-## Build status — BLOCKED on the node image (OQ1), 2026-06-27
-Investigation (the `/loop work on P1` round) confirms P1 can't be built on what we have:
-- **No confidential RKE2 node image exists** in our repos or on the cluster — only the
-  platform's planned "measured RKE2 CVM" (`dev-c8s-integration` follow-up, not shipped).
-  `base_cpu_image` is a ~3 GiB attestation *appliance* (runs attestation-api), not a node.
-- **We can't build one** without the IGVM/verity image pipeline (steep): our SNP VMs boot
-  a verity rootfs + a matched `guest-smpN.igvm` via the custom IGVM qemu — you can't drop
-  an arbitrary RKE2 cloud image into that boot path. Building a confidential RKE2 node
-  image needs the same pipeline (steep was 404/inaccessible).
-- **OQ2 (control channel) collapses into OQ1:** the appliance has no interactive guest
-  control channel (our workflows only ever reach the virt-launcher, never the guest), and
-  adding one means rebuilding the image → the same pipeline blocker.
-- Secondary: host SSH (`ubuntu@100.65.229.52`) is currently timing out, so even the
-  empirical "boot a base VM and probe inside it" path is hampered (cluster still reachable
-  via the Rancher kubeconfig).
+## Build status — node image BUILDABLE; route decision needed (updated 2026-06-27)
+First pass concluded "blocked" (no RKE2 node image; `base_cpu_image` is a ~3 GiB
+attestation *appliance*, not a node; SNP VMs boot a verity rootfs + matched
+`guest-smpN.igvm`, so you can't drop in an arbitrary RKE2 image). **Then we looked at
+kettle-orchestrator/kettle — which revealed the image pipeline, and it's replicable:**
 
-**Unblock = one of:** (a) the platform's measured RKE2 CVM image lands and we can boot it
-on the harness; (b) we get access to the IGVM/verity image-build pipeline (steep) to build
-our own RKE2 node image. Both are outside our current access — not a code problem.
+- **steep (the confidential-image builder) = `mkosi` (upstream, open) + kettle's
+  `igvm-tools Build` + a baked `--cloud-init`.** kettle's `bin/image-build` runs
+  `steep build target/image --smp --memory --extra <files> --cloud-init <user-data> --package …`.
+- **kettle's `igvm-tools` is PUBLIC and has a `Build` subcommand** ("Build an IGVM file
+  from firmware, kernel, and optional components" — `crates/igvm-tools/src/builder.rs`).
+  So the IGVM-packaging half is in our hands.
+- **The `--cloud-init` is the control channel (OQ2 solved by the build).** steep bakes a
+  `#cloud-config` (users, `write_files` for systemd units, `runcmd`, udev for
+  `/dev/sev-guest`). So we bake an sshd / kubeconfig-export / agent into the node image.
 
-**Decision:** stop rather than speculatively build an untestable harness (YAGNI). P0
-stands green; P1 resumes the moment a bootable confidential RKE2 node image exists. The
-per-component version-conformance model + the launch seam are ready for that day.
+So a confidential **RKE2 node image is buildable**: mkosi verity rootfs + RKE2
+(`--package`/`--extra`) + a cloud-init that installs/enables RKE2 and exposes a control
+channel, packaged into an IGVM by `igvm-tools Build`.
+
+**Two routes (pick one):**
+1. **Get it from the platform (cheapest).** The "measured RKE2 CVM" (steep-built; the
+   `dev-c8s-integration` workload they're already building) or steep itself. These are
+   **private** (anon GHCR → 403, like `base-cpu-image`), so this needs a pull cred / the
+   platform sharing — a small ask, and the image is already on their roadmap.
+2. **Replicate steep ourselves (our own, harder).** `mkosi` (open) + kettle's
+   `igvm-tools Build` (public) + an RKE2 cloud-init spec. Fully in our control but a
+   multi-day build (privileged mkosi builder, OVMF/kernel sourcing, verity + IGVM, RKE2's
+   kernel prereqs: cgroups v2 / overlay / br_netfilter / nft).
+
+**Net: P1 is no longer hard-blocked** — it's a route choice. **OQ2 (control channel) is
+solved** by the build's cloud-init; **OQ1 (node image)** is route 1 (ask) or route 2
+(build). (Secondary: host SSH `ubuntu@100.65.229.52` is intermittently timing out;
+cluster still reachable via the Rancher kubeconfig.)
+
+**Decision (open):** route 1 (get the platform's RKE2 CVM image / steep + a pull cred) is
+the cheapest unblock and should be tried first — it's a small ask and the image is already
+on their roadmap. Route 2 (replicate steep with mkosi + igvm-tools) is the autonomous
+fallback but a multi-day build, so don't start it speculatively before choosing. P0 stands
+green; the per-component version-conformance model + the launch seam are ready for either
+route's image.
 
 ## Goal / definition of done
 Boot a **confidential VM that is a single-node k8s cluster** (node-as-CVM), install
