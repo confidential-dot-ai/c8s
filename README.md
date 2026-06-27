@@ -36,6 +36,7 @@ confidential-ci/
 ├── attest/              DESIGN.md — in-guest attestation plan (scope #4)
 ├── kettle-e2e/          kettle-e2e.yml (green) + DESIGN.md — attested-build roundtrip CI (orchestrator client)
 ├── c8s-e2e/             DESIGN.md (scoping) — install c8s on SNP + prove the digest-allowlist enforcement
+├── conformance/         DESIGN.md — two-backend confidential conformance harness (KubeVirt P0 / kata P1); real-only
 ├── research/            product research (kettle, kettle-orchestrator, c8s) + CI test ideas
 ├── baremetal/           bare-metal path: ARC on RKE2 + KubeVirt SEV-SNP VMs (Model A)
 ├── host/                always-on host that runs ARC (GKE; NOT confidential)
