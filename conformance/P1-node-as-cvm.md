@@ -41,6 +41,56 @@ launch SNP VM (RKE2 node image)  → inner k3s/RKE2 Ready
   → teardown (P0)
 ```
 
+## What a green run proves — per-component, per-version conformance
+
+Because c8s evolves, the harness is **parameterized by component image digest**: every
+new build flows through and is proven to run + function + attest inside a CVM. The crux:
+**the SNP launch measurement attests the *environment* (the node/guest base); a
+component's *version* is governed by the digest allowlist + its SLSA provenance — never
+by the launch measurement.** So "component version X attested in a CVM" decomposes into
+three independently-checked facts:
+
+1. **Environment is a genuine CVM** — the node SNP report verifies against the expected
+   base measurement.
+2. **Version X is the governed one** — its digest is allowlisted → it runs; a
+   non-allowlisted digest → **blocked**. (The marquee allowlist test, applied *per
+   component*.)
+3. **It did its job** — the component's observable (below), plus (if it
+   produces/consumes attestation) its attestation verifies.
+
+### Per-component observables
+| Component | "worked" observable | attestation shows up as |
+|---|---|---|
+| `attestation-api` | serves a report we can verify | it *is* the report source (bound to the base measurement) |
+| `cds` | `c8s cds verify` → exit 0 | RA-TLS serving cert is SNP-bound (base measurement) |
+| `get-cert` | a workload gets a CDS-issued leaf cert | issuance *required* a successful attest→CDS challenge |
+| `ratls-mesh` | attested mTLS between 2 pods; **wrong-measurement peer rejected** | the mTLS handshake is RA-TLS (attestation-bound) |
+| `nri-image-policy` / `policy-monitor` | allowlisted digest runs; non-allowlisted **SIGKILLed/denied** | its *effect* is the version governance (fact #2) |
+| operator / webhook | injects runtimeClass / get-cert correctly | functional (runs in the attested node) |
+
+### Version-conformance flow (digest-parameterized; re-run per build)
+```
+input: component=cds, digest=sha256:NEW
+ → allowlist sha256:NEW  → deploy cds@NEW into the confidential node
+ → c8s cds verify → exit 0                  (ran + attested inside the attested CVM)
+ → (negative) deploy cds@NEW NOT allowlisted → blocked   (version governance works)
+```
+Same shape for every component — swap the digest, re-run. CI thus continuously proves
+*each new version* runs + functions + attests in a CVM, and that the allowlist correctly
+admits/denies it by digest.
+
+### Boundaries (honest)
+- **node-as-CVM (P1): all components share the *one* node launch measurement** —
+  they're runtime containers in the single node CVM, so there's no distinct
+  per-component measurement.
+- **Per-component, per-pod CVMs** (each in its own memory-encrypted VM with its own base
+  measurement) come only with **kata / pod-as-CVM** (deferred last); even there the
+  component *version* is allowlist-governed, not in the launch measurement.
+- **Supply chain** (is digest X built from the expected source?) = **SLSA provenance**
+  (kettle's job), not attestation. Attestation = *where it ran*; provenance = *what it's
+  built from*; allowlist = *which digest is allowed*. All three = "this version, from
+  this source, ran in a real CVM."
+
 ## What `c8s install` handles for us (NOT our open questions)
 
 Given a running cluster + a pull secret, `c8s install` (its embedded Helm chart) does
