@@ -1,6 +1,7 @@
 # P1 — c8s node-as-CVM on the conformance harness (scoping)
 
-> **Status: SCOPING — not built.** Reuses the P0 harness (launch/attest/teardown).
+> **Status: SCOPING COMPLETE; BUILD BLOCKED (2026-06-27) — see "Build status" below.**
+> Reuses the P0 harness (launch/attest/teardown).
 > **Critical path = the node image: no confidential RKE2 node image exists in our
 > hands yet** (bare-metal `images/` has only KubeVirt *infra* images; the "measured
 > RKE2 CVM" is a planned platform follow-up for `dev-c8s-integration`, per
@@ -8,6 +9,30 @@
 > TEE-device wiring, and NRI/containerd setup** — so our real job is just: give it a
 > **confidential RKE2 cluster** to install into (OQ1) + a **control channel** to drive
 > it (OQ2) + a pull secret. Pin OQ1 + OQ2 first. Don't build until pinned.
+
+## Build status — BLOCKED on the node image (OQ1), 2026-06-27
+Investigation (the `/loop work on P1` round) confirms P1 can't be built on what we have:
+- **No confidential RKE2 node image exists** in our repos or on the cluster — only the
+  platform's planned "measured RKE2 CVM" (`dev-c8s-integration` follow-up, not shipped).
+  `base_cpu_image` is a ~3 GiB attestation *appliance* (runs attestation-api), not a node.
+- **We can't build one** without the IGVM/verity image pipeline (steep): our SNP VMs boot
+  a verity rootfs + a matched `guest-smpN.igvm` via the custom IGVM qemu — you can't drop
+  an arbitrary RKE2 cloud image into that boot path. Building a confidential RKE2 node
+  image needs the same pipeline (steep was 404/inaccessible).
+- **OQ2 (control channel) collapses into OQ1:** the appliance has no interactive guest
+  control channel (our workflows only ever reach the virt-launcher, never the guest), and
+  adding one means rebuilding the image → the same pipeline blocker.
+- Secondary: host SSH (`ubuntu@100.65.229.52`) is currently timing out, so even the
+  empirical "boot a base VM and probe inside it" path is hampered (cluster still reachable
+  via the Rancher kubeconfig).
+
+**Unblock = one of:** (a) the platform's measured RKE2 CVM image lands and we can boot it
+on the harness; (b) we get access to the IGVM/verity image-build pipeline (steep) to build
+our own RKE2 node image. Both are outside our current access — not a code problem.
+
+**Decision:** stop rather than speculatively build an untestable harness (YAGNI). P0
+stands green; P1 resumes the moment a bootable confidential RKE2 node image exists. The
+per-component version-conformance model + the launch seam are ready for that day.
 
 ## Goal / definition of done
 Boot a **confidential VM that is a single-node k8s cluster** (node-as-CVM), install
