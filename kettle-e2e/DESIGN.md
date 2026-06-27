@@ -7,8 +7,10 @@
 > `kettle verify --nonce` passes **signature + provenance + binary checksum +
 > nonce/freshness**, fail-closed. One green run = a build ran in a real TEE and
 > the artifact is cryptographically tied to its source, toolchain, and a fresh
-> nonce. P2 (`--igvm` launch-measurement bind) is next; one P2-only TBD (a GHCR
-> pull cred for `oras pull`).
+> nonce. P2 (`--igvm` launch-measurement bind) is wired but **parked**: the image
+> is now public (no cred needed), but the live orchestrator's attested launch
+> measurement does not match the image its `/config` advertises — a server-side
+> deployment mismatch, not a CI/kettle bug. See "P2 finding" below.
 
 ## Goal / definition of done
 
@@ -126,20 +128,45 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
    (base64 ZIP/tarball) — deterministic, fast, no external repo dependency.
    Fallback: `repo_url=https://github.com/burntsushi/ripgrep` (kettle's own example).
 
-### P2 blocker — CONFIRMED (2026-06-26): a GHCR pull credential
-- The pinned `ghcr.io/confidential-dot-ai/kettle-build` image is **private**
-  (anonymous GHCR token → `HTTP 403` on the manifest), and there is **no other
-  source** for the IGVM (kettle releases ship only CLI binaries; the cluster's
-  `igvm-files` PVC holds a *different* image — `guest-smp2`, not the orchestrator's
-  `guest-smp10`). So P2's `oras pull` needs auth.
-- P2 is therefore blocked **only** on a credential with **`read:packages`** + pull
-  access to `confidential-dot-ai/kettle-build` (classic/fine-grained PAT or a
-  GitHub App token; **SSO-authorized** for the org if it enforces SAML). Store as
-  an Actions secret (e.g. `GHCR_PULL_TOKEN`); workflow does `oras login ghcr.io`
-  before pulling. Matches the steer: mint a dedicated cred at org rollout.
-- Everything else for P2 is ready: digest from `/config`, `--igvm`/`--image` flags
-  confirmed in `verify.rs`, `oras` installs in-job.
-- `/build` rate-limiting (unconfirmed; not auth).
+### P2 finding — measurement mismatch in the deployed service (2026-06-26)
+The image was made **public**, so `oras pull` needs no credential (the earlier
+GHCR-cred blocker is gone). We wired P2 (oras pull + `kettle verify --igvm
+--image`) and ran it — it **fails closed on the launch-measurement bind**, and the
+cause is server-side, not ours:
+
+| Value | Digest |
+|---|---|
+| Published golden — image's own `manifest.json` `snp_launch_digest` | `82e291e0…` |
+| `kettle measure_snp` recomputed from the pulled `guest-smp10.igvm` | `82e291e0…` (**== golden**) |
+| **Attested** launch digest from the CVM that ran our build | `1932a2f5…` (**differs**) |
+
+- kettle's verifier is **correct** — it reproduces the image's published
+  measurement *exactly* (both `82e291e0`). So this is **not** a kettle/measure_snp
+  bug and **not** a CI bug.
+- The build at `build.confidential.ai` therefore **did not run on the image its own
+  `/config` advertises** (`8c1a825`, smp=10, golden `82e291e0`); the live CVM
+  measured to `1932a2f5` — a different image/config. The published image was built
+  **2026-06-22**; the deployed orchestrator predates it → most likely the live
+  service boots an **older on-disk image than `/config` reports** (deployment drift).
+- `--image` (dm-verity) ✅ is only a **self-consistency** check between the *pulled*
+  IGVM and *pulled* disk — it never touches the attestation, so it can't catch
+  this. Only `--igvm` binds to the report, and it correctly failed.
+
+**Disposition:** CI reverted to the green P1 (the meaningful, passing check). P2 is
+mechanically ready (pull is anonymous; flags confirmed) and re-enables the moment
+the deployed orchestrator's attested measurement matches its advertised image.
+
+**Decisive next check (to confirm H1 vs H2):**
+- H1 (likely): live service runs a different/older image → a build on the *correct*
+  image would verify. Confirm by asking what image/smp `build.confidential.ai`
+  actually boots (its `/usr/share/kettle/image`), or by an independent
+  `sev-snp-measure --igvm guest-smp10.igvm` (expect `82e291e0`).
+- H2 (less likely): `measure_snp` + the producer `manifest.json` were both produced
+  by the same code and neither matches real hardware (then `1932a2f5` is the true
+  measurement). Same independent-tool check distinguishes it: if `sev-snp-measure`
+  yields `1932a2f5`, it's H2.
+
+`/build` rate-limiting (unconfirmed; not auth).
 
 ## Chase-down: is the orchestrator deployed? — YES
 

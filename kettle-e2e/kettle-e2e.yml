@@ -3,6 +3,9 @@ name: kettle-e2e
 #   submit a build -> the orchestrator launches a CVM, builds + hardware-signs SLSA
 #   provenance -> download the output -> `kettle verify --nonce` (signature +
 #   provenance + artifact checksums + nonce/freshness), FAIL-CLOSED.
+# P2 (the --igvm launch-measurement bind) is parked: the live orchestrator's
+# attested launch digest does not match the image its /config advertises — see
+# kettle-e2e/DESIGN.md "P2 finding". Re-enable once the deployment is aligned.
 # The TEE is REMOTE (the orchestrator's CVM), so this job is a pure HTTP client;
 # it runs on confidential-bm only for dogfooding — any runner would do.
 on:
