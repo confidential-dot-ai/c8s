@@ -1,18 +1,20 @@
 # Kettle e2e roundtrip in CI — design
 
-> **Status: P1 BUILT & GREEN** (2026-06-26). [`kettle-e2e.yml`](kettle-e2e.yml)
-> runs on `confidential-bm` in `cifrai/confidential-bm-smoke`: it submits a build
-> to the orchestrator (`build.confidential.ai`), which launches a CVM, builds
-> ripgrep (pinned commit `4649aa97`) + hardware-signs SLSA provenance, then
-> `kettle verify --nonce` passes **signature + provenance + binary checksum +
-> nonce/freshness**, fail-closed. One green run = a build ran in a real TEE and
-> the artifact is cryptographically tied to its source, toolchain, and a fresh
-> nonce. P2 (`--igvm` launch-measurement bind) is wired but **parked**: the image
-> is now public (no cred needed), but kettle's `measure_snp` golden (`82e291e0`,
-> a QEMU+KVM-specific *replication*) does not match the production hypervisor's
-> attested measurement (`1932a2f5`) — and the orchestrator never checks it. A
-> measurement-tooling vs deployed-VMM gap, not a wrong image and not our CI. See
-> "P2 finding" below.
+> **Status: P1 + P2 BOTH GREEN** (2026-06-26→27). [`kettle-e2e.yml`](kettle-e2e.yml)
+> runs on `confidential-bm` in `cifrai/confidential-bm-smoke`: submit a build to
+> the orchestrator (`build.confidential.ai`) → CVM builds ripgrep (pinned commit
+> `4649aa97`) + hardware-signs SLSA provenance → verify, fail-closed.
+> **P1** (`kettle verify --nonce`): signature + provenance + binary checksum +
+> nonce/freshness. **P2** (`--igvm`/`--image`): launch measurement + dm-verity
+> roothash, binding the build to the EXACT pinned CVM image.
+>
+> P2 was first shipped as a non-blocking probe and **caught a real deployment
+> drift**: the orchestrator advertised image `8c1a825` (golden `82e291e0`) while
+> its CVM attested `1932a2f5`. A redeploy to a fresh image (`39961c62`, golden
+> `200a8d9a`) realigned it — P2 now passes and is **promoted to a required gate**.
+> NB: this proves `measure_snp` is *correct* (it reproduces the production
+> hypervisor's measurement once the deployment is consistent); the earlier read
+> that measure_snp was broken (H2) was wrong — it was H1 (drift). See "P2 finding".
 
 ## Goal / definition of done
 
@@ -130,11 +132,29 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
    (base64 ZIP/tarball) — deterministic, fast, no external repo dependency.
    Fallback: `repo_url=https://github.com/burntsushi/ripgrep` (kettle's own example).
 
-### P2 finding — measurement mismatch in the deployed service (2026-06-26)
-The image was made **public**, so `oras pull` needs no credential (the earlier
-GHCR-cred blocker is gone). We wired P2 (oras pull + `kettle verify --igvm
---image`) and ran it — it **fails closed on the launch-measurement bind**, and the
-cause is server-side, not ours:
+### P2 finding — deployment drift, caught and then RESOLVED (2026-06-26→27)
+
+> **OUTCOME: P2 now PASSES; it was H1 (deployment drift), not H2.** The
+> non-blocking probe caught a real drift and then auto-detected its fix:
+> - **Broken window:** `/config` advertised image `8c1a825` (golden `82e291e0`,
+>   which both steep's `manifest.json` *and* kettle's `measure_snp` compute) but the
+>   CVM attested `1932a2f5` → the orchestrator was **not booting the image it
+>   advertised**.
+> - **Fix:** a fresh image was published (`39961c62`, built `2026-06-27T01:08`,
+>   golden `200a8d9a`) and the orchestrator was redeployed onto it. `/config` now
+>   serves `39961c62`, and `kettle verify --igvm --image` **PASSES** in CI.
+> - **Correction:** this proves `measure_snp` is **correct** — it reproduces the
+>   production hypervisor's launch measurement once the deployment is consistent.
+>   The earlier H2 read ("measure_snp doesn't match real hardware") was **wrong**;
+>   the true cause was H1 (drift). P2 is now a **required fail-closed gate** — if the
+>   service drifts again, it goes red, which is the point.
+> - **Still worth doing (unchanged):** the orchestrator should *self-verify* the
+>   attested measurement against the image golden — it currently doesn't (its
+>   `ImageManifest` has no `measurement` field), which is exactly why the drift
+>   shipped silently until external CI caught it.
+
+The original investigation (left for the record) — at the time, the broken window
+looked like this and the cause appeared server-side:
 
 | Value | Digest |
 |---|---|
@@ -154,9 +174,14 @@ cause is server-side, not ours:
   IGVM and *pulled* disk — it never touches the attestation, so it can't catch
   this. Only `--igvm` binds to the report, and it correctly failed.
 
-**Disposition:** CI reverted to the green P1 (the meaningful, passing check). P2 is
-mechanically ready (pull is anonymous; flags confirmed) and re-enables the moment
-the deployed orchestrator's attested measurement matches its advertised image.
+**Disposition:** P1 is the required green gate. P2 (oras pull + `kettle verify
+--igvm --image`) runs on every build as a **non-blocking conformance probe** —
+because catching exactly this kind of gap is the point of CI. It classifies on the
+verdict text (kettle exits 0 even on FAILED): the known measurement mismatch →
+`::warning::` (job stays green); a full PASS → `::notice:: promote me` (upstream
+fixed it — make P2 a required gate); anything else → `::error::` (genuine
+regression, fails the job). So the issue stays surfaced on every run and we're told
+the moment it's fixed, without falsely red-flagging the pipeline.
 
 **Sharper framing (independent of which tool is "right"):** the orchestrator's
 `/config` *advertises* image `8c1a825` (which, by every computation we have —
