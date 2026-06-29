@@ -38,6 +38,11 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 			want: true,
 		},
 		{
+			name:      "nil resource list with no error",
+			resources: nil,
+			want:      false,
+		},
+		{
 			name: "group version not found",
 			err: apierrors.NewNotFound(schema.GroupResource{
 				Group:    v1alpha2.GroupVersion.Group,
@@ -79,5 +84,23 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 				t.Fatalf("discovered groupVersion %q, want %q", fake.gotGV, v1alpha2.GroupVersion.String())
 			}
 		})
+	}
+}
+
+func TestBoolPtr(t *testing.T) {
+	for _, v := range []bool{true, false} {
+		p := boolPtr(v)
+		if p == nil || *p != v {
+			t.Fatalf("boolPtr(%v) = %v", v, p)
+		}
+	}
+}
+
+func TestInt64Ptr(t *testing.T) {
+	for _, v := range []int64{0, -1, 1000} {
+		p := int64Ptr(v)
+		if p == nil || *p != v {
+			t.Fatalf("int64Ptr(%d) = %v", v, p)
+		}
 	}
 }

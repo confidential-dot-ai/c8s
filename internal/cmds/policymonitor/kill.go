@@ -51,6 +51,8 @@ type killer interface {
 
 type signalSender struct{}
 
+var _ killer = signalSender{}
+
 func (signalSender) kill(pid int, sig os.Signal) error {
 	if pid <= 1 {
 		// Guard against killing init / a wrap-around. kata-agent never
@@ -93,6 +95,8 @@ type cgroupLocator struct {
 	// to the kill path on hardware.
 	pollInterval time.Duration
 }
+
+var _ pidLocator = (*cgroupLocator)(nil)
 
 func newCgroupLocator(root string) *cgroupLocator {
 	return &cgroupLocator{

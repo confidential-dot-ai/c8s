@@ -43,6 +43,8 @@ func (a *AtomicHandoffEAR) Set(token string) {
 	a.v.Store(token)
 }
 
+var _ HandoffEARSource = (*AtomicHandoffEAR)(nil)
+
 // HandoffBootstrap provisions the handoff signer key + a refreshing EAR source
 // that the handoff handler needs. CDS implements it in process via
 // NewLocalHandoffBootstrap (it is its own EAR issuer); the signer key lives in

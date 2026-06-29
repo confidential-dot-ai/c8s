@@ -35,6 +35,11 @@ const maxUpstreamResponseBytes = 32 << 20
 // EchoBackend reflects the request — used for the demo and tests.
 type EchoBackend struct{}
 
+var (
+	_ Backend = EchoBackend{}
+	_ Backend = (*HTTPBackend)(nil)
+)
+
 // Forward implements Backend.
 func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.TunnelResponse, error) {
 	msg := fmt.Sprintf("LB enclave received %d bytes over the over-encrypted channel for %s %s: %q",

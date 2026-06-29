@@ -79,6 +79,8 @@ type k8sResolver struct {
 	localCIDRSource func(string) ([]localCIDR, error)
 }
 
+var _ Resolver = (*k8sResolver)(nil)
+
 // newK8sResolver creates a resolver backed by a K8s Pod informer. It blocks
 // until the initial cache sync completes. localCIDRBootTimeout bounds the
 // synchronous local-CIDR retry at startup; <=0 picks defaultLocalCIDRBootTimeout.

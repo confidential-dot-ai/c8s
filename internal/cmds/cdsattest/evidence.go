@@ -18,6 +18,8 @@ type EvidenceProvider interface {
 	Evidence(ctx context.Context, reportData []byte) (evidence json.RawMessage, platform, generation string, err error)
 }
 
+var _ EvidenceProvider = LiveEvidenceProvider{}
+
 // LiveEvidenceProvider asks the local attestation-api for a fresh report
 // bound to reportData. This is the production path; it requires a reachable
 // attestation-api and runs inside the LB's CVM.

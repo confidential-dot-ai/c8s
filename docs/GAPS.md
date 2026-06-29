@@ -50,3 +50,29 @@ final security model. Each bullet links to the tracking issue.
   responses over 32 MiB fail instead of being forwarded. Large transfers need
   application-level range/chunk APIs or a future streaming tunnel protocol with
   multiple encrypted records.
+
+## Testing / coverage gaps
+
+Measured with `go test ./... -cover`. The packages below stay at low or zero
+coverage by necessity, not neglect: their remaining code paths need real
+infrastructure (containerd, a cluster, root, raw sockets) or fault injection
+that would require adding test seams to production code. They are listed so a
+low coverage number is not mistaken for an untested risk that a quick unit test
+could close.
+
+- `internal/containerd` (0%) — the tag-to-digest resolver and `StopContainer`
+  require a live containerd socket; the concrete `Resolver` exposes no interface
+  seam to mock. Needs an integration test against a real/embedded containerd.
+- `cmd/get-cert`, `cmd/nri-image-policy`, `cmd/policy-monitor`, `cmd/ratls-mesh`
+  (0%) — thin `main()` → `os.Exit` shims; all logic lives in (and is tested via)
+  `internal/cmds/*`. Not meaningfully unit-testable.
+- `internal/cmds/ratlsmesh` (~49%) — the bulk is Linux-only `*_linux.go` code
+  (iptables/ipset, netlink, `SO_ORIGINAL_DST`, raw sockets) requiring root and a
+  configured host; only the pure logic and error paths are unit-tested.
+- `cmd/c8s` (~42%) — cobra command wiring and the real-listener startup path.
+- `internal/version`, `pkg/resources` — declarations only (no executable
+  statements), so coverage is not applicable.
+- Residual uncovered branches across otherwise well-covered packages: daemon
+  ticker/select loops, signal handlers, real-listener `run()` entrypoints, and
+  `crypto/rand`/marshal failure branches that cannot be triggered deterministically
+  without injecting faults into non-test source.

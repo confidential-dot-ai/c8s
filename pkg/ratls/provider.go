@@ -27,6 +27,8 @@ type SelfSignedProvider struct {
 	Opts       *CertOptions
 }
 
+var _ CertProvider = (*SelfSignedProvider)(nil)
+
 // Provision generates a key, obtains hardware attestation, and creates a
 // self-signed certificate with the attestation embedded as an X.509 extension.
 func (p *SelfSignedProvider) Provision(ctx context.Context) (*tls.Certificate, time.Duration, error) {

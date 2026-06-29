@@ -267,6 +267,28 @@ func TestWorkloadServiceCleansUpWhenNamespaceBecomesExcluded(t *testing.T) {
 	}
 }
 
+func TestNewWorkloadUnsupportedKind(t *testing.T) {
+	r := &WorkloadServiceReconciler{Kind: v1alpha2.WorkloadKind("CronJob")}
+	if obj := r.newWorkload(); obj != nil {
+		t.Fatalf("newWorkload(unsupported) = %#v, want nil", obj)
+	}
+}
+
+func TestSetupWithManagerRejectsUnsupportedKind(t *testing.T) {
+	r := &WorkloadServiceReconciler{Kind: v1alpha2.WorkloadKind("CronJob")}
+	// nil manager is fine: the unsupported-kind guard returns before the
+	// manager is ever touched.
+	if err := r.SetupWithManager(nil); err == nil {
+		t.Fatal("SetupWithManager(unsupported kind) = nil, want error")
+	}
+}
+
+func TestPodTemplateReturnsNilForUnknownObject(t *testing.T) {
+	if tmpl := podTemplate(&corev1.Pod{}); tmpl != nil {
+		t.Fatalf("podTemplate(*Pod) = %#v, want nil", tmpl)
+	}
+}
+
 func TestServicePortsMirrorsAndDedupes(t *testing.T) {
 	template := corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{

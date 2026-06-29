@@ -33,6 +33,8 @@ func (p *CertKeyProvider) PublicKey(_ string) (*ecdsa.PublicKey, error) {
 	return p.pub, nil
 }
 
+var _ KeyProvider = (*CertKeyProvider)(nil)
+
 var jwksRefreshesTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "cds_jwks_refreshes_total",
 	Help: "Total JWKS endpoint refreshes.",
@@ -49,6 +51,8 @@ type JWKSKeyProvider struct {
 	mu        sync.Mutex
 	lastForce time.Time
 }
+
+var _ KeyProvider = (*JWKSKeyProvider)(nil)
 
 func NewJWKSKeyProvider(ctx context.Context, url string, cacheTTL time.Duration, client *http.Client, logger *slog.Logger) (*JWKSKeyProvider, error) {
 	if client == nil {
