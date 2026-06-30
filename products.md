@@ -21,26 +21,34 @@ The stack is built in layers. Confidential Metal and Confidential Kubernetes are
 
 ## Confidential Metal
 
-The foundation. Confidential Metal turns on confidential computing in the hardware and hands back a CVM whose measurement actually means something: a minimal, hardened image, a reproducible launch measurement, and build provenance signed by the hardware.
+The foundation for bare metal. Confidential Metal turns on confidential computing on CC-capable hardware: software that sets the BIOS and a hardened host image carrying the right TEE firmware and kernel parameters. On top of that it provides the machinery to launch CVMs you can fully measure and verify, a hardened guest image measured from firmware all the way to user space, with that measurement bound to an attestable build and the attestation library baked in.
+
+Managed clouds like GCP and Azure already hand you measurable CVMs; Confidential Metal brings the same guarantees to your own bare metal.
 
 ```
-╔════════════════════════════════════════════╗
-║              Confidential VM               ║
-║                                            ║
-║           minimal hardened image           ║
-║      reproducible launch measurement       ║
-║          signed build provenance           ║
-╚════════════════════════════════════════════╝
-                      │
-                      ▼  attestation
-┌────────────────────────────────────────────┐
-│        measured, attested, trusted         │
-└────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│                Host: CC enabled                │
+│        BIOS + TEE firmware, host image         │
+└────────────────────────────────────────────────┘
+                        │  launches
+                        ▼
+╔════════════════════════════════════════════════╗
+║                Confidential VM                 ║
+║                                                ║
+║              hardened guest image              ║
+║        measured: firmware to user space        ║
+║          attestation library built in          ║
+╚════════════════════════════════════════════════╝
+                        │
+                        ▼  attestation
+┌────────────────────────────────────────────────┐
+│          measured, attested, trusted           │
+└────────────────────────────────────────────────┘
 ```
 
 ## Confidential Kubernetes
 
-One CVM is not a service. Confidential Kubernetes (C8s) turns it into a platform you can host and scale on. Every workload gets an attested identity, all traffic between components is encrypted, and the control plane stays outside the boundary, so an operator can run your workloads without ever seeing them.
+One CVM is not a service. Confidential Kubernetes (C8s) turns it into a platform you can host and scale on, with confidentiality spanning the whole cluster. Every workload gets an attested identity, all traffic between components is encrypted, and the control plane stays outside the boundary, so an operator can run your workloads without ever seeing them. C8s builds on the measurable CVMs and CC-enabled hardware that Confidential Metal provides on bare metal (and that GCP and Azure provide in the cloud).
 
 ```
 ┌──────────────────────────────────────────────────────┐
