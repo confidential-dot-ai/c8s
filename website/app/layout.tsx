@@ -4,8 +4,8 @@ import { Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 
-// Resolve theme before paint: localStorage wins, else system, else dark.
-const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='dark';}})();`;
+// Resolve theme before paint: a saved toggle choice wins, otherwise default to light.
+const THEME_SCRIPT = `(function(){try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark'){t='light';}document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='light';}})();`;
 
 const sourceSerif = Source_Serif_4({
   variable: "--font-source-serif",

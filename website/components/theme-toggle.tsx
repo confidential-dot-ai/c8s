@@ -13,12 +13,12 @@ function subscribe(cb: () => void) {
 }
 
 function getSnapshot(): Theme {
-  return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
 function getServerSnapshot(): Theme {
   // Matches the SSR markup; the pre-paint script in layout.tsx corrects it.
-  return "dark";
+  return "light";
 }
 
 function setTheme(next: Theme) {

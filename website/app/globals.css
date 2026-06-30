@@ -1,26 +1,10 @@
 @import "tailwindcss";
 
 /* ── Theme tokens ───────────────────────────────────────────────
-   Default :root is the dark/terminal theme (the no-preference fallback).
-   [data-theme] is set before paint by the inline script in layout.tsx,
-   so it always reflects localStorage or prefers-color-scheme.
-   The @media block keeps no-JS visitors honoring their system setting. */
+   Default :root is the light theme (the default everyone sees on first load).
+   [data-theme] is set before paint by the inline script in layout.tsx; a saved
+   toggle choice wins, otherwise the site stays light. */
 :root,
-:root[data-theme="dark"] {
-  --background: #1a1a1a;
-  --foreground: #d6d6d6;
-  --muted: #888888;
-  --border: #333333;
-  --accent: #fedc51;
-  --heading: #ffffff;
-  --code: #d2a8ff;
-  --code-bg: #2a2a2a;
-  --pre-bg: #0a0a0a;
-  --row-hover: #242424;
-  --cta-bg: #fedc51;
-  --cta-text: #1a1a1a;
-}
-
 :root[data-theme="light"] {
   --background: #fbfbf9;
   --foreground: #1f1f1d;
@@ -36,21 +20,19 @@
   --cta-text: #1f1f1d;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    --background: #fbfbf9;
-    --foreground: #1f1f1d;
-    --muted: #6b6b66;
-    --border: #e4e2dc;
-    --accent: #8a5a00;
-    --heading: #111110;
-    --code: #6f42c1;
-    --code-bg: #f0eee8;
-    --pre-bg: #f6f5f1;
-    --row-hover: #f2f0ea;
-    --cta-bg: #fedc51;
-    --cta-text: #1f1f1d;
-  }
+:root[data-theme="dark"] {
+  --background: #1a1a1a;
+  --foreground: #d6d6d6;
+  --muted: #888888;
+  --border: #333333;
+  --accent: #fedc51;
+  --heading: #ffffff;
+  --code: #d2a8ff;
+  --code-bg: #2a2a2a;
+  --pre-bg: #0a0a0a;
+  --row-hover: #242424;
+  --cta-bg: #fedc51;
+  --cta-text: #1a1a1a;
 }
 
 @theme inline {
@@ -96,7 +78,7 @@ body {
 .prose {
   max-width: none;
   line-height: 1.7;
-  font-size: 1rem;
+  font-size: 1.0625rem;
 }
 
 .prose h1,
