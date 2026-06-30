@@ -4,7 +4,7 @@ Run AI workloads on TEE-backed infrastructure with end-to-end attestations of ha
 
 For detailed rates, see [Pricing](/pricing.md).
 
-**Enterprise & on-prem.** Prefer to deploy on your own infrastructure? We license Confidential's modular stack to AI labs and infrastructure providers — on-prem, bare metal, all major clouds. [Contact sales](mailto:hello@confidential.ai).
+**Enterprise & on-prem.** Prefer to deploy on your own infrastructure? We license Confidential's modular stack to AI labs and infrastructure providers, on-prem, bare metal, all major clouds. [Contact sales](mailto:hello@confidential.ai).
 
 ### Table of Contents
 

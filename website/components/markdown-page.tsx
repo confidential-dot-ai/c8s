@@ -4,6 +4,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSlug from "rehype-slug";
 import Link from "next/link";
 import { type ComponentPropsWithoutRef, type ReactNode } from "react";
+import { CopyButton } from "./copy-button";
 
 function isInternalLink(href: string): boolean {
   return (href.startsWith("/") && !href.startsWith("//")) || href.startsWith("#");
@@ -79,7 +80,12 @@ export function MarkdownPage({ content }: { content: string }) {
           pre: ({ children, ...rest }) => {
             const text = getTextContent(children);
             const isDiagram = /[┌┐└┘├┤┬┴┼│─═║╔╗╚╝╠╣╦╩╬]/.test(text);
-            return <pre {...rest} className={isDiagram ? "mx-auto w-fit" : undefined}>{children}</pre>;
+            return (
+              <div className="code-block">
+                <CopyButton text={text} />
+                <pre {...rest} className={isDiagram ? "w-fit" : undefined}>{children}</pre>
+              </div>
+            );
           },
         }}
       >

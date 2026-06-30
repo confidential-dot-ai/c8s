@@ -4,9 +4,9 @@ All prices include hardware-enforced integrity, privacy and verifiability by TEE
 
 On-demand usage. Pay for what you use.
 
-Custom pricing is available for high-volume deals — [get in touch](mailto:hello@confidential.ai).
+Custom pricing is available for high-volume deals, [get in touch](mailto:hello@confidential.ai).
 
-**Enterprise & on-prem.** Prefer to deploy on your own infrastructure? We license Confidential's modular stack to AI labs and infrastructure providers — on-prem, bare metal, all major clouds. [Contact sales](mailto:hello@confidential.ai).
+**Enterprise & on-prem.** Prefer to deploy on your own infrastructure? We license Confidential's modular stack to AI labs and infrastructure providers, on-prem, bare metal, all major clouds. [Contact sales](mailto:hello@confidential.ai).
 
 ## Confidential Inference
 
@@ -23,7 +23,7 @@ Additional models available on request: [hello@confidential.ai](mailto:hello@con
 
 ## Confidential VMs
 
-**GPU VMs** — billed per GPU-hour.
+**GPU VMs**: billed per GPU-hour.
 
 | GPU | VRAM | Host CPU TEE | Per GPU-Hour |
 |---|---|---|---|
@@ -33,7 +33,7 @@ Additional models available on request: [hello@confidential.ai](mailto:hello@con
 | B300 | 288 GB HBM3e | AMD SEV-SNP or Intel TDX | $6.00 |
 
 
-**CPU VMs** — billed per vCPU core-hour, plus per GB-hour of RAM.
+**CPU VMs**: billed per vCPU core-hour, plus per GB-hour of RAM.
 
 | TEE Backend | Per Core-Hour | Per GB-Hour (RAM) |
 |---|---|---|

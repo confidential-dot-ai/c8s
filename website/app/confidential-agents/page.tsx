@@ -1,9 +1,9 @@
 import { getMarkdownContent } from "@/lib/markdown";
-import { MarkdownPage } from "@/components/markdown-page";
+import { MarkdownPageWithToc } from "@/components/markdown-page-with-toc";
 
 export const metadata = { title: "Confidential Agents" };
 
 export default function ConfidentialAgentsPage() {
   const content = getMarkdownContent("confidential-agents.md");
-  return <MarkdownPage content={content} />;
+  return <MarkdownPageWithToc content={content} />;
 }

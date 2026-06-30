@@ -1,6 +1,6 @@
 # Attestable Builds
 
-Cryptographic proof of what was built and from which source. Kettle, our attestable build service, runs your build process inside a TEE and emits a signed [attestable build](/docs/attestable-builds/) linking the git commit to the final artifact — no deterministic compilers required.
+Cryptographic proof of what was built and from which source. Kettle, our attestable build service, runs your build process inside a TEE and emits a signed [attestable build](/docs/attestable-builds/) linking the git commit to the final artifact, no deterministic compilers required.
 
 Every build produces a verifiable, tamper-evident chain of custody: signed attestation of the build environment, provenance for every input, and a hardware-rooted measurement of the output. Downstream consumers can verify the artifact came from the claimed source, built with the claimed toolchain, without needing to trust anyone.
 
