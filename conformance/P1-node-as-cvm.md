@@ -27,9 +27,17 @@ building our own node image **no longer needs the steep repo**:
 **New build path (steep-free):** pull `cached-artefacts/{kernel,ovmf-sev}` + mkosi RKE2
 verity rootfs + `igvm-tools Build` (public) → `guest.igvm`+`disk.raw` → boot on the harness.
 
-**Residual unknowns to verify before the multi-day rootfs build:**
-1. does `cached-artefacts/kernel` carry RKE2's modules (overlay/br_netfilter/nft/cgv2)? If
-   not, build a kernel with them (standard build + published config; still no steep repo).
+**Residual unknowns — #1 now VERIFIED (a real constraint):**
+1. **CONFIRMED: the published kernel is NOT RKE2-capable.** `cached-artefacts/kernel` is
+   `kata-static-kernel.tar.zst` (the kata guest kernel); its config (=
+   `kata-guest-base/kernel/config-x86_64.snapshot`, 6.12.84) **lacks `VETH`, `BRIDGE`,
+   `BRIDGE_NETFILTER`, `VXLAN`, `USER_NS`, `CGROUP_BPF`** — the core of k8s pod
+   networking. Confidential guest kernels are minimal by design (kata = minimal guest +
+   host networking); node-as-CVM needs a *fat* in-guest k8s kernel that **nobody
+   publishes**. So an RKE2 node image needs a **custom kernel BUILD** (linux 6.12.84 +
+   that snapshot + RKE2 modules) — steep's kernel build (repo still inaccessible) OR a
+   standalone compile we do. This duplicates the platform's in-progress "measured RKE2
+   CVM" kernel work → strongest unblock is still **their RKE2 CVM image** or **steep access**.
 2. can we stage + boot a *new* image on the KubeVirt harness (its `disk.raw` as a PVC +
    `guest.igvm` for the igvm-hook-sidecar)? The harness is currently wired to
    `cpu-image-rootdisk` + `guest-smp2.igvm`.
