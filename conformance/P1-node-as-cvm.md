@@ -1,8 +1,13 @@
 # P1 — c8s node-as-CVM on the conformance harness (scoping)
 
-> **Status: SCOPING COMPLETE; node image BUILDABLE — route decision needed (2026-06-27).**
-> Looking at kettle revealed the image pipeline (steep = mkosi + kettle's public
-> `igvm-tools Build` + cloud-init), so P1 is no longer hard-blocked — see "Build status".
+> **Status: SCOPING COMPLETE; DECISION — we consume images, we don't build them
+> (2026-06-27).** Like the orchestrator (a consumer of a pre-built image; steep is the
+> builder), our role is **pull + boot + test**, not image-building. Building an RKE2 node
+> image ourselves needs a fat custom confidential kernel nobody publishes — against the
+> grain and a duplicate of the platform's work. So routes 2/3 (steep access / from-scratch
+> kernel) are **dropped**. **Single ask:** platform builds + publishes the **measured RKE2
+> CVM image** to GHCR (like `kettle-build`/`conf-qemu-guest-base`); we `oras pull` it (we
+> have packages access) + boot it on the harness → `c8s install` → conformance.
 > Reuses the P0 harness (launch/attest/teardown).
 > **Critical path = the node image: no confidential RKE2 node image exists in our
 > hands yet** (bare-metal `images/` has only KubeVirt *infra* images; the "measured
