@@ -12,6 +12,31 @@
 > **confidential RKE2 cluster** to install into (OQ1) + a **control channel** to drive
 > it (OQ2) + a pull secret. Pin OQ1 + OQ2 first. Don't build until pinned.
 
+## UPDATE — GHCR packages access obtained; steep blocker largely DISSOLVED (2026-06-27)
+We got read access to `confidential-dot-ai` GHCR packages. No pre-built RKE2 node image
+exists (no `rke2-*`), **but the IGVM build ingredients are all published + pullable**, so
+building our own node image **no longer needs the steep repo**:
+- **`conf-qemu-guest-base`** — a steep-built **IGVM confidential base** (`guest.igvm` +
+  `disk.raw` + `roothash` + golden `7606795c…`; smp=2, kernel 6.12.84). The QEMU/IGVM
+  family our harness boots — a working reference + a measurement.
+- **`cached-artefacts/kernel`** + **`cached-artefacts/ovmf-sev`** (`latest-main-x86_64`) —
+  the hardened kernel + OVMF-SEV = the `igvm-tools Build` inputs steep would compile.
+- Bonus pullable: `charts/c8s` (helm chart), `cds`/`get-cert`/`attestation-api`/
+  `cert-issuer`/`assam` (c8s components), `kubectl` — so `c8s install`'s images are in reach.
+
+**New build path (steep-free):** pull `cached-artefacts/{kernel,ovmf-sev}` + mkosi RKE2
+verity rootfs + `igvm-tools Build` (public) → `guest.igvm`+`disk.raw` → boot on the harness.
+
+**Residual unknowns to verify before the multi-day rootfs build:**
+1. does `cached-artefacts/kernel` carry RKE2's modules (overlay/br_netfilter/nft/cgv2)? If
+   not, build a kernel with them (standard build + published config; still no steep repo).
+2. can we stage + boot a *new* image on the KubeVirt harness (its `disk.raw` as a PVC +
+   `guest.igvm` for the igvm-hook-sidecar)? The harness is currently wired to
+   `cpu-image-rootdisk` + `guest-smp2.igvm`.
+
+**Status: blocked-on-steep-access → BUILDABLE with what we now have.** (kata/orchestrator
+remain explicitly out of scope.)
+
 ## Build status — node image BUILDABLE; route decision needed (updated 2026-06-27)
 First pass concluded "blocked" (no RKE2 node image; `base_cpu_image` is a ~3 GiB
 attestation *appliance*, not a node; SNP VMs boot a verity rootfs + matched
