@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { notFound } from "next/navigation";
 import { getMarkdownContent } from "@/lib/markdown";
-import { MarkdownPage } from "@/components/markdown-page";
+import { MarkdownPageWithToc } from "@/components/markdown-page-with-toc";
 
 const BLOG_DIR = path.resolve(process.cwd(), "..", "blog");
 
@@ -30,5 +30,5 @@ export default async function BlogPostPage({ params }: { params: Promise<{ slug:
   }
 
   const content = getMarkdownContent(`blog/${slug}.md`);
-  return <MarkdownPage content={content} />;
+  return <MarkdownPageWithToc content={content} />;
 }

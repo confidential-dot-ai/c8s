@@ -58,7 +58,7 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
   return (
     <nav
       aria-label="Table of contents"
-      className="hidden xl:block fixed top-24 left-6 w-64 max-h-[calc(100vh-8rem)] overflow-y-auto text-xs leading-relaxed"
+      className="hidden xl:block fixed top-16 right-6 w-56 max-h-[calc(100vh-6rem)] overflow-y-auto text-xs leading-relaxed"
     >
       <ul className="flex flex-col gap-0.5 border-l border-border pl-3">
         {items.map((item, idx) => {

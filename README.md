@@ -15,7 +15,7 @@ Data and weights stay private and untamperable while being processed.
 
 ## Get Started
 
-Run AI workloads on our infra — see [Cloud](/cloud.md). For enterprise and on-prem deployments, or anything else, [contact us](mailto:hello@confidential.ai).
+Run AI workloads on our infra, see [Cloud](/cloud). For enterprise and on-prem deployments, or anything else, [contact us](mailto:hello@confidential.ai).
 
 ## Member of
 

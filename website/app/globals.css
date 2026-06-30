@@ -1,13 +1,56 @@
 @import "tailwindcss";
 
-:root {
+/* ── Theme tokens ───────────────────────────────────────────────
+   Default :root is the dark/terminal theme (the no-preference fallback).
+   [data-theme] is set before paint by the inline script in layout.tsx,
+   so it always reflects localStorage or prefers-color-scheme.
+   The @media block keeps no-JS visitors honoring their system setting. */
+:root,
+:root[data-theme="dark"] {
   --background: #1a1a1a;
   --foreground: #d6d6d6;
   --muted: #888888;
   --border: #333333;
-  --accent: #FEDC51;
-  --heading: #d6d6d6;
+  --accent: #fedc51;
+  --heading: #ffffff;
   --code: #d2a8ff;
+  --code-bg: #2a2a2a;
+  --pre-bg: #0a0a0a;
+  --row-hover: #242424;
+  --cta-bg: #fedc51;
+  --cta-text: #1a1a1a;
+}
+
+:root[data-theme="light"] {
+  --background: #fbfbf9;
+  --foreground: #1f1f1d;
+  --muted: #6b6b66;
+  --border: #e4e2dc;
+  --accent: #8a5a00;
+  --heading: #111110;
+  --code: #6f42c1;
+  --code-bg: #f0eee8;
+  --pre-bg: #f6f5f1;
+  --row-hover: #f2f0ea;
+  --cta-bg: #fedc51;
+  --cta-text: #1f1f1d;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --background: #fbfbf9;
+    --foreground: #1f1f1d;
+    --muted: #6b6b66;
+    --border: #e4e2dc;
+    --accent: #8a5a00;
+    --heading: #111110;
+    --code: #6f42c1;
+    --code-bg: #f0eee8;
+    --pre-bg: #f6f5f1;
+    --row-hover: #f2f0ea;
+    --cta-bg: #fedc51;
+    --cta-text: #1f1f1d;
+  }
 }
 
 @theme inline {
@@ -32,12 +75,24 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Monospace stack used for code, labels, and ASCII diagrams. */
+:root {
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}
+
 ::selection {
   background: var(--sel-bg, var(--accent));
   color: var(--sel-color, var(--background));
 }
 
-/* Markdown prose styling */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Markdown prose styling ─────────────────────────────────────── */
 .prose {
   max-width: none;
   line-height: 1.7;
@@ -54,7 +109,7 @@ body {
 .prose h1 {
   font-size: 1.75rem;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--heading);
   margin-top: 2.5rem;
   margin-bottom: 1rem;
 }
@@ -67,7 +122,7 @@ body {
 .prose h2 {
   font-size: 1.3rem;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--heading);
   margin-top: 2rem;
   margin-bottom: 0.75rem;
   letter-spacing: 0.05em;
@@ -76,7 +131,7 @@ body {
 .prose h3 {
   font-size: 1.05rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--heading);
   margin-top: 1.5rem;
   margin-bottom: 0.5rem;
 }
@@ -97,24 +152,24 @@ body {
 
 .prose a {
   color: var(--accent);
-  text-decoration-line: none !important;
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
 }
 
 .prose a:hover {
-  text-decoration-line: underline !important;
-  text-decoration-color: var(--accent) !important;
-  text-decoration-thickness: 1px !important;
-  text-underline-offset: 3px;
+  text-decoration-color: var(--accent);
 }
 
 .prose :is(h1, h2, h3, h4) a[aria-label="Link to section"] {
   color: var(--muted);
-  text-decoration: none !important;
+  text-decoration: none;
 }
 
 .prose :is(h1, h2, h3, h4) a[aria-label="Link to section"]:hover {
   color: var(--foreground);
-  text-decoration: none !important;
+  text-decoration: none;
 }
 
 .prose strong {
@@ -178,36 +233,89 @@ body {
 }
 
 .prose blockquote {
-  border-left: 2px solid var(--border);
-  padding-left: 1rem;
+  border-left: 3px solid var(--accent);
+  background: var(--code-bg);
+  padding: 0.75rem 1rem;
+  border-radius: 0 4px 4px 0;
   color: var(--muted);
   margin-bottom: 1rem;
 }
 
+.prose blockquote p:last-child {
+  margin-bottom: 0;
+}
+
 .prose code {
-  font-family: inherit;
-  font-size: 0.875em;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
   color: var(--code);
-  background: none;
-  padding: 0;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
 }
 
 .prose a code {
   color: inherit;
+  background: none;
+  padding: 0;
+}
+
+/* Code block wrapper holds the copy button. */
+.code-block {
+  position: relative;
+  margin-bottom: 1rem;
 }
 
 .prose pre {
-  background: #0a0a0a;
+  background: var(--pre-bg);
   border: 1px solid var(--border);
+  border-radius: 6px;
   padding: 1rem;
   overflow-x: auto;
-  margin-bottom: 1rem;
   line-height: 1.3;
+  font-family: var(--font-mono);
+}
+
+.code-block .prose pre,
+.prose .code-block pre {
+  margin-bottom: 0;
 }
 
 .prose pre code {
   color: var(--foreground);
-  font-family: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: none;
+  padding: 0;
+}
+
+.copy-button {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--muted);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.45rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.code-block:hover .copy-button,
+.copy-button:focus-visible {
+  opacity: 1;
+}
+
+.copy-button:hover {
+  color: var(--foreground);
 }
 
 .prose hr {
@@ -226,7 +334,7 @@ body {
 .prose thead th {
   text-align: left;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--heading);
   border-bottom: 1px solid var(--border);
   padding: 0.5rem 0.75rem 0.5rem 0;
   font-size: 0.8rem;
@@ -239,7 +347,7 @@ body {
 }
 
 .prose tbody tr:hover {
-  background: #1a1a1a;
+  background: var(--row-hover);
 }
 
 .prose img {
@@ -247,16 +355,52 @@ body {
   height: auto;
 }
 
-/* Table of contents scrollbar */
-nav[aria-label="Table of contents"]::-webkit-scrollbar {
+/* ── CTA button (true conversion actions only) ──────────────────── */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--cta-bg);
+  color: var(--cta-text);
+  border: 1px solid var(--cta-bg);
+  border-radius: 5px;
+  padding: 0.5rem 0.9rem;
+  text-decoration: none;
+  transition: filter 0.15s;
+}
+
+.cta:hover {
+  filter: brightness(1.05);
+}
+
+.cta-ghost {
+  background: transparent;
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+
+.cta-ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Sidebar / TOC chrome ───────────────────────────────────────── */
+nav[aria-label="Table of contents"]::-webkit-scrollbar,
+nav[aria-label="Primary"]::-webkit-scrollbar {
   width: 3px;
 }
 
-nav[aria-label="Table of contents"]::-webkit-scrollbar-track {
+nav[aria-label="Table of contents"]::-webkit-scrollbar-track,
+nav[aria-label="Primary"]::-webkit-scrollbar-track {
   background: transparent;
 }
 
-nav[aria-label="Table of contents"]::-webkit-scrollbar-thumb {
+nav[aria-label="Table of contents"]::-webkit-scrollbar-thumb,
+nav[aria-label="Primary"]::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 3px;
 }
