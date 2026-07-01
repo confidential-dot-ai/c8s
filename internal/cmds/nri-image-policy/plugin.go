@@ -289,7 +289,7 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 		return nil, nil
 	}
 
-	// If not ready yet, defer the sweep until after KBS init completes.
+	// If not ready yet, defer the sweep until after CDS init completes.
 	if !p.Ready() {
 		p.logger.Info("plugin not ready, deferring startup sweep",
 			"pods", len(pods), "containers", len(ctrs))
@@ -360,7 +360,7 @@ func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandb
 
 // RunDeferredSweep runs the startup sweep on pods/containers that were seen
 // during Synchronize before the plugin was ready. Should be called after
-// SetReady and KBS init.
+// SetReady and CDS init.
 func (p *plugin) RunDeferredSweep(ctx context.Context) {
 	cfg := p.cfg
 
@@ -393,7 +393,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	// been fetched yet. Deny all non-exempt container creation to close
 	// the startup window.
 	if !p.Ready() {
-		// Exempt namespaces always pass (prevents deadlock when KBS itself
+		// Exempt namespaces always pass (prevents deadlock when CDS itself
 		// runs in-cluster inside an exempt namespace).
 		if slices.Contains(cfg.Policy.ExemptNamespaces, pod.GetNamespace()) {
 			p.logger.Info("plugin initializing: allowing container in exempt namespace",

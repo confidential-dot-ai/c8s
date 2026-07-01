@@ -31,7 +31,7 @@ type ServerConfig struct {
 
 	// CertProvider, when set, is used instead of Platform/AttestFunc for
 	// certificate provisioning. This enables pluggable certificate sources
-	// (e.g., KBS-issued certificates). When nil, a SelfSignedProvider is
+	// (e.g., CDS-issued certificates). When nil, a SelfSignedProvider is
 	// constructed from Platform and AttestFunc.
 	CertProvider CertProvider
 
@@ -274,7 +274,7 @@ func (s *certState) effectiveTTL() time.Duration {
 
 // SwapProvider atomically replaces the certificate provider and triggers
 // an immediate re-provisioning. Used for runtime upgrades (e.g., self-signed
-// to KBS-issued). The old certificate continues serving until the new one
+// to CDS-issued). The old certificate continues serving until the new one
 // is ready — if provisioning fails, the old cert and provider remain active.
 func (s *certState) SwapProvider(ctx context.Context, provider CertProvider) error {
 	// Provision with the new provider BEFORE swapping. This prevents a
@@ -367,7 +367,7 @@ func (m *CertManager) SetOnRotationFail(fn func()) {
 
 // SwapProvider replaces the underlying certificate provider at runtime and
 // immediately provisions a certificate from the new provider. Use this for
-// runtime upgrades (e.g., self-signed to KBS-issued).
+// runtime upgrades (e.g., self-signed to CDS-issued).
 func (m *CertManager) SwapProvider(ctx context.Context, provider CertProvider) error {
 	return m.state.SwapProvider(ctx, provider)
 }

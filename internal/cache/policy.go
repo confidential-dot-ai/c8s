@@ -7,7 +7,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
-// PolicyCache caches the allowlist fetched from KBS.
+// PolicyCache caches the allowlist fetched from CDS.
 type PolicyCache struct {
 	mu        sync.RWMutex
 	allowlist *allowlist.Allowlist
@@ -32,7 +32,7 @@ func (c *PolicyCache) SetAllowlist(wl *allowlist.Allowlist) {
 	c.allowlist = wl
 }
 
-// Clear removes the cached allowlist. Next CreateContainer triggers a fresh KBS fetch.
+// Clear removes the cached allowlist. Next CreateContainer triggers a fresh CDS fetch.
 func (c *PolicyCache) Clear() {
 	c.SetAllowlist(nil)
 }
