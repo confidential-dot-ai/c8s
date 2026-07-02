@@ -150,8 +150,13 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-url: %w", err)
 	}
+	// CDS is reached over RA-TLS: the scheme MUST be https so the client
+	// verifies CDS's TEE attestation. A plaintext http:// URL would fall back
+	// to a client that skips attestation entirely and impersonation by any
+	// on-path peer becomes trivial. The chart only ever renders https URLs, so
+	// a non-https value is a misconfiguration, not a supported mode.
 	if parsed.Scheme != "https" {
-		return http.DefaultClient, nil
+		return nil, fmt.Errorf("--cds-url must use https (RA-TLS); got scheme %q", parsed.Scheme)
 	}
 
 	measurements, err := ratls.ParseHexMeasurements(cfg.CDSMeasurements)

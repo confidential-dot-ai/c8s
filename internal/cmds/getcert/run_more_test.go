@@ -21,6 +21,14 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
+// plaintextCDSClient builds an attestclient over the default transport for
+// tests that drive the cert flow against a plaintext httptest CDS. Production
+// requires https (see cdsHTTPClient), so these tests inject the client
+// directly rather than route through newCDSClient.
+func plaintextCDSClient(cdsURL string) attestclient.Client {
+	return attestclient.NewClientWithHTTP(cdsURL, http.DefaultClient)
+}
+
 func TestNewCmdFlagDefaultsAndRequired(t *testing.T) {
 	cmd := NewCmd()
 	if cmd.Use != "get-cert" {
@@ -459,10 +467,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 		SAN:               "host.example.com",
 		OutPath:           filepath.Join(dir, "cert.pem"),
 	}
-	client, err := newCDSClient(cfg)
-	if err != nil {
-		t.Fatalf("newCDSClient: %v", err)
-	}
+	client := plaintextCDSClient(cfg.CDSURL)
 	if err := obtainCert(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
@@ -486,10 +491,7 @@ func TestObtainCertCDSError(t *testing.T) {
 	t.Cleanup(cds.Close)
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com"}
-	client, err := newCDSClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := plaintextCDSClient(cfg.CDSURL)
 	if err := obtainCert(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCert succeeded, want error when CDS fails")
 	}
@@ -532,10 +534,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 		InitialRetryTimeout:  5 * time.Second,
 		InitialRetryInterval: time.Millisecond,
 	}
-	client, err := newCDSClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := plaintextCDSClient(cfg.CDSURL)
 	if err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
@@ -557,10 +556,7 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 	t.Cleanup(cds.Close)
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com", InitialRetryTimeout: 0}
-	client, err := newCDSClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := plaintextCDSClient(cfg.CDSURL)
 	if err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCertWithRetry succeeded, want error")
 	}
@@ -581,8 +577,11 @@ func TestRunOnceWritesCert(t *testing.T) {
 		OutPath:           filepath.Join(dir, "cert.pem"),
 		// run-once mode: RenewInterval == 0
 	}
-	if err := run(cfg); err != nil {
-		t.Fatalf("run: %v", err)
+	// run() builds an https-only RA-TLS client via newCDSClient; drive the
+	// run-once path (obtainCertWithRetry then return) against the plaintext
+	// fake CDS with an injected client instead.
+	if err := obtainCertWithRetry(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
+		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if _, err := os.Stat(cfg.OutPath); err != nil {
 		t.Fatalf("cert not written: %v", err)
