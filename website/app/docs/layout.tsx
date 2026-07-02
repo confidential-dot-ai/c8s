@@ -1,25 +1,13 @@
-import { source } from '@/lib/source';
-import { DocsLayout } from 'fumadocs-ui/layouts/docs';
-import { baseOptions } from '@/lib/layout.shared';
-import { NativeFolder } from '@/components/native-folder';
-import { DocsSidebarFooter } from '@/components/docs-sidebar-extras';
-
-export default function Layout({ children }: { children: React.ReactNode }) {
+export default function DocsLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  // The navigation lives in the shared sidebar (nested under "Docs"); this is
+  // just the content column. Slightly wider than marketing to fit code/tables.
   return (
-    <DocsLayout
-      tree={source.getPageTree()}
-      // Render folders as native <details> so expand/collapse never depends on
-      // client-side hydration. Disable the desktop sidebar-collapse button.
-      // The sidebar header (nav.title in layout.shared) is the back-to-site link.
-      sidebar={{
-        collapsible: false,
-        components: { Folder: NativeFolder },
-        footer: <DocsSidebarFooter />,
-      }}
-      themeSwitch={{ enabled: false }}
-      {...baseOptions()}
-    >
-      {children}
-    </DocsLayout>
+    <main className="px-5 md:px-10 py-12">
+      <div className="max-w-[820px]">{children}</div>
+    </main>
   );
 }

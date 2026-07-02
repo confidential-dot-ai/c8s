@@ -3,6 +3,8 @@ import Script from "next/script";
 import { Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 import { RootProvider } from "fumadocs-ui/provider/next";
+import { Sidebar } from "@/components/sidebar";
+import { getDocsNav } from "@/lib/docs-nav";
 
 // Resolve theme before paint: a saved toggle choice wins, otherwise default to light.
 // Mirror the choice onto both `data-theme` (home tokens) and the `dark` class
@@ -27,6 +29,10 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Built server-side and handed to the (client) sidebar so the docs tree can
+  // nest under the "Docs" nav item without a separate docs layout.
+  const docsNav = getDocsNav();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -40,10 +46,12 @@ export default function RootLayout({
         </Script>
       </head>
       <body className={`${sourceSerif.variable} ${sourceSerif.className} antialiased`}>
-        {/* next-themes is disabled: the pre-paint script above owns `data-theme`
-            and the `.dark` class, so nothing mutates <html> on the client and
-            there is no theme hydration mismatch. */}
-        <RootProvider theme={{ enabled: false }}>{children}</RootProvider>
+        {/* next-themes is disabled: the pre-paint script owns `data-theme` and the
+            `.dark` class, so nothing mutates <html> on the client. */}
+        <RootProvider theme={{ enabled: false }}>
+          <Sidebar docsNav={docsNav} />
+          <div className="md:pl-64 min-h-screen">{children}</div>
+        </RootProvider>
       </body>
     </html>
   );
