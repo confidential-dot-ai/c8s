@@ -99,7 +99,7 @@ acronym alone.
 | Term | Use exactly | Notes / not |
 | --- | --- | --- |
 | Product name | **c8s** | Always lowercase, even at sentence start. Bold on first mention per page (`**c8s**`). Not "C8s", "C8S", "c8S". |
-| Confidential Kubernetes | "confidential Kubernetes" | Lowercase descriptor. |
+| Confidential Kubernetes | "Confidential Kubernetes" | Capitalized product term. Not "confidential Kubernetes". |
 | CDS | **CDS** (Certificate Distribution Service) | The trust root. Not "cds" in prose. |
 | RA-TLS | **RA-TLS** (Remote-Attestation TLS) | Not "raTLS", "RATLS", "ra-tls". |
 | EAR | **EAR** (Entity Attestation Result) | An ES256 JWT the CDS issues. (Keep this expansion unless source says otherwise.) |

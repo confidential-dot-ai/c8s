@@ -44,11 +44,13 @@ export function FourSteps() {
           <Link
             key={s.n}
             href={s.href}
-            className="group border border-fd-border rounded-lg p-5 hover:border-fd-primary transition-colors bg-fd-card"
+            className="group no-underline! border border-fd-border rounded-lg p-5 hover:border-fd-primary transition-colors bg-fd-card"
           >
             <div className="text-fd-primary font-mono text-sm mb-3">{s.n}</div>
             <div className="text-fd-foreground font-medium mb-2 flex items-center gap-1">
-              {s.title}
+              <span className="underline decoration-1 underline-offset-[3px] decoration-fd-muted-foreground/50 transition-colors group-hover:decoration-fd-primary">
+                {s.title}
+              </span>
               <ArrowRight
                 size={14}
                 className="opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all"
