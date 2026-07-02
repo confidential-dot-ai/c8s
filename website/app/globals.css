@@ -466,30 +466,7 @@ nav[aria-label="Primary"]::-webkit-scrollbar-thumb {
   display: none;
 }
 
-/* ── Docs (Fumadocs) chrome ─────────────────────────────────────── */
-
-/* Keep the sidebar's scroll self-contained so the wheel never chains through. */
-#nd-sidebar [data-radix-scroll-area-viewport],
-#nd-sidebar [class*='overflow-'] {
-  overscroll-behavior: contain;
-}
-
-/* Native <details> sidebar folders (components/native-folder.tsx): strip the
-   default disclosure marker and rotate our own chevron on open. */
-#nd-sidebar details.fd-folder > summary {
-  list-style: none;
-  cursor: pointer;
-}
-#nd-sidebar details.fd-folder > summary::-webkit-details-marker {
-  display: none;
-}
-#nd-sidebar details.fd-folder > summary .fd-folder-chevron {
-  transition: transform 0.2s ease;
-  transform: rotate(-90deg);
-}
-#nd-sidebar details.fd-folder[open] > summary .fd-folder-chevron {
-  transform: rotate(0deg);
-}
+/* ── Docs content chrome ────────────────────────────────────────── */
 
 /* Collapsible boxes in docs content — native <details> (reliable, no JS). */
 details[data-collapse] {
@@ -521,16 +498,6 @@ details[data-collapse][open] > summary::before {
 }
 details[data-collapse] > :not(summary):last-child {
   margin-bottom: 0.9rem;
-}
-
-/* Top navbar: let it span the full width with comfortable gutters. */
-#nd-nav > div > * {
-  max-width: none;
-}
-@media (min-width: 768px) {
-  #nd-nav nav {
-    padding-inline: 2rem;
-  }
 }
 
 /* Architecture / flow diagrams (Next-optimized <img> in docs content only). */

@@ -43,14 +43,13 @@ Authoring voice/terminology/formatting: `STYLE_GUIDE.md` at the repo root.
 
 ### Website (`website/`)
 
-Next.js 16 + React 19 + Tailwind 4. Marketing pages use `react-markdown`; docs use Fumadocs. Route groups keep them separate:
+Next.js 16 + React 19 + Tailwind 4. Marketing pages use `react-markdown`; docs content uses Fumadocs (MDX), but **not** Fumadocs' `DocsLayout` — there's a single shared sidebar for the whole site.
 
-- **`app/(marketing)/`** — marketing pages, wrapped by the left `components/sidebar.tsx`. Each page calls `getMarkdownContent("<name>.md")` and renders `components/markdown-page.tsx` (remark-gfm, rehype-raw, rehype-slug; internal links become `<Link>`s). Marketing prose is styled via the `.prose` class in `app/globals.css`.
-- **`app/docs/`** — Fumadocs `DocsLayout` (`app/docs/layout.tsx`) + the MDX renderer (`app/docs/[[...slug]]/page.tsx`). `source.config.ts` + `lib/source.ts` load the content collection; `content/docs/**` is generated into `.source/` by `fumadocs-mdx` (gitignored). Search: `app/api/search/route.ts`.
+- **One shared sidebar.** `components/sidebar.tsx` is rendered once in the **root** `app/layout.tsx` (so it persists across navigation). The root layout builds the docs nav server-side via `lib/docs-nav.ts` (`source.getPageTree()` → serializable `DocsNavNode[]`) and passes it to the sidebar. On `/docs/**` routes the sidebar renders the docs tree (collapsible folders, marketing mono styling) **nested under the "Docs" item** — no separate docs sidebar, no back button.
+- **`app/(marketing)/layout.tsx`** — just the content column (`max-w-[680px]`). Pages call `getMarkdownContent("<name>.md")` → `components/markdown-page.tsx` (remark-gfm, rehype-raw, rehype-slug). Marketing prose is styled via `.prose` in `app/globals.css`.
+- **`app/docs/layout.tsx`** — just the content column (`max-w-[820px]`). `app/docs/[[...slug]]/page.tsx` renders the page with Fumadocs' `DocsTitle`/`DocsDescription`/`DocsBody` (content styling only) plus the site's own `components/table-of-contents.tsx` (mapped from `page.data.toc`). `source.config.ts` + `lib/source.ts` load the collection; `content/docs/**` generates into `.source/` (gitignored). Note: dropping `DocsLayout` also drops Fumadocs' built-in search UI — `app/api/search/route.ts` still exists if search is re-added.
 
-**Theme:** light-default with a dark toggle. The pre-paint script in `app/layout.tsx` sets both `data-theme` (home tokens) and the `.dark` class (Fumadocs' dark tokens + `dark:` utilities). `app/globals.css` maps Fumadocs' `--color-fd-*` tokens onto the home palette so docs and marketing share one theme and one `ThemeToggle`. Fumadocs' own `next-themes` is disabled.
-
-**Navigation / sidebar overtake:** on marketing routes the left rail is `components/sidebar.tsx`; on `/docs/**` the Fumadocs docs tree "overtakes" it, with a **back-to-site** banner (`components/docs-sidebar-extras.tsx`) pinned at the top.
+**Theme:** light-default with a dark toggle. `components/theme-toggle.tsx` and the pre-paint script in `app/layout.tsx` both set `data-theme` (home tokens) **and** the `.dark` class (Fumadocs' dark tokens + `dark:` utilities + Shiki dark theme all key off `.dark`). `app/globals.css` maps Fumadocs' `--color-fd-*` tokens onto the home palette so docs and marketing share one theme and one `ThemeToggle`. Fumadocs' own `next-themes` is disabled.
 
 **Diagrams:** committed docs SVGs are dark-palette; a recolored `*-light.svg` sits beside each, and `components/diagram.tsx` (wired as the `img` MDX component) swaps them per theme via a no-JS `.dark` CSS rule. `source.config.ts` disables Fumadocs' image import so `/diagrams/*.svg` paths stay literal.
 

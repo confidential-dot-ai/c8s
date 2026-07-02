@@ -2,14 +2,25 @@ import { source } from '@/lib/source';
 import {
   DocsBody,
   DocsDescription,
-  DocsPage,
   DocsTitle,
 } from 'fumadocs-ui/layouts/docs/page';
 import { notFound } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
-import { JOURNEY_URLS } from '@/components/journey-nav';
 import { createRelativeLink } from 'fumadocs-ui/mdx';
+import { TableOfContents, type TocItem } from '@/components/table-of-contents';
 import type { Metadata } from 'next';
+import type { ReactNode } from 'react';
+
+/** Flatten a heading ReactNode (usually a plain string) to text for the TOC. */
+function tocText(n: ReactNode): string {
+  if (typeof n === 'string') return n;
+  if (typeof n === 'number') return String(n);
+  if (Array.isArray(n)) return n.map(tocText).join('');
+  if (n && typeof n === 'object' && 'props' in n) {
+    return tocText((n as { props?: { children?: ReactNode } }).props?.children);
+  }
+  return '';
+}
 
 export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
@@ -20,18 +31,17 @@ export default async function Page(props: {
 
   const MDX = page.data.body;
 
-  // Journey pages render the <JourneyNav> stepper, so suppress the built-in
-  // sidebar-order prev/next footer there (it would conflict with the path order).
-  const onJourney = JOURNEY_URLS.includes(page.url);
-  // The docs hub is an index, not part of a linear reading flow — no prev/next.
-  const isHub = page.url === '/docs';
+  // The docs use the site's own table-of-contents component (right rail),
+  // mapped from Fumadocs' heading data — same look as the marketing pages.
+  const toc: TocItem[] = page.data.toc.map((item) => ({
+    id: item.url.replace(/^#/, ''),
+    text: tocText(item.title),
+    level: item.depth,
+  }));
 
   return (
-    <DocsPage
-      toc={page.data.toc}
-      full={page.data.full}
-      footer={{ enabled: !onJourney && !isHub }}
-    >
+    <>
+      {toc.length > 0 && <TableOfContents items={toc} />}
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <DocsBody>
@@ -42,7 +52,7 @@ export default async function Page(props: {
           })}
         />
       </DocsBody>
-    </DocsPage>
+    </>
   );
 }
 
