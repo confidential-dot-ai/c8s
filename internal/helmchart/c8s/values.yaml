@@ -171,6 +171,16 @@ cds:
       - key: dedicated
         value: cds
         effect: NoSchedule
+  ## CDS is a singleton in-memory trust root: any voluntary eviction (node
+  ## drain, autoscaler) destroys the CA and EAR keys and forces every workload
+  ## to re-bootstrap. The default PDB (maxUnavailable: 0) blocks voluntary
+  ## disruptions so a drain cannot silently take CDS down — the operator must
+  ## delete the pod deliberately (a planned re-bootstrap). Set maxUnavailable: 1
+  ## to allow drains if you accept the re-bootstrap, or enabled: false to remove
+  ## the PDB. See docs/THREAT_MODEL.md.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 0
   logLevel: info
   allowlistDB: /data/allowlist.db
   earIssuer: cds

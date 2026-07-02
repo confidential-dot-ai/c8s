@@ -19,6 +19,7 @@ import (
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigsyaml "sigs.k8s.io/yaml"
@@ -4565,6 +4566,59 @@ func TestChartEngineConflictDefaultMatchesValues(t *testing.T) {
 		t.Fatalf("teeProxy.upstream default = %q, but validations.yaml engine_upstream_conflict pins %q; keep them in sync",
 			values.TeeProxy.Upstream, defaultInValidations)
 	}
+}
+
+// TestCDSPodDisruptionBudget guards the singleton trust root: the PDB must
+// default to maxUnavailable: 0 (block voluntary drains so the in-memory CA is
+// not silently evicted) and its selector must actually match the CDS
+// Deployment's pods, not select nothing.
+func TestCDSPodDisruptionBudget(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	var pdb policyv1.PodDisruptionBudget
+	if !findDoc(t, out, "PodDisruptionBudget", "c8s-cds", &pdb) {
+		t.Fatalf("rendered manifest missing CDS PodDisruptionBudget\n%s", out)
+	}
+	if pdb.Spec.MaxUnavailable == nil || pdb.Spec.MaxUnavailable.IntValue() != 0 {
+		t.Fatalf("CDS PDB maxUnavailable = %v, want 0 (block voluntary disruption of the singleton trust root)", pdb.Spec.MaxUnavailable)
+	}
+
+	// The PDB selector must match the CDS Deployment's pod template labels, or
+	// it protects nothing.
+	dep := renderedDeployment(t, out, "c8s-cds")
+	for k, v := range pdb.Spec.Selector.MatchLabels {
+		if got := dep.Spec.Template.Labels[k]; got != v {
+			t.Fatalf("CDS PDB selector %s=%q does not match Deployment pod label %q; PDB would select no pods", k, v, got)
+		}
+	}
+
+	t.Run("maxUnavailable override", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "cds.podDisruptionBudget.maxUnavailable=1")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		var pdb policyv1.PodDisruptionBudget
+		if !findDoc(t, out, "PodDisruptionBudget", "c8s-cds", &pdb) {
+			t.Fatalf("rendered manifest missing CDS PodDisruptionBudget\n%s", out)
+		}
+		if pdb.Spec.MaxUnavailable == nil || pdb.Spec.MaxUnavailable.IntValue() != 1 {
+			t.Fatalf("CDS PDB maxUnavailable = %v, want 1", pdb.Spec.MaxUnavailable)
+		}
+	})
+
+	t.Run("disabled removes the PDB", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "cds.podDisruptionBudget.enabled=false")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		var pdb policyv1.PodDisruptionBudget
+		if findDoc(t, out, "PodDisruptionBudget", "c8s-cds", &pdb) {
+			t.Fatal("CDS PodDisruptionBudget rendered while podDisruptionBudget.enabled=false")
+		}
+	})
 }
 
 // TestAttestationApiSeccomp pins the seccomp profile on the attestation-api

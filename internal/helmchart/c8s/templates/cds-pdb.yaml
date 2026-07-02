@@ -1,0 +1,26 @@
+{{- if .Values.cds.podDisruptionBudget.enabled }}
+{{/*
+CDS is a singleton in-memory trust root: the mesh CA and EAR signing key live
+only in process memory, so any voluntary eviction (node drain, autoscaler)
+destroys the trust root and forces every workload to re-bootstrap. maxUnavailable: 0
+blocks voluntary disruptions so a drain cannot silently take CDS down; the
+operator must delete the pod deliberately, i.e. treat it as a planned
+re-bootstrap (see docs/THREAT_MODEL.md). Set maxUnavailable: 1 to allow drains
+if you accept the re-bootstrap, or enabled: false to remove the PDB.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "c8s.cdsName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: cds
+spec:
+  maxUnavailable: {{ include "c8s.int" .Values.cds.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: cds
+{{- end }}
