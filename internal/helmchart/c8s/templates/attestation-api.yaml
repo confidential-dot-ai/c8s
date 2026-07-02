@@ -97,6 +97,14 @@ spec:
             # and not device-cgroup gated.
             privileged: true
             readOnlyRootFilesystem: true
+            # Seccomp is independent of privileged: even a privileged container
+            # keeps a syscall filter, and the attestation-api makes only normal
+            # syscalls. RuntimeDefault narrows the kernel surface (this container
+            # is the widest on the node) and matches every other component.
+            # runAsNonRoot/cap-drop are moot while privileged, so this is the one
+            # substantive hardening available until the configfs path lands.
+            seccompProfile:
+              type: RuntimeDefault
             {{- else }}
 {{ fail (printf "attestationApi.cvmMode must be one of baremetal, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}

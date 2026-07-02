@@ -4565,3 +4565,26 @@ func TestChartEngineConflictDefaultMatchesValues(t *testing.T) {
 			values.TeeProxy.Upstream, defaultInValidations)
 	}
 }
+
+// TestAttestationApiSeccomp pins the seccomp profile on the attestation-api
+// container. It must run privileged (device-cgroup access to the TEE device),
+// but seccomp is independent of privileged and RuntimeDefault narrows the
+// syscall surface of the node's widest container; it is easy to drop silently.
+func TestAttestationApiSeccomp(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-attestation-api")
+	c, ok := findContainer(ds.Spec.Template.Spec.Containers, "attestation-api")
+	if !ok {
+		t.Fatalf("attestation-api container not found; got %v", containerNames(ds.Spec.Template.Spec.Containers))
+	}
+	sc := c.SecurityContext
+	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
+		t.Fatalf("attestation-api must be privileged (TEE device access); got %+v", sc)
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("attestation-api must set seccompProfile.type: RuntimeDefault; got %+v", sc.SeccompProfile)
+	}
+}
