@@ -55,7 +55,41 @@ retiring keys) is served at `GET /.well-known/jwks.json`.
 The CDS uses a nonce-challenge model so attestation evidence is cryptographically bound to a
 CSR's public key, preventing evidence replay or substitution.
 
-![CDS attestation flow: the client requests a one-time challenge, binds it into the report data, submits evidence and a CSR, and the CDS verifies and signs a leaf certificate.](/diagrams/cert-flow-base.svg)
+```
+   Workload                 CDS                    attestation-api
+   [get-cert]               [host]                 [host]
+      │                       │                       │
+      │  POST /authenticate   │                       │
+      │──────────────────────►│                       │
+      │                       │                       │
+      │  nonce                │                       │
+      │  one-time challenge   │                       │
+      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                       │
+      │                       │                       │
+  ┌───┴────────────────────────────────────┐         │
+  │ report_data =                           │         │
+  │   SHA-384(CSR pubkey ‖ nonce)           │         │
+  └───┬────────────────────────────────────┘         │
+      │                       │                       │
+      │  POST /attest         │                       │
+      │  challenge + evidence + CSR                   │
+      │──────────────────────►│                       │
+      │                       │  verify(evidence,     │
+      │                       │         report_data)  │
+      │                       │──────────────────────►│
+      │                       │                       │
+      │                       │  valid · launch_digest│
+      │                       │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
+      │                       │                       │
+      │              ┌────────┴─────────────────────┐ │
+      │              │ check measurement ·          │ │
+      │              │ validate CSR · sign (mesh CA)│ │
+      │              └────────┬─────────────────────┘ │
+      │                       │                       │
+      │  leaf certificate + CA chain                  │
+      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                       │
+      │                       │                       │
+```
 
 Step by step, on `POST /attest` the CDS:
 

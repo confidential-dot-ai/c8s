@@ -102,7 +102,41 @@ outside every one of them:
 
 A workload obtains a TEE-bound certificate from the CDS in a single in-process round trip:
 
-![Node-as-CVM certificate flow: the workload requests a challenge, generates evidence bound to its CSR, and the CDS verifies it via the attestation-api before signing a leaf certificate.](/diagrams/cert-flow-base.svg)
+```
+   Workload                 CDS                    attestation-api
+   [get-cert]               [host]                 [host]
+      │                       │                       │
+      │  POST /authenticate   │                       │
+      │──────────────────────►│                       │
+      │                       │                       │
+      │  nonce                │                       │
+      │  one-time challenge   │                       │
+      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                       │
+      │                       │                       │
+  ┌───┴────────────────────────────────────┐         │
+  │ report_data =                           │         │
+  │   SHA-384(CSR pubkey ‖ nonce)           │         │
+  └───┬────────────────────────────────────┘         │
+      │                       │                       │
+      │  POST /attest         │                       │
+      │  challenge + evidence + CSR                   │
+      │──────────────────────►│                       │
+      │                       │  verify(evidence,     │
+      │                       │         report_data)  │
+      │                       │──────────────────────►│
+      │                       │                       │
+      │                       │  valid · launch_digest│
+      │                       │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
+      │                       │                       │
+      │              ┌────────┴─────────────────────┐ │
+      │              │ check measurement ·          │ │
+      │              │ validate CSR · sign (mesh CA)│ │
+      │              └────────┬─────────────────────┘ │
+      │                       │                       │
+      │  leaf certificate + CA chain                  │
+      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                       │
+      │                       │                       │
+```
 
 ## Certificate flow — pod-as-CVM (Kata)
 
@@ -112,7 +146,30 @@ attestation-api is the in-guest service at `127.0.0.1:8400`. The trust anchor is
 **launch measurement** — CDS, attestation-service, ratls-mesh, and policy-monitor are all
 baked into the guest image and therefore covered by it.
 
-![Pod-as-CVM certificate flow: the workload CVM attests to the CDS CVM, which verifies evidence via the in-guest attestation-service and returns a leaf certificate — all inside the TEE boundary.](/diagrams/cert-flow-kata.svg)
+```
+  ╔═ SEV-SNP BOUNDARY · HOST CANNOT READ ════════════════════════════════╗
+  ║                                                                      ║
+  ║   Workload CVM            CDS CVM             attestation-service    ║
+  ║   [get-cert]              [mesh CA]           [127.0.0.1:8400]       ║
+  ║      │                       │                       │               ║
+  ║      │  RA-TLS connect       │                       │               ║
+  ║      │  verify CDS measurement                       │               ║
+  ║      │──────────────────────►│                       │               ║
+  ║      │                       │                       │               ║
+  ║      │  POST /attest         │                       │               ║
+  ║      │  challenge + evidence + CSR                   │               ║
+  ║      │──────────────────────►│                       │               ║
+  ║      │                       │  verify in-process    │               ║
+  ║      │                       │──────────────────────►│               ║
+  ║      │                       │                       │               ║
+  ║      │                       │  verdict + launch_digest              ║
+  ║      │                       │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│               ║
+  ║      │                       │                       │               ║
+  ║      │  leaf cert from mesh CA                       │               ║
+  ║      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                       │               ║
+  ║      │                       │                       │               ║
+  ╚══════════════════════════════════════════════════════════════════════╝
+```
 
 ## Install & admission ordering
 

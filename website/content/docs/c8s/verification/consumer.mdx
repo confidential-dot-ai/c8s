@@ -21,7 +21,42 @@ Instead of hiding attestation inside the TLS certificate, the c8s **Load Balance
 it over a normal HTTPS endpoint, via a challenge/response, and the client establishes a second,
 attested channel *inside* the existing connection:
 
-![Browser over-encryption flow: the browser fetches the LB enclave's attestation through the untrusted TLS terminator, verifies the hardware attestation evidence in WASM, runs a post-quantum handshake, and tunnels sealed requests end-to-end to the enclave.](/diagrams/over-encryption.svg)
+```
+ ┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────────┐
+ │       Browser       │    │   TLS terminator    │    │     LB enclave      │
+ │    c8s-verify-js    │    │      untrusted      │    │         TEE         │
+ └──────────┬──────────┘    └──────────┬──────────┘    └──────────┬──────────┘
+            │                          │                          │
+            │  GET /.well-known/c8s/attestation?nonce=N           │
+            │──────────────────────────┼──────────────────────────►
+            │                          │                          │
+            │                          │ ┌────────────────────────┴────────────┐
+            │                          │ │ HW report binds session key + nonce │
+            │                          │ └────────────────────────┬────────────┘
+            │                          │                          │
+            │  evidence + session pubkey + CDS cert               │
+            ◄──────────────────────────┼──────────────────────────│
+            │                          │                          │
+┌───────────┴────────────────────┐     │                          │
+│ verify SNP sig · measurement · │     │                          │
+│ report_data (WASM)             │     │                          │
+└───────────┬────────────────────┘     │                          │
+            │                          │                          │
+            │  handshake — X25519 + ML-KEM-768                    │
+            │──────────────────────────┼──────────────────────────►
+            │                          │                          │
+            │   ┌────────────────────────────────────────────┐    │
+            │   │ derive AES-256-GCM over-encryption channel │    │
+            │   └────────────────────────────────────────────┘    │
+            │                          │                          │
+            │  POST /tunnel — sealed request                      │
+            │──────────────────────────┼──────────────────────────►
+            │                          │                          │
+            │  sealed response         │                          │
+            ◄──────────────────────────┼──────────────────────────│
+            │                          │                          │
+            ▼                          ▼                          ▼
+```
 
 The plain HTTPS channel is **not trusted** — a malicious TLS-terminating proxy may sit in front
 of the real LB. Verification is performed entirely on the returned payload, and only then does

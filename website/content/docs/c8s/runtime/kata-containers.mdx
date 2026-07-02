@@ -70,7 +70,16 @@ swapped out by the host.
 
 ## Three layers of attestation
 
-![Three layers of attestation: the guest image (SNP launch digest), the container image (OCI digest checked against the allowlist), and the workload identity (RA-TLS certificate).](/diagrams/attestation-layers.svg)
+```
+   LAYER 0                  LAYER 1                  LAYER 2
+ ┌───────────────┐        ┌───────────────┐        ┌───────────────┐
+ │  Guest image  │        │   Container   │        │   Workload    │
+ │               │──────► │     image     │──────► │   identity    │
+ │  SNP launch   │        │               │        │               │
+ │    digest     │        │  OCI digest · │        │    RA-TLS     │
+ │               │        │   allowlist   │        │  certificate  │
+ └───────────────┘        └───────────────┘        └───────────────┘
+```
 
 1. **Guest image** — the SNP launch digest over OVMF + `vmlinuz` + cmdline (embedding the
    dm-verity root hash). Operator pre-attests and pins it.

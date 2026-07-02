@@ -220,8 +220,11 @@ body {
   text-decoration-color: var(--accent);
 }
 
-/* Underline only the Card title ("the title bits"), not the description. */
+/* Card titles style themselves (`not-prose`); the prose heading rules shouldn't
+   leak in. Zero the prose top margin so the title sits at the top of the card,
+   and underline only the title ("the title bits"). */
 .prose a[data-card] > h3 {
+  margin-block: 0;
   text-decoration-line: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
@@ -317,13 +320,18 @@ body {
   margin-top: 0;
 }
 
-.prose code {
+/* Exclude Fumadocs code blocks (their <figure> is `.not-prose`) from the marketing
+   code styling — otherwise the prose <pre> background/padding/border double up on
+   top of Fumadocs' own code box, adding grey bands above/below the code. Inline
+   code (not inside a `.not-prose` figure) still gets styled. */
+.prose code:not(:where(.not-prose, .not-prose *)) {
   font-family: var(--font-mono);
   font-size: 0.85em;
   color: var(--code);
   background: var(--code-bg);
   padding: 0.1em 0.35em;
   border-radius: 4px;
+  border: 0;
 }
 
 .prose a code {
@@ -338,7 +346,7 @@ body {
   margin-bottom: 1rem;
 }
 
-.prose pre {
+.prose pre:not(:where(.not-prose, .not-prose *)) {
   background: var(--pre-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -353,12 +361,16 @@ body {
   margin-bottom: 0;
 }
 
-.prose pre code {
+.prose pre code:not(:where(.not-prose, .not-prose *)) {
   color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 0.85em;
   background: none;
   padding: 0;
+  /* The code is inline + multi-line; without this, a stray bottom border
+     (introduced by the global Fumadocs reset) draws a faint line under every
+     row — very visible in ASCII/box-drawing diagrams. */
+  border: 0;
 }
 
 .copy-button {

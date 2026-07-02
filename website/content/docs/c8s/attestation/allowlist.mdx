@@ -56,7 +56,39 @@ key** (ES256 / P-256, see [CDS bootstrap](/docs/c8s/attestation/cds#token-signin
 and publishes the public half as a JWKS, and it only ever signs a token for a caller it has just
 verified — so holding a CDS-signed token *is* the credential, and there is nothing else to steal.
 
-![Allowlist write flow: an attested writer attests to the CDS, receives a token bound to the exact change (pbh), then POSTs to /allowlist with that token; the CDS re-verifies the signature, the writer's measurement, and the body hash before committing.](/diagrams/allowlist-write.svg)
+```
+  ┌─────────────────────────────┐          ┌─────────────────────────────┐
+  │           Writer            │          │             CDS             │
+  │       attested TEE ·        │          │      token-signing key      │
+  │    in write-measurements    │          │         (bootstrap)         │
+  └──────────────┬──────────────┘          └──────────────┬──────────────┘
+                 │                                        │
+                 │  attest — evidence + intended change   │
+                 │────────────────────────────────────────►
+                 │                                        │
+                 │                          ┌─────────────┴────────────┐
+                 │                          │ verify evidence ·        │
+                 │                          │ measurement ∈ write-list │
+                 │                          └─────────────┬────────────┘
+                 │                                        │
+                 │  attestation-bound token ·             │
+                 │  pbh = SHA-256(change)                 │
+                 ◄────────────────────────────────────────│
+                 │                                        │
+                 │  POST /allowlist {digest, image}       │
+                 │  + Bearer token                        │
+                 │────────────────────────────────────────►
+                 │                                        │
+                 │                          ┌─────────────┴─────────────┐
+                 │                          │ check sig · measurement · │
+                 │                          │ pbh = SHA-256(body)       │
+                 │                          └─────────────┬─────────────┘
+                 │                                        │
+                 │  204 · version bumped                  │
+                 ◄────────────────────────────────────────│
+                 │                                        │
+                 ▼                                        ▼
+```
 
 A write is four steps:
 
