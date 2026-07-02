@@ -260,7 +260,14 @@ This is how Android and Chrome OS work. The OS is read-only and verified. User d
 
 ### Practical Workflow
 
-When you update your application code, the workflow has several steps. First, copy your new code into the rootfs directory. Second, rebuild the filesystem image. Third, compute a new hash tree and root hash. Fourth, update your initramfs init script with the new root hash. Fifth, rebuild the initramfs archive. Finally, regenerate your IGVM file and compute the new expected measurement.
+When you update your application code, the workflow has several steps:
+
+1. Copy your new code into the rootfs directory.
+2. Rebuild the filesystem image.
+3. Compute a new hash tree and root hash.
+4. Update your initramfs init script with the new root hash.
+5. Rebuild the initramfs archive.
+6. Regenerate your IGVM file and compute the new expected measurement.
 
 The kernel and OVMF typically stay the same across updates. Only the initramfs changes (because it contains the new root hash), which means the LAUNCH_DIGEST changes.
 
