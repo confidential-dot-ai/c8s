@@ -55,7 +55,14 @@ Cloud providers implement extensive security controls: employee background check
 
 SEV-SNP treats the hypervisor as adversarial. This isn't a statement about cloud provider intentions. It's a design principle: assume the worst-case attacker has full control of the hypervisor and host OS, then design hardware that protects the guest anyway.
 
-What does "full hypervisor control" mean in practice? The attacker can read and write any region of host memory. They can inspect and modify the nested page tables that translate guest physical addresses to system physical addresses. They can control which physical pages back the guest's memory. They can intercept and inject interrupts. They can pause, resume, snapshot, and migrate the VM at will. They control the I/O devices the guest thinks it's talking to.
+What does "full hypervisor control" mean in practice? The attacker can:
+
+- Read and write any region of host memory
+- Inspect and modify the nested page tables that translate guest physical addresses to system physical addresses
+- Control which physical pages back the guest's memory
+- Intercept and inject interrupts
+- Pause, resume, snapshot, and migrate the VM at will
+- Control the I/O devices the guest thinks it's talking to
 
 In traditional virtualization, this level of access means total compromise. The attacker can dump the guest's memory, extract encryption keys, modify code in flight, and observe every piece of data the guest processes. SEV-SNP's goal is to make most of these attacks impossible despite the attacker having this level of access.
 

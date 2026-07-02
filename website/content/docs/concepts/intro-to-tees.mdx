@@ -29,7 +29,14 @@ Here's how this works in practice: Suppose that a user wants to submit a sensiti
 
 The server runs the LLM inside a TEE. When the user sends their query, it gets encrypted with the TEE's public key before transmission. Inside the TEE, the model processes the encrypted query using weights that remain encrypted in memory and are never accessible in plaintext to any software outside the enclave. The model returns an encrypted response along with a cryptographic attestation that proves exactly which model version and code processed the query and verifies that no other software could access the user's data or the model weights.
 
-Without a TEE, this interaction would expose the user's query in plaintext during processing, allow system administrators and other processes to access both the query and model weights in memory, enable potential interception by malicious software on the host system, and provide no verifiable guarantee about which software actually processed the request. The TEE provides hardware-backed isolation and cryptographic verification that creates a secure computation environment even on untrusted infrastructure.
+Without a TEE, this interaction would:
+
+- Expose the user's query in plaintext during processing
+- Allow system administrators and other processes to access both the query and model weights in memory
+- Enable potential interception by malicious software on the host system
+- Provide no verifiable guarantee about which software actually processed the request
+
+The TEE provides hardware-backed isolation and cryptographic verification that creates a secure computation environment even on untrusted infrastructure.
 
 ## How TEEs Actually Work
 
