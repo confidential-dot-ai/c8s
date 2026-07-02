@@ -23,12 +23,14 @@ export default async function Page(props: {
   // Journey pages render the <JourneyNav> stepper, so suppress the built-in
   // sidebar-order prev/next footer there (it would conflict with the path order).
   const onJourney = JOURNEY_URLS.includes(page.url);
+  // The docs hub is an index, not part of a linear reading flow — no prev/next.
+  const isHub = page.url === '/docs';
 
   return (
     <DocsPage
       toc={page.data.toc}
       full={page.data.full}
-      footer={{ enabled: !onJourney }}
+      footer={{ enabled: !onJourney && !isHub }}
     >
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
