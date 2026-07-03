@@ -40,6 +40,52 @@ Install image reference.
 {{- end }}
 
 {{/*
+Component-label prefix of the installer DaemonSet pods ("nri-installer-cds" /
+"nri-installer-worker"). pushImage's pod lookup filters on it — shared so a
+rename moves both.
+*/}}
+{{- define "nri-image-policy.installerComponentPrefix" -}}
+nri-installer-
+{{- end }}
+
+{{/*
+Image for the pre-upgrade push-hook pod. The old CDS-node plugin only admits
+digests in its old floor, so the hook must run an already-admitted image: a
+Running installer pod's install image (DS rolls maxUnavailable:1, so one
+survives mid-roll). Prefer a cds-archetype pod — it ran on the CDS node, so
+its image is admitted by the plugin the hook talks to; a worker pod's image
+only proves admissibility under that node's floor ∪ CDS-pull. The DaemonSet
+object is no use — a failed upgrade attempt already points its spec at the
+new, denied digest. Falls back to the chart's own image when lookup is empty
+(fresh install, helm template) — no plugin is enforcing there.
+*/}}
+{{- define "nri-image-policy.pushImage" -}}
+{{- $name := include "nri-image-policy.name" . -}}
+{{- $prefix := include "nri-image-policy.installerComponentPrefix" . -}}
+{{- $cdsImg := "" -}}
+{{- $anyImg := "" -}}
+{{- range dig "items" (list) (lookup "v1" "Pod" .Release.Namespace "") -}}
+{{- $labels := dig "metadata" "labels" (dict) . -}}
+{{- $component := dig "app.kubernetes.io/component" "" $labels -}}
+{{- if and (eq (dig "app.kubernetes.io/name" "" $labels) $name)
+           (eq (dig "app.kubernetes.io/instance" "" $labels) $.Release.Name)
+           (hasPrefix $prefix $component)
+           (eq (dig "status" "phase" "" .) "Running") -}}
+{{- range dig "spec" "initContainers" (list) . -}}
+{{- if eq (dig "name" "" .) "install" -}}
+{{- if eq $component (printf "%scds" $prefix) -}}
+{{- $cdsImg = dig "image" "" . -}}
+{{- else -}}
+{{- $anyImg = dig "image" "" . -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- coalesce $cdsImg $anyImg (include "nri-image-policy.image" .) -}}
+{{- end }}
+
+{{/*
 cdsPartitioned is true when cds.node.selector pins CDS to a dedicated node, so
 the installer renders the CDS/worker split (CDS-installer affinity In the
 selector, worker-installer anti-affinity NotIn it). An empty selector means "no

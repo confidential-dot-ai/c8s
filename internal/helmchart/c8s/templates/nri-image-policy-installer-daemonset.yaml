@@ -22,12 +22,12 @@ metadata:
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "nri-image-policy.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: nri-installer-{{ $archetype }}
+    app.kubernetes.io/component: {{ include "nri-image-policy.installerComponentPrefix" $ }}{{ $archetype }}
 spec:
   selector:
     matchLabels:
       {{- include "nri-image-policy.selectorLabels" $ | nindent 6 }}
-      app.kubernetes.io/component: nri-installer-{{ $archetype }}
+      app.kubernetes.io/component: {{ include "nri-image-policy.installerComponentPrefix" $ }}{{ $archetype }}
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -37,7 +37,7 @@ spec:
     metadata:
       labels:
         {{- include "nri-image-policy.selectorLabels" $ | nindent 8 }}
-        app.kubernetes.io/component: nri-installer-{{ $archetype }}
+        app.kubernetes.io/component: {{ include "nri-image-policy.installerComponentPrefix" $ }}{{ $archetype }}
       annotations:
         sidecar.istio.io/inject: "false"
     spec:

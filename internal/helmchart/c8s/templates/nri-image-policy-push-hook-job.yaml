@@ -1,3 +1,12 @@
+{{/*
+Upgrade keystone: before the roll, push the NEW installer digest to the
+CDS-node plugin so the new installer DS pod is admitted there. The installer
+then delivers the full new floor (+ containerd restart) → the new CDS pod is
+admitted → CDS serves the new allowlist → worker plugins pull it within one
+refresh interval and kubelet retries admit every other new pod. Without this
+push the enforcer can never upgrade itself: old floors deny all new images.
+See docs/decisions/2026-07-03-upgrade-keystone-push.md.
+*/}}
 {{- if .Values.nriImagePolicy.enabled }}
 apiVersion: batch/v1
 kind: Job
@@ -6,9 +15,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nri-image-policy.labels" . | nindent 4 }}
-    app.kubernetes.io/component: cds-digest-push
+    app.kubernetes.io/component: installer-digest-push
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    # pre-upgrade only: rollback replays stored hooks (see the decision doc).
+    helm.sh/hook: pre-upgrade
     helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
 spec:
@@ -18,7 +28,7 @@ spec:
     metadata:
       labels:
         {{- include "nri-image-policy.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: cds-digest-push
+        app.kubernetes.io/component: installer-digest-push
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
@@ -34,14 +44,14 @@ spec:
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.nriImagePolicy.imagePullSecrets) | nindent 6 }}
       containers:
         - name: push
-          image: {{ include "nri-image-policy.image" . }}
+          image: {{ include "nri-image-policy.pushImage" . }}
           imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
           env:
             - name: SOCKET
-              value: {{ printf "%s/%s" .Values.nriImagePolicy.hostPaths.runtimeDir .Values.nriImagePolicy.healthSocketName | quote }}
+              value: {{ include "nri-image-policy.hostHealthSocket" . | quote }}
             - name: PAYLOAD
-              value: |-
-                {"version":"1","digests":{ {{ $d := required "cds.image.digest is required" .Values.cds.image.digest }}{{ $d | quote }}: {{ printf "%s@%s" .Values.cds.image.repository $d | quote }} }}
+              {{- $d := required "nriImagePolicy.image.digest is required" .Values.nriImagePolicy.image.digest }}
+              value: {{ dict "version" "1" "digests" (dict $d (printf "%s@%s" .Values.nriImagePolicy.image.repository $d)) | toJson | quote }}
             - name: MAX_TIME
               value: {{ .Values.nriImagePolicy.push.curlMaxTime | quote }}
             - name: RETRIES
@@ -54,19 +64,26 @@ spec:
               set -eu
               i=0
               while [ "$i" -lt "$RETRIES" ]; do
-                if curl --unix-socket "$SOCKET" \
-                        --fail --silent --show-error \
-                        --max-time "$MAX_TIME" \
-                        -X PUT http://localhost/allowlist \
-                        -H 'Content-Type: application/json' \
-                        --data "$PAYLOAD"; then
-                  echo "push succeeded"
-                  exit 0
+                if [ -S "$SOCKET" ]; then
+                  if curl --unix-socket "$SOCKET" \
+                          --fail --silent --show-error \
+                          --max-time "$MAX_TIME" \
+                          -X PUT http://localhost/allowlist \
+                          -H 'Content-Type: application/json' \
+                          --data "$PAYLOAD"; then
+                    echo "push succeeded"
+                    exit 0
+                  fi
                 fi
                 i=$((i + 1))
                 echo "push attempt $i failed; sleeping $RETRY_DELAY s"
                 sleep "$RETRY_DELAY"
               done
+              if [ ! -S "$SOCKET" ]; then
+                echo "no plugin socket at $SOCKET; image policy not active on this node, nothing to unblock"
+                echo "(if policy SHOULD be active here, check hostPaths.runtimeDir/healthSocketName match the running release)"
+                exit 0
+              fi
               echo "push failed after $RETRIES attempts" >&2
               exit 1
           volumeMounts:
@@ -78,5 +95,5 @@ spec:
         - name: nri-socket
           hostPath:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
-            type: Directory
+            type: DirectoryOrCreate
 {{- end }}

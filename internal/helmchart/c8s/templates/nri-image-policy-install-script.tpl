@@ -146,11 +146,14 @@ if [ "$containerd_changed" = "1" ] || [ "$binary_changed" = "1" ] || [ "$config_
 fi
 
 i=0
+# Sized against the worker plugin's initial CDS pull (allowlistApi* consts in
+# internal/cmds/nri-image-policy/main.go): 4 backoff sleeps (2+4+8+16s) plus
+# per-attempt fetch timeouts before it goes Ready on the floor.
 until curl --unix-socket "/host{{ include "nri-image-policy.hostHealthSocket" $root }}" --silent --fail \
     --max-time 2 http://localhost/healthz >/dev/null 2>&1; do
   i=$((i + 1))
-  if [ "$i" -gt 60 ]; then
-    echo "ERROR: plugin not healthy after 60s" >&2
+  if [ "$i" -gt 120 ]; then
+    echo "ERROR: plugin not healthy after 120s" >&2
     exit 1
   fi
   sleep 1

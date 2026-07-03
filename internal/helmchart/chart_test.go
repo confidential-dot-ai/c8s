@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -540,6 +541,13 @@ func TestChartNriInstallerPartitionedByDefault(t *testing.T) {
 	}
 	if !nodeAffinityHasKey(worker, "role") {
 		t.Error("default worker installer must NotIn the role=cds selector")
+	}
+	// The push hook's pod lookup filters on this label prefix; a rename here
+	// silently turns the upgrade keystone into a permanent fallback.
+	for name, ds := range map[string]appsv1.DaemonSet{"cds": cds, "worker": worker} {
+		if got, want := ds.Spec.Template.Labels["app.kubernetes.io/component"], "nri-installer-"+name; got != want {
+			t.Errorf("%s installer pod component label = %q, want %q (pushImage lookup contract)", name, got, want)
+		}
 	}
 }
 
@@ -1140,6 +1148,95 @@ func TestChartNRIImagePolicyUsesCDSPushAndPullModes(t *testing.T) {
 	}
 	if cdsCfg.Allowlist.Pull.URL != "" {
 		t.Fatalf("CDS-node boot config has pull URL %q, want empty", cdsCfg.Allowlist.Pull.URL)
+	}
+}
+
+// renderedPushHookJob decodes the nri-image-policy push-hook Job.
+func renderedPushHookJob(t *testing.T, manifest string) batchv1.Job {
+	t.Helper()
+	var job batchv1.Job
+	if !findDoc(t, manifest, "Job", "c8s-nri-image-policy-push", &job) {
+		t.Fatalf("rendered manifest missing Job c8s-nri-image-policy-push\n%s", manifest)
+	}
+	return job
+}
+
+// The push hook is the upgrade keystone: it must fire BEFORE the roll and
+// push the new installer digest — not the cds digest — so the old CDS-node
+// plugin admits the new installer, which then delivers the full new floor.
+// Under helm template, lookup returns nothing, so the image is the fallback
+// (the chart's own installer image); the live-cluster path picks a Running
+// installer pod's image instead.
+func TestChartNriPushHookIsPreUpgradeKeystone(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	job := renderedPushHookJob(t, out)
+	// pre-upgrade only — rollback replays stored hooks (see the decision doc).
+	if got, want := job.Annotations["helm.sh/hook"], "pre-upgrade"; got != want {
+		t.Errorf("hook = %q, want %q", got, want)
+	}
+	if got, want := job.Annotations["helm.sh/hook-delete-policy"], "hook-succeeded,before-hook-creation"; got != want {
+		t.Errorf("hook-delete-policy = %q, want %q", got, want)
+	}
+
+	push := job.Spec.Template.Spec.Containers[0]
+	if got, want := push.Image, "ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest; got != want {
+		t.Errorf("hook image = %q, want lookup fallback %q", got, want)
+	}
+	var payload string
+	for _, env := range push.Env {
+		if env.Name == "PAYLOAD" {
+			payload = env.Value
+		}
+	}
+	if want := "ghcr.io/confidential-dot-ai/nri-image-policy@" + baseNRIDigest; !strings.Contains(payload, want) {
+		t.Errorf("PAYLOAD %q missing installer entry %q", payload, want)
+	}
+	if cdsDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000001"; strings.Contains(payload, cdsDigest) {
+		t.Errorf("PAYLOAD %q still carries the cds digest; the floor's cds self-entry covers it", payload)
+	}
+
+	if got, want := job.Spec.Template.Spec.NodeSelector["role"], "cds"; got != want {
+		t.Errorf("hook nodeSelector role = %q, want %q (must land on the CDS node's socket)", got, want)
+	}
+	vol := job.Spec.Template.Spec.Volumes[0]
+	if vol.HostPath == nil || vol.HostPath.Type == nil || *vol.HostPath.Type != corev1.HostPathDirectoryOrCreate {
+		t.Errorf("socket hostPath type = %v, want DirectoryOrCreate (pod must start on an untouched node)", vol.HostPath)
+	}
+}
+
+// A missing plugin socket means image policy is not active on the node —
+// the hook must no-op instead of failing the release.
+func TestChartNriPushHookToleratesAbsentSocket(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	job := renderedPushHookJob(t, out)
+	script := job.Spec.Template.Spec.Containers[0].Args[0]
+	for _, want := range []string{
+		`if [ -S "$SOCKET" ]; then`,
+		`image policy not active on this node`,
+		"exit 0",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("hook script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// Single-node mode (empty cds.node.selector) still renders the hook, with no
+// nodeSelector so it lands on the lone node.
+func TestChartNriPushHookRendersInSingleNodeMode(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "cds.node.selector=null")
+	if err != nil {
+		t.Fatalf("helm template --set cds.node.selector=null: %v\n%s", err, out)
+	}
+	job := renderedPushHookJob(t, out)
+	if len(job.Spec.Template.Spec.NodeSelector) != 0 {
+		t.Errorf("single-node hook must have no nodeSelector; got %v", job.Spec.Template.Spec.NodeSelector)
 	}
 }
 

@@ -758,8 +758,8 @@ nriImagePolicy:
   # Logging
   logLevel: info
 
-  # Push hook tuning. The hook uses the install image; image.digest is rendered
-  # into always_allow so the hook Pod can be admitted by the CDS-node plugin.
+  # Tuning for the pre-upgrade keystone push (see
+  # docs/decisions/2026-07-03-upgrade-keystone-push.md).
   push:
     curlMaxTime: "10"
     retries: "30"
@@ -774,7 +774,9 @@ nriImagePolicy:
         cpu: 100m
         memory: 32Mi
 
-  # Host paths the installer DaemonSets write to.
+  # Host paths the installer DaemonSets write to. runtimeDir (with
+  # healthSocketName) is the push-hook's contract with the PREVIOUS release's
+  # plugin — renaming it silently no-ops the upgrade keystone.
   hostPaths:
     pluginDir: /opt/nri/plugins
     configDir: /etc/nri/conf.d
