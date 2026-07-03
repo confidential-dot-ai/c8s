@@ -297,16 +297,25 @@ jobs:
           # build time. The workflow_run trigger already ensures Docker
           # succeeded on this same head_sha before we get here.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          # In-guest GHCR creds baked into the dm-verity rootfs so kata's
-          # experimental_force_guest_pull can fetch PRIVATE ghcr.io/confidential-dot-ai
-          # workload images (fetch.sh -> /etc/c8s/ghcr-auth.json -> tmpfiles
-          # copies it to /run/image-security/auth.json at boot). Classic
-          # read:packages PAT in the repo secret READ_PRIVATE_GHCR_TOKEN; if it
-          # is unset, fetch.sh bakes an empty auth set (anonymous, no secret in
-          # the image). GHCR validates the token not the username, but it must
-          # be non-empty — pass the repo owner. Baking a credential into the
-          # measured rootfs is a deliberate, documented tradeoff while the repos
-          # are private — see docs/pitfalls.md "ghcr-auth.json".
+          # READ_PRIVATE_GHCR_TOKEN (classic read:packages PAT, repo secret) has
+          # two jobs in fetch.sh, both needing cross-repo GHCR read:
+          #   1. In-guest GHCR creds baked into the dm-verity rootfs so kata's
+          #      experimental_force_guest_pull can fetch PRIVATE
+          #      ghcr.io/confidential-dot-ai workload images (fetch.sh ->
+          #      /etc/c8s/ghcr-auth.json -> tmpfiles copies it to
+          #      /run/image-security/auth.json at boot). If unset, fetch.sh bakes
+          #      an empty auth set (anonymous, no secret in the image). Baking a
+          #      credential into the measured rootfs is a deliberate, documented
+          #      tradeoff while the repos are private — see docs/pitfalls.md
+          #      "ghcr-auth.json".
+          #   2. Resolving the bootstrap-allowlist digest of tee-proxy, whose
+          #      GHCR package lives in a SIBLING repo (confidential-dot-ai/
+          #      tee-proxy) that this job's GITHUB_TOKEN login can't read (403).
+          #      fetch.sh resolves tee-proxy at its own branch tag (default
+          #      `main`, since tee-proxy versions independently of this repo) and
+          #      pins the digest into the measured allowlist.
+          # GHCR validates the token not the username, but it must be non-empty —
+          # pass the repo owner.
           READ_PRIVATE_GHCR_TOKEN: ${{ secrets.READ_PRIVATE_GHCR_TOKEN }}
           GHCR_PULL_USER: ${{ github.repository_owner }}
         run: |
