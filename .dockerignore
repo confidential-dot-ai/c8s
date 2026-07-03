@@ -1,0 +1,4 @@
+kata-guest-base/.build
+kata-guest-base/output*
+.git
+node_modules

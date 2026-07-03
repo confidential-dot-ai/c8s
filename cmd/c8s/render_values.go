@@ -144,9 +144,12 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sCom
 	if distro != "" {
 		setArgs = appendDistroInstallArgs(setArgs, distro)
 	}
-	if cmd.Flags().Changed(flagCvmMode) {
+	// Either flag changing on the CLI triggers the --set flow. A user who
+	// wants to drive teeDevices purely via -f leaves both flags unset and the
+	// chart's own defaults hold.
+	if cmd.Flags().Changed(flagCvmMode) || cmd.Flags().Changed(flagHardwarePlatform) {
 		var err error
-		setArgs, err = appendCvmModeInstallArgs(setArgs, installCvmMode)
+		setArgs, err = appendCvmModeInstallArgs(setArgs, installCvmMode, installHardwarePlatform)
 		if err != nil {
 			return nil, err
 		}
@@ -278,7 +281,8 @@ func init() {
 	renderValuesCmd.Flags().BoolVar(&installCRDs, "install-crds", true, "emit values for chart CRDs (false sets statusMirror.enabled=false, matching install --install-crds=false)")
 	renderValuesCmd.Flags().StringVar(&renderValuesDistro, "distro", "", "host Kubernetes distro (k8s | rke2) — install autodetects this from the cluster; render-values has no cluster, so pass it explicitly when you need it pinned. Unset leaves the chart default")
 	renderValuesCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration (cds.node.selector={}, cds.node.tolerations=[])")
-	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape selecting the TEE device: baremetal or gke (native /dev/sev-guest) or aks (vTPM /dev/tpm0)")
+	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM deployment shape (orthogonal to --hardware-platform): baremetal or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0)")
+	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "sev-snp", "CPU-level TEE hardware (orthogonal to --cvm-mode): sev-snp (default, /dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks")
 	renderValuesCmd.Flags().BoolVar(&installKata, "kata", false, "emit the Kata Containers runtime values (kata.enabled=true; disables host-side ratls-mesh/attestation-api/nri-image-policy)")
 	renderValuesCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (requires --kata)")
 	renderValuesCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each component image tag to its registry digest (via crane), pin it, and enable the NRI allowlist derivation")

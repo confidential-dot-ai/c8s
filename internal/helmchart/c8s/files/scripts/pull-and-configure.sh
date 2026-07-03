@@ -1,8 +1,16 @@
 #!/bin/sh
 # Pull the kata-guest-base rootfs image (hardened kernel + dm-verity
-# rootfs) into the host kata-images dir and rewrite the kata-qemu-snp
-# runtime config so kata-runtime boots our kernel + verity rootfs for
-# every kata-qemu-snp pod (measured direct-kernel boot, no IGVM).
+# rootfs) into the host kata-images dir and rewrite the confidential
+# kata runtime's config so kata-runtime boots our kernel + verity rootfs
+# for every pod (measured direct-kernel boot, no IGVM).
+#
+# One kata-guest-base artifact serves both kata-qemu-snp (AMD SEV-SNP) and
+# kata-qemu-tdx (Intel TDX): the vmlinuz has both TEE guest drivers built
+# in (runtime-probed), the rootfs bytes are TEE-neutral, and the dm-verity
+# root_hash is the same across shims. SHIM_NAME selects which shim's toml
+# to rewrite. On qemu-snp we also pin default_vcpus=1 because the SNP
+# launch digest depends on VMSA count; on qemu-tdx we omit that pin
+# because MRTD + RTMR[1] are SMP-invariant.
 #
 # Pure POSIX shell, kept as a standalone file (templated into the
 # kata-image-puller ConfigMap via .Files.Get) so it gets shellcheck.
@@ -13,6 +21,13 @@
 #   REGISTRY        guest-image registry (e.g. ghcr.io/confidential-dot-ai)   [required]
 #   TAG             kata-guest-base tag                             [required]
 #   HOST_IMG_DIR    /host-prefixed dir the puller writes into       [required]
+#   SHIM_NAME       confidential shim to configure: qemu-snp or qemu-tdx
+#                   [default qemu-snp — backward compat with pre-TDX chart]
+#   KATA_DEBUG      "true" to keep debug_console_enabled + journal-to-console
+#                   in the shim toml (dev only — host reads guest journal).
+#                   Default false = puller strips both so a leaked hand-patch
+#                   or a debug-variant install-then-normal-reinstall doesn't
+#                   silently ship a guest that streams its journal to the host.
 #   REGISTRY_AUTH   in-guest workload registry auth source (file://
 #                   baked path or kbs:// URI); empty = anonymous    [optional]
 #   ORAS_INSECURE   "true" to pull over plain HTTP (local mirror)   [optional]
@@ -21,6 +36,12 @@ set -eu
 : "${REGISTRY:?REGISTRY must be set (kata.guestImage.repository)}"
 : "${TAG:?TAG must be set (kata.guestImage.tag)}"
 : "${HOST_IMG_DIR:?HOST_IMG_DIR must be set (/host + kata.guestImage.hostPath)}"
+SHIM_NAME="${SHIM_NAME:-qemu-snp}"
+case "${SHIM_NAME}" in
+    qemu-snp|qemu-tdx) ;;
+    *) echo "ERROR: SHIM_NAME must be qemu-snp or qemu-tdx (got '${SHIM_NAME}')" >&2; exit 1 ;;
+esac
+KATA_DEBUG="${KATA_DEBUG:-false}"
 REGISTRY_AUTH="${REGISTRY_AUTH:-}"
 # --plain-http makes oras talk to an insecure (HTTP, no TLS) registry — for
 # local / in-cluster mirrors only. Empty for a normal TLS registry.
@@ -75,99 +96,96 @@ esac
 # sees the same files without the prefix.
 host_out_dir="${out_dir#/host}"
 
-# kata-deploy installs the qemu-snp config as a REGULAR FILE under
-# runtimes/qemu-snp/ and a convenience SYMLINK to it at this parent dir.
-# containerd's ConfigPath (emitted by kata-deploy's own install) points
-# at the runtimes/qemu-snp/ file — confirmed with `containerd config
-# dump`: ConfigPath = .../runtimes/qemu-snp/configuration-qemu-snp.toml.
-# So we patch that file directly. Patching the parent symlink path is a
-# silent no-op: sed/mv there replaces the symlink with a regular file and
-# leaves the runtimes/ file (the one the runtime loads) untouched, so the
-# pod fails at sandbox creation with the stock shared_fs="none"/no-guest-
-# pull `failed to mount .../rootfs ENOENT`. Targeting runtimes/ directly
-# is also robust to a parent symlink that a prior run already clobbered
-# into a stale regular file. See bare-metal-infra-management
-# docs/kata.md "TOML editing gotchas".
-cfg_target="${KATA_CONFIG_DIR}/runtimes/qemu-snp/configuration-qemu-snp.toml"
-if [ ! -f "${cfg_target}" ]; then
-    echo "ERROR: ${cfg_target} missing — has kata-deploy finished?" >&2
+# c8s writes ONLY a config.d/ drop-in — never the main configuration-<shim>.toml.
+#
+# kata-deploy owns the main toml (`configuration-qemu-snp.toml` /
+# `configuration-qemu-tdx.toml`) and rewrites it every time the DaemonSet's pod
+# restarts. Editing the main file in place produces a race the puller keeps
+# losing: kata-deploy restarts → clobbers our patch → next sandbox launches
+# with stock kata paths → containerd stack fails at rootfs mount (SNP: stock
+# vmlinuz doesn't have the c8s in-guest bits; TDX: stock vmlinuz doesn't have
+# TDX guest driver either).
+#
+# kata-runtime's config loader (src/runtime/pkg/katautils/config.go
+# decodeDropIns / updateFromDropIn) reads every *.toml in a `config.d/`
+# subdirectory next to the main file in alphabetical order AFTER the main
+# file, and each drop-in's set fields override the main file's values.
+# kata-deploy never touches config.d/, so a drop-in survives DS restarts
+# by design. This is exactly the mechanism the main-toml header comment
+# points operators at ("do not modify this file; put overrides in
+# config.d/").
+cfg_dir="${KATA_CONFIG_DIR}/runtimes/${SHIM_NAME}"
+main_cfg="${cfg_dir}/configuration-${SHIM_NAME}.toml"
+if [ ! -f "${main_cfg}" ]; then
+    echo "ERROR: ${main_cfg} missing — has kata-deploy finished?" >&2
     exit 1
 fi
-src_cfg="${cfg_target}.upstream"
-if [ ! -f "${src_cfg}" ]; then
-    # First run — snapshot kata-deploy's default once so subsequent
-    # runs re-derive from the pristine base.
-    cp "${cfg_target}" "${src_cfg}"
-fi
 
-echo "  Writing ${cfg_target}"
-# Point kata-qemu-snp at our kata-native parts and pin the knobs that
-# make the boot work + keep the SNP measurement stable. Everything else
-# (qemu path, SNP firmware/AMDSEV.fd, machine type) stays at
-# kata-deploy's stock SNP defaults.
+dropin_dir="${cfg_dir}/config.d"
+dropin="${dropin_dir}/50-c8s.toml"
+mkdir -p "${dropin_dir}"
+
+echo "  Writing ${dropin}"
+# Compose the drop-in. Fields we set:
 #
-#   kernel/image          -> our hardened vmlinuz + dm-verity rootfs image
-#   rootfs_type           -> ext4 (matches the osbuilder measured image;
-#                            value comes from the build's rootfs_type sidecar)
-#   kernel_verity_params  -> our root_hash/salt/blocks; kata builds the
-#                            dm-verity table from this and folds the hash
-#                            into the kernel-hashes SNP launch measurement
-#   shared_fs = none      -> no virtio-fs into the confidential guest
-#   default_vcpus/maxvcpus = 1 -> pin the boot-time VMSA count so the SNP
-#                            launch digest is stable across pods (the one
-#                            genuinely per-VM input to the measurement)
-sed -e "s|^kernel = .*|kernel = \"${host_out_dir}/vmlinuz\"|" \
-    -e "s|^image = .*|image = \"${host_out_dir}/kata-rootfs.img\"|" \
-    -e "s|^rootfs_type = .*|rootfs_type = \"${RFT}\"|" \
-    -e "s|^kernel_verity_params = .*|kernel_verity_params = \"${KVP}\"|" \
-    -e 's|^shared_fs = .*|shared_fs = "none"|' \
-    -e 's|^default_vcpus = .*|default_vcpus = 1|' \
-    -e 's|^default_maxvcpus = .*|default_maxvcpus = 1|' \
-    "${src_cfg}" > "${cfg_target}.c8s-tmp"
-
-# experimental_force_guest_pull = true. With shared_fs="none" there is
-# no host-share path for the container rootfs, so the kata-agent
-# (image-rs, confidential build) pulls the workload OCI image inside
-# the guest over its virtio-net interface. Without this, the kata-shim
-# fails with `failed to mount /run/kata-containers/shared/containers/
-# <id>/rootfs ... ENOENT`. Mirrors bare-metal-infra-management's kata
-# role (docs/kata-cc-mode.md). It's a [runtime]-section key; stock SNP
-# variants omit it, so replace-if-present else insert under [runtime].
-if grep -qE '^[[:space:]]*#?[[:space:]]*experimental_force_guest_pull[[:space:]]*=' "${cfg_target}.c8s-tmp"; then
-    sed -i -E 's|^[[:space:]]*#?[[:space:]]*experimental_force_guest_pull[[:space:]]*=.*|experimental_force_guest_pull = true|' "${cfg_target}.c8s-tmp"
-elif grep -qE '^\[runtime\]' "${cfg_target}.c8s-tmp"; then
-    sed -i '/^\[runtime\]/a experimental_force_guest_pull = true' "${cfg_target}.c8s-tmp"
-else
-    printf '\n[runtime]\nexperimental_force_guest_pull = true\n' >> "${cfg_target}.c8s-tmp"
-fi
-
-# In-guest registry auth. The kata-agent reads `agent.image_registry_auth`
-# off the guest kernel cmdline and hands the referenced credentials to the
-# in-guest CDH for guest-pull (kata's own
-# k8s-guest-pull-image-authenticated test wires it the same way). The value
-# is a file:// path baked into the measured rootfs (TEST — bakes creds into
-# the dm-verity image) or a kbs:// resource URI (production: the CDH fetches
-# it from the KBS after attestation). Appended to kernel_params, which rides
-# in the kernel-hashes SNP launch measurement: the value is a deterministic
-# URI (not the secret itself), so the launch digest stays stable. We derive
-# from the pristine upstream each run, so appending once is idempotent.
-if [ -n "${REGISTRY_AUTH}" ]; then
-    if grep -qE '^kernel_params = ' "${cfg_target}.c8s-tmp"; then
-        sed -i -E "s|^kernel_params = \"(.*)\"|kernel_params = \"\\1 agent.image_registry_auth=${REGISTRY_AUTH}\"|" "${cfg_target}.c8s-tmp"
-    else
-        echo "ERROR: no kernel_params line in ${cfg_target} to attach agent.image_registry_auth to" >&2
-        exit 1
+#   [hypervisor.qemu]
+#     kernel / image       -> our hardened vmlinuz + dm-verity rootfs
+#     rootfs_type          -> ext4 (from the osbuilder rootfs_type sidecar)
+#     kernel_verity_params -> the root_hash/salt/blocks matching the rootfs;
+#                             kata builds the dm-verity table from these and
+#                             folds the resulting hash into the launch
+#                             measurement (SNP kernel-hashes / TDX RTMR[1])
+#     shared_fs = "none"   -> no virtio-fs into the confidential guest
+#     kernel_params        -> appended to kata-runtime's built-in defaults;
+#                             carries agent.image_registry_auth for the
+#                             in-guest CDH's private-registry pull (baked
+#                             auth.json at /run/image-security/auth.json)
+#     default_vcpus/maxvcpus = 1 -> SNP-ONLY. Pins the boot-time VMSA count
+#                             so the launch digest is stable across pods.
+#                             TDX (MRTD + RTMR[1..2]) is SMP-invariant across
+#                             (vCPU, memory) — empirically confirmed — so we
+#                             omit the pin on qemu-tdx.
+#     debug_console_enabled -> forced false unless KATA_DEBUG=true (the
+#                             chart derives this from kata.guestImage.debug).
+#
+#   [runtime]
+#     experimental_force_guest_pull = true -> with shared_fs="none" the
+#                             kata-agent inside the VM pulls the workload
+#                             OCI image over the guest network (image-rs +
+#                             CDH). Without this, the shim fails at
+#                             `failed to mount /run/kata-containers/shared/
+#                             containers/<id>/rootfs ... ENOENT`.
+tmp="${dropin}.c8s-tmp"
+{
+    echo '# c8s kata-image-puller drop-in — MANAGED FILE, DO NOT EDIT.'
+    echo '#'
+    echo '# Layered on top of the sibling configuration-'"${SHIM_NAME}"'.toml by'
+    echo '# kata-runtime (see src/runtime/pkg/katautils/config.go decodeDropIns).'
+    echo '# Regenerated on every c8s-kata-image-puller reconcile from the'
+    echo '# published kata-guest-base:<tag> artifact under '"${host_out_dir}"'.'
+    echo ''
+    echo '[hypervisor.qemu]'
+    printf 'kernel = "%s/vmlinuz"\n' "${host_out_dir}"
+    printf 'image = "%s/kata-rootfs.img"\n' "${host_out_dir}"
+    printf 'rootfs_type = "%s"\n' "${RFT}"
+    printf 'kernel_verity_params = "%s"\n' "${KVP}"
+    echo 'shared_fs = "none"'
+    if [ -n "${REGISTRY_AUTH}" ]; then
+        printf 'kernel_params = "agent.image_registry_auth=%s"\n' "${REGISTRY_AUTH}"
     fi
-fi
+    if [ "${SHIM_NAME}" = "qemu-snp" ]; then
+        echo 'default_vcpus = 1'
+        echo 'default_maxvcpus = 1'
+    fi
+    if [ "${KATA_DEBUG}" = "true" ]; then
+        echo 'debug_console_enabled = true'
+    else
+        echo 'debug_console_enabled = false'
+    fi
+    echo ''
+    echo '[runtime]'
+    echo 'experimental_force_guest_pull = true'
+} > "${tmp}"
+mv -f "${tmp}" "${dropin}"
 
-mv -f "${cfg_target}.c8s-tmp" "${cfg_target}"
-
-# Restore kata-deploy's expected layout: the parent path is a relative
-# symlink to the runtimes/ file we just patched. A prior puller version
-# (or an in-place rewrite of the parent path) may have clobbered the
-# symlink into a stale regular file; recreate it so anything resolving
-# the parent path also sees the patched config.
-ln -sf "runtimes/qemu-snp/configuration-qemu-snp.toml" \
-    "${KATA_CONFIG_DIR}/configuration-qemu-snp.toml"
-
-echo "==> c8s-kata-image-puller: done"
+echo "==> c8s-kata-image-puller: done (shim=${SHIM_NAME}, dropin=${dropin})"

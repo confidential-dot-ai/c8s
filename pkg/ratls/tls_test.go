@@ -351,24 +351,22 @@ func TestNewServerTLSConfigMissingAttestFunc(t *testing.T) {
 	}
 }
 
-func TestTDXPlatformRejectedAtConfigTime(t *testing.T) {
-	_, _, err := NewServerTLSConfig(&ServerConfig{
+func TestTDXPlatformAcceptedAtConfigTime(t *testing.T) {
+	// TDX is a supported platform end-to-end. Server + client configs must
+	// build. Verification of a real TDX quote (VerifyAttestation) is
+	// handled at handshake time; config-time is only the platform
+	// allowlist gate.
+	if _, _, err := NewServerTLSConfig(&ServerConfig{
 		Platform:   "tdx",
 		AttestFunc: fakeAttestFunc,
-	})
-	if err == nil {
-		t.Error("expected error for TDX platform (not yet implemented)")
+	}); err != nil {
+		t.Errorf("expected TDX server config to build, got: %v", err)
 	}
-	if err != nil && !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' error, got: %v", err)
-	}
-
-	_, _, err = NewClientTLSConfig(&ClientConfig{
+	if _, _, err := NewClientTLSConfig(&ClientConfig{
 		Platform:   "tdx",
 		AttestFunc: fakeAttestFunc,
-	})
-	if err == nil {
-		t.Error("expected error for TDX platform on client config")
+	}); err != nil {
+		t.Errorf("expected TDX client config to build, got: %v", err)
 	}
 }
 

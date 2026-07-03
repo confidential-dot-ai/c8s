@@ -42,11 +42,13 @@ enabled = false
 
 [attestation]
 enabled = true
-# Bare-metal SEV-SNP only. kata-qemu-snp doesn't run on clouds (no nested SNP),
-# so the in-guest attester only ever sees /dev/sev-guest. Leaving the cloud
-# variants (az-snp/gcp-snp) in made every /attest log "Failed to instantiate
-# TCTI" because they probe a vTPM and DMI board_vendor that don't exist here,
-# and the failing attempts raced the working bare-snp one — ratls-mesh's
-# RA-TLS leaf minting then failed on first try, failing c8s-ready.target.
-platforms = ["snp"]
+# Bare-metal SEV-SNP and Intel TDX. kata-qemu-{snp,tdx} both run on
+# bare-metal (no cloud nesting), so the in-guest attester sees either
+# /dev/sev-guest (SNP) or /dev/tdx_guest (TDX, ConfigFS TSM report).
+# Cloud variants (az-snp/gcp-snp/gcp-tdx/az-tdx) are intentionally left
+# out: they probe a vTPM and DMI board_vendor that don't exist in a kata
+# guest, and the failing attempts raced the working bare-metal one —
+# ratls-mesh's RA-TLS leaf minting then failed on first try, failing
+# c8s-ready.target.
+platforms = ["snp", "tdx"]
 allow_debug = false

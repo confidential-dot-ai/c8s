@@ -97,7 +97,7 @@ spec:
       # (not via the confidential.ai/cw webhook path) because get-cert would dial
       # cds — cds fetching a leaf from itself is a bootstrap cycle. See
       # docs/install-flows.md ("Why CDS doesn't use cw for its runtimeClass").
-      runtimeClassName: kata-qemu-snp
+      runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
       serviceAccountName: {{ include "c8s.cdsName" . }}
       automountServiceAccountToken: false

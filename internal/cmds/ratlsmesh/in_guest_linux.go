@@ -231,6 +231,21 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	if err != nil {
 		return err
 	}
+	// Normalise c.platform so downstream `ratls.NewServerTLSConfig` /
+	// `NewClientTLSConfig` see a string `validatePlatform` accepts. When
+	// the operator (or the baked cloudinit.env default) passes
+	// --platform=auto we've now resolved it to a concrete TEE via
+	// /dev/{tdx_guest,sev-guest} probing above; keep the ServerConfig
+	// input consistent with that resolution instead of leaking "auto"
+	// through — otherwise NewServerTLSConfig rejects with
+	// `unsupported TEE platform: "auto"` and the whole service crash-
+	// loops in-guest (empirically observed on kata-qemu-tdx guests).
+	switch teeType {
+	case ratls.TEETypeTDX:
+		c.platform = "tdx"
+	case ratls.TEETypeSEVSNP:
+		c.platform = "sev-snp"
+	}
 	cdsMeasurements, err := parseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("%s: %w", envCDSMeasurements, err)

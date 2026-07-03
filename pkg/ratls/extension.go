@@ -148,20 +148,27 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 		CertChain: raw.CertChain,
 	}
 
-	if teeType == TEETypeSEVSNP {
-		embedded, err := parseEmbeddedEvidence(raw.Report)
+	// Auto-detect JSON envelope for the online-verification path. SEV-SNP
+	// covers both offline (bare-metal, raw report bytes) and online (az-snp,
+	// JSON envelope) — so we probe first and only normalize the raw SNP
+	// report shape when no envelope is present. TDX always takes the online
+	// path (the in-process Go parser is intentionally not carried; see
+	// verifyTDXOnline in verify.go), so an envelope is required.
+	embedded, err := parseEmbeddedEvidence(raw.Report)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case embedded != nil:
+		att.embedded = embedded
+	case teeType == TEETypeSEVSNP:
+		report, err := NormalizeSEVSNPReport(raw.Report)
 		if err != nil {
 			return nil, err
 		}
-		if embedded != nil {
-			att.embedded = embedded
-		} else {
-			report, err := NormalizeSEVSNPReport(raw.Report)
-			if err != nil {
-				return nil, err
-			}
-			att.Report = report
-		}
+		att.Report = report
+	case teeType == TEETypeTDX:
+		return nil, fmt.Errorf("%w: TDX RA-TLS extension must carry a JSON attestation-api envelope; got raw bytes", ErrInvalidReport)
 	}
 
 	return att, nil

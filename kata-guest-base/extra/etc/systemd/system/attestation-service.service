@@ -4,21 +4,29 @@
 # /etc/systemd/system/attestation-service.service). Names, paths, and
 # ports must match what ratls-mesh.service depends on.
 #
-# Threat model: this process runs inside the SEV-SNP kata guest. It owns
-# /dev/sev-guest (passed through by kata-qemu-snp) and exposes a
-# loopback-only HTTP API for in-guest callers (ratls-mesh). The host is
-# adversarial; loopback is inside the guest network namespace and is
-# not observable from the host.
+# Threat model: this process runs inside the confidential kata guest
+# (SEV-SNP or Intel TDX). It owns the TEE device (/dev/sev-guest on SNP,
+# /dev/tdx_guest on TDX) passed through by the respective kata runtime,
+# and exposes a loopback-only HTTP API for in-guest callers (ratls-mesh).
+# The host is adversarial; loopback is inside the guest network namespace
+# and is not observable from the host.
 
 [Unit]
 Description=Confidential AI attestation service (in-guest)
 Documentation=https://github.com/confidential-dot-ai/attestation-rs
 After=network.target
 Before=ratls-mesh.service
-# kata-qemu-snp passes /dev/sev-guest through; if it's missing the host
-# misconfigured the kata runtime and we want to fail loudly rather than
-# silently produce unverifiable evidence.
-AssertPathExists=/dev/sev-guest
+# kata's confidential runtime (SEV-SNP OR Intel TDX) passes the TEE
+# device through. Both paths are supported; the specific device that
+# gets asserted is picked below by the guest kernel's runtime detection
+# (attestation-rs's own detect() checks the same set). If BOTH are
+# missing the host misconfigured the runtime and we want to fail loudly
+# rather than silently produce unverifiable evidence. systemd's
+# AssertPathExists is AND-semantics across multiple lines, so we drop
+# the hard-fail assertion here and instead let attestation-rs's
+# is_available() checks return `no TEE platform detected` cleanly — the
+# unit's own ExecStart will exit-non-zero and the failure surfaces via
+# systemd status just as loudly.
 
 [Service]
 Type=exec
@@ -26,15 +34,17 @@ ExecStart=/usr/local/bin/attestation-service --config /etc/c8s/attestation-servi
 Restart=on-failure
 RestartSec=2s
 
-# Hardening. The service only needs read access to /dev/sev-guest and
-# network on loopback; everything else is locked down to shrink the
-# in-guest TCB attack surface.
+# Hardening. The service needs read access to the TEE device
+# (/dev/sev-guest on SNP, /dev/tdx_guest on TDX) and network on
+# loopback; everything else is locked down to shrink the in-guest TCB
+# attack surface.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=no
 DeviceAllow=/dev/sev-guest rw
+DeviceAllow=/dev/tdx_guest rw
 DevicePolicy=closed
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

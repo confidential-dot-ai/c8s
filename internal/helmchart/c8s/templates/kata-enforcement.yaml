@@ -47,17 +47,17 @@ spec:
     # webhook injects one, so a pod reaching validation without a class means
     # the webhook did not run.
     - expression: >-
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName in ['kata-qemu', 'kata-clh', 'kata-qemu-snp'])
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName in ['kata-qemu', 'kata-clh', 'kata-qemu-snp', 'kata-qemu-tdx'])
         || (has(object.spec.hostNetwork) && object.spec.hostNetwork)
         || (has(object.spec.hostPID) && object.spec.hostPID)
         || (has(object.spec.hostIPC) && object.spec.hostIPC)
       message: >-
         c8s kata enforcement: workload pods must run under a kata RuntimeClass
-        (kata-qemu, kata-clh, or kata-qemu-snp). The c8s operator webhook
-        injects one automatically for pods that do not set runtimeClassName;
-        a rejection here means the pod explicitly set a non-kata
-        runtimeClassName, or the c8s operator is not running. Host-namespace
-        pods are exempt.
+        (kata-qemu, kata-clh, kata-qemu-snp, or kata-qemu-tdx). The c8s
+        operator webhook injects one automatically for pods that do not set
+        runtimeClassName; a rejection here means the pod explicitly set a
+        non-kata runtimeClassName, or the c8s operator is not running.
+        Host-namespace pods are exempt.
       reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

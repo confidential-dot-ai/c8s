@@ -332,28 +332,38 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   `cat /sys/module/kvm_amd/parameters/sev_snp` (`Y`). See
   `bare-metal-infra-management/docs/host_setup/snp-cpu-bios-setup.md`.
 
-- **x86_64 only.** The chart renders `SHIMS_X86_64` (`qemu clh qemu-snp`) and
-  no AArch64 equivalent, so kata-deploy installs nothing on ARM nodes. Pods
-  scheduled there will fail to start under any kata RuntimeClass. Use
-  `kata.nodeSelector` to keep kata-deploy off non-x86_64 nodes if you have a
-  mixed-arch cluster.
+- **x86_64 only.** The chart renders `SHIMS_X86_64`
+  (`qemu clh qemu-snp qemu-tdx`) and no AArch64 equivalent, so kata-deploy
+  installs nothing on ARM nodes. Pods scheduled there will fail to start
+  under any kata RuntimeClass. Use `kata.nodeSelector` to keep kata-deploy
+  off non-x86_64 nodes if you have a mixed-arch cluster.
 
-- **Confidential kata is SEV-SNP only.** TDX is intentionally out of scope in
-  this release even though the c8s attestation-api and ratls-mesh both
-  already handle TDX. There is no `kata-qemu-tdx` shim in `SHIMS_X86_64`, no
-  `kata-qemu-tdx` RuntimeClass, and the kata-enforcement allowlist accepts
-  only `kata-qemu`, `kata-clh`, and `kata-qemu-snp`. The webhook auto-promotes
-  `confidential.ai/cw` pods to `kata-qemu-snp` unconditionally, and the
-  confidential class is **fixed, not configurable** — adding one (e.g.
-  `kata-qemu-tdx`) means updating the shim set, the RuntimeClasses, and the
-  enforcement allowlist together. TDX support is future work.
+- **Confidential kata: SEV-SNP or TDX per install.** A single cluster picks
+  one CPU TEE at install time via `--hardware-platform=<sev-snp|tdx>`. Under
+  `--hardware-platform=tdx`, the chart renders the `kata-qemu-tdx`
+  RuntimeClass with `nodeSelector: intel-tdx.node.kubernetes.io/enabled=true`
+  and the c8s control-plane pods (CDS, tee-proxy, tls-lb) resolve to
+  `kata-qemu-tdx`; under `--hardware-platform=sev-snp` (the default) the
+  same rendering happens for `kata-qemu-snp`. The kata-enforcement
+  allowlist accepts all four (`kata-qemu`, `kata-clh`, `kata-qemu-snp`,
+  `kata-qemu-tdx`), and the mutating webhook promotes `confidential.ai/cw`
+  pods to whichever confidential class the install chose.
 
-- **No mixed-platform clusters.** The `kata-qemu-snp` RuntimeClass has no
-  `scheduling.nodeSelector`, so the scheduler can place a confidential pod on
-  any node where kata-deploy ran. Assume the cluster is uniformly SEV-SNP
-  capable. Per-node platform labelling for heterogeneous clusters is tracked
-  in Future work below; until then, do not enable `--kata` on a cluster that
-  mixes SNP and non-SNP nodes.
+  The kata-guest-base image is a **single artifact for both TEEs**: its
+  hardened bzImage carries both `CONFIG_SEV_GUEST=y` and
+  `CONFIG_INTEL_TDX_GUEST=y` (runtime-probed via CPU feature flags), and
+  the dm-verity rootfs and `kernel_verity_params` are TEE-neutral. What
+  differs is the shim toml (per-shim `configuration-<shim>.toml`),
+  populated by the kata-image-puller from the same artifact bytes.
+
+- **No mixed-platform clusters.** Even though the `kata-qemu-tdx`
+  RuntimeClass carries the intel-tdx nodeSelector, the mutating webhook
+  chooses ONE confidential class per install; a mixed SNP+TDX cluster
+  would silently promote everything to whichever the install chose and
+  reject the other TEE's pods at admission. Assume the cluster is
+  uniformly one TEE. Per-install platform-labelling for heterogeneous
+  clusters is future work; until then, do not mix TEE hardware on a
+  single kata install.
 
 - **Host kernel modules.** Kata needs `/dev/kvm`, `/dev/vhost-vsock`, and
   `/dev/vhost-net`. On standard systemd distros the `vhost_vsock` / `vhost_net`
@@ -361,6 +371,41 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   fail with `open /dev/vhost-vsock: no such device`, load them
   (`modprobe vhost_vsock vhost_net`) and persist via `/etc/modules-load.d/`.
   Automatic module loading by the installer is future work.
+
+- **TDX host prerequisites** (only for `--hardware-platform=tdx`).
+  `kata-qemu-tdx` needs each host to have:
+
+  1. `/dev/tdx_guest` module loaded (`tdx_guest`) — provides the guest
+     TDREPORT + GetQuote ioctls that the in-guest attestation-service uses.
+  2. `qgsd` running on the host — the Intel DCAP Quote Generation Service
+     that signs the TDREPORT into a full TDX quote. Talks over vsock.
+  3. A `socat` unix→vsock bridge so KubeVirt's native
+     `qgsSocketPath: /var/run/tdx-qgs/qgs.socket` and kata's
+     `quote-generation-socket=vsock:2:4050` both reach the same qgsd.
+  4. Intel PCS API key in `/etc/sgx_default_qcnl.conf` — DCAP fetches
+     TCB collateral from Intel PCS during verify.
+  5. The node label `intel-tdx.node.kubernetes.io/enabled=true` — the
+     `kata-qemu-tdx` RuntimeClass nodeSelector expects it. `c8s install
+     --hardware-platform=tdx` preflight-checks for this label and refuses
+     to proceed if no node has it.
+
+  A ready-made provisioning path is out of scope for this repo — any
+  Ansible playbook / OS-level configuration tool can install DCAP + qgsd
+  + the bridge unit and apply the label. If you're building one from
+  scratch, the [Intel TDX documentation](https://cdrdv2.intel.com/v1/dl/getContent/726790)
+  and the DCAP quickstart are the canonical references. Once the host
+  is configured, verify:
+
+  ```
+  ls /dev/tdx_guest                           # exists
+  systemctl is-active qgsd                    # active
+  systemctl is-active tdx-qgs-bridge          # active
+  kubectl get node <node> \
+    -o jsonpath='{.metadata.labels.intel-tdx\.node\.kubernetes\.io/enabled}'
+  # → true
+  ```
+
+  Then `c8s install --hardware-platform=tdx --kata …` proceeds cleanly.
 
 - **One-shot `--kata` has a brief bootstrap window.** `c8s install --kata`
   brings up the webhook and the policy in the same release as kata-deploy,

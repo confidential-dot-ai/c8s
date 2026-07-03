@@ -969,7 +969,7 @@ func TestNewProviderValidation(t *testing.T) {
 		{"missing NodeIP", func(c *Config) { c.NodeIP = "" }},
 		{"invalid NodeIP", func(c *Config) { c.NodeIP = "not-an-ip" }},
 		{"missing TEEType", func(c *Config) { c.TEEType = 0 }},
-		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEETypeTDX }},
+		{"unsupported TEEType", func(c *Config) { c.TEEType = ratls.TEEType(99) }},
 	}
 
 	for _, tt := range tests {

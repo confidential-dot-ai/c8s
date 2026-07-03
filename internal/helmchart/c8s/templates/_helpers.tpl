@@ -69,6 +69,46 @@
 {{- end -}}
 {{- end -}}
 
+{{/*
+  RuntimeClass name to use for CDS / tee-proxy / tls-lb control-plane pods
+  when kata is enforcing. Under --kata all c8s pods run as kata VMs, and
+  the RC must match the cluster's confidential-VM hardware:
+
+    tdxGuest=true → kata-qemu-tdx (Intel TDX)
+    else          → kata-qemu-snp (SEV-SNP, default)
+
+  Single-hardware per cluster today. If both are set we prefer TDX; the
+  install CLI's --hardware-platform flag makes them mutually exclusive so
+  this fall-through is theoretical (a hand-crafted -f override could hit
+  it, and preferring one over failing keeps the render simple).
+
+  Keep this in sync with kata.yaml's RC blocks (kata-qemu-snp,
+  kata-qemu-tdx) and kata-enforcement.yaml's admission allowlist.
+*/}}
+{{- define "c8s.controlPlaneKataRuntimeClass" -}}
+{{- if .Values.attestationApi.teeDevices.tdxGuest -}}
+kata-qemu-tdx
+{{- else -}}
+kata-qemu-snp
+{{- end -}}
+{{- end -}}
+
+{{/*
+  Shim name (kata-deploy dir name under /opt/kata/share/defaults/kata-containers/runtimes/)
+  for the confidential shim to configure on this node. Mirrors
+  c8s.controlPlaneKataRuntimeClass: tdxGuest=true → qemu-tdx, else qemu-snp.
+  Passed as SHIM_NAME to pull-and-configure.sh; used by kata-image-puller.yaml
+  to target the correct configuration-qemu-<shim>.toml file. Single-hardware
+  per cluster (see the note on c8s.controlPlaneKataRuntimeClass).
+*/}}
+{{- define "c8s.kataShimName" -}}
+{{- if .Values.attestationApi.teeDevices.tdxGuest -}}
+qemu-tdx
+{{- else -}}
+qemu-snp
+{{- end -}}
+{{- end -}}
+
 {{- define "c8s.kataDeployImage" -}}
 {{- if and .Values.kata.image.digest .Values.kata.image.tag -}}
 {{ fail "kata.image.tag and kata.image.digest are mutually exclusive — set one, not both (digest wins silently otherwise, which surprises operators bumping versions)" }}

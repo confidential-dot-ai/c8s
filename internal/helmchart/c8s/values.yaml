@@ -190,7 +190,14 @@ cds:
   maxTTL: 24h
   challengeTTL: 60s
   requestTimeout: 5s
-  maxRequestSize: 65536
+  # -- Max HTTP request body CDS accepts on /authenticate, /sign-csr, and
+  # /attest. Sized for the largest evidence envelope we serve today: an Intel
+  # TDX quote + full cc_eventlog is ~90 KB uncompressed (the eventlog alone
+  # runs 40-85 KB on real TDX hosts; see kata-guest-base's
+  # attestation-service.toml). The stock 64 KiB limit is fine for SEV-SNP
+  # (evidence ~2 KiB) but rejects every TDX request with HTTP 422
+  # `http: request body too large`.
+  maxRequestSize: 262144
   readinessInterval: 10s
   ## /sign-csr CSRs arrive without a matching TCP source IP under chart routing,
   ## so leave sanValidation off and pin DNS SAN / CN patterns instead.
@@ -300,7 +307,11 @@ attestationApi:
   ## CVM platform shape — selects (via the install CLI) the TEE device:
   ##
   ## baremetal (default): bare-metal CVM, native /dev/sev-guest.
-  ## gke: GKE confidential VM — also native /dev/sev-guest.
+  ## node: generalized node-as-CVM — our own nodes (self-managed TDX/SNP) are
+  ##   themselves confidential VMs exposing a native TEE device (/dev/sev-guest,
+  ##   or /dev/tdx-guest with --hardware-platform tdx); pods run as ordinary
+  ##   processes attested via the node's own quote. Cloud-agnostic.
+  ## gke: GKE managed confidential VM — also native /dev/sev-guest.
   ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0.
   ##
   ## All modes render privileged: true. A hostPath device mount does not add a

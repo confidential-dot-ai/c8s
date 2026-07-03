@@ -154,9 +154,12 @@ func TestRATLSTEEType(t *testing.T) {
 		wantErr string
 	}{
 		{name: "sev snp", input: "sev-snp", want: ratls.TEETypeSEVSNP},
+		{name: "tdx", input: "tdx", want: ratls.TEETypeTDX},
 		{name: "empty", wantErr: "--platform is required"},
-		{name: "tdx", input: "tdx", wantErr: "TDX platform is not yet implemented"},
 		{name: "unknown", input: "sgx", wantErr: "unsupported --platform"},
+		// auto is intentionally not covered here — it stats /dev/*_guest
+		// paths on the host running the test and would be flaky.
+		// covered via the in-guest boot on tdx-host-1.
 	}
 
 	for _, tt := range tests {

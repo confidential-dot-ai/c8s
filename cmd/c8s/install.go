@@ -39,12 +39,13 @@ var (
 	installGetCertRunAsGroup    int64
 	installGetCertRunAsNonRoot  bool
 
-	installKata            bool
-	installKataDebug       bool
-	installCvmMode         string
-	installSingleNode      bool
-	installImagePullSecret string
-	installImageTag        string
+	installKata             bool
+	installKataDebug        bool
+	installCvmMode          string
+	installHardwarePlatform string
+	installSingleNode       bool
+	installImagePullSecret  string
+	installImageTag         string
 
 	installResolveDigests bool
 )
@@ -53,7 +54,8 @@ var (
 // gate or an arg-builder call). Naming them once keeps the references from
 // drifting.
 const (
-	flagCvmMode = "cvm-mode"
+	flagCvmMode          = "cvm-mode"
+	flagHardwarePlatform = "hardware-platform"
 )
 
 // c8sComponent maps a chart image to the helm value keys --resolve-digests
@@ -147,6 +149,30 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	}
 	if strings.TrimSpace(string(labeled)) == "" {
 		return fmt.Errorf("no node is labelled %s=%s, so the CDS pod cannot schedule (image policy pins it there). Label one: kubectl label node <node> %s=%s", key, val, key, val)
+	}
+	return nil
+}
+
+// preflightTDXNodes fails fast when --hardware-platform=tdx but no node carries
+// the intel-tdx.node.kubernetes.io/enabled=true label — the label the
+// kata-qemu-tdx RuntimeClass nodeSelector expects. The operator applies it
+// once the host has /dev/tdx_guest, qgsd running, and a unix→vsock QGS
+// bridge. Without a labelled node, kata-qemu-tdx pods would sit Pending
+// until timeout with an opaque scheduler error.
+//
+// Runs regardless of -f: the label is a fact about the host, not a values
+// choice, and every TDX install needs it.
+const tdxHostLabelKey = "intel-tdx.node.kubernetes.io/enabled"
+
+func preflightTDXNodes(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
+		"-l", tdxHostLabelKey+"=true", "-o", "name").Output()
+	if err != nil {
+		return fmt.Errorf("kubectl get nodes -l %s=true: %w", tdxHostLabelKey, err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return fmt.Errorf("--hardware-platform=tdx but no node is labelled %s=true. Every TDX install needs at least one host with /dev/tdx_guest available, qgsd (Intel DCAP Quote Generation Service) running, and a socat unix→vsock bridge so kata's QGS-over-vsock path reaches qgsd. Once your host is TDX-ready, label it:\n\n    kubectl label node <node> %s=true",
+			tdxHostLabelKey, tdxHostLabelKey)
 	}
 	return nil
 }
@@ -370,6 +396,19 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 		}
 
+		// Fail fast when --hardware-platform=tdx but no node carries the
+		// intel-tdx label. Under --kata the kata-qemu-tdx RuntimeClass has a
+		// nodeSelector on that label; under --cvm-mode=node the attestationApi
+		// DaemonSet needs at least one TDX-capable node. Runs whether or not
+		// -f was supplied — it's checking a fact about the cluster, not the
+		// values. Whichever provisioning path applied the label is out of
+		// scope here; the error message documents the host state expected.
+		if installHardwarePlatform == "tdx" && installCvmMode != "aks" {
+			if err := preflightTDXNodes(cmd.Context()); err != nil {
+				return err
+			}
+		}
+
 		if installImagePullSecret != "" {
 			if err := preflightImagePullSecret(cmd.Context(), installNamespace, installImagePullSecret); err != nil {
 				return err
@@ -574,16 +613,38 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // level — all modes render privileged: true, since a hostPath device mount alone
 // does not grant device-cgroup access):
 //
-//	baremetal, gke → native /dev/sev-guest
-//	aks            → vTPM /dev/tpm0
+//	baremetal, node, gke → native /dev/sev-guest (SEV-SNP) by default, or
+//	                       /dev/tdx-guest (Intel TDX) if --hardware-platform tdx
+//	aks                  → vTPM /dev/tpm0
+//
+// node and gke are distinct deployment targets that happen to share the
+// native-TEE-device wiring (they are NOT aliases):
+//
+//	node → generalized node-as-CVM: our own nodes (bare-metal TDX/SNP,
+//	       self-managed) are themselves confidential VMs. Pods run as ordinary
+//	       processes attested via the node's own quote. Cloud-agnostic.
+//	gke  → GKE specifically: Google's managed confidential VMs.
 //
 // GKE is the reason a plain managed→vTPM mapping is wrong: GKE confidential VMs
 // are a managed cloud but still expose the native /dev/sev-guest ioctl, not a
-// vTPM. The chart's teeDevices default is the native shape; this only flips it
-// to the vTPM for aks. Without it a `--cvm-mode aks` install would mount
-// /dev/sev-guest (absent on AKS), and the attestation-api pod would fail the
-// hostPath CharDevice check. Override individual teeDevices via -f for hosts
-// that don't fit the pairing (e.g. a TDX host needs tdxGuest).
+// vTPM. The chart's teeDevices default is the SNP shape; this flips it as
+// needed per (mode, platform). Without it a `--cvm-mode aks` install would
+// mount /dev/sev-guest (absent on AKS), and a bare-metal TDX host would
+// similarly mount the wrong device — the attestation-api pod would fail the
+// hostPath CharDevice check.
+//
+// `--cvm-mode` (deployment shape) and `--hardware-platform` (CPU TEE) are
+// ORTHOGONAL axes. baremetal/gke pair with either SEV-SNP
+// (--hardware-platform sev-snp, default) or Intel TDX (--hardware-platform
+// tdx). aks uses its own vTPM path regardless, and combining `--cvm-mode aks`
+// with `--hardware-platform tdx` is refused (AKS doesn't expose
+// /dev/tdx-guest to guest workloads).
+//
+// Mixed-hardware inside a single cluster (some SNP hosts, some TDX hosts) is
+// out of scope for now — a cluster is one hardware platform. Mixed support
+// would want the attestation-api DaemonSet split per-platform with per-node
+// label selectors, and ratlsmesh's `--platform` similarly per-node.
+// Follow-up work.
 //
 // aks also opts the pod-injector MutatingWebhookConfiguration out of AKS's
 // "admissionsenforcer" controller (annotation admissions.enforcer/disabled),
@@ -591,21 +652,52 @@ func appendDistroInstallArgs(helmArgs []string, distro string) []string {
 // re-apply conflict. That is rendered chart-side off attestationApi.cvmMode (so
 // GitOps/HelmRelease installs get it too), not emitted as a --set here; see
 // internal/helmchart/c8s/templates/webhook.yaml.
-func appendCvmModeInstallArgs(helmArgs []string, cvmMode string) ([]string, error) {
-	allowed := []string{"baremetal", "gke", "aks"}
-	if !slices.Contains(allowed, cvmMode) {
-		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowed, ", "), cvmMode)
+func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform string) ([]string, error) {
+	allowedModes := []string{"baremetal", "node", "gke", "aks"}
+	if !slices.Contains(allowedModes, cvmMode) {
+		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagCvmMode, strings.Join(allowedModes, ", "), cvmMode)
+	}
+	allowedPlatforms := []string{"sev-snp", "tdx"}
+	if !slices.Contains(allowedPlatforms, hardwarePlatform) {
+		return nil, fmt.Errorf("--%s must be one of %s, got %q", flagHardwarePlatform, strings.Join(allowedPlatforms, ", "), hardwarePlatform)
+	}
+	if cvmMode == "aks" && hardwarePlatform == "tdx" {
+		return nil, fmt.Errorf("--%s=aks is Azure vTPM-backed SEV-SNP; combining with --%s=tdx is not supported (AKS does not expose /dev/tdx-guest to guest workloads)", flagCvmMode, flagHardwarePlatform)
 	}
 	helmArgs = append(helmArgs, "--set-string", "attestationApi.cvmMode="+cvmMode)
-	// aks → vTPM /dev/tpm0; baremetal and gke → native /dev/sev-guest.
-	sevGuest, tpm := "true", "false"
-	if cvmMode == "aks" {
-		sevGuest, tpm = "false", "true"
+	// aks: vTPM regardless of --hardware-platform (validated above; only
+	// --hardware-platform sev-snp reaches here)
+	// baremetal/gke + --hardware-platform sev-snp: native /dev/sev-guest
+	// baremetal/gke + --hardware-platform tdx:     native /dev/tdx-guest
+	sevGuest, tdxGuest, tpm := "false", "false", "false"
+	switch {
+	case cvmMode == "aks":
+		tpm = "true"
+	case hardwarePlatform == "tdx":
+		tdxGuest = "true"
+	default:
+		sevGuest = "true"
 	}
-	return append(helmArgs,
+	helmArgs = append(helmArgs,
 		"--set", "attestationApi.teeDevices.sevGuest="+sevGuest,
+		"--set", "attestationApi.teeDevices.tdxGuest="+tdxGuest,
 		"--set", "attestationApi.teeDevices.tpm="+tpm,
-	), nil
+	)
+	// Propagate the CPU TEE to every component that names its RA-TLS platform.
+	// These default to SNP in the chart; on a TDX cluster CDS (which self-warms
+	// its serving cert via the attestation-api and is non-privileged, so it
+	// cannot probe /dev/tdx_guest to auto-detect) and the ratls-mesh must be
+	// told `tdx` explicitly, or CDS parses the attestation-api's TDX quote as an
+	// SNP report and crash-loops ("evidence contains neither attestation_report
+	// nor hcl_report"). aks stays on the SNP vTPM path. cds.ratlsPlatform uses
+	// `snp`/`tdx`; ratlsMesh.platform uses `sev-snp`/`tdx`.
+	if cvmMode != "aks" && hardwarePlatform == "tdx" {
+		helmArgs = append(helmArgs,
+			"--set-string", "cds.ratlsPlatform=tdx",
+			"--set-string", "ratlsMesh.platform=tdx",
+		)
+	}
+	return helmArgs, nil
 }
 
 // validateKataDebugFlags rejects --debug without --kata: the flag selects the
@@ -790,7 +882,8 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
-	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM platform shape — selects the TEE device: baremetal or gke (native /dev/sev-guest) or aks (vTPM /dev/tpm0). All modes render a privileged attestation-api (a hostPath device mount alone does not grant device-cgroup access)")
+	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM deployment shape (orthogonal to --hardware-platform): baremetal, or node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes), or gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0). All modes render a privileged attestation-api (a hostPath device mount alone does not grant device-cgroup access)")
+	installCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "sev-snp", "CPU-level TEE hardware (orthogonal to --cvm-mode): sev-snp (default, /dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks (Azure vTPM path); combining --cvm-mode=aks with --hardware-platform=tdx is refused")
 	installCmd.Flags().BoolVar(&installKata, "kata", false, "install the Kata Containers runtime stack (kata-deploy DaemonSet + RuntimeClasses) and enforce it: workload pods are injected with kata RuntimeClasses and non-kata classes are rejected. Also disables the host-side ratls-mesh, attestation-api, and nri-image-policy — under kata their function runs inside the kata-guest-base VM image")
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (tag <tag>-debug, kata.guestImage.debug=true): its baked guest policy allows host log/exec streams so 'kubectl logs' and 'kubectl exec' work on kata pods — container I/O becomes readable by the untrusted host and the SNP launch measurement differs from the locked image. Requires --kata; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")

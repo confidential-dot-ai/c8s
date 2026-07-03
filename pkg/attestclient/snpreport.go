@@ -49,22 +49,3 @@ func ExtractSNPReport(resp types.AttestResponse) (string, error) {
 		return "", fmt.Errorf("attestation evidence contains neither attestation_report nor hcl_report (platform: %s)", resp.Platform)
 	}
 }
-
-// RATLSEvidence returns the payload to embed in an RA-TLS certificate
-// extension. Bare-metal SNP can be verified offline from the raw SNP report.
-// Azure SNP vTPM evidence must keep the full attestation-api envelope
-// because the caller-controlled nonce is bound through the TPM quote, not
-// SNP REPORTDATA — pkg/ratls/verify.go forwards the envelope to the local
-// attestation-api /verify endpoint. az-tdx is intentionally not handled:
-// the verifier has no TDX-specific measurement or claims logic yet, so the
-// envelope would be accepted under SNP rules.
-func RATLSEvidence(resp types.AttestResponse) (string, error) {
-	if resp.Platform == string(types.PlatformAzSnp) {
-		evidence, err := json.Marshal(types.AttestationEvidence(resp))
-		if err != nil {
-			return "", fmt.Errorf("marshal RA-TLS attestation evidence: %w", err)
-		}
-		return string(evidence), nil
-	}
-	return ExtractSNPReport(resp)
-}

@@ -1339,6 +1339,7 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 		noCapabilities bool
 	}{
 		{mode: "baremetal", useDefault: true},
+		{mode: "node"},
 		{mode: "gke"},
 		{mode: "aks", noCapabilities: true},
 	} {
@@ -1371,7 +1372,7 @@ func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of baremetal, gke, aks (got "bogus")`)
+	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of baremetal, node, gke, aks (got "bogus")`)
 }
 
 func TestChartRendersManagedClusterKnobs(t *testing.T) {

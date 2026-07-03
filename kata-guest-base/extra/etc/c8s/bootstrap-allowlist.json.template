@@ -2,6 +2,8 @@
   "_comment": "Bootstrap image-digest allowlist seed, baked into the kata-guest-base dm-verity guest rootfs. Read at boot by /usr/local/bin/policy-monitor as its starting set; policy-monitor additionally refreshes from CDS over RA-TLS at runtime (see c8s/docs/kata-image-policy.md). Changing this seed requires rebuilding the guest image and rolling kata-qemu-snp pods to the new tag. Placeholders below are substituted at build time by kata-guest-base/scripts/fetch.sh from the GHCR images at the matching c8s release tag — see ../scripts/fetch.sh and .github/workflows/kata-guest-base.yml.",
   "sha256_digests": [
     "@@CDS_DIGEST@@",
-    "@@GET_CERT_DIGEST@@"
+    "@@GET_CERT_DIGEST@@",
+    "@@C8S_OPERATOR_DIGEST@@",
+    "@@TEE_PROXY_DIGEST@@"
   ]
 }

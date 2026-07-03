@@ -3,6 +3,22 @@
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (default "" $nri.cds.url) . -}}
 {{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
+{{- /*
+  Hardware-TEE mutual exclusion. A single cluster picks one CPU TEE at install
+  time (--hardware-platform sev-snp or tdx). teeDevices.sevGuest and
+  teeDevices.tdxGuest select which /dev/{sev,tdx}-guest node is mounted on the
+  attestation-api DaemonSet AND which shim/RuntimeClass helpers resolve to.
+  Setting both would mount both device files (harmless) but leave the runtime-
+  class helper (c8s.controlPlaneKataRuntimeClass) picking one arbitrarily,
+  producing a config that "works on paper" but attests through only one path.
+  Install CLI's --hardware-platform flag makes them mutually exclusive by
+  construction; this guard catches raw -f overrides that bypass the CLI.
+  aks (tpm) is orthogonal: it's the vTPM path and does not interact with these
+  two flags.
+*/ -}}
+{{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
+{{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}
+{{- end -}}
 {{- if and $tlsLB.enabled $teeProxy.enabled (eq $tlsLB.upstream.protocol "https") (eq $tlsLB.upstream.address "c8s-tee-proxy:443") (not (or $teeProxy.certProvisioning.enabled $teeProxy.tls.enabled $teeProxy.domain)) -}}
 {{- fail "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.certProvisioning.enabled (default), teeProxy.tls.enabled, or teeProxy.domain to enable the HTTPS listener" -}}
 {{- end -}}

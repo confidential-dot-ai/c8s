@@ -243,9 +243,13 @@ else
     echo "==> Bootstrap allowlist digests pre-supplied via env (no IMAGE_TAG resolution needed)"
 fi
 CDS_DIGEST="${CDS_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/cds:${IMAGE_TAG}")}"
-echo "    cds:      ${CDS_DIGEST}"
+echo "    cds:          ${CDS_DIGEST}"
 GET_CERT_DIGEST="${GET_CERT_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/get-cert:${IMAGE_TAG}")}"
-echo "    get-cert: ${GET_CERT_DIGEST}"
+echo "    get-cert:     ${GET_CERT_DIGEST}"
+C8S_OPERATOR_DIGEST="${C8S_OPERATOR_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/c8s-operator:${IMAGE_TAG}")}"
+echo "    c8s-operator: ${C8S_OPERATOR_DIGEST}"
+TEE_PROXY_DIGEST="${TEE_PROXY_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/tee-proxy:${IMAGE_TAG}")}"
+echo "    tee-proxy:    ${TEE_PROXY_DIGEST}"
 
 # Substitute placeholders into the template. We use sed with explicit
 # delimiters and `--` so a digest-like value can never be misparsed as
@@ -257,6 +261,8 @@ trap 'rm -f "${TMP_ALLOWLIST}"' EXIT
 sed \
     -e "s|@@CDS_DIGEST@@|${CDS_DIGEST}|g" \
     -e "s|@@GET_CERT_DIGEST@@|${GET_CERT_DIGEST}|g" \
+    -e "s|@@C8S_OPERATOR_DIGEST@@|${C8S_OPERATOR_DIGEST}|g" \
+    -e "s|@@TEE_PROXY_DIGEST@@|${TEE_PROXY_DIGEST}|g" \
     "${ALLOWLIST_TEMPLATE}" > "${TMP_ALLOWLIST}"
 
 # Belt-and-braces: refuse to ship a file that still has a placeholder.

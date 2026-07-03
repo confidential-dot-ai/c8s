@@ -335,40 +335,76 @@ func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
-	// native /dev/sev-guest for baremetal AND gke (GKE confidential VMs use the
-	// native ioctl, not a vTPM); vTPM /dev/tpm0 only for aks.
-	native := func(mode string) []string {
-		return []string{
+	// Two orthogonal axes:
+	//  --cvm-mode: baremetal / node (node-as-CVM) / gke (managed) / aks (vTPM)
+	//  --hardware-platform: sev-snp (/dev/sev-guest) / tdx (/dev/tdx-guest)
+	// baremetal+node+gke all take either hardware-platform; aks always emits vTPM
+	// (and combining aks with tdx is rejected).
+	build := func(mode string, sevGuest, tdxGuest, tpm string) []string {
+		out := []string{
 			"upgrade",
 			"--set-string", "attestationApi.cvmMode=" + mode,
-			"--set", "attestationApi.teeDevices.sevGuest=true",
-			"--set", "attestationApi.teeDevices.tpm=false",
+			"--set", "attestationApi.teeDevices.sevGuest=" + sevGuest,
+			"--set", "attestationApi.teeDevices.tdxGuest=" + tdxGuest,
+			"--set", "attestationApi.teeDevices.tpm=" + tpm,
 		}
+		// TDX (non-aks) also propagates the CPU TEE to the components that name
+		// their RA-TLS platform, or CDS parses the TDX quote as an SNP report.
+		if tdxGuest == "true" {
+			out = append(out,
+				"--set-string", "cds.ratlsPlatform=tdx",
+				"--set-string", "ratlsMesh.platform=tdx",
+			)
+		}
+		return out
 	}
-	cases := map[string][]string{
-		"baremetal": native("baremetal"),
-		"gke":       native("gke"),
-		"aks": {
-			"upgrade",
-			"--set-string", "attestationApi.cvmMode=aks",
-			"--set", "attestationApi.teeDevices.sevGuest=false",
-			"--set", "attestationApi.teeDevices.tpm=true",
-		},
+	cases := map[string]struct {
+		cvmMode          string
+		hardwarePlatform string
+		want             []string
+	}{
+		"baremetal + sev-snp": {"baremetal", "sev-snp", build("baremetal", "true", "false", "false")},
+		"gke + sev-snp":       {"gke", "sev-snp", build("gke", "true", "false", "false")},
+		"node + sev-snp":      {"node", "sev-snp", build("node", "true", "false", "false")},
+		"baremetal + tdx":     {"baremetal", "tdx", build("baremetal", "false", "true", "false")},
+		"gke + tdx":           {"gke", "tdx", build("gke", "false", "true", "false")},
+		"node + tdx":          {"node", "tdx", build("node", "false", "true", "false")},
+		"aks + sev-snp":       {"aks", "sev-snp", build("aks", "false", "false", "true")},
 	}
-	for mode, want := range cases {
-		t.Run(mode, func(t *testing.T) {
-			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := appendCvmModeInstallArgs([]string{"upgrade"}, tc.cvmMode, tc.hardwarePlatform)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			assertArgsEqual(t, got, want)
+			assertArgsEqual(t, got, tc.want)
 		})
 	}
 }
 
 func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure"); err == nil {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure", "sev-snp"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted an unknown --cvm-mode, want error")
+	}
+}
+
+func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "baremetal", "sgx"); err == nil {
+		t.Fatal("appendCvmModeInstallArgs accepted an unknown --hardware-platform, want error")
+	}
+}
+
+func TestAppendCvmModeInstallArgsRejectsAksWithTdx(t *testing.T) {
+	// AKS is Azure vTPM-backed SEV-SNP; TDX support on AKS would need a
+	// separate device path if it ever ships. Combining these axes silently
+	// would install with mounts that can never be attested; refuse
+	// explicitly instead.
+	_, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "tdx")
+	if err == nil {
+		t.Fatal("appendCvmModeInstallArgs accepted --cvm-mode=aks with --hardware-platform=tdx, want error")
+	}
+	if !strings.Contains(err.Error(), "aks") || !strings.Contains(err.Error(), "tdx") {
+		t.Errorf("error %q should mention both cvm-mode aks and hardware-platform tdx", err.Error())
 	}
 }
 

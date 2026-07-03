@@ -40,7 +40,7 @@ spec:
       # in-guest attestation-api on loopback under kata (c8s.attestationApiURL),
       # which only exists inside an SNP guest — and tee-proxy terminates tenant
       # TLS, so its plaintext must stay inside the TEE boundary.
-      runtimeClassName: kata-qemu-snp
+      runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
       {{- with .Values.teeProxy.priorityClassName }}
       priorityClassName: {{ . }}

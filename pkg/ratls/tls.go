@@ -608,14 +608,11 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 
 // validatePlatform checks that the platform string refers to an implemented
 // TEE type. Call at config creation time to fail fast instead of at first
-// handshake. Currently only SEV-SNP is implemented; TDX is recognized by
-// parseTEEType but not yet supported end-to-end.
+// handshake.
 func validatePlatform(platform string) error {
 	switch platform {
-	case "sev-snp":
+	case "sev-snp", "tdx":
 		return nil
-	case "tdx":
-		return fmt.Errorf("ratls: TDX platform is not yet implemented (use sev-snp)")
 	default:
 		return fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)
 	}

@@ -633,11 +633,33 @@ func TestUnmarshalExtensionReportSize(t *testing.T) {
 		}
 	})
 
-	t.Run("TDX report skips size check", func(t *testing.T) {
-		// TDX reports are variable-length, so no size check.
+	t.Run("TDX raw bytes are rejected", func(t *testing.T) {
+		// TDX extensions carry the full attestation-api evidence
+		// envelope (JSON), not raw quote bytes — verifyTDXOnline reads
+		// the envelope back and forwards it to attestation-api. Refuse
+		// raw bytes at parse time so a wire-format regression fails
+		// loudly instead of silently taking the "empty embedded" path.
 		att := &attestationASN1{
 			TEEType: int(TEETypeTDX),
 			Report:  []byte("variable-length-tdx-quote"),
+		}
+		data, err := marshalASN1(att)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = UnmarshalExtension(data)
+		if !errors.Is(err, ErrInvalidReport) {
+			t.Errorf("got %v, want errors.Is ErrInvalidReport", err)
+		}
+	})
+
+	t.Run("TDX evidence envelope is accepted", func(t *testing.T) {
+		// The TDX shape: RA-TLS extension Report field carries a JSON
+		// AttestationEvidence produced by RATLSEvidence(resp) for a
+		// platform="tdx" AttestResponse.
+		att := &attestationASN1{
+			TEEType: int(TEETypeTDX),
+			Report:  []byte(`{"platform":"tdx","evidence":{"quote":"AAAA"}}`),
 		}
 		data, err := marshalASN1(att)
 		if err != nil {
@@ -649,6 +671,10 @@ func TestUnmarshalExtensionReportSize(t *testing.T) {
 		}
 		if result.TEEType != TEETypeTDX {
 			t.Errorf("TEEType = %v, want TDX", result.TEEType)
+		}
+		embedded, ok := result.EmbeddedEvidence()
+		if !ok || embedded.Platform != "tdx" {
+			t.Errorf("EmbeddedEvidence() ok=%v platform=%q, want ok=true platform=tdx", ok, embedded.Platform)
 		}
 	})
 }

@@ -97,7 +97,16 @@ func CheckKeyBinding(pub crypto.PublicKey, att *Attestation, nonce []byte) error
 		_, err := checkSEVSNPBinding(att.Report, expected)
 		return err
 	case TEETypeTDX:
-		return fmt.Errorf("%w: TDX binding check not yet implemented", ErrUnsupportedTEE)
+		// TDX key-binding verification is not implemented here: the
+		// authoritative parser is attestation-rs (crates/attestation/
+		// src/platforms/tdx). Wiring a second, in-process Go parser for
+		// the Intel TDX quote layout would be fragile duplication —
+		// offset drift between the two would silently accept a bad
+		// quote. Production callers go through VerifyAttestation ->
+		// verifyTDXOnline, which forwards the raw quote to a local
+		// attestation-api /verify and reads ReportDataMatch off the
+		// signed response.
+		return fmt.Errorf("%w: TDX key-binding check delegates to attestation-api; call VerifyAttestation with a Policy.AttestationApiURL set", ErrUnsupportedTEE)
 	default:
 		return fmt.Errorf("%w: TEE type %d", ErrUnsupportedTEE, att.TEEType)
 	}
@@ -164,7 +173,15 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 	case TEETypeSEVSNP:
 		return verifySEVSNP(att, policy, expectedReportData)
 	case TEETypeTDX:
-		return nil, fmt.Errorf("%w: TDX verification not yet implemented", ErrUnsupportedTEE)
+		// TDX always carries a JSON envelope in the RA-TLS extension
+		// (see extension.go's UnmarshalExtension), so att.embedded is
+		// always populated. Delegate to the local attestation-api —
+		// see verifyTDXOnline's docstring for why we don't ship a
+		// second in-process TDX quote parser.
+		if att.embedded == nil {
+			return nil, fmt.Errorf("%w: TDX RA-TLS extension missing evidence envelope", ErrInvalidReport)
+		}
+		return verifyTDXOnline(att.embedded, policy, expectedReportData)
 	default:
 		return nil, fmt.Errorf("%w: TEE type %d", ErrUnsupportedTEE, att.TEEType)
 	}
@@ -203,6 +220,52 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 		Snp:        byte(packed >> 48),
 		Microcode:  byte(packed >> 56),
 	}
+}
+
+// verifyTDXOnline forwards a TDX evidence envelope to the local
+// attestation-api /verify endpoint. Analogous to verifySEVSNPOnline for
+// the SNP path — the attestation-api has all the Intel PCS collateral
+// (TDX Root CA, TCB info, QE identity) and the sgx-dcap-quoteverify
+// bindings needed to verify a TDX quote. We do NOT ship an in-process
+// TDX quote verifier here; delegating to attestation-api keeps the
+// heavy Intel dependencies out of every c8s Go binary and makes the
+// verifier upgradeable independently of the mesh binary.
+func verifyTDXOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
+	if evidence.Platform != string(types.PlatformTdx) {
+		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
+	}
+	if policy == nil || policy.AttestationApiURL == "" {
+		return nil, fmt.Errorf("%w: attestation-api URL is required for %s evidence", ErrInvalidReport, evidence.Platform)
+	}
+
+	timeout := policy.AttestationVerifyTimeout
+	if timeout <= 0 {
+		timeout = defaultAttestationVerifyTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// TDX REPORTDATA is 64 bytes; unlike SNP's 48-byte truncation we pass
+	// the full 64-byte expected value. attestation-api's /verify accepts
+	// either length and matches on prefix.
+	expected := types.NewBase64Bytes(expectedReportData[:])
+	allowDebug := policy.AllowDebug
+	issueToken := false
+	params := &types.VerifyParams{
+		ExpectedReportData: &expected,
+		AllowDebug:         &allowDebug,
+	}
+	resp, err := attestationclient.NewClient(policy.AttestationApiURL).Verify(ctx, types.NewVerifyRequest(*evidence, params, issueToken))
+	if err != nil {
+		return nil, fmt.Errorf("ratls: online tdx attestation verify: %w", err)
+	}
+	if !resp.Result.SignatureValid {
+		return nil, ErrSignatureInvalid
+	}
+	if resp.Result.ReportDataMatch == nil || !*resp.Result.ReportDataMatch {
+		return nil, fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
+	}
+	return &VerifyResult{TEEType: TEETypeTDX}, nil
 }
 
 func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
@@ -277,7 +340,10 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 }
 
 // snpEvidence wraps a raw SEV-SNP attestation report in the attestation-api's
-// bare-metal "snp" evidence envelope for POST /verify.
+// bare-metal "snp" evidence envelope for POST /verify. Only bare-metal SNP
+// carries raw report bytes in the RA-TLS extension; every other platform
+// carries the full envelope directly, so no wrapping is needed for them
+// (att.embedded is populated by UnmarshalExtension in that case).
 func snpEvidence(rawReport []byte) (*types.AttestationEvidence, error) {
 	inner, err := json.Marshal(struct {
 		AttestationReport string `json:"attestation_report"`

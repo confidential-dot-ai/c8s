@@ -31,7 +31,7 @@ spec:
       # (c8s.attestationApiURL), which only exists inside an SNP guest — and
       # tls-lb terminates client TLS with mesh-issued keys, so its plaintext
       # must stay inside the TEE boundary.
-      runtimeClassName: kata-qemu-snp
+      runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true

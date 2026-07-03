@@ -14,6 +14,8 @@
   different credential.
 */}}
 {{- $pullerAuthSecret := .Values.kata.guestImage.pullerAuthSecret | default .Values.imagePullSecret -}}
+{{- $shim := include "c8s.kataShimName" . -}}
+{{- $shimDropInPath := printf "/host/opt/kata/share/defaults/kata-containers/runtimes/%s/config.d/50-c8s.toml" $shim -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -73,22 +75,18 @@ spec:
         {{- end }}
       tolerations:
         - operator: Exists
-      # Single reconcile container: assert the guest-pull patch and KEEP it
-      # asserted. kata-deploy has no ordering dependency on this puller, so it
-      # writes the stock qemu-snp config both before this pod's first run AND
-      # again whenever it restarts — clobbering our patch (observed: a
-      # kata-deploy restart reverted experimental_force_guest_pull, and the next
-      # kata-qemu-snp sandbox failed to mount its rootfs). The loop therefore:
-      #   1. waits out kata-deploy's install — pull-and-configure.sh exits
-      #      non-zero until the qemu-snp config exists, so we simply retry;
-      #   2. applies the guest-pull patch (pull guest-base + rewrite the TOML);
-      #   3. re-applies whenever kata-deploy later clobbers it.
-      # The script is idempotent (oras pull is content-addressed; the rewrite
-      # re-derives from the pristine <cfg>.upstream snapshot), and re-runs are
-      # gated on a cheap grep, so steady state costs ~nothing. Readiness tracks
-      # "patch present", so dependent kata-qemu-snp pods can be ordered against
-      # it. This makes the puller the durable source of truth for the qemu-snp
-      # guest-pull config — see docs/pitfalls.md.
+      # Reconcile container: assert the c8s config.d drop-in exists next to
+      # kata-deploy's main shim toml.
+      #
+      # kata-deploy owns the main configuration-<shim>.toml — it rewrites it
+      # on every DaemonSet restart. c8s writes ONLY a config.d/50-c8s.toml
+      # drop-in that kata-runtime layers on top; kata-deploy never touches
+      # config.d/, so the drop-in survives DS restarts by design (verified
+      # empirically). No race with kata-deploy anymore; a "reconcile" pass is
+      # only needed to (a) wait out the initial kata-deploy install
+      # (pull-and-configure.sh exits non-zero until the main toml exists), and
+      # (b) re-materialize the drop-in if an operator deletes it manually.
+      # The oras pull is content-addressed so re-runs are cheap.
       containers:
         - name: reconcile
           image: {{ if .Values.kata.guestImage.pullerImage.digest -}}
@@ -100,10 +98,10 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              CFG=/host/opt/kata/share/defaults/kata-containers/runtimes/qemu-snp/configuration-qemu-snp.toml
+              DROPIN={{ $shimDropInPath }}
               while true; do
-                if ! grep -qE '^[[:space:]]*experimental_force_guest_pull[[:space:]]*=[[:space:]]*true' "$CFG" 2>/dev/null; then
-                  echo "reconcile: guest-pull patch absent — (re)applying"
+                if [ ! -f "$DROPIN" ]; then
+                  echo "reconcile: drop-in absent — (re)applying"
                   sh /scripts/pull-and-configure.sh || echo "reconcile: not ready (kata-deploy still installing?)" >&2
                 fi
                 sleep 30
@@ -121,6 +119,19 @@ spec:
               value: {{ .Values.kata.guestImage.registryAuth | quote }}
             - name: ORAS_INSECURE
               value: {{ .Values.kata.guestImage.insecure | quote }}
+            # Shim to configure: qemu-snp on SNP hosts, qemu-tdx on TDX hosts.
+            # Same guest artifact bytes across shims — kernel + rootfs + verity
+            # params are TEE-neutral; only the target toml path (and TDX skips
+            # the SNP-specific default_vcpus=1 launch-digest pin) differ.
+            - name: SHIM_NAME
+              value: {{ $shim | quote }}
+            # Under --debug the guest rootfs allows host log/exec streams AND
+            # the puller keeps debug_console_enabled / journal-to-console in
+            # the shim toml so `socat <console.sock>` reveals guest boot. In
+            # normal installs the puller strips both every reconcile so a
+            # debug-tainted node returns to prod posture on the next tick.
+            - name: KATA_DEBUG
+              value: {{ .Values.kata.guestImage.debug | default false | quote }}
           securityContext:
             # Privileged because we write into /opt/kata (kata-deploy's install
             # location). Same posture as kata-deploy; the /host bind mount is the
@@ -128,12 +139,13 @@ spec:
             # surprises.
             privileged: true
           readinessProbe:
-            # Ready once the guest-pull patch is present in the qemu-snp config.
+            # Ready once the c8s config.d drop-in is present next to the active
+            # shim's config (qemu-snp or qemu-tdx — see c8s.kataShimName).
             exec:
               command:
                 - /bin/sh
                 - -c
-                - grep -qE '^[[:space:]]*experimental_force_guest_pull[[:space:]]*=[[:space:]]*true' /host/opt/kata/share/defaults/kata-containers/runtimes/qemu-snp/configuration-qemu-snp.toml
+                - test -f {{ $shimDropInPath }}
             periodSeconds: 10
             failureThreshold: 30
           volumeMounts:

@@ -105,7 +105,7 @@ type proxyConfig struct {
 }
 
 func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
-	fs.StringVar(&c.platform, "platform", "sev-snp", "TEE platform: sev-snp, tdx")
+	fs.StringVar(&c.platform, "platform", "auto", "TEE platform: sev-snp, tdx, or auto (probes /dev/{tdx_guest,sev-guest})")
 	fs.StringVar(&c.attestationApiURL, "attestation-api-url", "", "URL of the local attestation-api (e.g. http://localhost:8400)")
 	fs.IntVar(&c.outboundPort, "outbound-port", 15001, "outbound listener port (intercepted app traffic)")
 	fs.IntVar(&c.inboundPort, "inbound-port", 15006, "inbound listener port (RA-TLS from peer nodes)")
@@ -706,10 +706,25 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	switch strings.TrimSpace(platform) {
 	case "sev-snp":
 		return ratls.TEETypeSEVSNP, nil
+	case "tdx":
+		return ratls.TEETypeTDX, nil
+	case "auto":
+		// Probe the guest device tree. Kata's confidential runtimes
+		// pass the TEE device through as /dev/{tdx_guest,sev-guest};
+		// attestation-rs's own is_available() does the same check.
+		// Prefer TDX over SNP for the (theoretical) mixed case — an
+		// operator setting --platform=auto wants a working guest,
+		// and choosing arbitrarily is the sanest tiebreaker for a
+		// shape we don't ship today.
+		if _, err := os.Stat("/dev/tdx_guest"); err == nil {
+			return ratls.TEETypeTDX, nil
+		}
+		if _, err := os.Stat("/dev/sev-guest"); err == nil {
+			return ratls.TEETypeSEVSNP, nil
+		}
+		return 0, fmt.Errorf("ratls-mesh: --platform=auto found neither /dev/tdx_guest nor /dev/sev-guest — the kata runtime did not expose a TEE device")
 	case "":
 		return 0, fmt.Errorf("--platform is required")
-	case "tdx":
-		return 0, fmt.Errorf("ratls-mesh: TDX platform is not yet implemented (use sev-snp)")
 	default:
 		return 0, fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
 	}

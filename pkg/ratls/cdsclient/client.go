@@ -289,10 +289,16 @@ func (cfg *Config) teeType() (ratls.TEEType, error) {
 	if cfg == nil || cfg.TEEType == 0 {
 		return 0, fmt.Errorf("cdsclient: TEEType is required")
 	}
-	if cfg.TEEType != ratls.TEETypeSEVSNP {
+	// Both SEV-SNP and TDX are supported. attestclient.RATLSEvidence
+	// dispatches per-TEE (SNP → raw report bytes; TDX → envelope minus
+	// cc_eventlog to fit the TLS 1.3 16 KB record cap), and CDS's
+	// challenge-bound verify path handles both.
+	switch cfg.TEEType {
+	case ratls.TEETypeSEVSNP, ratls.TEETypeTDX:
+		return cfg.TEEType, nil
+	default:
 		return 0, fmt.Errorf("cdsclient: TEEType %s is not supported", cfg.TEEType)
 	}
-	return cfg.TEEType, nil
 }
 
 func (c *Client) fetchCACertPEM(ctx context.Context) ([]byte, error) {
