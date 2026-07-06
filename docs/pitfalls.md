@@ -2,6 +2,59 @@
 
 Gotchas for humans and agents working on c8s. Each cites the relevant code.
 
+## Allowlist operator token: the body-binding must hash the exact bytes sent
+
+`pkg/operatorauth/operatorauth.go`, `pkg/allowlistclient/client.go`
+
+The operator write token carries `pbh = base64url(SHA-256(request body))`, and CDS
+(`internal/allowlist/handler.go` → `operatorauth.Verifier.Authorize`) re-hashes
+the body it received and compares. If the client serializes the body once for
+signing and again for sending, any difference (key ordering, whitespace) makes
+`pbh` mismatch and the write 401s. `allowlistclient.mutate` marshals the body
+**once** and hands those exact bytes to the `Authorizer` before sending them —
+do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
+end-to-end test (`integration_test.go`) exists to catch a regression here.
+
+## Operator key-pinning: revocation is coarse and the pin isn't attested (interim)
+
+`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`
+
+Allowlist writes are authorized by **pinned operator public keys**
+(`cds.operatorKeys`); `operatorauth.Verifier` accepts a token signed by any
+pinned key and consults **no CRL/OCSP**. Consequences to know before relying on
+it:
+
+- **Revoking one operator means editing the pinned-key list and re-installing**
+  (remove its public key from `cds.operatorKeys`). There is no per-key
+  revocation short of that. Keys are long-lived; a leaked operator private key is
+  usable until removed. Protect operator keys (vault/HSM/hardware token).
+- **The pinned-key list is host-supplied config, read only at CDS start, and not
+  part of CDS's attestation.** A control-plane that swaps the ConfigMap and
+  restarts CDS could pin its own key — the same unattested-config gap as the
+  allowlist seed. `c8s cds verify` now reports the pinned-key fingerprints (via
+  `GET /operator-keys`, fetched over a connection pinned to the attested serving
+  cert), which makes a swap *visible* to an operator who knows the expected
+  fingerprints — but a verifier still sees what CDS claims, not what was
+  measured. Committing the list via HOST_DATA/initdata remains the real fix.
+
+This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
+PKI (see `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`). **Longer
+term** we want a CA + short-lived operator certificates (chain carried in the
+JWT `x5c` header), giving delegated issuance and CA-based revocation instead of
+editing a pinned-key list, plus single-file (cert+key) operator credentials.
+
+## Operator-key auth is app-layer on purpose (do not switch CDS to mTLS)
+
+`internal/cmds/cds/run.go`
+
+CDS serves RA-TLS (`ratls.NewServerTLSConfig`) and sets **no** `ClientAuth`, so
+no client presents a TLS client cert. Operator writes are verified at the
+handler layer, not the TLS handshake. Enabling `tls.VerifyClientCertIfGiven` /
+`RequireAnyClientCert` on the CDS listener would change the handshake for every
+mesh client (ratls-mesh, nri-image-policy, get-cert, policy-monitor — all
+`Policy`-only RA-TLS clients today). Keep operator verification in
+`operatorauth.Verifier`, off the listener.
+
 ## kata-image-puller vs kata-deploy: the guest-pull config clobber
 
 `internal/helmchart/c8s/templates/kata-image-puller.yaml`

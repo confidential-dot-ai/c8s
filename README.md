@@ -124,6 +124,110 @@ credentials](docs/QUICKSTART.md#private-registry-credentials) for details.
   what chart-managed bootstrap means.
 - [Gaps](docs/GAPS.md) tracks the CDS-shaped follow-up work.
 
+## Managing the allowlist
+
+CDS serves the image-digest allowlist that `nri-image-policy` enforces on every
+node. The `c8s allowlist` command reads and mutates it.
+
+CDS has **no public ingress**. Reach it over a port-forward (the CLI verifies
+CDS's attestation, so the localhost hop is fine):
+
+```sh
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+CDS=https://localhost:8443
+```
+
+or front it via the tls-lb. The examples below use `$CDS`. The URL must be
+`https://` (RA-TLS); a plaintext `http://` endpoint is refused unless you pass
+`--insecure` (dev/test only, skips CDS attestation).
+
+**Reads** are unauthenticated:
+
+```sh
+# List the live allowlist (text or -o json)
+c8s allowlist list --url $CDS \
+  --measurements <cds-sha384-launch-digest> \
+  --attestation-api-url <attestation-api-url>
+
+# Back it up / show what a file would change
+c8s allowlist export --url $CDS > allowlist.json
+c8s allowlist diff allowlist.json --url $CDS
+```
+
+An `https://` URL is verified via CDS's RA-TLS attestation — pass
+`--measurements` (repeatable/comma-separated, or `--measurements-file`) to pin
+CDS's launch measurement; an empty set accepts any attested CDS (UNSAFE).
+Verification currently reaches the attestation-api at `--attestation-api-url`
+(forward it too, or run the CLI where it is reachable); local RA-TLS-cert
+verification like `c8s verify` is a planned improvement (see `docs/GAPS.md`).
+
+**Writes** require the operator key (see below):
+
+```sh
+# Add or remove single digests (--dry-run prints the change without calling CDS)
+c8s allowlist add    sha256:<digest> registry.example.com/app@sha256:<digest> --url $CDS --operator-key operator.key
+c8s allowlist remove sha256:<digest> --url $CDS --operator-key operator.key
+
+# Replace the whole allowlist from a file (CDS assigns the new version)
+c8s allowlist upload allowlist.json --url $CDS --operator-key operator.key
+```
+
+`upload` refuses a file that names none of the core c8s components
+(`cds`, `ratls-mesh`, `nri-image-policy`, `attestation-api`, `nginx`) — a
+cluster missing them cannot pull its own control plane. Re-run with `--force`
+to override, or change the required set with `--require`.
+
+### Operator allowlist credentials
+
+Allowlist writes are authenticated by an operator **EC key** whose **public**
+half CDS pins (`cds.operatorKeys`). The CLI signs a short-lived,
+request-body-bound token with the private key — so a captured token cannot be
+replayed against a different payload. Generate a keypair and pin the public half
+(P-256 EC):
+
+```sh
+# Operator private key — keep it safe (vault/HSM/hardware token). It never
+# leaves the operator's machine.
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+
+# Public key — this is what CDS pins.
+openssl ec -in operator.key -pubout -out operator.pub
+```
+
+Pin the public key(s) on CDS at install time (writes stay disabled until you do;
+concatenate several `operator.pub` blocks into one file to authorize multiple
+operators):
+
+```sh
+c8s install --operator-keys operator.pub   # plus your other install flags
+```
+
+Installing **without** `--operator-keys` leaves allowlist writes disabled (nobody
+can use `c8s allowlist` add/remove/upload), so `c8s install` refuses it on the
+default path unless you pass `--force` to acknowledge.
+
+Supply the operator key to the CLI by flag (`--operator-key`) or environment
+(`C8S_OPERATOR_KEY`); the flag wins.
+
+`c8s cds verify` reports the fingerprints of the keys a CDS actually pins
+(fetched over a connection bound to the attested serving cert). Compare against
+your local key with:
+
+```sh
+openssl pkey -pubin -in operator.pub -outform DER | sha256sum
+```
+
+The key list is CDS-reported config — it is **not** covered by the launch
+measurement (see `docs/pitfalls.md`).
+
+**Revocation is coarse (stop-gap):** operator keys are long-lived and CDS
+consults no CRL/OCSP, so revoking an operator means removing its public key from
+`cds.operatorKeys` and re-installing. The pinned-key list is also host-supplied
+config that is only read at CDS start and is not yet in CDS's attestation — see
+[`docs/pitfalls.md`](docs/pitfalls.md). A CA + operator certificates (with
+single-file cert+key credentials and CA-based revocation) is the planned
+improvement; see [`docs/decisions`](docs/decisions/) and `docs/GAPS.md`.
+
 ## Docker images
 
 All images are published to GHCR on push to `main` and `feat/**` branches:

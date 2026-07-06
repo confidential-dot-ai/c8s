@@ -63,7 +63,7 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
 	flags.StringVar(&cfg.allowlistDB, "allowlist-db", "", "Path to the allowlist SQLite database")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
-	flags.StringSliceVar(&cfg.allowlistWriteMeasurements, "allowlist-write-measurements", nil, "SHA-384 hex launch measurements allowed to mutate the allowlist via a bearer EAR (empty = reject all writes)")
+	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
 	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA via /handoff (empty = /handoff disabled)")
 
 	flags.Float64Var(&cfg.rateLimit, "rate-limit", 10, "max requests per second per source IP on attestation endpoints")
@@ -96,40 +96,40 @@ func NewCmd() *cobra.Command {
 }
 
 type config struct {
-	host                       string
-	port                       int
-	logLevel                   string
-	attestationApiURL          string
-	caCommonName               string
-	caCertValidity             time.Duration
-	measurements               []string
-	earIssuerName              string
-	expectedIssuer             string
-	jwtClockSkew               int64
-	maxTTL                     time.Duration
-	certTTL                    time.Duration
-	challengeTTL               time.Duration
-	requestTimeout             time.Duration
-	maxRequestSize             int64
-	readTimeout                time.Duration
-	readHeaderTimeout          time.Duration
-	writeTimeout               time.Duration
-	idleTimeout                time.Duration
-	maxHeaderBytes             int
-	sanValidation              bool
-	dnsSANPatterns             []string
-	allowedCNPattern           string
-	readinessInterval          time.Duration
-	minCAValidity              time.Duration
-	allowlistDB                string
-	allowlistSeed              string
-	allowlistWriteMeasurements []string
-	handoffMeasurements        []string
-	rotationInterval           time.Duration
-	rotationOverlap            time.Duration
-	rotationJitter             float64
-	ratlsPlatform              string
-	ratlsCertTTL               time.Duration
+	host                string
+	port                int
+	logLevel            string
+	attestationApiURL   string
+	caCommonName        string
+	caCertValidity      time.Duration
+	measurements        []string
+	earIssuerName       string
+	expectedIssuer      string
+	jwtClockSkew        int64
+	maxTTL              time.Duration
+	certTTL             time.Duration
+	challengeTTL        time.Duration
+	requestTimeout      time.Duration
+	maxRequestSize      int64
+	readTimeout         time.Duration
+	readHeaderTimeout   time.Duration
+	writeTimeout        time.Duration
+	idleTimeout         time.Duration
+	maxHeaderBytes      int
+	sanValidation       bool
+	dnsSANPatterns      []string
+	allowedCNPattern    string
+	readinessInterval   time.Duration
+	minCAValidity       time.Duration
+	allowlistDB         string
+	allowlistSeed       string
+	operatorKeys        string
+	handoffMeasurements []string
+	rotationInterval    time.Duration
+	rotationOverlap     time.Duration
+	rotationJitter      float64
+	ratlsPlatform       string
+	ratlsCertTTL        time.Duration
 
 	rateLimit                float64
 	rateBurst                int

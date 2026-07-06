@@ -41,7 +41,7 @@ func OpenStore(path string) (Store, error) {
 	}
 
 	if isNew {
-		slog.Warn("WHITELIST DATABASE DID NOT EXIST, CREATING NEW FILE", "path", path)
+		slog.Warn("allowlist db did not exist, creating", "path", path)
 	}
 
 	if _, err := db.Exec(initSQL); err != nil {
@@ -224,6 +224,41 @@ func (s *Store) SeedDigests(digests map[types.Digest]string) (int, error) {
 	}
 
 	return int(added), tx.Commit()
+}
+
+// Replace atomically swaps the entire allowlist for digests and bumps the
+// version. Unlike SeedDigests (additive), this is a full replace: entries not
+// present in digests — including ones an operator added earlier via POST — are
+// removed. The version is bumped unconditionally because a replace is an
+// explicit operator action; workers re-pull on the new ETag. An empty map
+// clears the allowlist (which denies every image); HandleReplace rejects a nil
+// map so only an explicit empty set reaches here.
+func (s *Store) Replace(digests map[types.Digest]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM allowlist"); err != nil {
+		return err
+	}
+	for digest, image := range digests {
+		if _, err := tx.Exec(
+			"INSERT INTO allowlist (digest, image) VALUES (?, ?)",
+			digest.String(), image,
+		); err != nil {
+			return err
+		}
+	}
+	if err := bumpVersionTx(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // Delete removes all given digests atomically. Returns false (and deletes nothing)

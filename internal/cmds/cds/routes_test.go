@@ -87,6 +87,44 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 	}
 }
 
+// TestRouter_RateLimitsAllowlistWrites pins that allowlist mutations sit behind
+// the same per-IP limiter as the attestation endpoints: token verification
+// costs ECDSA verifies before any authentication.
+func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
+	keyPEM, _ := earsigner.Generate()
+	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	store, _ := allowlist.OpenInMemory()
+	t.Cleanup(func() { _ = store.Close() })
+	ca, _ := issuer.NewCA("test ca", time.Hour)
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(1), 1, 100)
+	if err != nil {
+		t.Fatalf("rate limiter: %v", err)
+	}
+	deps := dependencies{
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		ReadyFn:          func() bool { return true },
+		EarIssuer:        earIss,
+		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      rl,
+		MaxRequestSize:   65536,
+	}
+	r := newRouter(deps)
+
+	do := func() int {
+		req := httptest.NewRequest(http.MethodPut, "/allowlist", bytes.NewReader([]byte(`{"digests":{}}`)))
+		req.RemoteAddr = "10.0.0.2:1234"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := do(); got == http.StatusTooManyRequests {
+		t.Fatalf("first request rate-limited unexpectedly: %d", got)
+	}
+	if got := do(); got != http.StatusTooManyRequests {
+		t.Fatalf("second request: got %d, want 429", got)
+	}
+}
+
 func newTestRateLimiter(t *testing.T) *issuer.IPRateLimiter {
 	t.Helper()
 	rl, err := issuer.NewIPRateLimiter(rate.Limit(1000), 1000, 1000)
@@ -188,6 +226,35 @@ func TestRouter_CAEndpointReturnsLoadedCert(t *testing.T) {
 	}
 	if _, err := certutil.ParseCertificatePEM(w.Body.Bytes()); err != nil {
 		t.Errorf("body is not a parseable cert: %v", err)
+	}
+}
+
+// TestRouter_OperatorKeysEndpoint: /operator-keys serves the pinned key PEM
+// when configured and 404s when allowlist writes are disabled — so `c8s verify`
+// can distinguish "no keys pinned" from a broken endpoint.
+func TestRouter_OperatorKeysEndpoint(t *testing.T) {
+	// Not configured (newStubRouter sets no OperatorKeysPEM) → 404.
+	r := newStubRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/operator-keys", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unset: status got %d, want 404", w.Code)
+	}
+
+	// Configured → 200 with the PEM served verbatim.
+	pemBundle := []byte("-----BEGIN PUBLIC KEY-----\nZHVtbXk=\n-----END PUBLIC KEY-----\n")
+	h := handleOperatorKeys(pemBundle)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/operator-keys", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("set: status got %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/x-pem-file" {
+		t.Errorf("content-type: got %q", ct)
+	}
+	if w.Body.String() != string(pemBundle) {
+		t.Errorf("body: got %q, want the configured PEM", w.Body.String())
 	}
 }
 

@@ -212,7 +212,37 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(cfg, policy, ev, out)
+	return verifyEvidence(cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out)
+}
+
+// operatorKeysReport is the (informational) pinned-operator-key section of the
+// verdict. Keys authorize allowlist writes on CDS; they are CDS-reported config,
+// not covered by the launch measurement.
+type operatorKeysReport struct {
+	fingerprints []string
+	note         string // non-empty when keys are absent/unavailable, explains why
+}
+
+// gatherOperatorKeys fetches the CDS-pinned operator key fingerprints for
+// kind=cds network targets. The fetch is bound to the attested serving cert
+// (see fetchOperatorKeyFingerprints); any failure degrades to a note — the
+// attestation verdict itself never depends on this section.
+func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorKeysReport {
+	if cfg.kind != "cds" || cfg.url == "" {
+		return operatorKeysReport{}
+	}
+	if ev.certSHA256 == "" {
+		return operatorKeysReport{note: "not fetched (no serving cert to bind to)"}
+	}
+	_, baseURL, err := normalizeTarget(cfg.url, defaultPort(cfg))
+	if err != nil {
+		return operatorKeysReport{note: "not fetched: " + err.Error()}
+	}
+	fps, note, err := fetchOperatorKeyFingerprints(ctx, baseURL, cfg.server, ev.certSHA256, cfg.timeout)
+	if err != nil {
+		return operatorKeysReport{note: "not fetched: " + err.Error()}
+	}
+	return operatorKeysReport{fingerprints: fps, note: note}
 }
 
 // verifyEvidence verifies already-gathered evidence (from any source/mode)
@@ -220,9 +250,11 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 // cluster runs), which auto-detects the product and fetches the VCEK from KDS
 // when it is not shipped inline — so a bare RA-TLS report and a discovery doc
 // both work — then renders the verdict.
-func verifyEvidence(cfg config, policy *ratls.VerifyPolicy, ev *evidence, out io.Writer) int {
+func verifyEvidence(cfg config, policy *ratls.VerifyPolicy, ev *evidence, opKeys operatorKeysReport, out io.Writer) int {
 	result, verr := verifyInProcess(ev, policy, minTCBFromCfg(cfg))
 	oc := newOutcome(cfg, ev, result, verr, policy)
+	oc.OperatorKeys = opKeys.fingerprints
+	oc.OperatorKeysNote = opKeys.note
 	render(cfg, oc, out)
 	if !oc.Verified {
 		return exitFailed
@@ -375,6 +407,12 @@ type Outcome struct {
 	CertSHA256  string    `json:"cert_sha256,omitempty"`
 	Pinned      bool      `json:"measurement_pinned"`
 	Error       string    `json:"error,omitempty"`
+
+	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
+	// operator public keys the target pins for allowlist writes. Informational:
+	// CDS-reported config, not covered by the launch measurement. kind=cds only.
+	OperatorKeys     []string `json:"operator_keys,omitempty"`
+	OperatorKeysNote string   `json:"operator_keys_note,omitempty"`
 }
 
 // newOutcome maps a verifier verdict to the shared Outcome. The verifier proves
@@ -487,6 +525,14 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  cert sha256:  %s\n", oc.CertSHA256)
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
+	if len(oc.OperatorKeys) > 0 {
+		fmt.Fprintf(out, "  operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):\n")
+		for _, fp := range oc.OperatorKeys {
+			fmt.Fprintf(out, "    sha256:%s\n", fp)
+		}
+	} else if oc.OperatorKeysNote != "" {
+		fmt.Fprintf(out, "  operator keys: %s\n", oc.OperatorKeysNote)
+	}
 	if !oc.Fresh {
 		fmt.Fprintf(out, "  note:         freshness NOT proven (no per-request nonce bound)\n")
 	}

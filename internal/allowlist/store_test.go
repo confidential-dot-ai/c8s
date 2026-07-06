@@ -1,6 +1,7 @@
 package allowlist
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -16,6 +17,79 @@ func mustParseDigest(t *testing.T, s string) types.Digest {
 		t.Fatalf("parse digest %q: %v", s, err)
 	}
 	return d
+}
+
+func TestReplaceSwapsSetAndBumpsVersion(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	beforeVersion, _, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	if err := store.Replace(map[types.Digest]string{
+		mustParseDigest(t, digestB): "image-b",
+	}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	version, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(digests) != 1 {
+		t.Fatalf("expected 1 digest after replace, got %d", len(digests))
+	}
+	if digests[mustParseDigest(t, digestB)] != "image-b" {
+		t.Fatalf("replacement entry missing: %#v", digests)
+	}
+	if _, ok := digests[mustParseDigest(t, digestA)]; ok {
+		t.Fatal("pre-replace entry survived a full replace")
+	}
+	// Replace must *increment* the version, not clear or reset it: the version
+	// lives in its own table, so DELETE FROM allowlist leaves it untouched and
+	// bumpVersionTx increments it. Assert monotonic +1 (a reset-to-default bug
+	// would still satisfy version != beforeVersion, so check the value).
+	before, err := strconv.Atoi(beforeVersion)
+	if err != nil {
+		t.Fatalf("beforeVersion %q not numeric: %v", beforeVersion, err)
+	}
+	after, err := strconv.Atoi(version)
+	if err != nil {
+		t.Fatalf("version %q not numeric: %v", version, err)
+	}
+	if after != before+1 {
+		t.Fatalf("expected version %d after replace, got %d (before=%d)", before+1, after, before)
+	}
+}
+
+func TestReplaceEmptyClears(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := store.Replace(map[types.Digest]string{}); err != nil {
+		t.Fatalf("replace empty: %v", err)
+	}
+	_, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(digests) != 0 {
+		t.Fatalf("expected empty allowlist after replace with empty set, got %d", len(digests))
+	}
 }
 
 func TestInitialVersionIsOne(t *testing.T) {

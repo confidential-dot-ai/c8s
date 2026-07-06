@@ -13,9 +13,6 @@ package resources
 type Resource string
 
 const (
-	// AllowlistWrite authorises POST/DELETE on /allowlist.
-	AllowlistWrite Resource = "cds/allowlist-write"
-
 	// SignCSR authorises POST /sign-csr.
 	SignCSR Resource = "cds/sign-csr"
 

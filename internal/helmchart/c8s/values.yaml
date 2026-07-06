@@ -224,9 +224,13 @@ cds:
   ##      serving cert against it when they dial CDS.
   ## Empty = no pinning (UNSAFE outside dev).
   measurements: []
-  ## SHA-384 hex launch digests whose bearer EAR may mutate the allowlist via
-  ## POST/DELETE /allowlist. Empty = allowlist writes are rejected.
-  allowlistWriteMeasurements: []
+  ## PEM bundle of operator EC public keys (public material, not a secret).
+  ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a
+  ## short-lived token signed by one of the matching operator private keys (see
+  ## `c8s allowlist` and the README "Operator allowlist credentials").
+  ## Empty = allowlist writes are rejected (reads are still served). Prefer
+  ## `c8s install --operator-keys <file>` over hand-editing this multi-line value.
+  operatorKeys: ""
   tokenSignerRotationInterval: 720h
   tokenSignerOverlap: 25h
   tokenSignerRotationJitter: 0.1

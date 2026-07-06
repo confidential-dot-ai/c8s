@@ -1,12 +1,14 @@
 package allowlist_test
 
 import (
-	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,98 +17,68 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
-	"github.com/confidential-dot-ai/c8s/internal/earclaims"
-	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
-	"github.com/confidential-dot-ai/c8s/pkg/jwks"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
 	digestA       = "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	digestMissing = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-	testIssuer    = "cds"
-	measurementA  = "allowed-launch-digest"
 )
 
-// authHeader issues an EAR bound to body via the pbh claim and returns it as
-// a Bearer header value. Callers MUST pass the exact bytes the server will
-// receive — any difference (whitespace, key ordering) breaks verification.
-func authHeader(t *testing.T, issuer ear.Issuer, measurement string, body []byte) string {
+// testOperatorCredential generates an operator key pair: a Signer for minting
+// write tokens and the public key CDS would pin.
+func testOperatorCredential(t *testing.T) (*operatorauth.Signer, *ecdsa.PublicKey) {
 	t.Helper()
-	token, err := issuer.IssueForRequestBody(json.RawMessage(`{"test":"evidence"}`), measurement, body)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("issue EAR: %v", err)
+		t.Fatalf("gen operator key: %v", err)
 	}
-	return "Bearer " + token
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal operator key: %v", err)
+	}
+	signer, err := operatorauth.NewSignerFromKeyPEM(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	if err != nil {
+		t.Fatalf("new operator signer: %v", err)
+	}
+	return signer, &key.PublicKey
 }
 
-func signedEAR(t *testing.T, keyPEM []byte, claims jwt.MapClaims) string {
+// authHeader mints an operator token bound to method + /allowlist + body and
+// returns it as a Bearer header value. Callers MUST pass the exact method and
+// bytes the server will receive — any difference breaks the token's bindings.
+func authHeader(t *testing.T, signer *operatorauth.Signer, method string, body []byte) string {
 	t.Helper()
-	key, err := certutil.ParseECPrivateKey(keyPEM)
+	header, err := signer.Authorization(method, "/allowlist", body)
 	if err != nil {
-		t.Fatalf("parse EAR key: %v", err)
+		t.Fatalf("mint operator token: %v", err)
 	}
-	kid, err := jwks.Thumbprint(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("thumbprint EAR key: %v", err)
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
-	token.Header["kid"] = kid
-	signed, err := token.SignedString(key)
-	if err != nil {
-		t.Fatalf("sign EAR: %v", err)
-	}
-	return signed
+	return header
 }
 
-// keyProviderFor builds the production KeyProvider (an earsigner.Rotator) from
-// a key PEM so tests verify tokens through the same kid-resolving path CDS uses.
-func keyProviderFor(t *testing.T, keyPEM []byte) issuer.KeyProvider {
-	t.Helper()
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: time.Hour, Overlap: time.Hour, Logger: slog.Default(),
-	}, keyPEM, func(*ecdsa.PrivateKey, string) {})
-	if err != nil {
-		t.Fatalf("new rotator: %v", err)
-	}
-	return rotator
-}
-
-func testAllowlistApp(t *testing.T) (http.Handler, *readiness.Checker, ear.Issuer) {
+func testAllowlistApp(t *testing.T) (http.Handler, *readiness.Checker, *operatorauth.Signer) {
 	t.Helper()
 	store, err := allowlist.OpenInMemory()
 	if err != nil {
 		t.Fatalf("open in-memory store: %v", err)
 	}
 
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("generate EAR key: %v", err)
-	}
-	issuer, err := ear.NewIssuer(keyPEM, testIssuer, 5*time.Minute)
-	if err != nil {
-		t.Fatalf("new EAR issuer: %v", err)
-	}
+	signer, pub := testOperatorCredential(t)
 
 	asClient := attestationclient.NewClient("http://localhost:0")
 	checker := readiness.NewChecker(asClient, 10*time.Second)
 
+	// Writes authorize through the production operatorauth.Verifier, so these
+	// tests exercise the same auth path a deployment runs.
 	wh := allowlist.Handler{
-		Store: &store,
-		WriteAuthorizer: allowlist.EARWriteAuthorizer{
-			KeyProvider:         keyProviderFor(t, keyPEM),
-			ExpectedIssuer:      testIssuer,
-			AllowedMeasurements: map[string]bool{measurementA: true},
-		}.Authorize,
+		Store:           &store,
+		WriteAuthorizer: operatorauth.Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: 30 * time.Second}.Authorize,
 	}
 
-	return allowlistTestRouter(wh, checker.Ready), &checker, issuer
+	return allowlistTestRouter(wh, checker.Ready), &checker, signer
 }
 
 // allowlistTestRouter mounts only the routes the allowlist tests exercise, so
@@ -117,6 +89,7 @@ func allowlistTestRouter(wh allowlist.Handler, ready attestation.ReadinessFunc) 
 	mux.HandleFunc("GET /readyz", attestation.HandleReadyz(ready))
 	mux.HandleFunc("GET /allowlist", wh.HandleList)
 	mux.HandleFunc("POST /allowlist", wh.HandleAdd)
+	mux.HandleFunc("PUT /allowlist", wh.HandleReplace)
 	mux.HandleFunc("DELETE /allowlist", wh.HandleDelete)
 	return mux
 }
@@ -195,6 +168,181 @@ func TestAllowlistListEmpty(t *testing.T) {
 	}
 }
 
+func TestAllowlistReplaceRequiresAuth(t *testing.T) {
+	app, _, _ := testAllowlistApp(t)
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	body := fmt.Sprintf(`{"digests":{"%s":"test-image"}}`, digestA)
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/allowlist", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("got status %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestAllowlistReplaceSwapsSet verifies PUT is a full replace: an entry present
+// before the replace and absent from the new set is gone afterward.
+func TestAllowlistReplaceSwapsSet(t *testing.T) {
+	app, _, signer := testAllowlistApp(t)
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	// Seed digestA via POST.
+	addBody := fmt.Sprintf(`{"digest":"%s","image":"old-image"}`, digestA)
+	addReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/allowlist", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, []byte(addBody)))
+	addResp, err := http.DefaultClient.Do(addReq)
+	if err != nil {
+		t.Fatalf("add request: %v", err)
+	}
+	addResp.Body.Close()
+	if addResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("add: got %d, want 204", addResp.StatusCode)
+	}
+
+	// Replace with a set containing only digestMissing.
+	putBody := fmt.Sprintf(`{"digests":{"%s":"new-image"}}`, digestMissing)
+	putReq, _ := http.NewRequest(http.MethodPut, srv.URL+"/allowlist", strings.NewReader(putBody))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set("Authorization", authHeader(t, signer, http.MethodPut, []byte(putBody)))
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		t.Fatalf("put request: %v", err)
+	}
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("put: got %d, want 204", putResp.StatusCode)
+	}
+
+	// GET and confirm the set is exactly {digestMissing}.
+	resp, err := http.Get(srv.URL + "/allowlist")
+	if err != nil {
+		t.Fatalf("get request: %v", err)
+	}
+	defer resp.Body.Close()
+	var listed types.AllowlistListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Digests) != 1 {
+		t.Fatalf("expected exactly 1 digest after replace, got %d", len(listed.Digests))
+	}
+	newDigest, _ := types.ParseDigest(digestMissing)
+	if listed.Digests[newDigest] != "new-image" {
+		t.Fatalf("replaced set missing new entry: %#v", listed.Digests)
+	}
+	oldDigest, _ := types.ParseDigest(digestA)
+	if _, ok := listed.Digests[oldDigest]; ok {
+		t.Fatal("old entry survived a full replace")
+	}
+}
+
+// guardTestHandler builds a Handler with a permissive authorizer, for tests of
+// the post-auth request-decoding guards.
+func guardTestHandler(t *testing.T) (allowlist.Handler, *allowlist.Store) {
+	t.Helper()
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open in-memory store: %v", err)
+	}
+	h := allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }}
+	return h, &store
+}
+
+// TestAllowlistReplaceRejectsNilDigests pins the wipe guard: a body whose
+// digests decode to a nil map (absent or null) must 422 without touching the
+// store, since clearing the allowlist denies every image on every node.
+func TestAllowlistReplaceRejectsNilDigests(t *testing.T) {
+	h, store := guardTestHandler(t)
+	d, _ := types.ParseDigest(digestA)
+	if err := store.Add(d, "img"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	versionBefore, _, _ := store.ListAll()
+
+	for _, body := range []string{`{}`, `{"digests":null}`} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/allowlist", strings.NewReader(body))
+		h.HandleReplace(rec, req)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT %s: got status %d, want 422", body, rec.Code)
+		}
+	}
+
+	version, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(digests) != 1 || version != versionBefore {
+		t.Fatalf("nil-digests PUT must not change the allowlist: %d entries, version %s -> %s",
+			len(digests), versionBefore, version)
+	}
+}
+
+// TestAllowlistReplaceExplicitEmptyClears verifies the deliberate wipe path
+// stays open: a non-nil empty set clears the allowlist.
+func TestAllowlistReplaceExplicitEmptyClears(t *testing.T) {
+	h, store := guardTestHandler(t)
+	d, _ := types.ParseDigest(digestA)
+	if err := store.Add(d, "img"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/allowlist", strings.NewReader(`{"digests":{}}`))
+	h.HandleReplace(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("got status %d, want 204", rec.Code)
+	}
+
+	_, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(digests) != 0 {
+		t.Fatalf("explicit empty replace left %d entries", len(digests))
+	}
+}
+
+// TestAllowlistAddRejectsMissingDigest pins the zero-digest guard: an absent
+// digest field skips Digest's validating UnmarshalJSON, and the row it would
+// insert is invisible to ListAll and unaddressable by Delete.
+func TestAllowlistAddRejectsMissingDigest(t *testing.T) {
+	h, store := guardTestHandler(t)
+	versionBefore, _, _ := store.ListAll()
+
+	for _, body := range []string{`{}`, `{"image":"ghost"}`} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/allowlist", strings.NewReader(body))
+		h.HandleAdd(rec, req)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("POST %s: got status %d, want 422", body, rec.Code)
+		}
+	}
+
+	// The version pins the no-insert invariant: ListAll hides a zero-digest
+	// row, but inserting one would still have bumped the version.
+	version, _, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if version != versionBefore {
+		t.Fatalf("zero-digest POST bumped version %s -> %s (ghost row inserted)", versionBefore, version)
+	}
+}
+
 func TestAllowlistAddRequiresAuth(t *testing.T) {
 	app, _, _ := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
@@ -212,18 +360,21 @@ func TestAllowlistAddRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestAllowlistAddRejectsUnauthorizedMeasurement(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+// TestAllowlistAddRejectsUnpinnedOperatorKey proves a well-formed token signed
+// by a key CDS does not pin is rejected at the handler level.
+func TestAllowlistAddRejectsUnpinnedOperatorKey(t *testing.T) {
+	app, _, _ := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
+	otherSigner, _ := testOperatorCredential(t) // not the pinned key
 	body := fmt.Sprintf(`{"digest":"%s","image":"test-image"}`, digestA)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, "other-launch-digest", []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, otherSigner, http.MethodPost, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -236,123 +387,7 @@ func TestAllowlistAddRejectsUnauthorizedMeasurement(t *testing.T) {
 	}
 }
 
-func TestAllowlistWriteAuthorizerRejectsMissingExpiration(t *testing.T) {
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("generate EAR key: %v", err)
-	}
-
-	token := signedEAR(t, keyPEM, jwt.MapClaims{
-		earclaims.Issuer:   testIssuer,
-		earclaims.IssuedAt: time.Now().Unix(),
-		earclaims.Submods: map[string]any{
-			earclaims.SubmodAttester: map[string]any{
-				earclaims.LaunchDigest: measurementA,
-			},
-		},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/allowlist", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	err = (allowlist.EARWriteAuthorizer{
-		KeyProvider:         keyProviderFor(t, keyPEM),
-		ExpectedIssuer:      testIssuer,
-		AllowedMeasurements: map[string]bool{measurementA: true},
-	}).Authorize(req, nil)
-	if err == nil {
-		t.Fatal("expected missing expiration to be rejected")
-	}
-}
-
-func TestAllowlistWriteAuthorizerRejectsExpiredToken(t *testing.T) {
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("generate EAR key: %v", err)
-	}
-
-	token := signedEAR(t, keyPEM, jwt.MapClaims{
-		earclaims.Issuer:    testIssuer,
-		earclaims.IssuedAt:  time.Now().Add(-10 * time.Minute).Unix(),
-		earclaims.ExpiresAt: time.Now().Add(-5 * time.Minute).Unix(),
-		earclaims.Submods: map[string]any{
-			earclaims.SubmodAttester: map[string]any{
-				earclaims.LaunchDigest: measurementA,
-			},
-		},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/allowlist", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	err = (allowlist.EARWriteAuthorizer{
-		KeyProvider:         keyProviderFor(t, keyPEM),
-		ExpectedIssuer:      testIssuer,
-		AllowedMeasurements: map[string]bool{measurementA: true},
-	}).Authorize(req, nil)
-	if err == nil {
-		t.Fatal("expected expired EAR to be rejected")
-	}
-}
-
-// TestAllowlistWriteAuthorizerAcceptsRetiringKey is the rotation-window
-// regression guard: an EAR signed by the previous (now retiring) key must still
-// authorize writes. The old hand-rolled authorizer resolved only the active
-// key, so a token minted moments before a rotation failed. Routing through the
-// rotator's kid-based KeyProvider fixes it.
-func TestAllowlistWriteAuthorizerAcceptsRetiringKey(t *testing.T) {
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("generate EAR key: %v", err)
-	}
-	// The issuer signs with the initial key's kid; after one rotation that kid
-	// is retiring, not active.
-	iss, err := ear.NewIssuer(keyPEM, testIssuer, 5*time.Minute)
-	if err != nil {
-		t.Fatalf("new EAR issuer: %v", err)
-	}
-
-	swapped := make(chan struct{}, 1)
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{
-		Interval: time.Millisecond,
-		Overlap:  time.Hour, // keep the retiring key resolvable
-		Logger:   slog.Default(),
-	}, keyPEM, func(*ecdsa.PrivateKey, string) {
-		select {
-		case swapped <- struct{}{}:
-		default:
-		}
-	})
-	if err != nil {
-		t.Fatalf("new rotator: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go rotator.Run(ctx)
-	select {
-	case <-swapped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for key rotation")
-	}
-	cancel()
-
-	body := []byte(`{"digest":"` + digestA + `","image":"retiring"}`)
-	token, err := iss.IssueForRequestBody(json.RawMessage(`{"test":"evidence"}`), measurementA, body)
-	if err != nil {
-		t.Fatalf("issue EAR: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/allowlist", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	if err := (allowlist.EARWriteAuthorizer{
-		KeyProvider:         rotator,
-		ExpectedIssuer:      testIssuer,
-		AllowedMeasurements: map[string]bool{measurementA: true},
-	}).Authorize(req, body); err != nil {
-		t.Fatalf("EAR signed by retiring key must still authorize: %v", err)
-	}
-}
-
-func addDigest(t *testing.T, srvURL string, issuer ear.Issuer, digest, image string) {
+func addDigest(t *testing.T, srvURL string, signer *operatorauth.Signer, digest, image string) {
 	t.Helper()
 	body := fmt.Sprintf(`{"digest":"%s","image":"%s"}`, digest, image)
 	req, err := http.NewRequest(http.MethodPost, srvURL+"/allowlist", strings.NewReader(body))
@@ -360,7 +395,7 @@ func addDigest(t *testing.T, srvURL string, issuer ear.Issuer, digest, image str
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, measurementA, []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -374,11 +409,11 @@ func addDigest(t *testing.T, srvURL string, issuer ear.Issuer, digest, image str
 }
 
 func TestAllowlistAddAndListRoundtrip(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	addDigest(t, srv.URL, issuer, digestA, "test-image")
+	addDigest(t, srv.URL, signer, digestA, "test-image")
 
 	resp, err := http.Get(srv.URL + "/allowlist")
 	if err != nil {
@@ -411,11 +446,11 @@ func TestAllowlistAddAndListRoundtrip(t *testing.T) {
 }
 
 func TestAllowlistDeleteExistingReturnsNoContent(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	addDigest(t, srv.URL, issuer, digestA, "test-image")
+	addDigest(t, srv.URL, signer, digestA, "test-image")
 
 	body := fmt.Sprintf(`{"digests":["%s"]}`, digestA)
 	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/allowlist", strings.NewReader(body))
@@ -423,7 +458,7 @@ func TestAllowlistDeleteExistingReturnsNoContent(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, measurementA, []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodDelete, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -452,7 +487,7 @@ func TestAllowlistDeleteExistingReturnsNoContent(t *testing.T) {
 }
 
 func TestAllowlistDeleteNonexistentReturnsNotFound(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
@@ -462,7 +497,7 @@ func TestAllowlistDeleteNonexistentReturnsNotFound(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, measurementA, []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodDelete, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -500,7 +535,7 @@ func TestAllowlistDeleteRequiresAuth(t *testing.T) {
 }
 
 func TestAllowlistAddRejectsInvalidDigest(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
@@ -510,7 +545,7 @@ func TestAllowlistAddRejectsInvalidDigest(t *testing.T) {
 		t.Fatalf("create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, measurementA, []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -524,16 +559,16 @@ func TestAllowlistAddRejectsInvalidDigest(t *testing.T) {
 }
 
 // TestAllowlistAddRejectsReplayWithDifferentBody is the H2 regression test:
-// a captured EAR for one body MUST NOT authorize a different body within the
-// EAR's TTL.
+// a captured operator token for one body MUST NOT authorize a different body
+// within the token's TTL.
 func TestAllowlistAddRejectsReplayWithDifferentBody(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
 	// Token is bound to the legitimate digestA body.
 	originalBody := fmt.Sprintf(`{"digest":"%s","image":"trusted-image"}`, digestA)
-	header := authHeader(t, issuer, measurementA, []byte(originalBody))
+	header := authHeader(t, signer, http.MethodPost, []byte(originalBody))
 
 	// Attacker replays the same token but ships a different digest.
 	attackerBody := fmt.Sprintf(`{"digest":"%s","image":"attacker-image"}`, digestMissing)
@@ -555,39 +590,6 @@ func TestAllowlistAddRejectsReplayWithDifferentBody(t *testing.T) {
 	}
 }
 
-// TestAllowlistAddRejectsTokenWithoutBodyHash confirms that the body-binding
-// claim is REQUIRED — a token issued without `pbh` (e.g. by older callers
-// that didn't use IssueForRequestBody) is rejected, not silently accepted.
-func TestAllowlistAddRejectsTokenWithoutBodyHash(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	// IssueWithLaunchDigest produces a token without the pbh claim.
-	token, err := issuer.IssueWithLaunchDigest(json.RawMessage(`{"test":"evidence"}`), measurementA)
-	if err != nil {
-		t.Fatalf("issue EAR: %v", err)
-	}
-
-	body := fmt.Sprintf(`{"digest":"%s","image":"test-image"}`, digestA)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/allowlist", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("token without pbh claim was accepted: got status %d, want 401", resp.StatusCode)
-	}
-}
-
 // TestAllowlistAddRejectsBodyOverConfiguredCap confirms the per-Handler cap
 // is honoured: an over-cap body returns 413 *before* the auth check runs
 // (so the handler doesn't burn CPU hashing megabytes a malicious caller
@@ -597,23 +599,12 @@ func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open in-memory store: %v", err)
 	}
-	keyPEM, err := earsigner.Generate()
-	if err != nil {
-		t.Fatalf("generate EAR key: %v", err)
-	}
-	issuer, err := ear.NewIssuer(keyPEM, testIssuer, 5*time.Minute)
-	if err != nil {
-		t.Fatalf("new EAR issuer: %v", err)
-	}
+	signer, pub := testOperatorCredential(t)
 	asClient := attestationclient.NewClient("http://localhost:0")
 	checker := readiness.NewChecker(asClient, 10*time.Second)
 	wh := allowlist.Handler{
-		Store: &store,
-		WriteAuthorizer: allowlist.EARWriteAuthorizer{
-			KeyProvider:         keyProviderFor(t, keyPEM),
-			ExpectedIssuer:      testIssuer,
-			AllowedMeasurements: map[string]bool{measurementA: true},
-		}.Authorize,
+		Store:             &store,
+		WriteAuthorizer:   operatorauth.Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: 30 * time.Second}.Authorize,
 		MaxWriteBodyBytes: 64,
 	}
 	srv := httptest.NewServer(allowlistTestRouter(wh, checker.Ready))
@@ -625,7 +616,7 @@ func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t, issuer, measurementA, []byte(body)))
+	req.Header.Set("Authorization", authHeader(t, signer, http.MethodPost, []byte(body)))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -685,11 +676,11 @@ func TestAllowlistListMatchingIfNoneMatchReturns304(t *testing.T) {
 }
 
 func TestAllowlistListStaleIfNoneMatchReturns200WithNewETag(t *testing.T) {
-	app, _, issuer := testAllowlistApp(t)
+	app, _, signer := testAllowlistApp(t)
 	srv := httptest.NewServer(app)
 	defer srv.Close()
 
-	addDigest(t, srv.URL, issuer, digestA, "test-image")
+	addDigest(t, srv.URL, signer, digestA, "test-image")
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL+"/allowlist", nil)
 	if err != nil {

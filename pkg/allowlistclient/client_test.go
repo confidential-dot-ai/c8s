@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,23 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// stubAuth is a test Authorizer returning a fixed header, recording the
+// method, path, and body it was asked to bind to.
+type stubAuth struct {
+	header    string
+	gotMethod string
+	gotPath   string
+	gotBody   []byte
+	callErr   error
+}
+
+func (s *stubAuth) Authorization(method, path string, body []byte) (string, error) {
+	s.gotMethod = method
+	s.gotPath = path
+	s.gotBody = body
+	return s.header, s.callErr
+}
 
 func TestNewClientTrimsTrailingSlash(t *testing.T) {
 	c := NewClient("http://example.com/api/")
@@ -57,9 +75,10 @@ func TestListSuccess(t *testing.T) {
 
 func TestAddSuccess(t *testing.T) {
 	digest, _ := types.ParseDigest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	earToken := []byte("test-ear")
+	auth := &stubAuth{header: "Bearer test-token"}
 
 	var gotAuth string
+	var gotBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/allowlist", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -67,20 +86,50 @@ func TestAddSuccess(t *testing.T) {
 			return
 		}
 		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	c := NewClientWithHTTP(srv.URL, srv.Client())
-	err := c.Add(digest, "my-image", earToken)
-	if err != nil {
+	if err := c.Add(context.Background(), digest, "my-image", auth); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expectedAuth := "Bearer " + string(earToken)
-	if gotAuth != expectedAuth {
-		t.Fatalf("expected auth header %q, got %q", expectedAuth, gotAuth)
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("expected auth header %q, got %q", "Bearer test-token", gotAuth)
+	}
+	// The Authorizer must be handed the exact method, path, and bytes the
+	// server received, so the token's bindings match on the wire.
+	if string(auth.gotBody) != string(gotBody) {
+		t.Fatalf("Authorizer saw body %q but server received %q", auth.gotBody, gotBody)
+	}
+	if auth.gotMethod != http.MethodPost || auth.gotPath != "/allowlist" {
+		t.Fatalf("Authorizer saw %s %s, want POST /allowlist", auth.gotMethod, auth.gotPath)
+	}
+}
+
+func TestReplaceSuccess(t *testing.T) {
+	digest, _ := types.ParseDigest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	auth := &stubAuth{header: "Bearer test-token"}
+
+	var gotMethod string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/allowlist", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+	err := c.Replace(context.Background(), map[types.Digest]string{digest: "img"}, auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("expected PUT, got %s", gotMethod)
 	}
 }
 
@@ -99,7 +148,7 @@ func TestDeleteSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithHTTP(srv.URL, srv.Client())
-	err := c.Delete([]types.Digest{digest}, []byte("test-ear"))
+	err := c.Delete(context.Background(), []types.Digest{digest}, &stubAuth{header: "Bearer test-token"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -116,7 +165,7 @@ func TestDeleteNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithHTTP(srv.URL, srv.Client())
-	err := c.Delete([]types.Digest{digest}, []byte("test-ear"))
+	err := c.Delete(context.Background(), []types.Digest{digest}, &stubAuth{header: "Bearer test-token"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

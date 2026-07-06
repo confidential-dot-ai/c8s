@@ -36,6 +36,21 @@ data:
   allowlist-seed.json: {{ include "c8s.allowlistSeedJSON" . | trim | quote }}
 ---
 {{- end }}
+{{- if .Values.cds.operatorKeys }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "c8s.cdsName" . }}-operator-keys
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: cds
+data:
+  # PEM bundle of operator EC public keys that authorize allowlist writes.
+  # Public key material — not a secret.
+  keys.pem: {{ .Values.cds.operatorKeys | quote }}
+---
+{{- end }}
 {{- if .Values.cds.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -169,8 +184,8 @@ spec:
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
-            {{- with .Values.cds.allowlistWriteMeasurements }}
-            - --allowlist-write-measurements={{ join "," . }}
+            {{- if .Values.cds.operatorKeys }}
+            - --operator-keys=/etc/cds-operator-keys/keys.pem
             {{- end }}
             {{- if .Values.cds.handoff.enabled }}
             - --handoff-measurements={{ join "," .Values.cds.measurements }}
@@ -226,6 +241,11 @@ spec:
               mountPath: /etc/cds
               readOnly: true
             {{- end }}
+            {{- if .Values.cds.operatorKeys }}
+            - name: operator-keys
+              mountPath: /etc/cds-operator-keys
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -251,6 +271,11 @@ spec:
         - name: allowlist-seed
           configMap:
             name: {{ include "c8s.cdsName" . }}-allowlist-seed
+        {{- end }}
+        {{- if .Values.cds.operatorKeys }}
+        - name: operator-keys
+          configMap:
+            name: {{ include "c8s.cdsName" . }}-operator-keys
         {{- end }}
 ---
 apiVersion: v1

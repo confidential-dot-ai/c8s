@@ -179,9 +179,11 @@ trust boundary.
 The chart installs a CDS Deployment, Service, ServiceAccount, and either an
 `emptyDir` allowlist DB or a PVC when `cds.persistence.enabled=true`. The
 operator injects pods with the chart-managed CDS Service URL. Allowlist
-writes use `Authorization: Bearer <EAR>`. CDS accepts `POST /allowlist` and
-`DELETE /allowlist` only when the EAR was issued by CDS and the requester's
-normalized launch measurement is listed in `cds.allowlistWriteMeasurements`.
+writes (`POST`, `PUT`, `DELETE /allowlist`) are authorized by an operator key:
+the caller presents a short-lived token signed by an operator EC private key
+whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
+that token (see the README, "Operator allowlist credentials"). Without
+`cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
 
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
 those flows comes from EAR validation, measurement allowlists, and CA
@@ -193,13 +195,18 @@ a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
 public-bundle PVC.
 
-Minimal allowlist-write values:
+Minimal allowlist-write values (pin operator public keys):
 
 ```yaml
 cds:
-  allowlistWriteMeasurements:
-    - "<sha384-launch-measurement>"
+  operatorKeys: |
+    -----BEGIN PUBLIC KEY-----
+    ...operator EC public key...
+    -----END PUBLIC KEY-----
 ```
+
+Prefer `c8s install --operator-keys operator.pub`, which reads the file and
+sets this value for you.
 
 ### Operational warning: CDS is a singleton until handoff is enabled
 
@@ -526,8 +533,9 @@ helm template c8s internal/helmchart/c8s \
   --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 >/dev/null && echo OK
 ```
 
-Append `--set 'cds.allowlistWriteMeasurements[0]=<sha384-launch-measurement>'`
-to either command to render the allowlist-write allowlist.
+Append `--set-file cds.operatorKeys=operator.pub` to either command to render
+the operator-keys ConfigMap and the CDS `--operator-keys` flag that gate
+allowlist writes.
 
 The rendered manifests should include:
 

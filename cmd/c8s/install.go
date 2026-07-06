@@ -46,6 +46,8 @@ var (
 	installSingleNode       bool
 	installImagePullSecret  string
 	installImageTag         string
+	installOperatorKeys     string
+	installForce            bool
 
 	installResolveDigests bool
 )
@@ -108,6 +110,23 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 		comps = append(comps, c8sComponent{valuePrefix: valuePath, repository: repo})
 	}
 	return comps, nil
+}
+
+// operatorKeysPreflight enforces that installing without pinned operator keys is
+// a deliberate choice. On the default path — no --operator-keys and no -f values
+// file that could carry cds.operatorKeys — it requires --force, because the
+// resulting CDS has allowlist writes disabled and nobody could add/remove/upload
+// allowlist entries via `c8s allowlist`. When keys are supplied, or the operator
+// is managing values via -f, it is a no-op (consistent with the other -f-gated
+// preflights). It returns a warning to print when --force lets it pass.
+func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool) (warn string, err error) {
+	if operatorKeys != "" || len(valuesFiles) > 0 {
+		return "", nil
+	}
+	if !force {
+		return "", fmt.Errorf("no operator keys provided: allowlist writes will be DISABLED — nobody can add/remove/upload allowlist entries via `c8s allowlist`. Re-run with --operator-keys <file> to enable writes, or --force to install with writes disabled anyway")
+	}
+	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall", nil
 }
 
 // preflightCDSNode fails fast (before the helm install) when no node carries
@@ -329,6 +348,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateKataDebugFlags(installKata, installKataDebug); err != nil {
 			return err
+		}
+		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
 		if _, err := exec.LookPath("helm"); err != nil {
 			return fmt.Errorf("helm CLI not found on PATH: %w", err)
@@ -889,5 +913,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull private c8s images from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
+	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled)")
 	rootCmd.AddCommand(installCmd)
 }

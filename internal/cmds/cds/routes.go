@@ -24,6 +24,7 @@ type dependencies struct {
 	EarIssuer        ear.Issuer
 	JWKSFunc         func() []byte
 	CACertPEM        []byte
+	OperatorKeysPEM  []byte                // pinned operator public keys; empty = /operator-keys 404s
 	RateLimiter      *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
 	MaxRequestSize   int64                 // applied to write endpoints; must be > 0
 }
@@ -57,17 +58,20 @@ func newRouter(deps dependencies) http.Handler {
 	}
 
 	r.Get("/allowlist", deps.AllowlistHandler.HandleList)
-	r.Method(http.MethodPost, "/allowlist", capBody(deps.MaxRequestSize, http.HandlerFunc(deps.AllowlistHandler.HandleAdd)))
-	r.Method(http.MethodDelete, "/allowlist", capBody(deps.MaxRequestSize, http.HandlerFunc(deps.AllowlistHandler.HandleDelete)))
+	r.Method(http.MethodPost, "/allowlist", deps.protected(http.HandlerFunc(deps.AllowlistHandler.HandleAdd)))
+	r.Method(http.MethodPut, "/allowlist", deps.protected(http.HandlerFunc(deps.AllowlistHandler.HandleReplace)))
+	r.Method(http.MethodDelete, "/allowlist", deps.protected(http.HandlerFunc(deps.AllowlistHandler.HandleDelete)))
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
+	r.Get("/operator-keys", handleOperatorKeys(deps.OperatorKeysPEM))
 
 	return r
 }
 
 // protected wraps a write handler with per-source-IP rate limiting and the
-// request-body cap. Used for the attestation endpoints an unauthenticated
-// caller can hit before any signature check.
+// request-body cap. Used for the endpoints an unauthenticated caller can hit
+// before any signature check: attestation issuance and allowlist mutations
+// (each junk allowlist write costs up to one ECDSA verify per pinned key).
 func (deps dependencies) protected(next http.Handler) http.Handler {
 	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(deps.MaxRequestSize, next))
 }
@@ -80,5 +84,19 @@ func handleCA(caCertPEM []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		w.Write(caCertPEM)
+	}
+}
+
+// handleOperatorKeys serves the pinned operator public-key bundle (public
+// material, like /ca) so `c8s verify` can report which keys may mutate the
+// allowlist. 404 when allowlist writes are disabled (no pinned keys).
+func handleOperatorKeys(operatorKeysPEM []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if len(operatorKeysPEM) == 0 {
+			http.Error(w, "no operator keys configured (allowlist writes disabled)", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Write(operatorKeysPEM)
 	}
 }

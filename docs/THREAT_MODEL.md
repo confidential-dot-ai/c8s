@@ -44,10 +44,21 @@ binary:
   Chart-managed ratls-mesh accepts CA bundle updates only when each new CA is
   signed by an already trusted CA, so unauthenticated bundle reads cannot add
   unrelated trust roots.
-- CDS's allowlist write EAR is bound to the request body: the EAR carries
-  a `pbh` claim equal to SHA-256 of the canonicalised body, and the handler
-  re-hashes and compares before accepting the mutation. A captured token
-  cannot be replayed against a different payload within the EAR's TTL.
+- CDS's allowlist writes (`POST`/`PUT`/`DELETE /allowlist`) are authorized by an
+  operator key whose public half is pinned in `cds.operatorKeys`, verified at the
+  application layer (not TLS mTLS — the listener stays RA-TLS). The `c8s
+  allowlist` CLI mints a short-lived JWT signed with the operator private key,
+  carrying a `pbh` claim equal to base64url(SHA-256(request body)); CDS verifies
+  the signature against its pinned keys and re-hashes the body against `pbh`
+  before mutating. A captured token cannot be replayed against a different payload within
+  its TTL. Anyone holding a pinned operator key can rewrite the image-integrity
+  control. Keys are long-lived and CDS consults no CRL/OCSP, so revoking an
+  operator means removing its public key from `cds.operatorKeys` and
+  re-installing; protect operator keys accordingly. The pinned-key list is
+  host-supplied config, read only at CDS start and not yet in CDS's attestation —
+  an interim tradeoff, see `docs/pitfalls.md`. With `cds.operatorKeys` unset,
+  writes are rejected and only reads are served. See
+  `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
 
 By default the chart pins no measurements. Two values control measurement
 pinning and both ship empty:

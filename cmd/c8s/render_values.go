@@ -16,7 +16,23 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
+
+// validateOperatorKeysFile checks the PEM bundle for cds.operatorKeys holds at
+// least one EC public key, so a wrong path or a private-key file fails at
+// install time rather than silently disabling allowlist writes on CDS. The
+// file itself is handed to helm via --set-file.
+func validateOperatorKeysFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read --operator-keys: %w", err)
+	}
+	if _, err := operatorauth.ParsePublicKeysPEM(data); err != nil {
+		return fmt.Errorf("--operator-keys %q: %w", path, err)
+	}
+	return nil
+}
 
 var renderValuesDistro string
 
@@ -158,6 +174,14 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sCom
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
 	if installImagePullSecret != "" {
 		setArgs = append(setArgs, "--set-string", "imagePullSecret="+installImagePullSecret)
+	}
+	// --set-file passes the PEM verbatim; --set-string would strvals-parse it,
+	// which only works while PEM happens to contain no commas or backslashes.
+	if installOperatorKeys != "" {
+		if err := validateOperatorKeysFile(installOperatorKeys); err != nil {
+			return nil, err
+		}
+		setArgs = append(setArgs, "--set-file", "cds.operatorKeys="+installOperatorKeys)
 	}
 	if installResolveDigests {
 		var err error

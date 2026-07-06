@@ -50,80 +50,88 @@ func (c Client) List(ctx context.Context) (types.AllowlistListResponse, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return types.AllowlistListResponse{}, &StatusError{Status: resp.StatusCode, Body: string(body)}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return types.AllowlistListResponse{}, &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 	}
 
+	body, err := readCapped(resp.Body, maxAllowlistResponseBytes)
+	if err != nil {
+		return types.AllowlistListResponse{}, err
+	}
 	var result types.AllowlistListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return types.AllowlistListResponse{}, err
 	}
 	return result, nil
 }
 
-// Add adds an image digest to the allowlist. Requires an EAR bearer token
-// authorized for cds/allowlist-write.
-func (c Client) Add(digest types.Digest, image string, earToken []byte) error {
-	reqBody := types.AllowlistAddRequest{
-		Digest: digest,
-		Image:  image,
-	}
-	data, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-
-	url := c.baseURL + "/allowlist"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+string(earToken))
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &StatusError{Status: resp.StatusCode}
-	}
-	return nil
+// Authorizer produces the HTTP Authorization header value for a mutation,
+// binding it to the exact method, URL path, and body the client will send.
+// Implemented by operatorauth.Signer.
+type Authorizer interface {
+	Authorization(method, path string, body []byte) (string, error)
 }
 
-// Delete removes image digests from the allowlist. Requires an EAR bearer token
-// authorized for cds/allowlist-write.
-// Returns an error with 404 status if any digest does not exist.
-func (c Client) Delete(digests []types.Digest, earToken []byte) error {
-	reqBody := types.AllowlistDeleteRequest{
-		Digests: digests,
-	}
-	data, err := json.Marshal(reqBody)
+// Add adds an image digest to the allowlist. The write is authorized by auth
+// (an operator credential); auth is invoked with the exact request body so the
+// resulting token binds to it.
+func (c Client) Add(ctx context.Context, digest types.Digest, image string, auth Authorizer) error {
+	data, err := json.Marshal(types.AllowlistAddRequest{Digest: digest, Image: image})
 	if err != nil {
 		return err
 	}
+	return c.mutate(ctx, http.MethodPost, data, auth)
+}
 
-	url := c.baseURL + "/allowlist"
-	req, err := http.NewRequest(http.MethodDelete, url, bytes.NewReader(data))
+// Delete removes image digests from the allowlist. Returns an error with 404
+// status if any digest does not exist.
+func (c Client) Delete(ctx context.Context, digests []types.Digest, auth Authorizer) error {
+	data, err := json.Marshal(types.AllowlistDeleteRequest{Digests: digests})
 	if err != nil {
 		return err
+	}
+	return c.mutate(ctx, http.MethodDelete, data, auth)
+}
+
+// Replace atomically swaps the entire allowlist for digests. CDS assigns the
+// new version, so the caller passes no version.
+func (c Client) Replace(ctx context.Context, digests map[types.Digest]string, auth Authorizer) error {
+	data, err := json.Marshal(types.AllowlistReplaceRequest{Digests: digests})
+	if err != nil {
+		return err
+	}
+	return c.mutate(ctx, http.MethodPut, data, auth)
+}
+
+// mutate sends a body-bound, authorized write to /allowlist. auth is called
+// with the exact method, path, and bytes sent, guaranteeing the token's
+// bindings match what the server receives.
+func (c Client) mutate(ctx context.Context, method string, body []byte, auth Authorizer) error {
+	if auth == nil {
+		return fmt.Errorf("allowlistclient: nil Authorizer")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+"/allowlist", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	authz, err := auth.Authorization(method, req.URL.Path, body)
+	if err != nil {
+		return fmt.Errorf("authorize request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+string(earToken))
+	req.Header.Set("Authorization", authz)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &StatusError{Status: resp.StatusCode}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 	}
+	io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

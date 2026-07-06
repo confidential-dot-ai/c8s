@@ -2,11 +2,13 @@ package cds
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"regexp"
 	"strings"
@@ -23,6 +25,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"golang.org/x/time/rate"
 )
@@ -122,19 +125,26 @@ func run(cfg config) error {
 		}
 	}
 
-	// /allowlist mutations require a bearer EAR whose launch measurement is in
-	// --allowlist-write-measurements. Empty allowlist rejects all writes.
-	allowlistWriteMeasurements := parseMeasurementAllowlist(cfg.allowlistWriteMeasurements)
+	// /allowlist mutations (POST/PUT/DELETE) are authorized by an operator token
+	// signed by one of the pinned operator keys (--operator-keys). Without any
+	// pinned key, writes fail closed while reads keep serving.
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
-		return fmt.Errorf("allowlist writes are disabled: set --allowlist-write-measurements")
+		return fmt.Errorf("allowlist writes are disabled: set --operator-keys")
 	}
-	if len(allowlistWriteMeasurements) > 0 {
-		writeAuthorizer = allowlist.EARWriteAuthorizer{
-			KeyProvider:         rotator,
-			ExpectedIssuer:      cfg.earIssuerName,
-			AllowedMeasurements: allowlistWriteMeasurements,
+	var operatorKeysPEM []byte
+	if cfg.operatorKeys != "" {
+		keys, pemBytes, err := loadOperatorKeys(cfg.operatorKeys)
+		if err != nil {
+			return err
+		}
+		operatorKeysPEM = pemBytes
+		writeAuthorizer = operatorauth.Verifier{
+			Keys:      keys,
+			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
-		slog.Info("allowlist write authorization enabled", "count", len(allowlistWriteMeasurements))
+		slog.Info("allowlist write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys))
+	} else {
+		slog.Warn("--operator-keys empty: allowlist writes are disabled (reads still served)")
 	}
 
 	policy := issuer.CSRPolicy{
@@ -189,6 +199,7 @@ func run(cfg config) error {
 		EarIssuer:        earIssuer,
 		JWKSFunc:         rotator.JWKSetJSON,
 		CACertPEM:        caChainPEM,
+		OperatorKeysPEM:  operatorKeysPEM,
 		RateLimiter:      rateLimiter,
 		MaxRequestSize:   cfg.maxRequestSize,
 	}
@@ -371,6 +382,22 @@ func compilePatterns(name string, raws []string) ([]*regexp.Regexp, error) {
 		}
 	}
 	return patterns, nil
+}
+
+// loadOperatorKeys reads the PEM operator public-key bundle used to verify
+// operator write tokens, returning both the parsed keys and the raw PEM (served
+// back on GET /operator-keys). It fails closed when the file has no EC public
+// key so a typo cannot silently disable write authorization.
+func loadOperatorKeys(path string) ([]*ecdsa.PublicKey, []byte, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read --operator-keys: %w", err)
+	}
+	keys, err := operatorauth.ParsePublicKeysPEM(pemBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--operator-keys %q: %w", path, err)
+	}
+	return keys, pemBytes, nil
 }
 
 func parseMeasurementAllowlist(raw []string) map[string]bool {
