@@ -8,7 +8,8 @@ TEE running the exact code you expect** — after install, from your laptop or a
 [consumer verification](/docs/c8s/verification/consumer) is the *browser / end-user*
 path (over-encryption inside an untrusted TLS terminator), this guide is the *backend /
 operator* path: dial a component, pull its SEV-SNP (or TDX) evidence, and check it against the
-AMD signature chain plus a pinned launch measurement.
+hardware vendor's signature chain — AMD's for SEV-SNP, Intel's for TDX — plus a pinned launch
+measurement.
 
 <Callout type="info">
   `c8s verify` (and the `c8s cds verify` shorthand) is the operator/CI verification entry point;
@@ -36,8 +37,8 @@ including **Zen4c (Siena / Bergamo)**, which stock `go-sev-guest` cannot classif
 collateral that isn't shipped inline (e.g. the VCEK for a bare report) is fetched from **AMD
 KDS**.
 
-The AMD chain, the REPORTDATA binding, the debug flag, and the minimum-TCB floor are proven by
-the verifier. The **launch-measurement allowlist** (`--measurements`) has no verifier-side input,
+The vendor signature chain, the REPORTDATA binding, the debug flag, and the minimum-TCB floor
+are proven by the verifier. The **launch-measurement allowlist** (`--measurements`) has no verifier-side input,
 so it is enforced client-side and **fails closed**: if the report's launch digest isn't in your
 allowlist, verification fails.
 
@@ -46,8 +47,9 @@ allowlist, verification fails.
 On the machine running `c8s verify`:
 
 - **Outbound HTTPS to AMD KDS** (`kdsintf.amd.com`), which the verifier uses to fetch the VCEK
-  when verifying a bare report. (A discovery document ships the VCEK inline, so the LB path
-  verifies offline.)
+  when verifying a bare SEV-SNP report. (A discovery document ships the VCEK inline, so the LB
+  path verifies offline. TDX quotes carry their certification chain inline and verify against
+  the verifier's embedded Intel root — no Intel endpoint is needed.)
 - **Network reach to the component** you're verifying (see [Reachability](#reachability-under-kata)).
 
 No container runtime is required — verification is entirely in-process.
@@ -85,6 +87,28 @@ c8s cds verify "https://$CDS_IP:8443" --measurements <sha384-launch-digest>
 
 A PKI / SAN mismatch when you dial the raw IP is expected and fine — `verify` trusts the
 attestation embedded in the serving cert, not the hostname on the certificate.
+
+For a CDS target the verdict also reports the **pinned operator keys** — SHA-256 fingerprints
+of the public keys authorized to write the
+[image allowlist](/docs/c8s/attestation/allowlist#authorizing-mutations), fetched from
+`GET /operator-keys` over a connection bound to the attested serving certificate:
+
+```text
+  operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):
+    sha256:<fingerprint>
+```
+
+Compare them against the keys you pinned at install:
+
+```bash
+openssl pkey -pubin -in operator.pub -outform DER | sha256sum
+```
+
+As the output says, the key list is CDS-reported config, **not** part of the launch
+measurement — an unexpected fingerprint is a red flag, but a matching one is visibility, not
+proof. The section is informational and never changes the verdict; with allowlist writes
+disabled it reads `operator keys: endpoint reports no pinned operator keys (allowlist writes
+disabled)`.
 
 ## Verify the load balancer
 
@@ -179,15 +203,19 @@ c8s cds verify "https://$CDS_IP:8443" --measurements-file digests.txt -o json
 }
 ```
 
-For a field-by-field reading of this output — including the `verified: true` /
+A CDS verdict additionally carries `operator_keys` (hex SHA-256 fingerprints of the pinned
+operator public keys) or, when none are pinned, an `operator_keys_note` explaining why. For a
+field-by-field reading of this output — including the `verified: true` /
 `measurement_pinned: false` gotcha — see the
 [CDS verification walkthrough](/docs/c8s/attestation/cds#verifying-the-cds-itself-ra-tls).
 
 ## Independently recompute the measurement
 
 The "spicier" cross-check: rather than trusting the digest you were handed, **recompute it
-yourself** with AMD's [`sev-snp-measure`](https://github.com/virtee/sev-snp-measure) and confirm
-that what a live node reports matches what the code *should* produce.
+yourself** from the launch components and confirm that what a live node reports matches what
+the code *should* produce. The worked example below is AMD SEV-SNP, using
+[`sev-snp-measure`](https://github.com/virtee/sev-snp-measure); Intel TDX is covered at the end
+of the section.
 
 <Steps>
 
@@ -208,8 +236,7 @@ sev-snp-measure --mode snp --vcpus 1 \
 ```
 
 A reproducible build yields the same digest published in the image manifest. A mismatch means
-the image isn't what you think it is. (`sev-snp-measure` is AMD-specific; on **Intel TDX** the
-equivalent launch values — `MRTD` and the `RTMR`s — are predicted with TDX's own tooling.)
+the image isn't what you think it is.
 
 </Step>
 
@@ -232,6 +259,14 @@ reading `claims.launch_digest` from a verify result) is fine for discovery — b
 </Step>
 
 </Steps>
+
+**On Intel TDX** the pinned value is the **`MRTD`** — the TD's build-time measurement, the same
+48-byte SHA-384 shape as the SNP launch digest, and what `--measurements` compares for a TDX
+target. Predict it from the TD's virtual firmware with Intel's TDX measurement tooling, then
+pin the predicted value exactly as above. The runtime measurement registers (`RTMR`s), which
+record later boot components, are **not** replayed by the c8s RA-TLS verify path — the TDX
+event log is deliberately kept out of the serving certificate (it can be fetched out-of-band) —
+so on TDX this cross-check covers the `MRTD`.
 
 ## Caveats
 

@@ -1,6 +1,6 @@
 ---
 title: The Allowlist
-description: How c8s controls exactly which container images may run — the allowlist data model, the CRUD API, attestation-authorized mutations, seeding, and enforcement.
+description: How c8s controls exactly which container images may run — the allowlist data model, the CRUD API, operator-authorized mutations, the c8s allowlist CLI, seeding, and enforcement.
 ---
 
 <JourneyNav current={5} />
@@ -8,7 +8,8 @@ description: How c8s controls exactly which container images may run — the all
 The **allowlist** is the set of container-image digests c8s permits to run. Nothing not on the
 list starts. It is **owned and served by the [CDS](/docs/c8s/attestation/cds)**, enforced at
 container-creation time by the `nri-image-policy` plugin (node-as-CVM) or the in-guest
-`policy-monitor` (pod-as-CVM), and managed through an attestation-authenticated API.
+`policy-monitor` (pod-as-CVM), and managed with the
+[`c8s allowlist` CLI](#managing-it-with-the-c8s-cli) against an operator-authorized API.
 
 ## Data model
 
@@ -35,53 +36,48 @@ The CDS exposes the allowlist at `/allowlist`:
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/allowlist` | none | list all digests; returns a weak ETag `W/"<version>"` and honours `If-None-Match` (304 when unchanged) |
-| `POST` | `/allowlist` | bearer token | add one `{ digest, image }`; bumps the version; `204` |
-| `DELETE` | `/allowlist` | bearer token | delete `{ digests: [...] }` **atomically** (all-or-nothing; `404` if any is missing) |
+| `GET` | `/allowlist` | none | list all digests; returns a weak ETag `W/"<version>"` and honors `If-None-Match` (304 when unchanged) |
+| `POST` | `/allowlist` | operator token | add one `{ digest, image }`; bumps the version; `204` |
+| `PUT` | `/allowlist` | operator token | **replace** the entire set with `{ "digests": {...} }` atomically; the CDS assigns the new version; `204`. Clearing must be spelled out as `{"digests":{}}` — a missing or `null` `digests` is rejected |
+| `DELETE` | `/allowlist` | operator token | delete `{ digests: [...] }` **atomically** (all-or-nothing; `404` if any is missing) |
+| `GET` | `/operator-keys` | none | the pinned operator public-key PEM bundle (`404` when writes are disabled) |
 
 Workers poll `GET /allowlist` and use the ETag to avoid redundant work — the version only
-changes when the set actually changes.
+changes when the set actually changes. Writes share the attestation endpoints' per-source-IP
+rate limit and request-body cap (`--max-request-size`).
 
 ## Authorizing mutations
 
-The allowlist is the source of truth for what may run, so the right to change it is gated on
-**hardware attestation of the writer** — not an API key. The operator establishes that authority
-**at CDS bootstrap**: the install-time value `cds.allowlistWriteMeasurements`
-(`--allowlist-write-measurements`) pins the launch measurement(s) of whoever is allowed to write.
-Empty — the default — rejects every mutation.
+The allowlist is the source of truth for what may run, so writes are authorized by an
+**operator key**: an EC keypair whose **public** half you pin into the CDS at install time
+(`c8s install --operator-keys` → `cds.operatorKeys`) and whose **private** half never leaves
+your side. There is no server-side session and no static bearer secret to hand out — for every
+write, the [`c8s allowlist` CLI](#managing-it-with-the-c8s-cli) signs a fresh, single-purpose
+token locally with the operator private key.
 
-There is no static credential to hand out. The write credential is a short-lived,
-attestation-bound **token** the CDS itself mints: at startup the CDS generates its **token-signing
-key** (ES256 / P-256, see [CDS bootstrap](/docs/c8s/attestation/cds#token-signing-and-jwks-rotation))
-and publishes the public half as a JWKS, and it only ever signs a token for a caller it has just
-verified — so holding a CDS-signed token *is* the credential, and there is nothing else to steal.
-
-```
-  ┌─────────────────────────────┐          ┌─────────────────────────────┐
-  │           Writer            │          │             CDS             │
-  │       attested TEE ·        │          │      token-signing key      │
-  │    in write-measurements    │          │         (bootstrap)         │
-  └──────────────┬──────────────┘          └──────────────┬──────────────┘
+```text
+  ┌─────────────────────────────┐          ╔═════════════════════════════╗
+  │          Operator           │          ║             CDS             ║
+  │   holds the EC private key  │          ║  pins operator public keys  ║
+  │      (--operator-key)       │          ║      (cds.operatorKeys)     ║
+  └──────────────┬──────────────┘          ╚══════════════╤══════════════╝
                  │                                        │
-                 │  attest — evidence + intended change   │
+                 │  RA-TLS dial · verify CDS evidence     │
+                 │  against --measurements                │
                  │────────────────────────────────────────►
                  │                                        │
-                 │                          ┌─────────────┴────────────┐
-                 │                          │ verify evidence ·        │
-                 │                          │ measurement ∈ write-list │
-                 │                          └─────────────┬────────────┘
-                 │                                        │
-                 │  attestation-bound token ·             │
-                 │  pbh = SHA-256(change)                 │
-                 ◄────────────────────────────────────────│
+                 │  mint token: pbh = SHA-256(body) ·     │
+                 │  htm/htu = method/path · 60s TTL       │
                  │                                        │
                  │  POST /allowlist {digest, image}       │
                  │  + Bearer token                        │
                  │────────────────────────────────────────►
                  │                                        │
                  │                          ┌─────────────┴─────────────┐
-                 │                          │ check sig · measurement · │
-                 │                          │ pbh = SHA-256(body)       │
+                 │                          │ signature ∈ pinned keys · │
+                 │                          │ exp−iat ≤ 5m · htm/htu    │
+                 │                          │ match request · pbh =     │
+                 │                          │ SHA-256(received body)    │
                  │                          └─────────────┬─────────────┘
                  │                                        │
                  │  204 · version bumped                  │
@@ -90,40 +86,57 @@ verified — so holding a CDS-signed token *is* the credential, and there is not
                  ▼                                        ▼
 ```
 
-A write is four steps:
+*A write is bound to the operator key, the HTTP method and path, and the exact body bytes — a
+captured token cannot be replayed against a different change.*
 
-1. **The writer attests.** A component that wants to change the allowlist proves with hardware
-   evidence (SEV-SNP or TDX) that it runs in a TEE whose launch measurement is in
-   `--allowlist-write-measurements`.
-   The CDS verifies that evidence the same way it does for the
-   [attestation flow](/docs/c8s/attestation/cds#the-attestation-flow).
-2. **The CDS issues a token bound to the change.** Via `/attest-key`, it mints a short-lived token —
-   signed with its bootstrap key — carrying the writer's `launch_digest` and a **`pbh`**
-   (payload-body-hash) claim set to `SHA-256` of the *exact* `{ digest, image }` (or delete) body
-   the writer is about to send.
-3. **The writer calls the API** — `POST`/`DELETE /allowlist` with that token as
-   `Authorization: Bearer`.
-4. **The CDS re-checks everything** before committing: the ES256 signature against its own JWKS,
-   `exp` + clock skew and the issuer, that the `launch_digest` is in
-   `--allowlist-write-measurements`, and — with a constant-time compare — that the token's `pbh`
-   equals `SHA-256` of the body it actually received.
+The token is a **JSON Web Token (JWT)** signed with the operator's ECDSA key, minted fresh by
+the CLI for each write with a 60-second lifetime. Three claims bind it to that one write:
 
-The `pbh` binding is the load-bearing part: a token minted to add image A **cannot** be replayed
-to add image B, delete an entry, or be reused at all once the change lands. Combined with the
-measurement gate, a captured token is worthless — only genuinely-attested code can touch the
-list.
+- `pbh` — the SHA-256 hash of the exact request body,
+- `htm` — the HTTP method,
+- `htu` — the URL path.
+
+The CDS accepts a mutation only when all of it checks out: the signature verifies against a
+pinned key; the token carries issue and expiry times no more than **five minutes** apart (a
+server-side cap, so no client tooling can mint a long-lived token); the method and path match
+the request it is actually handling; and the body hash matches a re-hash of the body the CDS
+actually received, compared in constant time.
+
+Verification happens at the application layer — the listener stays plain RA-TLS, so mesh
+clients are unaffected. Writes **fail closed**: with no pinned keys,
+`POST`/`PUT`/`DELETE /allowlist` are rejected while reads keep serving.
+
+Know the boundaries of this design before relying on it:
+
+- **A pinned operator key is the image-integrity control.** Anyone holding the private key can
+  rewrite what may run. Keep it in a vault, HSM, or hardware token, and supply it to the CLI
+  per invocation.
+- **Revocation is coarse.** Operator keys are long-lived, and revoking one means removing its
+  public key from `cds.operatorKeys` and re-installing — there is no CRL/OCSP-style revocation
+  to lean on.
+- **A captured token is briefly replayable — against the same change.** The body/method/path
+  binding stops cross-payload replay, but the token carries no cluster (`aud`) binding: two
+  clusters pinning the *same* operator key would accept each other's tokens within the validity
+  window. Pin **distinct keys per cluster**.
+- **The pinned-key list itself is not attested.** It is host-supplied config read at CDS start,
+  not part of the launch measurement, so a malicious control plane could swap the bundle and
+  restart the CDS. `c8s cds verify` reports the fingerprints a CDS actually pins, which makes a
+  swap *visible* to an operator who knows the expected values (see
+  [Verify who can write](#verify-who-can-write)) — but not *measured*.
 
 <Callout type="info">
-  Writes are off unless you set `--allowlist-write-measurements`; an empty list rejects every
-  mutation. See [Obtaining launch measurements](/docs/c8s/attestation/cds#obtaining-launch-measurements)
-  for getting the writer's digest.
+  **Planned, not yet shipped.** Two hardenings are coming: **binding the pinned operator keys
+  into the CDS's attestation**, so a verifier *proves* the key list instead of trusting the CDS
+  to report it, and a **CA with short-lived operator certificates**, giving delegated issuance
+  and real revocation. See [Limitations](/docs/c8s/limitations).
 </Callout>
 
 ## Seeding and bootstrap
 
 - **At startup**, `--allowlist-seed <json>` loads a `{ version, digests }` file into the store.
   Seeding is idempotent — it inserts only missing entries and bumps the version only if at
-  least one was new. Any seed error halts startup (fail-closed).
+  least one was new. Any seed error halts startup (fail-closed). The format is the same one
+  `c8s allowlist export` writes, so a backup round-trips as a seed or an `upload`.
 - **Under pod-as-CVM**, the guest image bakes `/etc/c8s/bootstrap-allowlist.json`, which is part of
   the guest's launch measurement. `policy-monitor` enforces against that baked list from `t=0`,
   before the first container starts, and CDS-served additions only ever *grow* the in-memory
@@ -147,13 +160,133 @@ The enforcement point is container creation:
   [Limitations](/docs/c8s/limitations).
 </Callout>
 
-## Managing it in practice
+## Managing it with the c8s CLI
 
-Add the digests of every image a confidential workload needs (the workload image and any init
-containers) before you deploy — otherwise `policy-monitor` will kill the container at start.
-The installer helps here: with the default `--resolve-digests=true`, `c8s install` resolves
-each c8s component image to its digest and adds it to the allowlist automatically, so the
-platform's own images are covered from first boot.
+`c8s allowlist` is the operator tool for the API above — unauthenticated reads (`list`,
+`export`, `diff`) and operator-signed writes (`add`, `remove`, `upload`). Add the digests of
+every image a confidential workload needs (the workload image and any init containers) *before*
+you deploy, or `policy-monitor` will kill the container at start. The platform's own images are
+covered from first boot: with the default `--resolve-digests=true`, `c8s install` resolves each
+c8s component image to its digest and allowlists it automatically. Every flag is in the
+[CLI Reference](/docs/c8s/install/cli-reference#c8s-allowlist).
+
+### Create the operator credential
+
+Generate an EC keypair (P-256, P-384, and P-521 are accepted) and pin the **public** half at
+install time — the private key stays with you:
+
+```bash
+# the operator private key — keep it in a vault/HSM; it never leaves your machine
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+
+# the public half — this is what the CDS pins
+openssl ec -in operator.key -pubout -out operator.pub
+
+c8s install --operator-keys operator.pub   # plus your other install flags
+```
+
+To authorize several operators, concatenate their `.pub` files into one bundle — and pin
+**distinct keys per cluster**. Installing *without* `--operator-keys` leaves allowlist writes
+disabled (reads still work), so `c8s install` refuses the default path unless you acknowledge
+with `--force`.
+
+### Reach the CDS
+
+The CDS has no public ingress. In base mode, port-forward it — and the attestation-api, which
+the CLI uses to verify the CDS's RA-TLS evidence on every `https://` dial:
+
+```bash
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+kubectl port-forward -n c8s-system svc/c8s-attestation-api 8400:8400 &
+
+CDS=https://localhost:8443
+API=http://localhost:8400
+```
+
+Under Kata mode the locked guest denies `kubectl port-forward` — dial the endpoint IPs from a
+box with cluster-network reach instead (see
+[reachability under kata](/docs/c8s/verification/cli#reachability-under-kata)).
+
+Pin the CDS launch measurement with `--measurements` (or `--measurements-file`) so you never
+read from — or worse, write to — a rogue CDS. Empty measurements accept *any* attested CDS and
+warn `UNSAFE`; a plaintext `http://` URL is refused outright unless you pass `--insecure`
+(dev/test only, skips CDS attestation).
+
+### Read it
+
+```bash
+# the live allowlist (text; -o json for machine-readable)
+c8s allowlist list \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST>
+
+# back it up, and preview what a changed file would do
+c8s allowlist export allowlist.json \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST>
+
+c8s allowlist diff allowlist.json \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST>
+```
+
+`<CDS_LAUNCH_DIGEST>` is the CDS's own SHA-384 launch measurement — see
+[Obtaining launch measurements](/docs/c8s/attestation/cds#obtaining-launch-measurements).
+`diff` prints `+` (added), `-` (removed), and `~` (image reference changed) against the live
+list — run it before any `upload`.
+
+### Write it
+
+Writes additionally take the operator private key, by flag or the `C8S_OPERATOR_KEY`
+environment variable (the flag wins). Every write supports `--dry-run`:
+
+```bash
+# add one digest (see "Getting an image's digest" below)
+c8s allowlist add <DIGEST> <IMAGE_REF> \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST> \
+  --operator-key operator.key
+
+# remove one or more digests
+c8s allowlist remove <DIGEST> \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST> \
+  --operator-key operator.key
+
+# replace the whole list from a file — prints the diff first; the CDS assigns the version
+c8s allowlist upload allowlist.json \
+  --url $CDS --attestation-api-url $API \
+  --measurements <CDS_LAUNCH_DIGEST> \
+  --operator-key operator.key
+```
+
+`<DIGEST>` is the image's `sha256:` manifest digest and `<IMAGE_REF>` the image reference it
+maps to. `upload` refuses a file that names none of the core c8s components (`cds`,
+`ratls-mesh`, `nri-image-policy`, `attestation-api`, `nginx`) — a cluster missing them cannot
+pull its own control plane. Override with `--force`, or change the required set with
+`--require`.
+
+### Verify who can write
+
+`c8s cds verify` reports a SHA-256 fingerprint of each operator public key the CDS actually
+pins, fetched from `GET /operator-keys` over a connection bound to the attested serving
+certificate:
+
+```text
+  operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):
+    sha256:<fingerprint>
+```
+
+Compare against the key you pinned:
+
+```bash
+openssl pkey -pubin -in operator.pub -outform DER | sha256sum
+```
+
+A mismatch — or an extra fingerprint you don't recognize — means the pinned bundle is not what
+you installed. The list is CDS-reported config, not part of the launch measurement, so treat
+this as a visibility check, not an attestation (see
+[the boundaries above](#authorizing-mutations)).
 
 ## Getting an image's digest
 
@@ -208,22 +341,35 @@ shows it per tag.
 
 ## Automating the allowlist
 
-Because writes are gated on *attestation of the writer* rather than a shared secret, the
-allowlist is safe to drive from automation — there's no long-lived credential to leak, and every
-change is attributable to an attested identity.
+A write is a single CLI call authorized by a key file, so it scripts cleanly — but automation
+here holds a live credential for the image-integrity control. Treat the operator key like a
+release-signing key, not a CI variable: vault-managed, one key per cluster and per pipeline,
+and removed from `cds.operatorKeys` when retired.
 
-**In CI.** A pipeline that builds a workload image knows the resulting digest at build time. If
-the build/release job runs inside an attested TEE whose measurement you've added to
-`--allowlist-write-measurements`, it can add that digest to the allowlist as its final step — no
-human in the loop, no static token, and the `pbh` binding means the token it's handed can only make
-that one change. The allowlist becomes a function of *what your attested pipeline produced*,
-updated on every release and trivially auditable.
+**In CI.** A pipeline that builds a workload image knows the resulting digest at build time.
+Give the release job its own operator key and make the final step:
+
+```bash
+c8s allowlist add "$(crane digest "$IMAGE")" "$IMAGE" \
+  --url "$CDS" --attestation-api-url "$API" \
+  --measurements <CDS_LAUNCH_DIGEST> \
+  --operator-key /run/secrets/operator.key
+```
+
+The token minted for that call expires in 60 seconds and can authorize only that exact change,
+so what transits the pipeline is narrow; the key file is the thing to protect. The CDS logs
+every accepted and rejected write (digest and image — not which pinned key signed it).
 
 **With kettle (planned).** [kettle](/docs/papers/kettle.pdf), Confidential AI's attestable-builds
 system, produces images whose digest is tied to a cryptographic attestation of *how they were
-built* — reproducible source → measured artifact. The natural next step is to let a
-kettle-attested build feed the allowlist directly: because the build itself is attested, its
-output digest can be admitted with an attestation-backed token, closing the loop from **source →
-reproducible build → measured image → allowed to run in the TEE** with nobody hand-curating
-digests. This isn't wired up yet — but the attestation-gated write API above is exactly the seam it
-plugs into.
+built* — reproducible source → measured artifact.
+
+The goal is to let a kettle-attested build feed the allowlist directly: a digest admitted
+because the *build* proved itself, not because a key holder vouched for it. That closes the
+loop — **source → reproducible build → measured image → allowed to run in the TEE** — with
+nobody hand-curating digests.
+
+None of this is wired up yet. It needs an attested-writer path — a launch measurement, rather
+than a pinned key, authorizing the write — planned alongside the
+[key-attestation and operator-certificate hardenings](#authorizing-mutations). See
+[Limitations](/docs/c8s/limitations).

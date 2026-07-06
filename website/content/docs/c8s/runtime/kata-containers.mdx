@@ -1,21 +1,22 @@
 ---
 title: Kata Containers
-description: How c8s uses Kata Containers to run each pod as its own SEV-SNP confidential VM — measured direct-kernel boot, the sealed guest image, and the guest-pull model.
+description: How c8s uses Kata Containers to run each pod as its own confidential VM (AMD SEV-SNP or Intel TDX) — measured direct-kernel boot, the sealed guest image, and the guest-pull model.
 ---
 
-When you install c8s with `--kata`, every workload pod becomes its own **SEV-SNP confidential
-VM**. This is the *pod-as-kata-cvm* model: "each pod is its own confidential VM." Kata
-Containers provides the per-pod micro-VM; c8s provides the attestation, identity, and policy
-that make it confidential and verifiable.
+When you install c8s with `--kata`, every workload pod becomes its own **confidential VM** —
+**AMD SEV-SNP** by default, **Intel TDX** with `--hardware-platform=tdx`. This is the
+*pod-as-kata-cvm* model: "each pod is its own confidential VM." Kata Containers provides the
+per-pod micro-VM; c8s provides the attestation, identity, and policy that make it confidential
+and verifiable.
 
 ## What gets installed
 
-`c8s install --kata` deploys the Kata runtime stack and registers three RuntimeClasses:
+`c8s install --kata` deploys the Kata runtime stack and registers four RuntimeClasses:
 
 - **`kata-deploy`** (DaemonSet, digest-pinned) installs the Kata runtime and
-  `containerd-shim-kata-v2` on every node — including the SEV-SNP-capable QEMU build used by
-  `kata-qemu-snp`, the guest kernel, guest image, and OVMF firmware. It restarts
-  containerd/RKE2 after install; running pods survive via shim persistence.
+  `containerd-shim-kata-v2` on every node — including the SEV-SNP- and TDX-capable QEMU builds,
+  the guest kernel, guest image, and OVMF firmware. It restarts containerd/RKE2 after install;
+  running pods survive via shim persistence.
 - **RuntimeClasses:**
 
   | RuntimeClass | Hypervisor | Confidential? |
@@ -23,6 +24,11 @@ that make it confidential and verifiable.
   | `kata-qemu` | QEMU micro-VM | No — VM isolation from the host only |
   | `kata-clh` | Cloud Hypervisor | No — VM isolation only |
   | `kata-qemu-snp` | QEMU + SEV-SNP | **Yes** — pod memory is encrypted against the host |
+  | `kata-qemu-tdx` | QEMU + Intel TDX | **Yes** — pod memory is encrypted against the host; schedules only on nodes labeled `intel-tdx.node.kubernetes.io/enabled=true` |
+
+  A cluster runs **one** confidential class: the webhook promotes `confidential.ai/cw` pods to
+  `kata-qemu-snp` or `kata-qemu-tdx` per the install's `--hardware-platform` — mixed-TEE
+  clusters are not supported. The rest of this page describes the SEV-SNP path.
 
 Installing `--kata` also **disables** the host-side `ratls-mesh`, `attestation-api`, and
 `nri-image-policy`: under Kata their function moves *inside* the guest image, where the host

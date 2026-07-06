@@ -114,7 +114,7 @@ acronym alone.
 | Measurement | "launch measurement" / "measurement" | The SHA-384 launch digest. |
 | Components (code names) | `c8s operator`, `attestation-api`, `ratls-mesh`, `nri-image-policy`, `policy-monitor`, `get-cert`, `cds-attest` | Lowercase, code-formatted as identifiers; match the source exactly. |
 | CRD | `ConfidentialWorkload` (short name `cwl`), group `confidential.ai`, version `v1alpha2` | |
-| Runtime classes | `kata-qemu`, `kata-qemu-snp`, `kata-clh` | Code-formatted; exact. |
+| Runtime classes | `kata-qemu`, `kata-qemu-snp`, `kata-qemu-tdx`, `kata-clh` | Code-formatted; exact. |
 | Annotations / labels | `confidential.ai/cw`, `confidential.ai/c8s-injected`, … | Always code-formatted and exact. |
 | Namespace | `c8s-system` | Default install namespace. |
 

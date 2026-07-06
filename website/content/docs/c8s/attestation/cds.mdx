@@ -28,10 +28,10 @@ direction keeps the CA in attested CVM memory and replicates it via [handoff](#c
 
 The **attestation-bound token** is a JWT, signed with **ES256** (ECDSA P-256), that the
 CDS mints (via `/attest-key`) after a successful attestation. It is the cluster's
-attestation-bound **bearer credential**: a caller presents the token to authorize an
-[allowlist write](/docs/c8s/attestation/allowlist#authorizing-mutations) or a [CA handoff](#ca-handoff).
-(Certificate issuance does **not** use this token — `/attest` verifies evidence and returns the signed
-leaf in one step.) Key claims:
+attestation-bound **bearer credential**: a caller presents the token to authorize a
+[CA handoff](#ca-handoff). (Certificate issuance does **not** use this token — `/attest`
+verifies evidence and returns the signed leaf in one step. Allowlist writes use an
+[operator token](/docs/c8s/attestation/allowlist#authorizing-mutations), not an EAR.) Key claims:
 
 | Claim | Meaning |
 | --- | --- |
@@ -117,13 +117,14 @@ permitted to run (a SQLite store at `--allowlist-db`, served at `/allowlist`). U
 goes *through the CDS*; there is no side channel.
 
 Who may update it is decided by the operator **at CDS bootstrap**: the install-time value
-`cds.allowlistWriteMeasurements` (`--allowlist-write-measurements`) pins the launch measurement(s)
-of the authorized writer(s); empty rejects every write. The credential itself is not a static
-secret — a writer attests to the CDS (`/attest-key`), receives a short-lived
-[CDS-signed token](#token-signing-and-jwks-rotation) bound to its key and to the exact change, and presents it as
-`Authorization: Bearer` on `POST` / `DELETE /allowlist`. The CDS re-verifies the token signature,
-the writer's measurement against `cds.allowlistWriteMeasurements`, and a body-hash binding before
-committing.
+`cds.operatorKeys` (`--operator-keys`, set by `c8s install --operator-keys`) pins the operator
+EC **public** key(s) authorized to write; empty rejects every write while reads keep serving.
+For each write, the [`c8s allowlist` CLI](/docs/c8s/attestation/allowlist#managing-it-with-the-c8s-cli)
+signs a short-lived token with the operator's private key, bound to the exact method, path, and
+request body; the CDS verifies the signature against its pinned keys and re-checks each binding
+before committing. The pinned bundle is public material (served back at `GET /operator-keys` so
+`c8s cds verify` can report it), but it is host-supplied config — not part of the CDS's launch
+measurement.
 
 See [The Allowlist](/docs/c8s/attestation/allowlist) for the data model, the full write flow, seeding,
 and enforcement.
@@ -305,7 +306,7 @@ Each flag wants the digest of a different party:
 | `cds.measurements` (`--measurements`) | the workloads/peers allowed to attest to the CDS |
 | `ratls-mesh.measurements` | the mesh peers allowed to connect |
 | `--cds-measurements` (get-cert, ratls-mesh `cds` mode) | the CDS itself |
-| `cds.allowlist-write-measurements` | components allowed to mutate the allowlist |
+| `--measurements` (`c8s allowlist`) | the CDS itself, before reading or writing the allowlist |
 | `cds.handoff-measurements` | peer CDS replicas allowed to receive the CA |
 | `measurements` in [c8s-verify](/docs/c8s/verification/consumer) | the user-facing LB enclave |
 
@@ -321,9 +322,10 @@ Each flag wants the digest of a different party:
 | --- | --- | --- |
 | `POST` | `/authenticate` | issue a one-time challenge nonce |
 | `POST` | `/attest` | verify evidence + sign a CSR, returning the leaf PEM chain |
-| `POST` | `/attest-key` | verify evidence + issue an attestation-bound token bound to the caller's key (the allowlist-write / handoff credential) |
+| `POST` | `/attest-key` | verify evidence + issue an attestation-bound token bound to the caller's key (the handoff credential) |
 | `POST` | `/handoff` | hand the mesh CA to an attested peer replica |
-| `GET` `POST` `DELETE` | `/allowlist` | read / add / remove image digests (writes require a bearer token) |
+| `GET` `POST` `PUT` `DELETE` | `/allowlist` | read / add / replace / remove image digests (writes require an [operator token](/docs/c8s/attestation/allowlist#authorizing-mutations)) |
+| `GET` | `/operator-keys` | the pinned operator public-key PEM bundle (404 when allowlist writes are disabled) |
 | `GET` | `/.well-known/jwks.json` | the token-signing JWKS (ES256) |
 | `GET` | `/ca` | the mesh CA bundle |
 | `GET` | `/readyz` | readiness (fails if CA validity < `--min-ca-validity`) |
