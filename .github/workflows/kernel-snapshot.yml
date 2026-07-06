@@ -29,14 +29,14 @@ on:
         description: steep commit/ref to build the kernel from (default = pinned)
         required: false
         type: string
-        default: "4b731634be9ae6a592f082a2501f8de95f3600ce"
+        default: "96975ef5407035f766b6b48051ebf3a5e4a9632c"
   workflow_call:
     inputs:
       steep_ref:
         description: steep commit/ref to build the kernel from
         required: false
         type: string
-        default: "4b731634be9ae6a592f082a2501f8de95f3600ce"
+        default: "96975ef5407035f766b6b48051ebf3a5e4a9632c"
     secrets:
       STEEP_REPO_TOKEN:
         description: token with read access to confidential-dot-ai/steep (falls back to github.token)

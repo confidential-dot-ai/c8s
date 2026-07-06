@@ -81,7 +81,7 @@ env:
   # steep main's kernel fragments move (e.g. #16 added dm-crypt/AES-XTS, #21
   # added VIRTIO_IOMMU to required.config), so a new pin means a new guest
   # kernel and therefore a new SNP launch measurement.
-  STEEP_REF: "4b731634be9ae6a592f082a2501f8de95f3600ce"
+  STEEP_REF: "96975ef5407035f766b6b48051ebf3a5e4a9632c"
 
 jobs:
   build:

@@ -24,7 +24,7 @@ env:
   # MUST stay in lockstep with .github/workflows/kata-guest-base.yml: the kernel
   # cache key is scoped to the steep ref the kernel was built against, so a
   # mismatch here turns the exact-key restore into a miss.
-  STEEP_REF: "4b731634be9ae6a592f082a2501f8de95f3600ce"
+  STEEP_REF: "96975ef5407035f766b6b48051ebf3a5e4a9632c"
 
 jobs:
   extract:
