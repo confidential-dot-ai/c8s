@@ -235,10 +235,12 @@ func verifyTDXOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, 
 }
 
 func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolicy, expectedReportData [64]byte) (*VerifyResult, error) {
-	// az-snp and bare-metal snp share SNP measurement/result semantics and are
-	// wired end-to-end through this verifier. az-tdx and any future platform
-	// would need their own; fail closed rather than approve under SNP rules.
-	if evidence.Platform != string(types.PlatformAzSnp) && evidence.Platform != string(types.PlatformSnp) {
+	// az-snp, bare-metal snp, and gcp-snp share SNP measurement/result
+	// semantics and are wired end-to-end through this verifier. az-tdx and any
+	// future platform would need their own; fail closed rather than approve
+	// under SNP rules.
+	p := evidence.Platform
+	if p != string(types.PlatformAzSnp) && p != string(types.PlatformSnp) && p != string(types.PlatformGcpSnp) {
 		return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 	}
 

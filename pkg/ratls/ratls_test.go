@@ -514,20 +514,17 @@ func TestSNPMeasurementSizeConstant(t *testing.T) {
 	}
 }
 
-// embeddedAzureCert builds an RA-TLS certificate whose attestation extension
-// carries an az-snp envelope (the post-PR-98 wire shape). Returns the parsed
-// cert and the SHA-384(pubkey) that the attestation-api would expect to
-// see bound through the TPM quote.
-func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
+// embeddedEnvelopeCert builds an RA-TLS certificate whose attestation extension
+// carries an AttestationEvidence envelope for the given platform. Returns the
+// parsed cert and the SHA-384(pubkey) that the attestation-api would expect to
+// see bound through the report.
+func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.RawMessage) (*x509.Certificate, [64]byte) {
 	t.Helper()
 	key, expectedReportData, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
-	embedded, err := json.Marshal(types.AttestationEvidence{
-		Platform: string(types.PlatformAzSnp),
-		Evidence: json.RawMessage(`{"hcl_report":"fake","tpm_quote":{"message":"fake"}}`),
-	})
+	embedded, err := json.Marshal(types.AttestationEvidence{Platform: string(platform), Evidence: evidence})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,6 +537,13 @@ func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
 		t.Fatalf("ParseCertificate: %v", err)
 	}
 	return cert, expectedReportData
+}
+
+// embeddedAzureCert builds an RA-TLS certificate whose attestation extension
+// carries an az-snp envelope (the post-PR-98 wire shape).
+func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
+	t.Helper()
+	return embeddedEnvelopeCert(t, types.PlatformAzSnp, json.RawMessage(`{"hcl_report":"fake","tpm_quote":{"message":"fake"}}`))
 }
 
 // verifyResponse is a minimal builder for an attestation-api /verify
@@ -651,6 +655,36 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	}
 	if !bytes.Equal(result.Measurement[:], measurement) {
 		t.Fatalf("Measurement = %x, want %x", result.Measurement, measurement)
+	}
+}
+
+// TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi mirrors the az-snp
+// online path for GKE SEV-SNP: a gcp-snp evidence envelope passes the platform
+// gate and is forwarded to the attestation-api /verify endpoint, not rejected
+// as an unsupported TEE. (Evidence unwrapping is covered by the az-snp test.)
+func TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi(t *testing.T) {
+	cert, _ := embeddedEnvelopeCert(t, types.PlatformGcpSnp, json.RawMessage(`{"attestation_report":"fake"}`))
+
+	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
+	var observed types.VerifyRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatalf("decode verify request: %v", err)
+		}
+		if err := json.NewEncoder(w).Encode(verifyResponse(measurement)); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{measurement},
+	}, nil); err != nil {
+		t.Fatalf("VerifyCert: %v", err)
+	}
+	if observed.Platform != string(types.PlatformGcpSnp) {
+		t.Fatalf("platform = %q, want gcp-snp", observed.Platform)
 	}
 }
 

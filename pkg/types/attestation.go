@@ -88,11 +88,12 @@ func (b *Base64Bytes) UnmarshalJSON(data []byte) error {
 type Platform string
 
 const (
-	PlatformAuto  Platform = "auto"
-	PlatformSnp   Platform = "snp"
-	PlatformTdx   Platform = "tdx"
-	PlatformAzSnp Platform = "az-snp"
-	PlatformAzTdx Platform = "az-tdx"
+	PlatformAuto   Platform = "auto"
+	PlatformSnp    Platform = "snp"
+	PlatformTdx    Platform = "tdx"
+	PlatformAzSnp  Platform = "az-snp"
+	PlatformAzTdx  Platform = "az-tdx"
+	PlatformGcpSnp Platform = "gcp-snp"
 )
 
 // AttestRequest is the request body for the attestation-api POST /attest.
