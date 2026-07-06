@@ -619,8 +619,11 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 		if req.Params == nil || req.Params.ExpectedReportData == nil {
 			t.Fatal("missing expected report data")
 		}
-		if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:]) {
-			t.Fatalf("expected_report_data = %x, want %x", got, expectedReportData[:])
+		// az-snp binds via a TPM quote whose nonce is the 48-byte SHA-384
+		// digest, so exactly those 48 bytes must be sent — not the zero-padded
+		// 64-byte form, which fails attestation-api with a nonce-length error.
+		if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
+			t.Fatalf("expected_report_data = %x (%d bytes), want %x (%d bytes)", got, len(got), expectedReportData[:sha512.Size384], sha512.Size384)
 		}
 
 		resp := map[string]any{

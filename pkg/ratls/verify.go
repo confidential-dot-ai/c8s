@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -249,11 +250,17 @@ func verifySEVSNPOnline(evidence *types.AttestationEvidence, policy *VerifyPolic
 		m := unpackSNPMinTcb(policy.MinTCBVersion)
 		minTcb = &m
 	}
-	// Send all 64 REPORTDATA bytes. ReportDataForKey puts SHA-384 in bytes
-	// 0-47 and zero-pads 48-63; passing the full value makes the binding a
-	// full-length compare at the call site rather than relying on the
-	// attestation-api to zero-pad a 48-byte prefix.
-	resp, err := callAttestationVerify(evidence, policy, expectedReportData[:], minTcb)
+	// The expected-REPORTDATA length is platform-specific. az-snp binds the key
+	// through a TPM quote whose nonce is the 48-byte SHA-384 digest, so it must
+	// receive exactly those 48 bytes — sending the zero-padded 64-byte form
+	// fails attestation-api's az-snp verify with "TPM nonce length mismatch".
+	// Bare-metal snp and gcp-snp carry a native 64-byte SNP REPORTDATA field
+	// (SHA-384 in bytes 0-47, zero-padded 48-63) and compare the full 64.
+	reportData := expectedReportData[:]
+	if evidence.Platform == string(types.PlatformAzSnp) {
+		reportData = expectedReportData[:sha512.Size384]
+	}
+	resp, err := callAttestationVerify(evidence, policy, reportData, minTcb)
 	if err != nil {
 		return nil, err
 	}
