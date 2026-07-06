@@ -30,6 +30,15 @@ Tested on AMD EPYC with SEV-SNP using cryptographic proving workloads (STARK pro
 
 Full benchmark details: [TEE Performance on CPUs](https://confidential.ai/blog/tee-performance-cpus)
 
+## Products
+
+Confidential is a stack of licensed software for running private AI on your own infrastructure — bare metal or any major cloud. Prompts, weights, data, and agent state stay encrypted in memory while they run, and every result carries a cryptographic attestation of what ran and where. License the layers you need, or run all of them as a managed service on [Confidential Cloud](https://confidential.ai/cloud). [Products](https://confidential.ai/products)
+
+- **Confidential Metal** — the foundation for bare metal. Turns on confidential computing on CC-capable hardware and launches CVMs you can fully measure and verify, with a hardened guest image measured from firmware to user space.
+- **Confidential Kubernetes (C8s)** — turns a single CVM into a platform you can host and scale on. Every workload gets an attested identity, all traffic between components is encrypted, and the control plane stays outside the trust boundary.
+- **Confidential Inference** — private inference on your own stack. Open-weight models behind an OpenAI-compatible API, with prompts, responses, and weights encrypted in CVM memory and an attestation on every response.
+- **Confidential Agents** — private, isolated CVMs for AI agents, ready over SSH in seconds, preloaded with an agent runtime and attested inference. Code, data, and keys stay invisible to the host.
+
 ## How To Use Confidential
 
 - **Confidential Cloud** — hosted TEE-backed infrastructure. On-demand inference, GPU and CPU VMs, attested CI/CD builds, and a private agents API. No code changes. [Cloud](https://confidential.ai/cloud) · [Pricing](https://confidential.ai/pricing)
@@ -108,6 +117,12 @@ Confidential works with AI labs and infrastructure providers. Components are mod
 - [Team](https://confidential.ai/team): The people building Confidential.
 - [Careers](https://confidential.ai/careers): Open positions at Confidential.
 - [Email](mailto:hello@confidential.ai): hello@confidential.ai
+
+## All Pages
+
+Complete index of top-level pages:
+
+{{pages_index}}
 
 ## Full Documentation
 

@@ -144,6 +144,13 @@ function extractTableAfter(filePath: string, marker: string): string {
   return tableLines.join("\n");
 }
 
+function buildPagesIndex(files: ContentFile[]): string {
+  return files
+    .filter((f) => !f.relPath.includes("/"))
+    .map((f) => `- [${f.title}](${f.fullUrl})`)
+    .join("\n");
+}
+
 function buildBlogIndex(files: ContentFile[]): string {
   return files
     .filter((f) => f.relPath.startsWith("blog/") && f.relPath !== "blog/README.md")
@@ -172,6 +179,7 @@ export function buildLlmsText(): string {
     "{{cpu_vms_table}}": extractTableAfter("pricing.md", "**CPU VMs**"),
     "{{inference_pricing_table}}": extractTableAfter("pricing.md", "## Confidential Inference"),
     "{{attestable_builds_table}}": extractTableAfter("pricing.md", "## Attestable Builds"),
+    "{{pages_index}}": buildPagesIndex(files),
     "{{blog_index}}": buildBlogIndex(files),
     "{{docs_index}}": buildDocsIndex(files),
   };
