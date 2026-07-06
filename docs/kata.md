@@ -169,11 +169,11 @@ policy-monitor consumes it even though the host NRI plugin is gone.
 ### Chart-managed mesh components pin their own RuntimeClass
 
 The release namespace is excluded from the webhook (next section), so the
-chart-managed tee-proxy and tls-lb Deployments cannot rely on injection.
-Under `kata.enabled` the chart pins `runtimeClassName: kata-qemu-snp` on them
-directly, the same pattern as CDS: their get-cert containers dial the
-in-guest attestation-api on loopback, which only exists inside an SNP guest —
-and both terminate TLS with mesh-issued keys, so their plaintext must stay
+chart-managed tls-lb Deployment cannot rely on injection. Under
+`kata.enabled` the chart pins `runtimeClassName: kata-qemu-snp` on it
+directly, the same pattern as CDS: its get-cert containers dial the
+in-guest attestation-api on loopback, which only exists inside an SNP guest,
+and it terminates TLS with mesh-issued keys, so its plaintext must stay
 inside the TEE boundary.
 
 ### Host-namespace pods are exempt
@@ -342,7 +342,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   one CPU TEE at install time via `--hardware-platform=<sev-snp|tdx>`. Under
   `--hardware-platform=tdx`, the chart renders the `kata-qemu-tdx`
   RuntimeClass with `nodeSelector: intel-tdx.node.kubernetes.io/enabled=true`
-  and the c8s control-plane pods (CDS, tee-proxy, tls-lb) resolve to
+  and the c8s control-plane pods (CDS, tls-lb) resolve to
   `kata-qemu-tdx`; under `--hardware-platform=sev-snp` (the default) the
   same rendering happens for `kata-qemu-snp`. The kata-enforcement
   allowlist accepts all four (`kata-qemu`, `kata-clh`, `kata-qemu-snp`,

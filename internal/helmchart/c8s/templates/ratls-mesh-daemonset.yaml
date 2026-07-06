@@ -7,7 +7,7 @@
 {{- $cdsURL := printf "https://%s-cds.%s.svc:8443" .Release.Name .Release.Namespace -}}
 {{- $certMode := .Values.ratlsMesh.certMode -}}
 {{- /*
-The release namespace is deliberately NOT excluded: tee-proxy's egress to
+The release namespace is deliberately NOT excluded: tls-lb's egress to
 workload pod IPs (via the operator-managed headless Services) must be
 interceptable so that hop gets attested mTLS. Control-plane traffic inside the
 release namespace dials Service VIPs, which are never in the pod-destination

@@ -25,9 +25,6 @@ c8sComponents:
   - valuePath: nriImagePolicy.image
     enabledPath: nriImagePolicy.enabled
     cdsExempt: false
-  - valuePath: teeProxy.image
-    enabledPath: teeProxy.enabled
-    cdsExempt: false
 
 ## Operator container image. The same image runs every c8s mode that
 ## doesn't need extra OS bins: controller manager and injected get-cert.
@@ -206,7 +203,7 @@ cds:
   ## always-present in-cluster Service DNS pattern (c8s.cdsDnsSanPattern:
   ## <name>.<namespace>.svc). A SAN passes if it matches any allowed pattern.
   ##
-  ## The mesh's own CSRs (tls-lb, c8s-tee-proxy.<ns>.svc, ratls-mesh.<ns>.svc)
+  ## The mesh's own CSRs (tls-lb.<ns>.svc, ratls-mesh.<ns>.svc)
   ## always validate against the built-in Service pattern, so leave this empty
   ## for purely in-cluster deployments. When tls-lb fronts a routed domain, make
   ## that hostname the first tlsLb.san entry and add it here so CDS signs it onto
@@ -619,7 +616,7 @@ ratlsMesh:
   # Iptables sync sidecar resources
   iptablesSync:
     # Local source namespaces excluded from transparent mesh interception.
-    # The release namespace is intentionally NOT excluded: tee-proxy's egress
+    # The release namespace is intentionally NOT excluded: tls-lb's egress
     # to workload pod IPs must be intercepted to get attested mTLS, and
     # control-plane traffic dials Service VIPs the mesh never intercepts.
     # With cwInboundEnforcement, excluded sources are blocked from reaching
@@ -825,7 +822,7 @@ nriImagePolicy:
     # deriveComponents: a demo convenience (off by default, like
     # `c8s install --resolve-digests`, which turns it on). When true, the c8s
     # component images this chart installs (operator, cds, attestation-api,
-    # ratls-mesh, nri-image-policy, tee-proxy) are auto-added to the floor
+    # ratls-mesh, nri-image-policy) are auto-added to the floor
     # whenever their image.digest is set, so a digest-pinned install self-allows
     # the c8s images without listing them in `digests`. It never covers the
     # non-c8s system images, so production installs pin the full floor in
@@ -875,12 +872,12 @@ nriImagePolicy:
   # plugin.health_addr config field (rendered as "unix://<path>").
   healthSocketName: health.sock
 
-# Inference-engine preset. A convenience that derives teeProxy.upstream from a
-# known engine's default port so callers need not know it. The derived upstream
-# is the operator-managed headless Service for the workload
+# Inference-engine preset. A convenience that derives tlsLb.upstream.address
+# from a known engine's default port so callers need not know it. The derived
+# upstream is the operator-managed headless Service for the workload
 # (c8s-<workloadId>.<namespace>.svc.cluster.local:<port>): headless DNS returns
-# pod IPs, which the node mesh intercepts to wrap the hop in attested mTLS — a
-# Service VIP it cannot. Leaving name empty preserves teeProxy.upstream
+# pod IPs, which the node mesh intercepts to wrap the hop in attested mTLS; a
+# Service VIP it cannot. Leaving name empty preserves tlsLb.upstream.address
 # verbatim; setting both is rejected (see validations.yaml).
 engine:
   # Engine name -> default server port. Single source of truth: the helper and
@@ -888,8 +885,8 @@ engine:
   presets:
     vllm: "8000"
     sglang: "30000"
-  # Engine to use. Empty: teeProxy.upstream is used as-is. Otherwise a key of
-  # presets above.
+  # Engine to use. Empty: tlsLb.upstream.address is used as-is. Otherwise a
+  # key of presets above.
   name: ""
   # The confidential.ai/cw id on the engine pod. The headless Service the
   # operator mints is c8s-<workloadId>; workloadId must form a DNS-1035 label
@@ -899,106 +896,39 @@ engine:
   # Service lives). Empty defaults to the release namespace.
   namespace: ""
 
-teeProxy:
-  enabled: true
-  image:
-    repository: ghcr.io/confidential-dot-ai/tee-proxy
-    tag: ""
-    digest: ""
-    pullPolicy: IfNotPresent
-  imagePullSecrets: []
-  replicas: 1
-  ## Rollout strategy. Recreate, not surge: tee-proxy binds the node's host
-  ## ports (hostPort 80/443 by default), so two concurrent pods on a node would
-  ## collide on the port; and its autocert cache is now a per-pod in-memory
-  ## volume rather than shared storage, so a surge pod would re-provision rather
-  ## than share. get-cert's in-process retry covers the brief gap while the
-  ## single pod restarts.
-  strategy:
-    type: Recreate
-  # Domain for autocert TLS
-  domain: ""
-  # -- Self-provision a CDS-issued serving cert via get-cert (like tls-lb),
-  #    instead of a static secret. When enabled, the chart-rendered c8s-cert
-  #    sidecar writes localhost+2.pem/-key.pem into tls.mountPath and tee-proxy
-  #    serves HTTPS from there, hot-reloading on renewal. This is how tls-lb
-  #    reaches tee-proxy over mutual attested TLS rather than plain HTTP.
-  #    Mutually exclusive with tls.enabled (a static secret).
-  certProvisioning:
-    enabled: true
-    # -- Renewal interval for the get-cert sidecar. Must be shorter than the
-    #    CDS-issued cert TTL.
-    renewInterval: "1h"
-  # Static TLS certificate Secret. When enabled, tee-proxy starts HTTPS using
-  # --tls-dir and expects cert/key files named localhost+2.pem and
-  # localhost+2-key.pem inside mountPath. Leave off when certProvisioning is on.
-  tls:
-    enabled: false
-    secretName: ""
-    certKey: tls.crt
-    keyKey: tls.key
-    mountPath: /tls
-  # Upstream service to proxy to. To get this hop wrapped in the node mesh's
-  # attested mTLS, point it at the operator-managed headless Service for the
-  # workload (c8s-<cw-id>.<namespace>.svc.cluster.local:<container-port>):
-  # headless DNS returns pod IPs, which the mesh intercepts — Service VIPs it
-  # cannot. Note the explicit container port: dialing pod IPs bypasses the
-  # Service's port mapping.
-  upstream: vllm-router-service.vllm.svc.cluster.local
-  # Attestation header name
-  headerName: "Attestation-Report"
-  # Remote attestation-api URL (required for new tee-proxy versions)
-  attestationURL: ""
-  # Listening ports (the ports tee-proxy itself listens on inside the pod).
-  ports:
-    https: 443
-    http: 80
-  # Host-network edge binding. When enabled, tee-proxy publishes its listeners
-  # on the node's host ports so external clients reach attested TLS directly on
-  # the node IP. This grabs the node's 80/443: on clusters whose ingress already
-  # owns them — notably RKE2, which bundles rke2-ingress-nginx on hostPort
-  # 80/443 — the tee-proxy pod stays Pending ("didn't have free ports for the
-  # requested pod ports"). On such clusters set enabled: false (reach tee-proxy
-  # through its Service / your own ingress or NodePort) or point http/https at
-  # free host ports. http/https are the host ports to bind; empty derives them
-  # from ports.{http,https} above.
-  hostPort:
-    enabled: true
-    https: ""
-    http: ""
-  # Node placement
-  nodeSelector: {}
-  tolerations: []
-  # Resources
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 128Mi
-  # Probe timings
-  probes:
-    readiness:
-      initialDelaySeconds: 5
-      periodSeconds: 10
-    liveness:
-      initialDelaySeconds: 10
-      periodSeconds: 30
-  # Priority class for pod scheduling
-  priorityClassName: system-node-critical
-
 tlsLb:
   enabled: true
 
-  ## Rollout strategy. Surge so the new (cert-holding) tls-lb pod is Ready
-  ## before the old one is retired — the front door keeps serving across a roll,
-  ## and a pod that fails to get its cert never replaces a working one.
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  ## Rollout strategy. Empty resolves by hostPort.enabled: Recreate when the
+  ## node port is bound (two concurrent pods on a node would collide on the
+  ## host port, and on a single-node cluster a surge pod could never schedule,
+  ## deadlocking the roll; get-cert's in-process retry covers the brief
+  ## restart gap), otherwise RollingUpdate with maxSurge=1/maxUnavailable=0 so
+  ## the new (cert-holding) pod is Ready before the old one is retired. Any
+  ## non-empty value here renders verbatim; in particular a surge strategy
+  ## carried over from an older values file (the previous shipped default)
+  ## deadlocks a single-node roll while hostPort is enabled, so leave this
+  ## empty unless hostPort is off.
+  strategy: {}
+
+  # Host-network edge binding. When enabled, nginx's TLS listener is published
+  # on the node's host port so external clients reach the front door directly
+  # on the node IP (kubelet/CNI portmap DNATs the host port to the in-pod
+  # unprivileged listener, so nginx needs no privileged bind). This grabs the
+  # node's 443: on clusters whose ingress already owns it (notably RKE2, which
+  # bundles rke2-ingress-nginx on hostPort 80/443) the tls-lb pod stays
+  # Pending ("didn't have free ports for the requested pod ports"); set
+  # enabled: false there (reach tls-lb through its Service or your own
+  # ingress) or point https at a free host port. https is the host port to
+  # bind; empty derives 443.
+  #
+  # Availability trade-off: with the port bound the strategy auto-resolves to
+  # Recreate, so every tls-lb roll drops the node-IP front door for the pod
+  # restart window (under kata, a full CVM boot). For gapless rolls set
+  # enabled: false and expose tls-lb through its Service instead.
+  hostPort:
+    enabled: true
+    https: ""
 
   # -- Public hostnames for the front door, as a list. Empty defaults to the
   # chart-managed Service DNS name: <release>-tls-lb.<namespace>.svc. Every entry
@@ -1008,34 +938,35 @@ tlsLb:
   # only server_name and need no dnsSanPatterns entry.
   san: []
 
-  # -- Upstream backend service to proxy traffic to. Defaults to the
-  # chart-managed tee-proxy over mutual attested TLS: tee-proxy serves a
-  # CDS-issued cert (teeProxy.certProvisioning) and tls-lb presents its own
-  # CDS-issued client cert and verifies tee-proxy's against the mesh CA. Point
-  # elsewhere (and set protocol/tls) for a different backend.
+  # -- Upstream backend the front door proxies to. Defaults to the workload
+  # over plain HTTP at the app layer: point address at the operator-managed
+  # headless Service (or use the engine preset, which derives it) so the
+  # pod-IP hop is wrapped in the node mesh's attested mTLS. The tls sub-block
+  # applies only when protocol is https (an upstream that terminates TLS
+  # itself).
   upstream:
-    # -- Host and port of the upstream service.
-    address: c8s-tee-proxy:443
+    # -- Host and port of the upstream service. The engine preset (engine.name)
+    # derives this; set one, not both. This default is also hardcoded in
+    # validations.yaml ($defaultUpstream); keep the two in sync
+    # (TestChartEngineConflictDefaultMatchesValues enforces it).
+    address: vllm-router-service.vllm.svc.cluster.local
     # -- Protocol for the upstream connection (http or https).
-    protocol: https
+    protocol: http
     tls:
       # -- Present the CDS-issued certificate to HTTPS upstreams.
       useCDSClientCert: true
-      # -- Verify the HTTPS upstream's certificate chain. The default trustedCAPath
-      # (the CDS-issued cert file, which already contains the CA chain) is what
-      # verifies the chart-managed tee-proxy's CDS cert.
+      # -- Verify the HTTPS upstream's certificate chain against trustedCAPath.
       verify: true
       # -- Maximum upstream server certificate chain depth nginx will verify when
       # upstream.tls.verify=true. Increase for private PKI chains with more
       # intermediates between the upstream leaf and trusted CA bundle.
       verifyDepth: 2
       # -- SNI/verification name for the HTTPS upstream. Must match the upstream
-      # cert SAN. Empty defaults to the address host, except for the chart-managed
-      # tee-proxy where it defaults to its CDS cert SAN <release>-tee-proxy.<ns>.svc.
+      # cert SAN. Empty defaults to the address host.
       serverName: ""
       # -- CA file nginx verifies the upstream against. Defaults to the get-cert
       # output at <tlsMountPath>/cert.pem, which CDS returns as leaf+CA chain, so
-      # the CA that signed the chart-managed tee-proxy is already on disk. Set to
+      # CDS-issued upstream certs verify out of the box. Set to
       # <meshCA.mountPath>/<meshCA.key> (and provide that ConfigMap) or another
       # path for a different upstream.
       trustedCAPath: /tls/cert.pem
@@ -1086,10 +1017,8 @@ tlsLb:
     # -- Headers advertised in Access-Control-Expose-Headers. Always emitted
     # by tls-lb (and merged in front of the upstream's value in pass-through
     # mode) so browsers can read these headers from JS regardless of what
-    # the upstream advertises. Defaults to the tee-proxy attestation header
-    # (see teeProxy.headerName); update this list if teeProxy.headerName is
-    # changed or other custom response headers need to be readable.
-    exposeHeaders: ["Attestation-Report"]
+    # the upstream advertises.
+    exposeHeaders: []
     # -- Sets Access-Control-Allow-Credentials: true when enabled.
     allowCredentials: false
     # -- Seconds browsers may cache the preflight response.
@@ -1172,6 +1101,14 @@ tlsLb:
     #    (targetPort references the named `https` port), so public 443 is
     #    unaffected; front it with a LoadBalancer for external ingress.
     httpsPort: 8443
+    # -- DNS server nginx queries to re-resolve the catch-all upstream address
+    #    at request time (per record TTL). Headless-Service upstreams (the
+    #    engine preset) resolve to pod IPs that change on pod churn; without
+    #    runtime re-resolution nginx would pin the IPs it saw at startup and
+    #    502 until the next config reload. This name is resolved once at nginx
+    #    startup through the pod's /etc/resolv.conf; override it on clusters
+    #    whose DNS Service is not named kube-dns.
+    resolver: kube-dns.kube-system.svc.cluster.local
     # -- UID/GID used by nginx and the get-cert containers so both can access
     #    the in-memory CDS key material on the shared tls-certs volume.
     runAsUser: 101

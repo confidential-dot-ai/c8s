@@ -27,12 +27,9 @@
 # This script also materialises /etc/c8s/bootstrap-allowlist.json — the
 # in-VM policy-monitor's image-digest allowlist — from the template at
 # extra/etc/c8s/bootstrap-allowlist.json.template by substituting the
-# SHA-256 digests of four container images: the c8s-repo images cds,
+# SHA-256 digests of three container images: the c8s-repo images cds,
 # get-cert and c8s-operator (resolved at IMAGE_TAG, this commit's short
-# SHA), and tee-proxy — which is built in a SEPARATE repo, so it is
-# resolved at its own branch tag (TEE_PROXY_TAG, default `main`) with a
-# cross-repo credential rather than at IMAGE_TAG (see the tee-proxy block
-# below for the full rationale). The digests are resolved against GHCR via
+# SHA). The digests are resolved against GHCR via
 # `oras manifest fetch`; a missing/unfetchable image is fatal — we never
 # proceed with an empty or placeholder-bearing allowlist, because that
 # would silently lock kata-qemu-snp pods out of every CDS bootstrap
@@ -191,9 +188,7 @@ fi
 #
 # If all three are set, no IMAGE_TAG-based oras lookup happens and IMAGE_TAG is
 # unused. If any is missing, IMAGE_TAG is required so the remaining ones can be
-# resolved against the registry. (tee-proxy is intentionally excluded here: it
-# is resolved at TEE_PROXY_TAG — default `main` — not IMAGE_TAG, so it never
-# makes IMAGE_TAG mandatory; see the tee-proxy block below.)
+# resolved against the registry.
 if [[ -z "${CDS_DIGEST:-}" || -z "${GET_CERT_DIGEST:-}" || -z "${C8S_OPERATOR_DIGEST:-}" ]]; then
     if [[ -z "${IMAGE_TAG}" ]]; then
         echo "FATAL: IMAGE_TAG is required to resolve the bootstrap allowlist." >&2
@@ -256,59 +251,6 @@ GET_CERT_DIGEST="${GET_CERT_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/get-cert
 echo "    get-cert:     ${GET_CERT_DIGEST}"
 C8S_OPERATOR_DIGEST="${C8S_OPERATOR_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/c8s-operator:${IMAGE_TAG}")}"
 echo "    c8s-operator: ${C8S_OPERATOR_DIGEST}"
-# tee-proxy is NOT a c8s-repo image. It is built in its OWN repo
-# (confidential-dot-ai/tee-proxy) on an independent cadence, which forces two
-# departures from the cds/get-cert/c8s-operator handling above:
-#
-#   1. Tag. IMAGE_TAG (this c8s commit's short SHA) never tags tee-proxy, so
-#      resolving tee-proxy:${IMAGE_TAG} 404s — the original bug. tee-proxy also
-#      versions independently of c8s's vX.Y.Z scheme, so a c8s release tag can't
-#      be reused either. Resolve at its own branch tag: TEE_PROXY_TAG, default
-#      `main` — the tag `c8s install` resolves component images at for a
-#      main/unstamped CLI build (cmd/c8s/install.go fallbackImageTag). The
-#      allowlist is only a seed (policy-monitor refreshes it from CDS over
-#      RA-TLS at runtime), so tracking tee-proxy's main is acceptable; the
-#      concrete sha256 is still pinned into the dm-verity root at build time.
-#
-#   2. Credential. tee-proxy's GHCR package is linked to a different repo, so
-#      the ambient CI login (this repo's GITHUB_TOKEN, which can read the
-#      c8s-repo packages above) is denied it (403 — the second half of the
-#      original failure). Authenticate this one fetch with the cross-repo
-#      read:packages PAT we already hold for the ghcr-auth.json bake
-#      (READ_PRIVATE_GHCR_TOKEN), in a throwaway docker config so the ambient
-#      login — which the c8s-image lookups above and the CI artifact push later
-#      rely on — is left untouched. The token is fed via stdin, never argv.
-#      With no such token (local dev), fall back to the ambient login: the
-#      developer's own `oras login` already has read on the package.
-#
-# Override TEE_PROXY_TAG to pin a specific tee-proxy release, or set
-# TEE_PROXY_DIGEST to skip resolution entirely.
-TEE_PROXY_TAG="${TEE_PROXY_TAG:-main}"
-if [[ -n "${TEE_PROXY_DIGEST:-}" ]]; then
-    # Digest supplied directly: it was not resolved from any tag, so don't
-    # attribute a fabricated one to it (in the console line or the bake marker).
-    TEE_PROXY_TAG_MARKER="(supplied via TEE_PROXY_DIGEST)"
-    echo "    tee-proxy:    ${TEE_PROXY_DIGEST} ${TEE_PROXY_TAG_MARKER}"
-else
-    if [[ -n "${READ_PRIVATE_GHCR_TOKEN:-}" ]]; then
-        _tp_cfg="$(mktemp -d)"
-        if ! printf '%s' "${READ_PRIVATE_GHCR_TOKEN}" \
-            | DOCKER_CONFIG="${_tp_cfg}" oras login "${GHCR_REGISTRY_HOST:-ghcr.io}" \
-                --username "${GHCR_PULL_USER:-confidential-dot-ai}" --password-stdin >/dev/null 2>&1; then
-            rm -rf "${_tp_cfg}"
-            echo "FATAL: oras login to ${GHCR_REGISTRY_HOST:-ghcr.io} for the cross-repo tee-proxy read failed" >&2
-            exit 1
-        fi
-        # Scope DOCKER_CONFIG to this command-substitution subshell only, so the
-        # ambient ~/.docker login (and thus the later artifact push) is unaffected.
-        TEE_PROXY_DIGEST="$(export DOCKER_CONFIG="${_tp_cfg}"; resolve_digest "${IMAGE_REGISTRY}/tee-proxy:${TEE_PROXY_TAG}")"
-        rm -rf "${_tp_cfg}"
-    else
-        TEE_PROXY_DIGEST="$(resolve_digest "${IMAGE_REGISTRY}/tee-proxy:${TEE_PROXY_TAG}")"
-    fi
-    TEE_PROXY_TAG_MARKER="${TEE_PROXY_TAG}"
-    echo "    tee-proxy:    ${TEE_PROXY_DIGEST} (tag=${TEE_PROXY_TAG})"
-fi
 
 # Substitute placeholders into the template. We use sed with explicit
 # delimiters and `--` so a digest-like value can never be misparsed as
@@ -321,7 +263,6 @@ sed \
     -e "s|@@CDS_DIGEST@@|${CDS_DIGEST}|g" \
     -e "s|@@GET_CERT_DIGEST@@|${GET_CERT_DIGEST}|g" \
     -e "s|@@C8S_OPERATOR_DIGEST@@|${C8S_OPERATOR_DIGEST}|g" \
-    -e "s|@@TEE_PROXY_DIGEST@@|${TEE_PROXY_DIGEST}|g" \
     "${ALLOWLIST_TEMPLATE}" > "${TMP_ALLOWLIST}"
 
 # Belt-and-braces: refuse to ship a file that still has a placeholder.
@@ -338,18 +279,12 @@ rm -f "${TMP_ALLOWLIST}"
 trap - EXIT
 echo "==> bootstrap allowlist: ${ALLOWLIST_DST}"
 
-# Record the resolved digests in the bake marker for reproducibility. The
-# tee-proxy tag is recorded alongside its digest because it resolves at a
-# floating branch tag (TEE_PROXY_TAG) rather than the immutable IMAGE_TAG the
-# c8s-repo images use — so the tag is the only thing that says which tee-proxy
-# main this digest was.
+# Record the resolved digests in the bake marker for reproducibility.
 {
     printf 'allowlist_image_tag: %s\n' "${IMAGE_TAG}"
     printf 'allowlist_cds_digest: %s\n' "${CDS_DIGEST}"
     printf 'allowlist_get_cert_digest: %s\n' "${GET_CERT_DIGEST}"
     printf 'allowlist_c8s_operator_digest: %s\n' "${C8S_OPERATOR_DIGEST}"
-    printf 'allowlist_tee_proxy_tag: %s\n' "${TEE_PROXY_TAG_MARKER}"
-    printf 'allowlist_tee_proxy_digest: %s\n' "${TEE_PROXY_DIGEST}"
 } >> "${EXTRA_DIR}/usr/local/share/c8s/.kata-guest-base-baked"
 
 # --- In-guest GHCR registry auth (private guest-pull) ------------------

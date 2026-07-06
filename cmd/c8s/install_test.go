@@ -436,7 +436,6 @@ var testComponents = []c8sComponent{
 	{"cds.image", "ghcr.io/confidential-dot-ai/cds"},
 	{"ratlsMesh.image", "ghcr.io/confidential-dot-ai/ratls-mesh"},
 	{"nriImagePolicy.image", "ghcr.io/confidential-dot-ai/nri-image-policy"},
-	{"teeProxy.image", "ghcr.io/confidential-dot-ai/tee-proxy"},
 }
 
 func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
@@ -454,8 +453,6 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000dd", nil
 		case "ghcr.io/confidential-dot-ai/nri-image-policy:v1":
 			return "sha256:00000000000000000000000000000000000000000000000000000000000000ee", nil
-		case "ghcr.io/confidential-dot-ai/tee-proxy:v1":
-			return "sha256:00000000000000000000000000000000000000000000000000000000000000ff", nil
 		}
 		t.Fatalf("unexpected ref resolved: %q", ref)
 		return "", nil
@@ -479,8 +476,6 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 		"--set-string", "ratlsMesh.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000dd",
 		"--set-string", "nriImagePolicy.image.repository=ghcr.io/confidential-dot-ai/nri-image-policy",
 		"--set-string", "nriImagePolicy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ee",
-		"--set-string", "teeProxy.image.repository=ghcr.io/confidential-dot-ai/tee-proxy",
-		"--set-string", "teeProxy.image.digest=sha256:00000000000000000000000000000000000000000000000000000000000000ff",
 		// Resolving component digests enables their derivation into the NRI allowlist.
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
 	})
@@ -547,7 +542,6 @@ func TestChartComponentsFromValues(t *testing.T) {
 		"cds.image":            "ghcr.io/confidential-dot-ai/cds",
 		"ratlsMesh.image":      "ghcr.io/confidential-dot-ai/ratls-mesh",
 		"nriImagePolicy.image": "ghcr.io/confidential-dot-ai/nri-image-policy",
-		"teeProxy.image":       "ghcr.io/confidential-dot-ai/tee-proxy",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)

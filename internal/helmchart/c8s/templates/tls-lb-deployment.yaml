@@ -1,8 +1,14 @@
 {{- if .Values.tlsLb.enabled }}
+{{- if not (kindIs "bool" .Values.tlsLb.hostPort.enabled) -}}
+{{- /* A string "false" is truthy and would both bind the node port and force
+Recreate, silently defeating the operator's opt-out. */ -}}
+{{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
+{{- end -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
-{{- $attestUpstreamServerName := default (include "tls-lb.upstreamServerName" .) .Values.tlsLb.upstream.tls.serverName -}}
+{{- $upstreamAddress := include "c8s.tlsLb.resolvedUpstreamAddress" . -}}
+{{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,7 +18,20 @@ metadata:
 spec:
   replicas: {{ .Values.tlsLb.nginx.replicas }}
   strategy:
+    {{- if .Values.tlsLb.strategy }}
     {{- toYaml .Values.tlsLb.strategy | nindent 4 }}
+    {{- else if .Values.tlsLb.hostPort.enabled }}
+    {{- /* Two pods on a node would collide on the host port; on a single-node
+    cluster a surge pod could never schedule, deadlocking the roll. */}}
+    type: Recreate
+    {{- else }}
+    {{- /* Surge so the new (cert-holding) pod is Ready before the old one is
+    retired: the front door keeps serving across a roll. */}}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
   selector:
     matchLabels:
       {{- include "tls-lb.selectorLabels" . | nindent 6 }}
@@ -44,6 +63,9 @@ spec:
           ports:
             - name: https
               containerPort: {{ .Values.tlsLb.nginx.httpsPort }}
+              {{- if .Values.tlsLb.hostPort.enabled }}
+              hostPort: {{ .Values.tlsLb.hostPort.https | default 443 }}
+              {{- end }}
               protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false
@@ -140,12 +162,12 @@ spec:
             # would read it once at startup and embed a stale copy in every bundle.
             # The cds_cert_pem is not bound to the attestation (report_data binds the
             # session key), so the client pins the mesh CA out of band instead.
-            # Terminate over-encryption here and forward to the same tee-proxy
-            # backend nginx proxies to, over the same mutual attested TLS hop
-            # (CDS client cert + verify against the CDS CA chain). c8s-system is
-            # excluded as a mesh source, so this hop is secured at the app layer
-            # rather than by the raTLS mesh.
-            - --upstream={{ .Values.tlsLb.upstream.protocol }}://{{ .Values.tlsLb.upstream.address }}
+            # Terminate over-encryption here and forward to the same workload
+            # backend nginx proxies to. An http upstream is plaintext at the
+            # app layer; pointed at a headless Service (the engine preset),
+            # the node mesh wraps the pod-IP hop in attested mTLS. An https
+            # upstream terminates TLS itself and gets the mTLS args below.
+            - --upstream={{ .Values.tlsLb.upstream.protocol }}://{{ $upstreamAddress }}
             {{- if $attestUsesHTTPSUpstream }}
             - --upstream-ca={{ $upstreamTrustedCAPath }}
             {{- if .Values.tlsLb.upstream.tls.useCDSClientCert }}

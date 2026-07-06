@@ -57,7 +57,7 @@ func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.Tu
 // is https it does mTLS with the LB's CDS-issued client cert and verifies the
 // peer against the mesh CA (mirroring the tls-lb nginx proxy_ssl_* config).
 type HTTPBackend struct {
-	base   string // upstream base URL, e.g. http://c8s-tee-proxy:80
+	base   string // upstream base URL, e.g. http://vllm-router-service.vllm.svc.cluster.local
 	client *http.Client
 }
 

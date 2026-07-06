@@ -3,10 +3,13 @@
 {{- range $s := $sans -}}{{- include "tls-lb.validateSan" $s -}}{{- end -}}
 {{- $serverNames := join " " $sans -}}
 {{- include "tls-lb.validateProtocol" (required "protocol must be http or https" .Values.tlsLb.upstream.protocol) -}}
-{{- include "tls-lb.validateUpstreamAddress" .Values.tlsLb.upstream -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
-{{- $upstreamServerName := default (include "tls-lb.upstreamServerName" .) .Values.tlsLb.upstream.tls.serverName -}}
+{{- $upstreamAddress := include "c8s.tlsLb.resolvedUpstreamAddress" . -}}
+{{- if not (regexMatch `^[^[:space:]{};/#]+$` $upstreamAddress) -}}
+{{- fail (printf "tlsLb.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: %s" $upstreamAddress) -}}
+{{- end -}}
+{{- $upstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
 {{- include "tls-lb.validateProxyTLS" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "label" "tlsLb.upstream") -}}
 {{- include "tls-lb.validateCORS" .Values.tlsLb.cors -}}
 {{- range $i, $route := .Values.tlsLb.routes -}}
@@ -44,9 +47,11 @@ data:
         {{- include "tls-lb.corsMap" . | nindent 8 }}
 {{- end }}
 
-        upstream backend {
-            server {{ .Values.tlsLb.upstream.address }};
-        }
+        # The catch-all upstream is dialed via a variable (see location /), so
+        # nginx re-resolves it here at request time per record TTL. A static
+        # upstream block would pin the pod IPs a headless-Service name (the
+        # engine preset) resolved to at startup and 502 after pod churn.
+        resolver {{ .Values.tlsLb.nginx.resolver }};
 
         {{- range $i, $route := .Values.tlsLb.routes }}
         {{- if hasKey $route "upstream" }}
@@ -75,7 +80,7 @@ data:
             ssl_session_cache shared:SSL:10m;
             ssl_session_timeout 1d;
 
-            # Large buffers for upstream responses that include TEE attestation headers (~8KB).
+            # Headroom for upstream responses with large headers.
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
@@ -187,7 +192,8 @@ data:
                 {{- if eq .Values.tlsLb.upstream.protocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}
-                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://backend;
+                set $backend_addr {{ $upstreamAddress }};
+                proxy_pass {{ .Values.tlsLb.upstream.protocol }}://$backend_addr;
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

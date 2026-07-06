@@ -68,35 +68,11 @@ Validate that the protocol used for an upstream is only http or https
 {{- end -}}
 
 {{/*
-Catch the umbrella chart's default tee-proxy HTTP service port when callers
-switch tls-lb to HTTPS upstream mode without also moving the backend port.
-*/}}
-{{- define "tls-lb.validateUpstreamAddress" -}}
-{{- if and (eq .protocol "https") (eq .address "c8s-tee-proxy:80") -}}
-{{- fail "tlsLb.upstream.protocol=https requires tlsLb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443" -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
 Derive an SNI/verification name from a host:port upstream address.
 */}}
 {{- define "tls-lb.serverNameFromAddress" -}}
 {{- $serverName := regexReplaceAll `^\[([^\]]+)\](?::[0-9]+)?$` . "${1}" -}}
 {{- regexReplaceAll `^([^:]+)(?::[0-9]+)?$` $serverName "${1}" -}}
-{{- end -}}
-
-{{/*
-Default SNI/verification name for the upstream. Normally the address host, but
-for the chart-managed tee-proxy (whose CDS cert SAN is its Service FQDN) it
-returns <tee-proxy.fullname>.<namespace>.svc so verify=true matches the SAN.
-*/}}
-{{- define "tls-lb.upstreamServerName" -}}
-{{- $host := include "tls-lb.serverNameFromAddress" .Values.tlsLb.upstream.address -}}
-{{- if eq $host (include "tee-proxy.fullname" .) -}}
-{{- printf "%s.%s.svc" $host .Release.Namespace -}}
-{{- else -}}
-{{- $host -}}
-{{- end -}}
 {{- end -}}
 
 {{/*
@@ -220,9 +196,8 @@ headers); otherwise we fall back to tls-lb's configured values.
 
 Access-Control-Expose-Headers is the one exception: tls-lb's configured
 exposeHeaders are ALWAYS advertised (and merged in front of upstream's
-value when in pass-through mode). This is required so browsers can read
-tee-proxy-injected headers like Attestation-Report, which the vllm
-upstream does not know to advertise.
+value when in pass-through mode), so browsers can read custom response
+headers the upstream does not know to advertise.
 
 Emitted only when CORS is enabled. Caller nindents into the nginx `http {}`
 context.

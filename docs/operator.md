@@ -137,7 +137,7 @@ caveat, and the SEV-SNP-host / GPU constraints.
 ## Uninstall
 
 `c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
-release (operator, CDS, attestation-api, ratls-mesh, tee-proxy, tls-lb, the
+release (operator, CDS, attestation-api, ratls-mesh, tls-lb, the
 webhook configuration, RuntimeClasses, and the enforcement policy). The chart's
 `pre-delete` hook deletes the `MutatingWebhookConfiguration` by name first, so a
 `failurePolicy: Fail` webhook can never outlive the operator Service and block
@@ -384,10 +384,11 @@ certificate/discovery path.
 
 ## Engine upstream preset
 
-tee-proxy forwards to one upstream, `teeProxy.upstream`, an opaque `host:port`
-the chart never interprets. For a workload run as the operator-managed headless
-Service (annotated `confidential.ai/cw`, see [Injection contract](#injection-contract)),
-that upstream must be the headless Service's own DNS name and container port,
+tls-lb proxies its catch-all route to one upstream, `tlsLb.upstream.address`,
+an opaque `host:port` the chart never interprets. For a workload run as the
+operator-managed headless Service (annotated `confidential.ai/cw`, see
+[Injection contract](#injection-contract)), that upstream must be the headless
+Service's own DNS name and container port,
 `c8s-<workloadId>.<namespace>.svc.cluster.local:<port>`. Headless DNS resolves
 to pod IPs, which the node mesh intercepts to wrap the hop in attested mTLS; a
 regular Service VIP it cannot intercept, so dialing one leaves the hop in
@@ -416,10 +417,11 @@ engine:
 ```
 
 With `engine.name=sglang` and `engine.workloadId=infer` in namespace
-`c8s-system`, tee-proxy's `--upstream` resolves to
+`c8s-system`, tls-lb's upstream resolves to
 `c8s-infer.c8s-system.svc.cluster.local:30000`. Leaving `engine.name` empty
-preserves `teeProxy.upstream` verbatim, so an upstream that is not a c8s-managed
-workload (an existing Service, an external address) is set directly:
+preserves `tlsLb.upstream.address` verbatim, so an upstream that is not a
+c8s-managed workload (an existing Service, an external address) is set
+directly:
 
 ```bash
 helm template c8s internal/helmchart/c8s \
@@ -431,14 +433,23 @@ helm template c8s internal/helmchart/c8s \
 The chart rejects, at render time, with stable `kind=` markers (the same the
 chart tests assert on):
 
-- `engine_upstream_conflict`: both `engine.name` and a custom `teeProxy.upstream`
-  are set. They are two ways to say the same thing; set one.
+- `engine_upstream_conflict`: both `engine.name` and a custom
+  `tlsLb.upstream.address` are set. They are two ways to say the same thing;
+  set one.
+- `engine_https_upstream`: `engine.name` is set with
+  `tlsLb.upstream.protocol=https`. The derived headless-Service hop is
+  plaintext at the app layer (the mesh wraps it in attested mTLS), so an https
+  protocol could only fail at runtime.
+- `https_plaintext_default`: `engine.name` is empty and
+  `tlsLb.upstream.protocol=https` while `tlsLb.upstream.address` is still the
+  default plaintext vllm router; same runtime-only failure class as above.
+  A custom address with https is accepted as the operator's contract.
 - `engine_missing_workload_id`: `engine.name` is set but `engine.workloadId` is
   empty.
 - `engine_invalid_workload_id`: `c8s-<workloadId>` is not a DNS-1035 label
   (start with a letter, then `[a-z0-9-]`, end alphanumeric; the `c8s-` prefix
   caps `workloadId` at 59 chars), so the operator would refuse to mint the
-  Service and tee-proxy would dial a name that resolves to nothing. The rule
+  Service and tls-lb would dial a name that resolves to nothing. The rule
   mirrors `webhook.WorkloadServiceName`.
 - `unknown_engine`: `engine.name` is not a key of `engine.presets`.
 
@@ -512,7 +523,6 @@ helm template c8s internal/helmchart/c8s \
   --set attestationApi.image.tag=main \
   --set cds.image.tag=main \
   --set ratlsMesh.image.tag=main \
-  --set teeProxy.image.tag=main \
   --set nriImagePolicy.enabled=false >/dev/null && echo OK
 ```
 
@@ -529,7 +539,6 @@ helm template c8s internal/helmchart/c8s \
   --set attestationApi.image.tag=main \
   --set cds.image.tag=main \
   --set ratlsMesh.image.tag=main \
-  --set teeProxy.image.tag=main \
   --set nriImagePolicy.image.tag=main \
   --set nriImagePolicy.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
   --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 >/dev/null && echo OK

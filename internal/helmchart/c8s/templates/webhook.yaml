@@ -33,7 +33,7 @@ webhooks:
     # is a no-op regardless of namespace. The exclusion matters for kata
     # enforcement, which forces a runtimeClassName onto any in-scope pod with
     # no annotation: without it, --kata-enforce would try to run c8s's own
-    # control plane (operator, cds, attestation-api, tee-proxy, tls-lb are not
+    # control plane (operator, cds, attestation-api, tls-lb are not
     # hostNetwork) as kata VMs. The reinject sweep excludes the same set.
     namespaceSelector:
       matchExpressions:

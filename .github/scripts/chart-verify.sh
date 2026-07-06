@@ -24,7 +24,6 @@ common_set=(
   --set attestationApi.image.tag=ci
   --set cds.image.tag=ci
   --set ratlsMesh.image.tag=ci
-  --set teeProxy.image.tag=ci
   --set nriImagePolicy.image.tag=ci
   --set nriImagePolicy.image.digest=sha256:aaaa000000000000000000000000000000000000000000000000000000000000
   --set cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001

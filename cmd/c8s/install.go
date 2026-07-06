@@ -306,7 +306,7 @@ var installCmd = &cobra.Command{
   - the mutating admission webhook configuration
   - the attestation-api DaemonSet (per-node /attest + /verify)
   - the CDS trust root (attestation, EAR issuance, mesh CA, leaf signing)
-  - the ratls-mesh, nri-image-policy, tee-proxy, and tls-lb components
+  - the ratls-mesh, nri-image-policy, and tls-lb components
 
 Under --kata the install is ENFORCING: every workload pod runs as a kata VM
 (injected and validated at admission), and the host-side ratls-mesh,

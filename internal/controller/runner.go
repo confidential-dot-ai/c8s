@@ -146,7 +146,7 @@ func Run(ctx context.Context, opts Options) error {
 	excluded := excludedNamespaceSet(opts.LeaderElectionNS, opts.ExcludeNamespaces)
 
 	// Headless-Service provisioning: one Service per annotated workload so
-	// in-cluster clients (tee-proxy) can dial pod IPs by DNS and get the
+	// in-cluster clients (tls-lb) can dial pod IPs by DNS and get the
 	// node mesh's attested mTLS — the mesh cannot intercept Service VIPs.
 	// Gated on get-cert injection (not kata-only mode): without it no pod
 	// ever carries the cw label the Service selects on.

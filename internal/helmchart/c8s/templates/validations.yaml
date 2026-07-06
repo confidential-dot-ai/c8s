@@ -1,8 +1,18 @@
 {{- $tlsLB := .Values.tlsLb -}}
-{{- $teeProxy := .Values.teeProxy -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (default "" $nri.cds.url) . -}}
 {{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
+{{- /* Must track values.yaml tlsLb.upstream.address
+       (TestChartEngineConflictDefaultMatchesValues pins the two together). */ -}}
+{{- $defaultUpstream := "vllm-router-service.vllm.svc.cluster.local" -}}
+{{- /*
+  Helm silently ignores values keys the chart no longer reads, so a values
+  file carried over from a release that still had tee-proxy would drop its
+  settings (hostPort opt-out, upstream) without a trace. Fail loud instead.
+*/ -}}
+{{- if hasKey .Values "teeProxy" -}}
+{{- fail "VALIDATION_ERROR kind=removed_component: teeProxy.* values are set, but the tee-proxy component was removed; tls-lb dials the workload directly. Migrate teeProxy.hostPort to tlsLb.hostPort and teeProxy.upstream to tlsLb.upstream.address, then drop the teeProxy block." -}}
+{{- end -}}
 {{- /*
   Hardware-TEE mutual exclusion. A single cluster picks one CPU TEE at install
   time (--hardware-platform sev-snp or tdx). teeDevices.sevGuest and
@@ -18,9 +28,6 @@
 */ -}}
 {{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
 {{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}
-{{- end -}}
-{{- if and $tlsLB.enabled $teeProxy.enabled (eq $tlsLB.upstream.protocol "https") (eq $tlsLB.upstream.address "c8s-tee-proxy:443") (not (or $teeProxy.certProvisioning.enabled $teeProxy.tls.enabled $teeProxy.domain)) -}}
-{{- fail "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.certProvisioning.enabled (default), teeProxy.tls.enabled, or teeProxy.domain to enable the HTTPS listener" -}}
 {{- end -}}
 {{- if and .Values.kata.enabled (ne .Values.webhook.failurePolicy "Fail") -}}
 {{- fail (printf "kata.enabled=true requires webhook.failurePolicy=Fail (got %q): kata is enforcing — the ValidatingAdmissionPolicy rejects pods that reach validation without a kata RuntimeClass, so the mutating webhook that injects that class must also fail closed — otherwise an operator-down event silently bypasses enforcement" .Values.webhook.failurePolicy) -}}
@@ -71,9 +78,9 @@
 {{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got %d)" $attestationNodePort) -}}
 {{- end -}}
 {{- /*
-  engine preset checks. The resolvedUpstream helper fails closed on the unknown
-  engine too, but validate here so they surface independent of whether tee-proxy
-  is enabled or the helper is reached, with stable kind= markers for the tests.
+  engine preset checks. The resolvedUpstreamAddress helper fails closed on the
+  unknown engine too, but validate here so they surface independent of whether
+  the helper is reached, with stable kind= markers for the tests.
 */ -}}
 {{- $engine := .Values.engine -}}
 {{- if $engine.name -}}
@@ -93,9 +100,24 @@
 {{- if or (gt (len $svc) 63) (not (regexMatch "^[a-z]([-a-z0-9]*[a-z0-9])?$" $svc)) -}}
 {{- fail (printf "VALIDATION_ERROR kind=engine_invalid_workload_id: engine.workloadId=%q makes Service name %q, not a DNS-1035 label (start with a letter, then [a-z0-9-], end alphanumeric, <=63 chars)" $engine.workloadId $svc) -}}
 {{- end -}}
-{{- /* defaultUpstream must track values.yaml teeProxy.upstream. */ -}}
-{{- $defaultUpstream := "vllm-router-service.vllm.svc.cluster.local" -}}
-{{- if and $teeProxy.upstream (ne $teeProxy.upstream $defaultUpstream) -}}
-{{- fail (printf "VALIDATION_ERROR kind=engine_upstream_conflict: engine.name=%q derives teeProxy.upstream, but teeProxy.upstream is also set to %q; set one, not both" $engine.name $teeProxy.upstream) -}}
+{{- if and $tlsLB.upstream.address (ne $tlsLB.upstream.address $defaultUpstream) -}}
+{{- fail (printf "VALIDATION_ERROR kind=engine_upstream_conflict: engine.name=%q derives tlsLb.upstream.address, but tlsLb.upstream.address is also set to %q; set one, not both" $engine.name $tlsLB.upstream.address) -}}
 {{- end -}}
+{{- /*
+  The derived headless-Service hop is plaintext at the app layer; the node
+  mesh wraps it in attested mTLS. An https upstream protocol can only fail at
+  runtime against that backend, so reject it at render time.
+*/ -}}
+{{- if eq $tlsLB.upstream.protocol "https" -}}
+{{- fail (printf "VALIDATION_ERROR kind=engine_https_upstream: engine.name=%q derives a plaintext headless-Service upstream (the mesh wraps the hop in attested mTLS), but tlsLb.upstream.protocol=https; use protocol http with the engine preset" $engine.name) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+  Same class of misconfig without the engine preset: the default upstream is
+  the plaintext vllm router, so protocol=https against it can only fail at
+  runtime (a TLS handshake to a plaintext port). A custom address is the
+  operator's contract; only the known-plaintext default is guarded.
+*/ -}}
+{{- if and $tlsLB.enabled (not $engine.name) (eq $tlsLB.upstream.protocol "https") (eq $tlsLB.upstream.address $defaultUpstream) -}}
+{{- fail "VALIDATION_ERROR kind=https_plaintext_default: tlsLb.upstream.protocol=https with the default plaintext upstream (vllm-router-service.vllm.svc.cluster.local); point tlsLb.upstream.address at a backend that terminates TLS, or keep protocol http" -}}
 {{- end -}}

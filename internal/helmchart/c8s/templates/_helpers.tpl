@@ -70,7 +70,7 @@
 {{- end -}}
 
 {{/*
-  RuntimeClass name to use for CDS / tee-proxy / tls-lb control-plane pods
+  RuntimeClass name to use for CDS / tls-lb control-plane pods
   when kata is enforcing. Under --kata all c8s pods run as kata VMs, and
   the RC must match the cluster's confidential-VM hardware:
 
@@ -305,7 +305,7 @@ seccompProfile:
   c8s.cdsDnsSanPattern is the in-cluster --dns-san-pattern the chart always
   passes to CDS: a regex matching any in-cluster Service DNS name
   (<name>.<namespace>.svc). CDS full-matches it, so workloads in any namespace
-  (tls-lb, tee-proxy, ratls-mesh in the release namespace; tenant workloads in
+  (tls-lb, ratls-mesh in the release namespace; tenant workloads in
   their own) can request a leaf for their Service name. Operators fronting a
   public domain append that hostname via cds.dnsSanPatterns, which adds further
   --dns-san-pattern args alongside this one rather than replacing it.

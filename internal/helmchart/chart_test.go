@@ -165,8 +165,6 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 		"app.kubernetes.io/component: cds",
 		"app.kubernetes.io/name: ratls-mesh",
 		"app.kubernetes.io/name: nri-image-policy",
-		"app.kubernetes.io/name: tee-proxy",
-		"port: 443\n      targetPort: 443\n      protocol: TCP\n      name: https",
 		"app.kubernetes.io/name: tls-lb",
 		"server_name c8s-tls-lb.c8s-system.svc;",
 	} {
@@ -228,7 +226,7 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		{"--ipset-maxelem", "262144"},
 		{"--ready-file", "/tmp/ratls-iptables-ready"},
 		{"--iptables-metrics-file", "/tmp/ratls-iptables-metrics.json"},
-		// The release namespace must NOT be excluded: tee-proxy egress to
+		// The release namespace must NOT be excluded: tls-lb egress to
 		// workload pod IPs (headless-Service dials) needs mesh interception.
 		{"--exclude-source-namespaces", "kube-system"},
 	} {
@@ -313,13 +311,18 @@ func argvContainsFlagValue(argv []string, flag, value string) bool {
 	return false
 }
 
-func containerHostPort(c corev1.Container, portName string) (int32, bool) {
+func namedContainerPort(c corev1.Container, portName string) (corev1.ContainerPort, bool) {
 	for _, p := range c.Ports {
 		if p.Name == portName {
-			return p.HostPort, true
+			return p, true
 		}
 	}
-	return 0, false
+	return corev1.ContainerPort{}, false
+}
+
+func containerHostPort(c corev1.Container, portName string) (int32, bool) {
+	p, ok := namedContainerPort(c, portName)
+	return p.HostPort, ok
 }
 
 func containersExposingHostPort(ds *appsv1.DaemonSet, port int32) []string {
@@ -1356,7 +1359,6 @@ func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 		"--set", "webhook.getCert.runAsNonRoot=false",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
-		"--set", "teeProxy.enabled=false",
 		"--set", "tlsLb.enabled=false",
 	)
 	if err != nil {
@@ -1519,7 +1521,7 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 func TestChartGlobalImagePullSecrets(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "imagePullSecrets[0].name=ghcr-pull",
-		"--set", "teeProxy.imagePullSecrets[0].name=tee-special",
+		"--set", "tlsLb.imagePullSecrets[0].name=lb-special",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1529,10 +1531,10 @@ func TestChartGlobalImagePullSecrets(t *testing.T) {
 	if !hasPullSecret(rm.Spec.Template.Spec.ImagePullSecrets, "ghcr-pull") {
 		t.Errorf("ratls-mesh missing global pull secret: %v", rm.Spec.Template.Spec.ImagePullSecrets)
 	}
-	// teeProxy's own value overrides the global.
-	tp := renderedDeployment(t, out, "c8s-tee-proxy")
-	if hasPullSecret(tp.Spec.Template.Spec.ImagePullSecrets, "ghcr-pull") || !hasPullSecret(tp.Spec.Template.Spec.ImagePullSecrets, "tee-special") {
-		t.Errorf("tee-proxy should use its override, not the global: %v", tp.Spec.Template.Spec.ImagePullSecrets)
+	// tlsLb's own value overrides the global.
+	lb := renderedDeployment(t, out, "c8s-tls-lb")
+	if hasPullSecret(lb.Spec.Template.Spec.ImagePullSecrets, "ghcr-pull") || !hasPullSecret(lb.Spec.Template.Spec.ImagePullSecrets, "lb-special") {
+		t.Errorf("tls-lb should use its override, not the global: %v", lb.Spec.Template.Spec.ImagePullSecrets)
 	}
 }
 
@@ -1552,12 +1554,10 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"--set-string", "tlsLb.publicTLS.certKey=public.crt",
 		"--set-string", "tlsLb.publicTLS.keyKey=public.key",
 		"--set", "tlsLb.discovery.enabled=true",
-		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
+		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
 		"--set", "tlsLb.upstream.protocol=https",
 		"--set", "tlsLb.upstream.tls.verify=true",
-		"--set-string", "tlsLb.upstream.tls.serverName=tee-proxy.tee-attestation.svc.cluster.local",
-		"--set", "teeProxy.tls.enabled=true",
-		"--set-string", "teeProxy.tls.secretName=tee-proxy-internal-tls",
+		"--set-string", "tlsLb.upstream.tls.serverName=my-backend.other-ns.svc.cluster.local",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1574,10 +1574,10 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"alias /tls/ca.pem;",
 		"proxy_ssl_certificate /tls/cert.pem;",
 		"proxy_ssl_certificate_key /tls/key.pem;",
-		"proxy_ssl_name tee-proxy.tee-attestation.svc.cluster.local;",
+		"proxy_ssl_name my-backend.other-ns.svc.cluster.local;",
 		"proxy_ssl_verify on;",
 		"proxy_ssl_trusted_certificate /tls/cert.pem;",
-		"proxy_pass https://backend;",
+		"proxy_pass https://$backend_addr;",
 		"name: tls-certs",
 		"name: public-tls",
 		"mountPath: /edge-tls",
@@ -1653,17 +1653,17 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		"--port=8800",
 		"--generation=milan",
 		"--attestation-api-url=http://",
-		// The default upstream is the mutual attested TLS tee-proxy hop (#156):
-		// the sidecar presents the CDS client cert and trusts tee-proxy via the
-		// CDS CA chain get-cert writes to /tls/cert.pem (#158), not the mesh CA.
-		"--upstream=https://c8s-tee-proxy:443",
-		"--upstream-ca=/tls/cert.pem",
-		"--upstream-cert=/tls/cert.pem",
-		"--upstream-key=/tls/key.pem",
-		"--upstream-server-name=c8s-tee-proxy.c8s-system.svc",
+		// The default upstream is the workload over plain HTTP at the app
+		// layer; the mTLS args render only for an https upstream.
+		"--upstream=http://vllm-router-service.vllm.svc.cluster.local",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("cds-attest args missing %q: %v", want, sidecar.Args)
+		}
+	}
+	for _, banned := range []string{"--upstream-ca", "--upstream-cert", "--upstream-key", "--upstream-server-name"} {
+		if strings.Contains(joined, banned) {
+			t.Fatalf("cds-attest must not set %s for the default http upstream: %v", banned, sidecar.Args)
 		}
 	}
 	// --cds-cert-file must NOT be set: nginx serves /.well-known/c8s/cds-cert.pem
@@ -1689,6 +1689,31 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		}
 	}
 
+	// An https upstream: the sidecar presents the CDS client cert and
+	// verifies the upstream against the CA chain get-cert writes to
+	// /tls/cert.pem, mirroring the nginx proxy_ssl_* config.
+	httpsOut, err := helmTemplate(t,
+		"--set", "tlsLb.attest.enabled=true",
+		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
+		"--set", "tlsLb.upstream.protocol=https",
+	)
+	if err != nil {
+		t.Fatalf("helm template (https upstream): %v\n%s", err, httpsOut)
+	}
+	httpsSidecar := renderedDeploymentContainer(t, httpsOut, "c8s-tls-lb", "cds-attest")
+	httpsJoined := strings.Join(httpsSidecar.Args, " ")
+	for _, want := range []string{
+		"--upstream=https://my-backend.other-ns.svc:8443",
+		"--upstream-ca=/tls/cert.pem",
+		"--upstream-cert=/tls/cert.pem",
+		"--upstream-key=/tls/key.pem",
+		"--upstream-server-name=my-backend.other-ns.svc",
+	} {
+		if !strings.Contains(httpsJoined, want) {
+			t.Fatalf("cds-attest args missing %q: %v", want, httpsSidecar.Args)
+		}
+	}
+
 	// Default off: no sidecar, no well-known proxy.
 	offOut, err := helmTemplate(t)
 	if err != nil {
@@ -1696,81 +1721,6 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	}
 	if strings.Contains(offOut, "name: cds-attest") || strings.Contains(offOut, "location /.well-known/c8s/ {") {
 		t.Fatal("cds-attest sidecar should not render when tlsLb.attest.enabled is false")
-	}
-}
-
-func TestChartRendersTeeProxyStaticTLSSecret(t *testing.T) {
-	out, err := helmTemplate(t,
-		// The static-secret TLS mode is the non-default alternative to
-		// certProvisioning (self-rendered CDS cert), so turn the latter off.
-		"--set", "teeProxy.certProvisioning.enabled=false",
-		"--set", "teeProxy.tls.enabled=true",
-		"--set-string", "teeProxy.tls.secretName=tee-proxy-internal-tls",
-		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
-		"--set", "tlsLb.upstream.protocol=https",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, want := range []string{
-		"- --tls-dir",
-		"- \"/tls\"",
-		"mountPath: /tls",
-		"name: static-tls",
-		"secretName: tee-proxy-internal-tls",
-		"key: tls.crt",
-		"path: localhost+2.pem",
-		"key: tls.key",
-		"path: localhost+2-key.pem",
-		"port: 443",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
-	}
-}
-
-// TestChartTeeProxyAutocertCacheIsInMemory pins the --host autocert TLS mode:
-// tee-proxy's Let's Encrypt cache (ACME account key + issued certs) is located
-// via --cert-cache-dir and backed by an in-memory tmpfs, never a host-backed
-// volume, so the key material stays inside the TEE. The default certProvisioning
-// shape uses --tls-dir and renders no autocert-cache volume at all.
-func TestChartTeeProxyAutocertCacheIsInMemory(t *testing.T) {
-	// Autocert mode: a domain, with neither certProvisioning nor a static
-	// secret. The domain alone satisfies the HTTPS-listener validation.
-	out, err := helmTemplate(t,
-		"--set", "teeProxy.certProvisioning.enabled=false",
-		"--set-string", "teeProxy.domain=proxy.example.com",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	for _, want := range []string{
-		"- --cert-cache-dir",
-		"- \"/tmp/certs\"",
-		"name: autocert-cache",
-		"mountPath: /tmp/certs",
-		"medium: Memory",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("autocert render missing %q\n%s", want, out)
-		}
-	}
-	// Must not regress to the removed host-backed certs PVC.
-	if strings.Contains(out, "c8s-tee-proxy-certs") {
-		t.Errorf("autocert mode must not render the removed tee-proxy certs PVC\n%s", out)
-	}
-
-	// Default shape (certProvisioning on): --tls-dir, and no autocert-cache.
-	base, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template (default): %v\n%s", err, base)
-	}
-	if strings.Contains(base, "name: autocert-cache") {
-		t.Errorf("default shape should not render the autocert-cache volume\n%s", base)
-	}
-	if strings.Contains(base, "--cert-cache-dir") {
-		t.Errorf("default shape should use --tls-dir, not --cert-cache-dir\n%s", base)
 	}
 }
 
@@ -1868,185 +1818,40 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 	}
 }
 
-// TestTeeProxyProbesAvoidMTLSHandshakeUnderKata: tee-proxy runs under kata
-// (runtimeClassName: kata-qemu-snp), so the in-guest RA-TLS mesh fronts its
-// serving port with mutual attested TLS and the kubelet's httpGet probe is
-// rejected at the handshake ("tls: certificate required"). The chart must fall
-// back to a tcpSocket probe under kata (same fix as tls-lb / cds.yaml). The
-// base shape keeps the httpGet /.well-known/health check — deliberately
-// httpGet rather than tcpSocket there, since a direct TCP probe to tee-proxy's
-// own TLS port logs a spurious "TLS handshake error: EOF".
-func TestTeeProxyProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
-	type namedProbe struct {
-		name  string
-		probe *corev1.Probe
-	}
-
-	base, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, base)
-	}
-	proxy := renderedDeploymentContainer(t, base, "c8s-tee-proxy", "proxy")
-	for _, p := range []namedProbe{
-		{"readiness", proxy.ReadinessProbe},
-		{"liveness", proxy.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.HTTPGet == nil {
-			t.Fatalf("base shape: tee-proxy %s probe should be httpGet; got %+v", p.name, p.probe)
-		}
-		if got := p.probe.HTTPGet.Path; got != "/.well-known/health" {
-			t.Errorf("base shape: tee-proxy %s probe path = %q, want /.well-known/health", p.name, got)
-		}
-	}
-
-	kata, err := helmTemplateKata(t)
-	if err != nil {
-		t.Fatalf("helm template --kata: %v\n%s", err, kata)
-	}
-	proxy = renderedDeploymentContainer(t, kata, "c8s-tee-proxy", "proxy")
-	for _, p := range []namedProbe{
-		{"readiness", proxy.ReadinessProbe},
-		{"liveness", proxy.LivenessProbe},
-	} {
-		if p.probe == nil || p.probe.TCPSocket == nil {
-			t.Fatalf("kata shape: tee-proxy %s probe should be tcpSocket (an httpGet hits the in-guest mTLS handshake); got %+v", p.name, p.probe)
-		}
-		if p.probe.HTTPGet != nil {
-			t.Errorf("kata shape: tee-proxy %s probe must not be httpGet under kata", p.name)
-		}
-	}
-}
-
-// TestChartTeeProxyHostPort covers the teeProxy.hostPort edge toggle. The
-// default publishes the node host ports (443/80). hostPort.enabled=false omits
-// them so the pod schedules where another controller already owns 80/443 (e.g.
-// RKE2's bundled ingress-nginx). Custom host ports bind independently of the
-// in-pod listener ports.
-func TestChartTeeProxyHostPort(t *testing.T) {
-	portHostPort := func(c corev1.Container, name string) (containerPort, hostPort int32, found bool) {
-		for _, p := range c.Ports {
-			if p.Name == name {
-				return p.ContainerPort, p.HostPort, true
-			}
-		}
-		return 0, 0, false
-	}
-
-	t.Run("default binds host 443/80", func(t *testing.T) {
-		out, err := helmTemplate(t)
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		proxy, ok := findContainer(renderedDeployment(t, out, "c8s-tee-proxy").Spec.Template.Spec.Containers, "proxy")
-		if !ok {
-			t.Fatal("proxy container missing")
-		}
-		for name, want := range map[string]int32{"https": 443, "http": 80} {
-			if _, hp, found := portHostPort(proxy, name); !found || hp != want {
-				t.Fatalf("%s hostPort = %d (found=%v), want %d", name, hp, found, want)
-			}
-		}
-	})
-
-	t.Run("disabled omits host ports", func(t *testing.T) {
-		out, err := helmTemplate(t, "--set", "teeProxy.hostPort.enabled=false")
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		proxy, ok := findContainer(renderedDeployment(t, out, "c8s-tee-proxy").Spec.Template.Spec.Containers, "proxy")
-		if !ok {
-			t.Fatal("proxy container missing")
-		}
-		for _, name := range []string{"https", "http"} {
-			cp, hp, found := portHostPort(proxy, name)
-			if !found {
-				t.Fatalf("%s port missing entirely; container must still listen", name)
-			}
-			if hp != 0 {
-				t.Fatalf("%s hostPort = %d, want 0 (unbound)", name, hp)
-			}
-			if cp == 0 {
-				t.Fatalf("%s containerPort must stay set even with hostPort disabled", name)
-			}
-		}
-	})
-
-	t.Run("custom host ports decouple from listener ports", func(t *testing.T) {
-		out, err := helmTemplate(t,
-			"--set", "teeProxy.hostPort.https=8443",
-			"--set", "teeProxy.hostPort.http=8080",
-		)
-		if err != nil {
-			t.Fatalf("helm template: %v\n%s", err, out)
-		}
-		proxy, ok := findContainer(renderedDeployment(t, out, "c8s-tee-proxy").Spec.Template.Spec.Containers, "proxy")
-		if !ok {
-			t.Fatal("proxy container missing")
-		}
-		for name, want := range map[string]struct{ cp, hp int32 }{
-			"https": {443, 8443},
-			"http":  {80, 8080},
-		} {
-			cp, hp, found := portHostPort(proxy, name)
-			if !found || cp != want.cp || hp != want.hp {
-				t.Fatalf("%s = containerPort %d / hostPort %d (found=%v), want %d / %d", name, cp, hp, found, want.cp, want.hp)
-			}
-		}
-	})
-}
-
-func TestChartRejectsManagedTeeProxyHTTPSWithoutListener(t *testing.T) {
-	// With every HTTPS-listener source off (certProvisioning, static tls,
-	// domain), https to the chart tee-proxy has nothing to talk to.
-	out, err := helmTemplate(t,
-		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:443",
-		"--set", "tlsLb.upstream.protocol=https",
-		"--set", "teeProxy.certProvisioning.enabled=false",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want tee-proxy HTTPS-listener failure\n%s", out)
-	}
-	assertHelmFailMessage(t, out, "tlsLb.upstream.protocol=https with the chart-managed tee-proxy requires teeProxy.certProvisioning.enabled (default), teeProxy.tls.enabled, or teeProxy.domain to enable the HTTPS listener")
-}
-
-func TestChartRejectsTLSLBHTTPSWithTeeProxyHTTPPort(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set-string", "tlsLb.upstream.address=c8s-tee-proxy:80",
-		"--set", "tlsLb.upstream.protocol=https",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want tls-lb upstream address failure\n%s", out)
-	}
-	assertHelmFailMessage(t, out, "tlsLb.upstream.protocol=https requires tlsLb.upstream.address to point at a TLS port; for the chart-managed tee-proxy use c8s-tee-proxy:443")
-}
-
-// TestChartDefaultTLSLBToTeeProxyIsMutualTLS pins the new default: tls-lb
-// reaches the chart tee-proxy over mutual attested TLS (both CDS-issued certs).
-func TestChartDefaultTLSLBToTeeProxyIsMutualTLS(t *testing.T) {
+// TestChartDefaultTLSLBUpstreamIsWorkloadDirect pins the default front-door
+// path: tls-lb proxies straight to the workload over plain HTTP at the app
+// layer (the node mesh wraps pod-IP hops in attested mTLS), with no
+// proxy_ssl_* directives on the default route. The upstream is dialed via a
+// variable with a resolver so nginx re-resolves per DNS TTL: a headless
+// Service (the engine preset) returns pod IPs that change on pod churn, and
+// a static upstream block would pin the startup-time IPs and 502 until the
+// next config reload.
+func TestChartDefaultTLSLBUpstreamIsWorkloadDirect(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	cfg := renderedTLSLBNginxConf(t, out)
 	for _, want := range []string{
-		"server c8s-tee-proxy:443;",
-		"proxy_pass https://backend;",
-		"proxy_ssl_verify on;",
-		"proxy_ssl_name c8s-tee-proxy.c8s-system.svc;",
-		"proxy_ssl_certificate /tls/cert.pem;",
-		// trust = the get-cert output cert.pem, which CDS returns as leaf+CA
-		// chain, so the CDS CA that signed tee-proxy is the anchor.
-		"proxy_ssl_trusted_certificate /tls/cert.pem;",
+		"resolver kube-dns.kube-system.svc.cluster.local;",
+		"set $backend_addr vllm-router-service.vllm.svc.cluster.local;",
+		"proxy_pass http://$backend_addr;",
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Fatalf("tls-lb nginx config missing %q\n%s", want, cfg)
 		}
 	}
+	if strings.Contains(cfg, "upstream backend {") {
+		t.Fatalf("catch-all upstream must be a variable dial, not a static upstream block (it would pin headless pod IPs at startup)\n%s", cfg)
+	}
+	if strings.Contains(cfg, "proxy_ssl_") {
+		t.Fatalf("default http upstream must not render proxy_ssl_ directives\n%s", cfg)
+	}
 }
 
 func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
-		"--set-string", "upstream.address=tee-proxy.tee-attestation.svc.cluster.local:443",
+		"--set-string", "upstream.address=my-backend.other-ns.svc.cluster.local:443",
 		"--set", "upstream.protocol=https",
 		"--set", "upstream.tls.verify=true",
 	)
@@ -2055,7 +1860,7 @@ func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	}
 	cfg := renderedTLSLBNginxConfig(t, out)
 	defaultRoute := cfg.location(t, "prefix", "/")
-	defaultRoute.assertDirective(t, "proxy_ssl_name", "tee-proxy.tee-attestation.svc.cluster.local")
+	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 }
 
 func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
@@ -2097,8 +1902,8 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	}
 
 	defaultRoute := cfg.location(t, "prefix", "/")
-	defaultRoute.assertDirective(t, "proxy_pass", "http://backend")
-	cfg.upstream(t, "backend").assertServer(t, "vllm:8000")
+	defaultRoute.assertDirective(t, "set", "$backend_addr", "vllm:8000")
+	defaultRoute.assertDirective(t, "proxy_pass", "http://$backend_addr")
 	cfg.upstream(t, "route_0").assertServer(t, "cds.c8s-system.svc:8080")
 	cfg.upstream(t, "route_1").assertServer(t, "tenant-router.c8s-system.svc:8080")
 }
@@ -2944,69 +2749,33 @@ func TestChartKataShapeDropsHostSideComponents(t *testing.T) {
 	}
 }
 
-// Chart-managed mesh components live in the release namespace, which the
-// kata-enforcement webhook deliberately excludes — so the chart itself must
-// pin the confidential RuntimeClass on them under kata, exactly like cds.yaml.
-// kata-qemu-snp specifically: their get-cert containers dial the in-guest
-// attestation-api on loopback (c8s.attestationApiURL), which only exists
-// inside an SNP guest.
-func TestChartKataPinsRuntimeClassOnTeeProxyAndTLSLB(t *testing.T) {
+// tls-lb lives in the release namespace, which the kata-enforcement webhook
+// deliberately excludes — so the chart itself must pin the confidential
+// RuntimeClass on it under kata, exactly like cds.yaml. kata-qemu-snp
+// specifically: its get-cert containers dial the in-guest attestation-api on
+// loopback (c8s.attestationApiURL), which only exists inside an SNP guest.
+func TestChartKataPinsRuntimeClassOnTLSLB(t *testing.T) {
 	out, err := helmTemplateKata(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
-		dep := renderedDeployment(t, out, name)
-		rc := dep.Spec.Template.Spec.RuntimeClassName
-		if rc == nil || *rc != "kata-qemu-snp" {
-			t.Errorf("%s runtimeClassName = %v, want kata-qemu-snp", name, rc)
-		}
+	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	rc := dep.Spec.Template.Spec.RuntimeClassName
+	if rc == nil || *rc != "kata-qemu-snp" {
+		t.Errorf("c8s-tls-lb runtimeClassName = %v, want kata-qemu-snp", rc)
 	}
 }
 
-// Without kata the same Deployments must carry no RuntimeClass — runc is the
+// Without kata the same Deployment must carry no RuntimeClass — runc is the
 // only runtime on a plain cluster.
-func TestChartNoRuntimeClassOnTeeProxyAndTLSLBWithoutKata(t *testing.T) {
+func TestChartNoRuntimeClassOnTLSLBWithoutKata(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, name := range []string{"c8s-tee-proxy", "c8s-tls-lb"} {
-		dep := renderedDeployment(t, out, name)
-		if rc := dep.Spec.Template.Spec.RuntimeClassName; rc != nil {
-			t.Errorf("%s runtimeClassName = %q, want unset without kata", name, *rc)
-		}
-	}
-}
-
-// tee-proxy's --attestation-url must follow the same kata switch as everything
-// else (c8s.attestationApiURL): under kata the host attestation-api DaemonSet
-// is not deployed, so the old hardcoded Service URL would dial nothing — the
-// in-guest loopback agent serves attestation instead.
-func TestChartTeeProxyAttestationURLFollowsKata(t *testing.T) {
-	tests := []struct {
-		name string
-		kata bool
-		want string
-	}{
-		{name: "host shape", kata: false, want: "http://c8s-attestation-api.c8s-system.svc:8400"},
-		{name: "kata shape", kata: true, want: "http://127.0.0.1:8400"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			render := helmTemplate
-			if tt.kata {
-				render = helmTemplateKata
-			}
-			out, err := render(t)
-			if err != nil {
-				t.Fatalf("helm template: %v\n%s", err, out)
-			}
-			proxy := renderedDeploymentContainer(t, out, "c8s-tee-proxy", "proxy")
-			if got, ok := containerArgValue(proxy.Args, "--attestation-url"); !ok || got != tt.want {
-				t.Errorf("--attestation-url = %q (found=%t), want %q; args=%v", got, ok, tt.want, proxy.Args)
-			}
-		})
+	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	if rc := dep.Spec.Template.Spec.RuntimeClassName; rc != nil {
+		t.Errorf("c8s-tls-lb runtimeClassName = %q, want unset without kata", *rc)
 	}
 }
 
@@ -3184,7 +2953,6 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.image.tag=dev",
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.image.tag=dev",
-		"--set", "teeProxy.image.tag=dev",
 		"--set", "nriImagePolicy.image.tag=dev",
 		"--set", "nriImagePolicy.image.digest=" + baseNRIDigest,
 		// The fail-closed default (this PR) activates the
@@ -3456,7 +3224,6 @@ func TestChartCDSDnsSanPatternAcceptsAnyNamespace(t *testing.T) {
 	}
 	for _, san := range []string{
 		"c8s-tls-lb.c8s-system.svc",
-		"c8s-tee-proxy.c8s-system.svc",
 		"ratls-mesh.c8s-system.svc",
 		"acme-vllm-router-service.vllm.svc",
 		"acme-vllm-acme-opt-125m-engine-service.vllm.svc",
@@ -3495,33 +3262,160 @@ func TestChartCDSDnsSanPatternsAppendPublicHostname(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--dns-san-pattern="+public)
 }
 
-// TestChartCertDependentPodStrategies pins each cert-dependent pod's rollout
-// strategy to its constraint: tls-lb has no host-port binding so it surges (new
-// cert-holding pod Ready before the old one retires, no serving gap), while
-// tee-proxy binds the node's host ports (80/443) and must stay Recreate — a
-// surge would collide two pods on the host port. get-cert's in-process retry
-// covers tee-proxy's brief restart gap.
+// TestChartCertDependentPodStrategies pins tls-lb's rollout strategy to its
+// constraint: with the default hostPort binding it must Recreate (two pods on
+// a node would collide on the host port, and a surge pod could never schedule
+// on a single-node cluster, deadlocking the roll); without hostPort it surges
+// so the new cert-holding pod is Ready before the old one retires. An
+// explicit tlsLb.strategy renders verbatim.
 func TestChartCertDependentPodStrategies(t *testing.T) {
-	out, err := helmTemplate(t)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
+	t.Run("default hostPort binds, so Recreate", func(t *testing.T) {
+		out, err := helmTemplate(t)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
+		if tlsLB.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("c8s-tls-lb strategy = %q, want Recreate (host-port binding forbids two concurrent pods on a node)", tlsLB.Spec.Strategy.Type)
+		}
+	})
+
+	t.Run("no hostPort surges with no gap", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.enabled=false")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
+		if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("c8s-tls-lb strategy = %q, want RollingUpdate", tlsLB.Spec.Strategy.Type)
+		}
+		if ru := tlsLB.Spec.Strategy.RollingUpdate; ru == nil ||
+			ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
+			ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
+			t.Errorf("c8s-tls-lb should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
+		}
+	})
+
+	t.Run("explicit strategy renders verbatim", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set-string", "tlsLb.strategy.type=RollingUpdate")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
+		if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("c8s-tls-lb strategy = %q, want the explicit RollingUpdate override", tlsLB.Spec.Strategy.Type)
+		}
+	})
+}
+
+// TestChartTLSLBHostPort covers the tlsLb.hostPort edge toggle. The default
+// publishes nginx's TLS listener on the node's host port 443 (the in-pod
+// listener stays on the unprivileged nginx.httpsPort). hostPort.enabled=false
+// omits it so the pod schedules where another controller already owns 443
+// (e.g. RKE2's bundled ingress-nginx). A custom host port binds independently
+// of the listener port.
+func TestChartTLSLBHostPort(t *testing.T) {
+	nginxHTTPSPort := func(t *testing.T, out string) (containerPort, hostPort int32) {
+		t.Helper()
+		nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+		p, ok := namedContainerPort(nginx, "https")
+		if !ok {
+			t.Fatal("nginx container has no https port")
+		}
+		return p.ContainerPort, p.HostPort
 	}
 
-	// tls-lb: surge, no gap.
-	tlsLB := renderedDeployment(t, out, "c8s-tls-lb")
-	if tlsLB.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-		t.Errorf("c8s-tls-lb strategy = %q, want RollingUpdate", tlsLB.Spec.Strategy.Type)
-	}
-	if ru := tlsLB.Spec.Strategy.RollingUpdate; ru == nil ||
-		ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
-		ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
-		t.Errorf("c8s-tls-lb should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
-	}
+	t.Run("default binds host 443", func(t *testing.T) {
+		out, err := helmTemplate(t)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cp, hp := nginxHTTPSPort(t, out)
+		if cp != 8443 || hp != 443 {
+			t.Fatalf("https = containerPort %d / hostPort %d, want 8443 / 443", cp, hp)
+		}
+	})
 
-	// tee-proxy: Recreate, because it binds the node's host ports.
-	teeProxy := renderedDeployment(t, out, "c8s-tee-proxy")
-	if teeProxy.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-		t.Errorf("c8s-tee-proxy strategy = %q, want Recreate (host-port binding forbids two concurrent pods on a node)", teeProxy.Spec.Strategy.Type)
+	t.Run("disabled omits the host port", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.enabled=false")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cp, hp := nginxHTTPSPort(t, out)
+		if hp != 0 {
+			t.Fatalf("https hostPort = %d, want 0 (unbound)", hp)
+		}
+		if cp != 8443 {
+			t.Fatalf("https containerPort = %d, must stay 8443 with hostPort disabled", cp)
+		}
+	})
+
+	t.Run("custom host port decouples from the listener port", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "tlsLb.hostPort.https=8443")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cp, hp := nginxHTTPSPort(t, out)
+		if cp != 8443 || hp != 8443 {
+			t.Fatalf("https = containerPort %d / hostPort %d, want 8443 / 8443", cp, hp)
+		}
+	})
+
+	t.Run("string bool is rejected", func(t *testing.T) {
+		// A string "false" is truthy in templates and would silently keep the
+		// port bound (and the strategy on Recreate) despite the opt-out.
+		out, err := helmTemplate(t, "--set-string", "tlsLb.hostPort.enabled=false")
+		if err == nil {
+			t.Fatalf("helm template succeeded, want string-bool rejection\n%s", out)
+		}
+		assertHelmFailMessage(t, out, "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: false")
+	})
+}
+
+// TestChartNoTeeProxyRemnants sweeps the default and kata renders for any
+// leftover tee-proxy wiring after the component's removal.
+func TestChartNoTeeProxyRemnants(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		render func(t *testing.T, args ...string) (string, error)
+	}{
+		{"default", helmTemplate},
+		{"kata", helmTemplateKata},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tc.render(t)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			if strings.Contains(strings.ToLower(out), "tee-proxy") {
+				t.Fatalf("render still references tee-proxy\n%s", out)
+			}
+		})
+	}
+}
+
+// TestChartRejectsMalformedUpstreamAddress pins the catch-all upstream to the
+// same charset guard every routes[].backend.address gets: an address with
+// nginx metacharacters must fail the render, not corrupt the config.
+func TestChartRejectsMalformedUpstreamAddress(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "tlsLb.upstream.address=bad addr;{}")
+	if err == nil {
+		t.Fatalf("helm template succeeded, want upstream address rejection\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.upstream.address must be a host:port address without scheme, whitespace, semicolons, braces, slashes, or '#', got: bad addr;{}")
+}
+
+// TestChartRejectsLeftoverTeeProxyValues: helm silently ignores values keys
+// the chart no longer reads, so a values file carried over from a release
+// that still had tee-proxy would drop its settings (e.g. the hostPort
+// opt-out) without a trace. The render must fail loud instead.
+func TestChartRejectsLeftoverTeeProxyValues(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "teeProxy.hostPort.enabled=false")
+	if err == nil {
+		t.Fatalf("helm template succeeded, want removed_component failure\n%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "removed_component" {
+		t.Fatalf("validation kind = %q, want removed_component\n%s", got, out)
 	}
 }
 
@@ -3534,7 +3428,7 @@ func TestChartGetCertRetriesInProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	inits := renderedDeploymentInitContainers(t, out, "c8s-tee-proxy")
+	inits := renderedDeploymentInitContainers(t, out, "c8s-tls-lb")
 	var cert *corev1.Container
 	for i := range inits {
 		if inits[i].Name == "c8s-cert" {
@@ -3542,7 +3436,7 @@ func TestChartGetCertRetriesInProcess(t *testing.T) {
 		}
 	}
 	if cert == nil {
-		t.Fatalf("tee-proxy has no c8s-cert init container\n%s", out)
+		t.Fatalf("tls-lb has no c8s-cert init container\n%s", out)
 	}
 	assertContainerHasArg(t, "c8s-cert", cert.Args, "--initial-retry-timeout=2m")
 }
@@ -3713,7 +3607,7 @@ func renderedDeploymentContainer(t *testing.T, manifest, deploymentName, contain
 // names the parent-chart tls-lb tests already assert. upstream.address is
 // pinned to the standalone subchart's old default (vllm:8000) so the
 // default-backend assertions remain a meaningful fixture rather than the
-// parent's c8s-tee-proxy:80 wiring.
+// parent's default upstream wiring.
 func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
@@ -3728,11 +3622,9 @@ func helmTemplateTLSLB(t *testing.T, args ...string) (string, error) {
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
-		"--set", "teeProxy.enabled=false",
 		"--set-string", "tlsLb.upstream.address=vllm:8000",
-		// Plain-HTTP upstream baseline for the tls-lb subchart tests; the
-		// chart default targets the tee-proxy over https, but this harness
-		// points at a bare vllm address. Tests that exercise https set it.
+		// Plain-HTTP upstream baseline for the tls-lb subchart tests, on a
+		// bare vllm address. Tests that exercise https set it.
 		"--set", "tlsLb.upstream.protocol=http",
 		"--set", "tlsLb.nginx.image.tag=dev",
 		"--show-only", "templates/tls-lb-configmap.yaml",
@@ -3790,9 +3682,11 @@ func Example_tlsLBConfig() {
 	//     sendfile on;
 	//     keepalive_timeout 65;
 	//
-	//     upstream backend {
-	//         server vllm:8000;
-	//     }
+	//     # The catch-all upstream is dialed via a variable (see location /), so
+	//     # nginx re-resolves it here at request time per record TTL. A static
+	//     # upstream block would pin the pod IPs a headless-Service name (the
+	//     # engine preset) resolved to at startup and 502 after pod churn.
+	//     resolver kube-dns.kube-system.svc.cluster.local;
 	//     upstream route_0 {
 	//         server c8s-cds.c8s-system.svc:8443;
 	//     }
@@ -3812,7 +3706,7 @@ func Example_tlsLBConfig() {
 	//         ssl_session_cache shared:SSL:10m;
 	//         ssl_session_timeout 1d;
 	//
-	//         # Large buffers for upstream responses that include TEE attestation headers (~8KB).
+	//         # Headroom for upstream responses with large headers.
 	//         proxy_buffer_size 16k;
 	//         proxy_buffers 4 16k;
 	//         # Route: /allowlist -> http://c8s-cds.c8s-system.svc:8443
@@ -3838,7 +3732,8 @@ func Example_tlsLBConfig() {
 	//             proxy_set_header X-Forwarded-Proto $scheme;
 	//         }
 	//         location / {
-	//             proxy_pass http://backend;
+	//             set $backend_addr vllm:8000;
+	//             proxy_pass http://$backend_addr;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;
 	//             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -3924,7 +3819,6 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		cdsD = "sha256:00000000000000000000000000000000000000000000000000000000000000a3"
 		rmD  = "sha256:00000000000000000000000000000000000000000000000000000000000000a4"
 		nriD = "sha256:00000000000000000000000000000000000000000000000000000000000000a5"
-		tpD  = "sha256:00000000000000000000000000000000000000000000000000000000000000a6"
 	)
 	out, err := helmTemplate(t,
 		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
@@ -3933,7 +3827,6 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		"--set-string", "cds.image.digest="+cdsD,
 		"--set-string", "ratlsMesh.image.digest="+rmD,
 		"--set-string", "nriImagePolicy.image.digest="+nriD,
-		"--set-string", "teeProxy.image.digest="+tpD,
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -3953,7 +3846,6 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 		cdsD: "ghcr.io/confidential-dot-ai/cds@" + cdsD,
 		rmD:  "ghcr.io/confidential-dot-ai/ratls-mesh@" + rmD,
 		nriD: "ghcr.io/confidential-dot-ai/nri-image-policy@" + nriD,
-		tpD:  "ghcr.io/confidential-dot-ai/tee-proxy@" + tpD,
 	}
 	for digest, ref := range want {
 		if got := seed.Digests[digest]; got != ref {
@@ -4262,7 +4154,6 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
-		"--set", "teeProxy.enabled=false",
 		// discovery defaults to enabled; scope this example to route rendering
 		// (discovery's own locations are covered by a dedicated test above).
 		"--set", "tlsLb.discovery.enabled=false",
@@ -4355,12 +4246,11 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 		}
 		return false
 	})
-	// The default render ships at least operator, cds, tee-proxy, and tls-lb
-	// Deployments plus the attestation-api, ratls-mesh, and nri-image-policy
-	// DaemonSets; fewer means the decode regressed and the loop below passes
-	// vacuously.
-	if len(workloads) < 7 {
-		t.Fatalf("decoded only %d pod-bearing workloads, want >= 7", len(workloads))
+	// The default render ships at least operator, cds, and tls-lb Deployments
+	// plus the attestation-api, ratls-mesh, and nri-image-policy DaemonSets;
+	// fewer means the decode regressed and the loop below passes vacuously.
+	if len(workloads) < 6 {
+		t.Fatalf("decoded only %d pod-bearing workloads, want >= 6", len(workloads))
 	}
 
 	for _, w := range workloads {
@@ -4381,7 +4271,7 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "imagePullSecret=ghcr-secret",
-		"--set", "teeProxy.imagePullSecrets[0].name=extra")
+		"--set", "tlsLb.imagePullSecrets[0].name=extra")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -4393,7 +4283,7 @@ func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 				Template corev1.PodTemplateSpec `json:"template"`
 			} `json:"spec"`
 		}
-		if err := sigsyaml.Unmarshal(doc, &obj); err != nil || obj.Kind != "Deployment" || obj.Metadata.Name != "c8s-tee-proxy" {
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil || obj.Kind != "Deployment" || obj.Metadata.Name != "c8s-tls-lb" {
 			return false
 		}
 		names = pullSecretNames(obj.Spec.Template.Spec.ImagePullSecrets)
@@ -4401,7 +4291,7 @@ func TestChartImagePullSecretAppendsToComponentLocalOverride(t *testing.T) {
 	})
 	for _, want := range []string{"extra", "ghcr-secret"} {
 		if !slices.Contains(names, want) {
-			t.Errorf("tee-proxy imagePullSecrets = %v, missing %q", names, want)
+			t.Errorf("tls-lb imagePullSecrets = %v, missing %q", names, want)
 		}
 	}
 }
@@ -4557,16 +4447,18 @@ func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
 	}
 }
 
-// teeProxyUpstream returns the host:port from tee-proxy's --upstream
-// http://<host:port> arg in the rendered deployment.
-func teeProxyUpstream(t *testing.T, manifest string) string {
+// tlsLbUpstreamAddress returns the address from the catch-all location's
+// `set $backend_addr <addr>;` directive in the rendered tls-lb nginx config.
+func tlsLbUpstreamAddress(t *testing.T, manifest string) string {
 	t.Helper()
-	proxy := renderedDeploymentContainer(t, manifest, "c8s-tee-proxy", "proxy")
-	v, ok := containerArgValue(proxy.Args, "--upstream")
-	if !ok {
-		t.Fatalf("tee-proxy proxy container missing --upstream\nargs: %v", proxy.Args)
+	sets := renderedTLSLBNginxConfig(t, manifest).location(t, "prefix", "/").directives["set"]
+	for _, args := range sets {
+		if len(args) == 2 && args[0] == "$backend_addr" {
+			return args[1]
+		}
 	}
-	return strings.TrimPrefix(v, "http://")
+	t.Fatalf("location / has no `set $backend_addr <addr>;` directive; got %v", sets)
+	return ""
 }
 
 func TestChartEngineUpstreamDefault(t *testing.T) {
@@ -4574,8 +4466,8 @@ func TestChartEngineUpstreamDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	// No engine preset: teeProxy.upstream passes through verbatim.
-	if got, want := teeProxyUpstream(t, out), "vllm-router-service.vllm.svc.cluster.local"; got != want {
+	// No engine preset: tlsLb.upstream.address passes through verbatim.
+	if got, want := tlsLbUpstreamAddress(t, out), "vllm-router-service.vllm.svc.cluster.local"; got != want {
 		t.Fatalf("default upstream = %q, want %q", got, want)
 	}
 }
@@ -4599,7 +4491,7 @@ func TestChartEnginePresetDerivesUpstream(t *testing.T) {
 			// Derives the operator-managed headless Service in the release
 			// namespace (c8s-system), with the preset's port appended.
 			want := "c8s-infer.c8s-system.svc.cluster.local:" + tt.port
-			if got := teeProxyUpstream(t, out); got != want {
+			if got := tlsLbUpstreamAddress(t, out); got != want {
 				t.Fatalf("%s upstream = %q, want %q", tt.name, got, want)
 			}
 		})
@@ -4615,7 +4507,7 @@ func TestChartEnginePresetHonorsNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if got, want := teeProxyUpstream(t, out), "c8s-infer.workloads.svc.cluster.local:30000"; got != want {
+	if got, want := tlsLbUpstreamAddress(t, out), "c8s-infer.workloads.svc.cluster.local:30000"; got != want {
 		t.Fatalf("upstream = %q, want %q", got, want)
 	}
 }
@@ -4646,9 +4538,18 @@ func TestChartEnginePresetValidation(t *testing.T) {
 			args: []string{
 				"--set-string", "engine.name=sglang",
 				"--set-string", "engine.workloadId=infer",
-				"--set-string", "teeProxy.upstream=my-router.ns.svc:9000",
+				"--set-string", "tlsLb.upstream.address=my-router.ns.svc:9000",
 			},
 			kind: "engine_upstream_conflict",
+		},
+		{
+			name: "https-upstream",
+			args: []string{
+				"--set-string", "engine.name=sglang",
+				"--set-string", "engine.workloadId=infer",
+				"--set", "tlsLb.upstream.protocol=https",
+			},
+			kind: "engine_https_upstream",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4663,9 +4564,22 @@ func TestChartEnginePresetValidation(t *testing.T) {
 	}
 }
 
+// TestChartRejectsHTTPSAgainstPlaintextDefault: without the engine preset the
+// same misconfig class engine_https_upstream catches is guarded for the
+// known-plaintext default upstream; https against it can only fail at runtime.
+func TestChartRejectsHTTPSAgainstPlaintextDefault(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "tlsLb.upstream.protocol=https")
+	if err == nil {
+		t.Fatalf("helm template succeeded, want https_plaintext_default failure\n%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "https_plaintext_default" {
+		t.Fatalf("validation kind = %q, want https_plaintext_default\n%s", got, out)
+	}
+}
+
 // TestChartEngineConflictDefaultMatchesValues guards the engine_upstream_conflict
-// check in validations.yaml: it hardcodes the default teeProxy.upstream so it
-// can tell "user left the default" from "user set a custom upstream". If
+// check in validations.yaml: it hardcodes the default tlsLb.upstream.address so
+// it can tell "user left the default" from "user set a custom upstream". If
 // values.yaml drifts, the conflict check would either fire on the default or
 // miss a real conflict — pin the two together.
 func TestChartEngineConflictDefaultMatchesValues(t *testing.T) {
@@ -4675,16 +4589,18 @@ func TestChartEngineConflictDefaultMatchesValues(t *testing.T) {
 		t.Fatalf("read values.yaml: %v", err)
 	}
 	var values struct {
-		TeeProxy struct {
-			Upstream string `yaml:"upstream"`
-		} `yaml:"teeProxy"`
+		TLSLB struct {
+			Upstream struct {
+				Address string `yaml:"address"`
+			} `yaml:"upstream"`
+		} `yaml:"tlsLb"`
 	}
 	if err := yaml.Unmarshal(data, &values); err != nil {
 		t.Fatalf("unmarshal values.yaml: %v", err)
 	}
-	if values.TeeProxy.Upstream != defaultInValidations {
-		t.Fatalf("teeProxy.upstream default = %q, but validations.yaml engine_upstream_conflict pins %q; keep them in sync",
-			values.TeeProxy.Upstream, defaultInValidations)
+	if values.TLSLB.Upstream.Address != defaultInValidations {
+		t.Fatalf("tlsLb.upstream.address default = %q, but validations.yaml engine_upstream_conflict pins %q; keep them in sync",
+			values.TLSLB.Upstream.Address, defaultInValidations)
 	}
 }
 

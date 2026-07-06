@@ -80,7 +80,7 @@ var uninstallCmd = &cobra.Command{
 sweeps the host-side kata artifacts off every node.
 
 'helm uninstall' already unwinds most of the install: the release resources
-(operator, CDS, attestation-api, ratls-mesh, tee-proxy, tls-lb, webhook
+(operator, CDS, attestation-api, ratls-mesh, tls-lb, webhook
 configuration, RuntimeClasses, enforcement policy), the NRI image-policy host
 plugin (pre-delete hook), and — best-effort — the kata runtime itself:
 deleting the kata-deploy DaemonSet runs 'kata-deploy cleanup' in its preStop

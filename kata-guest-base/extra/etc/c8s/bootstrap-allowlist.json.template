@@ -3,7 +3,6 @@
   "sha256_digests": [
     "@@CDS_DIGEST@@",
     "@@GET_CERT_DIGEST@@",
-    "@@C8S_OPERATOR_DIGEST@@",
-    "@@TEE_PROXY_DIGEST@@"
+    "@@C8S_OPERATOR_DIGEST@@"
   ]
 }

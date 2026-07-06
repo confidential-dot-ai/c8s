@@ -86,7 +86,7 @@ not a cluster resource.
 | kata-enforcement VAP | ✗ | ✓ | cluster |
 | RuntimeClass injection (workloads) | ✗ | ✓ | webhook (admission time) |
 | get-cert injection (`confidential.ai/cw` pods) | ✓ | ✓ | webhook (admission time) |
-| tee-proxy / tls-lb (bundled workloads) | ✓ | ✓ CVM | runc in base; `kata-qemu-snp` CVM under kata (pinned by the chart) |
+| tls-lb (bundled workload) | ✓ | ✓ CVM | runc in base; `kata-qemu-snp` CVM under kata (pinned by the chart) |
 
 ¹ on by default; disable via `-f` values (`kata.guestImage.enabled=false`)  ² on by default; disable via `-f` values (`kata.nodeTaint.enabled=false`)
 

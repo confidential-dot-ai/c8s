@@ -86,7 +86,7 @@ spec:
        second replica would mint a divergent trust root. Active/active needs
        the /handoff path (cds.handoff.enabled), not extra replicas here. */}}
   replicas: 1
-  # Recreate, not surge like tee-proxy/tls-lb: the RWO data PVC and singleton
+  # Recreate, not surge: the RWO data PVC and singleton
   # trust root both forbid two concurrent CDS pods. Dependents ride out the
   # brief CDS gap via get-cert's in-process retry.
   strategy:

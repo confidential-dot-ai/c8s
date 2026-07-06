@@ -40,7 +40,7 @@ const collisionRequeue = 5 * time.Minute
 
 // WorkloadServiceReconciler provisions one headless Service per workload whose
 // pod template carries the confidential.ai/cw annotation. Headless DNS returns
-// pod IPs, so a client dialing the Service name (e.g. tee-proxy's --upstream)
+// pod IPs, so a client dialing the Service name (e.g. tls-lb's upstream)
 // hits a pod IP directly and the node-level ratls-mesh wraps the connection in
 // attested mTLS — the mesh is pod-IP-routed and cannot intercept Service VIPs.
 //
