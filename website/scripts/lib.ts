@@ -61,6 +61,12 @@ export const C8S_COMMANDS: CommandSpec[] = [
   },
   { command: 'operator', files: ['cmd/c8s/operator.go'] },
   { command: 'cds', files: ['internal/cmds/cds/cmd.go'] },
+  // Persistent flags live in cmd.go; the write subcommands (add/remove/upload)
+  // register their own flags in write.go. read.go registers none.
+  {
+    command: 'allowlist',
+    files: ['internal/cmds/allowlist/cmd.go', 'internal/cmds/allowlist/write.go'],
+  },
   { command: 'verify', files: ['internal/cmds/verify/verify.go'] },
   { command: 'get-cert', files: ['internal/cmds/getcert/run.go'] },
   { command: 'ratls-mesh', files: ['internal/cmds/ratlsmesh/main.go'] },

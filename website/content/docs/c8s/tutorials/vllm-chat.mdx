@@ -85,31 +85,46 @@ annotation. (The pod won't actually start until its image is allowlisted, next.)
 ### 2. Allow the vLLM image
 
 Nothing runs unless its image **digest** is on the [allowlist](/docs/c8s/attestation/allowlist) —
-otherwise `policy-monitor` kills the container at start. Resolve the digest of the exact image you
-deployed:
+otherwise enforcement blocks the container at creation. Resolve the digest of the exact image
+you deployed:
 
 ```bash
 crane digest <your-registry>/vllm-cpu:v0.6.3
 # sha256:…
 ```
 
-Pin it in the allowlist floor in a values file. The chart renders `bootstrapAllowlist.digests` into
-CDS's `--allowlist-seed` (and every enforcement plugin's boot config), so the CDS-served allowlist
-includes it from the next reconcile:
+Add it to the live allowlist with `c8s allowlist`, signed by the operator key you created when
+installing the cluster (`operator.key` — its public half is what you pinned with
+`--operator-keys`). The CDS has no public ingress, so port-forward it first — along with the
+attestation-api, which the CLI uses to verify the CDS's own attestation before talking to it:
 
-```yaml
-# values.yaml — we'll apply this in Step 3, together with the LB routing
-nriImagePolicy:
-  bootstrapAllowlist:
-    digests:
-      "sha256:<vllm-image-digest>": "<your-registry>/vllm-cpu:v0.6.3"
+```bash
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+kubectl port-forward -n c8s-system svc/c8s-attestation-api 8400:8400 &
+
+c8s allowlist add sha256:<vllm-image-digest> <your-registry>/vllm-cpu:v0.6.3 \
+  --url https://localhost:8443 \
+  --attestation-api-url http://localhost:8400 \
+  --operator-key operator.key
+# added sha256:<vllm-image-digest>
+```
+
+The CLI will warn that no `--measurements` are pinned — it's accepting *any* attested CDS,
+which is fine for this tutorial cluster; in production pin your CDS launch digest so a write
+can never land on a rogue CDS. The enforcement plugins poll the CDS-served list, so the vLLM
+pod from Step 1 starts on its next retry:
+
+```bash
+kubectl get pods -n workloads -w
+# vllm-…   1/1   Running
 ```
 
 <Callout type="info">
-  This is the **bootstrap** path — a chart value applied at install. To add an image to a *running*
-  cluster without re-applying, an attested writer can `POST /allowlist` with a short-lived
-  CDS-signed token — see [Authorizing mutations](/docs/c8s/attestation/allowlist#authorizing-mutations).
-  Either way the write goes through the CDS; there's no static token.
+  Prefer a version-controlled allowlist? The **bootstrap** path pins digests in a values file
+  instead (`nriImagePolicy.bootstrapAllowlist.digests`), baking them into the boot-time floor
+  the chart seeds into the CDS — better suited to GitOps flows. See
+  [Seeding and bootstrap](/docs/c8s/attestation/allowlist#seeding-and-bootstrap) and
+  [Managing it with the c8s CLI](/docs/c8s/attestation/allowlist#managing-it-with-the-c8s-cli).
 </Callout>
 
 </Step>
@@ -120,10 +135,10 @@ nriImagePolicy:
 
 You don't hand-edit nginx. The chart wires the front door as a chain —
 **tls-lb (public TLS + over-encryption) → tee-proxy (attested) → your engine** — and you aim the
-last hop at your vLLM workload with the inference-engine preset. Add to the same values file:
+last hop at your vLLM workload with the inference-engine preset, in a small values file:
 
 ```yaml
-# values.yaml (continued)
+# values.yaml
 engine:
   name: vllm          # preset for vLLM's default port (8000)
   workloadId: vllm    # the confidential.ai/cw id from Step 1
@@ -134,11 +149,11 @@ tlsLb:
     enabled: true     # serve the c8s-verify/v1 attestation + over-encryption endpoints
 ```
 
-Apply everything (the allowlist entry and the routing) with one upgrade — re-run your original
-`c8s install` with `-f values.yaml` added:
+Apply the routing with one upgrade — re-run your original `c8s install` with `-f values.yaml`
+added:
 
 ```bash
-c8s install -f values.yaml   # plus the flags you first installed with (e.g. --single-node)
+c8s install -f values.yaml   # plus the flags you first installed with (e.g. --single-node --operator-keys operator.pub)
 ```
 
 The preset derives `teeProxy.upstream = c8s-vllm.workloads.svc.cluster.local:8000`, so tee-proxy

@@ -188,14 +188,28 @@ kubectl create secret docker-registry ghcr-secret \
 
 On Azure, SEV-SNP attestation comes from the **vTPM at `/dev/tpm0`**, not a native
 `/dev/sev-guest` device. Select that path with `--cvm-mode aks` — despite the name it means
-"Azure vTPM". Note there's **no `--kata`**: per-pod CVMs need nesting Azure doesn't provide, so
-this is a node-as-CVM install.
+"Azure vTPM". (`--cvm-mode` picks the deployment shape; the separate CPU-TEE selector
+`--hardware-platform` is ignored under `aks`, which is always vTPM-backed SEV-SNP.) Note
+there's **no `--kata`**: per-pod CVMs need nesting Azure doesn't provide, so this is a
+node-as-CVM install.
+
+First mint the operator keypair whose public half the install pins into the CDS — the private
+key is what will authorize [allowlist](/docs/c8s/attestation/allowlist) writes later, and
+without `--operator-keys` the installer stops and asks for `--force`:
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+openssl ec -in operator.key -pubout -out operator.pub
+```
+
+Then install:
 
 ```bash
 c8s install \
   --single-node \
   --cvm-mode aks \
-  --image-pull-secret ghcr-secret
+  --image-pull-secret ghcr-secret \
+  --operator-keys operator.pub
 ```
 
 `--single-node` makes every node CDS-eligible (no dedicated CDS node).

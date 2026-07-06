@@ -20,6 +20,15 @@ items are deliberate non-goals for now; others are tracked work.
   issuance time, but it is not carried inside the leaf for downstream re-verification.
 - **The image allowlist gates the digest only.** `nri-image-policy` / `policy-monitor` enforce
   the container-image digest — not args, env, mounts, capabilities, or the rest of the pod spec.
+- **Allowlist write authorization is pinned-key, not PKI.** Writes are authorized by long-lived
+  operator public keys pinned in `cds.operatorKeys`. Revocation is coarse — removing the key and
+  re-installing, with no CRL/OCSP. Write tokens are bound to body, method, and path but carry no
+  cluster binding, so clusters pinning the *same* operator key accept each other's captured
+  tokens within the five-minute validity cap — pin distinct keys per cluster. And the pinned
+  list itself is host-supplied config outside the CDS launch measurement: `c8s cds verify`
+  reports the pinned-key fingerprints so a swap is visible, but not measured. A CA with
+  short-lived operator certificates is the planned replacement. See
+  [Authorizing mutations](/docs/c8s/attestation/allowlist#authorizing-mutations).
 - **No per-workload peer allowlists in the mesh.** Any attested mesh peer can talk to any other;
   there is no per-workload restriction on who may connect to whom.
 - **No SPIFFE-style URI SAN identities.** Workload identity is carried by the CDS-issued cert's
@@ -41,10 +50,11 @@ items are deliberate non-goals for now; others are tracked work.
 - **Pod-as-CVM is unavailable on Azure.** Azure does not expose nested virtualization, so AKS
   runs node-as-CVM only — all pods on a node share one confidential boundary. See
   [Provisioning on Azure](/docs/c8s/install/azure#why-pod-as-cvm-is-not-available-on-azure).
-- **The per-pod Kata runtime is SEV-SNP today.** Node-as-CVM and the rest of the platform run on
-  both AMD SEV-SNP and Intel TDX, but the confidential *pod* runtime (`--kata`,
-  `kata-qemu-snp`) currently requires an AMD SEV-SNP host — TDX per-pod support is in progress.
-  On a non-SNP host you can still run `kata-qemu` (isolation without confidentiality).
+- **One CPU TEE per cluster for confidential pods.** The per-pod runtime (`--kata`) supports
+  AMD SEV-SNP and Intel TDX, but an install picks exactly one via `--hardware-platform`
+  (rendering `kata-qemu-snp` *or* `kata-qemu-tdx`), and the webhook promotes every confidential
+  pod to that one class — mixed SNP + TDX clusters are not supported. On a host with neither
+  TEE you can still run `kata-qemu` (isolation without confidentiality).
 - **Browser verification is SEV-SNP only.** The [c8s-verify](/docs/c8s/verification/consumer)
   WASM verifier ships AMD ARK/ASK roots and verifies SEV-SNP evidence; TDX is reserved in the
   wire protocol but not yet implemented.

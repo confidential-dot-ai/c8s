@@ -53,9 +53,10 @@ not preinstalled on stock Azure images (`sudo apt install make` on Debian/Ubuntu
 <Callout type="info">
   **Which TEEs?** The platform — CDS, attestation verification, the RA-TLS mesh, the allowlist,
   and the **node-as-CVM** shape — runs on both **AMD SEV-SNP** and **Intel TDX**. The per-pod
-  **Kata runtime** (`--kata`), `sev-snp-measure`, and the browser
-  [verification library](/docs/c8s/verification/consumer) are SEV-SNP today, with TDX
-  support in progress.
+  **Kata runtime** (`--kata`) supports both, but a cluster picks **one** CPU TEE at install time
+  with `--hardware-platform` (`sev-snp` by default; `tdx` renders the `kata-qemu-tdx`
+  RuntimeClass instead of `kata-qemu-snp` — no mixed-TEE clusters). `sev-snp-measure` and the
+  browser [verification library](/docs/c8s/verification/consumer) remain SEV-SNP.
 </Callout>
 
 ## Quickstart: a single-node cluster
@@ -68,6 +69,22 @@ running a single Kata pod still wants a dedicated CDS node, so leave it off ther
 <Steps>
 
 <Step>
+### Create the operator credential
+
+Writes to the [image allowlist](/docs/c8s/attestation/allowlist) are authorized by an operator
+EC key whose **public** half the install pins into the CDS. Generate the pair once; the private
+key stays with you (vault/HSM):
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+openssl ec -in operator.key -pubout -out operator.pub
+```
+
+Installing without `--operator-keys` disables allowlist writes — nobody can allowlist a workload
+image — so the installer refuses the default path unless you acknowledge with `--force`.
+</Step>
+
+<Step>
 ### Install the default shape (node-as-CVM)
 
 Start with the default install to confirm the control plane is healthy. This runs every
@@ -75,7 +92,7 @@ component in ordinary node containers (node-as-CVM); there is no per-pod confide
 you add `--kata`.
 
 ```bash
-c8s install --single-node
+c8s install --single-node --operator-keys operator.pub
 ```
 </Step>
 
@@ -87,14 +104,20 @@ stack, injects kata RuntimeClasses into workload pods, rejects non-kata pods, an
 security services into the guest image.
 
 ```bash
-c8s install --single-node --kata
+c8s install --single-node --kata --operator-keys operator.pub
 ```
 
 On a managed service that exposes SEV-SNP through a vTPM (Azure AKS), select the device shape
 with `--cvm-mode`:
 
 ```bash
-c8s install --single-node --cvm-mode aks
+c8s install --single-node --cvm-mode aks --operator-keys operator.pub
+```
+
+On Intel TDX hosts, select the CPU TEE with `--hardware-platform` (the default is `sev-snp`):
+
+```bash
+c8s install --single-node --kata --hardware-platform tdx --operator-keys operator.pub
 ```
 </Step>
 
@@ -137,10 +160,32 @@ certificate defaults — see the [CLI Reference](/docs/c8s/install/cli-reference
 | --- | --- | --- |
 | `--single-node` | `false` | Single-node clusters: makes every node CDS-eligible (no dedicated CDS node). Node count only — not the number of pod CVMs. |
 | `--kata` | `false` | Turn on the confidential pod runtime: each pod becomes a confidential VM and enforcement is switched on. |
-| `--cvm-mode` | `baremetal` | Select the TEE device: `baremetal`/`gke` (native `/dev/sev-guest`) or `aks` (vTPM `/dev/tpm0`). |
+| `--cvm-mode` | `baremetal` | Select the CVM deployment shape: `baremetal`, `node` (generalized node-as-CVM: the nodes are themselves confidential VMs), `gke` (GKE managed CVMs), or `aks` (vTPM `/dev/tpm0`). Orthogonal to `--hardware-platform`. |
+| `--hardware-platform` | `sev-snp` | Select the CPU TEE: `sev-snp` (`/dev/sev-guest`) or `tdx` (Intel TDX, `/dev/tdx-guest`). Ignored under `--cvm-mode=aks` (vTPM-backed SEV-SNP; `aks` + `tdx` is refused). TDX needs TDX-ready, labeled hosts — see below. |
+| `--operator-keys` | `""` | Pin the operator public key(s) authorized to write the [image allowlist](/docs/c8s/attestation/allowlist#authorizing-mutations). Omitting it disables allowlist writes, so the install requires `--force` to proceed without it. |
 | `--debug` | `false` | Use the debug guest image so `kubectl logs`/`exec` work on kata pods. **Development only** — it changes the launch measurement and exposes container I/O to the host. Requires `--kata`. |
 | `--resolve-digests` | `true` | Resolve and pin component images to digests and add them to the NRI allowlist. Set `false` only when you supply digests yourself via `-f`. |
 | `--image-pull-secret` | `""` | Name of an existing `dockerconfigjson` Secret in the namespace so all components can pull private c8s images from first start. |
+
+<details data-collapse>
+<summary>TDX host prerequisites (--hardware-platform=tdx)</summary>
+
+Every TDX install preflight-checks that at least one node carries the label
+`intel-tdx.node.kubernetes.io/enabled=true` — the label the `kata-qemu-tdx` RuntimeClass
+schedules on — and refuses to proceed otherwise. Apply it only once a host actually is
+TDX-ready:
+
+- the `tdx_guest` module is loaded (`/dev/tdx_guest` present),
+- `qgsd` (Intel DCAP Quote Generation Service) is running, with a `socat` unix→vsock bridge so
+  kata's quote-generation socket reaches it,
+- an Intel PCS API key is configured in `/etc/sgx_default_qcnl.conf` (DCAP fetches TCB
+  collateral during verification).
+
+```bash
+kubectl label node <NODE> intel-tdx.node.kubernetes.io/enabled=true
+```
+
+</details>
 
 <Callout type="info">
   **`--image-pull-secret` is only needed while the images are private.** It exists because the
