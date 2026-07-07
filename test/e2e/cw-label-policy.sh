@@ -21,11 +21,11 @@ trap cleanup EXIT
 # to contain <expected-substring> so the check proves which invariant fired,
 # not merely that some admission plugin objected.
 expect_deny() {
+  (( $# >= 3 )) || fail "expect_deny: usage: expect_deny <description> <expected-substring> -- <command...>"
+  [[ $3 == -- ]] || fail "expect_deny: expected '--' before the command, got '$3'"
   local what=$1 want=$2
-  # ${3-} so a miscall with too few args hits this fail, not set -u's raw
-  # "unbound variable" at the [[ ]].
-  [[ ${3-} == -- ]] || fail "expect_deny: expected '--' before the command, got '${3-}'"
   shift 3
+  (( $# > 0 )) || fail "expect_deny: missing command after '--'"
   local out
   if out=$("$@" 2>&1); then
     fail "$what was admitted; want denial matching '$want'. output: $out"
