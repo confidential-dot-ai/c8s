@@ -559,3 +559,74 @@ func TestRunDiscoveryVerify_EndToEnd(t *testing.T) {
 		t.Errorf("expected NOT VERIFIED, got:\n%s", output)
 	}
 }
+
+// TestResolveMode locks in kind→mode routing. The regression it guards: an
+// explicit --kind must drive the evidence mode when --mode is left at its
+// (auto) default, so `c8s cds verify --kind lb` resolves to discovery rather
+// than dialing for the embedded RA-TLS extension the LB front door never
+// serves. An explicit non-auto --mode always wins over kind.
+func TestResolveMode(t *testing.T) {
+	cases := []struct {
+		name string
+		kind string
+		mode string
+		want string
+	}{
+		{"lb kind, auto mode", "lb", "auto", "discovery"},
+		{"lb kind, empty mode", "lb", "", "discovery"},
+		{"cds kind, auto mode", "cds", "auto", "ratls-cert"},
+		{"workload kind, auto mode", "workload", "auto", "ratls-cert"},
+		{"auto kind, auto mode", "auto", "auto", "auto"},
+		{"empty kind, empty mode", "", "", "auto"},
+		{"explicit mode overrides lb kind", "lb", "ratls-cert", "ratls-cert"},
+		{"explicit mode overrides cds kind", "cds", "attestation-endpoint", "attestation-endpoint"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveMode(config{kind: tc.kind, mode: tc.mode})
+			if got != tc.want {
+				t.Errorf("resolveMode(kind=%q, mode=%q) = %q, want %q", tc.kind, tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGatherEvidence_AutoPrefersDiscovery proves auto mode (no --kind) detects
+// an LB by fetching its discovery doc first — the bare `c8s verify <lb>` path.
+func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {
+	certPEM, _ := selfSignedCertPEM(t)
+	doc := discoveryDocWith(t, certPEM, []byte("challenge"), `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`)
+	lb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != defaultDiscoveryPath {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Write(doc)
+	}))
+	defer lb.Close()
+
+	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, nil)
+	if err != nil {
+		t.Fatalf("auto mode should reach the discovery doc, got: %v", err)
+	}
+	if !strings.Contains(ev.source, "discovery document") {
+		t.Errorf("source = %q, want the discovery-doc path", ev.source)
+	}
+}
+
+// TestGatherEvidence_AutoFallsBackToServingCert proves auto mode falls through
+// to the RA-TLS serving cert when discovery is absent (a non-LB TLS endpoint):
+// the surfaced error is the cert-path verdict, not the discovery 404.
+func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
+	// 404s every path (no /v1/discovery) and presents httptest's plain serving
+	// cert, which carries no RA-TLS extension.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, nil)
+	if !errors.Is(err, ratls.ErrNotAttested) {
+		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
+	}
+}

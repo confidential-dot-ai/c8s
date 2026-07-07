@@ -84,11 +84,16 @@ func NewCmd() *cobra.Command {
 
 	// `c8s cds verify` — a shorthand for `c8s verify --kind cds`, sharing the
 	// same implementation. Running CDS (the server) stays `c8s cds`.
+	//
+	// Mode is intentionally left at auto: resolveMode derives it from --kind
+	// (cds → ratls-cert, lb → discovery), so `c8s cds verify --kind lb` targets
+	// the LB's discovery doc. Presetting Mode: "ratls-cert" here would shadow
+	// that and make --kind lb dial for the embedded RA-TLS extension the LB
+	// front door never serves.
 	cmd.AddCommand(verify.NewCmd(verify.Defaults{
 		Use:         "verify [target]",
 		Short:       "Verify a CDS endpoint's TEE attestation",
 		Kind:        "cds",
-		Mode:        "ratls-cert",
 		DefaultPort: 8443,
 	}))
 

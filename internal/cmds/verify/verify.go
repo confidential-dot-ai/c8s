@@ -129,7 +129,7 @@ Evidence sources:
                          evidence with the VCEK inline), or, in --mode ratls-cert,
                          dial the RA-TLS serving cert (bare report; the VCEK is
                          fetched from AMD KDS). Default mode: cds → ratls-cert,
-                         lb → discovery.
+                         lb → discovery, auto → discovery then serving cert.
   --from-file FILE       verify a saved PEM cert or attestation-response JSON.
 
   c8s cds verify https://cds.example.com:8443 --measurements <sha384-hex>
@@ -343,8 +343,10 @@ func resolveMode(cfg config) string {
 		return "discovery"
 	case "cds", "workload":
 		return "ratls-cert"
-	default: // auto
-		return "ratls-cert"
+	default: // auto (or unknown kind): let gatherEvidence try the LB discovery
+		// doc, then the RA-TLS serving cert, so a bare target with no --kind is
+		// detected either way. Returning a concrete mode here would defeat that.
+		return "auto"
 	}
 }
 
