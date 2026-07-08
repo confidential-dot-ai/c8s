@@ -109,6 +109,14 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 				PodIP:  "10.244.0.7",
 			},
 		},
+		// cw pod in an excluded namespace: out of the mesh, so in no set.
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Labels: cwLabels},
+			Status: corev1.PodStatus{
+				HostIP: "10.0.0.1",
+				PodIP:  "10.244.0.99",
+			},
+		},
 		// hostNetwork and completed cw pods: excluded like everywhere else.
 		&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Labels: cwLabels},
@@ -126,6 +134,7 @@ func TestCollectPodIPSetMembersCWPods(t *testing.T) {
 		},
 	}, []string{"10.0.0.1"}, parseExcludedNamespaces("kube-system"), true)
 
+	// 10.244.0.99 (cw pod in kube-system) is absent from both sets.
 	if want := []string{"10.244.0.5", "10.244.1.9"}; !reflect.DeepEqual(sets.cwIPv4, want) {
 		t.Fatalf("cw IPv4 pod IPs = %#v, want %#v", sets.cwIPv4, want)
 	}
