@@ -248,9 +248,9 @@ the [install guide](/docs/c8s/install/installation) for the rest of the flags.
 
 ### 6. Verify the install
 
-Confirm the control plane came up. A node-as-CVM install runs seven components — `c8s-cds`,
-`c8s-operator`, `c8s-attestation-api`, `c8s-ratls-mesh`, `c8s-nri-image-policy`, `c8s-tee-proxy`,
-and `c8s-tls-lb` — and all should be `Running` with every container ready:
+Confirm the control plane came up. A node-as-CVM install runs six components — `c8s-cds`,
+`c8s-operator`, `c8s-attestation-api`, `c8s-ratls-mesh`, `c8s-nri-image-policy`, and
+`c8s-tls-lb` — and all should be `Running` with every container ready:
 
 ```bash
 kubectl get pods -n c8s-system

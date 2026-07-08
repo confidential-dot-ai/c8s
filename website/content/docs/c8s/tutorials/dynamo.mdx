@@ -372,17 +372,18 @@ frontend → router → worker across attested, identity-bearing components.
 
 ### 5. Point the front door at the frontend
 
-External clients come in through the chart's front-door chain — **tls-lb (public TLS +
-over-encryption) → tee-proxy (attested) → your frontend**. The engine presets cover vLLM and
-SGLang; for Dynamo, set the upstream directly to the minted headless Service and the
-frontend's container port. Headless DNS returns pod IPs, which the node mesh wraps in
-attested mTLS — a Service VIP it cannot. `service.type: LoadBalancer` gives the front door a
-public IP on AKS:
+External clients come in through the chart's front door — **tls-lb (public TLS +
+over-encryption) → your frontend**, dialed over the node mesh's attested mTLS. Point it at the
+frontend's container port (`8000`) with `engine.port`: it derives the minted headless Service
+`c8s-dynamo`, whose DNS returns pod IPs the node mesh wraps in attested mTLS — a Service VIP it
+cannot. `service.type: LoadBalancer` gives the front door a public IP on AKS:
 
 ```yaml
 # values.yaml
-teeProxy:
-  upstream: c8s-dynamo.workloads.svc.cluster.local:8000
+engine:
+  port: "8000"        # the frontend's --http-port → headless Service c8s-dynamo
+  workloadId: dynamo  # the confidential.ai/cw value from Step 2
+  namespace: workloads
 
 tlsLb:
   attest:
@@ -416,8 +417,17 @@ LB_ADDRESS=<EXTERNAL-IP>
 
 <Callout type="info">
   **Not on the Azure tutorial's cluster?** Use the flags you originally installed with, and
-  expose `c8s-tls-lb` however your environment does it — a cloud `LoadBalancer`, a `NodePort`,
-  or your own edge — then set `LB_ADDRESS` to whatever address terminates at it.
+  expose `c8s-tls-lb` however your environment does it. With no cloud load balancer, set
+  `tlsLb.service.type: NodePort` in `values.yaml` and reach the front door on the node:
+
+  ```bash
+  NODE_PORT=$(kubectl get svc -n c8s-system c8s-tls-lb -o jsonpath='{.spec.ports[0].nodePort}')
+  LB_ADDRESS=<node-ip>:$NODE_PORT
+  ```
+
+  On RKE2, tls-lb also binds the node's `:443` directly (`hostPort`); if RKE2's bundled
+  `rke2-ingress-nginx` already owns `:443`, set `tlsLb.hostPort.enabled: false` and reach it
+  through the NodePort. Then set `LB_ADDRESS` to whatever address terminates at tls-lb.
 </Callout>
 
 </Step>
@@ -434,7 +444,10 @@ c8s verify "https://$LB_ADDRESS" --kind lb --measurements <LB_LAUNCH_DIGEST>
 # exit code 0: evidence verified against the pinned measurement
 ```
 
-Then chat over the sealed channel with [c8s-verify](/docs/c8s/verification/consumer) — it
+Then chat over the sealed channel with [c8s-verify](/docs/c8s/verification/consumer) — a
+**zero-build ES module you vendor** (not an npm package). Follow
+[its installation](/docs/c8s/verification/consumer#installation) — `npm install mlkem-wasm`, then
+map the `c8s-verify` specifier to the vendored `src/index.js` — before `node chat.mjs`. It
 re-verifies the attestation, checks the cert chains to your pinned mesh CA, and opens the
 post-quantum over-encrypted tunnel; keep requests non-streaming (the tunnel seals whole
 request/response envelopes):

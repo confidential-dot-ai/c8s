@@ -122,7 +122,14 @@ helm install kserve oci://ghcr.io/kserve/charts/kserve-resources --version v0.19
   --set kserve.controller.deploymentMode=Standard \
   --set kserve.controller.gateway.disableIngressCreation=true
 
+# Wait for the controller before applying the runtimes: the ClusterServingRuntimes go through
+# KServe's validating webhook, which returns "no endpoints available" until its pod is Ready.
+kubectl wait --for=condition=Available -n kserve deploy/kserve-controller-manager --timeout=180s
+
 kubectl apply --server-side -f https://github.com/kserve/kserve/releases/download/v0.19.0/kserve-cluster-resources.yaml
+# This manifest also contains LLMInferenceServiceConfig objects (a KServe LLM CRD the v0.19.0
+# kserve-crd chart doesn't install); the "no matches for kind" lines printed for those are
+# harmless — the sklearn runtime this tutorial serves is created.
 ```
 
 Confirm both control planes are up before moving on:
@@ -228,16 +235,19 @@ kubectl get cwl -n workloads
 
 ### 4. Point the front door at the predictor
 
-External clients reach the model through the chart's front-door chain — **tls-lb (public TLS +
-over-encryption) → tee-proxy (attested) → your predictor**. The engine presets cover vLLM and
-SGLang; for KServe, set the upstream directly to the minted headless Service and the
-`kserve-container` port (`8080` — pod-IP dials bypass Service port mapping, so use the
-container port, not the KServe Service's port 80):
+External clients reach the model through the chart's front door — **tls-lb (public TLS +
+over-encryption) → your predictor**, dialed over the node mesh's attested mTLS. The `engine`
+preset knows vLLM's and SGLang's ports; KServe's predictor serves on `8080`, so point the front
+door there with `engine.port` (the explicit-port form of the preset — it derives the same
+mesh-wrapped headless Service `c8s-iris`, so the hop is attested, not a Service VIP the mesh
+can't intercept):
 
 ```yaml
 # values.yaml
-teeProxy:
-  upstream: c8s-iris.workloads.svc.cluster.local:8080
+engine:
+  port: "8080"        # KServe's kserve-container port → headless Service c8s-iris
+  workloadId: iris    # the confidential.ai/cw value from Step 3
+  namespace: workloads
 
 tlsLb:
   attest:
@@ -260,9 +270,9 @@ c8s install \
   -f values.yaml
 ```
 
-tee-proxy now dials the predictor over the node mesh's attested mTLS, and tls-lb fronts it
-with public TLS. A request from outside is decrypted **inside the LB enclave** and forwarded
-down this chain to KServe's v1 REST endpoint.
+tls-lb now dials the predictor's headless Service over the node mesh's attested mTLS and fronts
+it with public TLS. A request from outside is decrypted **inside the LB enclave** and forwarded
+over the mesh to KServe's v1 REST endpoint.
 
 Grab the public address Azure assigns — it's `<pending>` for a minute or so:
 
@@ -276,8 +286,17 @@ LB_ADDRESS=<EXTERNAL-IP>
 
 <Callout type="info">
   **Not on the Azure tutorial's cluster?** Use the flags you originally installed with, and
-  expose `c8s-tls-lb` however your environment does it — a cloud `LoadBalancer`, a `NodePort`,
-  or your own edge — then set `LB_ADDRESS` to whatever address terminates at it.
+  expose `c8s-tls-lb` however your environment does it. With no cloud load balancer, set
+  `tlsLb.service.type: NodePort` in `values.yaml` and reach the front door on the node:
+
+  ```bash
+  NODE_PORT=$(kubectl get svc -n c8s-system c8s-tls-lb -o jsonpath='{.spec.ports[0].nodePort}')
+  LB_ADDRESS=<node-ip>:$NODE_PORT
+  ```
+
+  On RKE2, tls-lb also binds the node's `:443` directly (`hostPort`); if RKE2's bundled
+  `rke2-ingress-nginx` already owns `:443`, set `tlsLb.hostPort.enabled: false` and reach it
+  through the NodePort. Then set `LB_ADDRESS` to whatever address terminates at tls-lb.
 </Callout>
 
 </Step>
@@ -294,10 +313,13 @@ c8s verify "https://$LB_ADDRESS" --kind lb --measurements <LB_LAUNCH_DIGEST>
 # exit code 0: evidence verified against the pinned measurement
 ```
 
-Then make a verified prediction. The [c8s-verify](/docs/c8s/verification/consumer) client
-re-checks the attestation, confirms the LB belongs to *your* cluster (its cert chains to your
-pinned mesh CA), and opens the post-quantum over-encrypted channel; only then does the request
-go out — sealed end-to-end into the enclave:
+Then make a verified prediction with the [c8s-verify](/docs/c8s/verification/consumer) client —
+a **zero-build ES module you vendor** (it is not published to npm). Follow
+[its installation](/docs/c8s/verification/consumer#installation) — `npm install mlkem-wasm`, then
+map the `c8s-verify` specifier to the vendored `src/index.js` — before running `node predict.mjs`
+below. The client re-checks the attestation, confirms the LB belongs to *your* cluster (its cert
+chains to your pinned mesh CA), and opens the post-quantum over-encrypted channel; only then does
+the request go out — sealed end-to-end into the enclave:
 
 ```js
 // predict.mjs
