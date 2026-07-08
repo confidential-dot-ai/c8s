@@ -70,7 +70,9 @@ az aks create \
 ```
 
 <Callout type="warn">
-  **Verify the node-pool shape.** If your subscription/region only allows the confidential size on
+  **Verify the node-pool shape.**
+
+  If your subscription/region only allows the confidential size on
   a **user** pool, create a regular system pool and add the confidential pool with
   `az aks nodepool add --mode User --node-vm-size Standard_DC4as_v5 --os-sku Ubuntu …` — then drop
   `--single-node` in step 5 and let the CDS schedule onto the confidential pool. See the
@@ -215,7 +217,9 @@ c8s install \
 `--single-node` makes every node CDS-eligible (no dedicated CDS node).
 
 <Callout type="warn">
-  **Validate on managed nodes.** This install runs privileged DaemonSets that touch the node host
+  **Validate on managed nodes.**
+
+  This install runs privileged DaemonSets that touch the node host
   — `nri-image-policy` patches containerd and restarts it, `ratls-mesh` sets up `iptables`, and
   `attestation-api` mounts `/dev/tpm0`. Confirm these complete on your AKS node pool (and survive
   node image upgrades) before relying on it.
@@ -248,9 +252,9 @@ the [install guide](/docs/c8s/install/installation) for the rest of the flags.
 
 ### 6. Verify the install
 
-Confirm the control plane came up. A node-as-CVM install runs seven components — `c8s-cds`,
-`c8s-operator`, `c8s-attestation-api`, `c8s-ratls-mesh`, `c8s-nri-image-policy`, `c8s-tee-proxy`,
-and `c8s-tls-lb` — and all should be `Running` with every container ready:
+Confirm the control plane came up. A node-as-CVM install runs six components — `c8s-cds`,
+`c8s-operator`, `c8s-attestation-api`, `c8s-ratls-mesh`, `c8s-nri-image-policy`, and
+`c8s-tls-lb` — and all should be `Running` with every container ready:
 
 ```bash
 kubectl get pods -n c8s-system
@@ -298,6 +302,13 @@ full comparison.
 **Continue the tutorial:** [Verified chat over confidential vLLM](/docs/c8s/tutorials/vllm-chat) —
 deploy a vLLM model server onto **this AKS cluster**, attest that it's running in a TEE, and chat
 with it over an encrypted channel from your laptop.
+
+Or bring your serving stack of choice onto this cluster:
+
+- [NVIDIA Dynamo](/docs/c8s/tutorials/dynamo) — a multi-component serving graph (frontend,
+  router, worker, discovery) run confidentially.
+- [KServe](/docs/c8s/tutorials/kserve) — `InferenceService` model serving in Standard mode,
+  every image digest-allowlisted.
 
 Or branch off:
 
