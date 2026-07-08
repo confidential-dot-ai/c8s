@@ -25,7 +25,7 @@ The site has **two content systems** in one Next.js app:
 
 Markdown files at the repo root are the source of truth for the marketing pages. The website reads them at build time.
 
-- Top-level `.md` files: `README.md` (home), `cloud.md`, `pricing.md`, `products.md`, `team.md`, `confidential-*.md`, `attestable-builds.md`
+- Top-level `.md` files: `README.md` (home), `cloud.md`, `pricing.md`, `products.md`, `team.md`, `confidential-*.md`, `attested-builds.md`
 - `blog/` — Blog posts
 - `careers/` — Careers page
 
@@ -37,7 +37,7 @@ All documentation lives inside the app as **MDX** with `meta.json` sidebar order
 
 - `content/docs/index.mdx` — the docs hub (the "From zero to verified, in four steps" `<FourSteps />` block + section cards)
 - `content/docs/c8s/**` — the c8s platform docs (migrated from the standalone c8s-docs site)
-- `content/docs/concepts/**`, `whitepapers/**`, `attestable-builds/**`, `api/**` — the rest, re-architected from the old repo-root `docs/`
+- `content/docs/concepts/**`, `whitepapers/**`, `attested-builds/**`, `api/**` — the rest, re-architected from the old repo-root `docs/`
 
 Authoring voice/terminology/formatting: `STYLE_GUIDE.md` at the repo root.
 
