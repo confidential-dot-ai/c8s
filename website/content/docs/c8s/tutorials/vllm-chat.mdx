@@ -42,7 +42,9 @@ Headless DNS returns pod IPs, which the node mesh wraps in attested mTLS. We ser
 **`facebook/opt-125m`**, a tiny model that's quick to load on CPU.
 
 <Callout type="warn">
-  **This tutorial uses a CPU build of vLLM.** vLLM's published `vllm/vllm-openai` image is a
+  **This tutorial uses a CPU build of vLLM.**
+
+  vLLM's published `vllm/vllm-openai` image is a
   **CUDA** build that won't start without a GPU, and vLLM ships no official prebuilt CPU image —
   so build one from
   [vLLM's CPU Dockerfile](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/), push
@@ -127,7 +129,7 @@ pod from Step 1 starts on its next retry:
 
 ```bash
 kubectl get pods -n workloads -w
-# vllm-…   1/1   Running
+# vllm-…   2/2   Running   ← the vLLM container plus the injected c8s-cert sidecar
 ```
 
 <Callout type="info">
@@ -144,9 +146,9 @@ kubectl get pods -n workloads -w
 
 ### 3. Point the Load Balancer at vLLM
 
-You don't hand-edit nginx. The chart wires the front door as a chain —
-**tls-lb (public TLS + over-encryption) → tee-proxy (attested) → your engine** — and you aim the
-last hop at your vLLM workload with the inference-engine preset, in a small values file:
+You don't hand-edit nginx. The chart wires the front door —
+**tls-lb (public TLS + over-encryption) → your engine**, over the node mesh's attested mTLS — and
+you aim it at your vLLM workload with the inference-engine preset, in a small values file:
 
 ```yaml
 # values.yaml
@@ -167,11 +169,11 @@ added:
 c8s install -f values.yaml   # plus the flags you first installed with (e.g. --single-node --operator-keys operator.pub)
 ```
 
-The preset derives `teeProxy.upstream = c8s-vllm.workloads.svc.cluster.local:8000`, so tee-proxy
-dials vLLM's headless Service and that hop rides the node mesh's attested mTLS; tls-lb already
-proxies to tee-proxy over attested mTLS by default — hence no nginx surgery. A request your client
-sends over the over-encryption tunnel (Step 6) is decrypted **inside the LB enclave** and forwarded
-down this chain to vLLM's OpenAI-compatible `/v1/chat/completions`.
+The preset derives `tlsLb.upstream = c8s-vllm.workloads.svc.cluster.local:8000`, so tls-lb dials
+vLLM's headless Service directly and that hop rides the node mesh's attested mTLS — hence no nginx
+surgery. A request your client sends over the over-encryption tunnel (Step 6) is decrypted
+**inside the LB enclave** and forwarded over the mesh to vLLM's OpenAI-compatible
+`/v1/chat/completions`.
 
 </Step>
 

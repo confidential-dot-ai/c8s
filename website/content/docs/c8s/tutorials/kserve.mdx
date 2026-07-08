@@ -1,0 +1,406 @@
+---
+title: Serving a confidential model with KServe
+description: Run KServe on a c8s cluster in Standard deployment mode — every image digest-allowlisted, the predictor carrying a CDS-issued TEE identity — and serve verified predictions through the attested front door.
+---
+
+This tutorial puts **KServe** — the standard Kubernetes model-serving layer — on top of a
+**c8s** cluster, so a deployed model and every request to it stay inside the Trusted Execution
+Environment (TEE).
+
+You'll install the KServe control plane with every image on the
+[allowlist](/docs/c8s/attestation/allowlist), deploy a scikit-learn `InferenceService` as a
+confidential workload, and call it from your laptop only after cryptographically verifying the
+enclave — the host, the cloud operator, and any TLS-terminating proxy in between see only
+ciphertext.
+
+KServe keeps its whole API surface — `InferenceService`, model formats, autoscaling — and c8s
+adds the confidential substrate underneath: digest enforcement at container creation, an
+identity issued by the **CDS** (Certificate Distribution Service, the cluster's attested trust
+root) bound to the predictor, and an attested front door.
+
+<Callout type="info">
+  **Why Standard mode?**
+
+  KServe's Knative (serverless) mode requires Knative and Istio. c8s
+  already runs its own pod-to-pod mesh — **RA-TLS** (Remote-Attestation TLS) rooted in hardware
+  attestation — and a second service mesh double-intercepts the same traffic and injects
+  un-attested proxies into the confidential path (see [Limitations](/docs/c8s/limitations)).
+  Standard mode runs each predictor as a plain Deployment: no Knative, no Istio, nothing
+  between your pods and the attested mesh.
+</Callout>
+
+## Prerequisites
+
+This tutorial **continues from
+[Deploy a confidential AKS cluster and run c8s](/docs/c8s/tutorials/azure-e2e)** and assumes
+that cluster: single-node AKS in **node-as-CVM** mode, with `operator.pub` pinned at install.
+On a different c8s cluster everything here transfers — adjust the install flags in Step 4 and
+how you expose the front door.
+
+You'll also need:
+
+- The `c8s` CLI, `kubectl`, `helm`, and `crane` on your laptop (all already there if you
+  followed that tutorial).
+- The **operator private key** (`operator.key`) — [allowlist
+  writes](/docs/c8s/attestation/allowlist#authorizing-mutations) are signed with it.
+- For the final step: **Node ≥ 20**, plus the LB **launch measurement** and your cluster's
+  **mesh CA** PEM, supplied out of band — see
+  [Consumer verification](/docs/c8s/verification/consumer).
+
+## Step by step
+
+<Steps>
+
+<Step>
+
+### 1. Allowlist the KServe platform images
+
+On a c8s cluster, **nothing runs unless its image digest is on the allowlist** — and that
+includes control planes, not just your models. This is the point, not a hurdle: the same
+enforcement that will gate your model server also gates cert-manager and the KServe
+controller, so a compromised upstream image can't quietly land next to your weights.
+
+Reach the CDS (it has no public ingress), then add the digests of everything this tutorial
+runs: cert-manager's three components, the KServe controller pod's two containers, and the two
+images every sklearn predictor pod uses — `storage-initializer` (the init container that
+fetches the model) and `sklearnserver` (the model server):
+
+```bash
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+kubectl port-forward -n c8s-system svc/c8s-attestation-api 8400:8400 &
+
+for IMAGE in \
+  "quay.io/jetstack/cert-manager-controller:v1.20.3" \
+  "quay.io/jetstack/cert-manager-webhook:v1.20.3" \
+  "quay.io/jetstack/cert-manager-cainjector:v1.20.3" \
+  "kserve/kserve-controller:v0.19.0" \
+  "quay.io/brancz/kube-rbac-proxy:v0.18.0" \
+  "kserve/storage-initializer:v0.19.0" \
+  "kserve/sklearnserver:v0.19.0"; do
+  c8s allowlist add "$(crane digest "$IMAGE")" "$IMAGE" \
+    --url https://localhost:8443 \
+    --attestation-api-url http://localhost:8400 \
+    --operator-key operator.key
+done
+```
+
+Each `add` prints the digest it admitted. The CLI will warn that no `--measurements` are
+pinned — it's accepting *any* attested CDS, fine for a tutorial cluster; in production pin
+your CDS launch digest so a write can never land on a rogue CDS.
+
+<Callout type="info">
+  `crane digest` reads the digest a tag currently points to — for these multi-arch images
+  that's the index digest, the one containerd records when a node pulls the tag. If a pod
+  later still reports `image not in allowlist`, compare against the digest the node actually
+  resolved: `kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].imageID}'` —
+  see [Getting an image's digest](/docs/c8s/attestation/allowlist#getting-an-images-digest).
+</Callout>
+
+</Step>
+
+<Step>
+
+### 2. Install cert-manager and KServe
+
+cert-manager issues the serving certificates for KServe's own admission webhooks —
+control-plane plumbing, separate from the CDS-issued workload identities:
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.3/cert-manager.yaml
+kubectl wait --for=condition=Available -n cert-manager deploy --all --timeout=180s
+```
+
+Then KServe itself: the CRDs, the controller in **Standard** deployment mode, and the
+`ClusterServingRuntime` catalog (runtime images pull only when an `InferenceService` uses
+them, so allowlisting `sklearnserver` alone was enough). `disableIngressCreation` stops the
+controller from minting Ingress objects — the attested front door replaces that role in
+Step 4:
+
+```bash
+helm install kserve-crd oci://ghcr.io/kserve/charts/kserve-crd --version v0.19.0
+
+helm install kserve oci://ghcr.io/kserve/charts/kserve-resources --version v0.19.0 \
+  --namespace kserve --create-namespace \
+  --set kserve.controller.deploymentMode=Standard \
+  --set kserve.controller.gateway.disableIngressCreation=true
+
+# Wait for the controller before applying the runtimes: the ClusterServingRuntimes go through
+# KServe's validating webhook, which returns "no endpoints available" until its pod is Ready.
+kubectl wait --for=condition=Available -n kserve deploy/kserve-controller-manager --timeout=180s
+
+kubectl apply --server-side -f https://github.com/kserve/kserve/releases/download/v0.19.0/kserve-cluster-resources.yaml
+# This manifest also contains LLMInferenceServiceConfig objects (a KServe LLM CRD the v0.19.0
+# kserve-crd chart doesn't install); the "no matches for kind" lines printed for those are
+# harmless — the sklearn runtime this tutorial serves is created.
+```
+
+Confirm both control planes are up before moving on:
+
+```bash
+kubectl get pods -n cert-manager
+# three pods Running — allowlisted before the kubelet ever asked
+
+kubectl get pods -n kserve
+# kserve-controller-manager-…   2/2   Running
+```
+
+</Step>
+
+<Step>
+
+### 3. Deploy a confidential InferenceService
+
+From here it looks like any KServe cluster — one `InferenceService`, serving the classic
+scikit-learn iris classifier from a public bucket. The only c8s-specific line is the
+`confidential.ai/cw: iris` annotation: predictor-level annotations land on the pods KServe
+creates, so the c8s webhook injects the `c8s-cert` identity sidecar, and the value `iris` is
+the **workload id** from which the operator mints the headless Service `c8s-iris`:
+
+```yaml
+# iris.yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: iris
+  namespace: workloads
+spec:
+  predictor:
+    annotations:
+      confidential.ai/cw: iris    # workload id → headless Service c8s-iris
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: gs://kfserving-examples/models/sklearn/1.0/model
+```
+
+```bash
+kubectl create namespace workloads   # skip if it exists from another tutorial
+kubectl apply -f iris.yaml
+
+kubectl get inferenceservice -n workloads iris -w
+# NAME   URL   READY
+# iris   …     True
+```
+
+The model downloads *inside* the TEE: `storage-initializer` runs as an init container in the
+predictor pod, so the artifact goes encrypted-in-memory from its first byte on the cluster —
+the host never sees it unwrapped. While it starts, look at what c8s injected:
+
+```bash
+kubectl get pod -n workloads -l serving.kserve.io/inferenceservice=iris \
+  -o jsonpath='{range .items[0].spec.initContainers[*]}{.name}{"\n"}{end}'
+# c8s-cert              ← injected identity sidecar (holds the CDS-issued cert)
+# storage-initializer   ← KServe's model fetcher
+
+kubectl get svc -n workloads c8s-iris
+# NAME       TYPE        CLUSTER-IP   …
+# c8s-iris   ClusterIP   None         ← headless: resolves to pod IPs
+```
+
+Headless matters: DNS returns pod IPs, which the RA-TLS mesh intercepts and wraps in attested
+mTLS — a Service VIP it cannot.
+
+Optionally, mirror attestation status into a `ConfidentialWorkload` CR so `kubectl` can show
+it (a status view — injection works with or without it):
+
+```yaml
+# iris-cwl.yaml
+apiVersion: confidential.ai/v1alpha2
+kind: ConfidentialWorkload
+metadata:
+  name: iris            # must equal the confidential.ai/cw value
+  namespace: workloads
+spec:
+  workloadRef:
+    kind: Deployment
+    name: iris-predictor
+```
+
+```bash
+kubectl apply -f iris-cwl.yaml
+kubectl get cwl -n workloads
+# NAME   WORKLOAD         ATTESTED   TOTAL
+# iris   iris-predictor   1          1
+```
+
+<Callout type="warn">
+  **In-cluster clients: dial `c8s-iris`, not the KServe Service.**
+
+  KServe also creates an
+  ordinary ClusterIP Service (`iris-predictor`), but the mesh cannot intercept Service-VIP
+  traffic — so c8s **drops** VIP flows to confidential pods rather than let them arrive in
+  plaintext. The headless `c8s-iris` resolves to pod IPs, which the mesh wraps in attested
+  mTLS. (Kubelet probes and the front-door path below are unaffected.)
+</Callout>
+
+</Step>
+
+<Step>
+
+### 4. Point the front door at the predictor
+
+External clients reach the model through the chart's front door — **tls-lb (public TLS +
+over-encryption) → your predictor**, dialed over the node mesh's attested mTLS. The `engine`
+preset knows vLLM's and SGLang's ports; KServe's predictor serves on `8080`, so point the front
+door there with `engine.port` (the explicit-port form of the preset — it derives the same
+mesh-wrapped headless Service `c8s-iris`, so the hop is attested, not a Service VIP the mesh
+can't intercept):
+
+```yaml
+# values.yaml
+engine:
+  port: "8080"        # KServe's kserve-container port → headless Service c8s-iris
+  workloadId: iris    # the confidential.ai/cw value from Step 3
+  namespace: workloads
+
+tlsLb:
+  attest:
+    enabled: true    # serve the c8s-verify/v1 attestation endpoints
+  service:
+    type: LoadBalancer
+```
+
+`service.type: LoadBalancer` gives the front door a public IP on AKS. Apply it all by
+re-running the `c8s install` from the Azure tutorial with `-f values.yaml` added (the front
+door has one catch-all upstream — this repoints it if another tutorial's workload was wired
+first):
+
+```bash
+c8s install \
+  --single-node \
+  --cvm-mode aks \
+  --image-pull-secret ghcr-secret \
+  --operator-keys operator.pub \
+  -f values.yaml
+```
+
+tls-lb now dials the predictor's headless Service over the node mesh's attested mTLS and fronts
+it with public TLS. A request from outside is decrypted **inside the LB enclave** and forwarded
+over the mesh to KServe's v1 REST endpoint.
+
+Grab the public address Azure assigns — it's `<pending>` for a minute or so:
+
+```bash
+kubectl get svc -n c8s-system c8s-tls-lb -w
+# NAME         TYPE           CLUSTER-IP   EXTERNAL-IP   PORT(S)
+# c8s-tls-lb   LoadBalancer   10.0.…       20.…          443:…/TCP
+
+LB_ADDRESS=<EXTERNAL-IP>
+```
+
+<Callout type="info">
+  **Not on the Azure tutorial's cluster?**
+
+  Use the flags you originally installed with, and expose `c8s-tls-lb` however your
+  environment does it. With no cloud load balancer, set `tlsLb.service.type: NodePort` in
+  `values.yaml` and reach the front door on the node:
+
+  ```bash
+  NODE_PORT=$(kubectl get svc -n c8s-system c8s-tls-lb -o jsonpath='{.spec.ports[0].nodePort}')
+  LB_ADDRESS=<node-ip>:$NODE_PORT
+  ```
+
+  On RKE2, tls-lb also binds the node's `:443` directly (`hostPort`); if RKE2's bundled
+  `rke2-ingress-nginx` already owns `:443`, set `tlsLb.hostPort.enabled: false` and reach it
+  through the NodePort. Then set `LB_ADDRESS` to whatever address terminates at tls-lb.
+</Callout>
+
+</Step>
+
+<Step>
+
+### 5. Verify the enclave and predict
+
+First, prove the front door is a genuine TEE running the image you expect — from your laptop,
+before any feature vector leaves it. The CLI check pins the LB launch measurement:
+
+```bash
+c8s verify "https://$LB_ADDRESS" --kind lb --measurements <LB_LAUNCH_DIGEST>
+# exit code 0: evidence verified against the pinned measurement
+```
+
+Then make a verified prediction with the [c8s-verify](/docs/c8s/verification/consumer) client —
+a **zero-build ES module you vendor** (it is not published to npm). Follow
+[its installation](/docs/c8s/verification/consumer#installation) — `npm install mlkem-wasm`, then
+map the `c8s-verify` specifier to the vendored `src/index.js` — before running `node predict.mjs`
+below. The client re-checks the attestation, confirms the LB belongs to *your* cluster (its cert
+chains to your pinned mesh CA), and opens the post-quantum over-encrypted channel; only then does
+the request go out — sealed end-to-end into the enclave:
+
+```js
+// predict.mjs
+import { C8sClient } from "c8s-verify";
+import { readFileSync } from "node:fs";
+
+const client = new C8sClient({
+  baseUrl: `https://${process.env.LB_ADDRESS}`,
+  measurements: [process.env.LB_MEASUREMENT],     // pinned LB launch digest
+  meshCaPem: readFileSync("mesh-ca.pem", "utf8"), // pinned cluster anchor
+});
+
+const session = await client.connect(); // throws C8sVerifyError on any failure
+
+const res = await session.fetch("/v1/models/iris:predict", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    instances: [
+      [6.8, 2.8, 4.8, 1.4],
+      [6.0, 3.4, 4.5, 1.6],
+    ],
+  }),
+});
+console.log(res.text());
+```
+
+```bash
+LB_ADDRESS=$LB_ADDRESS \
+LB_MEASUREMENT=<sha384-launch-digest-of-the-lb> \
+NODE_TLS_REJECT_UNAUTHORIZED=0 \
+node predict.mjs
+# {"predictions":[1,1]}
+```
+
+`NODE_TLS_REJECT_UNAUTHORIZED=0` is fine *here*: you dialed a bare IP whose outer TLS cert is
+the LB's CDS-issued one, which web PKI doesn't know — and in this design the outer TLS layer
+is untrusted transport by definition. Trust comes from the attestation checks and the sealed
+channel, so the env var relaxes only the outer web-PKI check. For a real deployment you'd put
+a public certificate on the LB via `tlsLb.publicTLS` and drop it.
+
+Both flowers classify as class `1` (versicolor). The feature vectors traveled sealed to the LB
+enclave, crossed the cluster only over attested mTLS, and were scored by a model the host
+never saw. The full client walkthrough — including a failure drill where a wrong measurement
+refuses to connect — is in
+[Verified chat over confidential vLLM](/docs/c8s/tutorials/vllm-chat).
+
+</Step>
+
+</Steps>
+
+## What you've proven
+
+By the time `{"predictions":[1,1]}` comes back, you've established — from an untrusted client,
+over an untrusted network — that:
+
+1. every image in the serving path, control plane included, was **admitted by digest** before
+   it could run;
+2. the front door is a **genuine TEE** running the exact measured image you pinned, in **your**
+   cluster (cert chained to your pinned mesh CA);
+3. the model was fetched, loaded, and scored **inside the confidential boundary** — by
+   [transitivity](/docs/c8s/verification/consumer#transitivity-of-trust), the attested LB only
+   forwards over the RA-TLS mesh to the predictor behind it;
+4. request and response crossed the infrastructure **sealed end-to-end** — the TLS terminator,
+   the host, and the operator saw ciphertext.
+
+## Where to go next
+
+- **Serve a different model format** — any KServe runtime works the same way: allowlist the
+  runtime image's digest, keep the `confidential.ai/cw` annotation on the predictor. See
+  [the allowlist](/docs/c8s/attestation/allowlist#managing-it-with-the-c8s-cli).
+- **LLM serving** — [Verified chat over confidential vLLM](/docs/c8s/tutorials/vllm-chat) runs
+  the same pattern with an OpenAI-compatible engine and a chat client, and
+  [NVIDIA Dynamo](/docs/c8s/tutorials/dynamo) shows a multi-component serving graph.
+- **Automate the digests** — wire `c8s allowlist add` into the pipeline that builds your model
+  images: [Automating the allowlist](/docs/c8s/attestation/allowlist#automating-the-allowlist).
+- **Pin for production** — set `cds.measurements` and per-cluster operator keys before real
+  traffic: [threat model](/docs/c8s/architecture/threat-model).
