@@ -1,6 +1,6 @@
 # Confidential AI
 
-The confidential computing stack for AI. 
+The confidential computing stack for AI at scale.
 
 We run your AI workloads (inference, agents, training) in hardware-encrypted Trusted Execution Environments (TEEs). 
 
