@@ -1,0 +1,29 @@
+name: signed-commits
+
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}-signed-commits
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    name: Verified commit signatures
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every commit must have a GitHub-verified signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          unverified=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits" \
+            --paginate --jq '.[] | select(.commit.verification.verified | not) | .sha[0:7] + " " + (.commit.message | split("\n")[0])')
+          if [ -n "$unverified" ]; then
+            echo "::error::Commits without a verified signature — see CONTRIBUTING.md, Signed commits:"
+            echo "$unverified"
+            exit 1
+          fi

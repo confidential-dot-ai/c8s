@@ -1,5 +1,7 @@
 # c8s
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENCE)
+
 Confidential computing infrastructure for Kubernetes. Provides TEE attestation, certificate management, RA-TLS mesh networking, and container image policy enforcement.
 
 ## Components
@@ -256,3 +258,9 @@ per-role image names remain stable, but each image copies the same multi-mode
 
 - [`confidential-dot-ai/deployment-scripts`](https://github.com/confidential-dot-ai/deployment-scripts) - Ansible roles for deploying these components
 - [`confidential-dot-ai/attestation-rs`](https://github.com/confidential-dot-ai/attestation-rs) - TEE attestation evidence verification service (publishes the `attestation-api` image)
+
+## License
+
+c8s is licensed under the [GNU Affero General Public License v3.0](LICENCE).
+Contributions are accepted under the terms in
+[CONTRIBUTING.md](CONTRIBUTING.md).

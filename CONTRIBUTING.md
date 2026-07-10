@@ -15,10 +15,17 @@ This document and the repository license are still evolving; see
 - **Contributing grants no governance rights.** Having a contribution merged
   does not give you decision-making power, maintainership, or any say in the
   project's direction.
-- **Your contribution becomes the project's code.** By submitting a
-  contribution you grant the project the right to use, modify, relicense,
-  and redistribute it for any purpose. In practice: once you commit and
-  push, it is the project's code, not yours.
+- **You must have the right to submit it.** By submitting a contribution
+  you certify that it is your original work, or that you otherwise have
+  the right to submit it under these Terms and the repository license.
+- **Your contribution becomes the company's code.** By submitting a
+  contribution you assign its copyright, and grant all other rights in it,
+  to Inexorable Inc trading as confidential.ai, including the rights to
+  use, modify, relicense, and redistribute it for any purpose. To the
+  extent such an assignment is ineffective under applicable law, you
+  instead grant Inexorable Inc trading as confidential.ai a perpetual,
+  worldwide, irrevocable, royalty-free, transferable, sublicensable
+  license to exercise all rights in the contribution.
 
 ## LLM-assisted contributions
 
@@ -34,18 +41,23 @@ Using LLMs to write code is accepted and encouraged, with three conditions:
 
 If you can't meet all three for a given change, it isn't ready to submit.
 
-## Developer Certificate of Origin
+## Signed commits
 
-Every commit must be signed off, certifying the
-[Developer Certificate of Origin](https://developercertificate.org/):
+Every commit must carry a signature GitHub shows as **Verified** — GPG or
+SSH, with the signing key registered on your GitHub account (see [GitHub's
+commit-signing docs](https://docs.github.com/en/authentication/managing-commit-signature-verification)):
 
 ```sh
-git commit -s
+git commit -S    # or once: git config --global commit.gpgsign true
 ```
 
-This adds a `Signed-off-by:` trailer stating you have the right to submit
-the work under the repository license. PRs containing unsigned commits will
-not be merged.
+CI rejects PRs containing commits without a verified signature.
+
+## Contributor License Agreement
+
+Your agreement to the [Terms](#terms) above is recorded once, on your first
+pull request: the CLA check asks you to accept them by replying to its
+comment, and PRs cannot merge until the check passes.
 
 ## Development setup
 
