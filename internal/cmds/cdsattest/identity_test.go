@@ -36,6 +36,12 @@ type testMeshIdentity struct {
 
 func writeTestMeshIdentity(t *testing.T) testMeshIdentity {
 	t.Helper()
+	now := time.Now()
+	return writeTestMeshIdentityWithLeafValidity(t, now.Add(-time.Hour), now.Add(time.Hour))
+}
+
+func writeTestMeshIdentityWithLeafValidity(t *testing.T, leafNotBefore, leafNotAfter time.Time) testMeshIdentity {
+	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -66,8 +72,8 @@ func writeTestMeshIdentity(t *testing.T) testMeshIdentity {
 	leafTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(time.Hour),
+		NotBefore:    leafNotBefore,
+		NotAfter:     leafNotAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -258,6 +264,14 @@ func TestLoadMeshIdentityRejectsCopiedLeafWithoutPrivateKey(t *testing.T) {
 	writeTestPEM(t, identity.keyFile, "EC PRIVATE KEY", otherDER)
 	if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
 		t.Fatal("copied public leaf was accepted without its private key")
+	}
+}
+
+func TestLoadMeshIdentityRejectsExpiredLeaf(t *testing.T) {
+	now := time.Now()
+	identity := writeTestMeshIdentityWithLeafValidity(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
+		t.Fatal("expired mesh identity leaf was accepted")
 	}
 }
 

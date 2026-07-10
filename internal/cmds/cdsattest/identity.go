@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
@@ -27,8 +28,8 @@ type meshIdentity struct {
 // loadMeshIdentity reads all three files for every v2 attestation request so a
 // get-cert rotation is observed without restarting the sidecar. X509KeyPair
 // verifies that the private key matches the leaf. A transient rotation mismatch
-// fails this request closed; the next request can retry after the three files
-// converge on one credential generation.
+// or an expired credential fails this request closed; the next request can
+// retry after the three files converge on one valid credential generation.
 func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	if certFile == "" || keyFile == "" || caFile == "" {
 		return nil, fmt.Errorf("mesh identity cert, key, and CA files are required")
@@ -61,6 +62,12 @@ func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	if !ok {
 		return nil, fmt.Errorf("mesh identity private key must be ECDSA, got %T", pair.PrivateKey)
 	}
+	// CheckSignatureFrom does not check validity periods; enforce them so a
+	// failed rotation fails closed here instead of at the client.
+	now := time.Now()
+	if err := checkValidity(now, leaf, "leaf"); err != nil {
+		return nil, err
+	}
 
 	caCerts, err := certutil.ParsePEMCertificates(caPEM)
 	if err != nil {
@@ -76,10 +83,21 @@ func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	if issuer == nil {
 		return nil, fmt.Errorf("mesh identity leaf is not signed by any configured mesh CA")
 	}
+	if err := checkValidity(now, issuer, "CA"); err != nil {
+		return nil, err
+	}
 
 	bundle := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
 	bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: issuer.Raw})...)
 	return &meshIdentity{leaf: leaf, ca: issuer, private: private, bundlePEM: bundle}, nil
+}
+
+func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return fmt.Errorf("mesh identity %s is expired or not yet valid (not_before=%s not_after=%s)",
+			role, cert.NotBefore.Format(time.RFC3339), cert.NotAfter.Format(time.RFC3339))
+	}
+	return nil
 }
 
 func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
