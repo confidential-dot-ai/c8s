@@ -356,7 +356,7 @@ Watch Kubernetes pods and maintain the iptables/ipset rules that redirect mesh t
 | `--resync-period` | duration | `30s` | No | periodic full ipset reconciliation interval |
 | `--watchdog-period` | duration | `2s` | No | interval at which the base-chain jump rules are re-asserted |
 | `--ipset-maxelem` | int | `(default)` | No | maximum members per managed ipset |
-| `--enforce-cw-inbound` | bool | `false` | No | drop FORWARD-path traffic to confidential-workload pods (label `confidential.ai/cw`) so only mesh-delivered and host-local traffic reaches them |
+| `--cw-inbound-passthrough` | string | `udp:53,tcp:53` | No | comma-separated `proto:source-port` replies exempted from the always-on cw inbound guard (which drops FORWARD-path traffic to `confidential.ai/cw` pods so only mesh-delivered and host-local traffic reaches them). Empty = strict drop-all; DNS is the default |
 | `--ready-file` | string | `""` | No | path to write after initial ipset and iptables sync succeeds |
 | `--iptables-metrics-file` | string | `(default)` | No | shared file where iptables-sync publishes counters (empty disables) |
 | `--log-level` | string | `info` | No | log level: debug, info, warn, error |
