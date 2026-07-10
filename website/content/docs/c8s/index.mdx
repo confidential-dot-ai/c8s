@@ -48,7 +48,7 @@ problem**, and contractual promises do not solve any side of it:
 Hardware TEEs (AMD SEV-SNP, Intel TDX, and NVIDIA Confidential Computing) resolve all three
 at once: they **encrypt the runtime** in hardware, **measure the code** that booted, and let
 that measurement be **attested** to a remote verifier. c8s turns those primitives into a
-working Kubernetes platform — even on managed services like EKS, GKE, and AKS where the
+working Kubernetes platform — even on managed services like GKE and AKS where the
 control plane itself cannot be attested.
 
 > Read the full design in the [c8s whitepaper](https://arxiv.org/abs/2604.26974) *(arXiv)*.
