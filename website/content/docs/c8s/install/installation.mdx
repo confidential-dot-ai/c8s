@@ -173,9 +173,8 @@ certificate defaults — see the [CLI Reference](/docs/c8s/install/cli-reference
 <summary>TDX host prerequisites (--hardware-platform=tdx)</summary>
 
 Every TDX install preflight-checks that at least one node carries the label
-`intel-tdx.node.kubernetes.io/enabled=true` — the label the `kata-qemu-tdx` RuntimeClass
-schedules on — and refuses to proceed otherwise. Apply it only once a host actually is
-TDX-ready:
+`confidential.ai/tdx=true` — the label the TDX RuntimeClasses schedule on — and refuses to
+proceed otherwise. Apply it only once a host actually is TDX-ready:
 
 - the `tdx_guest` module is loaded (`/dev/tdx_guest` present),
 - `qgsd` (Intel DCAP Quote Generation Service) is running, with a `socat` unix→vsock bridge so
@@ -184,7 +183,7 @@ TDX-ready:
   collateral during verification).
 
 ```bash
-kubectl label node <NODE> intel-tdx.node.kubernetes.io/enabled=true
+kubectl label node <NODE> confidential.ai/tdx=true
 ```
 
 </details>
