@@ -29,11 +29,9 @@ extra/usr/local/bin/
 # artifact (its digests go stale) and is regenerated on every build.
 extra/etc/c8s/bootstrap-allowlist.json
 
-# In-guest GHCR registry auth: a docker auth.json baked into the dm-verity
-# rootfs so the in-guest CDH can guest-pull PRIVATE ghcr.io/confidential-dot-ai images.
-# GENERATED at build time by scripts/fetch.sh from the READ_PRIVATE_GHCR_TOKEN
-# env (CI passes the repo secret of the same name); a no-token build bakes an
-# empty auth set. It holds a credential and is build output, so it is NEVER
-# source-controlled — keep it gitignored. See docs/pitfalls.md "ghcr-auth.json"
-# + README.md "Private guest-pull".
+# In-guest registry auth for guest-pull: a docker auth.json baked into the
+# dm-verity rootfs. GENERATED at build time by scripts/fetch.sh — empty in
+# stock builds; a pre-staged file (private-mirror creds) may hold a real
+# credential, so it is NEVER source-controlled. See docs/pitfalls.md
+# "ghcr-auth.json" + README.md "Guest-pull registry auth".
 extra/etc/c8s/ghcr-auth.json

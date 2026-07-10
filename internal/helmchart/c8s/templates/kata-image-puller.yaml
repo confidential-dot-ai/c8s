@@ -157,7 +157,7 @@ spec:
             # (privileged), so $HOME=/root. The projected volume below renames
             # the standard dockerconfigjson key (.dockerconfigjson) to the
             # filename oras expects (config.json). See docs/pitfalls.md
-            # "Private kata-guest-base puller credentials".
+            # "kata-guest-base puller credentials".
             - name: dockercfg
               mountPath: /root/.docker
               readOnly: true

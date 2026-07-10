@@ -23,11 +23,10 @@ on:
     branches: [main]
     paths: *docker-paths
   # Manual rebuild escape hatch. The push trigger above is path-gated to source
-  # changes, so a rebuild driven by something OFF the source tree — a rotated
-  # secret baked into a downstream image (e.g. READ_PRIVATE_GHCR_TOKEN, which
-  # the Kata guest base bakes into the measured rootfs), a base-image refresh,
-  # or a registry re-push — has no commit that would trip the paths filter and
-  # cannot otherwise run. workflow_dispatch publishes EVERY component image at
+  # changes, so a rebuild driven by something OFF the source tree — a
+  # base-image refresh or a registry re-push — has no commit that would trip
+  # the paths filter and cannot otherwise run. workflow_dispatch publishes
+  # EVERY component image at
   # this commit's tags (the matrix fans out to all of them — see
   # docker-build-matrix.sh), exactly as a tag push does, so the downstream
   # "Kata guest base" workflow can resolve every component's :<short-sha> and

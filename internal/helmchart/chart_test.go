@@ -4880,7 +4880,7 @@ func TestChartKataGuestImageDebugDerivesNvidiaDebugTag(t *testing.T) {
 }
 
 // With neither value set the pull stays anonymous: no dockercfg volume at all
-// (the supported shape once the artifacts go public).
+// (the default shape — the published artifacts are public).
 func TestChartKataPullerAnonymousWithoutSecrets(t *testing.T) {
 	out, err := helmTemplateKata(t)
 	if err != nil {

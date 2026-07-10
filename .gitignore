@@ -2,8 +2,7 @@
 build/
 
 # Local scratch: temporary kata bring-up scripts (see .local-kata/README.md).
-# Not for source control or CI; may reference a runtime-only GHCR PAT (passed
-# via $GHCR_PAT, never stored in-tree).
+# Not for source control or CI.
 .local-kata/
 
 # Stray root-level binaries from `go build ./cmd/<name>` without -o build/

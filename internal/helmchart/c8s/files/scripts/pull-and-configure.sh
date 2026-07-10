@@ -224,9 +224,9 @@ echo "  Writing ${dropin}"
 #                             measurement (SNP kernel-hashes / TDX RTMR[1])
 #     shared_fs = "none"   -> no virtio-fs into the confidential guest
 #     kernel_params        -> appended to kata-runtime's built-in defaults;
-#                             carries agent.image_registry_auth for the
-#                             in-guest CDH's private-registry pull (baked
-#                             auth.json at /run/image-security/auth.json)
+#                             carries agent.image_registry_auth pointing the
+#                             in-guest CDH at its guest-pull auth source
+#                             (baked auth.json at /run/image-security/auth.json)
 #     default_vcpus/maxvcpus = 1 -> SNP-ONLY (both SNP shims, CPU and GPU).
 #                             Pins the boot-time VMSA count so the launch
 #                             digest is stable across pods. No pin on the TDX

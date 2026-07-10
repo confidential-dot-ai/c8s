@@ -58,8 +58,9 @@ imagePullSecrets: []
 ## Name of a pre-existing registry-credential Secret
 ## (kubernetes.io/dockerconfigjson) in the release namespace, appended to
 ## every component's imagePullSecrets — both the chart-wide list above and any
-## component-local override — so all pods pull private c8s images from first
-## start, with no manually wired Secret references and no pod restart. Unlike
+## component-local override — so all pods pull from an authenticated registry
+## (e.g. a private mirror of the c8s images) from first start, with no
+## manually wired Secret references and no pod restart. Unlike
 ## the imagePullSecrets list, a component-local override does not shed it.
 ## The chart never creates or adopts the Secret itself: create it with
 ## kubectl/external-secrets and pass `c8s install --image-pull-secret <name>`,
@@ -464,16 +465,16 @@ kata:
     ## Optional Secret name (kubernetes.io/dockerconfigjson) in the release
     ## namespace whose `.dockerconfigjson` is projected to /root/.docker/config.json
     ## inside the puller pod so the host-side `oras pull` of kata-guest-base can
-    ## authenticate against a PRIVATE registry (e.g. ghcr.io/confidential-dot-ai today).
+    ## authenticate against a registry that requires it (e.g. a private mirror;
+    ## the stock ghcr.io/confidential-dot-ai artifact is public and needs none).
     ## Defaults to the chart-wide imagePullSecret: the in-pod oras pull ignores
     ## kubelet imagePullSecrets, but the credential shape is the same and the
-    ## artifact lives in the same registry as the c8s images, so one
+    ## artifact usually lives in the same registry as the c8s images, so one
     ## `c8s install --image-pull-secret` covers both. Set this to use a
     ## different credential (must be type kubernetes.io/dockerconfigjson — the
     ## projection reads the `.dockerconfigjson` key). With both unset the pull
-    ## is anonymous (correct once the artifacts go public — drop the value and
-    ## the Secret then). See docs/pitfalls.md "Private kata-guest-base puller
-    ## credentials".
+    ## is anonymous — the default, and correct for the public artifact. See
+    ## docs/pitfalls.md "kata-guest-base puller credentials".
     ##
     ## NOTE: this is a HOST-SIDE operator credential — NOT in the TCB / SNP
     ## launch measurement, and unrelated to `registryAuth` below (which IS in
@@ -483,22 +484,23 @@ kata:
     pullerAuthSecret: ""
     ## In-guest workload registry auth source. When set, the puller appends
     ## `agent.image_registry_auth=<this>` to the kata-qemu-snp guest kernel
-    ## cmdline so the in-guest CDH can authenticate private guest-pulls.
-    ##   - file:///run/image-security/auth.json  DEFAULT: a docker auth.json
-    ##     baked into the dm-verity-measured rootfs at build time (from the
-    ##     READ_PRIVATE_GHCR_TOKEN repo secret — a read-only GHCR PAT) and
-    ##     copied to this tmpfs path early in boot. Lets every kata-qemu-snp
-    ##     pod guest-pull PRIVATE ghcr.io/confidential-dot-ai images out of the box. The
-    ##     credential lives in the measured rootfs — a deliberate tradeoff
-    ##     while the repos/artifacts are private (see kata-guest-base/README.md
-    ##     "Private guest-pull" + docs/pitfalls.md). NOTE: appending this moves
-    ##     the SNP launch measurement vs. an empty value — predict accordingly.
+    ## cmdline so the in-guest CDH can authenticate guest-pulls.
+    ##   - file:///run/image-security/auth.json  DEFAULT: the docker auth.json
+    ##     baked into the dm-verity-measured rootfs at build time and copied to
+    ##     this tmpfs path early in boot. Stock guest-base builds bake empty
+    ##     auths (anonymous — the c8s images are public); a build with
+    ##     pre-staged credentials (private mirror) authenticates out of the
+    ##     box, with the credential inside the measured rootfs (see
+    ##     kata-guest-base/README.md "Guest-pull registry auth" +
+    ##     docs/pitfalls.md "ghcr-auth.json").
     ##   - kbs:///<repo>/<type>/<tag>  Secret-free: CDH fetches the docker
     ##     auth.json from the Key Broker Service AFTER the guest attests, so no
-    ##     credential is baked into the image. Pair it with a guest-base built
-    ##     WITHOUT the token (bakes empty auths). Preferred once a KBS is wired.
+    ##     credential is baked into the image. Preferred for private mirrors
+    ##     once a KBS is wired.
     ##   - ""  anonymous pulls (public images only) — the puller omits the
     ##     cmdline param entirely.
+    ## NOTE: the cmdline is measured, so changing this value moves the SNP
+    ## launch measurement — re-predict reference values when overriding.
     registryAuth: "file:///run/image-security/auth.json"
     ## puller image (oras + a shell). Pinned by digest — the puller writes
     ## into a privileged host path so a repointed tag would be code execution

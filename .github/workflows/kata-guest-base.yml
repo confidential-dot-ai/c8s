@@ -100,9 +100,9 @@ jobs:
     # the triggering Docker event — "main", the tag name, or a branch name).
     #
     # Accept BOTH origins of that Docker run: a push (the normal merge-to-main
-    # path) and a workflow_dispatch (the manual rebuild — e.g. re-baking a
-    # rotated READ_PRIVATE_GHCR_TOKEN into the measured rootfs without a source
-    # change). A dispatched Docker run on main publishes every component at this
+    # path) and a workflow_dispatch (the manual rebuild — e.g. a base-image
+    # refresh or registry re-push with no source change). A dispatched Docker
+    # run on main publishes every component at this
     # commit's :<short-sha> just like a push does, so cascading off it produces
     # a correct measured image; the head_branch == main / v* guard still keeps a
     # dispatched side-branch Docker run from auto-triggering this build.
@@ -149,9 +149,11 @@ jobs:
         with:
           repository: confidential-dot-ai/attestation-rs
           path: attestation-rs
-          token: ${{ secrets.ATTESTATION_REPO_TOKEN || github.token }}
 
       - name: Checkout steep
+        # steep is a private repo, so the checkout needs STEEP_REPO_TOKEN (a
+        # token with read access; falls back to github.token if/when steep
+        # goes public).
         # Pinned to a steep main commit — PR #13 (feat/kernel-config) merged
         # 2026-06-03, so main carries `steep kernel --kernel-config-fragment`,
         # which build.sh needs to fold c8s's kernel/container.config into the
@@ -286,11 +288,9 @@ jobs:
       - name: Setup ORAS
         uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
 
-      # Log in to GHCR for the manifest-fetch step. GHCR allows
-      # anonymous reads of public images, but the c8s images are
-      # currently private at certain tags; logging in unconditionally
-      # avoids a "works on main, breaks on a PR branch" pit. Same
-      # token as the publish step below.
+      # Log in to GHCR for the manifest-fetch step: authenticated reads
+      # dodge GHCR's anonymous rate limits. Same token as the publish
+      # step below.
       - name: Log in to GHCR (for digest resolution)
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -310,20 +310,6 @@ jobs:
           # build time. The workflow_run trigger already ensures Docker
           # succeeded on this same head_sha before we get here.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          # READ_PRIVATE_GHCR_TOKEN (classic read:packages PAT, repo secret):
-          # in-guest GHCR creds baked into the dm-verity rootfs so kata's
-          # experimental_force_guest_pull can fetch PRIVATE
-          # ghcr.io/confidential-dot-ai workload images (fetch.sh ->
-          # /etc/c8s/ghcr-auth.json -> tmpfiles copies it to
-          # /run/image-security/auth.json at boot). If unset, fetch.sh bakes
-          # an empty auth set (anonymous, no secret in the image). Baking a
-          # credential into the measured rootfs is a deliberate, documented
-          # tradeoff while the repos are private — see docs/pitfalls.md
-          # "ghcr-auth.json".
-          # GHCR validates the token not the username, but it must be non-empty —
-          # pass the repo owner.
-          READ_PRIVATE_GHCR_TOKEN: ${{ secrets.READ_PRIVATE_GHCR_TOKEN }}
-          GHCR_PULL_USER: ${{ github.repository_owner }}
         run: |
           # docker.yml tags every push by 7-char short SHA
           # (metadata-action `type=sha,prefix=`), so trim head_sha to match.
