@@ -19,12 +19,22 @@ type SignCSRParams struct {
 	CSR      *x509.CertificateRequest
 	TTL      time.Duration // pre-capped by caller; not clamped here
 	Evidence []byte        // raw attestation evidence; SHA-256 embedded as audit extension
+
 	// ConfigClaimsExt, when set, is the DER value of the RA-TLS config-claims
 	// extension (ratls.OIDRATLSConfigClaims) to stamp on the leaf. The caller
 	// MUST have verified the claims against the requester's evidence and (for
 	// workload digests) the allowlist before passing them — SignCSR does not
 	// re-verify (docs/ratls.md).
 	ConfigClaimsExt []byte
+
+	// Attestation, when non-nil, is embedded verbatim in the issued leaf as
+	// the OID .1.1 RA-TLS attestation extension. Callers set this so a
+	// downstream ratls-mode verifier (e.g. secret-broker --peer-verify=ratls)
+	// sees the same attestation the issuer just verified. When set, this
+	// takes precedence over any .1.1 extension the client's CSR carried —
+	// the CSR-copied path lets a client supply its own attestation, but the
+	// issuer's server-verified evidence is authoritative.
+	Attestation *ratls.Attestation
 }
 
 // SignCSR signs csr against this CA, returning the leaf certificate PEM and
@@ -56,7 +66,15 @@ func (c *CA) SignCSR(p SignCSRParams) (certPEM []byte, serial *big.Int, err erro
 	if err := certutil.AppendAttestationDigest(template, digest[:]); err != nil {
 		return nil, nil, err
 	}
-	copyRATLSExtension(template, p.CSR)
+	if p.Attestation != nil {
+		ext, err := p.Attestation.MarshalExtension()
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal RA-TLS attestation: %w", err)
+		}
+		template.ExtraExtensions = append(template.ExtraExtensions, ext)
+	} else {
+		copyRATLSExtension(template, p.CSR)
+	}
 	if len(p.ConfigClaimsExt) > 0 {
 		template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
 			Id:    ratls.OIDRATLSConfigClaims,
