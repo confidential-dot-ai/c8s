@@ -36,7 +36,7 @@ verifies evidence and returns the signed leaf in one step. Allowlist writes use 
 | Claim | Meaning |
 | --- | --- |
 | `iss` | issuer (`--ear-issuer`, default `cds`) |
-| `iat` / `exp` | issued-at and expiry (default lifetime 24h) |
+| `iat` / `exp` | issued-at and expiry. the lifetime follows `--cert-ttl` (default 24h) |
 | `submods.attester` | the attestation result, including `ear_status`, the trustworthiness vector, raw evidence, and the normalized `launch_digest` |
 | `tee_public_key` | base64url PKIX DER of the ECDSA key the TEE attested — used for key binding |
 | `pbh` *(optional)* | payload-body hash, binding the token to a specific request body |
