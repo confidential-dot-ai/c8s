@@ -28,17 +28,17 @@ registered with cobra/pflag.
 | `--webhook-get-cert-run-as-user` | int64 | `65532` | No | runAsUser for injected get-cert containers |
 | `--webhook-get-cert-run-as-group` | int64 | `65532` | No | runAsGroup for injected get-cert containers |
 | `--webhook-get-cert-run-as-non-root` | bool | `true` | No | set runAsNonRoot for injected get-cert containers |
-| `--single-node` | bool | `false` | No | single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible |
-| `--cvm-mode` | string | `baremetal` | No | CVM deployment shape (orthogonal to `--hardware-platform`): `baremetal`, or `node` (generalized node-as-CVM: the nodes are themselves confidential VMs, pods run as ordinary processes), or `gke` (GKE managed confidential VMs), or `aks` (vTPM /dev/tpm0). All modes render a privileged attestation-api |
+| `--single-node` | bool | `false` | No | single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets `cds.node.selector={}` and `cds.node.tolerations=[]` |
+| `--cvm-mode` | string | `baremetal` | No | CVM deployment shape (orthogonal to `--hardware-platform`): `baremetal`, or `node` (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes), or `gke` (GKE managed confidential VMs), or `aks` (vTPM /dev/tpm0). All modes render a privileged attestation-api (a hostPath device mount alone does not grant device-cgroup access) |
 | `--hardware-platform` | string | `sev-snp` | No | CPU-level TEE hardware (orthogonal to `--cvm-mode`): `sev-snp` (/dev/sev-guest) or `tdx` (Intel TDX, /dev/tdx-guest). Ignored when `--cvm-mode=aks` (Azure vTPM path); `--cvm-mode=aks` with `--hardware-platform=tdx` is refused |
-| `--kata` | bool | `false` | No | install the Kata Containers runtime stack and enforce it: workload pods get kata RuntimeClasses and non-kata classes are rejected. Also disables the host-side ratls-mesh, attestation-api, and nri-image-policy |
-| `--debug` | bool | `false` | No | use the kata-guest-base DEBUG image variant so kubectl logs/exec work on kata pods — container I/O becomes readable by the host and the SNP measurement differs. Requires `--kata`; development only |
+| `--kata` | bool | `false` | No | install and enforce the Kata Containers runtime stack: every workload pod runs as a confidential VM (kata RuntimeClass injected; non-kata classes rejected), including NVIDIA GPU pods. Labels every kata node for the declared `--hardware-platform` (clearing the other platform's label), failing fast when no node qualifies |
+| `--debug` | bool | `false` | No | use the kata-guest-base DEBUG guest variant (`<tag>-debug`): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires `--kata`; development only |
 | `--image-tag` | string | `""` | No | component image tag to resolve digests at (default: the CLI build version, or `main` for an unstamped build); override to pin a specific branch/tag/release |
 | `--resolve-digests` | bool | `true` | No | resolve each component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist. Pass `--resolve-digests=false` when supplying digests via `-f` |
-| `--image-pull-secret` | string | `""` | No | name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; appended to every component's imagePullSecrets |
+| `--image-pull-secret` | string | `""` | No | name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type |
 | `--workload-ref` | string slice | `nil` | No | existing workload to adopt as a confidential workload, as `<cw-id>=<namespace>/<kind>/<name>[:<port>]`; repeatable. Kind is any resource exposing a pod template at `spec.template` (deployment, statefulset, daemonset, or an operator CRD such as `<kind>.<group>`); install patches the pod template with `confidential.ai/cw=<cw-id>` once c8s is ready. The optional `:<port>` is the tls-lb upstream port, required on the ref `--upstream` selects |
 | `--upstream` | string | `""` | No | `confidential.ai/cw` id of the adopted `--workload-ref` workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream `c8s-<id>.<ns>.svc.cluster.local:<port>` from that ref's `:<port>`. Without this or a verified-https `tlsLb.upstream`, tls-lb renders no catch-all route until one is attached |
-| `--operator-keys` | string | `""` | No | path to a PEM bundle of operator EC public keys that authorize [`c8s allowlist`](#c8s-allowlist) writes; sets `cds.operatorKeys`. Without it, allowlist writes are disabled (reads still served) |
+| `--operator-keys` | string | `""` | No | path to a PEM bundle of operator EC public keys that authorize [`c8s allowlist`](#c8s-allowlist) writes; sets `cds.operatorKeys`. Without it, allowlist writes are disabled (reads still served). See [creating the operator credential](/docs/c8s/attestation/allowlist#create-the-operator-credential) |
 | `--force` | bool | `false` | No | proceed past guarded prompts — currently: install without `--operator-keys` (allowlist writes disabled). Not needed when values are supplied via `-f` |
 
 {/* flags:uninstall */}
@@ -73,7 +73,7 @@ pass `--distro` to pin it. Still needs the registry reachable for the default di
 | Flag | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `--distro` | string | `""` | No | host Kubernetes distro (`k8s` \| `rke2`); install autodetects this, render-values can't, so pass it when you need it pinned (unset leaves the chart default) |
-| `--single-node` | bool | `false` | No | single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration |
+| `--single-node` | bool | `false` | No | single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration (`cds.node.selector={}`, `cds.node.tolerations=[]`) |
 | `--cvm-mode` | string | `baremetal` | No | CVM deployment shape (orthogonal to `--hardware-platform`): `baremetal`, or `node` (generalized node-as-CVM native TEE device), or `gke` (GKE managed CVMs), or `aks` (vTPM /dev/tpm0) |
 | `--hardware-platform` | string | `sev-snp` | No | CPU-level TEE hardware (orthogonal to `--cvm-mode`): `sev-snp` (/dev/sev-guest) or `tdx` (Intel TDX, /dev/tdx-guest). Ignored when `--cvm-mode=aks` |
 | `--kata` | bool | `false` | No | emit the Kata Containers runtime values (`kata.enabled=true`; disables host-side ratls-mesh/attestation-api/nri-image-policy) |
@@ -85,7 +85,6 @@ pass `--distro` to pin it. Still needs the registry reachable for the default di
 | `--install-crds` | bool | `true` | No | emit values for chart CRDs (false sets `statusMirror.enabled=false`, matching `install --install-crds=false`) |
 | `--workload-ref` | string slice | `nil` | No | adopted workload as `<cw-id>=<namespace>/<kind>/<name>[:<port>]`; repeatable. Used here only to derive `--upstream`'s address (render-values patches nothing) |
 | `--upstream` | string | `""` | No | `confidential.ai/cw` id of the adopted `--workload-ref` workload tls-lb routes its catch-all to; derives `tlsLb.upstream.address` `c8s-<id>.<ns>.svc.cluster.local:<port>` from that ref's `:<port>` |
-| `--operator-keys` | string | `""` | No | path to a PEM bundle of operator EC public keys that authorize [`c8s allowlist`](#c8s-allowlist) writes; the file's **content** is embedded as `cds.operatorKeys` in the emitted values (the chart value is PEM content, never a path) |
 
 {/* flags:operator */}
 ## `c8s operator`
@@ -102,7 +101,7 @@ Run the c8s controller-manager and admission webhook.
 | `--get-cert-image` | string | `""` | No | image reference the webhook injects for get-cert containers (empty = webhook disabled) |
 | `--cds-url` | string | `""` | No | CDS Service URL the injected get-cert containers POST to |
 | `--attestation-api-url` | string | `""` | No | attestation-api endpoint (empty = no verification) |
-| `--exclude-namespaces` | string slice | `nil` | No | extra namespaces the startup reinject sweep skips |
+| `--exclude-namespaces` | string slice | `nil` | No | extra namespaces the startup reinject sweep skips (mirrors `webhook.extraExcluded`) |
 | `--webhook-config-name` | string | `""` | No | MutatingWebhookConfiguration to patch caBundle (empty = skip) |
 | `--webhook-service-name` | string | `""` | No | webhook Service name (defaults to c8s) |
 | `--webhook-service-namespace` | string | `""` | No | webhook Service namespace (defaults to --leader-election-namespace) |
@@ -112,7 +111,7 @@ Run the c8s controller-manager and admission webhook.
 | `--get-cert-run-as-user` | int64 | `65532` | No | runAsUser for injected get-cert containers |
 | `--get-cert-run-as-group` | int64 | `65532` | No | runAsGroup for injected get-cert containers |
 | `--get-cert-run-as-non-root` | bool | `true` | No | set runAsNonRoot for injected get-cert containers |
-| `--kata-enforce` | bool | `false` | No | inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses |
+| `--kata-enforce` | bool | `false` | No | inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses (set by the chart under `kata.enabled`) |
 | `--hardware-platform` | string | `sev-snp` | No | CPU TEE the injected confidential kata classes target: `sev-snp` or `tdx` (set by the chart to match the RuntimeClasses it renders) |
 
 {/* flags:cds */}
@@ -127,7 +126,7 @@ Run the Certificate Distribution Service (CDS). Requires `--attestation-api-url`
 | `-p, --port` | int | `8443` | No | listen port |
 | `--log-level` | string | `info` | No | log level: debug, info, warn, error |
 | `--attestation-api-url` | string | `""` | **Yes** | URL of the attestation-api service |
-| `--ca-common-name` | string | `DefaultCACommonName` | No | common name for the in-memory generated mesh CA |
+| `--ca-common-name` | string | `c8s Mesh CA` | No | common name for the in-memory generated mesh CA |
 | `--ca-cert-validity` | duration | `8760h` | No | validity period of the in-memory mesh CA certificate |
 | `--measurements` | string slice | `nil` | No | SHA-384 hex launch measurements allowed to call /attest (empty = no pinning, UNSAFE) |
 | `--ear-issuer` | string | `cds` | No | EAR JWT issuer claim |
@@ -143,15 +142,15 @@ Run the Certificate Distribution Service (CDS). Requires `--attestation-api-url`
 | `--write-timeout` | duration | `10s` | No | HTTP server write timeout |
 | `--idle-timeout` | duration | `20s` | No | HTTP server idle timeout |
 | `--max-header-bytes` | int | `1048576` | No | maximum HTTP request header bytes |
-| `--san-validation` | bool | `true` | No | require CSR IP SANs to equal the request source IP |
-| `--dns-san-pattern` | string slice | `nil` | No | regex a CSR's DNS SANs may match in full; repeatable |
+| `--san-validation` | bool | `true` | No | require CSR IP SANs to equal the request source IP (false rejects CSRs carrying IP SANs) |
+| `--dns-san-pattern` | string slice | `nil` | No | regex a CSR's DNS SANs may match in full; repeatable, and a SAN passes if it matches any one. The chart always supplies the in-cluster Service DNS pattern and appends a public hostname when tls-lb fronts a routed domain. A CSR carrying DNS SANs is rejected when none are set |
 | `--allowed-cn-pattern` | string | `""` | No | regex the CSR Subject CN must match in full (empty disables) |
 | `--readiness-interval` | duration | `10s` | No | readiness check interval |
 | `--min-ca-validity` | duration | `1h` | No | /readyz fails when the loaded mesh CA has less than this remaining lifetime |
 | `--allowlist-db` | string | `""` | **Yes** | path to the allowlist SQLite database |
-| `--allowlist-seed` | string | `""` | No | path to a JSON allowlist (version + digests map) seeded into the store at startup |
+| `--allowlist-seed` | string | `""` | No | path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding) |
 | `--operator-keys` | string | `""` | No | path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served) |
-| `--handoff-measurements` | string slice | `nil` | No | SHA-384 hex launch measurements allowed to pull the mesh CA via /handoff |
+| `--handoff-measurements` | string slice | `nil` | No | SHA-384 hex launch measurements allowed to pull the mesh CA via /handoff (empty = /handoff disabled) |
 | `--rate-limit` | float64 | `10` | No | max requests per second per source IP on attestation endpoints |
 | `--rate-burst` | int | `20` | No | max burst size per source IP |
 | `--rate-limiter-max-entries` | int | `10000` | No | max entries in the per-IP rate limiter |
@@ -185,9 +184,9 @@ Flags shared by every subcommand:
 | Flag | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `--url` | string | `""` | **Yes** | CDS base URL. CDS has no public ingress: reach it via a port-forward or the tls-lb. An `https://` URL is verified via RA-TLS; plaintext `http://` is refused without `--insecure` |
-| `--measurements` | string slice | `nil` | No | allowed SHA-384 hex CDS launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE) |
-| `--measurements-file` | string | `""` | No | file of allowed CDS launch measurements, one hex digest per line |
-| `--attestation-api-url` | string | `""` | No | attestation-api URL used to verify CDS RA-TLS evidence; required for `https://` URLs |
+| `--measurements` | string slice | `nil` | No | allowed SHA-384 hex launch measurement(s) of the attested endpoint — CDS directly, or the tls-lb's discovery evidence when fronted (repeatable / comma-separated); empty = no pinning (UNSAFE) |
+| `--measurements-file` | string | `""` | No | file of allowed launch measurements, one hex digest per line |
+| `--attestation-api-url` | string | `""` | No | attestation-api URL used to verify CDS RA-TLS evidence; required for `https://` URLs unless measurements make the verification self-contained |
 | `--timeout` | duration | `15s` | No | per-request timeout |
 | `--operator-key` | string | `""` | No | operator EC private key PEM file whose public key is pinned on CDS via `--operator-keys` (env `C8S_OPERATOR_KEY`; the flag wins); required for writes |
 | `-o, --output` | string | `text` | No | output format: `text` or `json` |
@@ -218,7 +217,7 @@ traffic to the backend. It's a chart-managed component, not normally run by hand
 | `--attestation-api-url` | string | `""` | No | attestation-api URL (production evidence source) |
 | `--platform` | string | `snp` | No | TEE platform |
 | `--generation` | string | `genoa` | No | AMD processor generation for the browser verifier: `milan` \| `genoa` \| `turin` |
-| `--serving-cert-file` | string | `""` | No | path to the LB serving-leaf PEM; enables the tls-cert attestation binding (`?pq=false`), re-read per request to follow get-cert rotation |
+| `--serving-cert-file` | string | `""` | No | path to the LB serving-leaf PEM (the cert nginx presents); enables the tls-cert attestation binding (`?pq=false`, `report_data` binds the leaf's SPKI), re-read per request to follow get-cert rotation |
 | `--cds-cert-file` | string | `""` | No | optional PEM (LB leaf + mesh CA) to also serve at `/.well-known/c8s/cds-cert.pem`; normally nginx serves this statically, so leave empty |
 | `--evidence-fixture` | string | `""` | No | **dev only**: serve recorded SNP evidence from this file instead of the attestation-api |
 | `--session-ttl` | duration | `5m` | No | pending-handshake TTL and established-session idle TTL |
@@ -275,14 +274,14 @@ Obtain a signed certificate via the CDS attestation flow. Requires `--cds-url`,
 | `--cds-measurements` | string | `""` | No | comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS) |
 | `--attestation-api-url` | string | `""` | **Yes** | URL of the local attestation-api (e.g. http://localhost:8400) |
 | `-o, --out` | string | `""` | No | path to write the signed certificate chain PEM (stdout if omitted) |
-| `--ca-out` | string | `""` | No | path to write just the mesh CA bundle PEM |
+| `--ca-out` | string | `""` | No | path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap |
 | `--key` | string | `""` | No | path to a PEM private key to use for the CSR (ephemeral if omitted) |
 | `--key-out` | string | `""` | No | path to write the generated private key PEM (ephemeral keys only) |
 | `--key-mode` | string | `0600` | No | octal mode for generated private key |
 | `--san` | string | `""` | **Yes** | Subject Alternative Name for the certificate (IP address or hostname) |
 | `-v, --verbose` | bool | `false` | No | enable debug logging |
 | `--renew-interval` | duration | `0` | No | re-obtain the certificate at this interval (0 = run once and exit) |
-| `--initial-retry-timeout` | duration | `2m` | No | retry the first certificate request in-process for up to this long before failing |
+| `--initial-retry-timeout` | duration | `2m` | No | retry the first certificate request in-process for up to this long before failing, so a transient CDS/mesh outage during a roll does not crash the init container into kubelet backoff (0 = try once) |
 | `--initial-retry-interval` | duration | `2s` | No | delay between in-process retries of the first certificate request |
 | `--reload-nginx` | bool | `true` | No | SIGHUP nginx after certificate renewal or watched file changes |
 | `--continue-on-initial-error` | bool | `false` | No | in renewal mode, keep running when the first certificate request fails |
@@ -305,7 +304,7 @@ Run the RA-TLS L4 mesh proxy or its iptables side commands.
 | `--outbound-port` | int | `15001` | No | outbound listener port (intercepted app traffic) |
 | `--inbound-port` | int | `15006` | No | inbound listener port (RA-TLS from peer nodes) |
 | `--node-ip` | string | `""` | No | this node's IP (auto-detected from NODE_IP env if unset) |
-| `--cert-dns-san` | string | `""` | No | DNS SAN placed on the CDS-issued mesh cert (must match CDS --dns-san-pattern) |
+| `--cert-dns-san` | string | `""` | No | DNS SAN placed on the CDS-issued mesh cert (must match CDS `--dns-san-pattern`; empty omits SANs). Not used for peer verification, which is attestation-based |
 | `--log-level` | string | `info` | No | log level: debug, info, warn, error |
 | `--dial-timeout` | duration | `5s` | No | plain TCP dial timeout |
 | `--tls-dial-timeout` | duration | `10s` | No | RA-TLS dial timeout |
@@ -319,11 +318,11 @@ Run the RA-TLS L4 mesh proxy or its iptables side commands.
 | `--measurements` | string | `""` | No | comma-separated hex SHA-384 launch measurements (empty = accept any TEE) |
 | `--cert-ttl` | duration | `24h` | No | RA-TLS certificate lifetime (rotates at 50%) |
 | `--rotation-timeout` | duration | `30s` | No | max time for background certificate rotation |
-| `--cert-mode` | string | `self-signed` | No | certificate mode: self-signed (default), cds |
+| `--cert-mode` | string | `self-signed` | No | certificate mode: `self-signed` (default), or `cds` (boots self-signed, upgrades to CDS-issued in background) |
 | `--cds-url` | string | `""` | No | CDS service URL for attestation and CA bundle retrieval (required for cds mode) |
 | `--ca-cert` | string | `""` | No | path to CA certificate file for peer verification |
 | `--ca-poll-interval` | duration | `5m` | No | interval to poll CDS /ca for CA bundle updates |
-| `--cds-measurements` | string | `""` | No | comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match |
+| `--cds-measurements` | string | `""` | No | comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match; empty = accept any (UNSAFE outside development) |
 | `--session-cache-size` | int | `64` | No | TLS session cache size per node (0 disables session resumption) |
 | `--access-log` | bool | `true` | No | emit per-connection structured access log |
 | `--cert-pipeline-probe-url` | string | `""` | No | CDS /ready URL for pipeline health probing (empty = disabled) |
@@ -335,8 +334,8 @@ Run the RA-TLS L4 mesh proxy or its iptables side commands.
 | `--health-read-timeout` | duration | `5s` | No | health server read timeout |
 | `--health-write-timeout` | duration | `10s` | No | health server write timeout |
 | `--metrics-update-interval` | duration | `10s` | No | interval for resolver cache and cert expiry metric updates |
-| `--local-cidr-boot-timeout` | duration | `1s` | No | synchronous retry budget at startup for host pod-network CIDR discovery |
-| `--iptables-metrics-file` | string | `(default)` | No | shared file where iptables-sync publishes counters (empty disables) |
+| `--local-cidr-boot-timeout` | duration | `1s` | No | synchronous retry budget at startup for host pod-network CIDR discovery; past this the mesh falls through to the async refresh loop and local-destination validation uses Kubernetes pod HostIP ownership until discovery recovers |
+| `--iptables-metrics-file` | string | `/tmp/ratls-iptables-metrics.json` | No | shared file where iptables-sync publishes counters (empty disables) |
 | `--cds-op-timeout` | duration | `30s` | No | per-operation timeout for CDS certificate upgrade and CA bundle refresh |
 | `--cert-pipeline-probe-timeout` | duration | `5s` | No | HTTP client timeout for cert pipeline health probe requests |
 | `--cert-pipeline-probe-interval` | duration | `60s` | No | interval between cert pipeline health probe requests |
@@ -348,16 +347,16 @@ Watch Kubernetes pods and maintain the iptables/ipset rules that redirect mesh t
 | Flag | Type | Default | Required | Description |
 | --- | --- | --- | --- | --- |
 | `--outbound-port` | int | `15001` | No | outbound listener port |
-| `--uid` | int | `(default proxy UID)` | No | UID to exclude from redirect |
-| `--exclude-uids` | string | `0` | No | comma-separated UIDs to skip (e.g. root=0) |
-| `--exclude-source-namespaces` | string | `(default)` | No | comma-separated local source namespaces excluded from transparent mesh |
-| `--node-ip` | string array | `nil` | No | local node IP(s); repeat or comma-separate for dual-stack |
+| `--uid` | int | `1337` | No | UID to exclude from redirect |
+| `--exclude-uids` | string | `0` | No | comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries) |
+| `--exclude-source-namespaces` | string | `kube-system` | No | comma-separated local source namespaces excluded from transparent mesh interception |
+| `--node-ip` | string slice | `nil` | No | local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to the `NODE_IP` env. Each address must be a non-loopback, non-unspecified IP bound to a local interface |
 | `--resync-period` | duration | `30s` | No | periodic full ipset reconciliation interval |
-| `--watchdog-period` | duration | `2s` | No | interval at which the base-chain jump rules are re-asserted |
-| `--ipset-maxelem` | int | `(default)` | No | maximum members per managed ipset |
+| `--watchdog-period` | duration | `2s` | No | interval at which the base-chain jump rules are re-asserted at position 1 (bounds the race window against kube-proxy reinserting KUBE-SERVICES) |
+| `--ipset-maxelem` | int | `262144` | No | maximum members per managed ipset |
 | `--cw-inbound-passthrough` | string | `udp:53,tcp:53` | No | comma-separated `proto:source-port` replies exempted from the always-on cw inbound guard (which drops FORWARD-path traffic to `confidential.ai/cw` pods so only mesh-delivered and host-local traffic reaches them). Empty = strict drop-all; DNS is the default |
 | `--ready-file` | string | `""` | No | path to write after initial ipset and iptables sync succeeds |
-| `--iptables-metrics-file` | string | `(default)` | No | shared file where iptables-sync publishes counters (empty disables) |
+| `--iptables-metrics-file` | string | `/tmp/ratls-iptables-metrics.json` | No | shared file where iptables-sync publishes counters (empty disables) |
 | `--log-level` | string | `info` | No | log level: debug, info, warn, error |
 
 The `ratls-mesh iptables-cleanup` subcommand takes no flags.
