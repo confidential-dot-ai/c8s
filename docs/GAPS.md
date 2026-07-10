@@ -109,8 +109,9 @@ final security model. Each bullet links to the tracking issue.
   and nonce, but not to the serving SPKI or mesh identity. The public mesh leaf
   and CA are fetched separately, so an allowed-measurement attacker can copy them
   without proving possession of a CA-issued key. #314 binds the mesh leaf and
-  issuing CA into the PQ transcript with proof of possession of the leaf key;
-  until it lands, measurement + CA pins are not cluster authentication.
+  issuing CA into a domain-separated PQ transcript with per-session proof of
+  possession of the leaf key; until it lands, measurement + CA pins are not
+  cluster authentication.
 - An optional CDS-issued EAR over the bundle (`ear` field) is defined in the
   contract but not yet populated by the LB.
 - The over-encrypted tunnel is not streaming yet. The sidecar buffers each

@@ -89,7 +89,7 @@ Think in dependencies, not a flat list. An edge means "trusts / is vouched for b
    (pins measurement         │ mesh      │            │   (CVM)   │  KV-cache / secrets
     AND mesh CA)             └───────────┘            └────────────┘
                                    ▲ intended transitive trust; default PQ mode
-                                   │ does not yet bind the LB mesh identity (§5)
+                                   │ does not yet bind the LB mesh identity (§5 Addressable)
 
   SUPPLY CHAIN (entirely OUTSIDE the TEE, yet defines what the TEE will accept):
     CI / ghcr.io ─▶ image digests ─▶ bootstrap allowlist (BAKED INTO the measurement)
@@ -163,7 +163,7 @@ rather than restating it.
 | **SMT- and migration-enabled guests are accepted** (`GuestPolicy{SMT:true, MigrateMA:true}`). SMT exposes cross-thread side channels; MigrateMA accepts live-migratable encrypted VMs. | host | Pin the guest policy (reject SMT / MigrateMA) or record an explicit accept. | attestation-go `validateOptions`; attestation-rs `snp/verify.rs`; #301 |
 | Image policy gates the image *digest* only, not args/env/mounts/capabilities/pod-spec. | whoever controls the pod spec | Extend the NRI plugin to pod-spec fields. | GAPS §Image and pod spec; #49 |
 | No image signing / SLSA / provenance anywhere; trust is digest-pinning only. A compromised Actions run or ghcr.io push could inject a component that attestation accepts once its digest is promoted/baked. | CI / registry | cosign/notation signing + SBOM (named as future work in deployment-scripts T21). | §6 supply-chain assumptions; #307 |
-| The default browser **PQ** flow does not bind the LB's mesh identity to its attested session key: `report_data` commits only to `x25519 \|\| mlkem768 \|\| nonce`, and the mesh leaf and CA are public bytes fetched separately. A genuine attacker-operated LB with an allowed measurement can copy the target cluster's public leaf/CA chain, attest its own session key, and satisfy both pins without proving possession of a key issued by that CA. The PQ tunnel authenticates an allowed image and protects the session, but does not identify one cluster; until the fix lands, do not treat the measurement + mesh-CA pins as sufficient cluster authentication. | allowed-measurement LB / out-of-cluster network attacker | Bind the mesh leaf and issuing CA into a domain-separated PQ attestation transcript and prove possession of the leaf key per session. | `internal/cmds/cdsattest`; `pkg/overenc`; #314 |
+| The default browser **PQ** flow does not bind the LB's mesh identity to its attested session key: `report_data` commits only to `x25519 \|\| mlkem768 \|\| nonce`, and the mesh leaf and CA are public bytes fetched separately. A genuine attacker-operated LB with an allowed measurement can copy the target cluster's public leaf/CA chain, attest its own session key, and satisfy both pins without proving possession of a CA-issued key. Until the fix lands, do not treat the measurement + mesh-CA pins as cluster authentication. | allowed-measurement LB / out-of-cluster network attacker | Bind the mesh leaf and issuing CA into a domain-separated PQ attestation transcript and prove possession of the leaf key per session. | `internal/cmds/cdsattest`; `pkg/overenc`; GAPS §Browser / out-of-cluster verification; #314 |
 
 ### Open — threat now, no committed fix (posture decisions)
 
@@ -210,8 +210,7 @@ If any of these is false, the corresponding guarantee does not hold.
    out of band and inspects `warnings[]`. These pins are necessary but not
    sufficient for cluster authentication in the default PQ mode: its attestation
    binds the session key and nonce, but not the separately fetched mesh identity
-   (§5 Addressable). The `pq=false` mode instead binds the serving-leaf SPKI, but does not
-   create the post-quantum over-encryption tunnel.
+   (§5 Addressable).
 
 **Supply-chain and external trust roots (load-bearing here):**
 6. **Hardware root of trust** (AMD/Intel/NVIDIA) is sound — if the manufacturer is
@@ -422,8 +421,8 @@ freely.
 
 The `c8s cds-attest` sidecar (proxied by the tls-lb nginx front-end) exposes a browser-facing surface over plain HTTPS so an
 out-of-cluster client (the `c8s-verify-js` library, or `TEErminator`) can verify
-the Load Balancer's TEE measurement and open a post-quantum over-encrypted
-channel to its enclave. Cluster identity has an additional gap described below.
+the Load Balancer's TEE measurement (not yet its cluster identity, §5
+Addressable) and open a post-quantum over-encrypted channel to its enclave.
 The wire contract is `c8s-verify-js/PROTOCOL.md`.
 
 - `GET /.well-known/c8s/cds-cert.pem` — the mesh CA / LB cert chain. Served
@@ -435,12 +434,10 @@ The wire contract is `c8s-verify-js/PROTOCOL.md`.
   over-encryption key and the client nonce. The client verifies the hardware
   signature, the launch measurement against its pinned allowlist, and this
   binding before deriving the channel. It does **not** bind the serving SPKI or
-  mesh identity. A second binding mode exists
+  mesh identity (§5 Addressable). A second binding mode exists
   (`?pq=false`, `report_data = SHA-384(serving_leaf_spki || nonce)`) where the
   attestation commits to the LB's outer TLS leaf instead of an over-encryption
-  key. This supplies the missing SPKI binding but does not create the PQ tunnel;
-  the modes currently provide different properties rather than one strictly
-  dominating the other.
+  key, supplying the SPKI binding but no PQ tunnel.
 - `POST /.well-known/c8s/handshake` + over-encrypted application records —
   X25519 + ML-KEM-768 → HKDF-SHA256 → AES-256-GCM (`pkg/overenc`). The **entire**
   request is sealed — method, path, headers, and body — so a TLS-terminating proxy
@@ -452,11 +449,9 @@ The tls-lb nginx serves the static `cds-cert.pem`/`mesh-ca.pem` and reverse-prox
 
 The intended trust is transitive: after authenticating the LB's mesh identity,
 the client relies on the in-cluster RA-TLS mesh to vouch for the backend pods the
-LB talks to. That first identity edge is incomplete in the default PQ flow. A
-measurement pin proves an allowed image on genuine hardware, while a mesh-CA pin
-validates public certificate bytes; because the PQ attestation proves neither
-possession of the leaf key nor a binding to that chain, the two checks do not yet
-identify one cluster (§5 Addressable, §6(5)).
+LB talks to. That first identity edge is incomplete in the default PQ flow: the
+attestation proves neither possession of the leaf key nor a binding to the mesh
+chain, so the two pins do not yet identify one cluster (§5 Addressable, §6(5)).
 
 **Client-side responsibilities and their downgrades** (all supplied out of band by
 the embedding app): the SDK **fails closed** with a typed error taxonomy
