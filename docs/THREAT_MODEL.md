@@ -227,9 +227,11 @@ If any of these is false, the corresponding guarantee does not hold.
    + the boot-time VMSA set. `manifest.json` carries artifact hashes and prediction
    inputs, but no launch digest; the workflow publishes it with unsigned `oras push`.
    An operator must derive the digest separately with `sev-snp-measure` and supply it
-   to the relevant verifier/chart allowlists, which default to empty. Reproducible
-   rootfs inputs permit an independent rebuild, but do not provide a signing,
-   publication, or pinning chain by themselves.
+   to the relevant verifier/chart allowlists, which default to empty. The build
+   inputs are pinned, but the rootfs is not yet bit-for-bit reproducible
+   (mkfs.ext4 writes a random UUID and timestamps), so an independent rebuild
+   cannot corroborate the published verity root hash or launch digest; the
+   per-build digest must be pinned as published.
 9. **Host provisioning is correct and is not verified by c8s** — SNP enabled in
    BIOS/firmware, GPU CC mode on, vfio-pci binding clean, node labels honest
    (`--hardware-platform` is trusted, not probed). The node-level kata/containerd
