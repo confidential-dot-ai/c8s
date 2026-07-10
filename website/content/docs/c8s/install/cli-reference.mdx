@@ -115,6 +115,7 @@ Run the c8s controller-manager and admission webhook.
 | `--get-cert-run-as-group` | int64 | `65532` | No | runAsGroup for injected get-cert containers |
 | `--get-cert-run-as-non-root` | bool | `true` | No | set runAsNonRoot for injected get-cert containers |
 | `--kata-enforce` | bool | `false` | No | inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses |
+| `--hardware-platform` | string | `sev-snp` | No | CPU TEE the injected confidential kata classes target: `sev-snp` or `tdx` (set by the chart to match the RuntimeClasses it renders) |
 
 {/* flags:cds */}
 ## `c8s cds`
