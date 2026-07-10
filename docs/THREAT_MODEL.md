@@ -163,6 +163,7 @@ rather than restating it.
 | **SMT- and migration-enabled guests are accepted** (`GuestPolicy{SMT:true, MigrateMA:true}`). SMT exposes cross-thread side channels; MigrateMA accepts live-migratable encrypted VMs. | host | Pin the guest policy (reject SMT / MigrateMA) or record an explicit accept. | attestation-go `validateOptions`; attestation-rs `snp/verify.rs`; #301 |
 | Image policy gates the image *digest* only, not args/env/mounts/capabilities/pod-spec. | whoever controls the pod spec | Extend the NRI plugin to pod-spec fields. | GAPS §Image and pod spec; #49 |
 | No image signing / SLSA / provenance anywhere; trust is digest-pinning only. A compromised Actions run or ghcr.io push could inject a component that attestation accepts once its digest is promoted/baked. | CI / registry | cosign/notation signing + SBOM (named as future work in deployment-scripts T21). | §6 supply-chain assumptions; #307 |
+| The default browser **PQ** flow does not bind the LB's mesh identity to its attested session key: `report_data` commits only to `x25519 \|\| mlkem768 \|\| nonce`, and the mesh leaf and CA are public bytes fetched separately. A genuine attacker-operated LB with an allowed measurement can copy the target cluster's public leaf/CA chain, attest its own session key, and satisfy both pins without proving possession of a key issued by that CA. The PQ tunnel authenticates an allowed image and protects the session, but does not identify one cluster; until the fix lands, do not treat the measurement + mesh-CA pins as sufficient cluster authentication. | allowed-measurement LB / out-of-cluster network attacker | Bind the mesh leaf and issuing CA into a domain-separated PQ attestation transcript and prove possession of the leaf key per session. | `internal/cmds/cdsattest`; `pkg/overenc`; #314 |
 
 ### Open — threat now, no committed fix (posture decisions)
 
@@ -174,7 +175,6 @@ rather than restating it.
 | Namespace exemptions (release ns, `kube-system`, `kube-public`, `kube-node-lease`) bypass injection and kata enforcement; `kube-system` also skips image policy. Host-namespace pods are exempt with no PSA floor, so any user with create-pod RBAC opts out via `hostNetwork:true`. | tenant with pod-create RBAC | RuntimeClass enforcement is a guardrail, not a boundary; the actual boundary is per-pod attestation. A cluster-wide PodSecurityAdmission floor is required to close the host-namespace bypass (#311). |
 | `CopyFileRequest` is allowed by the guest OPA policy — the untrusted host can write files into a running guest (not path-scoped). | host | Deliberate deviation (`default-policy.rego`), but an in-guest attack surface worth stating. |
 | A running external service mesh (Istio/Linkerd) alongside c8s injects **un-attested** proxies into the confidential path and breaks the model. | operator misconfig | Do not run a second mesh (c8s-docs limitations). |
-| The default browser **PQ** flow does not bind the LB's mesh identity to its attested session key. `report_data` commits only to `x25519 \|\| mlkem768 \|\| nonce`; the mesh leaf and CA are public bytes fetched separately. A genuine attacker-operated LB with an allowed measurement can copy the target cluster's public leaf/CA chain, attest its own session key, and satisfy both pins without proving possession of a key issued by that CA. | allowed-measurement LB / out-of-cluster network attacker | The PQ tunnel authenticates an allowed image and protects the session, but does not yet identify “my cluster.” Bind the serving SPKI or another mesh identity to the PQ attestation transcript and verify proof of possession. Until then, do not treat the measurement + mesh-CA pins as sufficient cluster authentication. |
 
 ### Escape hatches to keep out of production (Open, gated by warnings only)
 
@@ -210,7 +210,7 @@ If any of these is false, the corresponding guarantee does not hold.
    out of band and inspects `warnings[]`. These pins are necessary but not
    sufficient for cluster authentication in the default PQ mode: its attestation
    binds the session key and nonce, but not the separately fetched mesh identity
-   (§5 Open). The `pq=false` mode instead binds the serving-leaf SPKI, but does not
+   (§5 Addressable). The `pq=false` mode instead binds the serving-leaf SPKI, but does not
    create the post-quantum over-encryption tunnel.
 
 **Supply-chain and external trust roots (load-bearing here):**
@@ -429,7 +429,7 @@ The wire contract is `c8s-verify-js/PROTOCOL.md`.
 - `GET /.well-known/c8s/cds-cert.pem` — the mesh CA / LB cert chain. Served
   **unauthenticated by design** (same reasoning as in-cluster `GET /ca`). The
   default PQ attestation does not bind this chain to the attested session key, so
-  the client cannot yet use it to authenticate the PQ endpoint (§5 Open).
+  the client cannot yet use it to authenticate the PQ endpoint (§5 Addressable).
 - `GET /.well-known/c8s/attestation?nonce=` — raw SEV-SNP evidence whose
   `report_data = SHA-384(x25519 || mlkem768 || nonce)` binds the per-session
   over-encryption key and the client nonce. The client verifies the hardware
@@ -456,7 +456,7 @@ LB talks to. That first identity edge is incomplete in the default PQ flow. A
 measurement pin proves an allowed image on genuine hardware, while a mesh-CA pin
 validates public certificate bytes; because the PQ attestation proves neither
 possession of the leaf key nor a binding to that chain, the two checks do not yet
-identify one cluster (§5 Open, §6(5)).
+identify one cluster (§5 Addressable, §6(5)).
 
 **Client-side responsibilities and their downgrades** (all supplied out of band by
 the embedding app): the SDK **fails closed** with a typed error taxonomy
