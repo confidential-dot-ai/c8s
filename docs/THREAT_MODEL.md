@@ -220,7 +220,7 @@ If any of these is false, the corresponding guarantee does not hold.
 7. **AMD KDS / Intel PCS** are reachable and authentic; stale-cache windows and the
    CRL fail-open default (§5 Addressable) are the residual.
 8. **Kata reference measurements are operator-supplied, not signed or published by
-   the build.** The shipped path is measured direct-kernel boot: Steep compiles the
+   the build.** The shipped path is measured direct-kernel boot: steep compiles the
    bare `vmlinuz`, Kata osbuilder produces the dm-verity rootfs, and the launch digest
    covers OVMF + kernel + the exact Kata command line (including the verity root hash)
    + the boot-time VMSA set. The digest covers boot state only: the writable
