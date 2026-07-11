@@ -246,7 +246,8 @@ If any of these is false, the corresponding guarantee does not hold.
     make attestation meaningful (§5 Open). The pinned upstream Kata runtime, its
     selected OVMF, and the confidential org's runners are supply-chain dependencies
     for the shipped direct-kernel boot path; an IGVM-for-QEMU patch is not
-    load-bearing on this path.
+    load-bearing on this path. The node-as-CVM shape boots via upstream QEMU's
+    IGVM support, a separate path not modeled here.
 
 ---
 
