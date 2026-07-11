@@ -223,8 +223,12 @@ If any of these is false, the corresponding guarantee does not hold.
    the build.** The shipped path is measured direct-kernel boot: Steep compiles the
    bare `vmlinuz`, Kata osbuilder produces the dm-verity rootfs, and the launch digest
    covers OVMF + kernel + the exact Kata command line (including the verity root hash)
-   + the boot-time VMSA set. `manifest.json` carries artifact hashes and prediction
-   inputs, but no launch digest; the workflow publishes it with unsigned `oras push`.
+   + the boot-time VMSA set. The digest covers boot state only: the writable
+   `/run` tmpfs, the in-guest-pulled workload images (tmpfs or the opt-in dm-crypt
+   scratch store), and host-supplied runtime inputs (per-pod cloud-init user-data,
+   `CopyFileRequest` writes) are not measured. `manifest.json` carries artifact
+   hashes and prediction inputs, but no launch digest; the workflow publishes it
+   with unsigned `oras push`.
    An operator must derive the digest separately with `sev-snp-measure` and supply it
    to the relevant verifier/chart allowlists, which default to empty. The build
    inputs are pinned, but the rootfs is not yet bit-for-bit reproducible
