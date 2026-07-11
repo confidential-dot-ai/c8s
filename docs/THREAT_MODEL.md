@@ -234,7 +234,8 @@ If any of these is false, the corresponding guarantee does not hold.
    inputs are pinned, but the rootfs is not yet bit-for-bit reproducible
    (mkfs.ext4 writes a random UUID and timestamps), so an independent rebuild
    cannot corroborate the published verity root hash or launch digest; the
-   per-build digest must be pinned as published.
+   per-build digest must be pinned as published. Build and pinning mechanics:
+   `docs/kata-guest-base.md`.
 9. **Host provisioning is correct and is not verified by c8s** — SNP enabled in
    BIOS/firmware, GPU CC mode on, vfio-pci binding clean, node labels honest
    (`--hardware-platform` is trusted, not probed). The node-level kata/containerd
