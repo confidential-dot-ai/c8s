@@ -442,7 +442,10 @@ The wire contract is `c8s-verify-js/PROTOCOL.md`.
   mesh identity (§5 Addressable). A second binding mode exists
   (`?pq=false`, `report_data = SHA-384(serving_leaf_spki || nonce)`) where the
   attestation commits to the LB's outer TLS leaf instead of an over-encryption
-  key, supplying the SPKI binding but no PQ tunnel.
+  key, supplying the SPKI binding but no PQ tunnel. That binding authenticates a
+  cluster only if the client also validates the served leaf against a
+  cluster-specific anchor (e.g. chains it to the pinned mesh CA); `pq=false` is
+  not by itself a fix for the mesh-identity gap (§5 Addressable).
 - `POST /.well-known/c8s/handshake` + over-encrypted application records —
   X25519 + ML-KEM-768 → HKDF-SHA256 → AES-256-GCM (`pkg/overenc`). The **entire**
   request is sealed — method, path, headers, and body — so a TLS-terminating proxy
