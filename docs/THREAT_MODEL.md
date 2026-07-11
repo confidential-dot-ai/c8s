@@ -242,9 +242,10 @@ If any of these is false, the corresponding guarantee does not hold.
    **not** in the measured TCB — it is trusted operationally.
 10. **CI and the fleet GitOps repo are trusted** to produce and distribute the guest
     artifacts, allowlists, image digests, and operator-supplied measurement pins that
-    make attestation meaningful (§5 Open). The Kata runtime/fork, its selected OVMF,
-    and the confidential org's runners are supply-chain dependencies for the shipped
-    direct-kernel boot path; an IGVM-for-QEMU patch is not load-bearing on this path.
+    make attestation meaningful (§5 Open). The pinned upstream Kata runtime, its
+    selected OVMF, and the confidential org's runners are supply-chain dependencies
+    for the shipped direct-kernel boot path; an IGVM-for-QEMU patch is not
+    load-bearing on this path.
 
 ---
 
