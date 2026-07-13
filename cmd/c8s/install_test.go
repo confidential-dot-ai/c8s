@@ -874,11 +874,22 @@ func TestTLSLBHostPort(t *testing.T) {
 			}
 		})
 	}
-	t.Run("non-numeric string errors", func(t *testing.T) {
-		if _, err := tlsLBHostPort(hp("https")); err == nil {
-			t.Fatal("want error for a non-numeric port")
-		}
-	})
+	for _, tc := range []struct {
+		name  string
+		https any
+	}{
+		{"non-numeric string", "https"},
+		{"string overflows int32", "4294967297"}, // 2^32 + 1 — would wrap to 1 on a bare int32 cast
+		{"string above port range", "70000"},
+		{"int above port range", 70000},
+		{"zero is not a port", 0},
+	} {
+		t.Run(tc.name+" errors", func(t *testing.T) {
+			if _, err := tlsLBHostPort(hp(tc.https)); err == nil {
+				t.Fatalf("want error for %v", tc.https)
+			}
+		})
+	}
 }
 
 func TestHostPortConflict(t *testing.T) {

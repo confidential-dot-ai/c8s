@@ -260,6 +260,7 @@ func tlsLBHostPort(tree map[string]any) (int32, error) {
 	if !ok {
 		return 443, nil
 	}
+	var port int64
 	switch v := m["https"].(type) {
 	case nil:
 		return 443, nil
@@ -267,18 +268,23 @@ func tlsLBHostPort(tree map[string]any) (int32, error) {
 		if v == "" {
 			return 443, nil
 		}
-		n, err := strconv.Atoi(v)
+		// ParseInt with bitSize 32 rejects values that would overflow int32.
+		n, err := strconv.ParseInt(v, 10, 32)
 		if err != nil {
-			return 0, fmt.Errorf("tlsLb.hostPort.https %q is not a port number: %w", v, err)
+			return 0, fmt.Errorf("tlsLb.hostPort.https %q is not a valid port number: %w", v, err)
 		}
-		return int32(n), nil
+		port = n
 	case int:
-		return int32(v), nil
+		port = int64(v)
 	case float64:
-		return int32(v), nil
+		port = int64(v)
 	default:
 		return 0, fmt.Errorf("tlsLb.hostPort.https has unexpected type %T", v)
 	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("tlsLb.hostPort.https %d is out of range (1-65535)", port)
+	}
+	return int32(port), nil
 }
 
 // hostPortConflict reports whether port is already bound on every node (so a new
