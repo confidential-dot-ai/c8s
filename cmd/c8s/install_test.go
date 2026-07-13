@@ -15,6 +15,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -797,6 +798,165 @@ func TestChooseDistroRejectsMixedClusters(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q (should name the fix and both node sets)", err.Error(), want)
 		}
+	}
+}
+
+// A -f file suppresses distro auto-detection only when it actually sets a
+// distro; passing -f for any other value must leave detection in force (the
+// bug: any -f used to silently drop the CLI to the chart's k8s default).
+func TestValuesFilesSetDistro(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("write values: %v", err)
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"nri distro set", "nriImagePolicy:\n  distro: rke2\n", true},
+		{"kata distro set", "kata:\n  distro: rke2\n", true},
+		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"distro key absent under section", "nriImagePolicy:\n  enabled: true\n", false},
+		{"empty distro string is not a choice", "nriImagePolicy:\n  distro: \"\"\n", false},
+		{"empty file", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := valuesFilesSetDistro([]string{write(t, tc.body)})
+			if err != nil {
+				t.Fatalf("valuesFilesSetDistro: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("valuesFilesSetDistro(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("no files means detect", func(t *testing.T) {
+		got, err := valuesFilesSetDistro(nil)
+		if err != nil || got {
+			t.Errorf("valuesFilesSetDistro(nil) = (%v, %v), want (false, nil)", got, err)
+		}
+	})
+
+	t.Run("one of several files sets it", func(t *testing.T) {
+		a := write(t, "tlsLb:\n  enabled: false\n")
+		b := write(t, "kata:\n  distro: rke2\n")
+		got, err := valuesFilesSetDistro([]string{a, b})
+		if err != nil || !got {
+			t.Errorf("valuesFilesSetDistro(two files) = (%v, %v), want (true, nil)", got, err)
+		}
+	})
+}
+
+func TestTLSLBHostPort(t *testing.T) {
+	hp := func(https any) map[string]any {
+		return map[string]any{"tlsLb": map[string]any{"hostPort": map[string]any{"https": https}}}
+	}
+	for _, tc := range []struct {
+		name string
+		tree map[string]any
+		want int32
+	}{
+		{"empty string derives 443", hp(""), 443},
+		{"no hostPort map", map[string]any{"tlsLb": map[string]any{}}, 443},
+		{"string override", hp("8443"), 8443},
+		{"int override", hp(9443), 9443},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tlsLBHostPort(tc.tree)
+			if err != nil || got != tc.want {
+				t.Fatalf("tlsLBHostPort = (%d, %v), want (%d, nil)", got, err, tc.want)
+			}
+		})
+	}
+	t.Run("non-numeric string errors", func(t *testing.T) {
+		if _, err := tlsLBHostPort(hp("https")); err == nil {
+			t.Fatal("want error for a non-numeric port")
+		}
+	})
+}
+
+func TestHostPortConflict(t *testing.T) {
+	pod := func(ns, name, node string, port int32) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+			Spec: corev1.PodSpec{
+				NodeName:   node,
+				Containers: []corev1.Container{{Name: "c", Ports: []corev1.ContainerPort{{HostPort: port}}}},
+			},
+		}
+	}
+	const ignoreNS = "c8s-system"
+
+	for _, tc := range []struct {
+		name        string
+		pods        []corev1.Pod
+		nodes       []string
+		wantBlocked bool
+		wantHolder  string // substring expected in holders, or "" for none
+	}{
+		{
+			name:        "single node, ingress holds 443",
+			pods:        []corev1.Pod{pod("kube-system", "rke2-ingress-nginx-abc", "node-a", 443)},
+			nodes:       []string{"node-a"},
+			wantBlocked: true,
+			wantHolder:  "kube-system/rke2-ingress-nginx-abc",
+		},
+		{
+			name: "two nodes, ingress on both",
+			pods: []corev1.Pod{
+				pod("kube-system", "ing-a", "node-a", 443),
+				pod("kube-system", "ing-b", "node-b", 443),
+			},
+			nodes:       []string{"node-a", "node-b"},
+			wantBlocked: true,
+		},
+		{
+			name:        "two nodes, ingress on only one leaves a free node",
+			pods:        []corev1.Pod{pod("kube-system", "ing-a", "node-a", 443)},
+			nodes:       []string{"node-a", "node-b"},
+			wantBlocked: false,
+		},
+		{
+			name:        "holder only in ignored namespace",
+			pods:        []corev1.Pod{pod(ignoreNS, "c8s-tls-lb", "node-a", 443)},
+			nodes:       []string{"node-a"},
+			wantBlocked: false,
+		},
+		{
+			name:        "different port is not a conflict",
+			pods:        []corev1.Pod{pod("kube-system", "ing-a", "node-a", 8080)},
+			nodes:       []string{"node-a"},
+			wantBlocked: false,
+		},
+		{
+			name:        "unscheduled holder occupies no node",
+			pods:        []corev1.Pod{pod("kube-system", "pending", "", 443)},
+			nodes:       []string{"node-a"},
+			wantBlocked: false,
+			wantHolder:  "kube-system/pending",
+		},
+		{
+			name:        "no nodes",
+			pods:        []corev1.Pod{pod("kube-system", "ing-a", "node-a", 443)},
+			nodes:       nil,
+			wantBlocked: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blocked, holders := hostPortConflict(tc.pods, tc.nodes, 443, ignoreNS)
+			if blocked != tc.wantBlocked {
+				t.Errorf("blocked = %v, want %v (holders=%v)", blocked, tc.wantBlocked, holders)
+			}
+			if tc.wantHolder != "" && !strings.Contains(strings.Join(holders, ","), tc.wantHolder) {
+				t.Errorf("holders %v missing %q", holders, tc.wantHolder)
+			}
+		})
 	}
 }
 

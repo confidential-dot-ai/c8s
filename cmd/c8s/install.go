@@ -183,6 +183,147 @@ func preflightCDSNode(ctx context.Context, chartPath string) error {
 	return nil
 }
 
+// preflightTLSLBHostPort fails fast when tls-lb's host port is already bound on
+// every node, so the tls-lb pod would sit Pending and `--wait` would time out
+// with an opaque scheduler error. The classic collision is a bundled ingress
+// controller (rke2 ships rke2-ingress-nginx on host 80/443). Reads chart
+// defaults, so the caller gates it to the default (no -f) path where they apply.
+func preflightTLSLBHostPort(ctx context.Context, chartPath, namespace string) error {
+	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
+	if err != nil {
+		return fmt.Errorf("helm show values %q: %w", chartPath, err)
+	}
+	var tree map[string]any
+	if err := yaml.Unmarshal(out, &tree); err != nil {
+		return fmt.Errorf("parse chart values: %w", err)
+	}
+	if !boolAtPath(tree, "tlsLb.enabled") || !boolAtPath(tree, "tlsLb.hostPort.enabled") {
+		return nil
+	}
+	port, err := tlsLBHostPort(tree)
+	if err != nil {
+		return err
+	}
+
+	nodesOut, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`).Output()
+	if err != nil {
+		return fmt.Errorf("kubectl get nodes: %w", err)
+	}
+	var nodes []string
+	for _, n := range strings.Split(strings.TrimSpace(string(nodesOut)), "\n") {
+		if n = strings.TrimSpace(n); n != "" {
+			nodes = append(nodes, n)
+		}
+	}
+
+	podsJSON, err := exec.CommandContext(ctx, "kubectl", "get", "pods",
+		"--all-namespaces", "-o", "json").Output()
+	if err != nil {
+		return fmt.Errorf("kubectl get pods --all-namespaces: %w", err)
+	}
+	var list corev1.PodList
+	if err := json.Unmarshal(podsJSON, &list); err != nil {
+		return fmt.Errorf("parse pod list: %w", err)
+	}
+
+	// Ignore the install namespace: c8s's own tls-lb pod lives there, so a
+	// re-install (Recreate) does not flag itself.
+	if blocked, holders := hostPortConflict(list.Items, nodes, port, namespace); blocked {
+		return fmt.Errorf("tls-lb wants host port %d but it is already bound on every node by: %s. "+
+			"tls-lb would stay Pending and --wait would time out. Reach tls-lb via its Service, or install with "+
+			"-f setting tlsLb.hostPort.enabled=false (or tlsLb.hostPort.https to a free port, or tlsLb.enabled=false)",
+			port, strings.Join(holders, ", "))
+	}
+	return nil
+}
+
+// boolAtPath walks a dotted path through a decoded YAML tree and returns the
+// bool at it, or false if a segment is missing or the leaf is not a bool.
+func boolAtPath(tree map[string]any, path string) bool {
+	var cur any = tree
+	for _, seg := range strings.Split(path, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return false
+		}
+		cur = m[seg]
+	}
+	b, _ := cur.(bool)
+	return b
+}
+
+// tlsLBHostPort resolves tlsLb.hostPort.https, defaulting to 443 (the chart's
+// empty-string default derives 443).
+func tlsLBHostPort(tree map[string]any) (int32, error) {
+	m, ok := nestedMap(tree, "tlsLb", "hostPort")
+	if !ok {
+		return 443, nil
+	}
+	switch v := m["https"].(type) {
+	case nil:
+		return 443, nil
+	case string:
+		if v == "" {
+			return 443, nil
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, fmt.Errorf("tlsLb.hostPort.https %q is not a port number: %w", v, err)
+		}
+		return int32(n), nil
+	case int:
+		return int32(v), nil
+	case float64:
+		return int32(v), nil
+	default:
+		return 0, fmt.Errorf("tlsLb.hostPort.https has unexpected type %T", v)
+	}
+}
+
+// hostPortConflict reports whether port is already bound on every node (so a new
+// host-port pod cannot schedule anywhere), along with the pods that hold it.
+// Pods in ignoreNamespace are skipped so c8s's own tls-lb does not self-flag.
+func hostPortConflict(pods []corev1.Pod, nodes []string, port int32, ignoreNamespace string) (bool, []string) {
+	taken := map[string]bool{}
+	holderSet := map[string]bool{}
+	for _, p := range pods {
+		if p.Namespace == ignoreNamespace || !podBindsHostPort(p, port) {
+			continue
+		}
+		holderSet[p.Namespace+"/"+p.Name] = true
+		if p.Spec.NodeName != "" {
+			taken[p.Spec.NodeName] = true
+		}
+	}
+	holders := make([]string, 0, len(holderSet))
+	for h := range holderSet {
+		holders = append(holders, h)
+	}
+	sort.Strings(holders)
+
+	if len(nodes) == 0 {
+		return false, holders
+	}
+	for _, n := range nodes {
+		if !taken[n] {
+			return false, holders // a free node exists; tls-lb can bind there
+		}
+	}
+	return true, holders
+}
+
+func podBindsHostPort(p corev1.Pod, port int32) bool {
+	for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
+		for _, cp := range c.Ports {
+			if cp.HostPort == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // preflightTDXNodes fails fast when --hardware-platform=tdx but no node carries
 // the confidential.ai/tdx=true label — the label the kata-qemu-tdx*
 // RuntimeClass nodeSelectors expect (kata.tdxNodeSelector default). On the
@@ -382,6 +523,29 @@ func stringAtPath(tree map[string]any, path string) (string, error) {
 	return s, nil
 }
 
+// valuesFilesSetDistro reports whether any -f values file explicitly sets
+// kata.distro or nriImagePolicy.distro. When one does, that file owns the host
+// containerd layout and cluster auto-detection must stand aside; when none
+// does, detection still applies even though other values were supplied.
+func valuesFilesSetDistro(files []string) (bool, error) {
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return false, fmt.Errorf("read values file %q: %w", f, err)
+		}
+		var tree map[string]any
+		if err := yaml.Unmarshal(data, &tree); err != nil {
+			return false, fmt.Errorf("parse values file %q: %w", f, err)
+		}
+		for _, path := range []string{"kata.distro", "nriImagePolicy.distro"} {
+			if v, err := stringAtPath(tree, path); err == nil && v != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install the c8s operator, CRDs, attestation-api, and component charts via Helm",
@@ -499,13 +663,16 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// kata-deploy and nri-image-policy must bind the host's containerd
 		// layout in every install mode, so the distro is detected from the
 		// cluster's kubelet versions and plumbed; letting the chart default
-		// (k8s) stand would silently mis-target RKE2. With -f nothing is
-		// plumbed — helm gives --set precedence over -f, and the values-file
-		// owner owns the layout (kata.distro / nriImagePolicy.distro there if
-		// the chart default doesn't fit). buildValueArgs skips the distro when
-		// it is empty.
+		// (k8s) stand would silently mis-target RKE2. Detection is suppressed
+		// only when a -f file actually sets kata.distro / nriImagePolicy.distro
+		// (that file then owns the layout) — not merely because some -f is
+		// present. buildValueArgs skips the distro when it is empty.
 		distro := ""
-		if len(installValues) == 0 {
+		distroInValues, err := valuesFilesSetDistro(installValues)
+		if err != nil {
+			return err
+		}
+		if !distroInValues {
 			distro, err = detectDistro(cmd.Context())
 			if err != nil {
 				return err
@@ -545,6 +712,15 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// clears the selector so no node needs the label.
 		if len(installValues) == 0 && !installSingleNode {
 			if err := preflightCDSNode(cmd.Context(), chartPath); err != nil {
+				return err
+			}
+		}
+
+		// Fail fast when tls-lb's host port is already taken cluster-wide (e.g.
+		// an existing ingress owns 443), which would otherwise wedge `--wait`.
+		// Default path only: a -f owner controls tlsLb.* and node placement.
+		if len(installValues) == 0 {
+			if err := preflightTLSLBHostPort(cmd.Context(), chartPath, installNamespace); err != nil {
 				return err
 			}
 		}

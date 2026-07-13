@@ -293,6 +293,20 @@ without crashing the binary; the handoff handler stays unregistered and the
 restart-fragility window above applies until the operator fixes the
 underlying issue.
 
+### Operator-added allowlist entries need persistence to survive a restart
+
+The same restart that re-bootstraps the mesh CA also resets the **served
+allowlist**. CDS seeds its store from the install seed at startup, then serves
+whatever an operator adds with `c8s allowlist add`. With
+`cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
+restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
+the install seed — workloads pulling those images are denied roughly one worker
+poll interval (~30s) later. CDS logs a warning at startup when persistence is
+off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
+(an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
+Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
+entries, are also enforced from the baked floor.
+
 ## Verifying attestation after install
 
 `c8s verify` (and `c8s cds verify`, shorthand for `c8s verify --kind cds`) fetches

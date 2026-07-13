@@ -155,6 +155,7 @@ spec:
             # attestation-service listens) and to the host Service otherwise.
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
+            - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
             {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - --allowlist-seed=/etc/cds/allowlist-seed.json
             {{- end }}

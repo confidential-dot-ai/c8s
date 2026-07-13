@@ -214,6 +214,20 @@ func (o *options) signer() (*operatorauth.Signer, error) {
 	return signer, nil
 }
 
+// matchedComponents returns the required component identifiers that appear as a
+// (case-insensitive) substring of image — the same name-based signal the upload
+// guard uses, applied to a single reference to recognise a component floor image.
+func matchedComponents(image string, required []string) []string {
+	low := strings.ToLower(image)
+	var hits []string
+	for _, comp := range required {
+		if strings.Contains(low, strings.ToLower(comp)) {
+			hits = append(hits, comp)
+		}
+	}
+	return hits
+}
+
 // missingComponents returns the required component identifiers not present as a
 // (case-insensitive) substring of any image reference in images.
 func missingComponents(images map[string]string, required []string) []string {

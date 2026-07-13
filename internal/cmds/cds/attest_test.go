@@ -397,3 +397,35 @@ func TestAttest_AttestationApiFailureReturns502(t *testing.T) {
 		t.Fatalf("status: got %d, want 502; body=%s", w.Code, w.Body.String())
 	}
 }
+
+// A 4xx from the attestation-api means it judged the evidence bad — a client
+// error, not an outage. It must not be reported as attestation_api_unreachable.
+func TestAttest_RejectedEvidenceReturns4xxNotUnreachable(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{
+			Error:   types.ErrorCodeInvalidRequest,
+			Message: "malformed evidence",
+		})
+	}))
+	t.Cleanup(bad.Close)
+	h := newTestAttestHandler(t, bad.URL, nil)
+	challenge := issueChallenge(t, h)
+	csrPEM, _ := generateCSR(t)
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+	var resp types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v; body=%s", err, w.Body.String())
+	}
+	if resp.Error == types.ErrorCodeAttestationApiUnreachable {
+		t.Fatalf("bad evidence mislabeled as %q", resp.Error)
+	}
+	if resp.Error != types.ErrorCodeVerificationFailed {
+		t.Fatalf("error code: got %q, want %q", resp.Error, types.ErrorCodeVerificationFailed)
+	}
+}

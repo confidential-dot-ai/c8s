@@ -7,6 +7,7 @@ final security model. Each bullet links to the tracking issue.
 ## Trust model
 
 - Chart-managed CDS runs as a singleton and keeps the active CA key in memory (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
+- CDS allowlist persistence is off by default (`cds.persistence.enabled=false`), so a restart resets the served allowlist to the install seed and operator-added digests (`c8s allowlist add`) are lost — workloads using them are denied ~30s later. CDS warns at startup when persistence is off; enable `cds.persistence.enabled=true` to retain dynamic entries. See `docs/operator.md` "Operator-added allowlist entries need persistence to survive a restart".
 - Active/active CDS replica handoff is opt-in via `cds.handoff.enabled`; it is off by default (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
 - Application-secret release is not implemented (tracked at [#46](https://github.com/confidential-dot-ai/c8s/issues/46)).
 - Per-workload measurement allowlists are not enforced at `/attest` (tracked at [#57](https://github.com/confidential-dot-ai/c8s/issues/57)).
@@ -140,3 +141,9 @@ could close.
   ticker/select loops, signal handlers, real-listener `run()` entrypoints, and
   `crypto/rand`/marshal failure branches that cannot be triggered deterministically
   without injecting faults into non-test source.
+- Cross-CVM mesh CA handoff cannot be exercised end-to-end on a single-node
+  cluster: a CDS on one CVM handing its CA to a **differently-measured** CDS on a
+  second CVM, and `/handoff` **rejecting** a peer whose launch measurement is not
+  in `cds.measurements`, both need a second, independently-measured confidential
+  VM. The measurement-gating logic is unit-tested with synthetic measurements;
+  the two-CVM path itself needs multi-node confidential infrastructure in CI.

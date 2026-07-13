@@ -80,10 +80,33 @@ func newRemoveCmd(o *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Resolve the digests' image refs before deleting, so we can flag any
+			// that are c8s component floor images: removing those from CDS does
+			// not lock them out — the NRI plugin always_allow and the in-guest
+			// baked seed keep admitting them — so a bare "removed" is misleading.
+			served := map[types.Digest]string{}
+			if resp, err := c.List(ctx(cmd)); err == nil {
+				served = resp.Digests
+			} else {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not fetch allowlist to check for component floor images: %v\n", err)
+			}
+
 			if err := c.Delete(ctx(cmd), digests, signer); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "removed %d digest(s)\n", len(digests))
+
+			for _, d := range digests {
+				if len(matchedComponents(served[d], defaultRequiredComponents)) == 0 {
+					continue
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"warning: %s (%s) is a c8s component floor image; removing it from CDS does not lock it out — "+
+						"the NRI plugin always_allow and the in-guest baked seed still admit it. "+
+						"To block a compromised component image, roll the chart with the bad digest replaced.\n",
+					d, served[d])
+			}
 			return nil
 		},
 	}

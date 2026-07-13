@@ -106,19 +106,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
 	verifyReq := types.VerifyReportData(req.Evidence, reportData)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
-	switch {
-	case errors.Is(err, attestationclient.ErrSignatureInvalid):
-		slog.Warn("attestation signature invalid")
-		attestation.WriteError(w, http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid")
-		return
-	case errors.Is(err, attestationclient.ErrReportDataMismatch):
-		slog.Warn("challenge did not match attestation evidence")
-		attestation.WriteError(w, http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence")
-		return
-	case err != nil:
-		slog.Warn("attestation-api error", "error", err)
-		attestation.WriteError(w, http.StatusBadGateway, types.ErrorCodeAttestationApiUnreachable,
-			fmt.Sprintf("failed to reach attestation-api: %s", err))
+	if err != nil {
+		status, code, msg := classifyVerifyError(err)
+		slog.Warn("attestation verification failed", "status", status, "error", err)
+		attestation.WriteError(w, status, code, msg)
 		return
 	}
 
@@ -176,4 +167,24 @@ func (h AttestHandler) caChainPEM() []byte {
 		return nil
 	}
 	return certutil.EncodeCertPEM(h.CA.Cert.Raw)
+}
+
+// classifyVerifyError maps a VerifyEnforced error to (HTTP status, error code,
+// message). A rejected verdict — bad signature, REPORTDATA mismatch, or a 4xx
+// the attestation-api returns for malformed/unacceptable evidence — is the
+// caller's fault and must not be reported as attestation_api_unreachable.
+// Only a transport failure or a 5xx/garbage upstream response is a real outage.
+func classifyVerifyError(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
+	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
+	}
+	var apiErr *attestationclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
+		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
+	}
+	return http.StatusBadGateway, types.ErrorCodeAttestationApiUnreachable,
+		fmt.Sprintf("failed to reach attestation-api: %s", err)
 }
