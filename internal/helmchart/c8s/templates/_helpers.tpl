@@ -531,6 +531,24 @@ cache_max_entries = 1024
 {{- $_ := set $digests $lbImg.digest (printf "%s@%s" $lbImg.repository $lbImg.digest) -}}
 {{- end -}}
 {{- end -}}
+{{- /* containerd-prep init-container images (rke2-only): the host NRI plugin
+       checks every container node-wide, so its own and kata's busybox prep
+       image must be in the floor or a DaemonSet re-roll self-deadlocks on
+       "image not in allowlist: busybox". Only seeded when the plugin enforces. */}}
+{{- if .Values.nriImagePolicy.enabled -}}
+{{- if eq .Values.nriImagePolicy.distro "rke2" -}}
+{{- $prep := .Values.nriImagePolicy.containerdPrep.image -}}
+{{- if $prep.digest -}}
+{{- $_ := set $digests $prep.digest (printf "%s@%s" $prep.repository $prep.digest) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.kata.enabled (eq .Values.kata.distro "rke2") -}}
+{{- $kprep := .Values.kata.containerdPrep.image -}}
+{{- if $kprep.digest -}}
+{{- $_ := set $digests $kprep.digest (printf "%s@%s" $kprep.repository $kprep.digest) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- range $digest, $image := .Values.nriImagePolicy.bootstrapAllowlist.digests -}}
 {{- $_ := set $digests $digest $image -}}
 {{- end -}}

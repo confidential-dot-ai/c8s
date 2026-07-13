@@ -125,6 +125,10 @@ func run(cfg config) error {
 		}
 	}
 
+	if !cfg.allowlistPersistent {
+		slog.Warn("allowlist store is not persistent (cds.persistence.enabled=false): a restart resets the served allowlist to the install seed and regenerates the mesh CA. Operator-added digests do not survive — re-add them after a restart, or enable persistence.")
+	}
+
 	// /allowlist mutations (POST/PUT/DELETE) are authorized by an operator token
 	// signed by one of the pinned operator keys (--operator-keys). Without any
 	// pinned key, writes fail closed while reads keep serving.

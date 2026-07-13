@@ -3529,6 +3529,29 @@ func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
 	}
 }
 
+// TestChartCDSAllowlistPersistentTracksPVC pins --allowlist-persistent to
+// cds.persistence.enabled, so CDS knows whether its allowlist store is durable
+// and warns at startup when it is not (operator-added digests are lost on a
+// restart otherwise).
+func TestChartCDSAllowlistPersistentTracksPVC(t *testing.T) {
+	t.Run("default (no persistence) renders false", func(t *testing.T) {
+		out, err := helmTemplate(t)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+		assertContainerHasArg(t, "cds", args, "--allowlist-persistent=false")
+	})
+	t.Run("persistence enabled renders true", func(t *testing.T) {
+		out, err := helmTemplate(t, "--set", "cds.persistence.enabled=true")
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+		assertContainerHasArg(t, "cds", args, "--allowlist-persistent=true")
+	})
+}
+
 // TestChartCDSServesRATLS confirms the cds container renders with a non-empty
 // --ratls-platform by default, i.e. RA-TLS serving is ON. An empty platform
 // makes cds serve /attest, /sign-csr, and /attest-key over plaintext HTTP,
@@ -4273,6 +4296,63 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 		}
 		if _, ok := seed.Digests[nxDigest]; ok {
 			t.Errorf("tls-lb nginx self-entry present with tls-lb disabled: %v", seed.Digests)
+		}
+	})
+}
+
+// The nri-image-policy containerd-prep init container (rke2 only) runs busybox,
+// which is not a c8sComponent, so it is never in the derive set. The host plugin
+// enforces every container node-wide, so unless busybox is self-seeded a
+// DaemonSet re-roll self-deadlocks ("image not in allowlist: busybox"). It must
+// be in both the CDS seed and the worker always_allow on rke2, and absent on k8s
+// where the init container is not rendered.
+func TestChartAllowlistsContainerdPrepOnRke2(t *testing.T) {
+	const (
+		prepDigest = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
+		prepRepo   = "example.test/busybox"
+	)
+	t.Run("rke2: self-entry present", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set-string", "nriImagePolicy.distro=rke2",
+			"--set-string", "nriImagePolicy.containerdPrep.image.repository="+prepRepo,
+			"--set-string", "nriImagePolicy.containerdPrep.image.digest="+prepDigest,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		wantRef := prepRepo + "@" + prepDigest
+
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if got := seed.Digests[prepDigest]; got != wantRef {
+			t.Errorf("containerd-prep seed entry = %q, want %q\nseed: %v", got, wantRef, seed.Digests)
+		}
+
+		worker := bootConfigFromInstaller(t, out, "c8s-nri-image-policy-worker")
+		if got := worker.Allowlist.AlwaysAllow[prepDigest]; got != wantRef {
+			t.Errorf("worker always_allow[%s] = %q, want %q\nalways_allow: %v", prepDigest, got, wantRef, worker.Allowlist.AlwaysAllow)
+		}
+	})
+
+	t.Run("k8s: no self-entry", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set-string", "nriImagePolicy.distro=k8s",
+			"--set-string", "nriImagePolicy.containerdPrep.image.repository="+prepRepo,
+			"--set-string", "nriImagePolicy.containerdPrep.image.digest="+prepDigest,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[prepDigest]; ok {
+			t.Errorf("containerd-prep self-entry present on k8s (init container not rendered): %v", seed.Digests)
 		}
 	})
 }
