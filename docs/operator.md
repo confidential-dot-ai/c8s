@@ -292,7 +292,12 @@ CDS logs for `attested CA handoff enabled` and
 `handoff EAR refreshed` lines. Failures will be logged at warn-level
 without crashing the binary; the handoff handler stays unregistered and the
 restart-fragility window above applies until the operator fixes the
-underlying issue.
+underlying issue. On a node-as-CVM (non-kata) cluster, `make
+test-e2e-ca-handoff` proves the full path end to end: it runs an attested
+in-cluster probe (`c8s cds request-handoff`) that pulls the CA over `/handoff`
+and verifies it against the served `/ca`. (The probe pod dials the local
+attestation-api Service; under kata that service is in-guest loopback, so the
+script does not support kata mode.)
 
 ### Operator-added allowlist entries need persistence to survive a restart
 

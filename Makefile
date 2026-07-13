@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer \
-       test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement vet fmt lint clean \
+       test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
 
 CONTROLLER_GEN         ?= controller-gen
@@ -120,6 +120,12 @@ test-e2e-cw-label-policy:
 # the c8s chart installed and a Running confidential workload.
 test-e2e-mesh-cw-enforcement:
 	./test/e2e/mesh-cw-enforcement.sh
+
+# Live-cluster check that attested CA handoff works end to end: an attested
+# probe pulls the mesh CA over /handoff and proves it is the live trust root.
+# Needs kubectl pointed at a node-as-CVM cluster with cds.handoff.enabled=true.
+test-e2e-ca-handoff:
+	./test/e2e/ca-handoff.sh
 
 # --- Linting ---
 
