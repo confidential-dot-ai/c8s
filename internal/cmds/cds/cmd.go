@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/requesthandoff"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
@@ -97,6 +98,10 @@ func NewCmd() *cobra.Command {
 		Kind:        "cds",
 		DefaultPort: 8443,
 	}))
+
+	// `c8s cds request-handoff` — client side of /handoff; live-cluster probe
+	// today, replica pull-on-startup precursor (#18).
+	cmd.AddCommand(requesthandoff.NewCmd())
 
 	return cmd
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -109,6 +110,13 @@ func LoadCertificateFile(path string) (*x509.Certificate, error) {
 // debug, info, warn, error (case-insensitive) or an error is returned, so a
 // typo fails at startup rather than silently logging at info.
 func NewJSONLogger(levelStr string) (*slog.Logger, error) {
+	return NewJSONLoggerTo(os.Stdout, levelStr)
+}
+
+// NewJSONLoggerTo is NewJSONLogger with an explicit writer, for commands that
+// must keep stdout reserved for machine-readable output and send diagnostics
+// to stderr.
+func NewJSONLoggerTo(w io.Writer, levelStr string) (*slog.Logger, error) {
 	level := slog.LevelInfo
 	if levelStr != "" {
 		// Delegate parsing/validation to the stdlib instead of maintaining a
@@ -117,7 +125,7 @@ func NewJSONLogger(levelStr string) (*slog.Logger, error) {
 			return nil, err
 		}
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})), nil
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})), nil
 }
 
 // ParsePEMCertificates parses all CERTIFICATE PEM blocks from data and returns

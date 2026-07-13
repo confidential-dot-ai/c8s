@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -283,6 +284,23 @@ func TestRequestHandoffRequiresMeasurementAllowlist(t *testing.T) {
 	_, err := RequestHandoff(context.Background(), HandoffClientDeps{}, "http://127.0.0.1", "ear", handoffTestKey(t), http.DefaultClient)
 	if err == nil {
 		t.Fatal("expected missing measurement allowlist error")
+	}
+}
+
+func TestRequestHandoffReturnsTypedStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	deps := HandoffClientDeps{AllowedMeasurements: map[string]bool{"allowed_measurement": true}}
+	_, err := RequestHandoff(context.Background(), deps, srv.URL, "ear", handoffTestKey(t), srv.Client())
+	var statusErr *HandoffStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("RequestHandoff error = %v, want *HandoffStatusError", err)
+	}
+	if statusErr.Status != http.StatusNotFound {
+		t.Fatalf("HandoffStatusError.Status = %d, want %d", statusErr.Status, http.StatusNotFound)
 	}
 }
 
