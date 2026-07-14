@@ -181,11 +181,12 @@ rather than restating it.
 `--evidence-fixture` (cds-attest serves fixed `report_data`, DEV ONLY), the `-debug`
 guest variant (host `Exec`/`ReadStream`/`WriteStream` RPCs allowed), `--ratls-platform
 ""` (plaintext CDS), attestation-service `allow_debug=true` and empty `api_keys`
-(unauthenticated `/verify`,`/attest`), and the c8s-verify client downgrades
-(`requireFreshness=false`, empty `measurements`, missing `meshCaPem`). Each is warned
-but not gated out of release builds; the browser downgrades return `ok:true` with
-`warnings[]`, so **the embedding app must inspect `warnings[]`** or the guarantee is
-void. Stock kata-guest-base builds now bake an empty `ghcr-auth.json`
+(unauthenticated `/verify`,`/attest`), and the c8s-verify client legacy mode
+(`requireClusterIdentity=false`, under which `requireFreshness=false`, empty
+`measurements`, or a missing `meshCaPem` reduce checks to warnings; the default
+policy rejects all four, §10). Each is warned but not gated out of release builds;
+the browser legacy mode returns `ok:true` with `warnings[]`, so **the embedding
+app must inspect `warnings[]`** or the guarantee is void. Stock kata-guest-base builds now bake an empty `ghcr-auth.json`
 (`{"auths":{}}`) — the c8s images are public, so anonymous guest-pull is the
 default; a private-mirror build (pre-staged file) still bakes credentials into
 the dm-verity root, so rotating them moves the launch measurement.
