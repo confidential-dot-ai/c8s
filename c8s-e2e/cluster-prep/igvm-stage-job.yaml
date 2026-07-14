@@ -1,0 +1,55 @@
+# Stages the rke2 CVM's IGVM onto the host (/var/lib/igvm/rke2.igvm) — an
+# in-cluster replica of confidential-metal's build-artifacts oras extract
+# (roles/build-artifacts/tasks/main.yml), which normally runs over SSH.
+# Also prints the image's manifest.json (per-variant launch measurements) so
+# the golden SHA-384 launch digest can be captured into rke2-image-refs.
+#
+# confai-images is PSA privileged, so the hostPath write admits there. The
+# igvm-files ROX PVC wraps the same host dir; the hook sidecar reads it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: igvm-stage-rke2-79d45313276e
+  namespace: confai-images
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: extract
+          image: ghcr.io/oras-project/oras:v1.3.2
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              IMAGE="ghcr.io/confidential-dot-ai/rke2@sha256:79d45313276e3251db30910aba47c85b9d37f5bc4b746ee0c2d78a032dc41486"
+              oras pull "$IMAGE" --output /work
+              tarball=$(ls /work/steep-cdi-*.tar.gz)   # title annotation carries a random suffix — glob
+              tar -xzf "$tarball" -C /work guest-smp4.igvm manifest.json
+              echo '=== manifest.json (golden measurements) ==='
+              cat /work/manifest.json
+              echo
+              cp /work/guest-smp4.igvm /igvm-host/rke2.igvm.tmp
+              chmod 0444 /igvm-host/rke2.igvm.tmp
+              mv /igvm-host/rke2.igvm.tmp /igvm-host/rke2.igvm
+              echo 'staged /var/lib/igvm/rke2.igvm'
+          env:
+            - name: DOCKER_CONFIG
+              value: /auth
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: igvm, mountPath: /igvm-host }
+            - { name: auth, mountPath: /auth, readOnly: true }
+          resources:
+            requests: { memory: 512Mi, cpu: 500m, ephemeral-storage: 1Gi }
+      volumes:
+        - name: work
+          emptyDir: { sizeLimit: 6Gi } # 1.43Gi tarball + extracted contents
+        - name: igvm
+          hostPath: { path: /var/lib/igvm, type: Directory }
+        - name: auth
+          secret:
+            secretName: ghcr-pull
+            items:
+              - { key: .dockerconfigjson, path: config.json }

@@ -26,11 +26,13 @@ spec:
     - toEntities:                 # the public internet (CI dependency fetches)
         - world
     - toEndpoints:                # narrow carve-out: the confidential VM's /attest
-        - matchLabels:            # endpoint (attestation-api) so the E2E can verify
-            k8s:io.kubernetes.pod.namespace: confai-images   # the VM it just launched
+        - matchLabels:            # endpoint (attestation-api) AND the in-CVM RKE2
+            k8s:io.kubernetes.pod.namespace: confai-images   # kube-apiserver (c8s e2e)
       toPorts:
         - ports:
             - { port: "8400", protocol: TCP }
+            - { port: "6443", protocol: TCP } # in-CVM kube-apiserver (bridge = pod identity)
   # NOT allowed (default-deny): other in-cluster pods/services/ports, remote nodes,
   # host-local endpoints → blocks east-west / lateral movement from a CI job. The
-  # only east-west exception is confai-images:8400 (the attestation endpoint).
+  # only east-west exceptions are confai-images:8400 (attestation) and :6443 (the
+  # nested CVM cluster's API, needed by the c8s e2e's kubectl/helm/install).

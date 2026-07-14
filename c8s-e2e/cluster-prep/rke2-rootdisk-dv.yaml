@@ -1,0 +1,35 @@
+# CDI import of the measured RKE2-node CVM image (steep-built) into a shared
+# rootdisk PVC — the exact render of confidential-metal's base-image-rootdisk
+# import for rke2_cvm_image (group_vars/workload/main.yml). Digest-suffixed
+# name: a bumped image gets a fresh PVC alongside the old one.
+#
+# Concurrency: local-path cannot do ROX, but on the single-node cluster many
+# VMs mount this RWO PVC at once PROVIDED each VM's disk sets readonly:true
+# (qemu shared lock; the verity rootfs never writes). No per-run clone needed.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: rke2-rootdisk-79d45313276e
+  namespace: confai-images
+  annotations:
+    # mandatory: local-path is WFFC and KubeVirt won't schedule the VMI until
+    # the DV is Ready — bind-immediate breaks the deadlock
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  labels:
+    app.kubernetes.io/part-of: confai
+    app.kubernetes.io/component: shared-rootdisk
+    confai.confidential.ai/source-digest-sha256: "79d45313276e"
+spec:
+  source:
+    registry:
+      url: "docker://ghcr.io/confidential-dot-ai/rke2@sha256:79d45313276e3251db30910aba47c85b9d37f5bc4b746ee0c2d78a032dc41486"
+      pullMethod: pod
+      secretRef: ghcr-pull
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: local-path
+    volumeMode: Filesystem
+    resources:
+      requests:
+        storage: 3Gi # disk.raw is ~2.06 GiB; DV spec immutable — resize = new name
