@@ -20,6 +20,20 @@ cluster-internal pinning (which shapes per platform in
 and let each platform verifier do its own shaping; `c8s-verify-js/PROTOCOL.md`
 ("az-snp") is the contract.
 
+## The bare-report KDS fetch is attestation-go's job; c8s only bounds and classifies it
+
+`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/cmds/verify/localverify.go` (`verifyInProcess`, `runAttestationGo`)
+
+`c8s verify` of a bare RA-TLS cert (SNP report, no inline VCEK) once hung for
+minutes on Zen4c (Siena/Bergamo) hosts, ignoring `--timeout`: verification ran
+with no context, and go-sev-guest's own KDS fetcher retried an unclassifiable
+`Unknown`-product URL. The VCEK fetch — including the Zen4c→Genoa product-line
+mapping — now lives in attestation-go (`snp.VerifyReportContext`; background in
+its README, "AMD KDS collateral for bare SNP reports"). What c8s must uphold:
+the verification context carries the `--timeout` deadline (`verifyEvidence`),
+and a failed fetch (`snp.ErrCollateralUnavailable`) maps to exit 3 (collateral
+unavailable), never a verification verdict (exit 2).
+
 ## get-cert injection integrity is name-based — reserve the name, don't trust it
 
 `internal/webhook/pod_mutator.go`, `internal/helmchart/c8s/templates/cw-label-integrity-policy.yaml`
