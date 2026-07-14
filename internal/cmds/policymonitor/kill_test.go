@@ -190,6 +190,71 @@ func TestCgroupLocator_WaitsForCgroupToAppear(t *testing.T) {
 	}
 }
 
+// TestCgroupLocator_WaitsForProcsToPopulate is the regression test for the
+// silent kill miss: kata-agent creates the container cgroup and writes
+// config.json (policy-monitor's trigger) BEFORE it forks the init into the
+// cgroup, so cgroup.procs is briefly empty. findInitPID must poll until the
+// PID appears, not give up on the first empty read.
+func TestCgroupLocator_WaitsForProcsToPopulate(t *testing.T) {
+	root := t.TempDir()
+	cid := "b790433fdb4f223a51940bae06c1cd54d73377fc3ea45c4fa5c7ea3bd4b6c829"
+	scope := filepath.Join(root, "kubepods.slice", "cri-containerd-"+cid+".scope")
+	if err := os.MkdirAll(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	procs := filepath.Join(scope, "cgroup.procs")
+	// cgroup exists but procs is empty — the init hasn't been forked in yet.
+	if err := os.WriteFile(procs, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locator := &cgroupLocator{
+		cgroupRoot:   root,
+		waitTimeout:  1 * time.Second,
+		pollInterval: 20 * time.Millisecond,
+	}
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		_ = os.WriteFile(procs, []byte("4242\n1234\n"), 0o644)
+	}()
+	pid, ok, err := locator.findInitPID(cid)
+	if err != nil {
+		t.Fatalf("findInitPID: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true — findInitPID must wait for cgroup.procs to populate")
+	}
+	if pid != 4242 {
+		t.Errorf("pid = %d, want 4242 (first/lowest in cgroup.procs)", pid)
+	}
+}
+
+// TestCgroupLocator_EmptyProcsTimesOut confirms a cgroup that stays empty
+// (a container that genuinely exited before we looked) times out to a
+// harmless no-op rather than blocking or erroring.
+func TestCgroupLocator_EmptyProcsTimesOut(t *testing.T) {
+	root := t.TempDir()
+	cid := "cafef00d"
+	scope := filepath.Join(root, "cri-containerd-"+cid+".scope")
+	if err := os.MkdirAll(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scope, "cgroup.procs"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locator := &cgroupLocator{
+		cgroupRoot:   root,
+		waitTimeout:  60 * time.Millisecond,
+		pollInterval: 20 * time.Millisecond,
+	}
+	_, ok, err := locator.findInitPID(cid)
+	if err != nil {
+		t.Fatalf("findInitPID: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false when cgroup.procs never populates")
+	}
+}
+
 func TestCgroupLocator_Timeout(t *testing.T) {
 	root := t.TempDir()
 	locator := &cgroupLocator{

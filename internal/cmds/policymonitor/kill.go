@@ -118,18 +118,23 @@ func (c *cgroupLocator) findInitPID(containerID string) (int, bool, error) {
 	deadline := time.Now().Add(c.waitTimeout)
 	for {
 		dir, err := findCgroupDir(c.cgroupRoot, containerID)
-		switch {
-		case err == nil && dir != "":
-			pid, err := readFirstPID(filepath.Join(dir, "cgroup.procs"))
-			if err == nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, false, fmt.Errorf("walk cgroup hierarchy: %w", err)
+		}
+		if dir != "" {
+			if pid, perr := readFirstPID(filepath.Join(dir, "cgroup.procs")); perr == nil {
 				return pid, true, nil
 			}
-			// cgroup.procs exists but is empty (container init forked
-			// then exited already) or unreadable. Treat as "not found"
-			// — the kill path is a no-op in either case.
-			return 0, false, nil
-		case err != nil && !errors.Is(err, os.ErrNotExist):
-			return 0, false, fmt.Errorf("walk cgroup hierarchy: %w", err)
+			// The cgroup exists but cgroup.procs is empty (or unreadable):
+			// kata-agent creates the cgroup and writes config.json — our
+			// trigger — BEFORE it forks the container init into the cgroup, so
+			// procs is briefly empty right when we look. Keep polling within
+			// the budget rather than giving up: the common race populates and
+			// we get the init PID to SIGKILL, while a container that genuinely
+			// exited stays empty and times out to a harmless no-op. Returning
+			// "not found" here (as this used to) is why a denied container's
+			// kill silently missed — the enforce decision was correct, the
+			// SIGKILL never landed.
 		}
 		if time.Now().After(deadline) {
 			return 0, false, nil
