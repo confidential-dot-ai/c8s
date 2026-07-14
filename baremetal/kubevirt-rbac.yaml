@@ -29,6 +29,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]          # E2E assert: read qemu cmdline in the launcher
     verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]         # read base-image-refs (producer's single source of truth)
+    verbs: ["get", "list"]
   - apiGroups: ["cdi.kubevirt.io"]    # per-run CDI clone of the base rootdisk
     resources: ["datavolumes"]
     verbs: ["get", "list", "watch", "create", "delete"]

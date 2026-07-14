@@ -144,7 +144,10 @@ measurement all change on a bump. Anything we *copy* will silently drift. Rules:
      `base-image-rootdisk` role to publish `confai-images/base-image-refs`
      (`rootPvc`, `igvm_sidecar_image`, `igvm_file`, `igvm_measurement` per cores).
      Our E2E reads it → zero divergence by construction. Small addition on their
-     side; the clean long-term fix.
+     side; the clean long-term fix. Status: producer side is up as
+     `bare-metal-infra-management` PR #60; `snp-e2e.yml` already reads the CM
+     (`rootPvc`/`sidecarImage`/`igvmFilePattern`) and **falls back to PVC discovery
+     until it merges + the cluster is re-provisioned**, so it's safe to ship now.
    - **Drift check (interim).** A scheduled job that compares our pinned sidecar /
      expected measurement against the bare-metal repo's `group_vars`
      (`igvm_sidecar_image`, `base_cpu_image`) at a pinned ref (and the live

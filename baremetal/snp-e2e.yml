@@ -9,19 +9,32 @@ jobs:
         run: |
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o kubectl
           chmod +x kubectl && echo "$PWD" >> "$GITHUB_PATH"
-      - name: launch confidential SEV-SNP VM (per-run clone; base resolved from cluster)
+      - name: launch confidential SEV-SNP VM (per-run clone; refs from base-image-refs, else discovered)
         run: |
           set -euo pipefail
           VM="bm-e2e-snp-${GITHUB_RUN_ID}"; echo "VM=$VM" >> "$GITHUB_ENV"
-          # Resolve the CURRENT base rootdisk PVC (digest-suffixed) live — never
-          # hardcode it, so a new base image can't silently drift us. Fail loudly
-          # if missing/ambiguous.
-          mapfile -t PVCS < <(kubectl -n confai-images get pvc -o name --sort-by=.metadata.creationTimestamp | grep -o 'cpu-image-rootdisk-[a-z0-9]*')
-          [ "${#PVCS[@]}" -ge 1 ] || { echo "::error::no cpu-image-rootdisk-* PVC in confai-images"; exit 1; }
-          ROOTPVC="${PVCS[-1]}"
-          [ "${#PVCS[@]}" -gt 1 ] && echo "::warning::multiple base PVCs (${PVCS[*]}); using newest $ROOTPVC"
-          echo "resolved base rootdisk: $ROOTPVC"
-          sed "s/bm-e2e-snp/${VM}/g; s/cpu-image-rootdisk-0df2ca7d5549/${ROOTPVC}/" snp-vm-e2e.yaml | kubectl apply -f -
+          SIDECAR=""; IGVM=""
+          # Prefer the producer-published single source of truth (the base-image-refs
+          # ConfigMap from bare-metal-infra-management). Until that PR is merged +
+          # the cluster re-provisioned, the CM won't exist (or we can't read it) —
+          # fall back to discovering the current base PVC and the manifest defaults.
+          if kubectl -n confai-images get cm base-image-refs >/dev/null 2>&1; then
+            ROOTPVC=$(kubectl -n confai-images get cm base-image-refs -o jsonpath='{.data.rootPvc}')
+            SIDECAR=$(kubectl -n confai-images get cm base-image-refs -o jsonpath='{.data.sidecarImage}')
+            PAT=$(kubectl -n confai-images get cm base-image-refs -o jsonpath='{.data.igvmFilePattern}')
+            IGVM="${PAT/\{cores\}/2}"
+            echo "base-image-refs: pvc=$ROOTPVC sidecar=$SIDECAR igvm=$IGVM"
+          else
+            mapfile -t PVCS < <(kubectl -n confai-images get pvc -o name --sort-by=.metadata.creationTimestamp | grep -o 'cpu-image-rootdisk-[a-z0-9]*')
+            [ "${#PVCS[@]}" -ge 1 ] || { echo "::error::no base-image-refs CM and no cpu-image-rootdisk-* PVC"; exit 1; }
+            ROOTPVC="${PVCS[-1]}"
+            echo "::warning::base-image-refs ConfigMap not found; falling back to discovered PVC $ROOTPVC + manifest defaults"
+          fi
+          # render: unique VM name + resolved rootPvc; override sidecar/igvm only when the CM provided them
+          M=$(sed "s/bm-e2e-snp/${VM}/g; s/cpu-image-rootdisk-0df2ca7d5549/${ROOTPVC}/" snp-vm-e2e.yaml)
+          [ -n "$SIDECAR" ] && M=$(printf '%s' "$M" | sed "s#ghcr.io/[^\"']*igvm-hook-sidecar@sha256:[a-f0-9]*#${SIDECAR}#")
+          [ -n "$IGVM" ] && M=$(printf '%s' "$M" | sed "s/guest-smp2\.igvm/${IGVM}/")
+          printf '%s\n' "$M" | kubectl apply -f -
       - name: wait for VMI Running (clone then boot)
         run: |
           set -uo pipefail
