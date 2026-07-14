@@ -21,7 +21,9 @@ cds_selector="app.kubernetes.io/name=c8s-operator,app.kubernetes.io/component=cd
 
 cds_ns=""
 pod=""
+kget_err=$(mktemp)
 cleanup() {
+  rm -f "$kget_err"
   if [ -n "$cds_ns" ] && [ -n "$pod" ]; then
     kubectl delete pod "$pod" -n "$cds_ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
@@ -31,11 +33,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # kget runs kubectl and, on failure, surfaces the real error instead of
-# letting an empty result masquerade as "resource not found".
+# letting an empty result masquerade as "resource not found". stderr goes to
+# a side file so a kubectl warning cannot corrupt the parsed output.
 kget() {
   local out
-  if ! out=$(kubectl "$@" 2>&1); then
-    fail "kubectl $* failed: $out"
+  if ! out=$(kubectl "$@" 2>"$kget_err"); then
+    fail "kubectl $* failed: $(cat "$kget_err")"
   fi
   printf '%s\n' "$out"
 }
