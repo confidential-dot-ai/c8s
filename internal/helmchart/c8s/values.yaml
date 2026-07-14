@@ -130,6 +130,11 @@ webhook:
 ## only — it is never rendered into a Kubernetes Secret or volume. EAR signing
 ## and JWKS are in-process too, so there is no internal RA-TLS hop.
 cds:
+  ## Number of cds pods. Keep at 1 unless handoff.peerUrl is set: extra pods
+  ## must ADOPT the running pod's CA (peerUrl) rather than mint their own, or
+  ## the mesh gets divergent trust roots. replicas>1 without peerUrl fails
+  ## chart render.
+  replicas: 1
   ## Pin `image.digest` for production deployments. The kata-guest-base
   ## bootstrap allowlist binds to the cds digest that was `:main` at the
   ## moment of the kata-guest-base build (floating tag); pinning the deployed
@@ -252,13 +257,20 @@ cds:
   ## it, a cds pod restart triggers a full mesh re-bootstrap.
   handoff:
     enabled: false
-    ## peerUrl: a surviving cds peer's https URL. When set, cds adopts that
-    ## peer's mesh CA over /handoff on startup instead of generating a fresh
-    ## one, and fails closed if the peer is unreachable or denies the handoff
-    ## (so a partition never mints a divergent trust root). Leave empty for the
-    ## first/only cds (cold start). Requires cds.measurements to pin the peer.
-    ## Only useful once a topology keeps a peer alive across the restart; the
-    ## default single-replica Recreate deployment has no surviving peer.
+    ## peerUrl: where a starting cds ADOPTS its mesh CA from over /handoff
+    ## instead of generating a fresh one. Setting it also flips the rollout to
+    ## RollingUpdate (maxUnavailable:0/maxSurge:1) so the new pod adopts from the
+    ## still-serving old pod before it is retired — this is what closes the
+    ## restart-rebootstrap window. cds fails closed if the peer is unreachable or
+    ## denies the handoff (a partition never mints a divergent trust root).
+    ##
+    ## Two-phase install: leave empty on first install (cold start, self
+    ## generate); once a cds pod is serving, `helm upgrade --set
+    ## cds.handoff.peerUrl=self` to enable adoption on every subsequent roll.
+    ## The sentinel "self" expands to the cds Service URL (adopt from your own
+    ## predecessor); any other value is an explicit distinct-peer https URL.
+    ## Requires cds.measurements to pin the peer; cannot combine with
+    ## persistence.enabled (the surge pod cannot share the RWO data PVC).
     peerUrl: ""
   persistence:
     enabled: false

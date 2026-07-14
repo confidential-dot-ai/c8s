@@ -17,9 +17,19 @@
   {{- if not .Values.cds.measurements -}}
     {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_measurements: cds.handoff.peerUrl requires cds.measurements to pin the peer. See docs/operator.md." -}}
   {{- end -}}
-  {{- if not (hasPrefix "https://" .Values.cds.handoff.peerUrl) -}}
-    {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_scheme: cds.handoff.peerUrl must use https (RA-TLS)." -}}
+  {{- /* Check the resolved URL ("self" -> the CDS Service URL, else verbatim). */ -}}
+  {{- if not (hasPrefix "https://" (include "c8s.cdsHandoffPeerURL" .)) -}}
+    {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_scheme: cds.handoff.peerUrl must use https (RA-TLS), or the sentinel \"self\" for the CDS Service URL." -}}
   {{- end -}}
+  {{- /* The surge pod can't co-mount the RWO PVC; its allowlist rebuilds from
+         the seed, so forbid the combo rather than deadlock the roll. */ -}}
+  {{- if .Values.cds.persistence.enabled -}}
+    {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_persistence: cds.handoff.peerUrl (adoption) cannot be combined with cds.persistence.enabled (the surge pod cannot share the RWO data PVC). The allowlist is rebuilt from the seed. See docs/operator.md." -}}
+  {{- end -}}
+{{- end -}}
+{{- /* Extra replicas are safe only when they adopt (peerUrl). */ -}}
+{{- if and (gt (int .Values.cds.replicas) 1) (not .Values.cds.handoff.peerUrl) -}}
+  {{- fail "VALIDATION_ERROR kind=cds_replicas_without_peer: cds.replicas>1 requires cds.handoff.peerUrl so extra pods adopt the CA instead of minting divergent trust roots. See docs/operator.md." -}}
 {{- end -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -93,15 +103,24 @@ metadata:
   annotations:
     confidential.ai/trust-root-mode: "inMemory"
 spec:
-  {{/* Singleton: the mesh CA and EAR signing key live in process memory, so a
-       second replica would mint a divergent trust root. Active/active needs
-       the /handoff path (cds.handoff.enabled), not extra replicas here. */}}
-  replicas: 1
-  # Recreate, not surge: the RWO data PVC and singleton
-  # trust root both forbid two concurrent CDS pods. Dependents ride out the
-  # brief CDS gap via get-cert's in-process retry.
+  {{/* Extra pods are safe only when they adopt (peerUrl); the top-of-file
+       guard rejects replicas>1 without one. */}}
+  replicas: {{ .Values.cds.replicas }}
+  {{- if .Values.cds.handoff.peerUrl }}
+  # Surge the new pod so it adopts the CA from the still-serving old pod before
+  # that pod is retired; maxUnavailable:0 keeps exactly one Service endpoint, so
+  # --handoff-peer-url (the Service URL) resolves to the old pod during adoption.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- else }}
+  # Recreate: two non-adopting pods would mint divergent roots and can't
+  # co-mount the RWO data PVC. Dependents ride out the gap via get-cert retry.
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: c8s-operator
@@ -201,7 +220,7 @@ spec:
             {{- if .Values.cds.handoff.enabled }}
             - --handoff-measurements={{ join "," .Values.cds.measurements }}
             {{- end }}
-            {{- with .Values.cds.handoff.peerUrl }}
+            {{- with (include "c8s.cdsHandoffPeerURL" .) }}
             - --handoff-peer-url={{ . }}
             {{- end }}
             - --token-signer-rotation-interval={{ .Values.cds.tokenSignerRotationInterval }}

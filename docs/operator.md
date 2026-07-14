@@ -315,21 +315,35 @@ entries, are also enforced from the baked floor.
 
 ### Adopting a peer's CA on startup (`cds.handoff.peerUrl`)
 
-Setting `cds.handoff.peerUrl` to a surviving CDS peer's `https` URL makes a
-starting CDS **adopt** that peer's mesh CA over `/handoff` instead of generating
-a fresh one — the same attested pull the probe performs, run in process at
-startup. It pins the peer with `cds.measurements` (same launch digest), and it
-**fails closed**: if the peer is unreachable within `--handoff-peer-timeout` or
-denies the handoff, CDS refuses to start rather than mint a divergent trust
-root. Leave `peerUrl` empty for the first/only CDS (cold start), which
-generates as before. The startup log line reports
+Setting `cds.handoff.peerUrl` makes a starting CDS **adopt** the peer's mesh CA
+over `/handoff` instead of generating a fresh one — the same attested pull the
+probe performs, run in process at startup. It pins the peer with
+`cds.measurements` (same launch digest) and **fails closed**: if the peer is
+unreachable within `--handoff-peer-timeout` or denies the handoff, CDS refuses
+to start rather than mint a divergent trust root. The startup log reports
 `source=adopted-from-peer` or `source=self-generated`.
 
-Adoption only helps when a peer is actually alive when the new pod starts. The
-default single-replica `Recreate` deployment tears the old pod down first, so
-there is no peer to adopt from across a restart; a topology that keeps one CDS
-serving during the rollover is required to close the restart-rebootstrap window
-end to end (tracked at #18).
+Setting `peerUrl` also flips the rollout to `RollingUpdate`
+(`maxUnavailable: 0`/`maxSurge: 1`): the replacement pod starts and adopts from
+the still-serving old pod before that pod is retired, so the CA survives a
+restart and no workload re-provisions. The sentinel `peerUrl: self` expands to
+the CDS Service URL — the new pod adopts from its own predecessor, which is the
+only Ready Service endpoint while it starts. `peerUrl` cannot be combined with
+`persistence.enabled` (the surge pod cannot share the RWO data PVC; the
+allowlist rebuilds from the seed), and `replicas > 1` requires `peerUrl`.
+
+**Two-phase install** (adoption is a deliberate day-2 opt-in):
+
+1. Install normally with `peerUrl` empty — the first CDS cold-starts and
+   self-generates (`replicas: 1`, `Recreate`).
+2. Once it is serving, enable adoption:
+   `helm upgrade <release> ... --reuse-values --set cds.handoff.peerUrl=self`.
+   The upgrade surges a new pod that adopts the running CA; every subsequent
+   roll then preserves it.
+
+Verify with `kubectl rollout restart deploy/<release>-cds`: the new pod logs
+`source=adopted-from-peer` with the **same** CA fingerprint as before the
+restart (a plain restart without adoption changes it).
 
 ## Verifying attestation after install
 

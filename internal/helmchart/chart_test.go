@@ -3937,6 +3937,99 @@ func TestChartCDSHandoffPeerURLFailsOnNonHTTPS(t *testing.T) {
 	}
 }
 
+const cdsPeerMeasurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+
+// TestChartCDSStrategyTracksAdoption pins the rollout to its constraint: with
+// no adoption peer cds must Recreate (two non-adopting pods would mint
+// divergent trust roots); with cds.handoff.peerUrl set it surges so the new
+// pod adopts from the still-serving old pod before it retires.
+func TestChartCDSStrategyTracksAdoption(t *testing.T) {
+	t.Run("no peer: Recreate singleton", func(t *testing.T) {
+		out, err := helmTemplate(t)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		dep := renderedDeployment(t, out, "c8s-cds")
+		if dep.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("cds strategy = %q, want Recreate", dep.Spec.Strategy.Type)
+		}
+	})
+
+	t.Run("peerUrl set: surge with no gap", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "cds.handoff.peerUrl=self",
+			"--set", "cds.measurements[0]="+cdsPeerMeasurement,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		dep := renderedDeployment(t, out, "c8s-cds")
+		if dep.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+			t.Errorf("cds strategy = %q, want RollingUpdate", dep.Spec.Strategy.Type)
+		}
+		if ru := dep.Spec.Strategy.RollingUpdate; ru == nil ||
+			ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 0 ||
+			ru.MaxSurge == nil || ru.MaxSurge.IntValue() != 1 {
+			t.Errorf("cds should surge (maxSurge=1, maxUnavailable=0), got %+v", ru)
+		}
+	})
+}
+
+// TestChartCDSHandoffPeerSelfResolvesToServiceURL confirms the "self" sentinel
+// expands to the CDS Service URL so an operator flips one value, not a hostname.
+func TestChartCDSHandoffPeerSelfResolvesToServiceURL(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "cds.handoff.peerUrl=self",
+		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--handoff-peer-url=https://c8s-cds.c8s-system.svc:8443")
+}
+
+// TestChartCDSReplicasRequirePeer locks the divergence guard: extra replicas
+// without an adoption peer would mint divergent trust roots.
+func TestChartCDSReplicasRequirePeer(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "cds.replicas=2")
+	if err == nil {
+		t.Fatalf("helm template succeeded with replicas>1 and no peerUrl; output=%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "cds_replicas_without_peer" {
+		t.Fatalf("validation kind = %q, want cds_replicas_without_peer; output=%s", got, out)
+	}
+
+	// replicas>1 WITH a peer renders.
+	out, err = helmTemplate(t,
+		"--set", "cds.replicas=2",
+		"--set", "cds.handoff.peerUrl=self",
+		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template with replicas=2 + peerUrl failed: %v\n%s", err, out)
+	}
+	if got := *renderedDeployment(t, out, "c8s-cds").Spec.Replicas; got != 2 {
+		t.Fatalf("cds replicas = %d, want 2", got)
+	}
+}
+
+// TestChartCDSHandoffPeerRejectsPersistence locks the guard that adoption and
+// the RWO data PVC are mutually exclusive (a surge pod cannot co-mount it).
+func TestChartCDSHandoffPeerRejectsPersistence(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "cds.handoff.peerUrl=self",
+		"--set", "cds.measurements[0]="+cdsPeerMeasurement,
+		"--set", "cds.persistence.enabled=true",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with peerUrl + persistence; output=%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "cds_handoff_peer_persistence" {
+		t.Fatalf("validation kind = %q, want cds_handoff_peer_persistence; output=%s", got, out)
+	}
+}
+
 func renderedDeployment(t *testing.T, manifest, name string) appsv1.Deployment {
 	t.Helper()
 	var dep appsv1.Deployment
