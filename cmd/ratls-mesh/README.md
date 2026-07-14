@@ -128,7 +128,6 @@ destinations whose `Pod.Status.HostIP` matches this node's `NODE_IP`.
 | `--measurements` | `""` | Comma-separated hex SHA-384 launch measurements (empty = accept any TEE, warns) |
 | `--cert-mode` | `self-signed` | Certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background) |
 | `--cds-url` | `""` | CDS service URL for attestation and CA bundle retrieval (required for cds mode) |
-| `--attestation-api-url` | (required) | Local attestation-api URL (required for cds mode) |
 | `--cds-measurements` | `""` | Comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development) |
 | `--ca-cert` | `""` | Path to CA certificate PEM for X.509 chain verification |
 | `--ca-poll-interval` | `5m` | Interval for polling the CDS `/ca` endpoint for CA bundle updates (cds mode) |
@@ -282,7 +281,6 @@ and Helm rendering for `hostNetwork`, `iptables-sync`, and hostPort behavior.
 
 ## Security
 
-- [Threat Model](../../docs/SECURITY/THREAT_MODEL.md) — 21 analyzed threats (T1-T21) with mitigations and risk matrix
-- [Measurement Pinning](../../docs/SECURITY/MEASUREMENT_PINNING.md) — Production setup for TEE launch digest pinning
-- [Certificate Lifecycle](../../docs/SECURITY/CERT_LIFECYCLE.md) — Issuance, rotation, dual verification, bundle management
-- [Production Hardening](../../docs/SECURITY/PRODUCTION_HARDENING.md) — Must/should/could checklist
+- [Threat Model](../../docs/THREAT_MODEL.md) — adversary model, trust graph, enforcement gates, and residual risks
+- [Gaps](../../docs/GAPS.md) — known mesh/certificate limitations (peer measurement pinning, TDX policy path)
+- [Pitfalls](../../docs/pitfalls.md) — operational sharp edges, including the mesh inbound-passthrough trade-off

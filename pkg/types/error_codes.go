@@ -14,4 +14,8 @@ const (
 	ErrorCodeSignFailed                = "sign_failed"
 	ErrorCodeTimeout                   = "timeout"
 	ErrorCodeAttestationApiUnreachable = "attestation_api_unreachable"
+	ErrorCodeChannelError              = "channel_error"
+	ErrorCodeInternal                  = "internal"
+	ErrorCodeAttestationUnavailable    = "attestation_unavailable"
+	ErrorCodeBindingUnavailable        = "binding_unavailable"
 )

@@ -50,9 +50,9 @@ jobs:
           path: |
             steep/output/kernel
             steep/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
+          key: ${{ runner.os }}-kata-kernel-v3-${{ env.STEEP_REF }}-${{ hashFiles('c8s/kata-guest-base/kernel/container.config') }}
           restore-keys: |
-            ${{ runner.os }}-kata-kernel-v2-${{ env.STEEP_REF }}-
+            ${{ runner.os }}-kata-kernel-v3-${{ env.STEEP_REF }}-
 
       - name: Verify snapshot present + show sha256
         run: |

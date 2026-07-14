@@ -20,8 +20,10 @@ services:
 
   get-cert:
     build:
+      # cmd/get-cert/Dockerfile COPYs build/c8s, so the context must be the
+      # repo root and `make build` must have run first.
       context: ../..
-      dockerfile: Dockerfile.get-cert
+      dockerfile: cmd/get-cert/Dockerfile
     command:
       - --cds-url=http://mock-cds:8080
       - --attestation-api-url=http://mock-attestation:8400

@@ -131,7 +131,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.StringVar(&c.cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements that CDS's RA-TLS peer cert must match. Empty = accept any (UNSAFE outside development).")
 	fs.IntVar(&c.sessionCacheSize, "session-cache-size", 64, "TLS session cache size per node (0 disables session resumption)")
 	fs.BoolVar(&c.accessLog, "access-log", true, "emit per-connection structured access log")
-	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /ready URL for pipeline health probing (empty = disabled)")
+	fs.StringVar(&c.certPipelineProbeURL, "cert-pipeline-probe-url", "", "CDS /readyz URL for pipeline health probing (empty = disabled)")
 	fs.DurationVar(&c.cdsRetryBackoff, "cds-retry-backoff", 2*time.Second, "initial backoff duration for CDS certificate upgrade retries")
 	fs.DurationVar(&c.cdsRetryMaxBackoff, "cds-retry-max-backoff", 60*time.Second, "maximum backoff duration for CDS certificate upgrade retries")
 	fs.IntVar(&c.maxDestHeaderSize, "max-dest-header-size", 256, "maximum destination header size in bytes")
@@ -505,7 +505,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		logger.Info("CA bundle refresh enabled", "url", effectiveCAURL, "interval", c.caPollInterval)
 	}
 
-	// Cert pipeline health probe: periodically check CDS /ready.
+	// Cert pipeline health probe: periodically check CDS /readyz.
 	if c.certPipelineProbeURL != "" {
 		m.certPipelineHealthy.Set(0) // Start as unhealthy until first probe succeeds.
 		go func() {

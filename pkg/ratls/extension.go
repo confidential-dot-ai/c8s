@@ -155,7 +155,7 @@ func UnmarshalExtension(der []byte) (*Attestation, error) {
 	// first and only normalize the raw SNP report shape when no envelope is
 	// present; verification wraps the raw report in the "snp" envelope for
 	// attestation-api /verify. TDX has no raw-bytes shape (no in-process Go
-	// parser is carried; see verifyTDXOnline in verify.go), so an envelope
+	// parser is carried; see verifyReport in verify.go), so an envelope
 	// is required.
 	embedded, err := parseEmbeddedEvidence(raw.Report)
 	if err != nil {

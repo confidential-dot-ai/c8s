@@ -156,12 +156,7 @@ spec:
             # publicTLS secret it is that cert (mounted below). Re-read per request, so
             # get-cert renewals are picked up.
             - --serving-cert-file={{ include "tls-lb.publicCertPath" . }}
-            # --cds-cert-file is intentionally NOT set: nginx serves the same cert
-            # statically at /.well-known/c8s/cds-cert.pem from the shared cert volume
-            # and hot-reloads it on get-cert renewal (SIGHUP), whereas cds-attest
-            # would read it once at startup and embed a stale copy in every bundle.
-            # The cds_cert_pem is not bound to the attestation (report_data binds the
-            # session key), so the client pins the mesh CA out of band instead.
+            # --cds-cert-file intentionally unset: nginx serves the live cert at discovery.cdsCertPath (/.well-known/cds-cert.pem); cds-attest would embed a stale startup copy.
             # Terminate over-encryption here and forward to the same workload
             # backend nginx proxies to. An http upstream is plaintext at the
             # app layer; pointed at a headless Service (an adopted workload),

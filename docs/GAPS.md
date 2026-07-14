@@ -23,10 +23,12 @@ final security model. Each bullet links to the tracking issue.
   guests. Also note the SNP launch digest covers the VMSA set, so even a correct
   pin is per-VM-shape (vCPU count). Candidate fix is operator-signed allowlist
   entries verified in-guest against a baked operator public key.
-- RA-TLS measurement pinning is SNP-only: the TDX verify path ignores
-  `policy.Measurements` (and `MinTCBVersion`) entirely — see the LIMITATION note
-  on `verifyTDXOnline` (`pkg/ratls/verify.go`). A TDX deployment relying on
-  `cds.measurements` gets signature + report-data + debug checks only.
+- RA-TLS measurement pinning is SNP-only: the TDX verify path drops
+  `policy.Measurements` and `MinTCBVersion` — the attestation-api's TDX
+  verifier surfaces no launch measurement and takes no minimum-TCB parameter,
+  so `verifyTDXEvidence` sends neither (`pkg/attestationclient/verify.go`,
+  `EvidencePolicy`). A TDX deployment relying on `cds.measurements` gets
+  signature + report-data + debug checks only.
 
 ## Mesh and certificates
 

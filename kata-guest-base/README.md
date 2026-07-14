@@ -98,7 +98,7 @@ attests — is described in [`../docs/pitfalls.md`](../docs/pitfalls.md)
 > The host's CRI also does its own (anonymous) image-exists pull before
 > the guest pulls, so a private workload still needs host-side creds too
 > (`serviceAccount.imagePullSecrets`). See `docs/pitfalls.md`
-> "kata-qemu-snp pods still need a host-side image pull".
+> "Private workload images need registry creds in TWO places under guest-pull".
 
 ## Build
 
@@ -110,7 +110,7 @@ attests — is described in [`../docs/pitfalls.md`](../docs/pitfalls.md)
 sudo apt-get install -y docker.io && sudo systemctl enable --now docker
 
 # Once per c8s/attestation-rs revision: build the in-guest binaries.
-cd /workspace/c8s            && make build-c8s-node && make build-policy-monitor
+cd /workspace/c8s            && make build-c8s-node && make build-policy-monitor && make build-rtmr3-measurer
 cd /workspace/attestation-rs && cargo build --release -p attestation-api --bin attestation-api --target x86_64-unknown-linux-musl
 
 # Stage the binaries + the bootstrap allowlist into extra/. (The attester

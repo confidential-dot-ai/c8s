@@ -151,7 +151,7 @@ rather than restating it.
 | In-guest CDS allowlist refresh is **disabled on every default kata install**: policy-monitor fail-closed refuses to run without `C8S_CDS_MEASUREMENTS`, and no shipping path can deliver the pin — baking it is self-referential (CDS runs from the same guest image the pin would be baked into, so the value would change the launch measurement it pins) and per-pod cloud-init is host-controlled (a host-chosen pin defeats the point). Guests therefore enforce the baked seed alone; operator `c8s allowlist add` reaches host-side enforcement and CDS but **not running guests**. Also: the SNP launch digest covers the VMSA set, so even a correct pin is per-VM-shape (vCPU count). Stricter than ratls-mesh (which warns and proceeds on an empty pin) by intent — for the refresh, "any attested TEE" is not enough because the host can boot its own CVM from the same guest image and pass "attested" while serving an attacker-chosen allowlist, and grow-only merging is no defence when additions are the attack. | host / operator drift | Operator-signed allowlist entries verified in-guest against a baked operator public key (candidate design). Interim: the deliberate fail-closed posture — guests enforce the measured seed and nothing else. | kata-image-policy.md; GAPS §Trust model |
 | GPU guest boots **kata's** GPU kernel with NVIDIA modules grafted from kata's rootfs — kernel/driver provenance is the kata release, not the c8s build. | supply chain | A steep GPU kernel flavor (`CONFIG_MODULES=y` + `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build key) compiling/signing the NVIDIA modules. Interim: module loading locked after bring-up (`kernel.modules_disabled=1`). | pitfalls; GAPS §Confidential GPU; #292 |
 | GPU CC mode is assumed correct on the host; no positive GPU attestation (SPDM / `nvidia-smi conf-compute`) reaches the relying party. | host | Wire SPDM / conf-compute attestation. Interim: locked guest fails closed on a non-CC GPU before the agent starts. | GAPS §Confidential GPU; #55 |
-| Mesh peer verification checks the CA chain but does not pin the peer's measurement; leaf certs embed no verified measurement. On **TDX**, `Measurements` and `MinTCBVersion` set by the operator are **silently ignored** (`pkg/ratls/verify.go` `verifyTDXOnline` LIMITATION). | pod-network / co-tenant | Pin peer measurement; wire the TDX measurement/TCB path. | GAPS §Mesh; `pkg/ratls/verify.go:220`; #47 (peer pin), #303 (TDX) |
+| Mesh peer verification checks the CA chain but does not pin the peer's measurement; leaf certs embed no verified measurement. On **TDX**, `Measurements` and `MinTCBVersion` set by the operator are **silently dropped**: the attestation-api's TDX verifier surfaces no launch measurement and takes no minimum-TCB parameter, so `verifyTDXEvidence` sends neither (`pkg/attestationclient/verify.go`). | pod-network / co-tenant | Pin peer measurement; wire the TDX measurement/TCB path. | GAPS §Mesh; `pkg/attestationclient/verify.go` (`EvidencePolicy`); #47 (peer pin), #303 (TDX) |
 | In-guest mesh exempts **all** UID-0 egress (so attestation-service can reach AMD KDS) — a workload running as root egresses in plaintext, bypassing the mesh. | root workload | Scope the exemption to attestation-service, not all of UID 0. Workloads MUST run non-root meanwhile. | GAPS §Mesh; #308 |
 | Kata guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the front-door pods (tls-lb nginx, CDS RA-TLS) reach external certless clients — every kata guest therefore accepts inbound TCP:8443 **without mesh mTLS**, and any workload listening on 8443 in a kata pod is reachable without a mesh client cert. (Parser rejects mesh listener ports and non-tcp entries, and logs an audit line when active.) | pod-network / co-tenant | Per-workload rather than per-image passthrough (front doors in dedicated guests; workload guests rebuild with the variable emptied). | pitfalls "kata guests: inbound TCP port 8443 bypasses the mesh"; GAPS §Mesh and certificates |
 | Post-start kill window: policy-monitor SIGKILLs a non-allowlisted container's init *after* kata-agent forks it (single-digit-ms, no network / no user-`execve`). Field regression 2026-07 (fixed): kata-agent's `create_sandbox` does `remove_dir_all` + `create_dir_all` on `/run/kata-containers`, silently detaching the boot-time inotify watch — the monitor logged "active, seed loaded" and made **zero decisions** on any subsequently created sandbox. Now watches in generations (Remove/Rename of the watch dir + periodic inode revalidation → re-Add + re-seed), so the single-digit-ms bound holds again. Any future in-guest watcher of a kata-agent-owned path must handle the same replacement (watch **liveness**, not just existence). **Second 2026-07 miss (fixed):** the kill path's cgroup lookup matched only the bare `<cid>` basename, but a systemd-PID-1 guest names the container cgroup `cri-containerd-<cid>.scope` under `kubepods*.slice`, so `findInitPID` never found it and the SIGKILL silently missed — policy-monitor *denied* the container but it ran **unenforced** (unbounded, not a bounded window). Fixed by `cgroupDirMatchesCID` (`internal/cmds/policymonitor/kill.go`); the bound holds only with **both** fixes. | host presenting a bad image | BPF-LSM `security_bprm_check_security` hook (designed, not committed). | kata-image-policy.md G4; pitfalls "kata-agent replaces /run/kata-containers", "policy-monitor cgroup lookup"; #309 |
@@ -231,11 +231,13 @@ If any of these is false, the corresponding guarantee does not hold.
    with unsigned `oras push`.
    An operator must derive the digest separately with `sev-snp-measure` and supply it
    to the relevant verifier/chart allowlists, which default to empty. The build
-   inputs are pinned, but the rootfs is not yet bit-for-bit reproducible
-   (mkfs.ext4 writes a random UUID and timestamps), so an independent rebuild
-   cannot corroborate the published verity root hash or launch digest; the
-   per-build digest must be pinned as published. Build and pinning mechanics:
-   `docs/kata-guest-base.md`.
+   inputs are pinned and the rootfs `root_hash` is bit-for-bit reproducible
+   (`build.sh` pins mkfs.ext4's UUID/hash-seed/timestamps via
+   `SOURCE_DATE_EPOCH`/`FIXED_FS_UUID`/`FIXED_HASH_SEED` and the verity salt
+   via `VERITY_SALT`), so an independent rebuild can corroborate the published
+   verity root hash and launch digest — provided the rebuild uses the same
+   e2fsprogs/cryptsetup versions (recorded in `manifest.json`
+   `relay_toolchain`). Build and pinning mechanics: `docs/kata-guest-base.md`.
 9. **Host provisioning is correct and is not verified by c8s** — SNP enabled in
    BIOS/firmware, GPU CC mode on, vfio-pci binding clean, node labels honest
    (`--hardware-platform` is trusted, not probed). The node-level kata/containerd
@@ -326,8 +328,9 @@ binary:
 
 - **`/attest`** enforces the `cds.measurements` launch-digest allowlist before
   issuing a leaf. **`/attest-key`** issues a TEE-bound EAR (no cert) for a
-  caller-generated key — used by in-cluster components (CDS's handoff signer) — and
-  is `protected` (requires valid TEE attestation) but **does not** consult
+  caller-generated key — used by in-cluster components (CDS's handoff signer).
+  Its handler verifies the TEE attestation evidence (the `protected` wrapper
+  adds only rate limiting and a body cap) but **does not** consult
   `cds.measurements`. This asymmetry is intentional for in-cluster self-attestation;
   it means measurement pinning does not constrain this route. (Flagged for review —
   confirm whether `/attest-key` should also honor `cds.measurements`.)
