@@ -1,4 +1,100 @@
-# c8s e2e in CI — design (scoping)
+# c8s e2e in CI — design
+
+## Grounded roadmap (2026-07-14 — full-org sweep)
+
+> Source: a 6-area deep-read of the now-accessible confidential-dot-ai org (c8s +
+> docs, c8s-charts/operator/fleet, confidential-metal@main incl. the new TDX
+> support, steep/igvm-tools, attestation-rs/-go/-service, org CI census).
+> Supersedes the guesses below where they conflict.
+
+**Headline:** the org is ~1–2 weeks of glue from the first fully automated lane
+(post-merge SNP-metal e2e on c8s main) and ~a quarter from the full 5-platform
+matrix. Every ingredient exists; **no repo has any hardware e2e workflow today**,
+so the only net-new artifact is the orchestrating workflow itself.
+
+**The single most load-bearing fact:** the PUBLIC `c8s` repo *already* runs jobs
+on a self-hosted SEV-SNP runner (`the-machine`, `kata-guest-base.yml`) via
+`workflow_run` chained off `Docker`, gated to `main`, never `pull_request`. That
+(a) defuses our #1 "public repos can't use self-hosted runners" gotcha (there IS
+an approved pattern in the org), and (b) is the exact trigger shape the e2e
+workflow should copy verbatim with `runs-on: confidential-bm`
+(`kata-guest-base.yml` L47–126: `workflow_run` → gate `head_branch==main` →
+checkout `head_sha` → resolve `:<short-sha>` images).
+
+**What c8s actually is (corrects the scoping below):** a Go monorepo — CLI/operator,
+CDS (verifies SNP/TDX attestation, signs workload certs from an in-TEE mesh CA),
+RA-TLS L4 mesh, digest-allowlist enforcement, measured kata guest image. It has
+**zero cluster-provisioning code**: `c8s install` (helm of the chart *embedded in
+the checkout* at `internal/helmchart/c8s`) onto an existing k8s/RKE2 ≥1.30
+cluster, one TEE per cluster via `--hardware-platform sev-snp|tdx`, shape via
+`--cvm-mode baremetal|node|gke|aks`, optional `--kata`. Per-commit
+`:<short-sha>` component images exist for every main commit (`docker.yml` +
+retag-unchanged) → `c8s install --image-tag <short-sha>` deploys the exact
+commit under test with no chart-publish dependency.
+
+**Platform matrix (exists → gap):**
+
+| Lane | Exists today | Gap |
+|---|---|---|
+| **SNP-metal** | ~90%: our green confidential-bm runners + attested ephemeral SNP CVMs + multi-CVM; **measured RKE2-node CVM image exists** (`ghcr.io/confidential-dot-ai/rke2@79d45313`, standing workload on dev-c8s-integration; readonly rootdisk PVC → N boots, no clone needed); `confai launch/verify/delete` wraps lifecycle + launch-digest | no workflow wires it to c8s pushes; github-runner-dev is stale vs metal main (legacy `lunal.dev/sev-snp` label, no base-image-refs CM → re-provision); serial-console kubeconfig scrape is the flaky link |
+| **TDX-metal** | `tdx-dev-host-1` fully provisioned (RKE2 + KubeVirt v1.9 TDVF/QGS, DCAP, TDX rootdisk PVC pre-imported); `confai --platform tdx` launch+verify (MRTD/RTMRs) | no ARC scale set there; pinned attestation-cli v0.4.0 lacks `--expected-mrtd/rtmr*` (release pipeline wedged); no TDX RKE2-node image (all rootdisk/dev-vm plays gated `sev_snp_enabled`) |
+| **SNP-cloud (GKE)** | proven once by us (torn down); **c8s-fleet has ephemeral-cluster automation** (`PROVIDER=gke make provision` → `test-gke-<id>`, pick-region by quota, `make teardown AUTO_CONFIRM=1`) | wire provision→install→e2e→teardown into a nightly; secrets bootstrap (GCP SA, fleet SOPS age key, ghcr-secret); quota/latency → nightly not per-push |
+| **TDX-cloud** | software-ready only (chart + CLI + attestation-rs main verify gcp-tdx) | no TDX provisioning config exists anywhere; AKS path refuses tdx; quota unknown — weakest leg |
+| **GPU-TDX** | `b200-dev-1` (8× B200, vfio, `confai launch --gpu-model B200`, CC-mode tooling; attestation-rs#54 is the explicit ask) | tailnet-only, hand-built PCCS not ansible-ized, no runner — do last |
+
+**Phases (leverage-ordered):**
+1. **Post-merge SNP-metal e2e chained off c8s `Docker`** (~1–2 wks): re-provision
+   the runner host (fixes label + publishes base-image-refs + import rke2 rootdisk
+   instance) → `e2e-snp-metal.yml` copying the `the-machine` trigger pattern →
+   boot 1 RKE2-node CVM, `confai verify --platform snp` (enforces launch digest —
+   closes attest Phase 1b), scrape kubeconfig → `c8s install --single-node
+   --cvm-mode node --hardware-platform sev-snp --image-tag <sha>` → run
+   `test/e2e/cw-label-policy.sh`, `mesh-cw-enforcement.sh`, `c8s cds verify`,
+   nginx-confidential smoke → `confai delete` in `if: always()`.
+2. **Two-CVM CDS CA-handoff e2e** (~1 wk, parallel): c8s `docs/GAPS.md` literally
+   says this test "needs multi-node confidential infrastructure in CI" — our green
+   multi-CVM job is that primitive; team is on `feat/ca-handoff-probe` right now.
+3. **TDX-metal lane on tdx-dev-host-1** (2–4 wks; VM-level TDX e2e ~1 wk): second
+   scale set (`confidential-bm-tdx`), unwedge attestation-cli release, VM-level
+   attest e2e from the pre-imported TDX PVC first; TDX RKE2 image is the long pole.
+4. **Resurrect SNP-GKE as nightly** (1–2 wks, parallel): c8s-fleet provision →
+   `c8s install --cvm-mode gke` → e2e → teardown + orphan-reaper.
+5. **TDX-cloud** (~1 wk *if* quota): delta on Phase 4 (`confidential_node_type:
+   tdx` + c3-* machine types).
+6. **Kata pod-as-CVM + GPU-TDX** (last): kata e2e can't nest in a KubeVirt CVM →
+   needs dev-c8s-integration time-share or dedicated host; GPU lane closes
+   attestation-rs#54.
+
+**Quick wins available now:** enforce launch_digest in the existing green attest
+job (steep public → `igvm-tools measure`, or just `confai verify`); re-provision
+github-runner-dev (`make provision TAGS=kubevirt,base-image-rootdisk
+LIMIT=sev-snp-gh-runner`); wire c8s's unused `test/integration/run.sh`
+(docker-compose, mock CDS — needs no hardware) into c8s `ci.yml`; one-PR
+attestation-rs version bump to unwedge the release that carries the
+`--expected-*` flags; one-line steep `base.yml` fix (pushes the wrong output dir,
+so `steep:base` is missing the golden measurements its README promises).
+
+**Top risks:** serial-console kubeconfig scrape (flakiest link); artifact skew
+across three pinned supply chains (rke2 image STEEP_REF-pinned + manual; kata
+guest bakes per-commit digests; base-cpu-image has no publishing workflow); AMD
+KDS fragility (no CRL/backoff in CLI; durable fix = `snphost import` on hosts so
+evidence carries VCEK inline — unverified); TDX verify hard-fails on any Intel
+PCS outage; keep the `main`-only/never-PR runner posture (fork gating unsolved);
+shared substrates (dev-c8s-integration, the-machine) need scheduling/locking;
+go module path still `…/bare-metal-infra-management` (import via old path).
+
+**Questions only the team can answer:** what IS the weekly manual checklist
+(codify that, not a guess); how is `the-machine` registered (repo-level runner on
+public c8s vs an org group allowing public repos — decides Phase 1's trigger
+home); can hosts `snphost import` VCEKs; is post-merge-on-main an acceptable
+regression gate vs wanting PR-triggered e2e; kata e2e substrate
+(dev-c8s-integration time-share vs dedicated); will steep ship igvm-tools in its
+release assets + attestation-rs unwedge its release; TDX cloud quota reality;
+does the blackwell SNP+GPU host still exist or is b200 the only GPU lane.
+
+---
+
+## Original scoping (2026-06) — kept for the kata-phase detail
 
 > **SUPERSEDED-IN-PART by [`../conformance/DESIGN.md`](../conformance/DESIGN.md).**
 > The approach is now: prove the host we have today (`sev-snp-gh-runner`) can test
