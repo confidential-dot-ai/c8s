@@ -1,7 +1,8 @@
 # Bare-metal confidential runner (RKE2 + KubeVirt SEV-SNP)
 
 The GKE path (`../`) runs runners on Confidential GKE nodes. On the company's
-bare-metal platform (`conf/bare-metal-infra-management`: RKE2 + KubeVirt + custom
+bare-metal platform (`confidential-dot-ai/confidential-metal`, formerly
+`bare-metal-infra-management`: RKE2 + KubeVirt + custom
 IGVM QEMU), confidentiality is a **SEV-SNP KubeVirt VM** (verity rootfs, IGVM
 measured boot) — not a confidential node. So **Model A** is the fit:
 
@@ -36,6 +37,11 @@ measured boot) — not a confidential node. So **Model A** is the fit:
   no baked deps — a baked image needs a registry we can push to).
 
 ## What's blocked (cluster provisioning, not this infra)
+
+> **Resolved upstream:** the rename gap below was fixed in the metal repo — #58
+> (org rename, merged) and #60 (base-image-refs ConfigMap, merged 2026-07-13, now
+> in `confidential-dot-ai/confidential-metal`). The cluster picks both up on its
+> next provision run. Kept for history; our E2E was never blocked (see workaround).
 
 Launching the SNP **target VM** fails today because the cluster's confidential-VM
 image stack is only **partially provisioned** — a `lunal-dev → confidential-dot-ai`
@@ -144,10 +150,11 @@ measurement all change on a bump. Anything we *copy* will silently drift. Rules:
      `base-image-rootdisk` role to publish `confai-images/base-image-refs`
      (`rootPvc`, `igvm_sidecar_image`, `igvm_file`, `igvm_measurement` per cores).
      Our E2E reads it → zero divergence by construction. Small addition on their
-     side; the clean long-term fix. Status: producer side is up as
-     `bare-metal-infra-management` PR #60; `snp-e2e.yml` already reads the CM
+     side; the clean long-term fix. Status: **producer side MERGED**
+     (`confidential-metal` PR #60, 2026-07-13); `snp-e2e.yml` reads the CM
      (`rootPvc`/`sidecarImage`/`igvmFilePattern`) and **falls back to PVC discovery
-     until it merges + the cluster is re-provisioned**, so it's safe to ship now.
+     until the playbook next runs against the cluster** (the CM is published by
+     the `base-image-rootdisk` role at provision time), so it's safe either way.
    - **Drift check (interim).** A scheduled job that compares our pinned sidecar /
      expected measurement against the bare-metal repo's `group_vars`
      (`igvm_sidecar_image`, `base_cpu_image`) at a pinned ref (and the live

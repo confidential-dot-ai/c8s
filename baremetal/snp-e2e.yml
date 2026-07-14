@@ -15,9 +15,10 @@ jobs:
           VM="bm-e2e-snp-${GITHUB_RUN_ID}"; echo "VM=$VM" >> "$GITHUB_ENV"
           SIDECAR=""; IGVM=""
           # Prefer the producer-published single source of truth (the base-image-refs
-          # ConfigMap from bare-metal-infra-management). Until that PR is merged +
-          # the cluster re-provisioned, the CM won't exist (or we can't read it) —
-          # fall back to discovering the current base PVC and the manifest defaults.
+          # ConfigMap, published by confidential-metal's base-image-rootdisk role —
+          # merged in PR #60). Until the playbook next runs against this cluster the
+          # CM may not exist (or we can't read it) — fall back to discovering the
+          # current base PVC and the manifest defaults.
           if kubectl -n confai-images get cm base-image-refs >/dev/null 2>&1; then
             ROOTPVC=$(kubectl -n confai-images get cm base-image-refs -o jsonpath='{.data.rootPvc}')
             SIDECAR=$(kubectl -n confai-images get cm base-image-refs -o jsonpath='{.data.sidecarImage}')

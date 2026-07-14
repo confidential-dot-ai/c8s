@@ -28,8 +28,10 @@ image and `confai` already implement RATS end-to-end:
   reference value is computed from source, not pinned.
 
 ### Phase 1a — DONE (how it's wired)
-We bypassed `confai` (its `measure` step needs `steep`/igvm-tools, which is
-**inaccessible** — `lunal-dev/steep` 404s) and went straight to the verifier:
+We bypassed `confai` (at the time its `measure` step needed `steep`/igvm-tools,
+which were inaccessible — `lunal-dev/steep` 404'd. **No longer true: as of
+2026-07-14 `confidential-dot-ai/steep` is public**, so the measure path is open)
+and went straight to the verifier:
 1. **`attestation-cli` on the runner — prebuilt, no build.** Download the public
    release asset `confidential-dot-ai/attestation-rs` v0.4.0 `attestation-cli`
    (x86-64 linux); the runner `apt`-installs `libtss2-dev` (the binary links it).
@@ -41,8 +43,9 @@ We bypassed `confai` (its `measure` step needs `steep`/igvm-tools, which is
 
 ### Phase 1b — remaining
 - **Assert `launch_digest` == golden** (today we record it: `d300bd58…`). Needs a
-  measurement tool: `confai measure`/`steep` (blocked) or `sev-snp-measure` against
-  the IGVM. Until then it's recorded, not enforced.
+  measurement tool: `confai measure`/`steep` — **unblocked 2026-07-14, steep is
+  now public** — or `sev-snp-measure` against the IGVM. Until wired it's
+  recorded, not enforced.
 - **Cert-chain collateral:** verify reports `collateral_verified: false` — enable
   VCEK→ASK→ARK chain verification (KDS is reachable via `world` egress).
 
