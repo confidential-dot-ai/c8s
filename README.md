@@ -308,7 +308,9 @@ attestation and reports the operator keys it pins.
 
 ```text
 api/               CRD types
-cmd/               Binaries: cds, c8s, get-cert, ratls-mesh, nri-image-policy
+cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy,
+                   policy-monitor, rtmr3-measurer (cmd/cds is only the
+                   Dockerfile for the `c8s cds` subcommand, internal/cmds/cds)
 internal/          Operator, webhook, attestation, mesh CA, embedded Helm chart
 pkg/               Public Go libraries (see Libraries above)
 kata-guest-base/   Confidential guest image recipe for pod-as-CVM

@@ -3,17 +3,17 @@ name: Kata guest base
 # Builds + pushes the kata-guest-base rootfs image — the kata-native
 # guest every c8s kata-qemu-snp pod boots into. kata-qemu does measured
 # direct-kernel boot (no IGVM/UKI), so we publish the parts kata wants: a
-# hardened kernel (built by steep), a dm-verity erofs rootfs (built by
+# hardened kernel (built by steep), a dm-verity ext4 rootfs (built by
 # kata's osbuilder, with our ratls-mesh / attestation-service /
 # policy-monitor + bootstrap allowlist baked into the verity root), and
 # the verity params. The rootfs root hash rides in the kata kernel
 # cmdline and is folded into the SNP kernel-hashes launch measurement;
-# per-pod container images (assam, cert-issuer, workloads) are secondary
+# per-pod container images (cds, get-cert, workloads) are secondary
 # measurements the operator attests post-install.
 #
 # Output: ghcr.io/confidential-dot-ai/kata-guest-base:<tag> via `oras push`. Flat
 # at the org level matches every other c8s artifact
-# (ghcr.io/confidential-dot-ai/{assam,cert-issuer,ratls-mesh,...}).
+# (ghcr.io/confidential-dot-ai/{cds,get-cert,ratls-mesh,...}).
 #
 # Every build also publishes a DEBUG variant at <tag>-debug (build.sh
 # Step 5): the same rootfs except the baked kata-agent policy allows the

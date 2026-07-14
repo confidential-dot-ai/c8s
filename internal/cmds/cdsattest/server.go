@@ -136,18 +136,18 @@ func (s *Server) handleCDSCert(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	nonceB64 := r.URL.Query().Get("nonce")
 	if nonceB64 == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "missing nonce")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "missing nonce")
 		return
 	}
 	nonce, err := base64.RawURLEncoding.DecodeString(nonceB64)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "nonce must be base64url")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce must be base64url")
 		return
 	}
 	// The freshness guarantee rests on a high-entropy, client-chosen nonce bound
 	// into report_data; reject anything too short to carry it.
 	if len(nonce) < minNonceBytes {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "nonce too short")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce too short")
 		return
 	}
 
@@ -163,7 +163,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	key, err := overenc.GenerateServerKey()
 	if err != nil {
 		s.log.Error("generate session key", "error", err)
-		writeErr(w, http.StatusInternalServerError, "internal", "key generation failed")
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "key generation failed")
 		return
 	}
 	pub := key.Public()
@@ -175,7 +175,7 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
-		writeErr(w, http.StatusBadGateway, "attestation_unavailable", "could not obtain attestation evidence")
+		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
 		return
 	}
 
@@ -207,7 +207,7 @@ func (s *Server) handleAttestationTLSCert(w http.ResponseWriter, r *http.Request
 	spki, err := s.servingLeafSPKI()
 	if err != nil {
 		s.log.Error("tls-cert binding unavailable", "error", err)
-		writeErr(w, http.StatusNotImplemented, "binding_unavailable",
+		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable,
 			"tls-cert binding is not configured on this LB (set --serving-cert-file)")
 		return
 	}
@@ -219,7 +219,7 @@ func (s *Server) handleAttestationTLSCert(w http.ResponseWriter, r *http.Request
 	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
-		writeErr(w, http.StatusBadGateway, "attestation_unavailable", "could not obtain attestation evidence")
+		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
 		return
 	}
 
@@ -260,7 +260,7 @@ func (s *Server) servingLeafSPKI() ([]byte, error) {
 func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	var req types.HandshakeRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid JSON")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid JSON")
 		return
 	}
 
@@ -273,33 +273,33 @@ func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	if !ok || now.Sub(entry.createdAt) > s.cfg.NonceTTL {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "unknown or expired nonce")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "unknown or expired nonce")
 		return
 	}
 
 	nonce, err := base64.RawURLEncoding.DecodeString(req.Nonce)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "nonce must be base64url")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce must be base64url")
 		return
 	}
 	clientX, err1 := base64.RawURLEncoding.DecodeString(req.ClientX25519)
 	ct, err2 := base64.RawURLEncoding.DecodeString(req.MLKEMCt)
 	if err1 != nil || err2 != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "handshake fields must be base64url")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "handshake fields must be base64url")
 		return
 	}
 
 	channel, err := entry.key.Agree(overenc.Handshake{ClientX25519: clientX, MLKEMCiphertext: ct}, nonce)
 	if err != nil {
 		s.log.Warn("handshake agree failed", "error", err)
-		writeErr(w, http.StatusBadRequest, "channel_error", "key agreement failed")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "key agreement failed")
 		return
 	}
 
 	idRaw := make([]byte, 16)
 	if _, err := rand.Read(idRaw); err != nil {
 		s.log.Error("generate session id", "error", err)
-		writeErr(w, http.StatusInternalServerError, "internal", "session id generation failed")
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "session id generation failed")
 		return
 	}
 	id := base64.RawURLEncoding.EncodeToString(idRaw)
@@ -333,29 +333,29 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if session.channel == nil {
-		writeErr(w, http.StatusUnauthorized, "channel_error", "no over-encryption session")
+		writeErr(w, http.StatusUnauthorized, types.ErrorCodeChannelError, "no over-encryption session")
 		return
 	}
 
 	recBytes, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "channel_error", "read record")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "read record")
 		return
 	}
 	var rec overenc.Record
 	if err := cbor.Unmarshal(recBytes, &rec); err != nil {
-		writeErr(w, http.StatusBadRequest, "channel_error", "invalid record")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "invalid record")
 		return
 	}
 	plaintext, err := session.channel.Open(rec, overenc.RequestAAD())
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "channel_error", "decrypt failed")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "decrypt failed")
 		return
 	}
 
 	var env types.TunnelRequest
 	if err := cbor.Unmarshal(plaintext, &env); err != nil {
-		writeErr(w, http.StatusBadRequest, "channel_error", "invalid request envelope")
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeChannelError, "invalid request envelope")
 		return
 	}
 
@@ -367,12 +367,12 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 	respCBOR, err := cbor.Marshal(resp)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "marshal response envelope")
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "marshal response envelope")
 		return
 	}
 	out, err := session.channel.Seal(respCBOR, overenc.ResponseAAD())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "seal failed")
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "seal failed")
 		return
 	}
 	writeCBOR(w, http.StatusOK, out)
@@ -423,7 +423,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeCBOR(w http.ResponseWriter, status int, v any) {
 	b, err := cbor.Marshal(v)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "marshal failed")
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "marshal failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/cbor")

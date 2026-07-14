@@ -20,7 +20,8 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// Enforced on the SNP path only; ignored for TDX (see verifyTDXOnline).
+	// Enforced on the SNP path only; dropped for TDX (see
+	// attestationclient.EvidencePolicy).
 	Measurements [][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
@@ -28,7 +29,8 @@ type VerifyPolicy struct {
 	// (bootloader, TEE, reserved, snp, microcode, etc.) — each component
 	// of the current TCB must be >= the corresponding minimum.
 	// If zero, any TCB version is accepted.
-	// Enforced on the SNP path only; ignored for TDX (see verifyTDXOnline).
+	// Enforced on the SNP path only; dropped for TDX (see
+	// attestationclient.EvidencePolicy).
 	MinTCBVersion uint64
 
 	// AllowDebug controls whether debug-mode guests are accepted.

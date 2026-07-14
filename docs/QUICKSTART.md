@@ -78,13 +78,13 @@ and pass its name at install time:
 
 ```sh
 kubectl create namespace c8s-system
-kubectl create secret docker-registry ghcr-secret \
+kubectl create secret docker-registry ghcr-pull-secret \
   -n c8s-system \
   --docker-server=ghcr.io \
   --docker-username=<user-or-x-access-token> \
   --docker-password="$GITHUB_TOKEN"
 
-c8s install --namespace c8s-system --image-pull-secret ghcr-secret \
+c8s install --namespace c8s-system --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
 

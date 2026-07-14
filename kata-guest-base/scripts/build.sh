@@ -11,7 +11,7 @@
 # not a self-booting image:
 #
 #   kernel = <vmlinuz>                 a bare bzImage  (steep's hardened kernel)
-#   image  = <kata-rootfs.img>         a 2-partition image: p1=erofs rootfs,
+#   image  = <kata-rootfs.img>         a 2-partition image: p1=ext4 rootfs,
 #                                      p2=dm-verity hash tree (NO superblock)
 #   kernel_verity_params = root_hash=…,salt=…,data_blocks=…,…
 #

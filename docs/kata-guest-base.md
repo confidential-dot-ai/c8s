@@ -19,7 +19,7 @@ enforcement ([`kata-image-policy.md`](kata-image-policy.md)) hangs off
 it.
 
 > **Boot model in one line.** kata-qemu does measured *direct-kernel
-> boot* (a bare `vmlinuz` + a dm-verity erofs rootfs whose root hash
+> boot* (a bare `vmlinuz` + a dm-verity ext4 rootfs whose root hash
 > rides in the kernel cmdline) — no IGVM or UKI on kata's path. The
 > mechanics (`kernel_verity_params`, SNP `kernel-hashes`, 1 vCPU for a
 > stable digest) are in
@@ -379,4 +379,4 @@ launch-digest mismatch at attestation time and clients refuse the pod.
 - [`kata-guest-base/README.md`](../kata-guest-base/README.md) — the recipe: boot model, what's baked in, build, consume, measure.
 - [`kata-image-policy.md`](kata-image-policy.md) — in-guest per-image enforcement (`policy-monitor`).
 - [`kata.md`](kata.md) — installing and enforcing the kata runtime (`c8s install --kata`).
-- [`install-flows.md`](install-flows.md) — how the three install modes assemble the platform.
+- [`install-flows.md`](install-flows.md) — how the two install modes assemble the platform.

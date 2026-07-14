@@ -11,7 +11,7 @@ the gaps it does not.
 > "part of the launch measurement", that means it sits on the dm-verity
 > root: its bytes are covered by the SNP launch digest and cannot change
 > without changing the digest. The measurement mechanics (osbuilder
-> dm-verity erofs, `kernel-hashes`, the verity root hash in the kata
+> dm-verity ext4, `kernel-hashes`, the verity root hash in the kata
 > kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
@@ -594,9 +594,12 @@ What the host still sees is the *transport*: it brokers the guest's
 outbound network, so for an anonymous pull from a public registry it
 observes which image reference and layers are fetched (a metadata
 leak, not a content-confidentiality break — the bytes are public).
-Registry credentials for private pulls are delivered to the in-guest
-CDH after attestation (KBS) rather than baked, so they are not
-exposed to the host.
+Registry credentials for private pulls are currently baked into the
+dm-verity root (`ghcr-auth.json`, covered by the launch measurement —
+see `kata-guest-base/README.md`), so they are not host-readable at
+runtime but rotate only with an image rebuild. KBS delivery to the
+in-guest CDH after attestation (`kbs://` via
+`kata.guestImage.registryAuth`) is the secret-free alternative.
 
 policy-monitor still enforces on CreateContainer (it reads the
 digest from the bundle's `config.json`). Moving the decision earlier

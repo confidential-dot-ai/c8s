@@ -421,7 +421,7 @@ real credentials, keep in mind:
 
 ## Bump `KATA_SRC_COMMIT` in lockstep with `KATA_VERSION`
 
-`kata-guest-base/scripts/build.sh:79`
+`kata-guest-base/scripts/build.sh` (`KATA_SRC_COMMIT`)
 
 The kata source (osbuilder) is fetched by **immutable commit** (`KATA_SRC_COMMIT`),
 not by the `KATA_VERSION` git tag — a git tag is mutable, and a re-pointed
