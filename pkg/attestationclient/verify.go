@@ -89,10 +89,9 @@ type EvidencePolicy struct {
 	MinTcb *types.MinTcb
 
 	// Measurements is the set of acceptable launch measurements; empty
-	// accepts any (callers are expected to warn). Enforced on the SNP paths
-	// only — the TDX verifier does not surface a launch measurement, so a
-	// pinned set is silently ignored for tdx. Wire that through before
-	// relying on TDX in a measurement-pinned deployment.
+	// accepts any (callers are expected to warn). The TDX verifier surfaces
+	// no launch measurement, so a pinned set fails closed for tdx until
+	// measurement enforcement is wired through.
 	Measurements [][]byte
 }
 
@@ -145,8 +144,13 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 }
 
 func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
-	// No MinTcb (the TDX verifier has no such parameter) and no measurement
-	// enforcement (no launch measurement surfaced) — see EvidencePolicy.
+	// The TDX verifier surfaces no launch measurement, so a pinned set can
+	// never be satisfied: fail closed like the SNP missing-digest case
+	// rather than silently skipping the caller's identity anchor.
+	if len(policy.Measurements) > 0 {
+		return types.VerifyResponse{}, fmt.Errorf("%w: TDX verifier surfaces no launch measurement", ErrMeasurementNotAllowed)
+	}
+	// No MinTcb: the TDX verifier has no such parameter.
 	return c.VerifyEnforced(ctx, verifyRequest(evidence, policy.ExpectedReportData[:], policy.AllowDebug, nil))
 }
 

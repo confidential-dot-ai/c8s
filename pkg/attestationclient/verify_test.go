@@ -111,9 +111,13 @@ func TestVerifyEvidenceWireForm(t *testing.T) {
 			var captured types.VerifyRequest
 			srv := verifyServer(t, verifyResult(tc.platform, true, boolPtr(true), measurement), &captured)
 
+			// No pin for tdx: a pinned set fails closed there (tested below).
+			policy := EvidencePolicy{ExpectedReportData: erd, Measurements: [][]byte{measurement}}
+			if tc.platform == string(types.PlatformTdx) {
+				policy.Measurements = nil
+			}
 			_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
-				types.AttestationEvidence{Platform: tc.platform, Evidence: json.RawMessage(`{"x":1}`)},
-				EvidencePolicy{ExpectedReportData: erd, Measurements: [][]byte{measurement}})
+				types.AttestationEvidence{Platform: tc.platform, Evidence: json.RawMessage(`{"x":1}`)}, policy)
 			if err != nil {
 				t.Fatalf("VerifyEvidence: %v", err)
 			}
@@ -177,14 +181,24 @@ func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 		}
 	})
 
-	// The TDX verifier surfaces no launch measurement; a pinned set is
-	// documented as ignored (see EvidencePolicy.Measurements).
-	t.Run("tdx ignores pinned measurements and sends no min_tcb", func(t *testing.T) {
+	// The TDX verifier surfaces no launch measurement, so a pinned set can
+	// never be satisfied and must fail closed, not be silently skipped.
+	t.Run("tdx with pinned measurements fails closed", func(t *testing.T) {
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), nil), nil)
+		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
+			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
+		if !errors.Is(err, ErrMeasurementNotAllowed) {
+			t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
+		}
+	})
+
+	t.Run("tdx sends no min_tcb", func(t *testing.T) {
 		var captured types.VerifyRequest
 		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), nil), &captured)
 		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
 			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
-			EvidencePolicy{ExpectedReportData: erd, Measurements: pin, MinTcb: &types.MinTcb{Snp: 1}})
+			EvidencePolicy{ExpectedReportData: erd, MinTcb: &types.MinTcb{Snp: 1}})
 		if err != nil {
 			t.Fatalf("VerifyEvidence: %v", err)
 		}

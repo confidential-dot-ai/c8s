@@ -20,8 +20,8 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// Enforced on the SNP path only; dropped for TDX (see
-	// attestationclient.EvidencePolicy).
+	// The TDX verifier surfaces no launch measurement, so a pinned set fails
+	// closed against a TDX peer (see attestationclient.EvidencePolicy).
 	Measurements [][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
