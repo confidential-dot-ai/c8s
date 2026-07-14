@@ -97,7 +97,8 @@ func TestHandleNewContainer_AllowedDigest(t *testing.T) {
 
 	cid := "abcdef0123"
 	writeConfigJSON(t, watchDir, cid, map[string]string{
-		"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
+		"io.kubernetes.cri.container-type": "container",
+		"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
 	})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
@@ -114,7 +115,8 @@ func TestHandleNewContainer_DeniedDigest(t *testing.T) {
 
 	cid := "deadbeef"
 	writeConfigJSON(t, watchDir, cid, map[string]string{
-		"io.kubernetes.cri.image-name": "ghcr.io/evil/badimage@sha256:" + denied,
+		"io.kubernetes.cri.container-type": "container",
+		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
 	})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
@@ -200,7 +202,8 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		body, _ := json.Marshal(ociSpec{
 			Annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
+				"io.kubernetes.cri.container-type": "container",
+				"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
 			},
 		})
 		_ = os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644)
@@ -208,6 +211,79 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 	m.handleNewContainer(context.Background(), dir)
 	if calls := killer.snapshot(); len(calls) != 0 {
 		t.Fatalf("expected allow (no kills) after late config.json, got %+v", calls)
+	}
+}
+
+// TestReadConfigJSON_WaitsForContainerType covers the mid-write race: config.json
+// parses as valid JSON but its CRI annotations haven't landed yet.
+// readConfigJSON must keep polling until container-type is present, not decide
+// on the annotation-less spec.
+func TestReadConfigJSON_WaitsForContainerType(t *testing.T) {
+	m, _, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "mid-write"
+	// A valid but annotation-less config.json (kata-agent has written the file
+	// but not the annotations yet).
+	writeConfigJSON(t, watchDir, cid, map[string]string{})
+	path := filepath.Join(watchDir, cid, "config.json")
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		writeConfigJSON(t, watchDir, cid, map[string]string{
+			"io.kubernetes.cri.container-type": "container",
+			"io.kubernetes.cri.image-name":     "repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		})
+	}()
+	spec, err := m.readConfigJSON(context.Background(), path)
+	if err != nil {
+		t.Fatalf("readConfigJSON: %v", err)
+	}
+	if _, ok := spec.Annotations["io.kubernetes.cri.container-type"]; !ok {
+		t.Fatalf("expected readConfigJSON to wait for the container-type annotation; got %+v", spec.Annotations)
+	}
+}
+
+// TestReadConfigJSON_DeadlineFailsClosed proves that a config.json that parses
+// but never grows a container-type annotation (a bundle with the CRI
+// annotations stripped, e.g. a host trying to evade policy) returns the parsed
+// spec with a nil error on deadline — so the caller still classifies and denies
+// it, rather than getting an error and skipping enforcement (fail-open).
+func TestReadConfigJSON_DeadlineFailsClosed(t *testing.T) {
+	m, _, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "stripped"
+	writeConfigJSON(t, watchDir, cid, map[string]string{"unrelated": "x"})
+	path := filepath.Join(watchDir, cid, "config.json")
+	spec, err := m.readConfigJSON(context.Background(), path)
+	if err != nil {
+		t.Fatalf("want nil error so the caller fails closed on the returned spec, got %v", err)
+	}
+	if spec == nil {
+		t.Fatal("want the parsed (annotation-less) spec returned so the caller denies")
+	}
+	if isSandbox(spec.Annotations) {
+		t.Fatal("annotation-less spec must not classify as a sandbox")
+	}
+	if _, ok := extractDigest(spec.Annotations); ok {
+		t.Fatal("annotation-less spec must not yield a digest — caller must deny")
+	}
+}
+
+// TestHandleNewContainer_SandboxLateContainerType_NotKilled is the safety test
+// for the fix: the pod sandbox (pause) container's container-type=sandbox
+// annotation can be observed late. policy-monitor must wait for it and allow
+// the sandbox — decking it on the mid-write spec would SIGKILL the measured
+// pause and break the pod.
+func TestHandleNewContainer_SandboxLateContainerType_NotKilled(t *testing.T) {
+	m, killer, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := "late-sandbox"
+	writeConfigJSON(t, watchDir, cid, map[string]string{}) // annotations not written yet
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		writeConfigJSON(t, watchDir, cid, map[string]string{
+			"io.kubernetes.cri.container-type": "sandbox",
+		})
+	}()
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("sandbox must be allowed once its container-type lands; got kills %+v", calls)
 	}
 }
 

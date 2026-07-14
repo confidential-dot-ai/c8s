@@ -399,23 +399,46 @@ func (m *monitor) kill(cid string) {
 }
 
 // readConfigJSON retries reading + parsing config.json for the budget
-// configReadDeadline. The retry absorbs the small gap between
-// directory creation (which triggers our IN_CREATE event) and
-// kata-agent finishing the config.json write.
+// configReadDeadline. The retry absorbs the gap between directory creation
+// (which triggers our IN_CREATE event, and re-seed after kata-agent replaces
+// the watch dir) and kata-agent finishing the config.json write.
+//
+// It waits not just for the file to parse but for the OCI annotations to be
+// present (hasContainerType): kata-agent writes config.json and its CRI/kata
+// annotations as part of one create-container step, but policy-monitor can
+// observe the file after it parses yet before the annotations land — and a
+// decision on that half-written spec misclassifies the pod sandbox (denied,
+// which would SIGKILL the measured pause and break the pod) and reads no image
+// digest for a workload. On deadline it returns the last parsed spec anyway
+// (never nil-with-no-error for a spec that did parse) so the caller still fails
+// closed: a genuinely annotation-less bundle — e.g. a host that stripped the
+// annotations to evade policy — is denied, not skipped.
 func (m *monitor) readConfigJSON(ctx context.Context, path string) (*ociSpec, error) {
 	deadline := time.Now().Add(m.configReadDeadline)
+	var lastSpec *ociSpec
 	var lastErr error
 	for {
 		spec, err := readOCISpec(path)
-		if err == nil {
+		switch {
+		case err == nil && hasContainerType(spec.Annotations):
 			return spec, nil
-		}
-		lastErr = err
-		if !errors.Is(err, os.ErrNotExist) && !isPartialJSON(err) {
-			// Unrecoverable: not a transient race. Return immediately.
-			return nil, err
+		case err == nil:
+			// Parsed, but the annotations we key on aren't written yet.
+			// Remember it so a deadline still fails closed rather than skipping
+			// enforcement, and retry for the annotations to appear.
+			lastSpec = spec
+			lastErr = errPartialJSON
+		default:
+			lastErr = err
+			if !errors.Is(err, os.ErrNotExist) && !isPartialJSON(err) {
+				// Unrecoverable: not a transient race. Return immediately.
+				return nil, err
+			}
 		}
 		if time.Now().After(deadline) {
+			if lastSpec != nil {
+				return lastSpec, nil
+			}
 			return nil, lastErr
 		}
 		select {
@@ -424,6 +447,22 @@ func (m *monitor) readConfigJSON(ctx context.Context, path string) (*ociSpec, er
 		case <-time.After(m.configReadInterval):
 		}
 	}
+}
+
+// hasContainerType reports whether the OCI annotations carry a CRI
+// container-type marker (io.kubernetes.cri.container-type / the CRI-O
+// equivalent). Every container kata-agent creates for a Kubernetes pod — both
+// the sandbox and the workload — carries one, so its presence is a reliable
+// "kata-agent finished writing the annotations" signal. Absence means either a
+// mid-write read (retry) or a bundle with no CRI annotations at all (denied on
+// deadline, fail-closed).
+func hasContainerType(annotations map[string]string) bool {
+	for _, key := range k8sContainerTypeKeys {
+		if _, ok := annotations[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ociSpec is the subset of the OCI Runtime Spec we care about: the
