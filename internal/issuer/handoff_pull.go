@@ -18,7 +18,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 )
 
-const defaultPullRetryInterval = 2 * time.Second
+// DefaultPullRetryInterval is the fixed cadence between transient-failure
+// retries when PullConfig.RetryInterval is zero.
+const DefaultPullRetryInterval = 2 * time.Second
 
 // AttestKeyClient obtains a TEE-bound EAR for a caller-generated key from a
 // CDS peer's /attest-key. *attestclient.Client satisfies it.
@@ -44,7 +46,7 @@ type PullConfig struct {
 	// Logger is optional; nil uses slog.Default().
 	Logger *slog.Logger
 	// RetryInterval is the fixed cadence between transient-failure retries;
-	// zero uses defaultPullRetryInterval.
+	// zero uses DefaultPullRetryInterval.
 	RetryInterval time.Duration
 }
 
@@ -148,7 +150,7 @@ func PullHandoff(ctx context.Context, cfg PullConfig) (*HandoffMaterial, error) 
 	}
 	interval := cfg.RetryInterval
 	if interval <= 0 {
-		interval = defaultPullRetryInterval
+		interval = DefaultPullRetryInterval
 	}
 
 	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -160,21 +162,21 @@ func PullHandoff(ctx context.Context, cfg PullConfig) (*HandoffMaterial, error) 
 		return nil, fmt.Errorf("marshal handoff signer pubkey: %w", err)
 	}
 
-	ear, err := pullRetry(ctx, logger, interval, "attest-key", func() (string, error) {
+	ear, err := PullRetry(ctx, logger, interval, "attest-key", func() (string, error) {
 		return cfg.Attest.AttestKey(ctx, cfg.AttestationApiURL, pubDER)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attest-key: %w", err)
 	}
 
-	return pullRetry(ctx, logger, interval, "handoff", func() (*HandoffMaterial, error) {
+	return PullRetry(ctx, logger, interval, "handoff", func() (*HandoffMaterial, error) {
 		return RequestHandoff(ctx, cfg.Deps, cfg.PeerURL, ear, signer, cfg.HTTPClient)
 	})
 }
 
-// pullRetry retries op while ClassifyPullError reports PullTransient, on a
+// PullRetry retries op while ClassifyPullError reports PullTransient, on a
 // fixed cadence until ctx is done, returning the last error.
-func pullRetry[T any](ctx context.Context, logger *slog.Logger, interval time.Duration, stage string, op func() (T, error)) (T, error) {
+func PullRetry[T any](ctx context.Context, logger *slog.Logger, interval time.Duration, stage string, op func() (T, error)) (T, error) {
 	for {
 		v, err := op()
 		if ClassifyPullError(err) != PullTransient {

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -20,7 +21,12 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-const maxCABundleBytes = 1 << 20
+const (
+	maxCABundleBytes = 1 << 20
+	// maxErrorBodyBytes caps how much of the peer's non-2xx /ca body lands
+	// in the error message.
+	maxErrorBodyBytes = 8 << 10
+)
 
 type config struct {
 	peerURL           string
@@ -44,6 +50,18 @@ type report struct {
 	ServedCAMatch           bool   `json:"served_ca_match"`
 }
 
+// errorf prints one error line with control characters stripped, so an
+// untrusted peer body embedded in err cannot inject terminal escapes.
+func errorf(w io.Writer, format string, args ...any) {
+	msg := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, fmt.Sprintf(format, args...))
+	fmt.Fprintf(w, "error: %s\n", msg)
+}
+
 // run pulls the CA over /handoff, verifies it is the live trust root served
 // on /ca, and renders the report, returning the process exit code. It is the
 // unit-testable core (no os.Exit inside).
@@ -52,40 +70,42 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	// caller can parse it directly.
 	logger, err := certutil.NewJSONLoggerTo(errOut, cfg.logLevel)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: --log-level: %v\n", err)
+		errorf(errOut, "--log-level: %v", err)
+		return exitUsage
+	}
+
+	if cfg.timeout <= 0 {
+		errorf(errOut, "--timeout must be positive; got %s", cfg.timeout)
 		return exitUsage
 	}
 
 	parsed, err := url.Parse(cfg.peerURL)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: --peer-url: %v\n", err)
+		errorf(errOut, "--peer-url: %v", err)
 		return exitUsage
 	}
 	// Same guard as get-cert's cdsHTTPClient: a plaintext peer URL would skip
 	// RA-TLS attestation of the peer entirely.
 	if parsed.Scheme != "https" {
-		fmt.Fprintf(errOut, "error: --peer-url must use https (RA-TLS); got scheme %q\n", parsed.Scheme)
+		errorf(errOut, "--peer-url must use https (RA-TLS); got scheme %q", parsed.Scheme)
 		return exitUsage
 	}
 
 	pinned, err := ratls.ParseHexMeasurementsList(cfg.measurements)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: --measurements: %v\n", err)
+		errorf(errOut, "--measurements: %v", err)
 		return exitUsage
 	}
 	if len(pinned) == 0 {
-		fmt.Fprintf(errOut, "error: --measurements: no usable measurement\n")
+		errorf(errOut, "--measurements: no usable measurement")
 		return exitUsage
 	}
 	// The same digest set pins both channels: the peer's RA-TLS serving cert
 	// and its handoff issuer EAR. The EAR-side map is derived from the
 	// validated digests (hex.EncodeToString yields the NormalizeMeasurement
-	// form) so the two representations stay in sync. NOTE: the RA-TLS pin is
-	// enforced on SNP only; the attestation-api's TDX verifier surfaces no
-	// launch measurement, so against a TDX peer that channel's pin is a
-	// silent no-op and the EAR channel becomes the sole anchor. Handoff is
-	// SNP node-as-CVM today; wire TDX measurement enforcement into pkg/ratls
-	// before pointing this at a TDX peer.
+	// form) so the two representations stay in sync. Against a TDX peer the
+	// RA-TLS pin fails closed (its verifier surfaces no launch measurement);
+	// handoff is SNP node-as-CVM today.
 	allowed := make(map[string]bool, len(pinned))
 	for _, m := range pinned {
 		allowed[hex.EncodeToString(m)] = true
@@ -93,7 +113,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 
 	httpClient, err := ratls.NewVerifyingHTTPClient(pinned, cfg.attestationApiURL)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
+		errorf(errOut, "%v", err)
 		return exitUsage
 	}
 
@@ -103,7 +123,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	// validation runs right at the edge of --timeout.
 	keyProvider, err := issuer.NewJWKSKeyProvider(ctx, peerURL+"/.well-known/jwks.json", time.Minute, httpClient, logger)
 	if err != nil {
-		fmt.Fprintf(errOut, "error: JWKS key provider: %v\n", err)
+		errorf(errOut, "JWKS key provider: %v", err)
 		return exitUnavailable
 	}
 
@@ -125,21 +145,43 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	if err != nil {
 		var handoffErr *issuer.HandoffStatusError
 		if errors.As(err, &handoffErr) && handoffErr.Status == http.StatusNotFound {
-			fmt.Fprintf(errOut, "error: %v (if /handoff is not mounted, enable it with cds.handoff.enabled=true and pinned cds.measurements)\n", err)
+			errorf(errOut, "%v (if /handoff is not mounted, enable it with cds.handoff.enabled=true and pinned cds.measurements)", err)
 		} else {
-			fmt.Fprintf(errOut, "error: %v\n", err)
+			errorf(errOut, "%v", err)
 		}
 		return exitCodeFor(err)
 	}
 	logger.Info("handoff material received and validated",
 		"fingerprint", certutil.CertFingerprint(material.CACert.Raw))
 
-	served, err := fetchServedCA(ctx, httpClient, peerURL)
+	// Same retry ladder as the pull stages: a 5xx/transport blip on /ca right
+	// after a successful handoff is availability, not a verdict.
+	served, err := issuer.PullRetry(ctx, logger, issuer.DefaultPullRetryInterval, "served-ca", func() ([]*x509.Certificate, error) {
+		return fetchServedCA(ctx, httpClient, peerURL)
+	})
 	if err != nil {
-		fmt.Fprintf(errOut, "error: fetch served /ca: %v\n", err)
+		errorf(errOut, "fetch served /ca: %v", err)
 		return exitCodeFor(err)
 	}
 
+	rep, code := reportFor(material, served)
+	if !rep.ServedCAMatch {
+		logger.Error("handed-off CA cert is not in the served /ca bundle")
+	}
+
+	line, err := json.Marshal(rep)
+	if err != nil {
+		errorf(errOut, "marshal report: %v", err)
+		return exitFailed
+	}
+	fmt.Fprintln(out, string(line))
+
+	return code
+}
+
+// reportFor builds the operator-facing report and the exit code it implies:
+// exitVerified only when the handed-off CA cert is in the served /ca bundle.
+func reportFor(material *issuer.HandoffMaterial, served []*x509.Certificate) (report, int) {
 	rep := report{
 		CACertFingerprintSHA256: certutil.CertFingerprint(material.CACert.Raw),
 		CACertSubject:           material.CACert.Subject.String(),
@@ -148,20 +190,9 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		ServedCAMatch:           servedCAMatch(served, material.CACert),
 	}
 	if !rep.ServedCAMatch {
-		logger.Error("handed-off CA cert is not in the served /ca bundle")
+		return rep, exitFailed
 	}
-
-	line, err := json.Marshal(rep)
-	if err != nil {
-		fmt.Fprintf(errOut, "error: marshal report: %v\n", err)
-		return exitFailed
-	}
-	fmt.Fprintln(out, string(line))
-
-	if !rep.ServedCAMatch {
-		return exitFailed
-	}
-	return exitVerified
+	return rep, exitVerified
 }
 
 // exitCodeFor maps a final pull error to a process exit code, derived from the
@@ -183,6 +214,8 @@ func exitCodeFor(err error) int {
 // fetchServedCA GETs the peer's public /ca bundle over the same RA-TLS client.
 // It reads one byte past the cap so an oversized bundle is a clear error, not
 // a silent truncation that could drop the handed-off CA and fail the match.
+// Non-200s surface as *issuer.HandoffStatusError so ClassifyPullError keeps
+// availability (5xx/429) and verdicts apart here too.
 func fetchServedCA(ctx context.Context, client *http.Client, peerURL string) ([]*x509.Certificate, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peerURL+"/ca", nil)
 	if err != nil {
@@ -194,7 +227,8 @@ func fetchServedCA(ctx context.Context, client *http.Client, peerURL string) ([]
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("/ca returned %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return nil, &issuer.HandoffStatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	pemBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxCABundleBytes+1))
 	if err != nil {
