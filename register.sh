@@ -25,9 +25,25 @@
 #     SA=arc-e2e RUNNER_IMAGE=us-central1-docker.pkg.dev/.../confidential-runner-gcp:v2 \
 #     KUBE_CONTEXT=gke_conf-500518_us-central1-a_arc-host ./register.sh
 #   # rename (clean): RENAME_FROM=confidential-e2e SCALE_SET=confidential-gcp ... ./register.sh
+#   # company org via GitHub App (org prod — see org-setup.md; release name differs
+#   # from the cifrai scale set so both coexist, but the runs-on LABEL stays
+#   # `confidential-bm` via RUNNER_SCALE_SET_NAME):
+#   APP_ID=… APP_INSTALLATION_ID=… APP_PRIVATE_KEY_FILE=app.pem \
+#     ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=confidential-bm-conf \
+#     RUNNER_SCALE_SET_NAME=confidential-bm RUNNER_GROUP=confidential \
+#     MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
 set -euo pipefail
 
-: "${GH_RUNNER_TOKEN:?set GH_RUNNER_TOKEN=<runner registration credential> (never committed/printed)}"
+# Credential: a PAT (GH_RUNNER_TOKEN) or a GitHub App (APP_ID +
+# APP_INSTALLATION_ID + APP_PRIVATE_KEY_FILE). App is the org-prod path —
+# scoped to "Self-hosted runners: rw", revocable, not tied to a person.
+GH_RUNNER_TOKEN="${GH_RUNNER_TOKEN:-}"
+APP_ID="${APP_ID:-}"; APP_INSTALLATION_ID="${APP_INSTALLATION_ID:-}"; APP_PRIVATE_KEY_FILE="${APP_PRIVATE_KEY_FILE:-}"
+if [ -z "$GH_RUNNER_TOKEN" ] && { [ -z "$APP_ID" ] || [ -z "$APP_INSTALLATION_ID" ] || [ -z "$APP_PRIVATE_KEY_FILE" ]; }; then
+  echo "credential missing: set GH_RUNNER_TOKEN=<PAT>  OR  APP_ID= + APP_INSTALLATION_ID= + APP_PRIVATE_KEY_FILE=<key.pem>" >&2
+  exit 1
+fi
+[ -n "$APP_PRIVATE_KEY_FILE" ] && [ ! -r "$APP_PRIVATE_KEY_FILE" ] && { echo "APP_PRIVATE_KEY_FILE not readable: $APP_PRIVATE_KEY_FILE" >&2; exit 1; }
 : "${ORG_URL:?set ORG_URL=https://github.com/<org>  (or a repo URL)}"
 SCALE_SET="${SCALE_SET:-confidential-bm}"
 NS="${NS:-arc-runners}"
@@ -40,6 +56,8 @@ MAX_RUNNERS="${MAX_RUNNERS:-2}"
 RUNNER_IMAGE="${RUNNER_IMAGE:-}"      # optional container image override
 SA="${SA:-}"                          # optional template.spec.serviceAccountName
 RENAME_FROM="${RENAME_FROM:-}"        # optional old scale-set name to purge first
+RUNNER_GROUP="${RUNNER_GROUP:-}"      # optional org runner group (must exist first)
+RUNNER_SCALE_SET_NAME="${RUNNER_SCALE_SET_NAME:-}"  # optional runs-on label override (default: $SCALE_SET)
 CTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && CTX_ARG=(--kube-context "$KUBE_CONTEXT")
 KCTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && KCTX_ARG=(--context "$KUBE_CONTEXT")
 CHART_SS=oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
@@ -68,10 +86,19 @@ ensure_controller(){
 
 upsert_secret(){
   ensure_ns "$NS"
-  k create secret generic "$SECRET" -n "$NS" \
-    --from-literal=github_token="$GH_RUNNER_TOKEN" \
-    --dry-run=client -o yaml | k apply -f - >/dev/null
-  echo "secret: $NS/$SECRET upserted (token by reference — not in helm values)"
+  if [ -n "$APP_ID" ]; then
+    k create secret generic "$SECRET" -n "$NS" \
+      --from-literal=github_app_id="$APP_ID" \
+      --from-literal=github_app_installation_id="$APP_INSTALLATION_ID" \
+      --from-file=github_app_private_key="$APP_PRIVATE_KEY_FILE" \
+      --dry-run=client -o yaml | k apply -f - >/dev/null
+    echo "secret: $NS/$SECRET upserted (GitHub App by reference — not in helm values)"
+  else
+    k create secret generic "$SECRET" -n "$NS" \
+      --from-literal=github_token="$GH_RUNNER_TOKEN" \
+      --dry-run=client -o yaml | k apply -f - >/dev/null
+    echo "secret: $NS/$SECRET upserted (token by reference — not in helm values)"
+  fi
 }
 
 purge(){  # $1 = scale-set name to remove cleanly
@@ -97,6 +124,8 @@ install(){
   )
   [ -n "$RUNNER_IMAGE" ] && sets+=(--set "template.spec.containers[0].name=runner" --set "template.spec.containers[0].image=$RUNNER_IMAGE")
   [ -n "$SA" ] && sets+=(--set "template.spec.serviceAccountName=$SA")
+  [ -n "$RUNNER_GROUP" ] && sets+=(--set runnerGroup="$RUNNER_GROUP")
+  [ -n "$RUNNER_SCALE_SET_NAME" ] && sets+=(--set runnerScaleSetName="$RUNNER_SCALE_SET_NAME")
   if [ "$MODE" = template ]; then
     h template "$SCALE_SET" "$CHART_SS" --version "$CHART_VER" -n "$NS" \
       "${sets[@]}" \
@@ -130,4 +159,4 @@ upsert_secret
 [ -n "$RENAME_FROM" ] && purge "$RENAME_FROM"
 install
 verify
-echo "done. runs-on: $SCALE_SET   (repos must be PRIVATE — see OPEN-SOURCE.md)"
+echo "done. runs-on: ${RUNNER_SCALE_SET_NAME:-$SCALE_SET}   (repos must be PRIVATE — see OPEN-SOURCE.md)"

@@ -64,3 +64,34 @@ cluster (Model B), runs the E2E, tears it down.
 For prod, run ARC on a cloud cluster (e.g. a small GKE cluster) rather than
 local kind, and bind the runner's K8s SA to the GCP SA via Workload Identity
 Federation (see `e2e/README.md`) so Model-B provisioning needs no static keys.
+
+## Concrete: confidential-dot-ai rollout (2026-07-14)
+
+Verified constraints: b0xtch is org **member** (all `orgs/…/actions/runners`
+endpoints → 403 — registration needs org admin or the runners fine-grained
+role); org plan is **enterprise** (custom runner groups available). So the only
+**org-owner** action is minting the App (~3 min):
+
+1. Owner: Org → Settings → Developer settings → GitHub Apps → **New GitHub App**
+   — name `confidential-ci-runners`, homepage
+   `https://github.com/confidential-dot-ai/confidential-ci`, **Webhook: Active
+   unchecked**, Organization permissions → **Self-hosted runners: Read & write**
+   (nothing else; Metadata:Read is implied). Create → note **App ID** →
+   **Generate a private key** (.pem downloads) → sidebar **Install App** →
+   confidential-dot-ai → **All repositories**. Hand off App ID + .pem
+   (installation ID is discoverable from the .pem via the API).
+2. Us, with the .pem (no owner needed): look up the installation ID, create the
+   `confidential` runner group via the API, then register on the metal cluster —
+   **the cifrai scale set stays** (test-org regression harness); the release
+   name differs but the `runs-on` label is identical in both orgs:
+
+```bash
+APP_ID=<id> APP_INSTALLATION_ID=<inst> APP_PRIVATE_KEY_FILE=<key.pem> \
+  ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=confidential-bm-conf \
+  RUNNER_SCALE_SET_NAME=confidential-bm RUNNER_GROUP=confidential \
+  MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
+```
+
+3. Smoke: a private confidential-dot-ai repo (e.g. `confidential-ci` itself)
+   runs a `runs-on: confidential-bm` job. Repos must be **private** and in the
+   runner group's allow-list.
