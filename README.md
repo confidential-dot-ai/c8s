@@ -1,8 +1,9 @@
 # confidential-ci
 
 Self-hosted, **confidential-computing** GitHub Actions runners + the confidential
-E2E pipeline they run. This folder is self-contained — lift it into its own repo
-(`confidential-ci`) and it's the single source of truth for the CI infra.
+E2E pipeline they run. Lives at **`confidential-dot-ai/confidential-ci`**
+(transferred from `b0xtch/confidential-ci` 2026-07-14) — the single source of
+truth for the CI infra. Must stay **private** (see `OPEN-SOURCE.md`).
 
 It exists because GitHub-hosted runners have no TEE access, so **local-TEE** tests
 — spin up a confidential VM/K8s cluster on the runner and attest it — can't run on
