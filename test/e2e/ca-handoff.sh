@@ -37,7 +37,7 @@ kget() {
   if ! out=$(kubectl "$@" 2>&1); then
     fail "kubectl $* failed: $out"
   fi
-  printf '%s' "$out"
+  printf '%s\n' "$out"
 }
 
 # --- discover the cds deployment ---------------------------------------------
