@@ -11,8 +11,9 @@ import (
 )
 
 // EvidenceProvider yields TEE attestation evidence whose report_data equals the
-// selected protocol binding. The returned evidence is
-// the attestation-rs SnpEvidence JSON the browser verifier consumes verbatim.
+// identity transcript hash (or the serving-leaf SPKI binding for pq=false). The
+// returned evidence is the attestation-rs SnpEvidence JSON the browser verifier
+// consumes verbatim.
 type EvidenceProvider interface {
 	Evidence(ctx context.Context, reportData []byte) (evidence json.RawMessage, platform, generation string, err error)
 }
