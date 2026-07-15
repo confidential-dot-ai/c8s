@@ -29,7 +29,7 @@
 #
 # Cluster prereqs (once, via c8s-e2e/cluster-prep/apply.sh): rke2 rootdisk PVC,
 # /var/lib/igvm/rke2.igvm, rke2-image-refs CM, bm-e2e RBAC (console).
-name: e2e-c8s-snp
+name: e2e-c8s
 on:
   workflow_dispatch:
     inputs:
@@ -37,12 +37,43 @@ on:
         description: c8s commit to test (a chart tag charts/c8s:0.1.0-g<short-sha> must exist)
         required: false
         default: main
-concurrency: c8s-snp-e2e # virtctl console is exclusive per VMI; one lane at a time
 
 jobs:
   e2e:
-    runs-on: confidential-bm
+    # PLATFORM MATRIX — one cell per target we ship on. Adding a platform =
+    # adding a row here + its provision seam (the "provision the test cluster"
+    # step is the only truly platform-specific part; install/attest/e2e/teardown
+    # are shared). Cells run independently: fail-fast off, one is not a gate on
+    # another.
+    #
+    #   bare metal (customers who plug in power cords: CW/Nebius/Humain)
+    #     - snp-metal  [GREEN]      KubeVirt SEV-SNP node-as-CVM on our metal
+    #     - tdx-metal  [TODO]       tdx-dev-host-1 is provisioned+idle; needs an
+    #                               ARC runner + a TDX rke2-node image (the
+    #                               rootdisk/dev-vm plays are gated sev_snp_enabled)
+    #   cloud (customers who rent infra: Baseten/Modal/RunPod)
+    #     - gke-snp    [TODO]       c8s-fleet gke_provisioner mints an ephemeral
+    #                               Confidential GKE cluster; provision seam swaps,
+    #                               install/attest/e2e reuse this job body
+    #     - gke-tdx    [TODO]       delta on gke-snp (confidential_node_type: tdx)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: snp-metal
+            runner: confidential-bm
+            refs_cm: rke2-image-refs      # producer-published image refs + golden
+            cvm_mode: node                # the k8s node IS the SNP guest
+            hardware_platform: sev-snp
+            ratls_platform: sev-snp
+            cores: 4                      # MUST match the image's measured smp
+            memory: 16Gi
+    name: e2e (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 55
+    # per-platform serialization: virtctl console is exclusive per VMI, and metal
+    # cells share one host — but cells of different platforms may run concurrently
+    concurrency: c8s-e2e-${{ matrix.platform }}
     env:
       NS: confai-images
       VM: c8s-e2e-${{ github.run_id }}
@@ -65,22 +96,44 @@ jobs:
           chmod +x bin/*
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
-      - name: resolve refs (rke2 image + golden digest + short sha)
+      - name: resolve refs (producer image refs + golden digest + short sha)
         run: |
           set -euo pipefail
+          CM='${{ matrix.refs_cm }}'
           for k in rootPvc igvmFile launchDigestSmp4; do
-            v=$(kubectl -n "$NS" get cm rke2-image-refs -o jsonpath="{.data.$k}")
-            [ -n "$v" ] || { echo "::error::rke2-image-refs missing $k — run cluster-prep/apply.sh"; exit 1; }
+            v=$(kubectl -n "$NS" get cm "$CM" -o jsonpath="{.data.$k}")
+            [ -n "$v" ] || { echo "::error::$CM missing $k — run cluster-prep/apply.sh"; exit 1; }
           done
           SHORT=$(cd c8s && git rev-parse --short=7 HEAD)
           {
-            echo "ROOTPVC=$(kubectl -n "$NS" get cm rke2-image-refs -o jsonpath='{.data.rootPvc}')"
-            echo "IGVMFILE=$(kubectl -n "$NS" get cm rke2-image-refs -o jsonpath='{.data.igvmFile}')"
-            echo "GOLDEN=$(kubectl -n "$NS" get cm rke2-image-refs -o jsonpath='{.data.launchDigestSmp4}')"
+            echo "ROOTPVC=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.rootPvc}')"
+            echo "IGVMFILE=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.igvmFile}')"
+            echo "GOLDEN=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.launchDigestSmp4}')"
             echo "SHORT=$SHORT"
             echo "CHART_VER=0.1.0-g$SHORT"
           } >> "$GITHUB_ENV"
-          echo "c8s $SHORT -> chart 0.1.0-g$SHORT"
+          echo "${{ matrix.platform }}: c8s $SHORT -> chart 0.1.0-g$SHORT"
+
+      # reap-before-provision (NVIDIA/holodeck lesson): a killed run leaks its CVM
+      # and its rootdisk clone. Delete CVMs whose owning GitHub run is no longer
+      # in progress — never touch one belonging to a live run.
+      - name: reap leaked CVMs from finished runs
+        run: |
+          set +e +o pipefail
+          for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
+            rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
+            [ -z "$rid" ] && continue
+            [ "$rid" = "${{ github.run_id }}" ] && continue
+            st=$(gh api "repos/${{ github.repository }}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ] || [ -z "$st" ]; then
+              echo "reaping $vm (run $rid status=${st:-gone})"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run $rid still $st)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: boot the RKE2-node CVM (shared rootdisk)
         run: |
@@ -91,6 +144,14 @@ jobs:
           metadata:
             name: $VM
             namespace: $NS
+            labels:
+              # run metadata: lets the reaper attribute a leaked CVM to exactly one
+              # GitHub run, and keeps concurrent matrix cells from colliding
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/run-id: "${{ github.run_id }}"
+              ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
+              ci.confidential.ai/platform: "${{ matrix.platform }}"
+              ci.confidential.ai/c8s-sha: "$SHORT"
           spec:
             runStrategy: Always
             template:
@@ -106,12 +167,12 @@ jobs:
                 domain:
                   cpu:
                     model: EPYC-Genoa
-                    cores: 4              # MUST be 4: image measured at smp=4
+                    cores: ${{ matrix.cores }}   # MUST match the image's measured smp
                   memory:
-                    guest: 16Gi
+                    guest: ${{ matrix.memory }}
                   resources:
                     requests:
-                      memory: 16Gi
+                      memory: ${{ matrix.memory }}
                   firmware:
                     bootloader:
                       efi:
@@ -226,17 +287,17 @@ jobs:
                 node:
                   selector: null
                   tolerations: null
-                ratlsPlatform: sev-snp
+                ratlsPlatform: ${{ matrix.ratls_platform }}
                 # ENFORCE the golden launch digest: CDS only issues workload certs
                 # to nodes attesting this measurement (doesn't gate CDS's own Ready)
                 measurements: ["$GOLDEN"]
               attestationApi:
                 image:
                   tag: "main"
-                cvmMode: node
+                cvmMode: ${{ matrix.cvm_mode }}
                 teeDevices:
-                  sevGuest: true
-                  tdxGuest: false
+                  sevGuest: ${{ matrix.hardware_platform == 'sev-snp' }}
+                  tdxGuest: ${{ matrix.hardware_platform == 'tdx' }}
                   tpm: false
               ratlsMesh:
                 enabled: false
