@@ -1,5 +1,43 @@
 # c8s e2e in CI — design
 
+## ✅ MIGRATED TO THE ORG + GREEN THERE (2026-07-15)
+
+The lane now runs in `confidential-dot-ai/confidential-ci` (private,
+`.github/workflows/e2e-c8s.yml`) on the **org** runner and passes end-to-end.
+
+**Runner migration — done.** GitHub App `confidential-ci-runners` (id 4309649,
+installation 146850802) scoped to `organization_self_hosted_runners: write` ONLY.
+Registered the `confidential-bm` scale set to `confidential-dot-ai` via
+`register.sh` APP mode (App creds in a K8s Secret BY REFERENCE, never in helm
+values), same `runs-on: confidential-bm` label. Gotchas hit:
+- The ARC `gha-runner-scale-set` chart names the AutoscalingRunnerSet after
+  `runnerScaleSetName`, so re-registering with the same label **overwrites** the
+  old scale set (the cifrai one) — convenient here (that's the migration), but it
+  left a stale scale-set-id → listener crash-loop `RunnerScaleSetNotFoundException
+  (identifier 3)`. Fix: a clean purge cycle (`register.sh RENAME_FROM=confidential-bm`)
+  so ARC re-registers fresh and gets a new id. Then `listener: healthy`.
+- **Org-native ghcr auth**: a workflow in a confidential-dot-ai repo pulls the
+  private `charts/c8s` with the built-in `GITHUB_TOKEN` (+ `permissions:
+  packages: read`) — NO PAT needed. Confirmed working (chart pulled, c8s installed).
+- cifrai sandbox repos (`confidential-bm-smoke`, `attestation-rs-ci`) archived.
+
+**REAL FINDING — the golden was wrong; enforcement is a fast-follow.** I pinned
+`cds.measurements=[<manifest snp_launch_digest 131b1a32…>]` and CDS returned
+`403 measurement_denied: launch measurement not allowed` on WORKLOAD cert
+issuance. (The base install stayed green because CDS's OWN serving cert uses
+`/attest-key` which SKIPS the measurement check — only workload leaf issuance
+enforces it. And I'd misread the sidecar's "entering renewal loop" as success —
+it's the sidecar GIVING UP after the initial 403 and scheduling a 6h retry; the
+cert was never issued, `tls.crt does not exist after 3m`.) So the
+**image `manifest.json` `snp_launch_digest` does NOT equal the node's RUNTIME SNP
+launch measurement.** Per the c8s docs order (green-with-`[]`-first, pin after),
+the lane runs `measurements: []` = accept-any GENUINE SNP (still a real TEE proof:
+CDS serving cert + workload leaf both require a valid hardware SNP quote).
+**NEXT (top hardening item):** capture the node's ACTUAL launch measurement from a
+live `/attest` report (attestation-cli `launch_digest`) — or recompute it with the
+exact KubeVirt boot params (smp, guest policy, IGVM) via steep/sev-snp-measure —
+then pin THAT. The manifest value is computed under different assumptions.
+
 ## ✅ BARE-METAL SNP LANE GREEN (2026-07-15, run 29 / cifrai sandbox)
 
 `e2e-c8s-snp.yml` runs fully green end-to-end on `confidential-bm` against c8s

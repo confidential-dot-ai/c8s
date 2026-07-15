@@ -452,7 +452,7 @@ jobs:
             kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/DOUT_START/{f=1} f{print} /DOUT_END/{f=0}' | tail -35
             exit 1
           fi
-          echo "✅ E2E PASS on $SHORT: CDS attested (node is a genuine SEV-SNP TEE, launch digest == $GOLDEN, ENFORCED); confidential workload Running with a CDS-issued cert injected — c8s installed + exercised in-cluster on the measured RKE2-node-CVM"
+          echo "✅ E2E PASS on $SHORT (${{ matrix.platform }}): CDS attested (node is a genuine SEV-SNP TEE); confidential workload Running with a CDS-issued, attestation-gated cert injected — c8s installed + exercised in-cluster on the measured RKE2-node-CVM. NOTE: measurements=[] (accept-any genuine SNP); launch-digest ENFORCEMENT is the pending follow-up (golden $GOLDEN from manifest.json != node runtime measurement)."
 
       - name: diagnostics (on failure)
         if: failure()
