@@ -163,9 +163,9 @@ jobs:
           kubectl config set-credentials s --token="$(cat $SA/token)" --kubeconfig=/tmp/host.kubeconfig >/dev/null
           kubectl config set-context h --cluster=h --user=s -n "$NS" --kubeconfig=/tmp/host.kubeconfig >/dev/null
           kubectl config use-context h --kubeconfig=/tmp/host.kubeconfig >/dev/null
-          # expect: give virtctl a real pty, connect, type GUESTCMD, detach
+          # expect: give virtctl a real pty, connect (needs ~5s), type GUESTCMD, detach
           cat > /tmp/send.exp <<'EXP'
-          set timeout 3
+          set timeout 6
           spawn virtctl --kubeconfig /tmp/host.kubeconfig console $env(VM) -n $env(NS)
           expect timeout
           send -- "\r"
@@ -175,60 +175,34 @@ jobs:
           expect timeout
           send -- "\x1d"
           EXP
-          # gsh <cmd>: run cmd in the guest, echo its stdout (one line), write RC to /tmp/g.rc.
-          # Reads the result from the guest-console-log sidecar (reliable), keyed by a
-          # random marker so it never matches the typed-command echo.
-          cat > /tmp/gsh <<'GSH'
-          set +e +o pipefail
-          CMD="$1"; M="GQ${RANDOM}${RANDOM}Z"
-          GUESTCMD="{ ${CMD} ; } >/tmp/go 2>&1; RC=\$?; printf '${M}a'; tr '\n' '~' </tmp/go; printf '${M}r%se\n' \"\$RC\""
-          GUESTCMD="$GUESTCMD" timeout -k5 40 expect -f /tmp/send.exp >/dev/null 2>&1
-          LINE=""
-          for t in $(seq 1 8); do
-            sleep 3
-            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n~' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
-            LINE=$(printf '%s' "$LOG" | grep -oE "${M}a.*${M}r[0-9]+e" | tail -1)
-            [ -n "$LINE" ] && break
-          done
-          RC=$(printf '%s' "$LINE" | sed -E "s/.*${M}r([0-9]+)e\$/\1/")
-          printf '%s' "$LINE" | sed -E "s/^.*${M}a//; s/${M}r[0-9]+e\$//" | tr '~' '\n'
-          echo "${RC:-999}" > /tmp/g.rc
-          GSH
+          # gsend "<cmd>": type one command into the guest shell (fire-and-forget)
+          cat > /tmp/gsend.sh <<'SH'
+          GUESTCMD="$1" VM="$VM" NS="$NS" timeout -k5 45 expect -f /tmp/send.exp >/dev/null 2>&1
+          SH
           echo "helpers written"
 
-      - name: wait for the in-guest rke2 cluster Ready (via console)
-        run: |
-          set -uo pipefail
-          echo "waiting for guest autologin shell (~180s; boot blocks on networkd-wait-online)..."
-          for i in $(seq 1 30); do
-            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { echo "shell ready"; break; }
-            sleep 15
-          done
-          export VM NS POD
-          K="/var/lib/rancher/rke2/bin/kubectl"
-          for i in $(seq 1 30); do
-            OUT=$(bash /tmp/gsh "$K get nodes --no-headers")
-            echo "[$i] ${OUT:0:100}"
-            printf '%s' "$OUT" | grep -q ' Ready' && { echo "in-guest node Ready"; exit 0; }
-            sleep 10
-          done
-          echo "::error::in-guest rke2 node never became Ready"; exit 1
-
-      - name: install c8s in-cluster (rke2 helm-controller, OCI chart, via console)
+      # ONE in-guest driver does the whole install+wait+report, emitting @@markers@@
+      # to the serial console. The runner delivers it once (chunked base64 over the
+      # console), launches it, then POLLS guest-console-log (fast, host-side) for the
+      # markers — instead of dozens of slow per-command console round-trips.
+      # (Pattern from NVIDIA/aicr: do the work in-cluster, read the result out-of-band.)
+      - name: install c8s in-cluster via in-guest driver (rke2 helm-controller, OCI chart)
         env:
           GHCR_USER: ${{ secrets.GHCR_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           set -uo pipefail
-          export VM NS POD
-          K="/var/lib/rancher/rke2/bin/kubectl"
+          export VM NS
           [ -n "${GHCR_TOKEN:-}" ] || { echo "::error::GHCR_TOKEN secret not set (needed to pull the private chart)"; exit 1; }
-          # 1. ghcr dockerconfigjson secret in kube-system (helm-controller pulls the private OCI chart with it)
+          echo "waiting for guest autologin shell (~180s; boot blocks on networkd-wait-online)..."
+          for i in $(seq 1 30); do
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { echo "shell ready"; break; }
+            sleep 15
+          done
+          # secret + HelmChart, base64'd, BAKED into the driver (decoded in-guest)
           DCJ=$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$(printf '%s:%s' "$GHCR_USER" "$GHCR_TOKEN" | base64 -w0)" | base64 -w0)
-          SEC=$(printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: ghcr-oci\n  namespace: kube-system\ntype: kubernetes.io/dockerconfigjson\ndata:\n  .dockerconfigjson: %s\n' "$DCJ" | base64 -w0)
-          bash /tmp/gsh "printf %s '$SEC' | base64 -d | $K apply -f -"; echo "ghcr-oci secret rc=$(cat /tmp/g.rc)"
-          # 2. HelmChart CR — rke2 helm-controller installs the OCI chart into c8s-system
-          HC=$(cat <<EOF | base64 -w0
+          SEC_B64=$(printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: ghcr-oci\n  namespace: kube-system\ntype: kubernetes.io/dockerconfigjson\ndata:\n  .dockerconfigjson: %s\n' "$DCJ" | base64 -w0)
+          HC_B64=$(cat <<EOF | base64 -w0
           apiVersion: helm.cattle.io/v1
           kind: HelmChart
           metadata:
@@ -253,54 +227,66 @@ jobs:
                   enabled: false
           EOF
           )
-          bash /tmp/gsh "printf %s '$HC' | base64 -d | $K apply -f -"; echo "HelmChart apply rc=$(cat /tmp/g.rc)"
-          # 3. watch the helm-controller install Job (dump its LOGS each poll — the job
-          #    running 0/1 forever with nothing created means helm is blocked on the
-          #    OCI chart pull/auth; the logs say why). Cap the wait so we fail fast.
-          echo "--- waiting for the helm install job (with logs) ---"
-          jobdone=
-          for i in $(seq 1 14); do    # ~7 min cap, not 55
-            J=$(bash /tmp/gsh "$K -n kube-system get job helm-install-c8s --no-headers 2>&1")
-            echo "[$i] job: ${J:0:100}"
-            echo "     helm log tail:"
-            bash /tmp/gsh "$K -n kube-system logs job/helm-install-c8s --tail=8 2>&1 | tail -8" | sed 's/^/       | /'
-            printf '%s' "$J" | grep -qE '1/1|Complete' && { jobdone=1; echo "helm job complete"; break; }
-            sleep 20
+          # build the driver ($-escaped so only SEC_B64/HC_B64 expand here; the rest runs in-guest)
+          cat > /tmp/drive.sh <<DRIVER
+          #!/bin/bash
+          set +e
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          K=/var/lib/rancher/rke2/bin/kubectl
+          say(){ echo "@@\$1@@"; }
+          say DRIVE_START
+          for i in \$(seq 1 40); do \$K get nodes --no-headers 2>/dev/null | grep -q ' Ready' && break; sleep 6; done
+          \$K get nodes --no-headers 2>&1 | grep -q ' Ready' && say NODE_READY || { \$K get nodes 2>&1 | sed 's/^/@@ND /;s/\$/@@/'; say FAIL_NODE; exit 0; }
+          printf %s '$SEC_B64' | base64 -d | \$K apply -f - >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
+          printf %s '$HC_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+          for i in \$(seq 1 40); do
+            s=\$(\$K -n kube-system get job helm-install-c8s -o jsonpath='{.status.succeeded}' 2>/dev/null)
+            echo "@@HJOB \$i succ=\${s:-0}@@"
+            \$K -n kube-system logs job/helm-install-c8s --tail=3 2>/dev/null | sed 's/^/@@HLOG /;s/\$/@@/'
+            [ "\$s" = "1" ] && { say HELM_DONE; break; }
+            sleep 12
           done
-          if [ -z "$jobdone" ]; then
-            echo "::error::helm-install-c8s never completed — see helm log tail above (likely OCI chart pull/auth or chart --wait)"
-            bash /tmp/gsh "$K -n kube-system get job helm-install-c8s -o jsonpath='{.status}' 2>&1"
-            bash /tmp/gsh "$K -n kube-system logs job/helm-install-c8s --tail=40 2>&1"
+          for i in \$(seq 1 40); do
+            \$K -n c8s-system get pods --no-headers 2>&1 | sed 's/^/@@POD /;s/\$/@@/'
+            r=\$(\$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)
+            echo "@@CDSR \$i ready=\${r:-none}@@"
+            echo "\$r" | grep -qw true && { say CDS_READY; break; }
+            sleep 12
+          done
+          \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -12 | sed 's/^/@@EV /;s/\$/@@/'
+          say DRIVE_END
+          DRIVER
+          # deliver the driver into the guest (chunked base64 -> file -> decode)
+          DB=$(base64 -w0 /tmp/drive.sh)
+          echo "delivering driver (${#DB} b64 chars) in chunks..."
+          bash /tmp/gsend.sh "rm -f /tmp/d.b64"
+          printf '%s' "$DB" | fold -w900 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
+          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh 2>/dev/ttyS0 && echo @@DRIVERDECODED@@ || echo @@FAIL_DECODE@@"
+          sleep 4
+          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DRIVERDECODED@@'; then
+            echo "::warning::driver decode marker not seen yet; launching anyway"
+          fi
+          # launch the driver detached; its stdout -> ttyS0 -> guest-console-log
+          bash /tmp/gsend.sh "nohup bash /tmp/drive.sh >/dev/ttyS0 2>&1 </dev/null & echo @@LAUNCHED@@"
+          echo "--- polling guest-console-log for driver progress ---"
+          seen=""; ok=""
+          for i in $(seq 1 90); do   # ~15 min, fast host-side polls
+            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
+            NEW=$(printf '%s' "$LOG" | grep -oE '@@[^@]{1,140}@@' | sed 's/@@//g')
+            # print only newly-appeared marker lines
+            comm -13 <(printf '%s\n' "$seen" | sort -u) <(printf '%s\n' "$NEW" | sort -u) 2>/dev/null | grep -vE '^$' | sed 's/^/  · /'
+            seen="$NEW"
+            printf '%s' "$LOG" | grep -q '@@CDS_READY@@' && { ok=1; echo "CDS_READY seen"; break; }
+            printf '%s' "$LOG" | grep -qE '@@FAIL_' && { echo "driver reported a failure marker"; break; }
+            printf '%s' "$LOG" | grep -q '@@DRIVE_END@@' && { echo "driver ended without CDS_READY"; break; }
+            sleep 10
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::c8s did not converge (no CDS_READY). Full driver console output:"
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -50
             exit 1
           fi
-          echo "--- waiting for the CDS pod Ready (the gate; also the attestation proof) ---"
-          ready=
-          for i in $(seq 1 30); do
-            P=$(bash /tmp/gsh "$K -n c8s-system get pods --no-headers 2>&1")
-            echo "[$i] $(printf '%s' "$P" | tr '\n' '|' | cut -c1-170)"
-            CR=$(bash /tmp/gsh "$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null")
-            printf '%s' "$CR" | grep -qw true && { ready=1; echo "CDS Ready on poll $i"; break; }
-            sleep 15
-          done
-          echo "--- final c8s-system state ---"; bash /tmp/gsh "$K -n c8s-system get pods -o wide 2>&1"
-          if [ -z "$ready" ]; then
-            echo "::error::c8s did not converge in the CVM (CDS not Ready)"
-            bash /tmp/gsh "$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -25"
-            bash /tmp/gsh "$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Error|Failed|Back-off|Image|message' | tail -25"
-            exit 1
-          fi
-
-      - name: assert CDS attested (Ready with pinned golden measurement == confidential proof)
-        run: |
-          set -uo pipefail
-          export VM NS POD
-          K="/var/lib/rancher/rke2/bin/kubectl"
-          # CDS reaches Ready only if the node produced a genuine SNP report whose
-          # launch measurement matches cds.measurements=[golden]. Ready == attested.
-          CDS=$(bash /tmp/gsh "$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>&1")
-          echo "cds ready flags: $CDS"
-          printf '%s' "$CDS" | grep -qw true || { echo "::error::CDS not Ready — node not attested to the golden measurement"; exit 1; }
-          echo "✅ CDS attested: node is a genuine SEV-SNP TEE booted from the measured rke2 image (launch digest == $GOLDEN)"
+          echo "✅ CDS attested: node is a genuine SEV-SNP TEE booted from the measured rke2 image (launch digest == $GOLDEN); c8s $SHORT installed + converged in-cluster"
 
       - name: diagnostics (on failure)
         if: failure()
