@@ -24,31 +24,28 @@ LOGS=$(kubectl -n confai-images logs job/igvm-stage-rke2-79d45313276e)
 echo "$LOGS" | tail -5
 
 echo '== 4/6 publish rke2-image-refs ConfigMap (incl. golden smp4 launch digest) =='
-# manifest.json carries per-variant measurements; pull the smp=4 one out
-# defensively (schema owned by steep — walk for an object with smp 4 + a
-# 96-hex measurement, falling back to any 96-hex string on an smp4 line).
+# manifest.json carries per-variant measurements; pull the smp=4 variant's
+# snp_launch_digest (nested under measurement.*) — find the smp==4 object,
+# then regex its whole subtree for the sha384.
 GOLDEN=$(echo "$LOGS" | python3 -c '
 import json, re, sys
 raw = sys.stdin.read()
 start, end = raw.find("{"), raw.rfind("}")
-def walk(o):
+def smp4_objects(o):
     if isinstance(o, dict):
-        vals = {str(k).lower(): v for k, v in o.items()}
-        if str(vals.get("smp")) == "4" or vals.get("cores") == 4:
-            for v in o.values():
-                if isinstance(v, str) and re.fullmatch(r"[0-9a-f]{96}", v.lower()):
-                    yield v.lower()
-        for v in o.values(): yield from walk(v)
+        if str(o.get("smp")) == "4" or o.get("cores") == 4:
+            yield o
+        for v in o.values(): yield from smp4_objects(v)
     elif isinstance(o, list):
-        for v in o: yield from walk(v)
+        for v in o: yield from smp4_objects(v)
 cands = []
 if start >= 0 and end > start:
-    try: cands = list(walk(json.loads(raw[start:end+1])))
+    try:
+        for obj in smp4_objects(json.loads(raw[start:end+1])):
+            blob = json.dumps(obj)
+            m = re.search(r"\"[a-z_]*launch_digest\"\s*:\s*\"([0-9a-fA-F]{96})\"", blob)
+            cands += [m.group(1).lower()] if m else re.findall(r"[0-9a-f]{96}", blob.lower())
     except Exception: pass
-if not cands:  # fallback: 96-hex on a line mentioning smp4/smp-4/"smp": 4
-    for line in raw.splitlines():
-        if re.search(r"smp[-_\" :]*4", line, re.I):
-            cands += [m.lower() for m in re.findall(r"[0-9a-fA-F]{96}", line)]
 if not cands: sys.exit("no smp4 SHA-384 measurement found in manifest.json")
 print(cands[0])
 ')
