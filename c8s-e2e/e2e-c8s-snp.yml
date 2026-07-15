@@ -219,22 +219,24 @@ jobs:
 
           # 2. retry: ask the guest to emit its kubeconfig once rke2 has written it;
           #    read the output back from the reliable sidecar log, not the console.
+          # direct base64 dump between per-attempt markers (rke2.yaml confirmed to
+          # exist + be root-readable via diagnostics); empty payload => retry.
           b64=
           for i in $(seq 1 20); do
             echo "attempt $i: typing dump command into the guest shell..."
             M="KX${i}Q"                      # unique marker per attempt
-            SENDOUT=$(send "test -f /etc/rancher/rke2/rke2.yaml && echo ${M}A\$(base64 -w0 /etc/rancher/rke2/rke2.yaml)${M}Z || echo ${M}NOPE")
-            [ "$i" -le 2 ] && { echo "  --- expect/virtctl output (attempt $i) ---"; printf '%s\n' "$SENDOUT" | tr -cd '[:print:]\n' | tail -15 | sed 's/^/  | /'; }
+            send "printf ${M}A; base64 -w0 /etc/rancher/rke2/rke2.yaml 2>/dev/null; echo ${M}Z" >/dev/null
             sleep 5
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
-            if printf '%s' "$LOG" | grep -q "${M}NOPE"; then echo "attempt $i: rke2.yaml not written yet"; sleep 15; continue; fi
-            # the echoed command line has $( ) between the markers (not base64) — only the
-            # executed output matches [A-Za-z0-9+/=]+, so this picks the real payload
+            if [ "$i" -le 2 ]; then
+              echo "  --- guest-console-log slice after ${M}A (attempt $i) ---"
+              printf '%s' "$LOG" | grep -oE "${M}A.{0,80}" | tail -2 | sed 's/^/  | /'
+            fi
             cand=$(printf '%s' "$LOG" | grep -oE "${M}A[A-Za-z0-9+/=]+${M}Z" | tail -1 | sed "s/^${M}A//; s/${M}Z$//")
             if [ -n "$cand" ] && printf '%s' "$cand" | base64 -d 2>/dev/null | head -1 | grep -q '^apiVersion:'; then
               b64=$cand; echo "captured kubeconfig on attempt $i (${#cand} b64 chars)"; break
             fi
-            echo "attempt $i: no clean capture yet"; sleep 12
+            echo "attempt $i: no capture yet"; sleep 12
           done
           if [ -z "$b64" ]; then
             echo "::error::could not scrape kubeconfig — rke2.yaml never appeared; querying rke2 state in-guest"
