@@ -19,10 +19,15 @@ spec:
       restartPolicy: Never
       containers:
         - name: extract
-          image: ghcr.io/oras-project/oras:v1.3.2
+          # alpine + GNU tar, NOT the oras image: the tarball stores disk.raw as a
+          # GNU sparse entry (typeflag 'S') which busybox tar cannot parse past
+          image: alpine:3.20
           command: ["/bin/sh", "-ec"]
           args:
             - |
+              apk add --no-cache --quiet tar curl ca-certificates
+              curl -fsSL https://github.com/oras-project/oras/releases/download/v1.3.2/oras_1.3.2_linux_amd64.tar.gz -o /tmp/oras.tgz
+              tar -xzf /tmp/oras.tgz -C /usr/local/bin oras
               IMAGE="ghcr.io/confidential-dot-ai/rke2@sha256:79d45313276e3251db30910aba47c85b9d37f5bc4b746ee0c2d78a032dc41486"
               oras pull "$IMAGE" --output /work
               tarball=$(ls /work/steep-cdi-*.tar.gz)   # title annotation carries a random suffix — glob
