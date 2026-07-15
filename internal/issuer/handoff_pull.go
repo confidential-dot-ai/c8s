@@ -134,9 +134,12 @@ func pullErrorStatus(err error) (int, bool) {
 }
 
 // PullHandoff drives the requester side of the handoff protocol end to end:
-// a fresh in-memory signer key, a TEE-bound EAR for it from the peer's
-// /attest-key, then the CA material via /handoff. Each stage retries
-// transient failures (transport, 5xx, 429) until ctx is done — /handoff
+// a fresh in-memory requester signing key, a TEE-bound EAR for that key from
+// the peer's /attest-key, then the CA material via /handoff. RequestHandoff
+// separately creates a one-request X25519 recipient key for encryption;
+// neither ephemeral key is the CA private key returned inside the encrypted
+// material. Each stage retries transient failures (transport, 5xx, 429) until
+// ctx is done — /handoff
 // returns 503 while the peer's handoff EAR bootstraps — and the EAR is
 // obtained once, not per attempt, so retries do not redo TEE report
 // generation. A denial or other 4xx is a definitive verdict and fails fast.
@@ -153,13 +156,13 @@ func PullHandoff(ctx context.Context, cfg PullConfig) (*HandoffMaterial, error) 
 		interval = DefaultPullRetryInterval
 	}
 
-	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	requesterSigningKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate handoff signer key: %w", err)
+		return nil, fmt.Errorf("generate handoff requester signing key: %w", err)
 	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&signer.PublicKey)
+	pubDER, err := x509.MarshalPKIXPublicKey(&requesterSigningKey.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("marshal handoff signer pubkey: %w", err)
+		return nil, fmt.Errorf("marshal handoff requester signing public key: %w", err)
 	}
 
 	ear, err := PullRetry(ctx, logger, interval, "attest-key", func() (string, error) {
@@ -170,7 +173,7 @@ func PullHandoff(ctx context.Context, cfg PullConfig) (*HandoffMaterial, error) 
 	}
 
 	return PullRetry(ctx, logger, interval, "handoff", func() (*HandoffMaterial, error) {
-		return RequestHandoff(ctx, cfg.Deps, cfg.PeerURL, ear, signer, cfg.HTTPClient)
+		return RequestHandoff(ctx, cfg.Deps, cfg.PeerURL, ear, requesterSigningKey, cfg.HTTPClient)
 	})
 }
 

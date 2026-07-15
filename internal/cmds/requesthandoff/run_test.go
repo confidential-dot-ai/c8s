@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/elliptic"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,6 +53,19 @@ func TestReportForVerdict(t *testing.T) {
 	}
 	if want := certutil.CertFingerprint(ca.Cert.Raw); rep.CACertFingerprintSHA256 != want {
 		t.Fatalf("fingerprint = %s, want %s", rep.CACertFingerprintSHA256, want)
+	}
+	if rep.BundleCertCount != 1 {
+		t.Fatalf("BundleCertCount = %d, want 1", rep.BundleCertCount)
+	}
+	encoded, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"bundle_cert_count":1`)) {
+		t.Fatalf("report JSON = %s, want bundle_cert_count", encoded)
+	}
+	if bytes.Contains(encoded, []byte(`"bundle_certs"`)) {
+		t.Fatalf("report JSON retains ambiguous bundle_certs field: %s", encoded)
 	}
 
 	rep, code = reportFor(material, []*x509.Certificate{other.Cert})

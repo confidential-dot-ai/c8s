@@ -37,8 +37,9 @@ var (
 	ErrUnsupportedPlatform = errors.New("attestationclient: unsupported platform for evidence verification")
 )
 
-// snpMeasurementSize is the size of an SEV-SNP launch measurement (SHA-384).
-const snpMeasurementSize = 48
+// launchMeasurementSize is the size of both an SEV-SNP LAUNCH_DIGEST and an
+// Intel TDX MRTD (SHA-384).
+const launchMeasurementSize = 48
 
 // VerifyEnforced posts req to /verify and fails closed on the verdict
 // ([EnforceVerdict]). Every caller that trusts a /verify response must gate on
@@ -89,9 +90,10 @@ type EvidencePolicy struct {
 	MinTcb *types.MinTcb
 
 	// Measurements is the set of acceptable launch measurements; empty
-	// accepts any (callers are expected to warn). The TDX verifier surfaces
-	// no launch measurement, so a pinned set fails closed for tdx until
-	// measurement enforcement is wired through.
+	// accepts any (callers are expected to warn). The attestation-api
+	// normalizes both the SNP LAUNCH_DIGEST and the TDX MRTD into
+	// claims.launch_digest. This policy does not pin TDX RTMRs; see the TDX
+	// measurement note in docs/GAPS.md.
 	Measurements [][]byte
 }
 
@@ -124,34 +126,51 @@ func (c Client) verifySNPEvidence(ctx context.Context, evidence types.Attestatio
 	if err != nil {
 		return types.VerifyResponse{}, err
 	}
-
-	if resp.Result.Claims.LaunchDigest != "" {
-		measurement, err := hex.DecodeString(resp.Result.Claims.LaunchDigest)
-		if err != nil {
-			return types.VerifyResponse{}, fmt.Errorf("%w: launch digest is not hex: %w", ErrInvalidLaunchDigest, err)
-		}
-		if len(measurement) != snpMeasurementSize {
-			return types.VerifyResponse{}, fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidLaunchDigest, len(measurement), snpMeasurementSize)
-		}
-		if len(policy.Measurements) > 0 && !measurementAllowed(measurement, policy.Measurements) {
-			return types.VerifyResponse{}, fmt.Errorf("%w: launch measurement not in allowed set", ErrMeasurementNotAllowed)
-		}
-	} else if len(policy.Measurements) > 0 {
-		return types.VerifyResponse{}, fmt.Errorf("%w: launch measurement missing", ErrMeasurementNotAllowed)
+	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+		return types.VerifyResponse{}, err
 	}
 
 	return resp, nil
 }
 
 func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.AttestationEvidence, policy EvidencePolicy) (types.VerifyResponse, error) {
-	// The TDX verifier surfaces no launch measurement, so a pinned set can
-	// never be satisfied: fail closed like the SNP missing-digest case
-	// rather than silently skipping the caller's identity anchor.
-	if len(policy.Measurements) > 0 {
-		return types.VerifyResponse{}, fmt.Errorf("%w: TDX verifier surfaces no launch measurement", ErrMeasurementNotAllowed)
+	// The attestation-api surfaces MRTD as claims.launch_digest. Enforce it
+	// client-side just like SNP's LAUNCH_DIGEST. RTMR pinning is deliberately
+	// separate and not yet represented by EvidencePolicy. MinTcb is also
+	// omitted because the c8s TDX request has no minimum-TCB policy field.
+	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, policy.ExpectedReportData[:], policy.AllowDebug, nil))
+	if err != nil {
+		return types.VerifyResponse{}, err
 	}
-	// No MinTcb: the TDX verifier has no such parameter.
-	return c.VerifyEnforced(ctx, verifyRequest(evidence, policy.ExpectedReportData[:], policy.AllowDebug, nil))
+	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
+		return types.VerifyResponse{}, err
+	}
+	return resp, nil
+}
+
+// enforceLaunchMeasurement validates the verifier's normalized launch digest
+// and, when allowed is non-empty, requires it to match the caller's allowlist.
+// For SNP the digest is LAUNCH_DIGEST; for TDX it is MRTD. Both are SHA-384.
+func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error {
+	digest := resp.Result.Claims.LaunchDigest
+	if digest == "" {
+		if len(allowed) > 0 {
+			return fmt.Errorf("%w: launch measurement missing", ErrMeasurementNotAllowed)
+		}
+		return nil
+	}
+
+	measurement, err := hex.DecodeString(digest)
+	if err != nil {
+		return fmt.Errorf("%w: launch digest is not hex: %w", ErrInvalidLaunchDigest, err)
+	}
+	if len(measurement) != launchMeasurementSize {
+		return fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidLaunchDigest, len(measurement), launchMeasurementSize)
+	}
+	if len(allowed) > 0 && !measurementAllowed(measurement, allowed) {
+		return fmt.Errorf("%w: launch measurement not in allowed set", ErrMeasurementNotAllowed)
+	}
+	return nil
 }
 
 // verifyRequest builds the /verify request: expected REPORTDATA bound, token

@@ -375,12 +375,15 @@ func RunHandoffEARExpiryUpdater(ctx context.Context, src HandoffEARSource, inter
 }
 
 // RequestHandoff drives the client side of the handoff protocol against
-// peerURL and returns verified, decrypted CA material.
-func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, signer *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
+// peerURL and returns verified, decrypted CA material. requesterSigningKey is
+// the ECDSA key bound into requesterEAR and signs the request transcript. A
+// distinct, one-request X25519 key below encrypts the response; the CA private
+// key appears only inside the decrypted HandoffMaterial.
+func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, requesterSigningKey *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
 	if strings.TrimSpace(requesterEAR) == "" {
 		return nil, fmt.Errorf("handoff requester EAR is required")
 	}
-	if signer == nil {
+	if requesterSigningKey == nil {
 		return nil, fmt.Errorf("handoff requester signing key is required")
 	}
 	if len(deps.AllowedMeasurements) == 0 {
@@ -399,7 +402,7 @@ func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, reques
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signHandoffMessage(signer, requestMessage)
+	signature, err := signHandoffMessage(requesterSigningKey, requestMessage)
 	if err != nil {
 		return nil, err
 	}

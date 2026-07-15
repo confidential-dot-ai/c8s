@@ -46,7 +46,7 @@ type report struct {
 	CACertFingerprintSHA256 string `json:"ca_cert_fingerprint_sha256"`
 	CACertSubject           string `json:"ca_cert_subject"`
 	CACertNotAfter          string `json:"ca_cert_not_after"`
-	BundleCerts             int    `json:"bundle_certs"`
+	BundleCertCount         int    `json:"bundle_cert_count"`
 	ServedCAMatch           bool   `json:"served_ca_match"`
 }
 
@@ -97,6 +97,8 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		return exitUsage
 	}
 	if len(pinned) == 0 {
+		// Handoff deliberately has no accept-any development mode: both the
+		// RA-TLS peer and its issuer EAR must have an explicit identity pin.
 		errorf(errOut, "--measurements: no usable measurement")
 		return exitUsage
 	}
@@ -186,7 +188,7 @@ func reportFor(material *issuer.HandoffMaterial, served []*x509.Certificate) (re
 		CACertFingerprintSHA256: certutil.CertFingerprint(material.CACert.Raw),
 		CACertSubject:           material.CACert.Subject.String(),
 		CACertNotAfter:          material.CACert.NotAfter.Format(time.RFC3339),
-		BundleCerts:             len(material.Bundle),
+		BundleCertCount:         len(material.Bundle),
 		ServedCAMatch:           servedCAMatch(served, material.CACert),
 	}
 	if !rep.ServedCAMatch {

@@ -20,8 +20,8 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// The TDX verifier surfaces no launch measurement, so a pinned set fails
-	// closed against a TDX peer (see attestationclient.EvidencePolicy).
+	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
+	// covered by this policy; see the TDX measurement note in docs/GAPS.md.
 	Measurements [][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
@@ -66,11 +66,10 @@ type VerifyResult struct {
 	TEEType TEEType
 	// ReportData is the 64-byte expected REPORTDATA that the attestation-api
 	// confirmed the report is bound to (the api returns only a match verdict,
-	// not the report bytes, so this echoes the verified expectation). Only set
-	// on the SNP path; left zero for TDX.
+	// not the report bytes, so this echoes the verified expectation).
 	ReportData [64]byte
 	// Measurement is the 48-byte launch measurement reported by the
-	// attestation-api. Only set on the SNP path; left zero for TDX.
+	// attestation-api: LAUNCH_DIGEST for SNP or MRTD for TDX.
 	Measurement [48]byte
 	// PlatformInfo contains platform-specific metadata from the
 	// attestation-api response. Only set on the SNP path.
@@ -213,11 +212,12 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		return nil, mapVerifyError(evidence.Platform, err)
 	}
 
+	teeType := TEETypeSEVSNP
 	if evidence.Platform == string(types.PlatformTdx) {
-		return &VerifyResult{TEEType: TEETypeTDX}, nil
+		teeType = TEETypeTDX
 	}
-	result := &VerifyResult{TEEType: TEETypeSEVSNP}
-	if len(resp.Result.Claims.PlatformData) > 0 && !bytes.Equal(resp.Result.Claims.PlatformData, []byte("null")) {
+	result := &VerifyResult{TEEType: teeType}
+	if teeType == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 && !bytes.Equal(resp.Result.Claims.PlatformData, []byte("null")) {
 		result.PlatformInfo = resp.Result.Claims.PlatformData
 	}
 	copy(result.ReportData[:], expectedReportData[:])
