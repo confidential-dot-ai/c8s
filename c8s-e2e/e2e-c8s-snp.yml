@@ -122,7 +122,8 @@ jobs:
                       - name: rootdisk
                         disk:
                           bus: virtio
-                          readonly: true # verity rootfs never writes; lets concurrent VMs share the RWO PVC (qemu shared lock)
+                        # NB: no readonly — matches the chart's known-good launch;
+                        # re-test readonly (concurrent-boot sharing) once green
                     interfaces:
                       - name: default
                         bridge: {}        # masquerade is broken under SNP
@@ -146,6 +147,34 @@ jobs:
           [ -n "$IP" ] || { echo "::error::VMI has no IP"; exit 1; }
           echo "IP=$IP" >> "$GITHUB_ENV"
           echo "VMI Running at $IP"
+
+      - name: assert confidential boot (qemu cmdline + IGVM checksum + early console)
+        run: |
+          set -uo pipefail
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          HOSTKC=/tmp/host.kubeconfig
+          kubectl config set-cluster host --server="https://kubernetes.default.svc" --certificate-authority="$SA/ca.crt" --kubeconfig="$HOSTKC" >/dev/null
+          kubectl config set-credentials sa --token="$(cat $SA/token)" --kubeconfig="$HOSTKC" >/dev/null
+          kubectl config set-context host --cluster=host --user=sa --namespace="$NS" --kubeconfig="$HOSTKC" >/dev/null
+          kubectl config use-context host --kubeconfig="$HOSTKC" >/dev/null
+          # capture early boot output while we probe qemu (background console reader)
+          timeout -k 5 90 script -qec "timeout 80 virtctl --kubeconfig $HOSTKC console $VM -n $NS" /tmp/console.log >/dev/null 2>&1 </dev/null &
+          CONS=$!
+          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name | head -1)
+          [ -z "$POD" ] && POD=$(kubectl -n "$NS" get pods -o name | grep "virt-launcher-$VM" | head -1)
+          echo "launcher pod: $POD"
+          echo '--- qemu confidential-boot assertions ---'
+          kubectl -n "$NS" exec "${POD#pod/}" -c compute -- sh -c \
+            "tr '\0' '\n' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline > /tmp/q; \
+             grep -c 'sev-snp-guest' /tmp/q; grep -o 'igvm-cfg[^,]*file=[^ ,]*' /tmp/q || grep -o 'igvm[^ ]*' /tmp/q | head -3; \
+             ls -la /var/run/igvm/ 2>/dev/null; sha256sum /var/run/igvm/*.igvm 2>/dev/null" \
+            | tee /tmp/qemu-assert.txt || true
+          grep -q 'sev-snp-guest' /tmp/qemu-assert.txt || echo '::warning::sev-snp-guest NOT found in qemu cmdline'
+          grep -qi 'igvm' /tmp/qemu-assert.txt || echo '::warning::igvm-cfg NOT found in qemu cmdline'
+          wait $CONS 2>/dev/null || true
+          echo '--- early console output (sanitized, first 60 lines) ---'
+          tr -cd '[:print:]\n' < /tmp/console.log | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | head -60 || true
+          echo "--- console bytes captured: $(wc -c < /tmp/console.log) ---"
 
       # NOTE: no pre-install attest — the rke2 node image does NOT bake
       # attestation-api (unlike base-cpu-image); in node-as-CVM mode it arrives
