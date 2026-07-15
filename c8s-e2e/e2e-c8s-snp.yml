@@ -165,13 +165,13 @@ jobs:
           kubectl config use-context h --kubeconfig=/tmp/host.kubeconfig >/dev/null
           # expect: give virtctl a real pty, connect, type GUESTCMD, detach
           cat > /tmp/send.exp <<'EXP'
-          set timeout 8
+          set timeout 3
           spawn virtctl --kubeconfig /tmp/host.kubeconfig console $env(VM) -n $env(NS)
           expect timeout
           send -- "\r"
           expect timeout
           send -- "$env(GUESTCMD)\r"
-          set timeout 5
+          set timeout 4
           expect timeout
           send -- "\x1d"
           EXP
@@ -254,15 +254,25 @@ jobs:
           EOF
           )
           bash /tmp/gsh "printf %s '$HC' | base64 -d | $K apply -f -"; echo "HelmChart apply rc=$(cat /tmp/g.rc)"
-          # 3. watch the helm-controller install Job, then the c8s pods
-          echo "--- waiting for the helm install job ---"
-          for i in $(seq 1 30); do
-            J=$(bash /tmp/gsh "$K -n kube-system get job -l helmcharts.helm.cattle.io/chart=c8s --no-headers 2>/dev/null")
-            echo "[$i] job: ${J:0:110}"
-            printf '%s' "$J" | grep -qE 'Complete|1/1' && break
-            printf '%s' "$J" | grep -qiE 'Failed|BackoffLimit' && { echo "helm job failed"; bash /tmp/gsh "$K -n kube-system logs job/\$($K -n kube-system get job -l helmcharts.helm.cattle.io/chart=c8s -o name | head -1 | cut -d/ -f2) --tail=40"; break; }
-            sleep 15
+          # 3. watch the helm-controller install Job (dump its LOGS each poll — the job
+          #    running 0/1 forever with nothing created means helm is blocked on the
+          #    OCI chart pull/auth; the logs say why). Cap the wait so we fail fast.
+          echo "--- waiting for the helm install job (with logs) ---"
+          jobdone=
+          for i in $(seq 1 14); do    # ~7 min cap, not 55
+            J=$(bash /tmp/gsh "$K -n kube-system get job helm-install-c8s --no-headers 2>&1")
+            echo "[$i] job: ${J:0:100}"
+            echo "     helm log tail:"
+            bash /tmp/gsh "$K -n kube-system logs job/helm-install-c8s --tail=8 2>&1 | tail -8" | sed 's/^/       | /'
+            printf '%s' "$J" | grep -qE '1/1|Complete' && { jobdone=1; echo "helm job complete"; break; }
+            sleep 20
           done
+          if [ -z "$jobdone" ]; then
+            echo "::error::helm-install-c8s never completed — see helm log tail above (likely OCI chart pull/auth or chart --wait)"
+            bash /tmp/gsh "$K -n kube-system get job helm-install-c8s -o jsonpath='{.status}' 2>&1"
+            bash /tmp/gsh "$K -n kube-system logs job/helm-install-c8s --tail=40 2>&1"
+            exit 1
+          fi
           echo "--- waiting for the CDS pod Ready (the gate; also the attestation proof) ---"
           ready=
           for i in $(seq 1 30); do
