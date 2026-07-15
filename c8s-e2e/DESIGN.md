@@ -1,5 +1,75 @@
 # c8s e2e in CI — design
 
+## Lessons from NVIDIA/k8s-test-infra + NVIDIA/aicr (2026-07-15)
+
+Deep-read of NVIDIA's (non-confidential) ephemeral-GPU-test-cluster infra. They
+solved the same shape we have — hardware-dependent e2e on cloud+metal — so the
+transfer is high. Key takeaways:
+
+**They validate our choices:**
+- **Serial console is the industry norm, not a hack.** holodeck reaches
+  non-routable nodes over an out-of-band channel (`SSMTransport` →
+  `aws ssm start-session … AWS-StartPortForwardingSession`); k8s-test-infra does
+  ALL node ops via `docker exec <node>`, never the pod network. Out-of-band node
+  access is standard.
+- **Bare-metal-first with a pre-booted CVM = holodeck's `provider=ssh` "BYO host"**
+  (skips infra Create) — confirms the metal-SNP lane needs only a provisioner
+  driving the existing CVM, the least-effort green gate.
+- **Bash-over-ginkgo:** k8s-test-infra has NO ginkgo suite (grep RunSpecs empty);
+  e2e is `set -euo pipefail` `validate-*.sh` scripts. A ginkgo `rest.Config` would
+  reintroduce apiserver-reachability. YAGNI validated.
+- **Simulation is why THEIR problem is easy:** KWOK fake nodes, mock-NVML
+  `LD_PRELOAD`, kind-in-Docker colocation. A simulated node has no SNP measurement
+  — confirms [[confidential-only-no-simulation]] is why ours is genuinely harder.
+
+**Adopt (ranked):**
+1. **In-cluster Job dispatch for the e2e/conformance suite** (aicr
+   `validators/runner.go`, results back as CTRF JSON via ConfigMap). The runner
+   creates ONE Job and reads ONE result — never routes into the guest pod
+   network. Collapses our dozens of slow console polls into: console-apply a Job,
+   console-read a result ConfigMap. **This is the fix for our console-polling
+   slowness** — shrink the console to bootstrap + attestation + kick-off + read.
+2. **Guaranteed teardown = if:always() cleanup + reap-BEFORE-provision** (holodeck
+   post-entrypoint; aicr `delete-stale-*` pre-step). Plus a **label-keyed reaper
+   gated on LIVE GitHub job status**: read the RunId label off a leaked VMI, GET
+   `actions/runs/{id}/jobs`, reap only when all jobs `completed` (404 = safe).
+3. **Collision-free naming + run-metadata labels** on every VMI/namespace (RunId,
+   SHA, Actor, RunAttempt) so concurrent matrix cells don't collide and the reaper
+   attributes each unit to one run.
+4. **Prove consumption end-to-end**, not just registration: don't stop at "CDS
+   attested" — schedule a workload that exercises the confidential path and assert
+   it Runs, fail-closed. (k8s-test-infra schedules a Pod that actually claims the
+   device.)
+5. **Single declarative Environment/Holodeck CR** for the matrix (provider enum +
+   topology + component list) invoked once per cell via `workflow_call`, facts
+   discovered from spec files (yq), `fail-fast:false`. Add `provider:
+   metal-snp|metal-tdx|gke-snp|gke-tdx` + a `confidential` block (measurements, CC
+   mode). Wire only metal-SNP now.
+6. **Diff-aware-on-PR + full-on-merge** trigger tiers (dorny/paths-filter); our
+   matrix is far under GitHub's 256-cell cap so SKIP aicr's shard machinery.
+7. **public-repo + self-hosted safely:** `ok-to-test` approval → push-mirror to a
+   trusted `pull-request/<n>` branch (NVIDIA copy-pr-bot) so fork code never runs
+   on confidential runners with attestation secrets. Pin every action by SHA.
+
+**The differentiator (our biggest strategic transfer):** aicr's evidence bundle
+(in-toto + cosign/Rekor, ADR-007) is **signer-identity-bound, NOT cluster-
+physicality-bound** — they openly concede "a contributor can lie to the snapshot
+collectors" and defer hardware provenance (`ccManager.enabled:false`). **Binding
+the CVM's SNP launch measurement / TDX MRTD into the evidence predicate is exactly
+the physicality proof they lack.** That's our moat, not a copy.
+
+**Alternative to the console for routable lanes (noted):** holodeck avoids
+host/guest CIDR collisions by owning both nets and fixing disjoint ranges. For us
+that would mean **re-CIDRing the guest rke2 podCIDR off 10.42/16** to regain
+DIRECT apiserver reachability — cheaper than the console. BUT the guest is a
+verity-MEASURED image with baked rke2 config, so this is a **base-images ask** (a
+CVM image variant with a non-colliding CIDR), not something we can override at
+boot. Worth raising with the base-image owners; until then, serial console.
+
+**SKIP:** all simulation lanes (KWOK/mock-NVML/kind-colocation); holodeck's
+AWS/vSphere provider code (single-cloud, no CC); full CNCF conformance dashboards
+before the metal-SNP happy path is green; aicr's 256-cap shard machinery.
+
 ## Phase 1 build log (2026-07-15) — what's PROVEN, the wall, the pivot
 
 Building `e2e-c8s-snp.yml` (SNP-metal lane) end-to-end on `confidential-bm`, run
