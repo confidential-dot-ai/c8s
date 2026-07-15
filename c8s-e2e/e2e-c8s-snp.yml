@@ -266,15 +266,21 @@ jobs:
           cat > /tmp/pf.sh <<'PF'
           set +e
           LPORT=16443
-          if ! curl -sk -m2 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1; then
-            pkill -f "port-forward vmi/${VM}" 2>/dev/null
-            nohup virtctl --kubeconfig /tmp/host.kubeconfig port-forward "vmi/${VM}" -n "${NS}" "${LPORT}:6443" >/tmp/pf.log 2>&1 &
-            for i in $(seq 1 25); do curl -sk -m2 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1 && break; sleep 2; done
+          # TLS through apiserver-ws -> virt tunnel -> guest apiserver is slow; be generous
+          if ! curl -sk -m8 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1; then
+            pkill -f "port-forward vmi/${VM}" 2>/dev/null; sleep 1
+            nohup virtctl --kubeconfig /tmp/host.kubeconfig port-forward "vmi/${VM}" -n "${NS}" "${LPORT}:6443" >>/tmp/pf.log 2>&1 &
+            sleep 3
+            for i in $(seq 1 30); do curl -sk -m8 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1 && break; sleep 3; done
           fi
           PF
           echo "establishing virtctl port-forward tunnel to the CVM API..."
           bash /tmp/pf.sh
-          curl -sk -m5 "https://127.0.0.1:16443/healthz" -w 'tunnel -> HTTP %{http_code}\n' || { echo "::error::port-forward tunnel failed"; cat /tmp/pf.log 2>/dev/null; exit 1; }
+          if ! curl -sk -m10 "https://127.0.0.1:16443/healthz" -w 'tunnel -> HTTP %{http_code}\n'; then
+            echo "::error::port-forward tunnel failed"; echo '--- pf.log ---'; cat /tmp/pf.log 2>/dev/null
+            echo '--- raw TCP probe 127.0.0.1:16443 ---'; timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/16443' && echo 'port open' || echo 'port closed'
+            exit 1
+          fi
           echo "waiting for the in-CVM node Ready (via tunnel)..."
           ready=
           for i in $(seq 1 40); do
