@@ -1,5 +1,71 @@
 # c8s e2e in CI — design
 
+## Phase 1 build log (2026-07-15) — what's PROVEN, the wall, the pivot
+
+Building `e2e-c8s-snp.yml` (SNP-metal lane) end-to-end on `confidential-bm`, run
+against c8s `cd361b4`. Hard-won findings (16 live runs), so they're not redone:
+
+**PROVEN GREEN (the confidential-computing core):**
+- Boot a fresh **measured RKE2-node-as-CVM** from the `rke2` image
+  (`ghcr.io/confidential-dot-ai/rke2@sha256:79d4…`, shared rootdisk PVC, no clone).
+  qemu asserts `sev-snp-guest` + `igvm-cfg …rke2.igvm`; staged IGVM sha matches
+  the image's `manifest.json` (`f13625ba…`). Golden smp4 launch digest
+  `131b1a32…c55e8c` (from `manifest.json` `measurement.snp_launch_digest`).
+- **In-guest rke2 fully comes up**: node `Ready`, apiserver + certs, `rke2.yaml`
+  written. Boot to autologin shell ≈ **180s** — boot BLOCKS on
+  `systemd-networkd-wait-online.service` (FAILs then releases; ~3 min tax every
+  boot — worth flagging to base-image owners).
+- **Kubeconfig exfil over the serial console** (the "flakiest link"), now solid:
+  - The autologin **root shell is on ttyS0** (not hvc0 — the `console=hvc0` in the
+    measured cmdline is a phantom device this qemu doesn't expose; only isa-serial
+    `serial0`→`charserial0` exists, which is exactly what `virtctl console` attaches to).
+  - **`expect` drives `virtctl console`** (a piped `script` does NOT forward
+    keystrokes over the apiserver-proxied console — real pty required).
+  - **Decouple send from read**: type the dump command via console, read the
+    payload back from the **`guest-console-log` sidecar** (`virtctl console`
+    doesn't replay history). `printf MARK; base64 -w0 rke2.yaml; echo MARK`.
+  - GHA's default `bash -e`+`pipefail` silently kills best-effort loops
+    (`LOG=$(kubectl logs…)` inherits a transient nonzero) — `set +e +o pipefail`.
+
+**THE WALL — reaching the guest apiserver from the runner is a CIDR collision.**
+The host cluster's Cilium pod CIDR is `10.42.0.0/16` AND the in-CVM rke2 uses
+`10.42.0.0/16` too; under KubeVirt **bridge** networking (forced — masquerade is
+broken under SNP) the guest's node IP == the virt-launcher pod IP, inside that
+overlapping range. So routing to `<cvm>:6443` is **nondeterministic**: run 13
+reached it (`HTTP 401`), runs 14/16 blackholed (`i/o timeout`). It's not the
+runner's egress policy — **virt-handler itself** fails:
+`dialing VM: dial tcp 10.42.0.76:6443: connect: connection timed out`. Neither
+CIDR is changeable (guest is a verity-measured image; host is the whole cluster).
+`virtctl port-forward` doesn't save us — it dials the same colliding IP host-side.
+
+**THE PIVOT — install + test IN-CLUSTER, matching the team's real pattern.**
+c8s-fleet proves the canonical path: **c8s is installed by Flux running INSIDE the
+cluster** (`clusters/c8s-integration/flux-system`, `base/components/c8s-helmrelease-defaults`
+HelmRelease) and the e2e suite is **in-cluster** (`base/tests/{attestation-core,
+nri-enforcement,tls-lb-health,full-stack}`). Nobody reaches a CVM apiserver from
+outside. So the runner should NOT exfil a kubeconfig and helm-install remotely
+(my original design — it both fights the collision and diverges from prod).
+Instead: the runner drives everything **through the serial console** (100%
+reliable), running in-guest `kubectl`/helm-controller against the guest's LOCAL
+apiserver (no network hop, no collision). Options, best first:
+1. **rke2 helm-controller `HelmChart` CR** (in-guest `kubectl apply` of a small
+   manifest) referencing the OCI `charts/c8s` chart + pinned image values +
+   ghcr pull secret. rke2's built-in helm-controller installs it. No c8s CLI, no
+   external apiserver access. (`charts/c8s` exists as an OCI package; discover its
+   semver tag.)
+2. **Flux bootstrap** in the guest pointed at c8s-fleet pinned to the commit —
+   heaviest, closest to prod.
+3. Vendor `test/e2e/*.sh` (they're `kubectl`-only) + run them in-guest via console.
+`c8s cds verify` needs the c8s CLI; substitute in-guest `attestation-cli` against
+the CDS NodePort, or skip until the CLI is in-guest.
+
+Kernel caveat still stands: `ratlsMesh` stays disabled until base-images adds
+`CONFIG_NETFILTER_XT_SET`+`CONFIG_NETFILTER_XT_MATCH_OWNER` (monolithic kernel).
+
+Artifacts so far: `c8s-e2e/e2e-c8s-snp.yml` (external-path build, to be reworked
+in-cluster), `c8s-e2e/cluster-prep/` (rke2 rootdisk import + IGVM stage + refs CM
++ RBAC/egress — still valid), `baremetal/kubevirt-rbac.yaml` (+console/portforward).
+
 ## Grounded roadmap (2026-07-14 — full-org sweep)
 
 > Source: a 6-area deep-read of the now-accessible confidential-dot-ai org (c8s +
