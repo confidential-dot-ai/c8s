@@ -3,6 +3,7 @@ package issuer
 import (
 	"context"
 	"crypto/elliptic"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"testing"
@@ -88,6 +89,42 @@ func TestProvisionCAFailsClosedWhenPullErrors(t *testing.T) {
 			}
 			if ca != nil || adopted {
 				t.Fatalf("fail-closed path returned a CA (ca=%v adopted=%v)", ca, adopted)
+			}
+		})
+	}
+}
+
+func TestProvisionCARejectsChainedOrMultiCertHandoff(t *testing.T) {
+	// Adoption supports a single self-signed root; a parent cert or a
+	// rotation bundle must be refused, not silently truncated.
+	peerCA, err := NewCAWithCurve("peer-ca", time.Hour, elliptic.P256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherCA, err := NewCAWithCurve("retiring-ca", time.Hour, elliptic.P256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		material *HandoffMaterial
+	}{
+		{"parent cert", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, ParentCert: otherCA.Cert}},
+		{"multi-cert bundle", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, Bundle: []*x509.Certificate{peerCA.Cert, otherCA.Cert}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pull := func(context.Context, CAProvisionConfig, *slog.Logger) (*HandoffMaterial, error) {
+				return tc.material, nil
+			}
+			ca, adopted, err := provisionCA(context.Background(), CAProvisionConfig{
+				PeerURL:      "https://peer:8443",
+				Measurements: []string{"m"},
+			}, slog.Default(), pull)
+			if err == nil {
+				t.Fatal("provisionCA adopted a chained/multi-cert handoff; must refuse")
+			}
+			if ca != nil || adopted {
+				t.Fatalf("refusal path returned a CA (ca=%v adopted=%v)", ca, adopted)
 			}
 		})
 	}

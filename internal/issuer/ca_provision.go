@@ -79,7 +79,12 @@ func provisionCA(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logger
 
 	material, err := pull(ctx, cfg, logger)
 	if err != nil {
-		return nil, false, fmt.Errorf("adopt mesh CA from peer %s: %w", cfg.PeerURL, err)
+		return nil, false, fmt.Errorf("adopt mesh CA from peer %s (no fallback; if no peer survives, unset --handoff-peer-url to re-bootstrap deliberately): %w", cfg.PeerURL, err)
+	}
+	// Adoption carries a single self-signed root today; refuse chains or
+	// rotation bundles rather than silently drop trust material.
+	if material.ParentCert != nil || len(material.Bundle) > 1 {
+		return nil, false, fmt.Errorf("peer %s handed off a chained or multi-cert CA (parent=%t, bundle=%d certs); adoption supports a single self-signed mesh CA", cfg.PeerURL, material.ParentCert != nil, len(material.Bundle))
 	}
 	return &CA{Cert: material.CACert, Key: material.CAKey}, true, nil
 }
@@ -109,9 +114,11 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 		return nil, err
 	}
 
-	// The JWKS cache lives on the parent ctx so a kid-miss refresh still
-	// resolves if EAR validation runs at the edge of the pull deadline.
-	keyProvider, err := NewJWKSKeyProvider(ctx, cfg.PeerURL+"/.well-known/jwks.json", time.Minute, httpClient, logger)
+	// The JWKS cache must outlive the pull deadline (a kid-miss refresh can
+	// run at its edge) but not the process: stop its refresher on return.
+	provCtx, cancelProv := context.WithCancel(ctx)
+	defer cancelProv()
+	keyProvider, err := NewJWKSKeyProvider(provCtx, cfg.PeerURL+"/.well-known/jwks.json", time.Minute, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("build peer JWKS key provider: %w", err)
 	}
