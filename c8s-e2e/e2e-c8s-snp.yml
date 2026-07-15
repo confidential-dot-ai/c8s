@@ -147,31 +147,9 @@ jobs:
           echo "IP=$IP" >> "$GITHUB_ENV"
           echo "VMI Running at $IP"
 
-      - name: attest — genuine SNP + fresh nonce + ENFORCED golden launch digest
-        run: |
-          set -euo pipefail
-          echo "polling in-guest attestation-api :8400 ..."
-          for i in $(seq 1 30); do
-            curl -s -m5 -o /dev/null "http://$IP:8400/attest" && break || sleep 5
-          done
-          head -c 32 /dev/urandom > n.bin
-          B64=$(base64 -w0 n.bin); HEX=$(od -An -tx1 n.bin | tr -d ' \n')
-          curl -s -m20 -H 'Content-Type: application/json' -d "{\"report_data\":\"$B64\"}" \
-            "http://$IP:8400/attest" -o att.json -w 'POST /attest -> HTTP %{http_code}\n'
-          # AMD KDS rate-limits VCEK fetches (429) — retry verify with backoff
-          for i in 1 2 3 4 5; do
-            if attestation-cli verify --expected-report-data "$HEX" < att.json > claims.json 2>verify.err; then break; fi
-            grep -qi '429\|rate' verify.err && { echo "KDS backoff ($i)"; sleep $((i*25)); continue; }
-            cat verify.err; exit 1
-          done
-          jq . claims.json || cat claims.json
-          jq -e '.platform=="snp" and .signature_valid==true and .report_data_match==true and (.debug_allowed//false)==false' claims.json >/dev/null \
-            || { echo "::error::attestation claims failed"; exit 1; }
-          LD=$(jq -r '.launch_digest // empty' claims.json)
-          [ -n "$LD" ] || { echo "::error::no launch_digest in claims"; exit 1; }
-          [ "$LD" = "$GOLDEN" ] || { echo "::error::launch digest mismatch: attested=$LD golden=$GOLDEN"; exit 1; }
-          echo "launch digest ENFORCED: $LD == golden"
-
+      # NOTE: no pre-install attest — the rke2 node image does NOT bake
+      # attestation-api (unlike base-cpu-image); in node-as-CVM mode it arrives
+      # as the c8s DaemonSet. Attestation is enforced post-install below.
       - name: scrape in-CVM kubeconfig over serial console (retry — flakiest link)
         run: |
           set -uo pipefail
@@ -280,6 +258,38 @@ jobs:
             --operator-keys operator.pub \
             -f ci-values.yaml
           kubectl -n c8s-system get pods -o wide
+
+      - name: attest — genuine SNP + fresh nonce + ENFORCED golden launch digest
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$CVMKC"
+          # the c8s attestation-api DaemonSet reads the node CVM's /dev/sev-guest;
+          # reach it via port-forward (tunnels over the :6443 carve-out)
+          kubectl -n c8s-system rollout status ds -l app.kubernetes.io/name=attestation-api --timeout=180s 2>/dev/null \
+            || kubectl -n c8s-system get ds
+          SVC=$(kubectl -n c8s-system get svc -o name | grep -i attestation | head -1)
+          [ -n "$SVC" ] || { echo "::error::no attestation-api service in c8s-system"; kubectl -n c8s-system get svc; exit 1; }
+          PORT=$(kubectl -n c8s-system get "$SVC" -o jsonpath='{.spec.ports[0].port}')
+          kubectl -n c8s-system port-forward "$SVC" "18400:$PORT" >/dev/null 2>&1 &
+          PF=$!; sleep 3
+          head -c 32 /dev/urandom > n.bin
+          B64=$(base64 -w0 n.bin); HEX=$(od -An -tx1 n.bin | tr -d ' \n')
+          curl -s -m20 -H 'Content-Type: application/json' -d "{\"report_data\":\"$B64\"}" \
+            "http://127.0.0.1:18400/attest" -o att.json -w 'POST /attest -> HTTP %{http_code}\n'
+          kill $PF 2>/dev/null || true
+          # AMD KDS rate-limits VCEK fetches (429) — retry verify with backoff
+          for i in 1 2 3 4 5; do
+            if attestation-cli verify --expected-report-data "$HEX" < att.json > claims.json 2>verify.err; then break; fi
+            grep -qi '429\|rate' verify.err && { echo "KDS backoff ($i)"; sleep $((i*25)); continue; }
+            cat verify.err; exit 1
+          done
+          jq . claims.json || cat claims.json
+          jq -e '.platform=="snp" and .signature_valid==true and .report_data_match==true and (.debug_allowed//false)==false' claims.json >/dev/null \
+            || { echo "::error::attestation claims failed"; exit 1; }
+          LD=$(jq -r '.launch_digest // empty' claims.json)
+          [ -n "$LD" ] || { echo "::error::no launch_digest in claims"; exit 1; }
+          [ "$LD" = "$GOLDEN" ] || { echo "::error::launch digest mismatch: attested=$LD golden=$GOLDEN"; exit 1; }
+          echo "launch digest ENFORCED: $LD == golden (fresh nonce, non-debug, genuine SNP)"
 
       - name: e2e — confidential workload smoke + cw-label-policy
         run: |
