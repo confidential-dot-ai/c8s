@@ -21,7 +21,22 @@ values), same `runs-on: confidential-bm` label. Gotchas hit:
   packages: read`) — NO PAT needed. Confirmed working (chart pulled, c8s installed).
 - cifrai sandbox repos (`confidential-bm-smoke`, `attestation-rs-ci`) archived.
 
-**REAL FINDING — the golden was wrong; enforcement is a fast-follow.** I pinned
+**✅ GOLDEN ENFORCEMENT NOW REAL (2026-07-15, self-discovering).** Fixed: the
+driver reads the node's OWN runtime SNP launch measurement via **configfs-tsm**
+(`/sys/kernel/config/tsm/report` → `outblob`, MEASUREMENT at offset 0x90 / 144,
+48 bytes — the exact value CDS's `CheckMeasurement`/`LaunchDigestFromSubmods`
+compares, case-insensitive hex) BEFORE c8s installs, and pins
+`cds.measurements=[<discovered>]` (chart placeholder `RUNTIME_MEASUREMENT`
+sed-substituted in-guest). Org run 29458798739 GREEN with `MEAS_ENFORCED` — the
+workload cert was ISSUED under the pinned measurement, proving the configfs-tsm
+value == what CDS enforces. Self-discovering (correct across image bumps, no stale
+constant), fail-closed (a different image measures differently → workload certs
+denied), with a fallback to `[]` (accept-any) if configfs-tsm is unavailable so
+the lane can't regress. The image `manifest.json` `snp_launch_digest` remains the
+WRONG source (it's computed under different assumptions than the KubeVirt boot);
+the node's own report is authoritative.
+
+**Original finding (now resolved above):** I pinned
 `cds.measurements=[<manifest snp_launch_digest 131b1a32…>]` and CDS returned
 `403 measurement_denied: launch measurement not allowed` on WORKLOAD cert
 issuance. (The base install stayed green because CDS's OWN serving cert uses
