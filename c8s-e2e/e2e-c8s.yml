@@ -357,7 +357,12 @@ jobs:
           WOK=0; COK=0
           if [ "\$CDSOK" = "1" ]; then
             printf %s '$CW_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
-            for i in \$(seq 1 30); do
+            # PROVEN (run 31): the c8s-cert sidecar DOES get its leaf under the
+            # enforced golden ("entering renewal loop") — so the measurement binding
+            # is correct. But c8s-cert-wait can crash once (probing before the leaf
+            # lands) into kubelet's minutes-long CrashLoopBackOff, so allow a real
+            # window rather than declaring failure at 5 min.
+            for i in \$(seq 1 60); do
               DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
               echo "@@CWDEP \$i: \$DP@@"
               printf '%s' "\$DP" | grep -qE ' 1/1 ' && { WOK=1; say WORKLOAD_OK; break; }
@@ -372,7 +377,10 @@ jobs:
               # the cert sidecar/wait logs say WHY the leaf isn't issued (measurement
               # mismatch vs golden? CDS unreachable? timeout?)
               \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=15 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
+              # --previous too: c8s-cert-wait crash-loops, so the useful error is in
+              # the TERMINATED instance, not the pending one
               \$K -n default logs -l app=demo-nginx -c c8s-cert-wait --tail=15 2>&1 | sed 's/^/@@CWAITLOG /;s/\$/@@/'
+              \$K -n default logs -l app=demo-nginx -c c8s-cert-wait --previous --tail=15 2>&1 | sed 's/^/@@CWAITPREV /;s/\$/@@/'
               \$K -n c8s-system logs -l app.kubernetes.io/component=cds --tail=15 2>&1 | grep -iE 'attest|measure|reject|deny|error|digest' | tail -10 | sed 's/^/@@CDSLOG /;s/\$/@@/'
             fi
           fi
