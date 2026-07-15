@@ -328,7 +328,7 @@ jobs:
 
       - name: c8s install at the pinned commit (inside the attested CVM)
         run: |
-          set -euo pipefail
+          set -uo pipefail   # not -e: on helm --wait timeout we want to diagnose, not die
           openssl ecparam -name prime256v1 -genkey -noout -out operator.key
           openssl ec -in operator.key -pubout -out operator.pub
           export KUBECONFIG="$CVMKC"
@@ -338,7 +338,22 @@ jobs:
             --image-tag "$SHORT" --resolve-digests=false \
             --operator-keys operator.pub \
             -f ci-values.yaml
-          kubectl -n c8s-system get pods -o wide
+          rc=$?
+          echo "=== c8s-system pods ==="; kubectl -n c8s-system get pods -o wide
+          echo "=== c8s-system workloads ==="; kubectl -n c8s-system get deploy,ds,sts 2>&1
+          if [ $rc -ne 0 ]; then
+            echo "::group::not-Ready pod describes + logs"
+            for p in $(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '$2!~/^([1-9][0-9]*)\/\1$/{print $1}'); do
+              echo "----- describe $p -----"
+              kubectl -n c8s-system describe pod "$p" 2>&1 | grep -iE 'State|Reason|Ready|Image|Warning|Error|Back-off|Mounts|Events|message|Waiting|Last' | head -30
+              echo "----- logs $p (all containers, last 40) -----"
+              kubectl -n c8s-system logs "$p" --all-containers --tail=40 --prefix 2>&1 | tail -40
+            done
+            echo "=== recent events ==="; kubectl -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -30
+            echo "::endgroup::"
+            echo "::error::c8s install did not converge (helm --wait); see diagnostics above"
+            exit 1
+          fi
 
       - name: attest — genuine SNP + fresh nonce + ENFORCED golden launch digest
         run: |
