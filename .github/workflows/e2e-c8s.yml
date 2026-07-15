@@ -1,0 +1,459 @@
+# c8s e2e on SNP bare metal (Phase 1 of the confidential-CI north star).
+#
+# One runs-on: confidential-bm job: boot a fresh MEASURED RKE2-node-as-CVM (the
+# k8s node IS the SEV-SNP guest), assert it's a genuine confidential guest, then
+# install the c8s commit under test IN-CLUSTER and prove it converges.
+#
+# WHY in-cluster (not "reach the apiserver from the runner"): the host cluster's
+# Cilium and the in-CVM rke2 BOTH use 10.42.0.0/16, and under KubeVirt bridge
+# networking (forced — masquerade breaks under SNP) the guest node IP lands in
+# that overlapping range, so routing to <cvm>:6443 is a nondeterministic CIDR
+# collision (even virt-handler times out). The team's real pattern is Flux
+# installing c8s FROM INSIDE the cluster; we mirror that: drive everything
+# through the serial console (100% reliable) against the guest's LOCAL apiserver.
+#
+# Install path: rke2's built-in helm-controller installs the per-commit OCI chart
+# ghcr.io/confidential-dot-ai/charts/c8s:0.1.0-g<short-sha> (private -> needs a
+# ghcr read:packages credential, GHCR_USER/GHCR_TOKEN secrets).
+#
+# The confidential proof is c8s's own: CDS reaches Ready only if the node emits a
+# genuine SNP report whose launch measurement == the golden value we pin
+# (cds.measurements). So "CDS Ready" == the node is an attested SNP TEE booted
+# from the exact measured image. Fail-closed by c8s itself.
+#
+# Scope (deliberate): ratlsMesh + nriImagePolicy OFF for first-green — the mesh
+# needs kernel netfilter modules the monolithic guest kernel lacks
+# (CONFIG_NETFILTER_XT_SET/_MATCH_OWNER), and nri enforcement is the Phase-1b
+# marquee. First-green = c8s installs + operator/cds/attestation-api Ready +
+# CDS attested.
+#
+# Cluster prereqs (once, via c8s-e2e/cluster-prep/apply.sh): rke2 rootdisk PVC,
+# /var/lib/igvm/rke2.igvm, rke2-image-refs CM, bm-e2e RBAC (console).
+name: e2e-c8s
+on:
+  workflow_dispatch:
+    inputs:
+      c8s_ref:
+        description: c8s commit to test (a chart tag charts/c8s:0.1.0-g<short-sha> must exist)
+        required: false
+        default: main
+
+jobs:
+  e2e:
+    # PLATFORM MATRIX — one cell per target we ship on. Adding a platform =
+    # adding a row here + its provision seam (the "provision the test cluster"
+    # step is the only truly platform-specific part; install/attest/e2e/teardown
+    # are shared). Cells run independently: fail-fast off, one is not a gate on
+    # another.
+    #
+    #   bare metal (customers who plug in power cords: CW/Nebius/Humain)
+    #     - snp-metal  [GREEN]      KubeVirt SEV-SNP node-as-CVM on our metal
+    #     - tdx-metal  [TODO]       tdx-dev-host-1 is provisioned+idle; needs an
+    #                               ARC runner + a TDX rke2-node image (the
+    #                               rootdisk/dev-vm plays are gated sev_snp_enabled)
+    #   cloud (customers who rent infra: Baseten/Modal/RunPod)
+    #     - gke-snp    [TODO]       c8s-fleet gke_provisioner mints an ephemeral
+    #                               Confidential GKE cluster; provision seam swaps,
+    #                               install/attest/e2e reuse this job body
+    #     - gke-tdx    [TODO]       delta on gke-snp (confidential_node_type: tdx)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: snp-metal
+            runner: confidential-bm
+            refs_cm: rke2-image-refs      # producer-published image refs + golden
+            cvm_mode: node                # the k8s node IS the SNP guest
+            hardware_platform: sev-snp
+            ratls_platform: sev-snp
+            cores: 4                      # MUST match the image's measured smp
+            memory: 16Gi
+    name: e2e (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 55
+    # per-platform serialization: virtctl console is exclusive per VMI, and metal
+    # cells share one host — but cells of different platforms may run concurrently
+    concurrency: c8s-e2e-${{ matrix.platform }}
+    permissions:
+      contents: read
+      packages: read   # pull the private charts/c8s via GITHUB_TOKEN (org-native, no PAT)
+    env:
+      NS: confai-images
+      VM: c8s-e2e-${{ github.run_id }}
+    steps:
+      - name: checkout c8s at pinned ref (for the short-sha -> chart tag)
+        uses: actions/checkout@v4
+        with:
+          repository: confidential-dot-ai/c8s
+          ref: ${{ inputs.c8s_ref }}
+          path: c8s
+
+      - name: tools (kubectl + virtctl v1.7.0 + expect)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends jq ca-certificates bsdutils expect
+          mkdir -p "$PWD/bin"
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          curl -fsSL https://github.com/kubevirt/kubevirt/releases/download/v1.7.0/virtctl-v1.7.0-linux-amd64 -o bin/virtctl
+          echo "ec6ee5619290e19590f3f9cd8b8dfce1affe0380eaaca77b3784c7b1acea86a6  bin/virtctl" | sha256sum -c -
+          chmod +x bin/*
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: resolve refs (producer image refs + golden digest + short sha)
+        run: |
+          set -euo pipefail
+          CM='${{ matrix.refs_cm }}'
+          for k in rootPvc igvmFile launchDigestSmp4; do
+            v=$(kubectl -n "$NS" get cm "$CM" -o jsonpath="{.data.$k}")
+            [ -n "$v" ] || { echo "::error::$CM missing $k — run cluster-prep/apply.sh"; exit 1; }
+          done
+          SHORT=$(cd c8s && git rev-parse --short=7 HEAD)
+          {
+            echo "ROOTPVC=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.rootPvc}')"
+            echo "IGVMFILE=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.igvmFile}')"
+            echo "GOLDEN=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.launchDigestSmp4}')"
+            echo "SHORT=$SHORT"
+            echo "CHART_VER=0.1.0-g$SHORT"
+          } >> "$GITHUB_ENV"
+          echo "${{ matrix.platform }}: c8s $SHORT -> chart 0.1.0-g$SHORT"
+
+      # reap-before-provision (NVIDIA/holodeck lesson): a killed run leaks its CVM
+      # and its rootdisk clone. Delete CVMs whose owning GitHub run is no longer
+      # in progress — never touch one belonging to a live run.
+      - name: reap leaked CVMs from finished runs
+        run: |
+          set +e +o pipefail
+          for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
+            rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
+            [ -z "$rid" ] && continue
+            [ "$rid" = "${{ github.run_id }}" ] && continue
+            st=$(gh api "repos/${{ github.repository }}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ] || [ -z "$st" ]; then
+              echo "reaping $vm (run $rid status=${st:-gone})"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run $rid still $st)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: boot the RKE2-node CVM (shared rootdisk)
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: $VM
+            namespace: $NS
+            labels:
+              # run metadata: lets the reaper attribute a leaked CVM to exactly one
+              # GitHub run, and keeps concurrent matrix cells from colliding
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/run-id: "${{ github.run_id }}"
+              ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
+              ci.confidential.ai/platform: "${{ matrix.platform }}"
+              ci.confidential.ai/c8s-sha: "$SHORT"
+          spec:
+            runStrategy: Always
+            template:
+              metadata:
+                labels:
+                  vm.kubevirt.io/name: $VM
+                annotations:
+                  igvm.confidential.ai/file: "$IGVMFILE"
+                  hooks.kubevirt.io/hookSidecars: '[{"image":"ghcr.io/confidential-dot-ai/igvm-hook-sidecar@sha256:7450bb136bfc4d9434a7c1eb9e478ab3237e7d9acf5c211e7d080f2008b01ba0","imagePullPolicy":"IfNotPresent","args":["--version","v1alpha3"],"pvc":{"name":"igvm-files","volumePath":"/igvm","sharedComputePath":"/var/run/igvm"}}]'
+              spec:
+                nodeSelector:
+                  confidential.ai/sev-snp: "true"
+                domain:
+                  cpu:
+                    model: EPYC-Genoa
+                    cores: ${{ matrix.cores }}   # MUST match the image's measured smp
+                  memory:
+                    guest: ${{ matrix.memory }}
+                  resources:
+                    requests:
+                      memory: ${{ matrix.memory }}
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                  launchSecurity:
+                    snp: {}
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                    interfaces:
+                      - name: default
+                        bridge: {}        # masquerade is broken under SNP
+                    rng: {}
+                networks:
+                  - name: default
+                    pod: {}
+                volumes:
+                  - name: rootdisk
+                    persistentVolumeClaim:
+                      claimName: $ROOTPVC
+          EOF
+          echo "waiting for VMI Running..."
+          for i in $(seq 1 70); do
+            PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$PHASE" = Running ] && break
+            sleep 6
+          done
+          [ "$PHASE" = Running ] || { kubectl -n "$NS" describe vmi "$VM" | tail -30; echo "::error::VMI not Running"; exit 1; }
+          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name | head -1); POD=${POD#pod/}
+          echo "POD=$POD" >> "$GITHUB_ENV"
+          echo "VMI Running (launcher $POD)"
+
+      - name: assert genuine confidential boot (qemu sev-snp-guest + IGVM sha)
+        run: |
+          set -uo pipefail
+          echo '--- qemu cmdline ---'
+          kubectl -n "$NS" exec "$POD" -c compute -- sh -c \
+            "tr '\0' '\n' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline | grep -cE 'sev-snp-guest'" | tee /tmp/snp.cnt
+          kubectl -n "$NS" exec "$POD" -c compute -- sh -c "sha256sum /var/run/igvm/rke2.igvm 2>/dev/null" || true
+          [ "$(cat /tmp/snp.cnt 2>/dev/null)" = "1" ] && echo 'OK: genuine sev-snp-guest' || { echo '::error::not a sev-snp-guest'; exit 1; }
+
+      - name: console helpers (expect send + in-guest exec/read)
+        run: |
+          set -euo pipefail
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          kubectl config set-cluster h --server="https://kubernetes.default.svc" --certificate-authority="$SA/ca.crt" --kubeconfig=/tmp/host.kubeconfig >/dev/null
+          kubectl config set-credentials s --token="$(cat $SA/token)" --kubeconfig=/tmp/host.kubeconfig >/dev/null
+          kubectl config set-context h --cluster=h --user=s -n "$NS" --kubeconfig=/tmp/host.kubeconfig >/dev/null
+          kubectl config use-context h --kubeconfig=/tmp/host.kubeconfig >/dev/null
+          # expect: give virtctl a real pty, connect (needs ~5s), type GUESTCMD, detach
+          cat > /tmp/send.exp <<'EXP'
+          set timeout 6
+          spawn virtctl --kubeconfig /tmp/host.kubeconfig console $env(VM) -n $env(NS)
+          expect timeout
+          send -- "\r"
+          expect timeout
+          send -- "$env(GUESTCMD)\r"
+          set timeout 4
+          expect timeout
+          send -- "\x1d"
+          EXP
+          # gsend "<cmd>": type one command into the guest shell (fire-and-forget)
+          cat > /tmp/gsend.sh <<'SH'
+          GUESTCMD="$1" VM="$VM" NS="$NS" timeout -k5 45 expect -f /tmp/send.exp >/dev/null 2>&1
+          SH
+          echo "helpers written"
+
+      # ONE in-guest driver does the whole install+wait+report, emitting @@markers@@
+      # to the serial console. The runner delivers it once (chunked base64 over the
+      # console), launches it, then POLLS guest-console-log (fast, host-side) for the
+      # markers — instead of dozens of slow per-command console round-trips.
+      # (Pattern from NVIDIA/aicr: do the work in-cluster, read the result out-of-band.)
+      - name: install c8s in-cluster via in-guest driver (rke2 helm-controller, OCI chart)
+        env:
+          # org-native: pull the private chart with the built-in GITHUB_TOKEN
+          # (packages:read). Falls back to a GHCR_TOKEN PAT if one is set (cifrai).
+          GHCR_USER: ${{ secrets.GHCR_USER || github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          # best-effort loops: disable the runner's default bash -e + pipefail, or a
+          # no-match grep (e.g. "no new markers") silently kills the step
+          set +e +o pipefail
+          export VM NS
+          [ -n "${GHCR_TOKEN:-}" ] || { echo "::error::GHCR_TOKEN secret not set (needed to pull the private chart)"; exit 1; }
+          echo "waiting for guest autologin shell (~180s; boot blocks on networkd-wait-online)..."
+          for i in $(seq 1 30); do
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { echo "shell ready"; break; }
+            sleep 15
+          done
+          # secret + HelmChart, base64'd, BAKED into the driver (decoded in-guest)
+          DCJ=$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$(printf '%s:%s' "$GHCR_USER" "$GHCR_TOKEN" | base64 -w0)" | base64 -w0)
+          SEC_B64=$(printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: ghcr-oci\n  namespace: kube-system\ntype: kubernetes.io/dockerconfigjson\ndata:\n  .dockerconfigjson: %s\n' "$DCJ" | base64 -w0)
+          HC_B64=$(cat <<EOF | base64 -w0
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: c8s
+            namespace: kube-system
+          spec:
+            chart: oci://ghcr.io/confidential-dot-ai/charts/c8s
+            version: "$CHART_VER"
+            targetNamespace: c8s-system
+            createNamespace: false
+            dockerRegistrySecret:
+              name: ghcr-oci
+            valuesContent: |
+              image:
+                tag: "$SHORT"
+              cds:
+                image:
+                  tag: "$SHORT"
+                node:
+                  selector: null
+                  tolerations: null
+                ratlsPlatform: ${{ matrix.ratls_platform }}
+                # ENFORCE the golden launch digest: CDS only issues workload certs
+                # to nodes attesting this measurement (doesn't gate CDS's own Ready)
+                measurements: ["$GOLDEN"]
+              attestationApi:
+                image:
+                  tag: "main"
+                cvmMode: ${{ matrix.cvm_mode }}
+                teeDevices:
+                  sevGuest: ${{ matrix.hardware_platform == 'sev-snp' }}
+                  tdxGuest: ${{ matrix.hardware_platform == 'tdx' }}
+                  tpm: false
+              ratlsMesh:
+                enabled: false
+              nriImagePolicy:
+                enabled: false
+              tlsLb:
+                hostPort:
+                  enabled: false
+          EOF
+          )
+          # the canonical cw sample at the pinned commit (default ns is PSA-exempt in the rke2 image)
+          CW_B64=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
+          # build the driver ($-escaped so only SEC_B64/HC_B64/CW_B64 expand here; the rest runs in-guest)
+          cat > /tmp/drive.sh <<DRIVER
+          #!/bin/bash
+          set +e
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # timeout-wrap every kubectl: c8s installs a mutating webhook whose backend
+          # (operator) isn't Ready immediately, which can make an un-timed-out API call
+          # block forever and silently stall the driver after HELM_DONE
+          K="timeout 25 /var/lib/rancher/rke2/bin/kubectl"
+          say(){ echo "@@\$1@@"; }
+          say DRIVE_START
+          for i in \$(seq 1 40); do \$K get nodes --no-headers 2>/dev/null | grep -q ' Ready' && break; sleep 6; done
+          \$K get nodes --no-headers 2>&1 | grep -q ' Ready' && say NODE_READY || { \$K get nodes 2>&1 | sed 's/^/@@ND /;s/\$/@@/'; say FAIL_NODE; exit 0; }
+          printf %s '$SEC_B64' | base64 -d | \$K apply -f - >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
+          # pre-create c8s-system WITH the PSA privileged label — helm createNamespace
+          # can't set labels, and attestation-api's privileged pod is PSA-rejected
+          # without it (which stalls the whole CDS readiness chain)
+          \$K create ns c8s-system >/dev/null 2>&1
+          \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
+          printf %s '$HC_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+          # helm-controller RETRIES a failed helm job (a transient first-attempt
+          # failure is normal — run 21 succeeded on attempt 2). Wait for succ=1;
+          # don't bail on a single "INSTALLATION FAILED" in the aggregated log.
+          for i in \$(seq 1 45); do
+            s=\$(\$K -n kube-system get job helm-install-c8s -o jsonpath='{.status.succeeded}' 2>/dev/null)
+            echo "@@HJOB \$i succ=\${s:-0}@@"
+            \$K -n kube-system logs job/helm-install-c8s --tail=2 2>/dev/null | sed 's/^/@@HLOG /;s/\$/@@/'
+            [ "\$s" = "1" ] && { say HELM_DONE; break; }
+            sleep 12
+          done
+          say AFTERHELMLOOP
+          CDSOK=0
+          for i in \$(seq 1 45); do
+            PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
+            printf '%s\n' "\$PODS" | sed 's/^/@@POD /;s/\$/@@/'
+            # CDS ready = the c8s-cds-* pod shows 1/1 Running (label-agnostic; the
+            # jsonpath -l selector was wrong). tls-lb crashloop is separate + doesn't gate CDS.
+            CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
+            echo "@@CDSR \$i: \${CDS:-nopod}@@"
+            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { CDSOK=1; say CDS_READY; break; }
+            sleep 12
+          done
+          # consumption proof: a cw-annotated workload must run AND carry the injected
+          # c8s-cert container (cert issued by CDS under the ENFORCED golden measurement)
+          WOK=0; COK=0
+          if [ "\$CDSOK" = "1" ]; then
+            printf %s '$CW_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
+            # PROVEN (run 31): the c8s-cert sidecar DOES get its leaf under the
+            # enforced golden ("entering renewal loop") — so the measurement binding
+            # is correct. But c8s-cert-wait can crash once (probing before the leaf
+            # lands) into kubelet's minutes-long CrashLoopBackOff, so allow a real
+            # window rather than declaring failure at 5 min.
+            for i in \$(seq 1 60); do
+              DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
+              echo "@@CWDEP \$i: \$DP@@"
+              printf '%s' "\$DP" | grep -qE ' 1/1 ' && { WOK=1; say WORKLOAD_OK; break; }
+              sleep 10
+            done
+            IC=\$(\$K -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name} | {.items[0].spec.containers[*].name}' 2>/dev/null)
+            echo "@@CWCONTAINERS \${IC:-none}@@"
+            printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
+            [ "\$WOK" = "1" ] && [ "\$COK" = "1" ] && say E2E_OK
+            if [ "\$WOK" != "1" ]; then
+              \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason|message' | tail -12 | sed 's/^/@@CWDESC /;s/\$/@@/'
+              # the cert sidecar/wait logs say WHY the leaf isn't issued (measurement
+              # mismatch vs golden? CDS unreachable? timeout?)
+              \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=15 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
+              # --previous too: c8s-cert-wait crash-loops, so the useful error is in
+              # the TERMINATED instance, not the pending one
+              \$K -n default logs -l app=demo-nginx -c c8s-cert-wait --tail=15 2>&1 | sed 's/^/@@CWAITLOG /;s/\$/@@/'
+              \$K -n default logs -l app=demo-nginx -c c8s-cert-wait --previous --tail=15 2>&1 | sed 's/^/@@CWAITPREV /;s/\$/@@/'
+              \$K -n c8s-system logs -l app.kubernetes.io/component=cds --tail=15 2>&1 | grep -iE 'attest|measure|reject|deny|error|digest' | tail -10 | sed 's/^/@@CDSLOG /;s/\$/@@/'
+            fi
+          fi
+          \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -15 | sed 's/^/@@EV /;s/\$/@@/'
+          \$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Unhealthy|message:' | tail -20 | sed 's/^/@@DESC /;s/\$/@@/'
+          say DRIVE_END
+          DRIVER
+          # deliver the driver into the guest (chunked base64 -> file -> decode).
+          # A dropped console chunk truncates the script (unclosed 'for' -> syntax
+          # error), so VERIFY the byte count and RETRY the whole delivery.
+          DB=$(base64 -w0 /tmp/drive.sh); EXPLEN=${#DB}
+          echo "delivering driver ($EXPLEN b64 chars) with verify+retry..."
+          # NOTE: build the OK marker from a runtime var (R) so the SUCCESS string
+          # never appears literally in the typed command — else grep matches the
+          # command-echo and the check false-passes on a truncated script.
+          delivered=
+          for att in 1 2 3 4 5; do
+            bash /tmp/gsend.sh "rm -f /tmp/d.b64"
+            # `|| [ -n "$c" ]` processes fold's LAST line (no trailing newline) — else
+            # the final chunk is silently dropped and every delivery truncates identically
+            printf '%s' "$DB" | fold -w700 | while IFS= read -r c || [ -n "$c" ]; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
+            bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); R=x; [ \"\$L\" = \"$EXPLEN\" ] && R=OK; echo \"@@DLEN\${R}${att}v\${L}@@\""
+            sleep 4
+            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n')
+            if printf '%s' "$LOG" | grep -q "@@DLENOK${att}v"; then delivered=1; echo "driver delivered intact (attempt $att, $EXPLEN chars)"; break; fi
+            printf '%s' "$LOG" | grep -oE "@@DLENx${att}v[0-9]*@@" | tail -1 | sed 's/^/  delivery short: /'
+          done
+          [ -n "$delivered" ] || { echo "::error::driver delivery kept truncating over 5 attempts"; exit 1; }
+          bash /tmp/gsend.sh "R=ERR; base64 -d /tmp/d.b64 >/tmp/drive.sh 2>/dev/null && bash -n /tmp/drive.sh 2>/dev/null && R=OK; echo \"@@DEC\${R}z@@\""
+          sleep 4
+          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DECOKz@@'; then
+            echo "::error::driver decoded but failed bash -n syntax check"; exit 1
+          fi
+          # launch the driver DETACHED with its stdout on the console. NOT nohup:
+          # nohup redirects stdout to nohup.out when stdout is a terminal, which
+          # swallowed all driver output. A subshell-background keeps it on ttyS0.
+          bash /tmp/gsend.sh "(setsid sh -c 'bash /tmp/drive.sh 2>&1 | tee /tmp/drive.out >/dev/ttyS0' </dev/null &) ; echo @@LAUNCHED@@"
+          echo "--- polling guest-console-log for driver progress ---"
+          seen=""; ok=""
+          for i in $(seq 1 100); do   # fast host-side polls
+            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
+            NEW=$(printf '%s' "$LOG" | grep -oE '@@[^@]{1,140}@@' | sed 's/@@//g')
+            comm -13 <(printf '%s\n' "$seen" | sort -u) <(printf '%s\n' "$NEW" | sort -u) 2>/dev/null | grep -vE '^$' | sed 's/^/  · /'
+            seen="$NEW"
+            # SUCCESS gate = full e2e: CDS attested (golden ENFORCED) + cw workload
+            # Running + CDS-issued cert injected into it
+            printf '%s' "$LOG" | grep -q '@@E2E_OK@@' && { ok=1; echo "E2E_OK seen"; break; }
+            printf '%s' "$LOG" | grep -qE '@@FAIL_' && { echo "driver reported a failure marker"; break; }
+            printf '%s' "$LOG" | grep -q '@@DRIVE_END@@' && { echo "driver ended without E2E_OK"; break; }
+            sleep 10
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::e2e did not complete (no E2E_OK). Full driver console output:"
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -60
+            echo "--- /tmp/drive.out (driver's own record) ---"
+            bash /tmp/gsend.sh "echo @@DOUT_START@@; tail -30 /tmp/drive.out 2>&1; echo @@DOUT_END@@"
+            sleep 5
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/DOUT_START/{f=1} f{print} /DOUT_END/{f=0}' | tail -35
+            exit 1
+          fi
+          echo "✅ E2E PASS on $SHORT: CDS attested (node is a genuine SEV-SNP TEE, launch digest == $GOLDEN, ENFORCED); confidential workload Running with a CDS-issued cert injected — c8s installed + exercised in-cluster on the measured RKE2-node-CVM"
+
+      - name: diagnostics (on failure)
+        if: failure()
+        run: |
+          export VM NS POD
+          kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tail -50 || true
+
+      - name: "teardown (always — tmpfs CVM: deleting the VM is total)"
+        if: always()
+        run: kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true
