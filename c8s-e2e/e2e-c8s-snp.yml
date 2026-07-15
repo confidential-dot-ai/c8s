@@ -191,7 +191,9 @@ jobs:
           GHCR_USER: ${{ secrets.GHCR_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          set -uo pipefail
+          # best-effort loops: disable the runner's default bash -e + pipefail, or a
+          # no-match grep (e.g. "no new markers") silently kills the step
+          set +e +o pipefail
           export VM NS
           [ -n "${GHCR_TOKEN:-}" ] || { echo "::error::GHCR_TOKEN secret not set (needed to pull the private chart)"; exit 1; }
           echo "waiting for guest autologin shell (~180s; boot blocks on networkd-wait-online)..."
