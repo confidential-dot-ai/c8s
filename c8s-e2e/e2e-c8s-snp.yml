@@ -295,20 +295,23 @@ jobs:
           # error), so VERIFY the byte count and RETRY the whole delivery.
           DB=$(base64 -w0 /tmp/drive.sh); EXPLEN=${#DB}
           echo "delivering driver ($EXPLEN b64 chars) with verify+retry..."
+          # NOTE: build the OK marker from a runtime var (R) so the SUCCESS string
+          # never appears literally in the typed command — else grep matches the
+          # command-echo and the check false-passes on a truncated script.
           delivered=
-          for att in 1 2 3 4; do
+          for att in 1 2 3 4 5; do
             bash /tmp/gsend.sh "rm -f /tmp/d.b64"
             printf '%s' "$DB" | fold -w700 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
-            bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); [ \"\$L\" = \"$EXPLEN\" ] && echo @@DLEN_OK_${att}@@ || echo @@DLEN_BAD_${att}_\${L}@@"
+            bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); R=x; [ \"\$L\" = \"$EXPLEN\" ] && R=OK; echo \"@@DLEN\${R}${att}v\${L}@@\""
             sleep 4
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n')
-            if printf '%s' "$LOG" | grep -q "@@DLEN_OK_${att}@@"; then delivered=1; echo "driver delivered intact (attempt $att)"; break; fi
-            printf '%s' "$LOG" | grep -oE "@@DLEN_BAD_${att}_[0-9]*@@" | tail -1 | sed 's/^/  delivery short: /'
+            if printf '%s' "$LOG" | grep -q "@@DLENOK${att}v"; then delivered=1; echo "driver delivered intact (attempt $att, $EXPLEN chars)"; break; fi
+            printf '%s' "$LOG" | grep -oE "@@DLENx${att}v[0-9]*@@" | tail -1 | sed 's/^/  delivery short: /'
           done
-          [ -n "$delivered" ] || { echo "::error::driver delivery kept truncating over 4 attempts"; exit 1; }
-          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh && bash -n /tmp/drive.sh && echo @@DECODEOK@@ || echo @@DECODEERR@@"
+          [ -n "$delivered" ] || { echo "::error::driver delivery kept truncating over 5 attempts"; exit 1; }
+          bash /tmp/gsend.sh "R=ERR; base64 -d /tmp/d.b64 >/tmp/drive.sh 2>/dev/null && bash -n /tmp/drive.sh 2>/dev/null && R=OK; echo \"@@DEC\${R}z@@\""
           sleep 4
-          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DECODEOK@@'; then
+          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DECOKz@@'; then
             echo "::error::driver decoded but failed bash -n syntax check"; exit 1
           fi
           # launch the driver DETACHED with its stdout on the console. NOT nohup:
