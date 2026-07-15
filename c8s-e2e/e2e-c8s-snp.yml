@@ -49,7 +49,7 @@ jobs:
       - name: tools (kubectl, virtctl v1.7.0 pinned to host KubeVirt, helm, crane deps)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev jq openssl ca-certificates bsdutils
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev jq openssl ca-certificates bsdutils expect
           mkdir -p "$PWD/bin"
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
           curl -fsSL https://github.com/kubevirt/kubevirt/releases/download/v1.7.0/virtctl-v1.7.0-linux-amd64 -o bin/virtctl
@@ -199,9 +199,22 @@ jobs:
             sleep 15
           done
 
-          send() {  # type one line into the guest's ttyS0 autologin shell (fire-and-forget)
-            (sleep 2; printf '%s\n' "$1"; sleep 3) \
-              | timeout -k 5 40 script -qec "timeout 30 virtctl --kubeconfig $HOSTKC console $VM -n $NS" /dev/null >/dev/null 2>&1 || true
+          # expect drives virtctl console with a REAL pty (a piped `script` doesn't
+          # reliably forward keystrokes over the apiserver-proxied console): give
+          # virtctl time to connect + drain boot text, then send the command.
+          cat > /tmp/send.exp <<'EXP'
+          set timeout 10
+          spawn virtctl --kubeconfig $env(HOSTKC) console $env(VM) -n $env(NS)
+          expect timeout            ;# ~10s: let the websocket connect & boot text drain
+          send -- "\r"
+          expect timeout            ;# ~10s
+          send -- "$env(GUESTCMD)\r"
+          set timeout 6
+          expect timeout            ;# let the (large) output flush to the serial log
+          send -- "\x1d"            ;# Ctrl-] detaches virtctl cleanly
+          EXP
+          send() {  # type one line into the guest's ttyS0 autologin shell
+            GUESTCMD="$1" HOSTKC="$HOSTKC" VM="$VM" NS="$NS" timeout -k 5 45 expect -f /tmp/send.exp 2>&1
           }
 
           # 2. retry: ask the guest to emit its kubeconfig once rke2 has written it;
@@ -210,7 +223,8 @@ jobs:
           for i in $(seq 1 20); do
             echo "attempt $i: typing dump command into the guest shell..."
             M="KX${i}Q"                      # unique marker per attempt
-            send "test -f /etc/rancher/rke2/rke2.yaml && echo ${M}A\$(base64 -w0 /etc/rancher/rke2/rke2.yaml)${M}Z || echo ${M}NOPE"
+            SENDOUT=$(send "test -f /etc/rancher/rke2/rke2.yaml && echo ${M}A\$(base64 -w0 /etc/rancher/rke2/rke2.yaml)${M}Z || echo ${M}NOPE")
+            [ "$i" -le 2 ] && { echo "  --- expect/virtctl output (attempt $i) ---"; printf '%s\n' "$SENDOUT" | tr -cd '[:print:]\n' | tail -15 | sed 's/^/  | /'; }
             sleep 5
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
             if printf '%s' "$LOG" | grep -q "${M}NOPE"; then echo "attempt $i: rke2.yaml not written yet"; sleep 15; continue; fi
