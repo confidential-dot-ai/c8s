@@ -237,8 +237,13 @@ jobs:
             echo "attempt $i: no clean capture yet"; sleep 12
           done
           if [ -z "$b64" ]; then
-            echo "::error::could not scrape kubeconfig from the guest"
-            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tail -40
+            echo "::error::could not scrape kubeconfig — rke2.yaml never appeared; querying rke2 state in-guest"
+            send "echo DIAGX; systemctl is-active rke2-server; systemctl is-failed rke2-server; ip -4 addr show; ls -la /etc/rancher/rke2/ 2>&1; journalctl -u rke2-server --no-pager -n 60 2>&1 | tail -60; echo DIAGXEND" >/dev/null
+            sleep 8
+            echo '===== in-guest rke2 diagnostics ====='
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+              | awk '/DIAGX/{f=1} f{print} /DIAGXEND/{f=0}' | tail -80
+            echo '===== end diagnostics ====='
             exit 1
           fi
           printf '%s' "$b64" | base64 -d | python3 -c '
