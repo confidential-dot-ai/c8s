@@ -306,7 +306,14 @@ jobs:
             echo "@@CWCONTAINERS \${IC:-none}@@"
             printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
             [ "\$WOK" = "1" ] && [ "\$COK" = "1" ] && say E2E_OK
-            [ "\$WOK" = "1" ] || \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason|message' | tail -12 | sed 's/^/@@CWDESC /;s/\$/@@/'
+            if [ "\$WOK" != "1" ]; then
+              \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason|message' | tail -12 | sed 's/^/@@CWDESC /;s/\$/@@/'
+              # the cert sidecar/wait logs say WHY the leaf isn't issued (measurement
+              # mismatch vs golden? CDS unreachable? timeout?)
+              \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=15 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
+              \$K -n default logs -l app=demo-nginx -c c8s-cert-wait --tail=15 2>&1 | sed 's/^/@@CWAITLOG /;s/\$/@@/'
+              \$K -n c8s-system logs -l app.kubernetes.io/component=cds --tail=15 2>&1 | grep -iE 'attest|measure|reject|deny|error|digest' | tail -10 | sed 's/^/@@CDSLOG /;s/\$/@@/'
+            fi
           fi
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -15 | sed 's/^/@@EV /;s/\$/@@/'
           \$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Unhealthy|message:' | tail -20 | sed 's/^/@@DESC /;s/\$/@@/'
