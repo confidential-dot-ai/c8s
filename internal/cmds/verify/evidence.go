@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -114,60 +114,24 @@ func gatherFromRATLSCert(ctx context.Context, addr, serverName string, timeout t
 }
 
 // evidenceFromCert extracts the attestation extension from a certificate and
-// binds REPORTDATA to the certificate's public key. The serving cert carries no
-// per-request nonce, so the binding proves "this key was born in a TEE" but not
-// freshness (fresh=false).
+// binds REPORTDATA to the certificate's public key (localverify.CertEnvelope).
+// The serving cert carries no per-request nonce, so the binding proves "this
+// key was born in a TEE" but not freshness (fresh=false).
 func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) {
-	att, err := ratls.ExtractAttestation(cert)
+	platform, raw, erd, err := localverify.CertEnvelope(cert)
 	if err != nil {
 		return nil, err
-	}
-	platform, raw, err := evidenceFromAttestation(att)
-	if err != nil {
-		return nil, err
-	}
-	rd, err := ratls.ReportDataForKey(cert.PublicKey, nil)
-	if err != nil {
-		return nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
 	}
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
 		platform:    platform,
 		rawEvidence: raw,
-		erd:         keyAnchor(rd),
+		erd:         erd,
 		fresh:       false,
 		source:      source,
 		certSHA256:  hex.EncodeToString(sum[:]),
 		bindingNote: "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)",
 	}, nil
-}
-
-// evidenceFromAttestation turns an RA-TLS cert's embedded attestation into the
-// platform + evidence object the verifier expects. An embedded {platform,
-// evidence} envelope (e.g. az-snp) is forwarded verbatim; a raw SEV-SNP report
-// is wrapped as {attestation_report, cert_chain.vcek?}. A raw TDX report has no
-// evidence shape wired here yet — use the discovery / attestation endpoint,
-// which carries the attester's evidence object directly.
-func evidenceFromAttestation(att *ratls.Attestation) (string, json.RawMessage, error) {
-	if env, ok := att.EmbeddedEvidence(); ok {
-		return env.Platform, env.Evidence, nil
-	}
-	switch att.TEEType {
-	case ratls.TEETypeSEVSNP:
-		inner := map[string]any{"attestation_report": base64.StdEncoding.EncodeToString(att.Report)}
-		if len(att.CertChain) > 0 {
-			inner["cert_chain"] = map[string]any{"vcek": base64.StdEncoding.EncodeToString(att.CertChain)}
-		}
-		raw, err := json.Marshal(inner)
-		if err != nil {
-			return "", nil, fmt.Errorf("marshal snp evidence: %w", err)
-		}
-		return string(types.PlatformSnp), raw, nil
-	case ratls.TEETypeTDX:
-		return "", nil, fmt.Errorf("verifying a raw TDX report from an RA-TLS serving cert is not yet supported; use the discovery or attestation endpoint")
-	default:
-		return "", nil, fmt.Errorf("unsupported TEE type %d", att.TEEType)
-	}
 }
 
 // gatherFromEndpoint fetches nonce-bound evidence from the attestation endpoint.

@@ -2,9 +2,11 @@ package allowlist
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -19,8 +21,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	internalallowlist "github.com/confidential-dot-ai/c8s/internal/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -46,19 +51,6 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 		t.Fatal(err)
 	}
 
-	store, err := internalallowlist.OpenInMemory()
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	digest, err := types.ParseDigest(digA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Add(digest, "registry/c8s/cds@"+digA); err != nil {
-		t.Fatalf("seed store: %v", err)
-	}
-	h := internalallowlist.Handler{Store: &store}
-
 	doc, err := json.Marshal(types.DiscoveryDocument{
 		Version: "1",
 		CDSTLS: types.CDSTLSDiscovery{
@@ -79,34 +71,55 @@ func tlsLBServer(t *testing.T, measurementChallenge []byte) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(doc)
 	})
-	mux.HandleFunc("GET /allowlist", h.HandleList)
+	mux.HandleFunc("GET /allowlist", seededAllowlistHandler(t).HandleList)
 
 	srv := httptest.NewUnstartedServer(mux)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	srv.StartTLS()
-	t.Cleanup(func() {
-		srv.Close()
-		store.Close()
-	})
+	t.Cleanup(srv.Close)
 	return srv
 }
 
-// attestationAPIServer fakes the attestation-api /verify endpoint, approving
-// with the given launch measurement.
-func attestationAPIServer(t *testing.T, measurement []byte) *httptest.Server {
+// seededAllowlistHandler returns a CDS allowlist read handler over an
+// in-memory store seeded with digA.
+func seededAllowlistHandler(t *testing.T) internalallowlist.Handler {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"result": map[string]any{
-				"platform":          string(types.PlatformAzSnp),
-				"signature_valid":   true,
-				"report_data_match": true,
-				"claims":            map[string]any{"launch_digest": hex.EncodeToString(measurement)},
-			},
-		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	store, err := internalallowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	digest, err := types.ParseDigest(digA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(digest, "registry/c8s/cds@"+digA); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	return internalallowlist.Handler{Store: &store}
+}
+
+// approvingVerify stubs the verifier: approve, honoring the measurement-pin
+// contract for measurement (the pin itself is unit-tested in localverify).
+func approvingVerify(measurement []byte) localverify.VerifyFunc {
+	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		if len(p.Measurements) > 0 && !ratls.MeasurementAllowed(measurement, p.Measurements) {
+			return nil, localverify.ErrMeasurementNotAllowed
+		}
+		match := true
+		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
+	}
+}
+
+// runCmdWith executes the allowlist command with an injected evidence verifier.
+func runCmdWith(verify localverify.VerifyFunc, args ...string) (string, string, error) {
+	cmd := newCmd(verify)
+	var out, errb bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), errb.String(), err
 }
 
 // TestListThroughTLSLB is the regression test for `c8s allowlist list` against
@@ -117,12 +130,10 @@ func attestationAPIServer(t *testing.T, measurement []byte) *httptest.Server {
 func TestListThroughTLSLB(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 	lb := tlsLBServer(t, []byte("issuance-challenge"))
-	api := attestationAPIServer(t, measurement)
 
-	out, errOut, err := runCmd("list",
+	out, errOut, err := runCmdWith(approvingVerify(measurement), "list",
 		"--url", lb.URL,
 		"--measurements", hex.EncodeToString(measurement),
-		"--attestation-api-url", api.URL,
 	)
 	if err != nil {
 		t.Fatalf("list through tls-lb failed: %v (stderr: %s)", err, errOut)
@@ -138,17 +149,98 @@ func TestListThroughTLSLBFailsClosed(t *testing.T) {
 	pinned := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 	reported := bytes.Repeat([]byte{0x01}, ratls.SNPMeasurementSize)
 	lb := tlsLBServer(t, []byte("issuance-challenge"))
-	api := attestationAPIServer(t, reported)
 
-	_, _, err := runCmd("list",
+	_, _, err := runCmdWith(approvingVerify(reported), "list",
 		"--url", lb.URL,
 		"--measurements", hex.EncodeToString(pinned),
-		"--attestation-api-url", api.URL,
 	)
 	if err == nil {
 		t.Fatal("expected a measurement mismatch to fail the command")
 	}
 	if !strings.Contains(err.Error(), "discovery document verification failed") {
 		t.Fatalf("want a discovery verification error, got: %v", err)
+	}
+}
+
+// ratlsCDSServer stands in for a port-forwarded CDS: a TLS server whose
+// serving cert DOES carry the RA-TLS extension (an embedded az-snp envelope),
+// serving the allowlist read handler and no discovery document.
+func ratlsCDSServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	key, _, err := ratls.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	att := &ratls.Attestation{
+		TEEType: ratls.TEETypeSEVSNP,
+		Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+	}
+	der, err := ratls.CreateAttestedCert(key, att, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /allowlist", seededAllowlistHandler(t).HandleList)
+
+	srv := httptest.NewUnstartedServer(mux)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestListDirectRATLS drives the non-fronted path end to end: no discovery
+// document (ErrNoDiscovery fallback), so the CLI verifies the RA-TLS serving
+// cert in-process — the verifier must receive the embedded envelope and the
+// cert-key anchor — then reads the allowlist over the verified handshake.
+func TestListDirectRATLS(t *testing.T) {
+	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
+	cds := ratlsCDSServer(t)
+
+	var sawVerify bool
+	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		sawVerify = true
+		if platform != string(types.PlatformAzSnp) {
+			t.Fatalf("platform = %q, want az-snp", platform)
+		}
+		if len(p.ExpectedReportData) != sha512.Size384 {
+			t.Fatalf("expected_report_data is %d bytes, want the unpadded %d-byte cert-key anchor", len(p.ExpectedReportData), sha512.Size384)
+		}
+		return approvingVerify(measurement)(ctx, platform, evidence, p)
+	}
+
+	out, errOut, err := runCmdWith(verify, "list",
+		"--url", cds.URL,
+		"--measurements", hex.EncodeToString(measurement),
+	)
+	if err != nil {
+		t.Fatalf("list against a direct RA-TLS CDS failed: %v (stderr: %s)", err, errOut)
+	}
+	if !sawVerify {
+		t.Fatal("evidence verifier was not called")
+	}
+	if !strings.Contains(out, digA) {
+		t.Fatalf("output missing seeded digest %s:\n%s", digA, out)
+	}
+}
+
+// TestListDirectRATLSFailsClosed proves a serving cert whose evidence the
+// verifier rejects never serves a read: the handshake itself fails.
+func TestListDirectRATLSFailsClosed(t *testing.T) {
+	pinned := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
+	reported := bytes.Repeat([]byte{0x01}, ratls.SNPMeasurementSize)
+	cds := ratlsCDSServer(t)
+
+	_, _, err := runCmdWith(approvingVerify(reported), "list",
+		"--url", cds.URL,
+		"--measurements", hex.EncodeToString(pinned),
+	)
+	if err == nil {
+		t.Fatal("expected a measurement mismatch to fail the command")
+	}
+	if !strings.Contains(err.Error(), "peer attestation failed") {
+		t.Fatalf("want a peer-attestation failure from the handshake, got: %v", err)
 	}
 }

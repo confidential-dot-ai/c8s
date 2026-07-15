@@ -22,7 +22,7 @@ and let each platform verifier do its own shaping; `c8s-verify-js/PROTOCOL.md`
 
 ## The bare-report KDS fetch is attestation-go's job; c8s only bounds and classifies it
 
-`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/cmds/verify/localverify.go` (`verifyInProcess`, `runAttestationGo`)
+`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/localverify/localverify.go` (`Verify`, `dispatch`)
 
 `c8s verify` of a bare RA-TLS cert (SNP report, no inline VCEK) once hung for
 minutes on Zen4c (Siena/Bergamo) hosts, ignoring `--timeout`: verification ran
