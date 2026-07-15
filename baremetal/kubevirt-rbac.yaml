@@ -18,6 +18,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["subresources.kubevirt.io"]
     resources: ["virtualmachineinstances/console", "virtualmachineinstances/vnc",
+                "virtualmachineinstances/portforward",   # reach the in-CVM kube-apiserver
                 "virtualmachines/start", "virtualmachines/stop"]
     verbs: ["get", "update", "create"]
   - apiGroups: [""]

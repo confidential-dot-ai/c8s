@@ -248,6 +248,11 @@ jobs:
             echo '===== end diagnostics ====='
             exit 1
           fi
+          # Route the CVM API through a virtctl port-forward tunnel (apiserver
+          # websocket), NOT the pod network: the host cluster's Cilium and the
+          # in-CVM rke2 BOTH use 10.42.0.0/16, so direct routing to the CVM's
+          # 10.42.0.x:6443 is a racy CIDR collision (i/o timeout on ~half of runs).
+          # 127.0.0.1 is in rke2's serving-cert SANs, so TLS still verifies.
           printf '%s' "$b64" | base64 -d | python3 -c '
           import re, sys
           server = sys.argv[1]
@@ -255,14 +260,25 @@ jobs:
               line = line.rstrip("\n")
               line = re.sub(r"^(\s*server:\s*)\S+$", lambda m: m.group(1) + server, line)
               print(line)
-          ' "https://$IP:6443" > "$CVMKC"
+          ' "https://127.0.0.1:16443" > "$CVMKC"
           chmod 600 "$CVMKC"
-          # connectivity probe: can the runner reach the in-CVM kube-apiserver?
-          echo "probing runner -> CVM https://$IP:6443/healthz ..."
-          curl -sk -m5 "https://$IP:6443/healthz" -w ' <- HTTP %{http_code}\n' || echo "(curl to :6443 failed — egress/routing)"
-          echo "waiting for the in-CVM node Ready (server $IP:6443)..."
+          # tunnel helper (idempotent): every CVM-API step calls `bash /tmp/pf.sh`
+          cat > /tmp/pf.sh <<'PF'
+          set +e
+          LPORT=16443
+          if ! curl -sk -m2 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1; then
+            pkill -f "port-forward vmi/${VM}" 2>/dev/null
+            nohup virtctl --kubeconfig /tmp/host.kubeconfig port-forward "vmi/${VM}" -n "${NS}" "${LPORT}:6443" >/tmp/pf.log 2>&1 &
+            for i in $(seq 1 25); do curl -sk -m2 "https://127.0.0.1:${LPORT}/healthz" >/dev/null 2>&1 && break; sleep 2; done
+          fi
+          PF
+          echo "establishing virtctl port-forward tunnel to the CVM API..."
+          bash /tmp/pf.sh
+          curl -sk -m5 "https://127.0.0.1:16443/healthz" -w 'tunnel -> HTTP %{http_code}\n' || { echo "::error::port-forward tunnel failed"; cat /tmp/pf.log 2>/dev/null; exit 1; }
+          echo "waiting for the in-CVM node Ready (via tunnel)..."
           ready=
           for i in $(seq 1 40); do
+            bash /tmp/pf.sh   # keep the tunnel alive (websocket can drop)
             out=$(kubectl --kubeconfig "$CVMKC" get nodes 2>&1)
             { [ "$i" -le 3 ] || [ $((i % 6)) -eq 0 ]; } && echo "  [$i] $(printf '%s' "$out" | head -1 | cut -c1-140)"
             printf '%s' "$out" | grep -q ' Ready' && { ready=1; echo "node Ready on poll $i"; break; }
@@ -329,6 +345,7 @@ jobs:
       - name: c8s install at the pinned commit (inside the attested CVM)
         run: |
           set -uo pipefail   # not -e: on helm --wait timeout we want to diagnose, not die
+          bash /tmp/pf.sh    # ensure the CVM API tunnel is up
           openssl ecparam -name prime256v1 -genkey -noout -out operator.key
           openssl ec -in operator.key -pubout -out operator.pub
           export KUBECONFIG="$CVMKC"
@@ -358,6 +375,7 @@ jobs:
       - name: attest — genuine SNP + fresh nonce + ENFORCED golden launch digest
         run: |
           set -euo pipefail
+          bash /tmp/pf.sh
           export KUBECONFIG="$CVMKC"
           # the c8s attestation-api DaemonSet reads the node CVM's /dev/sev-guest;
           # reach it via port-forward (tunnels over the :6443 carve-out)
@@ -390,6 +408,7 @@ jobs:
       - name: e2e — confidential workload smoke + cw-label-policy
         run: |
           set -euo pipefail
+          bash /tmp/pf.sh
           export KUBECONFIG="$CVMKC"
           kubectl apply -f c8s/samples/nginx-confidential-pod.yaml
           kubectl -n default rollout status deploy/demo-nginx --timeout=180s
@@ -398,6 +417,7 @@ jobs:
       - name: e2e — c8s cds verify (real attestation, enforced measurement)
         run: |
           set -euo pipefail
+          bash /tmp/pf.sh
           export KUBECONFIG="$CVMKC"
           kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
           PF=$!; sleep 3
