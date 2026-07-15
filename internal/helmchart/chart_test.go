@@ -1294,12 +1294,94 @@ func TestChartRejectsInvalidAttestationApiNodePortWithNRI(t *testing.T) {
 	assertHelmFailMessage(t, out, "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got 0)")
 }
 
-// secretBrokerArgs enables the secret-broker with its minimum required values.
+const brokerMeasurement = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// secretBrokerArgs enables the secret-broker with its minimum secure-shape
+// values plus the explicit trusted-control-plane acknowledgement. It is for
+// render tests only; production cannot use this acknowledgement to turn a
+// hostile Kubernetes control plane into a trust boundary.
 func secretBrokerArgs(args ...string) []string {
 	return append([]string{
 		"--set", "secretBroker.enabled=true",
+		"--set", "secretBroker.insecureTrustControlPlane=true",
+		"--set-string", "secretBroker.measurements[0]=" + brokerMeasurement,
 		"--set-string", "secretBroker.openbao.address=https://c8s-openbao.c8s-system.svc:8200",
+		"--set-string", "secretBroker.openbao.measurements[0]=" + brokerMeasurement,
 	}, args...)
+}
+
+// TestChartRejectsSecretBrokerWithAdversarialControlPlane pins the default
+// posture for node-as-CVM: a node quote cannot protect Kubernetes-supplied
+// policy, credentials, or workload identity from the control plane.
+func TestChartRejectsSecretBrokerWithAdversarialControlPlane(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "secretBroker.enabled=true",
+		"--set-string", "secretBroker.openbao.address=https://c8s-openbao.c8s-system.svc:8200",
+		"--set-string", "attestationApi.cvmMode=node",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded, want secret_broker_untrusted_control_plane failure\n%s", out)
+	}
+	if got := parseValidationErrorKind(out); got != "secret_broker_untrusted_control_plane" {
+		t.Fatalf("validation kind = %q, want secret_broker_untrusted_control_plane\n%s", got, out)
+	}
+}
+
+func TestChartRejectsInvalidSecretBrokerMeasurements(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		kind string
+	}{
+		{
+			name: "caller",
+			args: []string{
+				"--set", "secretBroker.peerVerify=ratls",
+				"--set", "secretBroker.openbao.attested=false",
+			},
+			kind: "broker_caller_measurements",
+		},
+		{
+			name: "store",
+			args: []string{
+				"--set", "secretBroker.peerVerify=ca",
+				"--set", "secretBroker.openbao.attested=true",
+			},
+			kind: "broker_store_measurements",
+		},
+		{
+			name: "blank caller entry",
+			args: []string{
+				"--set-string", "secretBroker.measurements[0]= ",
+				"--set", "secretBroker.openbao.attested=false",
+			},
+			kind: "broker_caller_measurements",
+		},
+		{
+			name: "short store entry",
+			args: []string{
+				"--set", "secretBroker.peerVerify=ca",
+				"--set-string", "secretBroker.openbao.measurements[0]=00",
+			},
+			kind: "broker_store_measurements",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{
+				"--set", "secretBroker.enabled=true",
+				"--set", "secretBroker.insecureTrustControlPlane=true",
+				"--set-string", "secretBroker.openbao.address=https://c8s-openbao.c8s-system.svc:8200",
+			}
+			out, err := helmTemplate(t, append(args, tt.args...)...)
+			if err == nil {
+				t.Fatalf("helm template succeeded, want %s failure\n%s", tt.kind, out)
+			}
+			if got := parseValidationErrorKind(out); got != tt.kind {
+				t.Fatalf("validation kind = %q, want %s\n%s", got, tt.kind, out)
+			}
+		})
+	}
 }
 
 // TestChartSecretBrokerRendersMeshComponent pins the broker's integration with
@@ -1414,19 +1496,22 @@ func TestChartRejectsBrokerRatlsUnderKata(t *testing.T) {
 	}
 }
 
-// TestChartRejectsLUKSWithoutTEEShape: the injected c8s-luks-open container is
-// privileged; without per-pod kata CVMs or a node-as-CVM shape that privilege
-// would land on the real host, so the chart must refuse to arm the webhook.
-func TestChartRejectsLUKSWithoutTEEShape(t *testing.T) {
-	out, err := helmTemplate(t, secretBrokerArgs(
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
-	)...)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want luks_plain_baremetal failure\n%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "luks_plain_baremetal" {
-		t.Fatalf("validation kind = %q, want luks_plain_baremetal\n%s", got, out)
+// TestChartRejectsLUKSWithoutPerPodCVM verifies that attesting a shared node is
+// never mistaken for isolating a privileged workload init container.
+func TestChartRejectsLUKSWithoutPerPodCVM(t *testing.T) {
+	for _, mode := range []string{"baremetal", "node", "gke", "aks"} {
+		t.Run(mode, func(t *testing.T) {
+			out, err := helmTemplate(t, secretBrokerArgs(
+				"--set", "luks.enabled=true",
+				"--set-string", "attestationApi.cvmMode="+mode,
+			)...)
+			if err == nil {
+				t.Fatalf("helm template succeeded, want luks_requires_per_pod_cvm failure\n%s", out)
+			}
+			if got := parseValidationErrorKind(out); got != "luks_requires_per_pod_cvm" {
+				t.Fatalf("validation kind = %q, want luks_requires_per_pod_cvm\n%s", got, out)
+			}
+		})
 	}
 }
 

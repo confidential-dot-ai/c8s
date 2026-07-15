@@ -1,10 +1,11 @@
 // Package secretbroker implements the secret-broker subcommand: the c8s
-// "Secrets Manager Proxy" from the whitepaper (§4.3, §5.6.4). It sits inside
-// the trust boundary, speaks a subset of the Vault/OpenBao HTTP API so that
-// unmodified Vault/OpenBao Agent + CSI tooling can talk to it, authenticates
-// the calling workload by its attestation-rooted identity (RA-TLS measurement
-// or CDS-issued mesh cert), applies a per-secret release policy, and brokers
-// the request to a vanilla OpenBao (or HashiCorp Vault) instance.
+// "Secrets Manager Proxy" from the whitepaper (§4.3, §5.6.4). It is intended
+// to sit inside the trust boundary. It speaks a subset of the Vault/OpenBao
+// HTTP API so unmodified Vault/OpenBao Agent + CSI tooling can talk to it. It
+// authenticates the calling workload by its attestation-rooted identity
+// (RA-TLS measurement or CDS-issued mesh cert), applies a per-secret release
+// policy, and brokers the request to a vanilla OpenBao (or HashiCorp Vault)
+// instance.
 //
 // The external store never sees the workload directly — only the broker's
 // identity after attestation and policy pass.
@@ -27,9 +28,8 @@ const (
 // peerVerifyRATLS and peerVerifyCA are the two peer-verification modes.
 //
 //   - ratls: the caller's client cert carries a TEE attestation report; the
-//     broker verifies the hardware chain and the launch measurement against
-//     --measurements. This is the production, measurement-gated mode and needs
-//     real TEE hardware (or the in-cluster attestation-api).
+//     broker verifies the hardware chain and, on SNP, the launch measurement
+//     against --measurements. The current TDX verifier drops measurement pins.
 //   - ca: the caller's client cert is verified by X.509 chain to the CDS mesh
 //     CA, and identity is taken from the cert SAN. Use where the CDS issuance
 //     decision is the trust anchor, and for the hardware-free demo/integration
@@ -71,7 +71,7 @@ func NewCmd() *cobra.Command {
 	// Caller (workload) verification.
 	flags.StringVar(&cfg.peerVerify, "peer-verify", peerVerifyRATLS, "how to verify caller client certs: ratls (measurement-gated, needs TEE) or ca (chain to CDS mesh CA)")
 	flags.StringVar(&cfg.clientCA, "client-ca", "", "PEM CA bundle callers' certs must chain to in --peer-verify=ca mode (the CDS mesh CA)")
-	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements accepted from callers in --peer-verify=ratls mode (empty = accept any TEE measurement, UNSAFE)")
+	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements accepted from callers in --peer-verify=ratls mode (at least one required)")
 	flags.StringVar(&cfg.attestationApiURL, "attestation-api-url", "", "attestation-api URL for online RA-TLS verification (az-snp); also used to verify an attested OpenBao")
 
 	// Release policy.
@@ -82,7 +82,7 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.openbaoAddr, "openbao-addr", "", "base URL of the backing OpenBao/Vault, e.g. https://openbao:8200 (required)")
 	flags.StringVar(&cfg.openbaoCA, "openbao-ca", "", "PEM CA bundle for the OpenBao TLS endpoint (empty = system roots)")
 	flags.BoolVar(&cfg.openbaoAttested, "openbao-attested", true, "require the OpenBao endpoint to present a valid TEE attestation (RA-TLS); set false for an external/managed store")
-	flags.StringSliceVar(&cfg.openbaoMeasurements, "openbao-measurements", nil, "SHA-384 hex launch measurements accepted for an attested OpenBao (empty = accept any TEE measurement, UNSAFE)")
+	flags.StringSliceVar(&cfg.openbaoMeasurements, "openbao-measurements", nil, "SHA-384 hex launch measurements accepted for an attested OpenBao (at least one required)")
 	flags.StringVar(&cfg.openbaoToken, "openbao-token", "", "static token the broker uses to authenticate to OpenBao (mutually exclusive with --openbao-approle-*)")
 	flags.StringVar(&cfg.openbaoTokenFile, "openbao-token-file", "", "read the static OpenBao token from this file (keeps it out of argv; e.g. a mounted Secret)")
 	flags.StringVar(&cfg.openbaoRoleID, "openbao-approle-role-id", "", "AppRole role_id the broker uses to authenticate to OpenBao")

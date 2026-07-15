@@ -51,6 +51,42 @@
 {{- end -}}
 {{- end -}}
 {{- /*
+  Secret release is correctness-class. Today every authorization input the
+  broker consumes is supplied by Kubernetes: release policy is a ConfigMap,
+  the OpenBao token/AppRole secret_id is a Secret, and workload identity is a
+  control-plane-selected SAN. A hostile control plane can therefore rewrite
+  policy, steal the backing-store credential, or assign an allowed identity.
+
+  This render-time acknowledgement protects an honest deployer from claiming
+  an unsupported threat model; it is not itself a boundary against a hostile
+  control plane, which can mutate workloads and chart values. Keep the broker
+  off until its credential is attestation-bound and policy + workload identity
+  are cryptographically committed to measured evidence.
+*/ -}}
+{{- if and .Values.secretBroker.enabled (not .Values.secretBroker.insecureTrustControlPlane) -}}
+{{- fail "VALIDATION_ERROR kind=secret_broker_untrusted_control_plane: secretBroker.enabled=true is not compatible with an adversarial Kubernetes control plane: releasePolicy is mounted from a ConfigMap, the OpenBao credential is mounted from a Secret, and caller workload identity comes from a control-plane-selected SAN. Keep the broker disabled. For dev/test only, when the Kubernetes control plane is explicitly trusted, set secretBroker.insecureTrustControlPlane=true. This acknowledgement is not a runtime security boundary. See docs/decisions/2026-07-15-secret-broker-control-plane.md." -}}
+{{- end -}}
+{{- if and .Values.secretBroker.enabled (eq .Values.secretBroker.peerVerify "ratls") (empty .Values.secretBroker.measurements) -}}
+{{- fail "VALIDATION_ERROR kind=broker_caller_measurements: secretBroker.peerVerify=ratls requires a non-empty secretBroker.measurements allowlist. An empty list accepts any valid TEE and cannot authorize secret release. Pin the expected caller measurements, or use peerVerify=ca only for the explicitly trusted-control-plane dev/test path." -}}
+{{- end -}}
+{{- if and .Values.secretBroker.enabled (eq .Values.secretBroker.peerVerify "ratls") -}}
+{{- range $i, $measurement := .Values.secretBroker.measurements -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{96}$" (trim $measurement)) -}}
+{{- fail (printf "VALIDATION_ERROR kind=broker_caller_measurements: secretBroker.measurements[%d] must be exactly 96 hexadecimal characters (a 48-byte SHA-384 measurement). Blank or malformed entries must not degrade verification to accept-any." $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.secretBroker.enabled .Values.secretBroker.openbao.attested (empty .Values.secretBroker.openbao.measurements) -}}
+{{- fail "VALIDATION_ERROR kind=broker_store_measurements: secretBroker.openbao.attested=true requires a non-empty secretBroker.openbao.measurements allowlist. An empty list accepts any valid TEE as the backing store. Pin the expected store measurements, or set openbao.attested=false only when the external store is an explicit trust boundary." -}}
+{{- end -}}
+{{- if and .Values.secretBroker.enabled .Values.secretBroker.openbao.attested -}}
+{{- range $i, $measurement := .Values.secretBroker.openbao.measurements -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{96}$" (trim $measurement)) -}}
+{{- fail (printf "VALIDATION_ERROR kind=broker_store_measurements: secretBroker.openbao.measurements[%d] must be exactly 96 hexadecimal characters (a 48-byte SHA-384 measurement). Blank or malformed entries must not degrade verification to accept-any." $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /*
   Under kata.enabled, the in-guest ratls-mesh terminates every inbound TLS
   connection to a pod and enforces mesh-CA + attestation on the caller before
   forwarding plaintext to the app on loopback. The secret-broker never sees the
@@ -66,16 +102,15 @@
 {{- end -}}
 {{- /*
   The LUKS-open init container the webhook injects is privileged and mounts
-  /dev host-wide (cryptsetup needs the raw block device). That is tolerable
-  only when "the host" it touches is itself inside a TEE boundary: per-pod
-  kata CVMs (kata.enabled) or node-as-CVM shapes (host attestation-api
-  enabled). With neither, a luks-<name> annotation converts secrets-inject
-  into a privileged container on the real host — refuse to arm the webhook.
+  /dev (cryptsetup needs the raw block device). It is safe from cross-workload
+  host access only inside a per-pod kata CVM. In node-as-CVM modes, pods are
+  ordinary processes sharing the attested node, so a control-plane-selected
+  workload would receive privileged access to the node's devices.
   The webhook is armed only when the operator renders --luks-open-image,
   i.e. secretBroker.enabled && luks.enabled (see operator.yaml).
 */ -}}
-{{- if and .Values.secretBroker.enabled .Values.luks.enabled (not .Values.kata.enabled) (not .Values.attestationApi.enabled) -}}
-{{- fail "VALIDATION_ERROR kind=luks_plain_baremetal: luks.enabled=true but neither kata.enabled nor attestationApi.enabled is set. The injected c8s-luks-open init container is privileged and mounts /dev; without per-pod kata CVMs or a node-as-CVM shape (host attestation-api) that privilege lands on the real host, so a luks-<name> annotation would grant workloads host access. Set luks.enabled=false, or install a confidential shape (`c8s install --kata`, or a CVM node pool with attestationApi.enabled=true)." -}}
+{{- if and .Values.secretBroker.enabled .Values.luks.enabled (not .Values.kata.enabled) -}}
+{{- fail "VALIDATION_ERROR kind=luks_requires_per_pod_cvm: luks.enabled=true requires kata.enabled=true. The injected c8s-luks-open init container is privileged and mounts /dev; node-as-CVM attestation covers the shared node, not an individual workload, so injecting it into an ordinary pod would grant that pod host-device access. Set luks.enabled=false or use per-pod Kata CVMs." -}}
 {{- end -}}
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
 {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}

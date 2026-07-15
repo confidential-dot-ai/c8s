@@ -155,6 +155,40 @@ func hasLUKSAnnotations(annotations map[string]string) bool {
 	return false
 }
 
+// validateLUKSRuntime ensures the privileged /dev mount is scoped to the
+// workload's own confidential Kata VM. Chart validation checks the cluster
+// shape, but admission must also check the selected pod: host namespaces and
+// the non-confidential kata-qemu class bypass confidential runtime injection.
+func validateLUKSRuntime(pod *corev1.Pod, cfg Config) error {
+	if !cfg.KataEnforce {
+		return fmt.Errorf("%w: LUKS injection requires Kata enforcement; node-as-CVM and ordinary-container modes are shared-host boundaries",
+			errInvalidInjectionAnnotation)
+	}
+	if kataIncompatible(pod) {
+		return fmt.Errorf("%w: LUKS injection must not use hostNetwork, hostPID, or hostIPC because those modes cannot run inside a per-pod Kata CVM",
+			errInvalidInjectionAnnotation)
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName == "" {
+		return nil // kataRuntimeClassFor injects the platform's confidential class.
+	}
+
+	cfg = cfg.withDefaults()
+	allowed := map[string]struct{}{}
+	switch cfg.HardwarePlatform {
+	case HardwarePlatformSNP:
+		allowed[kataSnpRuntimeClass] = struct{}{}
+		allowed[kataSnpGpuRuntimeClass] = struct{}{}
+	case HardwarePlatformTDX:
+		allowed[kataTdxRuntimeClass] = struct{}{}
+		allowed[kataTdxGpuRuntimeClass] = struct{}{}
+	}
+	if _, ok := allowed[*pod.Spec.RuntimeClassName]; !ok {
+		return fmt.Errorf("%w: LUKS injection requires a confidential Kata RuntimeClass for hardware platform %q, got %q",
+			errInvalidInjectionAnnotation, cfg.HardwarePlatform, *pod.Spec.RuntimeClassName)
+	}
+	return nil
+}
+
 // In-pod paths for the LUKS-open init container.
 const (
 	luksDataVolume = "c8s-luks-data" // holds mount-target dirs shared with the app
@@ -166,12 +200,11 @@ const (
 // containers then mount that same subdir at the operator's requested Mount
 // path. Runs after c8s-secrets-agent-init (so the passphrase file exists).
 //
-// SAFETY: the injected container is privileged and mounts /dev host-wide so
-// cryptsetup can reach the block devices. This is only tolerable under kata
-// (or another CVM shape where "the host" is the guest kernel, which the
-// workload trusts). Without kata / node-as-cvm, an operator granting
-// secrets-inject to a workload effectively grants it a privileged sidecar.
-// The chart refuses that shape (kind=luks_plain_baremetal in validations.yaml).
+// SAFETY: the injected container is privileged and mounts /dev so cryptsetup
+// can reach the block devices. This is tolerable only when the container runs
+// inside the workload's own Kata CVM. A node-as-CVM quote covers a shared host,
+// not the selected workload, so the chart refuses every non-Kata shape
+// (kind=luks_requires_per_pod_cvm in validations.yaml).
 func injectLUKS(pod *corev1.Pod, eff injection, cfg Config) {
 	if len(eff.LUKS) == 0 {
 		return

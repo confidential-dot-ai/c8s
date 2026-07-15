@@ -749,20 +749,22 @@ The kata-guest CDH also intermittently failed guest-pull of
 error`), which is a known kata-CC failure class independent of the mesh
 issue but likely a contributing factor. Root cause not pinned down.
 
-Break-glass for now: use `c8s install --cvm-mode node` (node-as-CVM: the
-whole node is confidential, workload pods run as ordinary processes
-without the per-pod kata VM). The mesh, get-cert, and broker peer
-verification then run on the host without the kata-guest interception
-that seems to be biting the workload path. Full kata-CVM workload
-support is still the goal; this bullet gets deleted when the workload
-get-cert path is stable end-to-end.
+Do **not** use `c8s install --cvm-mode node` as break-glass for secret
+release. The whole node is confidential, but workload pods are ordinary
+processes and the adversarial control plane still selects their SANs, pod
+specs, policy ConfigMaps, and credential Secrets. A node quote cannot
+distinguish those workloads. The chart now refuses the broker unless a
+dev/test deployment explicitly sets
+`secretBroker.insecureTrustControlPlane=true`; LUKS additionally requires a
+per-pod Kata CVM. See
+`docs/decisions/2026-07-15-secret-broker-control-plane.md`.
 
-The end-to-end software story (broker + openbao + release policy + KV
-read via mTLS) is proven separately by
+The end-to-end software mechanics (broker + openbao + release policy + KV
+read via mTLS) are proven separately by
 `scratchpad/broker-openbao-e2e.sh` (adapts
 `scripts/secret-broker-demo.sh` to hit the deployed openbao via
-port-forward, hardware-free) — so the failure above is scoped to the
-mesh integration, not the broker.
+port-forward, hardware-free). That is functional dev/test coverage, not an
+adversarial-control-plane confidentiality proof.
 
 **Note on Path A step 1 (mesh leaves now carry `.1.1`)** —
 `internal/issuer/sign.go` and `internal/cmds/cds/attest.go` were updated so

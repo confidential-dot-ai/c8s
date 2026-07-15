@@ -9,7 +9,15 @@ final security model. Each bullet links to the tracking issue.
 - Chart-managed CDS runs as a singleton and keeps the active CA key in memory (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
 - CDS allowlist persistence is off by default (`cds.persistence.enabled=false`), so a restart resets the served allowlist to the install seed and operator-added digests (`c8s allowlist add`) are lost — workloads using them are denied ~30s later. CDS warns at startup when persistence is off; enable `cds.persistence.enabled=true` to retain dynamic entries. See `docs/operator.md` "Operator-added allowlist entries need persistence to survive a restart".
 - Active/active CDS replica handoff is opt-in via `cds.handoff.enabled`; it is off by default (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
-- Application-secret release is not implemented (tracked at [#46](https://github.com/confidential-dot-ai/c8s/issues/46)).
+- The secret-broker implementation is functional test scaffolding, not
+  adversarial-control-plane secret release. Its policy ConfigMap, OpenBao
+  credential Secret, broker pod spec, and caller SAN are Kubernetes-controlled;
+  the chart therefore refuses to enable it unless the deployer sets the
+  dev/test-only `secretBroker.insecureTrustControlPlane=true` acknowledgement.
+  Closing this requires attestation-bound short-lived store credentials,
+  measured/signed policy and startup inputs, and composed per-workload evidence
+  (tracked at [#46](https://github.com/confidential-dot-ai/c8s/issues/46); see
+  `docs/decisions/2026-07-15-secret-broker-control-plane.md`).
 - Per-workload measurement allowlists are not enforced at `/attest` (tracked at [#57](https://github.com/confidential-dot-ai/c8s/issues/57)).
 - Allowlist writes are authorized by pinned, long-lived operator public keys (`cds.operatorKeys`), verified at the app layer. Revocation is coarse — no CRL/OCSP, so revoking one operator means removing its key and re-installing. Write tokens are bound to body, method, and path, with a server-enforced 5-minute maximum validity, but carry no `aud`/cluster binding: clusters that pin the **same** operator key accept each other's captured tokens within that window, so pin distinct keys per cluster. The pinned-key list is host-supplied config, read only at CDS start; `c8s cds verify` now reports the pinned-key fingerprints (fetched from `GET /operator-keys` over a connection bound to the attested serving cert), but the list is still not committed to CDS's attestation (HOST_DATA/initdata) — a verifier sees what CDS claims, not what was measured. Longer term: a CA + short-lived operator certificates (single-file cert+key credentials, CA-based revocation). See `docs/pitfalls.md` and `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
 - The c8s infrastructure images are not pinned into NRI policy by default (tracked at [#51](https://github.com/confidential-dot-ai/c8s/issues/51)).

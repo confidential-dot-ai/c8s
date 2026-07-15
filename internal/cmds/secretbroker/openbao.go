@@ -205,11 +205,14 @@ func parseMeasurementsBytes(hexes []string) ([][]byte, error) {
 	for _, h := range hexes {
 		h = normalizeMeasurement(h)
 		if h == "" {
-			continue
+			return nil, fmt.Errorf("measurement must not be empty")
 		}
 		b, err := hex.DecodeString(h)
 		if err != nil {
 			return nil, fmt.Errorf("invalid measurement %q: %w", h, err)
+		}
+		if len(b) != 48 {
+			return nil, fmt.Errorf("measurement must be 48 bytes, got %d", len(b))
 		}
 		out = append(out, b)
 	}

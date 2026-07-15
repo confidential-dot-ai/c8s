@@ -4,6 +4,14 @@ Stage 5 of the openbao integration (`feat/openbao-integration`). This doc
 records the design **before** implementation so the shape is agreed and the
 seam with PR #295 (kata-guest confidential workload support) is explicit.
 
+> **Security correction (2026-07-15):** this document records the functional
+> design, not a production secret-release guarantee. Kubernetes currently
+> supplies the broker policy, backing-store credential, pod spec, and caller
+> identity. The chart therefore gates the feature as trusted-control-plane
+> dev/test only, disables LUKS by default, and permits LUKS only in a per-pod
+> Kata CVM. Node-as-CVM is not a safe fallback. See
+> `docs/decisions/2026-07-15-secret-broker-control-plane.md`.
+
 ## Goal
 
 A confidential workload can attach a **persistent, LUKS-encrypted volume**

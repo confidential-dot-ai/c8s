@@ -1,16 +1,23 @@
 # secret-broker
 
 `c8s secret-broker` is the c8s **Secrets Manager Proxy** (whitepaper §4.3, §5.6.4
-"Fit and limits"). It sits inside the trust boundary and brokers access from
-attested workloads to a vanilla **OpenBao** (or HashiCorp Vault) instance, so
-key material is released only over an attestation-gated channel.
+"Fit and limits"). It is intended to broker access from attested workloads to
+a vanilla **OpenBao** (or HashiCorp Vault) instance.
+
+> **Security status:** the current chart integration is dev/test only. Its
+> release policy, OpenBao credential, pod spec, and caller SAN are supplied by
+> Kubernetes, so it is not a trust boundary against an adversarial control
+> plane. The chart fails closed unless
+> `secretBroker.insecureTrustControlPlane=true` explicitly acknowledges a
+> trusted control plane. See
+> `docs/decisions/2026-07-15-secret-broker-control-plane.md`.
 
 It speaks a subset of the **Vault HTTP API**, so unmodified Vault/OpenBao Agent
 and CSI tooling work against it unchanged — point the agent's `vault.address` at
 the broker.
 
 ```
- workload pod (CDS mesh identity)                in TCB                    store
+ workload pod (CDS mesh identity)        intended broker boundary         store
  ┌───────────────────────────────┐         ┌──────────────────┐     ┌──────────────┐
  │ app ← /vault/secrets (tmpfs)   │ mTLS    │ secret-broker    │     │ OpenBao      │
  │ Vault Agent (UNMODIFIED) ──────┼────────►│  verify peer     │     │ (attested by │
@@ -23,10 +30,11 @@ the broker.
 ## Trust flow
 
 1. **Caller verification** happens at the TLS layer (`--peer-verify`):
-   - `ratls` (default, production): the caller's client cert carries a TEE
-     attestation report; the broker verifies the hardware chain and the launch
-     measurement against `--measurements`. Needs SEV-SNP/TDX (or the in-cluster
-     attestation-api for az-snp).
+   - `ratls` (default, measurement-verifying mode): the caller's client cert
+     carries a TEE attestation report; the broker verifies the hardware chain
+     and, on SNP, the launch measurement against `--measurements`. The current
+     TDX verifier drops measurement pins, so TDX is not suitable for
+     measurement-authorized secret release yet.
    - `ca`: the client cert is verified by X.509 chain to the CDS mesh CA
      (`--client-ca`) and identity is taken from the cert SAN. Use where the CDS
      issuance decision is the trust anchor, and for the hardware-free demo.
@@ -97,6 +105,7 @@ Enable the broker in the chart and point it at a backing store:
 ```yaml
 secretBroker:
   enabled: true
+  insecureTrustControlPlane: true # DEV/TEST ONLY; not safe against hostile Kubernetes
   peerVerify: ratls            # measurement-gated (needs TEE); "ca" for the mesh-CA path
   measurements: ["<sha384>"]   # callers accepted in ratls mode
   releasePolicy:
@@ -105,6 +114,7 @@ secretBroker:
   openbao:
     address: https://c8s-openbao.c8s-system.svc:8200
     attested: true             # require the store's TEE attestation; false = external store
+    measurements: ["<sha384>"] # required when attested=true
     credentialSecret: { name: openbao-broker-cred, key: token }
 secretAgent:                   # the injected agent image
   image: { repository: ghcr.io/openbao/openbao, tag: "2.5.5" }
@@ -127,9 +137,10 @@ C8S=./build/c8s ./scripts/secret-broker-demo.sh   # needs `bao` on PATH too
 
 ## Status
 
-Implemented and tested: the broker, the `secret-agent-config` renderer, the
-webhook agent injection, and the Helm wiring. Validated hardware-free against a
-real OpenBao (broker + unmodified `bao agent` → templated file). Pending a TEE
-cluster: on-hardware `--peer-verify=ratls`, and live in-cluster injection
-ordering. Future: scoped/least-privilege OpenBao tokens (the broker uses one
-identity today), KV v1, and dynamic/transit engines.
+Implemented and functionally tested: the broker, the `secret-agent-config`
+renderer, webhook agent injection, and Helm wiring. Validated hardware-free
+against a real OpenBao (broker + unmodified `bao agent` → templated file).
+Adversarial-control-plane secret release remains blocked pending the measured
+policy, attestation-bound credential, and composed workload evidence described
+in the 2026-07-15 decision. Future functional work includes KV v1 and
+dynamic/transit engines.

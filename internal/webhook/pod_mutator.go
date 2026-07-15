@@ -550,6 +550,11 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest,
 			fmt.Errorf("pod requests LUKS injection (%s<name>) but the operator has no --luks-open-image configured", luksAnnotationPrefix))
 	}
+	if inj != nil && len(inj.LUKS) > 0 {
+		if err := validateLUKSRuntime(pod, m.cfg); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
 
 	// confidential.ai/cw drives both get-cert injection and confidential
 	// class selection: a pod that opts in to a c8s workload identity also

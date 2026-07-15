@@ -741,6 +741,92 @@ func TestHandleAllowsPlainHostNetwork(t *testing.T) {
 	}
 }
 
+func TestHandleRequiresConfidentialKataForLUKS(t *testing.T) {
+	nonConfidential := kataRuntimeClass
+	confidentialSNP := kataSnpRuntimeClass
+	tests := []struct {
+		name        string
+		configure   func(*Config)
+		spec        corev1.PodSpec
+		wantAllowed bool
+		wantMessage string
+	}{
+		{
+			name:        "node as CVM",
+			spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+			wantMessage: "requires Kata enforcement",
+		},
+		{
+			name:      "host PID",
+			configure: func(cfg *Config) { cfg.KataEnforce = true },
+			spec: corev1.PodSpec{
+				HostPID:    true,
+				Containers: []corev1.Container{{Name: "app"}},
+			},
+			wantMessage: "hostPID",
+		},
+		{
+			name:      "non confidential Kata class",
+			configure: func(cfg *Config) { cfg.KataEnforce = true },
+			spec: corev1.PodSpec{
+				RuntimeClassName: &nonConfidential,
+				Containers:       []corev1.Container{{Name: "app"}},
+			},
+			wantMessage: "requires a confidential Kata RuntimeClass",
+		},
+		{
+			name:      "explicit confidential Kata class",
+			configure: func(cfg *Config) { cfg.KataEnforce = true },
+			spec: corev1.PodSpec{
+				RuntimeClassName: &confidentialSNP,
+				Containers:       []corev1.Container{{Name: "app"}},
+			},
+			wantAllowed: true,
+		},
+		{
+			name:        "webhook injected confidential Kata class",
+			configure:   func(cfg *Config) { cfg.KataEnforce = true },
+			spec:        corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+			wantAllowed: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			cfg := luksTestConfig()
+			if tt.configure != nil {
+				tt.configure(&cfg)
+			}
+			m := &podMutator{decoder: admission.NewDecoder(scheme), cfg: cfg.withDefaults()}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					AnnotationWorkload:              "api",
+					AnnotationSecretsInject:         "true",
+					secretAnnotationPrefix + "data": "secret/data/api/luks#passphrase",
+					luksAnnotationPrefix + "data":   "dev=/dev/vdb,mount=/data,secret=secret/data/api/luks#passphrase",
+				}},
+				Spec: tt.spec,
+			}
+			raw, err := json.Marshal(pod)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := m.Handle(context.Background(), admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+			})
+			if resp.Allowed != tt.wantAllowed {
+				t.Fatalf("Allowed = %v, want %v; response: %+v", resp.Allowed, tt.wantAllowed, resp.Result)
+			}
+			if !tt.wantAllowed && (resp.Result == nil || !strings.Contains(resp.Result.Message, tt.wantMessage)) {
+				t.Fatalf("denial message = %+v, want substring %q", resp.Result, tt.wantMessage)
+			}
+		})
+	}
+}
+
 // initContainersPatch decodes the /spec/initContainers patch op from an
 // admission response into typed containers.
 func initContainersPatch(t *testing.T, resp admission.Response) []corev1.Container {

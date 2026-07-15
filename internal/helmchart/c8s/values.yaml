@@ -1201,6 +1201,14 @@ tlsLb:
 ## which makes the operator inject the secretAgent below. Disabled by default.
 secretBroker:
   enabled: false
+  ## DEV/TEST ONLY. The current broker consumes its release policy from a
+  ## ConfigMap, its OpenBao credential from a Secret, and caller identity from
+  ## a CDS-issued SAN. An adversarial Kubernetes control plane can replace all
+  ## three. Keep false unless the control plane is explicitly inside the trust
+  ## boundary. This acknowledgement is not a runtime security boundary: the
+  ## long-term path requires attestation-bound credentials and measured policy
+  ## plus workload identity. See docs/decisions/2026-07-15-secret-broker-control-plane.md.
+  insecureTrustControlPlane: false
   replicas: 1
   port: 8443
   imagePullSecrets: []
@@ -1210,7 +1218,10 @@ secretBroker:
   ## SEV-SNP/TDX or the in-guest attestation-api) or "ca" (trust the CDS mesh-CA
   ## issuance decision, identity taken from the cert SAN).
   peerVerify: ratls
-  ## Measurements accepted from callers in ratls mode (empty = any TEE, UNSAFE).
+  ## Measurements accepted from callers in ratls mode. The chart rejects an
+  ## empty list while the broker is enabled; use peerVerify=ca explicitly for
+  ## the trusted-control-plane hardware-free development path. Currently
+  ## enforced for SNP only; TDX measurement enforcement remains unsupported.
   measurements: []
   certProvisioning:
     ## Renewal interval for the broker's own get-cert mesh-identity sidecar.
@@ -1226,6 +1237,9 @@ secretBroker:
     ## Require the store to present a valid TEE attestation (RA-TLS). Set false
     ## for an external/managed store, where the broker becomes the trust edge.
     attested: true
+    ## Required and non-empty when attested=true and the broker is enabled.
+    ## Currently enforced for SNP only; do not use a TDX store as a
+    ## measurement-authorized secret boundary.
     measurements: []
     ## How the broker authenticates to OpenBao: "token" or "approle".
     authMethod: token
@@ -1274,7 +1288,11 @@ secretAgent:
 ## as one of its subcommands. Override if you want to run luks-open from a
 ## dedicated (e.g. cryptsetup-only) image.
 luks:
-  enabled: true
+  ## Disabled by default because injection is privileged and mounts /dev.
+  ## The chart permits it only when kata.enabled=true gives the workload its
+  ## own CVM; admission also rejects host namespaces and non-confidential Kata
+  ## classes. Attesting a shared node is not a per-workload privilege boundary.
+  enabled: false
   image:
     ## Empty repository = fall back to the operator image (.Values.image), which
     ## exposes `c8s luks-open`. Set here for a dedicated image.

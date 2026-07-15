@@ -100,6 +100,22 @@ func validateConfig(cfg config) error {
 	if cfg.peerVerify == peerVerifyCA && cfg.clientCA == "" {
 		return fmt.Errorf("--peer-verify=ca requires --client-ca")
 	}
+	if cfg.peerVerify == peerVerifyRATLS {
+		if len(cfg.measurements) == 0 {
+			return fmt.Errorf("--peer-verify=ratls requires at least one --measurements value")
+		}
+		if _, err := parseMeasurementsBytes(cfg.measurements); err != nil {
+			return fmt.Errorf("--measurements: %w", err)
+		}
+	}
+	if cfg.openbaoAttested {
+		if len(cfg.openbaoMeasurements) == 0 {
+			return fmt.Errorf("--openbao-attested=true requires at least one --openbao-measurements value")
+		}
+		if _, err := parseMeasurementsBytes(cfg.openbaoMeasurements); err != nil {
+			return fmt.Errorf("--openbao-measurements: %w", err)
+		}
+	}
 	if cfg.openbaoToken != "" && cfg.openbaoRoleID != "" {
 		return fmt.Errorf("--openbao-token and --openbao-approle-role-id are mutually exclusive")
 	}
@@ -123,8 +139,8 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-// logStartup records the effective posture and emits loud warnings for the
-// UNSAFE-outside-development configurations (empty measurement allowlists).
+// logStartup records the effective posture and warns for explicit modes that
+// move identity or store trust outside broker-side RA-TLS verification.
 func logStartup(cfg config, addr string, ruleCount int) {
 	slog.Info("secret-broker listening (TLS)",
 		"addr", addr,
@@ -133,14 +149,8 @@ func logStartup(cfg config, addr string, ruleCount int) {
 		"openbao_attested", cfg.openbaoAttested,
 		"policy_rules", ruleCount,
 	)
-	if cfg.peerVerify == peerVerifyRATLS && len(cfg.measurements) == 0 {
-		slog.Warn("--measurements empty: accepting any TEE measurement from callers. UNSAFE outside development.")
-	}
 	if cfg.peerVerify == peerVerifyCA {
-		slog.Warn("--peer-verify=ca: callers are authorized by CDS-issued identity (SAN), not by re-verified measurement. Use ratls mode in production.")
-	}
-	if cfg.openbaoAttested && len(cfg.openbaoMeasurements) == 0 {
-		slog.Warn("--openbao-measurements empty: accepting any TEE measurement from the store. UNSAFE outside development.")
+		slog.Warn("--peer-verify=ca: callers are authorized by CDS-issued identity (SAN), not by a broker-verified measurement.")
 	}
 	if !cfg.openbaoAttested {
 		slog.Warn("--openbao-attested=false: the backing store is outside the trust boundary; the broker is the trust edge.")
