@@ -248,13 +248,14 @@ jobs:
           \$K get nodes --no-headers 2>&1 | grep -q ' Ready' && say NODE_READY || { \$K get nodes 2>&1 | sed 's/^/@@ND /;s/\$/@@/'; say FAIL_NODE; exit 0; }
           printf %s '$SEC_B64' | base64 -d | \$K apply -f - >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
           printf %s '$HC_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
-          for i in \$(seq 1 40); do
+          # helm-controller RETRIES a failed helm job (a transient first-attempt
+          # failure is normal — run 21 succeeded on attempt 2). Wait for succ=1;
+          # don't bail on a single "INSTALLATION FAILED" in the aggregated log.
+          for i in \$(seq 1 45); do
             s=\$(\$K -n kube-system get job helm-install-c8s -o jsonpath='{.status.succeeded}' 2>/dev/null)
             echo "@@HJOB \$i succ=\${s:-0}@@"
-            L=\$(\$K -n kube-system logs job/helm-install-c8s --tail=3 2>/dev/null)
-            printf '%s\n' "\$L" | sed 's/^/@@HLOG /;s/\$/@@/'
+            \$K -n kube-system logs job/helm-install-c8s --tail=2 2>/dev/null | sed 's/^/@@HLOG /;s/\$/@@/'
             [ "\$s" = "1" ] && { say HELM_DONE; break; }
-            printf '%s' "\$L" | grep -q 'INSTALLATION FAILED' && { say FAIL_HELM; break; }
             sleep 12
           done
           for i in \$(seq 1 40); do
