@@ -157,66 +157,73 @@ jobs:
           kubectl config set-credentials sa --token="$(cat $SA/token)" --kubeconfig="$HOSTKC" >/dev/null
           kubectl config set-context host --cluster=host --user=sa --namespace="$NS" --kubeconfig="$HOSTKC" >/dev/null
           kubectl config use-context host --kubeconfig="$HOSTKC" >/dev/null
-          # capture early boot output while we probe qemu (background console reader)
-          timeout -k 5 90 script -qec "timeout 80 virtctl --kubeconfig $HOSTKC console $VM -n $NS" /tmp/console.log >/dev/null 2>&1 </dev/null &
-          CONS=$!
           POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name | head -1)
           [ -z "$POD" ] && POD=$(kubectl -n "$NS" get pods -o name | grep "virt-launcher-$VM" | head -1)
+          POD=${POD#pod/}
           echo "launcher pod: $POD"
-          echo '--- qemu confidential-boot assertions ---'
-          kubectl -n "$NS" exec "${POD#pod/}" -c compute -- sh -c \
-            "tr '\0' '\n' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline > /tmp/q; \
-             grep -c 'sev-snp-guest' /tmp/q; grep -o 'igvm-cfg[^,]*file=[^ ,]*' /tmp/q || grep -o 'igvm[^ ]*' /tmp/q | head -3; \
-             ls -la /var/run/igvm/ 2>/dev/null; sha256sum /var/run/igvm/*.igvm 2>/dev/null" \
-            | tee /tmp/qemu-assert.txt || true
-          grep -q 'sev-snp-guest' /tmp/qemu-assert.txt || echo '::warning::sev-snp-guest NOT found in qemu cmdline'
-          grep -qi 'igvm' /tmp/qemu-assert.txt || echo '::warning::igvm-cfg NOT found in qemu cmdline'
-          wait $CONS 2>/dev/null || true
-          echo '--- early console output (sanitized, first 60 lines) ---'
-          tr -cd '[:print:]\n' < /tmp/console.log | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | head -60 || true
-          echo "--- console bytes captured: $(wc -c < /tmp/console.log) ---"
+          echo '--- FULL qemu cmdline (console/serial/chardev routing is the question) ---'
+          kubectl -n "$NS" exec "$POD" -c compute -- sh -c \
+            "tr '\0' ' ' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline" | tee /tmp/qcmd.txt | tr ' ' '\n' | grep -iE 'sev-snp-guest|igvm|console|serial|chardev|virtconsole|-device' | head -40 || true
+          echo '--- IGVM checksum (matches manifest f13625ba…) ---'
+          kubectl -n "$NS" exec "$POD" -c compute -- sh -c "sha256sum /var/run/igvm/rke2.igvm 2>/dev/null" || true
+          grep -q 'sev-snp-guest' /tmp/qcmd.txt && echo 'OK: sev-snp-guest present' || echo '::warning::sev-snp-guest NOT in qemu cmdline'
 
       # NOTE: no pre-install attest — the rke2 node image does NOT bake
       # attestation-api (unlike base-cpu-image); in node-as-CVM mode it arrives
       # as the c8s DaemonSet. Attestation is enforced post-install below.
-      - name: scrape in-CVM kubeconfig over serial console (retry — flakiest link)
+      #
+      # Kubeconfig exfil: the guest has an autologin root shell on ttyS0, but it
+      # only appears ~180s in (boot blocks on networkd-wait-online, which FAILS
+      # then releases). We DECOUPLE send from read: `virtctl console` TYPES the
+      # dump command (unreliable to read back — it doesn't replay history), and we
+      # READ the result from the guest-console-log sidecar (reliable, full serial
+      # history). Per-attempt marker so we never match a stale echo.
+      - name: scrape in-CVM kubeconfig (type via console, read via guest-console-log)
         run: |
           set -uo pipefail
-          # virtctl may not fall back to in-cluster config like kubectl — synthesize
           SA=/var/run/secrets/kubernetes.io/serviceaccount
           HOSTKC=/tmp/host.kubeconfig
           kubectl config set-cluster host --server="https://kubernetes.default.svc" --certificate-authority="$SA/ca.crt" --kubeconfig="$HOSTKC" >/dev/null
           kubectl config set-credentials sa --token="$(cat $SA/token)" --kubeconfig="$HOSTKC" >/dev/null
           kubectl config set-context host --cluster=host --user=sa --namespace="$NS" --kubeconfig="$HOSTKC" >/dev/null
           kubectl config use-context host --kubeconfig="$HOSTKC" >/dev/null
-          virtctl --kubeconfig "$HOSTKC" version || true   # proves client + apiserver path
-          scrape() {
-            # OUTER timeout is load-bearing: run 2 wedged >45min inside this
-            # pipeline with only the inner timeout — never trust it alone
-            (sleep 2; printf "\n"; sleep 2;
-             printf "echo KCFG-A; base64 -w0 /etc/rancher/rke2/rke2.yaml; echo; echo KCFG-Z\n"; sleep 8) \
-              | timeout -k 5 50 script -qec "timeout 40 virtctl --kubeconfig $HOSTKC console $VM -n $NS" /dev/null || true
-          }
-          b64=
-          for i in $(seq 1 15); do   # rke2-server writes rke2.yaml minutes after boot
-            echo "scrape attempt $i: connecting..."
-            out=$(scrape)
-            echo "scrape attempt $i: got ${#out} bytes from console"
-            [ -n "$out" ] && printf '%s' "$out" | tr -cd '[:print:]\n' | tail -c 300 | sed 's/^/  console| /'
-            b64=$(python3 -c '
-          import re, sys
-          s = sys.stdin.read().replace("\r", "")
-          s = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\\\)", "", s)
-          s = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", s)
-          s = re.sub(r"\x1b[=>]", "", s)
-          pairs = re.findall(r"KCFG-A(.*?)KCFG-Z", s, re.S)
-          if pairs:
-              print("".join(c for c in pairs[-1] if c.isalnum() or c in "+/="))
-          ' <<<"$out")
-            [ -n "$b64" ] && printf '%s' "$b64" | base64 -d 2>/dev/null | head -1 | grep -q '^apiVersion:' && break
-            b64=; sleep 20
+          POD=$(kubectl -n "$NS" get pods -l vm.kubevirt.io/name="$VM" -o name | head -1); POD=${POD#pod/}
+          echo "launcher pod: $POD"
+
+          # 1. wait for the autologin root shell (getty ~180s; boot blocks on networkd-wait-online)
+          echo "waiting for the guest autologin shell..."
+          for i in $(seq 1 30); do
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { echo "shell ready (~$((i*15))s)"; break; }
+            sleep 15
           done
-          [ -n "$b64" ] || { echo "::error::could not scrape kubeconfig from console"; exit 1; }
+
+          send() {  # type one line into the guest's ttyS0 autologin shell (fire-and-forget)
+            (sleep 2; printf '%s\n' "$1"; sleep 3) \
+              | timeout -k 5 40 script -qec "timeout 30 virtctl --kubeconfig $HOSTKC console $VM -n $NS" /dev/null >/dev/null 2>&1 || true
+          }
+
+          # 2. retry: ask the guest to emit its kubeconfig once rke2 has written it;
+          #    read the output back from the reliable sidecar log, not the console.
+          b64=
+          for i in $(seq 1 20); do
+            M="KX${i}Q"                      # unique marker per attempt
+            send "test -f /etc/rancher/rke2/rke2.yaml && echo ${M}A\$(base64 -w0 /etc/rancher/rke2/rke2.yaml)${M}Z || echo ${M}NOPE"
+            sleep 5
+            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
+            if printf '%s' "$LOG" | grep -q "${M}NOPE"; then echo "attempt $i: rke2.yaml not written yet"; sleep 15; continue; fi
+            # the echoed command line has $( ) between the markers (not base64) — only the
+            # executed output matches [A-Za-z0-9+/=]+, so this picks the real payload
+            cand=$(printf '%s' "$LOG" | grep -oE "${M}A[A-Za-z0-9+/=]+${M}Z" | tail -1 | sed "s/^${M}A//; s/${M}Z$//")
+            if [ -n "$cand" ] && printf '%s' "$cand" | base64 -d 2>/dev/null | head -1 | grep -q '^apiVersion:'; then
+              b64=$cand; echo "captured kubeconfig on attempt $i (${#cand} b64 chars)"; break
+            fi
+            echo "attempt $i: no clean capture yet"; sleep 12
+          done
+          if [ -z "$b64" ]; then
+            echo "::error::could not scrape kubeconfig from the guest"
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tail -40
+            exit 1
+          fi
           printf '%s' "$b64" | base64 -d | python3 -c '
           import re, sys
           server = sys.argv[1]
