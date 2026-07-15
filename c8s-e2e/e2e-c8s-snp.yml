@@ -277,11 +277,13 @@ jobs:
           done
           say AFTERHELMLOOP
           for i in \$(seq 1 45); do
-            say "CDSITER \$i"
-            \$K -n c8s-system get pods --no-headers 2>&1 | sed 's/^/@@POD /;s/\$/@@/'
-            r=\$(\$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)
-            echo "@@CDSR \$i ready=\${r:-none}@@"
-            echo "\$r" | grep -qw true && { say CDS_READY; break; }
+            PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
+            printf '%s\n' "\$PODS" | sed 's/^/@@POD /;s/\$/@@/'
+            # CDS ready = the c8s-cds-* pod shows N/N Running (label-agnostic; the
+            # jsonpath -l selector was wrong). tls-lb crashloop is separate + doesn't gate CDS.
+            CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
+            echo "@@CDSR \$i: \${CDS:-nopod}@@"
+            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { say CDS_READY; break; }
             sleep 12
           done
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -15 | sed 's/^/@@EV /;s/\$/@@/'
