@@ -1,5 +1,59 @@
 # c8s e2e in CI — design
 
+## ✅ BARE-METAL SNP LANE GREEN (2026-07-15, run 29 / cifrai sandbox)
+
+`e2e-c8s-snp.yml` runs fully green end-to-end on `confidential-bm` against c8s
+`cd361b4`: boot a measured RKE2-node-as-CVM on real SEV-SNP → assert genuine
+`sev-snp-guest` + IGVM → install that exact c8s commit **in-cluster** (rke2
+helm-controller, OCI chart `charts/c8s:0.1.0-gcd361b4`) → **CDS reaches
+`1/1 Running` = attested** (the node self-attests a genuine SNP quote for its
+RA-TLS serving cert) → teardown. This is Phase 1 of the north star, proven.
+
+**What made it green (the load-bearing fixes, so they're not relitigated):**
+- **In-cluster via console driver** (not external apiserver — CIDR collision):
+  deliver ONE driver script over the serial console, it does install+wait+report,
+  runner polls `guest-console-log` for `@@markers@@`. Console = bootstrap only.
+- **Canonical c8s values** (from docs, not guessed — matches c8s-fleet
+  c8s-integration): `cds.node.selector: null` + `tolerations: null` (THE
+  single-node CDS-Pending fix — chart default pins `role=cds`); pre-create +
+  label `c8s-system` with `pod-security.kubernetes.io/enforce=privileged` (helm
+  `createNamespace` can't label → attestation-api privileged pod PSA-rejected →
+  whole CDS chain stalls); `cds.measurements: []` for first-green (empty =
+  accept-any-attested; a mismatched golden makes peers reject CDS — pin the
+  golden only AFTER green); `cds.ratlsPlatform: sev-snp`;
+  `attestationApi.cvmMode: node` + `teeDevices.sevGuest: true`; ratlsMesh +
+  nriImagePolicy DISABLED (matches c8s-integration; mesh needs kernel netfilter
+  modules the monolithic guest lacks — a base-images ask).
+- **Canonical install method**: docs say the blessed path is the `c8s install`
+  CLI (or `c8s render-values` → Flux HelmRelease). We can't run `c8s install`
+  from the runner (needs apiserver reach). We hand-mirror its values via the
+  helm-controller HelmChart. TODO to be MORE canonical: `c8s render-values
+  --cvm-mode node --hardware-platform sev-snp --single-node --resolve-digests`
+  on the runner → feed into valuesContent (pins per-component digests).
+
+**Harness gotchas that cost the most runs (all mine, not the confidential stack):**
+- GHA default `bash -e` + `pipefail`: a no-match `grep` in a best-effort loop
+  silently kills the step. Use `set +e +o pipefail` in polling steps.
+- `nohup driver >/dev/ttyS0` swallows output to nohup.out — launch detached with
+  `(setsid ... >/dev/ttyS0 2>&1 &)`.
+- Markers in ECHOED commands false-match your own grep (the typed command text
+  contains e.g. `echo @@DECODEOK@@`). Build success markers from a runtime var
+  so the literal never appears in the command. Bit both progress- and
+  delivery-verification.
+- Chunked base64 delivery over console: `while read` DROPS `fold`'s final
+  newline-less chunk → every delivery truncates identically (unclosed `for` →
+  syntax error). Use `while read -r c || [ -n "$c" ]`, and verify byte-count +
+  `bash -n` with retry.
+- CDS readiness: detect by pod name + `1/1 Running`, not `-l
+  app.kubernetes.io/name=cds` (wrong label → false `ready=none`).
+
+**Next:** (1) pin the golden measurement (`cds.measurements: [<golden>]`) now
+that it's green, to ENFORCE launch-digest, not just accept-any. (2) prove
+consumption end-to-end (schedule a cw workload, assert it runs) per the NVIDIA
+lesson. (3) wire the merge trigger in the ORG c8s repo (blocked on the Ameen
+GitHub App credential) — the actual "merge → integration → signal" unlock.
+Then TDX-metal (Phase 3), cloud (Phase 4).
+
 ## Lessons from NVIDIA/k8s-test-infra + NVIDIA/aicr (2026-07-15)
 
 Deep-read of NVIDIA's (non-confidential) ephemeral-GPU-test-cluster infra. They
