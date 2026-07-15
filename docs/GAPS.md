@@ -120,7 +120,7 @@ final security model. Each bullet links to the tracking issue.
 
 ## Operations
 
-- Chart-managed CDS is not highly available by default (broker side tracked at [#75](https://github.com/confidential-dot-ai/c8s/issues/75)). Restart continuity ships via CA adoption + RollingUpdate (active/standby); true active/active is blocked by per-pod EAR signing keys (see [decisions/2026-07-14-cds-active-active-ear-jwks.md](decisions/2026-07-14-cds-active-active-ear-jwks.md)).
+- Chart-managed CDS is not highly available by default (broker side tracked at [#75](https://github.com/confidential-dot-ai/c8s/issues/75)). Restart continuity ships via CA adoption + RollingUpdate (active/standby); true active/active is blocked by per-pod EAR signing keys (design: [decisions/2026-07-14-cds-active-active-ear-jwks.md](decisions/2026-07-14-cds-active-active-ear-jwks.md); scope: [decisions/2026-07-14-cds-active-active-scope.md](decisions/2026-07-14-cds-active-active-scope.md)).
 - Multi-tenancy isolation has no complete design (tracked at [#56](https://github.com/confidential-dot-ai/c8s/issues/56)).
 - Federation and multi-cluster orchestration remain fleet-level concerns.
 - No operator↔chart capability handshake: the chart renders webhook-dependent
