@@ -19,7 +19,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
-const defaultPullRetryInterval = 2 * time.Second
+// DefaultPullRetryInterval is the fixed cadence between transient-failure
+// retries when PullConfig.RetryInterval is zero.
+const DefaultPullRetryInterval = 2 * time.Second
 
 // AttestKeyClient obtains a TEE-bound EAR for a caller-generated key from a
 // CDS peer's /attest-key. *attestclient.Client satisfies it.
@@ -45,7 +47,7 @@ type PullConfig struct {
 	// Logger is optional; nil uses slog.Default().
 	Logger *slog.Logger
 	// RetryInterval is the fixed cadence between transient-failure retries;
-	// zero uses defaultPullRetryInterval.
+	// zero uses DefaultPullRetryInterval.
 	RetryInterval time.Duration
 }
 
@@ -133,9 +135,12 @@ func pullErrorStatus(err error) (int, bool) {
 }
 
 // PullHandoff drives the requester side of the handoff protocol end to end:
-// a fresh in-memory signer key, a TEE-bound EAR for it from the peer's
-// /attest-key, then the CA material via /handoff. Each stage retries
-// transient failures (transport, 5xx, 429) until ctx is done — /handoff
+// a fresh in-memory requester signing key, a TEE-bound EAR for that key from
+// the peer's /attest-key, then the CA material via /handoff. RequestHandoff
+// separately creates a one-request X25519 recipient key for encryption;
+// neither ephemeral key is the CA private key returned inside the encrypted
+// material. Each stage retries transient failures (transport, 5xx, 429) until
+// ctx is done — /handoff
 // returns 503 while the peer's handoff EAR bootstraps — and the EAR is
 // obtained once, not per attempt, so retries do not redo TEE report
 // generation. A denial or other 4xx is a definitive verdict and fails fast.
@@ -152,33 +157,33 @@ func PullHandoff(ctx context.Context, cfg PullConfig) (*HandoffMaterial, error) 
 	}
 	interval := cfg.RetryInterval
 	if interval <= 0 {
-		interval = defaultPullRetryInterval
+		interval = DefaultPullRetryInterval
 	}
 
-	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	requesterSigningKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate handoff signer key: %w", err)
+		return nil, fmt.Errorf("generate handoff requester signing key: %w", err)
 	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&signer.PublicKey)
+	pubDER, err := x509.MarshalPKIXPublicKey(&requesterSigningKey.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("marshal handoff signer pubkey: %w", err)
+		return nil, fmt.Errorf("marshal handoff requester signing public key: %w", err)
 	}
 
-	ear, err := pullRetry(ctx, logger, interval, "attest-key", func() (string, error) {
+	ear, err := PullRetry(ctx, logger, interval, "attest-key", func() (string, error) {
 		return cfg.Attest.AttestKeyWithOperatorKeysHash(ctx, cfg.AttestationApiURL, pubDER, cfg.Deps.OperatorKeysHash)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attest-key: %w", err)
 	}
 
-	return pullRetry(ctx, logger, interval, "handoff", func() (*HandoffMaterial, error) {
-		return RequestHandoff(ctx, cfg.Deps, cfg.PeerURL, ear, signer, cfg.HTTPClient)
+	return PullRetry(ctx, logger, interval, "handoff", func() (*HandoffMaterial, error) {
+		return RequestHandoff(ctx, cfg.Deps, cfg.PeerURL, ear, requesterSigningKey, cfg.HTTPClient)
 	})
 }
 
-// pullRetry retries op while ClassifyPullError reports PullTransient, on a
+// PullRetry retries op while ClassifyPullError reports PullTransient, on a
 // fixed cadence until ctx is done, returning the last error.
-func pullRetry[T any](ctx context.Context, logger *slog.Logger, interval time.Duration, stage string, op func() (T, error)) (T, error) {
+func PullRetry[T any](ctx context.Context, logger *slog.Logger, interval time.Duration, stage string, op func() (T, error)) (T, error) {
 	for {
 		v, err := op()
 		if ClassifyPullError(err) != PullTransient {

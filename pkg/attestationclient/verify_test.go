@@ -93,7 +93,7 @@ func TestVerifyEvidenceWireForm(t *testing.T) {
 	for i := range erd[:sha512.Size384] {
 		erd[i] = byte(i) // SHA-384 digest portion; bytes 48-63 stay zero
 	}
-	measurement := bytes.Repeat([]byte{0x42}, snpMeasurementSize)
+	measurement := bytes.Repeat([]byte{0x42}, launchMeasurementSize)
 
 	cases := []struct {
 		platform string
@@ -111,9 +111,9 @@ func TestVerifyEvidenceWireForm(t *testing.T) {
 			var captured types.VerifyRequest
 			srv := verifyServer(t, verifyResult(tc.platform, true, boolPtr(true), measurement), &captured)
 
+			policy := EvidencePolicy{ExpectedReportData: erd, Measurements: [][]byte{measurement}}
 			_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
-				types.AttestationEvidence{Platform: tc.platform, Evidence: json.RawMessage(`{"x":1}`)},
-				EvidencePolicy{ExpectedReportData: erd, Measurements: [][]byte{measurement}})
+				types.AttestationEvidence{Platform: tc.platform, Evidence: json.RawMessage(`{"x":1}`)}, policy)
 			if err != nil {
 				t.Fatalf("VerifyEvidence: %v", err)
 			}
@@ -136,7 +136,7 @@ func TestVerifyEvidenceWireForm(t *testing.T) {
 
 func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 	var erd [64]byte
-	measurement := bytes.Repeat([]byte{0x42}, snpMeasurementSize)
+	measurement := bytes.Repeat([]byte{0x42}, launchMeasurementSize)
 	pin := [][]byte{measurement}
 
 	cases := []struct {
@@ -147,11 +147,11 @@ func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 	}{
 		{"measurement in set", verifyResult("snp", true, boolPtr(true), measurement),
 			EvidencePolicy{ExpectedReportData: erd, Measurements: pin}, nil},
-		{"measurement not in set", verifyResult("snp", true, boolPtr(true), bytes.Repeat([]byte{0x01}, snpMeasurementSize)),
+		{"measurement not in set", verifyResult("snp", true, boolPtr(true), bytes.Repeat([]byte{0x01}, launchMeasurementSize)),
 			EvidencePolicy{ExpectedReportData: erd, Measurements: pin}, ErrMeasurementNotAllowed},
 		{"measurement missing while pinned", verifyResult("snp", true, boolPtr(true), nil),
 			EvidencePolicy{ExpectedReportData: erd, Measurements: pin}, ErrMeasurementNotAllowed},
-		{"no pin accepts any measurement", verifyResult("snp", true, boolPtr(true), bytes.Repeat([]byte{0x01}, snpMeasurementSize)),
+		{"no pin accepts any measurement", verifyResult("snp", true, boolPtr(true), bytes.Repeat([]byte{0x01}, launchMeasurementSize)),
 			EvidencePolicy{ExpectedReportData: erd}, nil},
 	}
 	for _, tc := range cases {
@@ -177,14 +177,43 @@ func TestVerifyEvidenceMeasurementPolicy(t *testing.T) {
 		}
 	})
 
-	// The TDX verifier surfaces no launch measurement; a pinned set is
-	// documented as ignored (see EvidencePolicy.Measurements).
-	t.Run("tdx ignores pinned measurements and sends no min_tcb", func(t *testing.T) {
+	t.Run("tdx enforces MRTD surfaced as launch digest", func(t *testing.T) {
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), measurement), nil)
+		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
+			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
+		if err != nil {
+			t.Fatalf("VerifyEvidence: %v", err)
+		}
+	})
+
+	t.Run("tdx rejects MRTD outside the pinned set", func(t *testing.T) {
+		other := bytes.Repeat([]byte{0x01}, launchMeasurementSize)
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), other), nil)
+		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
+			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
+		if !errors.Is(err, ErrMeasurementNotAllowed) {
+			t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
+		}
+	})
+
+	t.Run("tdx rejects missing MRTD while pinned", func(t *testing.T) {
+		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), nil), nil)
+		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
+			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
+			EvidencePolicy{ExpectedReportData: erd, Measurements: pin})
+		if !errors.Is(err, ErrMeasurementNotAllowed) {
+			t.Fatalf("want ErrMeasurementNotAllowed, got: %v", err)
+		}
+	})
+
+	t.Run("tdx sends no min_tcb", func(t *testing.T) {
 		var captured types.VerifyRequest
 		srv := verifyServer(t, verifyResult("tdx", true, boolPtr(true), nil), &captured)
 		_, err := NewClient(srv.URL).VerifyEvidence(context.Background(),
 			types.AttestationEvidence{Platform: string(types.PlatformTdx), Evidence: json.RawMessage(`{}`)},
-			EvidencePolicy{ExpectedReportData: erd, Measurements: pin, MinTcb: &types.MinTcb{Snp: 1}})
+			EvidencePolicy{ExpectedReportData: erd, MinTcb: &types.MinTcb{Snp: 1}})
 		if err != nil {
 			t.Fatalf("VerifyEvidence: %v", err)
 		}

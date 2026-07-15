@@ -34,6 +34,8 @@ live trust root served on GET /ca.
 
 Must run inside an attested TEE with access to the local attestation-api; the
 peer admits only launch measurements pinned in its --handoff-measurements.
+A non-empty --measurements pin is mandatory even in development; handoff has
+no accept-any mode.
 The same operator public-key bundle configured on CDS is required: its
 canonical hash is bound into both handoff attestations and must match.
 Prints a one-line JSON report on stdout. The pulled CA private key never
@@ -53,7 +55,7 @@ unavailable (unreachable / disabled / still bootstrapping past --timeout).`,
 	f := cmd.Flags()
 	f.StringVar(&cfg.peerURL, "peer-url", "", "https URL of the CDS peer to pull the mesh CA from")
 	f.StringVar(&cfg.attestationApiURL, "attestation-api-url", "", "URL of the attestation-api service")
-	f.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements the peer may present; pins both its RA-TLS serving cert and its handoff issuer EAR")
+	f.StringSliceVar(&cfg.measurements, "measurements", nil, "required SHA-384 hex launch measurements the peer may present; pins both its RA-TLS serving cert and its handoff issuer EAR")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of operator EC public keys whose policy hash must match the peer")
 	f.StringVar(&cfg.expectedIssuer, "expected-issuer", "cds", "EAR JWT issuer claim required on the peer's handoff EAR")
 	f.DurationVar(&cfg.timeout, "timeout", 2*time.Minute, "overall deadline, including retries while the peer's handoff EAR bootstraps")
