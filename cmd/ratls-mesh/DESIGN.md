@@ -540,7 +540,7 @@ Certificates are provisioned lazily on the first TLS handshake and cached in mem
 4. Extract raw attestation report from the structured evidence response
 5. Embed attestation report in X.509 certificate extension
 6. Cache certificate in `certState` (RWMutex-protected)
-7. Rotate at 50% of TTL (default 12h → rotate at 6h)
+7. Rotate at 50% of TTL (default 24h → rotate at 12h)
 
 The `certState.mu` mutex serializes certificate provisioning — at most one attestation process runs at a time per cert type (server/client). After the first provisioning, the cached cert is returned for all subsequent handshakes until rotation.
 

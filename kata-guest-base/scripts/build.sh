@@ -2,7 +2,7 @@
 # Build the c8s kata-guest-base: a kata-NATIVE guest rootfs for the
 # kata-qemu-snp runtime class.
 #
-# WHY THIS LOOKS NOTHING LIKE THE OLD steep BUILD
+# WHY THIS LOOKS NOTHING LIKE THE OLD confos BUILD
 # ------------------------------------------------
 # kata-qemu does measured *direct-kernel* boot — there is no IGVM and no
 # UKI on kata's path (verified against kata 3.30.0: no igvm-cfg in govmm,
@@ -10,8 +10,8 @@
 # over OVMF + a directly-loaded kernel). So kata wants three passive parts,
 # not a self-booting image:
 #
-#   kernel = <vmlinuz>                 a bare bzImage  (steep's hardened kernel)
-#   image  = <kata-rootfs.img>         a 2-partition image: p1=erofs rootfs,
+#   kernel = <vmlinuz>                 a bare bzImage  (confos's hardened kernel)
+#   image  = <kata-rootfs.img>         a 2-partition image: p1=ext4 rootfs,
 #                                      p2=dm-verity hash tree (NO superblock)
 #   kernel_verity_params = root_hash=…,salt=…,data_blocks=…,…
 #
@@ -20,13 +20,13 @@
 # root hash rides in the kernel cmdline, which kernel-hashes folds into
 # the SNP launch measurement → the rootfs is attested transitively.
 #
-# steep is the wrong tool for that shape (it builds UEFI/IGVM self-booting
+# confos is the wrong tool for that shape (it builds UEFI/IGVM self-booting
 # disks), so we build the ROOTFS with kata's own osbuilder — which also
-# installs the version-matched kata-agent for us. We keep steep ONLY for
+# installs the version-matched kata-agent for us. We keep confos ONLY for
 # the hardened kernel (decoupled from the rootfs in kata).
 #
 # PIPELINE
-#   1. steep kernel              -> hardened vmlinuz             (kernel =)
+#   1. confos kernel              -> hardened vmlinuz             (kernel =)
 #   2. osbuilder rootfs (ubuntu) -> base rootfs + kata-agent
 #   3. overlay extra/            -> c8s bins + units + policy + allowlist
 #   4. osbuilder image (verity)  -> locked image  -> output/
@@ -50,12 +50,12 @@
 # PREREQS (this CANNOT run in a user-namespaced dev container):
 #   - docker running        (osbuilder builds inside Docker; needs loop devices)
 #   - sudo                  (osbuilder partitions/loop-mounts the image)
-#   - a steep checkout at ${WORKSPACE}/steep (built on demand)
+#   - a confidential-os-builder checkout at ${WORKSPACE}/confidential-os-builder (built on demand)
 #   - c8s binaries staged   (run scripts/fetch.sh first)
 #   - kata source at KATA_VERSION (fetched via `gh` if not already present)
 #
 # Override knobs (env): KATA_VERSION, FS_TYPE, BUILD_VARIANT, KATA_SRC,
-#   STEEP_DIR, OUTPUT_DIR, DEBUG_OUTPUT_DIR, SKIP_KERNEL=1 (reuse an
+#   CONFOS_DIR, OUTPUT_DIR, DEBUG_OUTPUT_DIR, SKIP_KERNEL=1 (reuse an
 #   existing vmlinuz).
 #   ROOTFS_CACHE_TAR (restore the pre-overlay base rootfs from this .tar.zst
 #   when it exists, else pack the freshly built one there — the CI cache hook).
@@ -87,9 +87,10 @@ KATA_SRC_COMMIT="${KATA_SRC_COMMIT:-86e5975ad6a20f091ed686e492672c70496d0400}"
 # measured-rootfs path for ext4 (create_rootfs_image). Its erofs path
 # (create_erofs_rootfs_image) loop-attaches the image before creating it
 # AND never runs veritysetup — so erofs + MEASURED_ROOTFS is broken there.
-# ext4 is kata's standard measured-rootfs fs. (Caveat: mkfs.ext4 writes a
-# random UUID/timestamps, so the verity root hash isn't bit-for-bit
-# reproducible across builds yet — see docs; pin the per-build digest.)
+# ext4 is kata's standard measured-rootfs fs. mkfs.ext4 would otherwise write
+# a random UUID/hash-seed/timestamps; the reproducibility knobs below
+# (SOURCE_DATE_EPOCH + mtime normalisation + fixed VERITY_SALT) pin all of it
+# so the verity root_hash is bit-for-bit reproducible across builds.
 FS_TYPE="${FS_TYPE:-ext4}"
 BUILD_VARIANT="${BUILD_VARIANT:-c8s}"
 DISTRO="${DISTRO:-ubuntu}"
@@ -97,7 +98,23 @@ DISTRO="${DISTRO:-ubuntu}"
 # agent ships from the ubuntu-noble confidential rootfs, so match it.
 OS_VERSION="${OS_VERSION:-noble}"
 
-STEEP_DIR="${STEEP_DIR:-${WORKSPACE}/steep}"
+# --- Reproducibility knobs -------------------------------------------------
+# Pinned sources of per-build randomness so two builds from the same inputs
+# produce a bit-for-bit identical dm-verity root_hash. What each knob pins and
+# why: docs/kata-guest-base.md "Reproducible root_hash".
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"   # 2024-01-01T00:00:00Z
+VERITY_SALT="${VERITY_SALT:-c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8}"   # public; measured via the cmdline
+UBUNTU_REPO_URL="${UBUNTU_REPO_URL:-}"   # empty -> osbuilder's default archive
+FIXED_FS_UUID="${FIXED_FS_UUID:-c8c8c8c8-c8c8-c8c8-c8c8-c8c8c8c8c8c8}"
+FIXED_HASH_SEED="${FIXED_HASH_SEED:-d8d8d8d8-d8d8-d8d8-d8d8-d8d8d8d8d8d8}"
+# The deterministic re-lay (seal_and_assemble) runs mkfs.ext4 + veritysetup on
+# the HOST, so root_hash is reproducible only for a matching toolchain. The
+# versions found are recorded in manifest.json; set these to make a mismatch
+# fatal (the CI publish path should pin both).
+REPRO_E2FSPROGS_VERSION="${REPRO_E2FSPROGS_VERSION:-}"
+REPRO_CRYPTSETUP_VERSION="${REPRO_CRYPTSETUP_VERSION:-}"
+
+CONFOS_DIR="${CONFOS_DIR:-${WORKSPACE}/confidential-os-builder}"
 OUTPUT_DIR="${OUTPUT_DIR:-${IMAGE_DIR}/output}"
 DEBUG_OUTPUT_DIR="${DEBUG_OUTPUT_DIR:-${IMAGE_DIR}/output-debug}"
 NVIDIA_OUTPUT_DIR="${NVIDIA_OUTPUT_DIR:-${IMAGE_DIR}/output-nvidia}"
@@ -116,26 +133,26 @@ EXTRA_NVIDIA_DIR="${IMAGE_DIR}/extra-nvidia"
 # The NVIDIA driver payload (kernel modules, GSP firmware, driver userland)
 # is grafted from kata's own nvidia-gpu-confidential rootfs image — the SAME
 # digest-pinned kata release that provides the agent — and the GPU variant
-# boots kata's matching GPU kernel, NOT the steep one (the steep kernel has
+# boots kata's matching GPU kernel, NOT the confos one (the confos kernel has
 # CONFIG_MODULES=n; the NVIDIA modules need the kernel they were built for).
 BUILD_NVIDIA="${BUILD_NVIDIA:-auto}"
 KATA_NVIDIA_CONFIDENTIAL_IMG="${KATA_NVIDIA_CONFIDENTIAL_IMG:-/opt/kata/share/kata-containers/kata-containers-nvidia-gpu-confidential.img}"
 KATA_NVIDIA_VMLINUZ="${KATA_NVIDIA_VMLINUZ:-/opt/kata/share/kata-containers/vmlinuz-nvidia-gpu.container}"
-# c8s's kernel config fragment, merged after steep's required + hardening
-# baseline by `steep kernel --kernel-config-fragment`. steep resolves the
+# c8s's kernel config fragment, merged after confos's required + hardening
+# baseline by `confos kernel --kernel-config-fragment`. confos resolves the
 # merged .config and writes it to a fixed path in its own tree (the old
 # --kernel-snapshot flag is gone). That snapshot is NOT a build input —
-# steep regenerates it from scratch each resolve — but it is the only
-# place the effect of steep's baseline (kernel version / hardening) on OUR
-# guest kernel is visible. So after the kernel build Step 1 copies steep's
+# confos regenerates it from scratch each resolve — but it is the only
+# place the effect of confos's baseline (kernel version / hardening) on OUR
+# guest kernel is visible. So after the kernel build Step 1 copies confos's
 # snapshot into this repo (KERNEL_SNAPSHOT), committed, so any drift is
 # reviewable in git. See README.md "Build" + container.config header.
 KERNEL_FRAGMENT="${IMAGE_DIR}/kernel/container.config"
-# Resolved-config lockfile: steep writes STEEP_SNAPSHOT during the kernel
+# Resolved-config lockfile: confos writes CONFOS_SNAPSHOT during the kernel
 # build; Step 1 copies it to KERNEL_SNAPSHOT (tracked in git) for drift
 # detection. Not read by the build.
 KERNEL_SNAPSHOT="${IMAGE_DIR}/kernel/config-x86_64.snapshot"
-STEEP_SNAPSHOT="${STEEP_DIR}/kernel/config-x86_64.snapshot"
+CONFOS_SNAPSHOT="${CONFOS_DIR}/kernel/config-x86_64.snapshot"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 die() { echo "FATAL: $*" >&2; exit 1; }
@@ -148,8 +165,8 @@ command -v jq     >/dev/null 2>&1 || die "jq not found — needed to emit manife
 # compute the rootfs-builder Docker build-args; without it RUST_TOOLCHAIN
 # comes back empty and the rustup install fails with a cryptic
 # '--default-toolchain <...> required' error.
-command -v yq >/dev/null 2>&1 || die "yq not found — osbuilder needs it to read kata's versions.yaml. Install mikefarah yq:
-       sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq"
+command -v yq >/dev/null 2>&1 || die "yq not found — osbuilder needs it to read kata's versions.yaml. Install mikefarah yq (pinned + checksummed; it shapes the measured guest rootfs build-args):
+       sudo curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64 && echo '0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598  /usr/local/bin/yq' | sha256sum -c - && sudo chmod +x /usr/local/bin/yq"
 
 # Guest-pull sandboxes need a pause image baked into the rootfs at
 # /pause_bundle — the kata-agent unpacks it for the sandbox (pause) container
@@ -175,25 +192,39 @@ for t in "mkfs.${FS_TYPE}" veritysetup parted qemu-img; do
         || die "${t} not found — needed to build the verity image on the host. Install: sudo apt-get install -y erofs-utils cryptsetup-bin parted gdisk e2fsprogs qemu-utils"
 done
 
+# Re-lay toolchain versions: recorded in manifest.json, enforced when pinned
+# (see the reproducibility knobs above).
+MKE2FS_VERSION="$(PATH="${PATH}:/usr/sbin:/sbin" mkfs.ext4 -V 2>&1 | awk 'NR==1{print $2}')"
+VERITYSETUP_VERSION="$(PATH="${PATH}:/usr/sbin:/sbin" veritysetup --version 2>/dev/null | awk 'NR==1{print $2}')"
+echo "    re-lay toolchain: mke2fs ${MKE2FS_VERSION} (e2fsprogs), veritysetup ${VERITYSETUP_VERSION} (cryptsetup)"
+if [[ -n "${REPRO_E2FSPROGS_VERSION}" && "${MKE2FS_VERSION}" != "${REPRO_E2FSPROGS_VERSION}" ]]; then
+    die "host e2fsprogs ${MKE2FS_VERSION} != pinned ${REPRO_E2FSPROGS_VERSION} — the re-lay toolchain shapes root_hash; install the pinned version or update the pin."
+fi
+if [[ -n "${REPRO_CRYPTSETUP_VERSION}" && "${VERITYSETUP_VERSION}" != "${REPRO_CRYPTSETUP_VERSION}" ]]; then
+    die "host cryptsetup ${VERITYSETUP_VERSION} != pinned ${REPRO_CRYPTSETUP_VERSION} — the re-lay toolchain shapes root_hash; install the pinned version or update the pin."
+fi
+
 # image_builder uses `losetup -P` to partition the image. On hosts where
 # the loop module isn't auto-loaded, losetup fails with `failed to set up
 # loop device: No such file or directory`. Load it best-effort up front.
 sudo modprobe loop 2>/dev/null || true
 
-[[ -f "${KERNEL_FRAGMENT}" ]] || die "${KERNEL_FRAGMENT} missing (c8s kernel config fragment, merged after steep's required + hardening baseline) — see README."
+[[ -f "${KERNEL_FRAGMENT}" ]] || die "${KERNEL_FRAGMENT} missing (c8s kernel config fragment, merged after confos's required + hardening baseline) — see README."
 
 # The overlay binaries must be staged before we build the rootfs image,
 # because they end up in the dm-verity root (and thus the measurement).
-for bin in ratls-mesh policy-monitor attestation-service; do
+for bin in ratls-mesh policy-monitor attestation-service rtmr3-measurer; do
     [[ -x "${EXTRA_DIR}/usr/local/bin/${bin}" ]] || die "${EXTRA_DIR}/usr/local/bin/${bin} missing — run scripts/fetch.sh first."
 done
 [[ -f "${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json" ]] || die "bootstrap-allowlist.json not staged — run scripts/fetch.sh (with IMAGE_TAG or *_DIGEST env vars) first."
 [[ -f "${EXTRA_DIR}/etc/kata-opa/default-policy.rego" ]] || die "default-policy.rego missing from overlay."
 
-# In-guest registry auth for guest-pull (staged by fetch.sh, empty unless a
-# developer pre-staged private-mirror creds). If build.sh runs standalone
-# without fetch.sh, bake an empty auth set so the file:// path the kata
-# cmdline names (agent.image_registry_auth) still resolves — anonymous pulls.
+# In-guest GHCR registry auth for private guest-pull. fetch.sh bakes this
+# from READ_PRIVATE_GHCR_TOKEN; tmpfiles copies it to
+# /run/image-security/auth.json, the file:// path the kata cmdline names
+# (agent.image_registry_auth, set by the puller). If build.sh is run
+# standalone without fetch.sh, bake an empty auth set so that path still
+# resolves — anonymous pulls, no credential in the measured rootfs.
 GHCR_AUTH_FILE="${EXTRA_DIR}/etc/c8s/ghcr-auth.json"
 if [[ ! -s "${GHCR_AUTH_FILE}" ]]; then
     echo "    NOTE: ${GHCR_AUTH_FILE} not staged by fetch.sh — baking empty auths (anonymous guest-pull)." >&2
@@ -213,38 +244,38 @@ fi
 sudo rm -rf "${DEBUG_OUTPUT_DIR}" "${NVIDIA_OUTPUT_DIR}" "${NVIDIA_DEBUG_OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}" "${WORK_DIR}"
 
-# --- Step 1/5: hardened kernel (steep) ---------------------------------
-# We only use steep to compile the kernel; the rootfs is osbuilder's job.
+# --- Step 1/5: hardened kernel (confos) ---------------------------------
+# We only use confos to compile the kernel; the rootfs is osbuilder's job.
 VMLINUZ_OUT="${OUTPUT_DIR}/vmlinuz"
 if [[ "${SKIP_KERNEL:-0}" == "1" && -f "${VMLINUZ_OUT}" ]]; then
     log "Step 1/5: reusing existing kernel (SKIP_KERNEL=1): ${VMLINUZ_OUT}"
 else
-    log "Step 1/5: building hardened kernel with steep"
-    [[ -d "${STEEP_DIR}" ]] || die "steep checkout not found at ${STEEP_DIR} (set STEEP_DIR)."
-    STEEP_BIN="${STEEP_BIN:-${STEEP_DIR}/target/release/steep}"
-    if [[ ! -x "${STEEP_BIN}" ]]; then
-        echo "    building steep (cargo build --release)"
-        ( cd "${STEEP_DIR}" && cargo build --release )
+    log "Step 1/5: building hardened kernel with confos"
+    [[ -d "${CONFOS_DIR}" ]] || die "confos checkout not found at ${CONFOS_DIR} (set CONFOS_DIR)."
+    CONFOS_BIN="${CONFOS_BIN:-${CONFOS_DIR}/target/release/confos}"
+    if [[ ! -x "${CONFOS_BIN}" ]]; then
+        echo "    building confos (cargo build --release)"
+        ( cd "${CONFOS_DIR}" && cargo build --release )
     fi
-    # steep writes output/kernel/vmlinuz relative to its own dir. steep
+    # confos writes output/kernel/vmlinuz relative to its own dir. confos
     # resolves its config snapshot internally (fixed kernel/config-x86_64.snapshot
-    # in the steep tree, auto-updated each build), so we pass only the fragment —
+    # in the confos tree, auto-updated each build), so we pass only the fragment —
     # the old --kernel-snapshot flag no longer exists.
-    ( cd "${STEEP_DIR}" && "${STEEP_BIN}" kernel \
+    ( cd "${CONFOS_DIR}" && "${CONFOS_BIN}" kernel \
         --kernel-config-fragment "${KERNEL_FRAGMENT}" )
-    STEEP_VMLINUZ="${STEEP_DIR}/output/kernel/vmlinuz"
-    [[ -f "${STEEP_VMLINUZ}" ]] || die "steep did not produce ${STEEP_VMLINUZ}"
-    install -m 0644 "${STEEP_VMLINUZ}" "${VMLINUZ_OUT}"
+    CONFOS_VMLINUZ="${CONFOS_DIR}/output/kernel/vmlinuz"
+    [[ -f "${CONFOS_VMLINUZ}" ]] || die "confos did not produce ${CONFOS_VMLINUZ}"
+    install -m 0644 "${CONFOS_VMLINUZ}" "${VMLINUZ_OUT}"
 
-    # Capture the resolved-config snapshot steep just wrote (baseline +
-    # our container.config, merged). steep keeps it in its own tree where
+    # Capture the resolved-config snapshot confos just wrote (baseline +
+    # our container.config, merged). confos keeps it in its own tree where
     # it gets overwritten/discarded; copy it next to the fragment in THIS
     # repo so the merged config is committed and reviewable — this is how a
-    # change in steep's kernel base that affects our guest kernel becomes
+    # change in confos's kernel base that affects our guest kernel becomes
     # visible here. Not a build input. (SKIP_KERNEL reuses an existing
     # vmlinuz without re-resolving, so it intentionally leaves the
     # committed snapshot untouched.)
-    [[ -f "${STEEP_SNAPSHOT}" ]] || die "steep did not produce ${STEEP_SNAPSHOT} — cannot capture the resolved-config snapshot."
+    [[ -f "${CONFOS_SNAPSHOT}" ]] || die "confos did not produce ${CONFOS_SNAPSHOT} — cannot capture the resolved-config snapshot."
     # Drift gate: compare the freshly-resolved config against the committed
     # lockfile BEFORE overwriting it. CHECK_SNAPSHOT=1 (set by CI on the
     # publish path) makes a mismatch fatal HERE — at Step 1, before osbuilder
@@ -252,19 +283,19 @@ else
     # drifted from what's committed/reviewed never gets built or published.
     # Local builds leave CHECK_SNAPSHOT unset and just refresh the lockfile.
     snapshot_drift=0
-    if [[ -f "${KERNEL_SNAPSHOT}" ]] && ! cmp -s "${STEEP_SNAPSHOT}" "${KERNEL_SNAPSHOT}"; then
+    if [[ -f "${KERNEL_SNAPSHOT}" ]] && ! cmp -s "${CONFOS_SNAPSHOT}" "${KERNEL_SNAPSHOT}"; then
         snapshot_drift=1
         committed_sha="$(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}')"
     fi
     # Copy regardless (so the uploaded artifact reflects what THIS build
     # resolved, even on a gate failure) — then enforce.
-    install -m 0644 "${STEEP_SNAPSHOT}" "${KERNEL_SNAPSHOT}"
+    install -m 0644 "${CONFOS_SNAPSHOT}" "${KERNEL_SNAPSHOT}"
     echo "    snapshot: ${KERNEL_SNAPSHOT} (sha256 $(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}'))"
     if [[ "${CHECK_SNAPSHOT:-0}" == "1" && "${snapshot_drift}" == "1" ]]; then
         die "resolved kernel config drifted from the committed snapshot.
        committed ${KERNEL_SNAPSHOT}: ${committed_sha}
        resolved  (this build):       $(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}')
-   steep's baseline (STEEP_REF) or kernel/container.config changed without
+   confos's baseline (CONFOS_REF) or kernel/container.config changed without
    re-committing kata-guest-base/kernel/config-x86_64.snapshot. Re-resolve and
    commit it (run the 'Kernel config snapshot' workflow, or a local build), or
    revert the change that moved it. Failing before osbuilder + the GHCR push."
@@ -317,6 +348,8 @@ mkdir -p "${ROOTFS_BUILD_DEST}" "${IMAGES_BUILD_DEST}" "${GO_PATH_DIR}"
 # bundle to validate those TLS connections (osbuilder's `required`-variant
 # rootfs ships none). The boot path (/attest) is network-free, so a missing
 # bundle would only degrade verification — but it is cheap and in `main`.
+# cryptsetup-bin: scratch-setup.service opens the ephemeral image-store scratch
+# disk under dm-crypt (see extra/usr/local/lib/c8s/scratch-setup.sh). In noble main.
 # Only `main`-component packages are installable (osbuilder sets
 # REPO_COMPONENTS=main); universe packages (e.g. traceroute, mtr-tiny) fail the
 # rootfs build with "no installation candidate".
@@ -324,8 +357,8 @@ mkdir -p "${ROOTFS_BUILD_DEST}" "${IMAGES_BUILD_DEST}" "${GO_PATH_DIR}"
 # nvidia-uvm load; udev's builtin libkmod only auto-loads nvidia via PCI
 # modalias — nvidia-uvm has no modalias). Without it the unit exits 127,
 # kata-agent never starts, and every GPU pod hangs in ContainerCreating.
-KATA_EXTRA_PKGS="libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-sys1t64 libtss2-tctildr0t64 ca-certificates kmod"
-# --- Step 1b/5: stage the CoCo guest-components ------------------------
+KATA_EXTRA_PKGS="libtss2-esys-3.0.2-0t64 libtss2-mu-4.0.1-0t64 libtss2-sys1t64 libtss2-tctildr0t64 ca-certificates kmod cryptsetup-bin"
+# --- Step 1b/5: stage the confidential guest-components ------------------------
 # confidential-data-hub (CDH), attestation-agent (AA), api-server-rest. The
 # kata-agent SPAWNS these at boot (its guest_components_procs default is
 # ApiServerRest, which implies CDH + AA) and performs in-guest image guest-pull
@@ -345,8 +378,8 @@ need_gc=0
 for gc in "${GUEST_COMPONENTS[@]}"; do [[ -x "${GC_BIN_DIR}/${gc}" ]] || need_gc=1; done
 if [[ "${need_gc}" == "1" ]]; then
     KATA_CONFIDENTIAL_IMG="${KATA_CONFIDENTIAL_IMG:-/opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image}"
-    [[ -f "${KATA_CONFIDENTIAL_IMG}" ]] || die "CoCo guest-components missing from ${GC_BIN_DIR} and KATA_CONFIDENTIAL_IMG=${KATA_CONFIDENTIAL_IMG} not found. Stage confidential-data-hub/attestation-agent/api-server-rest there, or point KATA_CONFIDENTIAL_IMG at a kata confidential rootfs image, or set COCO_GUEST_COMPONENTS_TARBALL."
-    log "Step 1b/5: staging CoCo guest-components from ${KATA_CONFIDENTIAL_IMG}"
+    [[ -f "${KATA_CONFIDENTIAL_IMG}" ]] || die "confidential guest-components missing from ${GC_BIN_DIR} and KATA_CONFIDENTIAL_IMG=${KATA_CONFIDENTIAL_IMG} not found. Stage confidential-data-hub/attestation-agent/api-server-rest there, or point KATA_CONFIDENTIAL_IMG at a kata confidential rootfs image, or set COCO_GUEST_COMPONENTS_TARBALL."
+    log "Step 1b/5: staging confidential guest-components from ${KATA_CONFIDENTIAL_IMG}"
     gc_loop="$(sudo losetup -fP --show "${KATA_CONFIDENTIAL_IMG}")"
     gc_mnt="$(mktemp -d)"
     sudo mount -o ro "${gc_loop}p1" "${gc_mnt}"
@@ -356,7 +389,7 @@ if [[ "${need_gc}" == "1" ]]; then
     done
     sudo umount "${gc_mnt}"; sudo losetup -d "${gc_loop}"; rmdir "${gc_mnt}"
 else
-    log "Step 1b/5: CoCo guest-components already staged in ${GC_BIN_DIR}"
+    log "Step 1b/5: confidential guest-components already staged in ${GC_BIN_DIR}"
 fi
 for gc in "${GUEST_COMPONENTS[@]}"; do log "  guest-component: ${gc} ($(stat -c%s "${GC_BIN_DIR}/${gc}") bytes)"; done
 
@@ -392,6 +425,7 @@ else
         AGENT_POLICY=yes \
         USE_DOCKER=1 \
         EXTRA_PKGS="${KATA_EXTRA_PKGS}" \
+        REPO_URL_X86_64="${UBUNTU_REPO_URL}" \
         ROOTFS_BUILD_DEST="${ROOTFS_BUILD_DEST}" \
         rootfs
     [[ -d "${TARGET_ROOTFS}" ]] || die "osbuilder did not produce a rootfs at ${TARGET_ROOTFS}"
@@ -419,6 +453,8 @@ C8S_UNITS=(
     attestation-service.service
     ratls-mesh.service
     policy-monitor.service
+    rtmr3-measurer.service
+    scratch-setup.service
     c8s-cloudinit-env.service
 )
 # kata boots the guest with `systemd.unit=kata-containers.target` on the kernel
@@ -454,8 +490,27 @@ rm -rf "${WORK_DIR}/pause-oci" "${WORK_DIR}/pause_bundle"
 skopeo copy "${PAUSE_REPO}:${PAUSE_VER}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
 umoci unpack --rootless --image "${WORK_DIR}/pause-oci:${PAUSE_VER}" "${WORK_DIR}/pause_bundle"
 [[ -f "${WORK_DIR}/pause_bundle/config.json" ]] || die "umoci did not produce pause_bundle/config.json"
+# Reproducibility: umoci emits the OCI runtime config.json with mount `options`
+# arrays in Go-map (non-deterministic) order — the only field that varies
+# build-to-build. Canonicalise by sorting each options array (order is
+# semantically irrelevant for mount flags).
+jq '(.mounts // []) |= map(if has("options") then .options |= sort else . end)' \
+    "${WORK_DIR}/pause_bundle/config.json" > "${WORK_DIR}/pause_bundle/config.json.tmp"
+mv "${WORK_DIR}/pause_bundle/config.json.tmp" "${WORK_DIR}/pause_bundle/config.json"
 sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
 sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
+
+# --- Reproducibility normalisation (must be the LAST rootfs mutation) ------
+# 1. umoci writes a *.mtree metadata manifest into the pause bundle whose bytes
+#    embed timestamps — the ONLY file that differs between two builds. It is
+#    unused at runtime (kata reads config.json + rootfs/), so drop it.
+# 2. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
+#    timestamps are deterministic (image_builder's `cp -a` preserves them).
+# Together with SOURCE_DATE_EPOCH-driven mke2fs (deterministic UUID/hash-seed/
+# created-time) and the fixed VERITY_SALT in seal_and_assemble, this makes the
+# dm-verity root_hash bit-for-bit reproducible.
+sudo find "${TARGET_ROOTFS}/pause_bundle" -name '*.mtree' -delete
+sudo find "${TARGET_ROOTFS}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
 
 # --- Steps 4-5: seal each variant into a verity image ------------------
 # seal_and_assemble <variant> <outdir>: seals the CURRENT state of
@@ -475,7 +530,7 @@ sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 seal_and_assemble() {
     local variant="$1" outdir="$2"
     # Third arg: kernel to ship with (and hash into) this artifact. Defaults
-    # to the steep kernel; the NVIDIA variants pass kata's GPU kernel, which
+    # to the confos kernel; the NVIDIA variants pass kata's GPU kernel, which
     # the grafted driver modules were built for.
     local kernel="${3:-${VMLINUZ_OUT}}"
     local img="${IMAGES_BUILD_DEST}/kata-rootfs-${variant}.img"
@@ -483,6 +538,7 @@ seal_and_assemble() {
         MEASURED_ROOTFS=yes \
         BUILD_VARIANT="${variant}" \
         AGENT_INIT=no \
+        SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
         "${OSBUILDER}/image-builder/image_builder.sh" \
         -o "${img}" \
         -f "${FS_TYPE}" \
@@ -493,6 +549,38 @@ seal_and_assemble() {
     local hash_file
     hash_file="$(dirname "${img}")/root_hash_${variant}.txt"
     [[ -f "${hash_file}" ]] || die "verity params file ${hash_file} not produced — was MEASURED_ROOTFS honoured?"
+
+    # Deterministic re-lay: repopulate p1 offline with `mkfs.ext4 -d` (pinned
+    # UUID/hash-seed, restamped mtimes, image_builder's block geometry) and
+    # verity-seal with the fixed salt, replacing image_builder's
+    # non-deterministic mount + `cp -a` layout and random salt. Rationale:
+    # docs/kata-guest-base.md "Reproducible root_hash".
+    local db dbs hbs loopdev newroot mnt tree
+    db="$(grep -oE 'data_blocks=[0-9]+' "${hash_file}" | cut -d= -f2)"
+    dbs="$(grep -oE 'data_block_size=[0-9]+' "${hash_file}" | cut -d= -f2)"
+    hbs="$(grep -oE 'hash_block_size=[0-9]+' "${hash_file}" | cut -d= -f2)"
+    loopdev="$(sudo losetup -fP --show "${img}")"
+    mnt="$(mktemp -d)"; tree="$(mktemp -d)"
+    sudo mount -o ro "${loopdev}p1" "${mnt}"
+    sudo cp -a "${mnt}/." "${tree}/"
+    sudo umount "${mnt}"; rmdir "${mnt}"
+    sudo find "${tree}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
+    # `sudo env SOURCE_DATE_EPOCH=...`: sudo's env_reset strips the exported
+    # value, and without it mke2fs stamps the superblock + every inode
+    # (crtime/ctime) with the build clock — the residual metadata difference.
+    sudo env SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" mkfs.ext4 -q -F -b "${dbs}" -m 0 \
+        -U "${FIXED_FS_UUID}" \
+        -E "hash_seed=${FIXED_HASH_SEED},lazy_itable_init=0,lazy_journal_init=0" \
+        -d "${tree}" "${loopdev}p1"
+    sudo rm -rf "${tree}"
+    newroot="$(sudo veritysetup format --no-superblock --hash=sha256 --salt="${VERITY_SALT}" \
+        --data-block-size="${dbs}" --hash-block-size="${hbs}" --data-blocks="${db}" \
+        "${loopdev}p1" "${loopdev}p2" 2>&1 | grep -i 'Root hash:' | awk '{print $NF}')"
+    sudo losetup -d "${loopdev}"
+    [[ -n "${newroot}" ]] || die "deterministic re-seal produced no root hash for ${variant}"
+    printf 'root_hash=%s,salt=%s,data_blocks=%s,data_block_size=%s,hash_block_size=%s' \
+        "${newroot}" "${VERITY_SALT}" "${db}" "${dbs}" "${hbs}" | sudo tee "${hash_file}" >/dev/null
+
     local kvp
     kvp="$(tr -d '\n' < "${hash_file}")"
     [[ "${kvp}" == root_hash=* ]] || die "unexpected verity params: ${kvp}"
@@ -524,6 +612,8 @@ seal_and_assemble() {
         --arg vmlinuz_sha "${vmlinuz_sha}" \
         --arg image_sha "${image_sha}" \
         --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg e2fsprogs_ver "${MKE2FS_VERSION}" \
+        --arg cryptsetup_ver "${VERITYSETUP_VERSION}" \
         '{
            version: ($version|tonumber),
            boot_model: "kata-direct-kernel",
@@ -532,6 +622,7 @@ seal_and_assemble() {
            rootfs_type: $fs_type,
            build_variant: $build_variant,
            kernel_verity_params: $kvp,
+           relay_toolchain: { e2fsprogs: $e2fsprogs_ver, cryptsetup: $cryptsetup_ver },
            outputs: {
              kernel:        { path: "vmlinuz",         sha256: $vmlinuz_sha },
              rootfs_image:  { path: "kata-rootfs.img", sha256: $image_sha }
@@ -607,7 +698,7 @@ seal_and_assemble "${BUILD_VARIANT}-debug" "${DEBUG_OUTPUT_DIR}"
 # bring-up is re-expressed as three units in extra-nvidia/ (driver+nodes ->
 # persistenced -> CDI/CC-ready/lockdown), with kata-agent Requires= the last.
 #
-# The variant boots kata's GPU kernel (modules must match it), not the steep
+# The variant boots kata's GPU kernel (modules must match it), not the confos
 # kernel — the one hardening delta vs the non-GPU guest, recorded in
 # docs/kata-gpu.md. Measured boot is identical: verity-sealed rootfs, root
 # hash on the cmdline, kernel-hashes launch measurement, manifest published.

@@ -92,7 +92,8 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   `cds.image.digest` are required; the CLI passes its build version when
   running `c8s install`. Unstamped local builds report version `dev`, and the
   install CLI maps that to the `main` branch tag because CI does not publish
-  `dev` (and `cds` publishes only `main`, not `latest`).
+  `dev` (CI publishes `main` and `latest` for every image on the default
+  branch).
 
 This means a default platform install creates the operator, CRDs, RBAC,
 webhook, attestation-api, and CDS. It does not mutate
@@ -171,10 +172,10 @@ caveat, and the SEV-SNP-host / GPU constraints.
 
 `c8s uninstall` reverses `c8s install`. It runs `helm uninstall` to remove the
 release (operator, CDS, attestation-api, ratls-mesh, tls-lb, the
-webhook configuration, RuntimeClasses, and the enforcement policy). The chart's
-`pre-delete` hook deletes the `MutatingWebhookConfiguration` by name first, so a
-`failurePolicy: Fail` webhook can never outlive the operator Service and block
-pod creation cluster-wide.
+webhook configuration, RuntimeClasses, and the enforcement policy). The
+`MutatingWebhookConfiguration` is release-tracked, so it is deleted with the
+release — a `failurePolicy: Fail` webhook cannot outlive the operator Service
+and block pod creation cluster-wide.
 
 For a `--kata` install it then **sweeps the host-side kata artifacts** that the
 `kata-deploy` preStop cleanup cannot guarantee: a short-lived privileged
@@ -201,8 +202,8 @@ Guardrails:
 
 Requires the `helm` and `kubectl` CLIs on `PATH`. See
 [`docs/install-flows.md`](install-flows.md#uninstall-flow) for the uninstall
-sequence (and the `webhook-cleanup` hook) and
-[`docs/kata.md`](kata.md#uninstalling) for the host sweep in full.
+sequence and [`docs/kata.md`](kata.md#uninstalling) for the host sweep in
+full.
 
 ## Chart-managed CDS
 
@@ -293,6 +294,20 @@ without crashing the binary; the handoff handler stays unregistered and the
 restart-fragility window above applies until the operator fixes the
 underlying issue.
 
+### Operator-added allowlist entries need persistence to survive a restart
+
+The same restart that re-bootstraps the mesh CA also resets the **served
+allowlist**. CDS seeds its store from the install seed at startup, then serves
+whatever an operator adds with `c8s allowlist add`. With
+`cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
+restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
+the install seed — workloads pulling those images are denied roughly one worker
+poll interval (~30s) later. CDS logs a warning at startup when persistence is
+off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
+(an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
+Component/floor digests are unaffected — they are re-seeded and, unlike dynamic
+entries, are also enforced from the baked floor.
+
 ## Verifying attestation after install
 
 `c8s verify` (and `c8s cds verify`, shorthand for `c8s verify --kind cds`) fetches
@@ -309,21 +324,20 @@ HTTPS to AMD KDS (`kdsintf.amd.com`), which it uses to fetch the VCEK for a bare
 report; no container runtime is needed.
 
 ```bash
-# CDS's RA-TLS endpoint is reachable by unattested clients, but it runs as a
-# locked kata guest: `kubectl port-forward` / `exec` are denied by the guest
-# policy (only the --debug guest image enables them), so localhost forwarding
-# won't work. Dial the pod IP directly from somewhere with cluster-network reach
-# (a node, or over a VPN). c8s-cds is a headless Service, so read its endpoint:
-CDS_IP=$(kubectl get endpoints c8s-cds -n c8s-system -o jsonpath='{.subsets[0].addresses[0].ip}')
+# CDS's RA-TLS endpoint answers unattested clients. Under kata the baked guest
+# env exempts the front-door port from the in-guest mesh redirect
+# (C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 — see docs/kata.md), so a plain
+# port-forward reaches it:
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
 
-c8s cds verify "https://$CDS_IP:8443" --measurements <sha384-launch-digest>
+c8s cds verify https://localhost:8443 --measurements <sha384-launch-digest>
 
 # JSON + exit codes for CI:
-c8s cds verify "https://$CDS_IP:8443" --measurements-file digests.txt -o json
+c8s cds verify https://localhost:8443 --measurements-file digests.txt -o json
 ```
 
-PKI/SAN mismatch when dialing the IP is fine — `verify` trusts the attestation
-embedded in the serving cert, not the certificate chain.
+PKI/SAN mismatch when dialing localhost or a pod IP is fine — `verify` trusts
+the attestation embedded in the serving cert, not the certificate chain.
 
 The launch digest(s) to pin are the same values discussed under measurement
 pinning (kata guest digest via `sev-snp-measure`, or the node CVM digest). They
@@ -331,8 +345,9 @@ are enforced client-side against the report's launch measurement; with no
 `--measurements` the command still runs but prints an UNSAFE warning — any
 genuine TEE is accepted.
 
-Exit codes are a CI contract: `0` verified, `2` verification/policy failed
-(e.g. wrong measurement), `3` evidence unavailable (unreachable/unparseable).
+Exit codes are a CI contract: `0` verified, `1` usage error, `2`
+verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
+(unreachable/unparseable).
 
 Caveats the output surfaces:
 
@@ -349,12 +364,10 @@ Caveats the output surfaces:
 ## Injection contract
 
 The webhook only reads pod metadata. A `ConfidentialWorkload` CR is not
-required for injection. For tls-lb pods in the c8s release namespace, the
-chart uses a dedicated webhook entry selected by the chart's existing
-`app.kubernetes.io/name=tls-lb` and release instance labels. That avoids
-sending every platform pod to the webhook during bootstrap while still ensuring
-tls-lb cannot silently start if its c8s annotation set is partially rendered or
-invalid.
+required for injection. The single webhook entry (`pods.c8s.confidential.ai`)
+excludes the release namespace via its namespaceSelector, so the chart's own
+pods never hit the webhook during bootstrap; tls-lb's get-cert containers are
+rendered directly into its pod template by the chart instead of injected.
 
 Opt a pod template in with:
 
@@ -383,6 +396,8 @@ For opted-in pods, the webhook:
   `restartPolicy: Always`) that fetches the first cert before application
   containers start and then renews `tls.crt` every
   `webhook.getCert.renewInterval`;
+- prepends a `c8s-cert-wait` run-once init container after it that gates the
+  application containers on the initial cert (see below);
 - stamps `confidential.ai/c8s-injected=true` to make reinvocation a no-op.
 
 The sidecar runs:
@@ -402,10 +417,16 @@ get-cert \
 
 `--key-out` is idempotent: on a kubelet restart of the sidecar it reuses the
 key that's already on disk, so the previously-issued cert chain stays valid.
-A `startupProbe` (`/c8s probe-file /etc/c8s/certs/tls.crt`) gates the
-application containers on the initial cert being written. Renewals rewrite
-the file on disk; application-level TLS reload remains the workload's
-responsibility unless the pod opts into one of the c8s reload annotations.
+The `c8s-cert-wait` init container (`/c8s probe-file --wait /etc/c8s/certs/tls.crt`)
+gates the application containers on the initial cert being written: it blocks
+until the cert exists, then exits, and normal init-completion ordering holds the
+workload until then — fail-closed. It is a plain init container rather than a
+`startupProbe` on the sidecar because the locked `kata-qemu-snp` guest denies
+`ExecProcessRequest` by design, so an exec probe could never pass there and the
+workload would hang in `Init`; a container blocking on its own is a
+`CreateContainerRequest` the guest allows. Renewals rewrite the file on disk;
+application-level TLS reload remains the workload's responsibility unless the
+pod opts into one of the c8s reload annotations.
 
 The sidecar is long-lived rather than a run-once init container because under
 kata it doubles as the pidns anchor for `shareProcessNamespace` — see
@@ -413,9 +434,9 @@ kata it doubles as the pidns anchor for `shareProcessNamespace` — see
 
 Platform-owned workloads can specialize the same webhook behavior with typed
 c8s annotations for the cert volume, cert/key filenames, renewal interval,
-nginx reload, Secret watch paths, discovery output, and get-cert UID/GID. The
-tls-lb chart uses those annotations to keep its PKI volumes and nginx config in
-the chart while dogfooding the webhook-injected get-cert containers. The
+nginx reload, Secret watch paths, discovery output, and get-cert UID/GID.
+(tls-lb, living in the webhook-excluded release namespace, renders equivalent
+get-cert containers directly from the chart's templates instead.) The
 webhook rejects incomplete reload-watch or discovery annotation sets during pod
 admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.

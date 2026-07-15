@@ -30,8 +30,8 @@ const (
 	exitNoEvidence = 3 // could not obtain evidence (connect/parse/file)
 )
 
-// connectError marks a failure to obtain evidence (vs. a verification verdict),
-// so the orchestration can map it to exit code 3.
+// connectError marks a failure to obtain evidence or verification collateral
+// (vs. a verification verdict), so the orchestration can map it to exit code 3.
 type connectError struct{ err error }
 
 func (e *connectError) Error() string { return e.err.Error() }
@@ -121,8 +121,8 @@ Verification runs in-process using attestation-go — the Go port of the
 attestation-rs engine the cluster runs. It auto-detects the platform and AMD
 product — including Zen4c (Siena/Bergamo), which stock go-sev-guest cannot — so
 the product line never has to be supplied by hand, and it fetches the VCEK for a
-bare report from AMD KDS, so the machine running it needs outbound HTTPS to
-kdsintf.amd.com (no container runtime required).
+bare report from AMD KDS (bounded by --timeout), so the machine running it needs
+outbound HTTPS to kdsintf.amd.com (no container runtime required).
 
 Evidence sources:
   https://host:port      GET the discovery endpoint (/v1/discovery — cert +
@@ -155,7 +155,7 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.mode, "mode", orDefault(d.Mode, "auto"), "evidence mode: auto, ratls-cert, discovery, or attestation-endpoint")
 	f.StringVar(&cfg.discoveryPath, "discovery-path", defaultDiscoveryPath, "path of the LB discovery document (discovery mode)")
 	f.StringVar(&cfg.server, "server-name", "", "TLS SNI server name (for port-forward / routed domains)")
-	f.DurationVar(&cfg.timeout, "timeout", 15*time.Second, "per-attempt timeout")
+	f.DurationVar(&cfg.timeout, "timeout", 15*time.Second, "per-attempt timeout (evidence fetch and AMD KDS collateral fetch)")
 	f.StringVar(&cfg.fromFile, "from-file", "", "verify evidence from a saved PEM certificate or attestation-response JSON instead of dialing")
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE)")
@@ -165,7 +165,7 @@ unavailable (unreachable / unparseable).`,
 	f.UintVar(&cfg.minTCBTEE, "min-tcb-tee", 0, "minimum TEE TCB component")
 	f.UintVar(&cfg.minTCBSNP, "min-tcb-snp", 0, "minimum SNP firmware TCB component")
 	f.UintVar(&cfg.minTCBMicrocode, "min-tcb-microcode", 0, "minimum microcode TCB component")
-	f.StringVar(&cfg.expectedRDHex, "expected-report-data", "", "hex REPORTDATA override for bare evidence files (up to 64 bytes, zero-padded)")
+	f.StringVar(&cfg.expectedRDHex, "expected-report-data", "", "hex REPORTDATA / TPM-nonce anchor override for bare evidence files (1–64 bytes, exactly as bound by the producer)")
 
 	f.StringVarP(&cfg.output, "output", "o", "text", "output format: text or json")
 	f.BoolVar(&cfg.showEvidence, "show-evidence", false, "print the raw report fields")
@@ -198,7 +198,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	// cluster runs. It auto-detects the platform and AMD product (incl. Siena)
 	// and fetches the VCEK from AMD KDS itself, so a bare RA-TLS report, a
 	// discovery doc, and an endpoint response all verify through one path.
-	var overrideERD *[64]byte
+	var overrideERD []byte
 	if cfg.expectedRDHex != "" {
 		erd, perr := parseExpectedReportData(cfg.expectedRDHex)
 		if perr != nil {
@@ -212,7 +212,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out)
+	return verifyEvidence(ctx, cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
 }
 
 // operatorKeysReport is the (informational) pinned-operator-key section of the
@@ -249,9 +249,20 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // in-process with attestation-go (the Go port of the attestation-rs engine the
 // cluster runs), which auto-detects the product and fetches the VCEK from KDS
 // when it is not shipped inline — so a bare RA-TLS report and a discovery doc
-// both work — then renders the verdict.
-func verifyEvidence(cfg config, policy *ratls.VerifyPolicy, ev *evidence, opKeys operatorKeysReport, out io.Writer) int {
-	result, verr := verifyInProcess(ev, policy, minTCBFromCfg(cfg))
+// both work — then renders the verdict. The verification attempt (including the
+// KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
+// exit 3, not a verification verdict.
+func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy, ev *evidence, opKeys operatorKeysReport, out, errOut io.Writer) int {
+	if cfg.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
+		defer cancel()
+	}
+	result, verr := verifyInProcess(ctx, ev, policy, minTCBFromCfg(cfg))
+	if isConnectError(verr) {
+		fmt.Fprintf(errOut, "error: could not fetch verification collateral: %v\n", verr)
+		return exitNoEvidence
+	}
 	oc := newOutcome(cfg, ev, result, verr, policy)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
@@ -299,7 +310,7 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 	}, nil
 }
 
-func gatherEvidence(ctx context.Context, cfg config, overrideERD *[64]byte) (*evidence, error) {
+func gatherEvidence(ctx context.Context, cfg config, overrideERD []byte) (*evidence, error) {
 	if cfg.fromFile != "" {
 		data, err := os.ReadFile(cfg.fromFile)
 		if err != nil {

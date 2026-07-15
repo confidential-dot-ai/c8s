@@ -1,9 +1,12 @@
 package verify
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/go-sev-guest/verify/trust"
 
@@ -14,21 +17,37 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
+// KDS getter bounds: the retry backoff is capped so several attempts fit inside
+// the default 15s --timeout (upstream's 30s cap assumes a 2min budget), and the
+// getter's own timeout backstops the fetch when the context carries no deadline
+// (--timeout 0).
+const (
+	kdsMaxRetryDelay = 8 * time.Second
+	kdsMaxFetchTime  = 2 * time.Minute
+)
+
 // verifyInProcess verifies already-gathered evidence with attestation-go — the
 // Go port of the attestation-rs engine the cluster runs (same self-describing
 // envelope, same VerifyParams/VerificationResult/Claims). It auto-detects the
 // platform (SEV-SNP incl. Zen4c Siena/Bergamo, TDX, az-snp, az-tdx) from the
 // envelope tag, so no product line is supplied by hand and no container is
-// launched.
-func verifyInProcess(ev *evidence, policy *ratls.VerifyPolicy, minTCB *teetypes.SnpTcb) (*teetypes.VerificationResult, error) {
+// launched. ctx bounds any AMD KDS collateral fetch (see docs/pitfalls.md —
+// Zen4c KDS product line).
+func verifyInProcess(ctx context.Context, ev *evidence, policy *ratls.VerifyPolicy, minTCB *teetypes.SnpTcb) (*teetypes.VerificationResult, error) {
 	params := teetypes.VerifyParams{
-		ExpectedReportData: ev.erd[:],
+		ExpectedReportData: ev.erd,
 		AllowDebug:         policy.AllowDebug,
 		MinTCB:             minTCB,
 	}
 
-	res, err := runAttestationGo(ev, params)
+	res, err := runAttestationGo(ctx, ev, params)
 	if err != nil {
+		// A failed KDS collateral fetch (unreachable, --timeout hit) means no
+		// verdict was reached: exit 3, like any other unobtainable evidence.
+		var re *trust.AttestationRecreationErr
+		if errors.Is(err, snp.ErrCollateralUnavailable) || errors.As(err, &re) {
+			return nil, &connectError{err: err}
+		}
 		// attestation-go returns an error (not a false verdict) on a bad
 		// signature, chain, policy, or REPORTDATA mismatch — all of which are a
 		// reachable-but-rejected outcome, i.e. a security verdict (exit 2).
@@ -50,9 +69,10 @@ func verifyInProcess(ev *evidence, policy *ratls.VerifyPolicy, minTCB *teetypes.
 // inline (a discovery doc or endpoint response). A bare RA-TLS serving cert
 // carries the SNP report but no VCEK, and the envelope path requires it inline
 // (attestation-go does no KDS fetch there); for that case we drop to
-// snp.VerifyReport with a KDS Getter — it resolves the product from the report
-// (Zen4c/Siena-aware) and fetches the VCEK from AMD KDS itself.
-func runAttestationGo(ev *evidence, params teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
+// snp.VerifyReportContext with a KDS Getter — it resolves the product from the
+// report (Zen4c/Siena-aware) and fetches the VCEK from AMD KDS itself, bounded
+// by ctx.
+func runAttestationGo(ctx context.Context, ev *evidence, params teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
 	if mayMissVCEK(ev.platform) {
 		var se snp.SnpEvidence
 		if err := json.Unmarshal(ev.rawEvidence, &se); err != nil {
@@ -63,11 +83,17 @@ func runAttestationGo(ev *evidence, params teetypes.VerifyParams) (*teetypes.Ver
 			if err != nil {
 				return nil, fmt.Errorf("decode attestation_report: %w", err)
 			}
-			// nil VCEK + a Getter ⇒ go-sev-guest fetches the VCEK from AMD KDS,
-			// using the product attestation-go resolves from the report.
-			return snp.VerifyReport(report, nil, params,
+			// nil VCEK + a Getter ⇒ attestation-go fetches the VCEK from AMD KDS,
+			// retrying until the --timeout ctx (verifyEvidence) or the backstop
+			// expires, whichever is sooner.
+			getter := &trust.RetryHTTPSGetter{
+				Timeout:       kdsMaxFetchTime,
+				MaxRetryDelay: kdsMaxRetryDelay,
+				Getter:        &trust.SimpleHTTPSGetter{},
+			}
+			return snp.VerifyReportContext(ctx, report, nil, params,
 				teetypes.PlatformType(ev.platform), snp.MinReportVersion,
-				snp.Options{Getter: trust.DefaultHTTPSGetter()})
+				snp.Options{Getter: getter})
 		}
 	}
 

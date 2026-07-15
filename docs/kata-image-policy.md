@@ -11,7 +11,7 @@ the gaps it does not.
 > "part of the launch measurement", that means it sits on the dm-verity
 > root: its bytes are covered by the SNP launch digest and cannot change
 > without changing the digest. The measurement mechanics (osbuilder
-> dm-verity erofs, `kernel-hashes`, the verity root hash in the kata
+> dm-verity ext4, `kernel-hashes`, the verity root hash in the kata
 > kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
@@ -147,6 +147,17 @@ denied container has no useful capabilities inside it (no network
 configured yet, no `execve` to user code yet). The
 [BPF-LSM upgrade path](#bpf-lsm-upgrade-path) below describes how to
 close the gap by hooking `security_bprm_check_security` in the kernel.
+
+**The bound holds only if the kill actually lands.** Step 2's `cgroup.procs`
+read depends on locating the container's cgroup, and on a systemd-PID-1 guest
+that cgroup is a systemd *scope* — `cri-containerd-<cid>.scope` nested under
+`kubepods*.slice` — not a bare `<cid>` directory. A cgroup matcher that only
+recognizes the bare `<cid>` silently misses the kill on the common (systemd)
+guest: policy-monitor *denies* the container but `findInitPID` returns
+not-found, so the SIGKILL never fires and the denied image runs **unenforced**
+(this was a 2026-07 field bug, fixed). The matcher must handle the
+systemd-scope naming — see `internal/cmds/policymonitor/kill.go`
+(`cgroupDirMatchesCID`).
 
 ## Why the OPA policy is permissive
 
@@ -534,9 +545,13 @@ policy-monitor enforces *after* kata-agent has forked the container
 init, not before — the mechanics and bounds are in
 [Post-start kill window](#post-start-kill-window) above.
 
-**Severity: low.** The TCB protection (SEV-SNP-encrypted memory)
-holds for the duration of the gap; the denied init cannot
-exfiltrate. But the gap is honest and called out for completeness.
+**Severity: low** — *provided the kill lands*. The TCB protection
+(SEV-SNP-encrypted memory) holds for the duration of the gap; the denied
+init cannot exfiltrate. But the gap is honest and called out for
+completeness. Note the bound is only "low severity" once the kill path
+matches the guest's systemd-scope cgroup naming (see the reliability caveat
+in [Post-start kill window](#post-start-kill-window) above); a matcher that
+missed it turned this bounded gap into unbounded non-enforcement.
 
 **Mitigation.** The [BPF-LSM upgrade path](#bpf-lsm-upgrade-path)
 hooks `security_bprm_check_security` to make the decision
@@ -579,9 +594,12 @@ What the host still sees is the *transport*: it brokers the guest's
 outbound network, so for an anonymous pull from a public registry it
 observes which image reference and layers are fetched (a metadata
 leak, not a content-confidentiality break — the bytes are public).
-Registry credentials for private pulls are delivered to the in-guest
-CDH after attestation (KBS) rather than baked, so they are not
-exposed to the host.
+Registry credentials for private pulls are currently baked into the
+dm-verity root (`ghcr-auth.json`, covered by the launch measurement —
+see `kata-guest-base/README.md`), so they are not host-readable at
+runtime but rotate only with an image rebuild. KBS delivery to the
+in-guest CDH after attestation (`kbs://` via
+`kata.guestImage.registryAuth`) is the secret-free alternative.
 
 policy-monitor still enforces on CreateContainer (it reads the
 digest from the bundle's `config.json`). Moving the decision earlier

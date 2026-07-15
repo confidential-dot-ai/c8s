@@ -7,6 +7,7 @@ final security model. Each bullet links to the tracking issue.
 ## Trust model
 
 - Chart-managed CDS runs as a singleton and keeps the active CA key in memory (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
+- CDS allowlist persistence is off by default (`cds.persistence.enabled=false`), so a restart resets the served allowlist to the install seed and operator-added digests (`c8s allowlist add`) are lost — workloads using them are denied ~30s later. CDS warns at startup when persistence is off; enable `cds.persistence.enabled=true` to retain dynamic entries. See `docs/operator.md` "Operator-added allowlist entries need persistence to survive a restart".
 - Active/active CDS replica handoff is opt-in via `cds.handoff.enabled`; it is off by default (tracked at [#18](https://github.com/confidential-dot-ai/c8s/issues/18)).
 - Application-secret release is not implemented (tracked at [#46](https://github.com/confidential-dot-ai/c8s/issues/46)).
 - Per-workload measurement allowlists are not enforced at `/attest` (tracked at [#57](https://github.com/confidential-dot-ai/c8s/issues/57)).
@@ -22,10 +23,12 @@ final security model. Each bullet links to the tracking issue.
   guests. Also note the SNP launch digest covers the VMSA set, so even a correct
   pin is per-VM-shape (vCPU count). Candidate fix is operator-signed allowlist
   entries verified in-guest against a baked operator public key.
-- RA-TLS measurement pinning is SNP-only: the TDX verify path ignores
-  `policy.Measurements` (and `MinTCBVersion`) entirely — see the LIMITATION note
-  on `verifyTDXOnline` (`pkg/ratls/verify.go`). A TDX deployment relying on
-  `cds.measurements` gets signature + report-data + debug checks only.
+- RA-TLS measurement pinning is SNP-only: the TDX verify path drops
+  `policy.Measurements` and `MinTCBVersion` — the attestation-api's TDX
+  verifier surfaces no launch measurement and takes no minimum-TCB parameter,
+  so `verifyTDXEvidence` sends neither (`pkg/attestationclient/verify.go`,
+  `EvidencePolicy`). A TDX deployment relying on `cds.measurements` gets
+  signature + report-data + debug checks only.
 
 ## Mesh and certificates
 
@@ -58,8 +61,8 @@ final security model. Each bullet links to the tracking issue.
   measured, manifest published — parity with the non-GPU guest), but it boots
   **kata's GPU kernel** with the NVIDIA modules/userland grafted from kata's
   digest-pinned GPU rootfs (`kata-guest-base/scripts/build.sh` Step 6): the
-  steep kernel has `CONFIG_MODULES=n` and cannot load the driver. Remaining
-  hardening: a steep GPU kernel flavor (`CONFIG_MODULES=y` +
+  confos kernel has `CONFIG_MODULES=n` and cannot load the driver. Remaining
+  hardening: a confos GPU kernel flavor (`CONFIG_MODULES=y` +
   `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build-time key) compiling and
   signing the NVIDIA open GPU kernel modules, replacing the graft — needs
   GPU hardware in CI to validate. Until then the guest locks module loading
@@ -80,6 +83,40 @@ final security model. Each bullet links to the tracking issue.
   eventual replacement for flag-trusting labels.
 - Node-as-CVM GPU is a separate mechanism (drivers baked into the node guest OS,
   measured into the node launch digest); this puller/runtime is pod-as-CVM only.
+
+## Confidential kata guest (TDX)
+
+- **Scratch-disk integrity.** The encrypted image store
+  (`scratch-setup.service`) is dm-crypt with no integrity layer. Not an
+  app-swap/code-injection vector: the host holds no key so it cannot forge
+  chosen plaintext (AES-XTS), a fresh per-boot key plus reformat kills
+  cross-boot replay, and the image is digest-verified in-guest before unpack
+  (the digest that lands in RTMR[3]). What remains: the host can corrupt
+  scratch blocks (a DoS), and unlike the dm-verity root fs the image store is
+  verified only at unpack, not continuously at execution — attestation covers
+  which image was *deployed*, not that every byte later served off scratch
+  still matches it. Close with dm-integrity (authenticated dm-crypt) before
+  asserting continuous workload integrity in customer-facing claims or a
+  security audit.
+- **qemu scratch wrapper is a shim.** Kata has no per-sandbox scratch-disk
+  knob, so `kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh` wraps the
+  qemu launch to attach the disk (host-config helper, deliberately not wired
+  into the build). Follow-up: a first-class attach (kata runtime or a CDI
+  device) so disk lifecycle and GC are managed, not wrapper-owned.
+- **RTMR[3] workload measurement is write-only today.** The measurer extends
+  the register, but no client-side verifier consumes it yet. The extend
+  convention is pinned by `pkg/rtmr3` (golden vectors in its tests); the
+  eventual verifier MUST build on that package. Multi-image pods extend in
+  first-seen order — see `docs/kata-guest-base.md` "Per-workload RTMR[3]
+  measurement".
+- **Reproducible `root_hash` assumes the host re-lay toolchain.** The
+  versions used are recorded in `manifest.json` (`relay_toolchain`) and can
+  be pinned fatal via `REPRO_E2FSPROGS_VERSION`/`REPRO_CRYPTSETUP_VERSION`,
+  but CI does not pin them yet and the re-lay is not containerized.
+- **Attestation trust-model follow-ups** for the TDX workload path:
+  client-side DCAP verification, RA-TLS binding of the app channel to the
+  attested VM, `/attest` eventlog trim, and the non-public `/verify`
+  endpoint.
 
 ## Operations
 
@@ -144,3 +181,9 @@ could close.
   ticker/select loops, signal handlers, real-listener `run()` entrypoints, and
   `crypto/rand`/marshal failure branches that cannot be triggered deterministically
   without injecting faults into non-test source.
+- Cross-CVM mesh CA handoff cannot be exercised end-to-end on a single-node
+  cluster: a CDS on one CVM handing its CA to a **differently-measured** CDS on a
+  second CVM, and `/handoff` **rejecting** a peer whose launch measurement is not
+  in `cds.measurements`, both need a second, independently-measured confidential
+  VM. The measurement-gating logic is unit-tested with synthetic measurements;
+  the two-CVM path itself needs multi-node confidential infrastructure in CI.

@@ -1,0 +1,17 @@
+[Unit]
+# Backs the guest-pull image store with a dm-crypt scratch disk; no-op
+# without a confai-scratch disk. Must run before kata-agent's first
+# guest-pull. See docs/kata-guest-base.md "Encrypted scratch disk".
+Description=c8s confidential image-store scratch disk (dm-crypt)
+Documentation=https://github.com/confidential-dot-ai/c8s/tree/main/kata-guest-base
+DefaultDependencies=no
+After=local-fs.target
+Before=kata-agent.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/c8s/scratch-setup.sh
+# never wedge kata-agent if something hangs
+TimeoutStartSec=60
+[Install]
+WantedBy=kata-containers.target

@@ -1,0 +1,22 @@
+[Unit]
+# Extends TDX RTMR[3] with each deployed workload's image digest.
+# See docs/kata-guest-base.md "Per-workload RTMR[3] measurement".
+Description=c8s rtmr3-measurer (in-guest per-workload RTMR[3] measurement)
+Documentation=https://github.com/confidential-dot-ai/c8s/tree/main/cmd/rtmr3-measurer
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rtmr3-measurer
+Restart=always
+RestartSec=2s
+# No ProtectKernelTunables=/ProtectSystem=strict — the RTMR[3] extend sysfs
+# must stay writable.
+NoNewPrivileges=yes
+ProtectHome=yes
+
+[Install]
+# multi-user for normal/debug boots; build.sh also links it into
+# kata-containers.target.wants (the target kata boots) — see C8S_UNITS.
+WantedBy=multi-user.target

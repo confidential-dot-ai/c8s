@@ -455,8 +455,8 @@ func TestUnmarshalExtensionReportSize(t *testing.T) {
 
 	t.Run("TDX raw bytes are rejected", func(t *testing.T) {
 		// TDX extensions carry the full attestation-api evidence
-		// envelope (JSON), not raw quote bytes — verifyTDXOnline reads
-		// the envelope back and forwards it to attestation-api. Refuse
+		// envelope (JSON), not raw quote bytes — verifyEnvelopeOnline
+		// reads the envelope back and forwards it to attestation-api. Refuse
 		// raw bytes at parse time so a wire-format regression fails
 		// loudly instead of silently taking the "empty embedded" path.
 		att := &attestationASN1{

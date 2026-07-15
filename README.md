@@ -308,7 +308,9 @@ attestation and reports the operator keys it pins.
 
 ```text
 api/               CRD types
-cmd/               Binaries: cds, c8s, get-cert, ratls-mesh, nri-image-policy
+cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy,
+                   policy-monitor, rtmr3-measurer (cmd/cds is only the
+                   Dockerfile for the `c8s cds` subcommand, internal/cmds/cds)
 internal/          Operator, webhook, attestation, mesh CA, embedded Helm chart
 pkg/               Public Go libraries (see Libraries above)
 kata-guest-base/   Confidential guest image recipe for pod-as-CVM
@@ -518,4 +520,4 @@ Contributions are accepted under the terms in
 
 - [`confidential-dot-ai/c8s-verify-js`](https://github.com/confidential-dot-ai/c8s-verify-js) - browser-side cluster verification library (npm: `c8s-verify`)
 - [`confidential-dot-ai/attestation-rs`](https://github.com/confidential-dot-ai/attestation-rs) - TEE attestation evidence verification service (publishes the `attestation-api` image)
-- [`confidential-dot-ai/deployment-scripts`](https://github.com/confidential-dot-ai/deployment-scripts) - Ansible roles for deploying these components
+- [`confidential-dot-ai/attestation-go`](https://github.com/confidential-dot-ai/attestation-go) - TEE attestation evidence verification library for go

@@ -2,6 +2,68 @@
 
 Gotchas for humans and agents working on c8s. Each cites the relevant code.
 
+## Attestation freshness anchor: pass it unpadded, never as the 64-byte field
+
+`internal/cmds/verify/evidence.go` (`evidence.erd`), `pkg/attestationclient/verify.go` (`verifySNPEvidence`)
+
+The expected REPORTDATA exists in two shapes that are not interchangeable:
+producers bind the **unpadded** anchor (48-byte SHA-384;
+`attestclient.MakeSNPRATLSAttestFunc` truncates to 48 before asking the
+attestation-api), while the SNP/TDX hardware `report_data` field is that anchor
+zero-padded to 64. The hardware-report verifiers zero-pad the expected value to
+the field size, but the Azure vTPM verifiers (az-snp, az-tdx) compare it **raw**
+against the quote's extraData — a pre-padded 64-byte value fails with
+`TPM nonce length mismatch: quote has 48 bytes, expected 64`. This broke
+`c8s verify` / `c8s cds verify` against every az-snp target while
+cluster-internal pinning (which shapes per platform in
+`attestationclient.verifySNPEvidence`) kept working. Carry the anchor unpadded
+and let each platform verifier do its own shaping; `c8s-verify-js/PROTOCOL.md`
+("az-snp") is the contract.
+
+## The bare-report KDS fetch is attestation-go's job; c8s only bounds and classifies it
+
+`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/cmds/verify/localverify.go` (`verifyInProcess`, `runAttestationGo`)
+
+`c8s verify` of a bare RA-TLS cert (SNP report, no inline VCEK) once hung for
+minutes on Zen4c (Siena/Bergamo) hosts, ignoring `--timeout`: verification ran
+with no context, and go-sev-guest's own KDS fetcher retried an unclassifiable
+`Unknown`-product URL. The VCEK fetch — including the Zen4c→Genoa product-line
+mapping — now lives in attestation-go (`snp.VerifyReportContext`; background in
+its README, "AMD KDS collateral for bare SNP reports"). What c8s must uphold:
+the verification context carries the `--timeout` deadline (`verifyEvidence`),
+and a failed fetch (`snp.ErrCollateralUnavailable`) maps to exit 3 (collateral
+unavailable), never a verification verdict (exit 2).
+
+## get-cert injection integrity is name-based — reserve the name, don't trust it
+
+`internal/webhook/pod_mutator.go`, `internal/helmchart/c8s/templates/cw-label-integrity-policy.yaml`
+
+The injected mesh-cert sidecar is named `c8s-cert`, and the webhook stamps the
+`confidential.ai/cw` label (workload Service membership) only when it injects.
+So the identity and the sidecar are meant to be inseparable — but the name and
+the `confidential.ai/c8s-injected` marker are just pod fields an author can
+also set. The original idempotency check skipped injection when a container of
+that name already existed and gated injection on the marker, so a pod could
+pre-declare its own `c8s-cert` (or preset the marker) to keep the cw identity
+while shedding the real, attestation-bound sidecar — no VAP checked sidecar
+presence, only `label == annotation`.
+
+Injection is now idempotent **by reconstruction**, not by trust:
+`injectInitContainers` drops any pre-existing `c8s-cert` / `c8s-cert-wait` init
+container and prepends the operator-built `c8s-cert` sidecar and `c8s-cert-wait`
+gate (so a decoy is overwritten, and a reinvocation converges),
+`rejectReservedCertContainer` denies either reserved name in the
+regular/ephemeral lists (which the init-slot rebuild cannot reach), and the
+marker no longer gates injection. The `cw-label-integrity` VAP backstops it in
+the API server: a pod carrying the `confidential.ai/cw` label must declare a
+`c8s-cert` init container with `restartPolicy: Always`, so the label cannot
+exist without the sidecar even on paths the CREATE-only webhook misses. The VAP
+check is structural (name + native-sidecar restartPolicy), matching
+kata-enforcement's "pin the contract, not the digest"; the webhook owns the
+exact image/args. The reinject sweep (`internal/controller/reinject_sweep.go`)
+still keys on the marker, but it keys on the cw *annotation*, not the label, so
+a spoofed marker there yields no Service membership.
+
 ## Allowlist operator token: the body-binding must hash the exact bytes sent
 
 `pkg/operatorauth/operatorauth.go`, `pkg/allowlistclient/client.go`
@@ -120,18 +182,18 @@ script exits non-zero (pod stays NotReady) when the env var is empty or 0. If
 you ever see a GPU pod schedule and run but the workload reports no CUDA
 device, check this key first — a hand-patched config can still regress it.
 
-## The `<tag>-nvidia` guest boots kata's GPU kernel, not the steep one
+## The `<tag>-nvidia` guest boots kata's GPU kernel, not the confos one
 
 `kata-guest-base/scripts/build.sh` (Step 6), `docs/kata-gpu.md`
 
 The GPU guest image IS the c8s guest (in-guest attestation-service /
 ratls-mesh / policy-monitor, locked policy, measured, c8s-published reference
 manifest) — but it boots kata's GPU kernel with the NVIDIA modules grafted
-from kata's own GPU rootfs, because the steep kernel has `CONFIG_MODULES=n`
+from kata's own GPU rootfs, because the confos kernel has `CONFIG_MODULES=n`
 and cannot load the driver. Module loading is locked down after driver
 bring-up (`kernel.modules_disabled=1`), and everything grafted sits inside
 the measured verity root — but the kernel/driver provenance is the kata
-release, not the c8s build. Compiling signed modules against a steep GPU
+release, not the c8s build. Compiling signed modules against a confos GPU
 kernel flavor closes this — see `docs/GAPS.md`. Also remember GPU SPDM
 attestation is not wired yet (`docs/kata-gpu.md` "Threat-model gaps").
 
@@ -359,7 +421,7 @@ real credentials, keep in mind:
 
 ## Bump `KATA_SRC_COMMIT` in lockstep with `KATA_VERSION`
 
-`kata-guest-base/scripts/build.sh:79`
+`kata-guest-base/scripts/build.sh` (`KATA_SRC_COMMIT`)
 
 The kata source (osbuilder) is fetched by **immutable commit** (`KATA_SRC_COMMIT`),
 not by the `KATA_VERSION` git tag — a git tag is mutable, and a re-pointed
@@ -407,6 +469,27 @@ failed inode identity check re-establishes the watch and re-runs the seed
 scan). Any future in-guest component that watches a path kata-agent owns must
 handle the same replacement — watch liveness, not just watch existence, and
 rescan after re-watching.
+
+## policy-monitor's cgroup lookup must match the systemd-scope name, or the SIGKILL silently misses
+
+`internal/cmds/policymonitor/kill.go` (`findCgroupDir` / `cgroupDirMatchesCID`)
+
+policy-monitor denies a non-allowlisted container correctly, then locates its
+init PID by walking `/sys/fs/cgroup` for the container's cgroup and reading
+`cgroup.procs`. The lookup used to match a directory whose basename equals
+`<cid>` **exactly**. But a systemd-PID-1 kata guest (our case) uses the systemd
+cgroup driver, so the container's cgroup is a **scope**:
+`cri-containerd-<cid>.scope` (containerd) or `crio-<cid>.scope`, nested under
+`kubepods.slice/.../kubepods-*-pod<uid>.slice/`. The exact-basename match never
+found it, `findInitPID` returned not-found, and the kill was a **silent no-op**
+— the denied image ran fully unenforced (worse than the bounded post-start
+window: unbounded). Same failure family as the inotify-watch death above:
+policy-monitor *decides* correctly but the *enforcement action* silently
+misses, with no error surfaced. `cgroupDirMatchesCID` now matches `<cid>`,
+`<cid>.scope`, and `<prefix>-<cid>.scope`. Any change to the kill path must be
+validated against a real systemd-PID-1 guest's cgroup layout (verify with
+`find /sys/fs/cgroup -name '*<cid>*'` in a guest debug console), not just the
+fs-driver `<cid>` shape the unit tests fabricate.
 
 ## kata guests: inbound TCP port 8443 bypasses the mesh (baked passthrough)
 
@@ -516,6 +599,34 @@ c8s GPU guest boots to agent in <1 min so the default rarely bites now, but any
 slow path (cold registry, huge image, big-memory guest) hits the 2 m wall
 first. RKE2: `kubelet-arg: runtime-request-timeout=20m` in
 `/etc/rancher/rke2/config.yaml` (matches the fleet ansible default).
+
+## Injected/chart probes on kata-guest containers must not use `exec`
+
+`internal/webhook/pod_mutator.go` (`certContainer` / `certWaitContainer`),
+`internal/helmchart/c8s/templates/_helpers.tpl` (`c8s.getCertContainers`)
+
+The locked `kata-qemu-snp` guest denies `ExecProcessRequest`
+(`kata-guest-base/extra/etc/kata-opa/default-policy.rego`, intentional — it is
+what blocks `kubectl exec` into a confidential pod). kubelet cannot distinguish
+an exec **probe** from a host exec, so **any `exec` probe on a container that
+runs inside a locked guest never passes**, and the pod hangs in `Init`
+(`Startup probe errored … ExecProcessRequest is blocked by policy`). This bit
+the get-cert readiness gate: a `startupProbe: exec [/c8s probe-file tls.crt]`
+on the `c8s-cert` native sidecar meant **every confidential workload pod was
+stuck in Init on the locked guest** — masked for a while because the published
+`kata-guest-base:main` was briefly a `c8s-debug` build (exec allowed), so it
+only surfaced on the real locked guest.
+
+Fix pattern: gate the workload with a plain **run-once init container**
+(`c8s-cert-wait`, running `c8s probe-file --wait`) that blocks on the cert file
+and exits 0 — running a container is `CreateContainerRequest`, which the guest
+allows, and normal init-completion ordering fails closed. The `c8s-cert`
+sidecar stays the long-lived first init container (it anchors
+`shareProcessNamespace` under kata), just without a probe. Any future readiness
+signal for a kata-guest container must be non-exec: a run-once gate container,
+or `httpGet`/`tcpSocket`/`grpc` (CDS's own probes are `tcpSocket`/`httpGet` for
+this reason). Never add an `exec` probe to CDS, tls-lb, or an injected
+workload container.
 
 ## `kubectl logs` on locked-guest pods is empty by design
 

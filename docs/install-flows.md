@@ -1,7 +1,7 @@
 # c8s install flows and features (non-kata vs kata)
 
 How `c8s install` assembles the platform, and how the runtime behaviour
-differs across the three install modes. This is the overview that ties the
+differs across the two install modes. This is the overview that ties the
 deeper docs together:
 
 - [`kata.md`](kata.md) — the kata runtime install + enforcement, in depth.
@@ -73,8 +73,7 @@ not a cluster resource.
 | Component | base | `--kata` | Runs on |
 |---|:--:|:--:|---|
 | c8s operator (webhook + controllers) | ✓ | ✓ | host (runc; always webhook-exempt) |
-| MWC `pod-injector` | ✓ | ✓ | cluster (pre-install hook) |
-| webhook-cleanup Job | ✓ | ✓ | host (runc; runs on uninstall) |
+| MWC `pod-injector` | ✓ | ✓ | cluster (release-tracked resource) |
 | **CDS** (Certificate Distribution Service: verify + EAR + mesh-CA + leaf signing) | ✓ host | ✓ **CVM** | runc in base, `kata-qemu-snp` under kata |
 | attestation-service | ✓ host | ✗ (in-VM) | host DaemonSet in base; baked into the guest image under kata |
 | ratls-mesh | ✓ host | ✗ (in-VM) | host DaemonSet in base; in-VM routing under kata |
@@ -137,7 +136,7 @@ measurement), not provided by the host.
 ```
 
 The host-side pods that remain under kata — operator, kata-deploy,
-kata-image-puller, webhook-cleanup — are **infrastructure that cannot itself
+kata-image-puller — are **infrastructure that cannot itself
 run inside a CVM** (they install/serve the very thing CVMs depend on). They are
 explicitly outside the trust boundary and are exempt from kata injection (see
 [Admission flow](#admission-flow)).
@@ -146,10 +145,11 @@ explicitly outside the trust boundary and are exempt from kata injection (see
 
 ## Install flow (ordering)
 
-The ordering is load-bearing: the admission webhook must exist and be trusted
-*before* the pods it mutates are created, or those pods get admitted unmutated
-(as runc). Helm's kind-order installs `MutatingWebhookConfiguration` *after*
-Deployments, so the chart makes the MWC a **`pre-install` hook** to lead.
+The MWC `pod-injector` is an **ordinary release-tracked resource**: Helm's
+kind-order applies it *after* the Deployments, with an empty `caBundle` and
+`failurePolicy: Fail`. The chart's own pods never depend on it — the MWC's
+namespaceSelector excludes the release namespace — and workload pods are
+annotated only after `helm --wait` reports the release ready.
 
 ```mermaid
 sequenceDiagram
@@ -157,36 +157,43 @@ sequenceDiagram
     participant K as kube-apiserver
     participant Helm as helm
     participant Op as operator pod
-    participant Pods as CDS / workloads
+    participant Pods as workloads
 
     CLI->>K: kubectl apply Namespace (privileged label if --kata)
     CLI->>Helm: helm upgrade --install --wait
-    Note over Helm: pre-install hook
-    Helm->>K: create MWC pod-injector (failurePolicy=Fail, empty caBundle)
     Note over Helm: normal resources (kind-order)
     Helm->>K: create operator Deployment, kata-deploy, CDS, ...
-    Op->>Op: bootstrapWebhookPKI: mint CA + serving cert
-    Op->>K: patch MWC caBundle (once, at startup)
-    Note over Pods,K: pods created before caBundle is patched →<br/>webhook call fails → Fail rejects → ReplicaSet retries
+    Helm->>K: create MWC pod-injector (failurePolicy=Fail, empty caBundle)
+    Op->>Op: bootstrapWebhookPKI: mint ephemeral CA + serving cert
+    Op->>K: patch MWC caBundle (every operator start)
+    Op->>K: reinject sweep: delete controller-owned cw pods admitted uninjected
+    Note over Pods,K: in-scope pod created before the caBundle patch →<br/>webhook call fails → Fail rejects → ReplicaSet retries
     Pods->>K: (retry) admitted + mutated correctly
     Helm-->>CLI: --wait: all Ready
 ```
 
 Key properties (see `templates/webhook.yaml`, `controller/runner.go`):
 
-- **`failurePolicy: Fail`** means the window before the operator patches the
-  caBundle *fails closed* — pod creation is rejected and retried, never
-  admitted as an unmutated runc pod.
-- The **operator is exempt** from the webhook (`objectSelector
-  component=operator`), so it can always boot to patch the caBundle — no
-  deadlock.
-- The MWC is **`pre-install` only**, not `pre-upgrade`: the operator patches
-  the caBundle once at startup, so recreating an empty MWC on every `helm
-  upgrade` would wedge the cluster. Cost: MWC spec changes require a clean
-  reinstall. (Detailed rationale in the `webhook.yaml` header comment.)
-- CDS is an **ordinary resource** (not a hook), so it comes up
-  during the main install — bootstrap services must not be gated behind the
-  workloads that depend on them.
+- **`failurePolicy: Fail`** means the window where the MWC exists but the
+  operator hasn't patched the caBundle yet *fails closed* — pod creation is
+  rejected and retried, never admitted as an unmutated runc pod.
+- The **chart's own components are exempt** via the MWC's namespaceSelector,
+  which excludes the release namespace (plus `kube-system`, `kube-public`,
+  `kube-node-lease`, and `webhook.extraExcluded`), so the operator can always
+  boot to patch the caBundle — no deadlock.
+- The webhook CA is **ephemeral**: `bootstrapWebhookPKI` re-mints it and
+  re-patches the caBundle on every operator start. The chart renders the
+  `caBundle` field only when `webhook.caBundle` is set, so a `helm upgrade`
+  leaves the operator-patched bundle in place and MWC spec changes roll out
+  like any other resource.
+- A `cw` pod admitted while the webhook was unavailable (e.g. before the MWC
+  existed on first install) cannot self-heal — admission fires only on CREATE
+  — so the operator runs a **one-shot reinject sweep** at startup that deletes
+  controller-owned `cw` pods missing injection; their controllers recreate
+  them through the webhook.
+- CDS comes up during the main install and, living in the excluded release
+  namespace, is never gated on the webhook — bootstrap services must not be
+  gated behind the workloads that depend on them.
 
 ---
 
@@ -197,8 +204,8 @@ operator's handler (`internal/webhook/pod_mutator.go`) decides:
 
 ```mermaid
 flowchart TD
-    P["Pod CREATE"] --> EX{"component in<br/>operator / webhook-cleanup /<br/>kata-image-puller?"}
-    EX -->|yes| PASS["pass through (runc)<br/>— host infrastructure"]
+    P["Pod CREATE"] --> EX{"namespace excluded?<br/>(release ns, kube-system, ...)"}
+    EX -->|yes| PASS["webhook not called (runc)<br/>— host infrastructure"]
     EX -->|no| CW{"has confidential.ai/cw?"}
     CW -->|yes| GC["inject get-cert<br/>(c8s-cert sidecar)"]
     CW -->|no| RC
@@ -214,20 +221,25 @@ flowchart TD
 Two independent injections, both keyed off the pod (not a CR):
 
 1. **get-cert** — driven by the `confidential.ai/cw=<id>` annotation, in
-   **any** mode. Injects a single `c8s-cert` native sidecar that fetches the
-   leaf cert from CDS on startup and renews it on a ticker; downstream
-   containers wait for its startupProbe before launching.
+   **any** mode. Injects a `c8s-cert` native sidecar that fetches the
+   leaf cert from CDS on startup and renews it on a ticker, plus a
+   `c8s-cert-wait` run-once init container (`/c8s probe-file --wait`) that
+   blocks until the initial cert is written so downstream containers wait for
+   it before launching. (An exec startupProbe cannot gate here: the locked
+   kata guest denies `ExecProcessRequest`.)
 2. **runtimeClass** — only under `--kata` (which is enforcing).
    `kata-qemu-snp` for `cw`-annotated pods (confidential), `kata-qemu`
    otherwise.
 
-**Exemptions** (must stay in sync across `webhook.yaml` objectSelector and the
-`kata-enforcement.yaml` VAP binding):
+**Exemptions** (the `webhook.yaml` MWC and the `kata-enforcement.yaml` VAP
+binding render the same namespaceSelector exclusion list and must stay in
+sync):
 
-- `operator` — serves the webhook.
-- `webhook-cleanup` — the pre-delete MWC remover.
-- `kata-image-puller` — host-infra that stages the guest image; it cannot run
-  as a kata VM (its `/host` bind-mount would map into the guest, not the host).
+- **excluded namespaces** — the release namespace (operator, CDS,
+  kata-image-puller: host infrastructure that installs/serves what CVMs
+  depend on — the puller cannot run as a kata VM, its `/host` bind-mount
+  would map into the guest) plus `kube-system`, `kube-public`,
+  `kube-node-lease`, and `webhook.extraExcluded`.
 - **host-namespace pods** (`hostNetwork`/`hostPID`/`hostIPC`) — a VM cannot
   share the host's namespaces. This is how `kata-deploy` (which sets
   `hostPID`+`hostNetwork`) is left as runc.
@@ -287,28 +299,25 @@ of the guest image whose SNP digest a client verifies — see
 
 ## Uninstall flow
 
-`helm uninstall` removes normal resources, but the `pre-install`-hooked MWC is
-**not** release-tracked. A leaked `failurePolicy: Fail` MWC pointing at a
-deleted operator Service would reject *every* in-scope pod creation
-cluster-wide. The chart prevents this with a **`pre-delete` hook** Job
-(`templates/webhook-cleanup.yaml`) that deletes the MWC by name before helm
-removes the operator.
+The MWC is release-tracked, so `helm uninstall` deletes it along with every
+other release resource — a `failurePolicy: Fail` webhook pointing at a deleted
+operator Service cannot leak and block pod creation cluster-wide. The only
+`pre-delete` hook in the chart is the nri-image-policy uninstall DaemonSet
+(`templates/nri-image-policy-uninstall-hook.yaml`, base mode only), which
+unwinds the host-side NRI plugin install before the release goes.
 
 ```mermaid
 sequenceDiagram
     participant Helm as helm uninstall
-    participant Job as webhook-cleanup Job
+    participant DS as nri uninstall DaemonSet
     participant K as kube-apiserver
-    Helm->>Job: run pre-delete hook (operator still alive)
-    Job->>K: kubectl delete mutatingwebhookconfiguration <release>-pod-injector
-    Helm->>K: delete release resources (operator, CDS, VAP, ...)
-    Note over K: no orphaned Fail webhook → cluster stays unblocked
+    Helm->>DS: pre-delete hook (base mode: unwind the host NRI plugin)
+    Helm->>K: delete release resources (operator, MWC pod-injector, CDS, VAP, ...)
+    Note over K: MWC removed with the release → no orphaned Fail webhook
 ```
 
-The cleanup Job is labelled `component=webhook-cleanup` (on the exemption list,
-and distinct from the operator's Service selector) and tolerates all taints so
-a single kata-tainted node cannot strand it. kata-deploy separately runs
-`kata-deploy cleanup` on `preStop` to unwind the host runtime install.
+kata-deploy separately runs `kata-deploy cleanup` on `preStop` to unwind the
+host runtime install.
 
 **`c8s uninstall`** wraps the helm step and adds the kata host sweep the
 preStop hook cannot guarantee: after the release is gone, a short-lived

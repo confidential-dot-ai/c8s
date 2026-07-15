@@ -31,8 +31,8 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		CertDir:           "/etc/c8s/certs",
 	})
 
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
+	if len(pod.Spec.InitContainers) != 2 {
+		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
 	}
 	if len(pod.Spec.Containers) != 1 {
 		t.Fatalf("containers = %d, want app container only", len(pod.Spec.Containers))
@@ -65,11 +65,23 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 	if cert.RestartPolicy == nil || *cert.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("c8s-cert restartPolicy = %#v, want Always (native sidecar so the pidns anchor stays alive under kata)", cert.RestartPolicy)
 	}
-	if cert.StartupProbe == nil || cert.StartupProbe.Exec == nil {
-		t.Fatalf("c8s-cert must expose a startupProbe so the workload waits for the initial cert; got %#v", cert.StartupProbe)
+	// The workload is gated by the c8s-cert-wait init container, not an exec
+	// startupProbe on the sidecar — the locked kata guest denies exec, so a
+	// probe could never pass there. The sidecar must carry no startupProbe.
+	if cert.StartupProbe != nil {
+		t.Fatalf("c8s-cert must NOT carry a startupProbe (exec is denied on locked kata guests); got %#v", cert.StartupProbe)
 	}
-	if got := cert.StartupProbe.Exec.Command; len(got) != 3 || got[0] != "/c8s" || got[1] != "probe-file" || got[2] != "/etc/c8s/certs/tls.crt" {
-		t.Fatalf("c8s-cert startupProbe command = %v, want [/c8s probe-file /etc/c8s/certs/tls.crt]", got)
+	wait := pod.Spec.InitContainers[1]
+	if wait.Name != reservedCertWaitContainerName {
+		t.Fatalf("init container[1] name = %q, want %s (the exec-free cert gate)", wait.Name, reservedCertWaitContainerName)
+	}
+	if wait.RestartPolicy != nil {
+		t.Fatalf("c8s-cert-wait must be a run-once init container (nil restartPolicy), got %#v", wait.RestartPolicy)
+	}
+	for _, want := range []string{"/c8s", "probe-file", "--wait", "/etc/c8s/certs/tls.crt"} {
+		if !hasArg(wait.Command, want) {
+			t.Fatalf("c8s-cert-wait command %v missing %s", wait.Command, want)
+		}
 	}
 	if cert.SecurityContext == nil {
 		t.Fatalf("missing c8s-cert security context")
@@ -145,8 +157,8 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 	if got := *pod.Spec.SecurityContext.FSGroup; got != 4242 {
 		t.Fatalf("fsGroup = %d, want 4242", got)
 	}
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
+	if len(pod.Spec.InitContainers) != 2 {
+		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
 	}
 	cert := pod.Spec.InitContainers[0]
 	if !hasArg(cert.Args, "--key-mode=0440") {
@@ -220,8 +232,8 @@ func TestMutatePodSupportsTLSLBProfile(t *testing.T) {
 	if len(pod.Spec.Volumes) != 3 {
 		t.Fatalf("volumes = %#v, want existing tls-lb volumes only", pod.Spec.Volumes)
 	}
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("init containers = %d, want a single c8s-cert sidecar", len(pod.Spec.InitContainers))
+	if len(pod.Spec.InitContainers) != 2 {
+		t.Fatalf("init containers = %d, want c8s-cert sidecar + c8s-cert-wait gate", len(pod.Spec.InitContainers))
 	}
 	cert := pod.Spec.InitContainers[0]
 	for _, want := range []string{
@@ -662,8 +674,8 @@ func TestHandleDerivesServiceSAN(t *testing.T) {
 	}
 
 	initContainers := initContainersPatch(t, resp)
-	if len(initContainers) != 1 {
-		t.Fatalf("initContainers patch = %d containers, want a single c8s-cert sidecar", len(initContainers))
+	if len(initContainers) != 2 {
+		t.Fatalf("initContainers patch = %d containers, want c8s-cert sidecar + c8s-cert-wait gate", len(initContainers))
 	}
 	if !hasArg(initContainers[0].Args, "--san=c8s-api.default.svc") {
 		t.Fatalf("%s args %v missing --san=c8s-api.default.svc", initContainers[0].Name, initContainers[0].Args)
@@ -803,10 +815,181 @@ func TestHandleSANOverrideWinsOverDerivation(t *testing.T) {
 		t.Fatalf("Handle denied: %v", resp.Result)
 	}
 	initContainers := initContainersPatch(t, resp)
-	if len(initContainers) != 1 {
-		t.Fatalf("initContainers patch = %d containers, want a single c8s-cert sidecar", len(initContainers))
+	if len(initContainers) != 2 {
+		t.Fatalf("initContainers patch = %d containers, want c8s-cert sidecar + c8s-cert-wait gate", len(initContainers))
 	}
 	if !hasArg(initContainers[0].Args, "--san=api.default.svc") {
 		t.Fatalf("%s args %v missing --san=api.default.svc", initContainers[0].Name, initContainers[0].Args)
+	}
+}
+
+// TestMutatePodReplacesPreexistingCertContainer proves injection is by
+// reconstruction: a pod that pre-declares its own c8s-cert init container to
+// shed the real one does not win — the operator-built sidecar replaces the
+// decoy rather than being skipped.
+func TestMutatePodReplacesPreexistingCertContainer(t *testing.T) {
+	decoy := int64(0)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{
+				Name:            "c8s-cert",
+				Image:           "attacker/pause:latest",
+				Command:         []string{"sleep", "infinity"},
+				SecurityContext: &corev1.SecurityContext{RunAsUser: &decoy},
+			}},
+			Containers: []corev1.Container{{Name: "app"}},
+		},
+	}
+
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage:      "ghcr.io/confidential-dot-ai/c8s-operator:test",
+		CDSURL:            "http://cds.c8s-system.svc:8443",
+		AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
+		CertDir:           "/etc/c8s/certs",
+	})
+
+	certs := 0
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == "c8s-cert" {
+			certs++
+		}
+	}
+	if certs != 1 {
+		t.Fatalf("c8s-cert init containers = %d, want exactly 1 (real sidecar replaces the decoy)", certs)
+	}
+	got := pod.Spec.InitContainers[0]
+	if got.Name != "c8s-cert" {
+		t.Fatalf("init[0] = %q, want c8s-cert leading the list", got.Name)
+	}
+	if got.Image != "ghcr.io/confidential-dot-ai/c8s-operator:test" {
+		t.Fatalf("c8s-cert image = %q, want the operator get-cert image (decoy survived)", got.Image)
+	}
+	if !hasArg(got.Args, "--cds-url=http://cds.c8s-system.svc:8443") {
+		t.Fatalf("c8s-cert args %v are not operator-built (decoy survived)", got.Args)
+	}
+	if got.RestartPolicy == nil || *got.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("c8s-cert restartPolicy = %#v, want Always", got.RestartPolicy)
+	}
+}
+
+// TestMutatePodInjectionIsIdempotent proves a reinvocation (mutatePod applied
+// twice, as reinvocationPolicy: IfNeeded can trigger) converges: one sidecar,
+// one cert volume, one mount per container.
+func TestMutatePodInjectionIsIdempotent(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	cfg := Config{
+		GetCertImage:      "img",
+		CDSURL:            "http://cds",
+		AttestationApiURL: "http://attestation-api",
+		CertDir:           "/etc/c8s/certs",
+	}
+	mutatePod(pod, &injection{WorkloadID: "api"}, cfg)
+	mutatePod(pod, &injection{WorkloadID: "api"}, cfg)
+
+	if got := len(pod.Spec.InitContainers); got != 2 {
+		t.Fatalf("init containers = %d after two injections, want 2 (c8s-cert + c8s-cert-wait, deduped)", got)
+	}
+	volumes := 0
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "c8s-certs" {
+			volumes++
+		}
+	}
+	if volumes != 1 {
+		t.Fatalf("c8s-certs volumes = %d after two injections, want 1", volumes)
+	}
+	for _, c := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		mounts := 0
+		for _, mnt := range c.VolumeMounts {
+			if mnt.Name == "c8s-certs" {
+				mounts++
+			}
+		}
+		if mounts != 1 {
+			t.Fatalf("container %s c8s-certs mounts = %d, want 1", c.Name, mounts)
+		}
+	}
+}
+
+// TestHandleRejectsReservedCertContainerName proves an opted-in pod cannot park
+// its own container under the reserved c8s-cert name (in the regular list) to
+// shadow the injected sidecar — the collision is rejected at admission.
+func TestHandleRejectsReservedCertContainerName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{
+		decoder: admission.NewDecoder(scheme),
+		cfg: Config{
+			GetCertImage: "ghcr.io/confidential-dot-ai/c8s-operator:test",
+			CDSURL:       "http://cds.c8s-system.svc:8443",
+			CertDir:      "/etc/c8s/certs",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "app"},
+			{Name: "c8s-cert", Image: "attacker/pause"},
+		}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if resp.Allowed {
+		t.Fatal("Handle admitted a cw pod with a reserved c8s-cert container; want denial")
+	}
+	if resp.Result == nil || !strings.Contains(resp.Result.Message, "reserved") {
+		t.Fatalf("denial message = %+v, want it to mention the reserved name", resp.Result)
+	}
+}
+
+// TestHandleInjectsDespitePresetInjectedMarker proves the
+// confidential.ai/c8s-injected marker no longer suppresses injection: a pod
+// that presets it (with no real sidecar) is still given the c8s-cert sidecar,
+// so the marker cannot be used to skip attestation-bound injection.
+func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{
+		decoder: admission.NewDecoder(scheme),
+		cfg: Config{
+			GetCertImage:      "ghcr.io/confidential-dot-ai/c8s-operator:test",
+			CDSURL:            "http://cds.c8s-system.svc:8443",
+			AttestationApiURL: "http://attestation-api.c8s-system.svc:8400",
+			CertDir:           "/etc/c8s/certs",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			AnnotationWorkload: "api",
+			AnnotationInjected: "true",
+		}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if !resp.Allowed {
+		t.Fatalf("Handle denied: %v", resp.Result)
+	}
+	inits := initContainersPatch(t, resp)
+	if len(inits) != 2 || inits[0].Name != "c8s-cert" || inits[1].Name != "c8s-cert-wait" {
+		t.Fatalf("initContainers patch = %+v, want injected c8s-cert + c8s-cert-wait despite the preset marker", inits)
 	}
 }

@@ -176,7 +176,7 @@ func newMetrics() *metrics {
 	})
 	m.certPipelineHealthy = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_cert_pipeline_healthy",
-		Help: "1 when CDS /ready is reachable (0=unreachable). Stays at -1 when CDS probing is not configured.",
+		Help: "1 when CDS /readyz is reachable (0=unreachable). Stays at -1 when CDS probing is not configured.",
 	})
 	m.certPipelineHealthy.Set(-1)
 	m.certExpiry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
