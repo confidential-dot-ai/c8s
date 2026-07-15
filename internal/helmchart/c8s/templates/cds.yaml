@@ -14,8 +14,11 @@
   {{- end -}}
 {{- end -}}
 {{- if .Values.cds.handoff.peerUrl -}}
-  {{- if not .Values.cds.measurements -}}
-    {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_measurements: cds.handoff.peerUrl requires cds.measurements to pin the peer. See docs/operator.md." -}}
+  {{- /* Without enabled no pod serves /handoff (--handoff-measurements renders
+         only under it), so the surge pod has nothing to adopt from and its own
+         config validation rejects peer-url-without-measurements: wedged roll. */ -}}
+  {{- if not .Values.cds.handoff.enabled -}}
+    {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_requires_enabled: cds.handoff.peerUrl requires cds.handoff.enabled=true so the serving pod offers /handoff for the next roll to adopt from. See docs/operator.md." -}}
   {{- end -}}
   {{- /* Check the resolved URL ("self" -> the CDS Service URL, else verbatim). */ -}}
   {{- if not (hasPrefix "https://" (include "c8s.cdsHandoffPeerURL" .)) -}}
@@ -26,10 +29,6 @@
   {{- if .Values.cds.persistence.enabled -}}
     {{- fail "VALIDATION_ERROR kind=cds_handoff_peer_persistence: cds.handoff.peerUrl (adoption) cannot be combined with cds.persistence.enabled (the surge pod cannot share the RWO data PVC). The allowlist is rebuilt from the seed. See docs/operator.md." -}}
   {{- end -}}
-{{- end -}}
-{{- /* Extra replicas are safe only when they adopt (peerUrl). */ -}}
-{{- if and (gt (int .Values.cds.replicas) 1) (not .Values.cds.handoff.peerUrl) -}}
-  {{- fail "VALIDATION_ERROR kind=cds_replicas_without_peer: cds.replicas>1 requires cds.handoff.peerUrl so extra pods adopt the CA instead of minting divergent trust roots. See docs/operator.md." -}}
 {{- end -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -103,9 +102,10 @@ metadata:
   annotations:
     confidential.ai/trust-root-mode: "inMemory"
 spec:
-  {{/* Extra pods are safe only when they adopt (peerUrl); the top-of-file
-       guard rejects replicas>1 without one. */}}
-  replicas: {{ .Values.cds.replicas }}
+  {{/* Fixed at 1: EAR signing keys are per pod, so a second Ready endpoint
+       breaks EAR verification even though adoption shares the CA (see
+       docs/decisions/2026-07-14-cds-active-active-ear-jwks.md). */}}
+  replicas: 1
   {{- if .Values.cds.handoff.peerUrl }}
   # Surge the new pod so it adopts the CA from the still-serving old pod before
   # that pod is retired; maxUnavailable:0 keeps exactly one Service endpoint, so
@@ -236,6 +236,16 @@ spec:
           ports:
             - name: https
               containerPort: {{ .Values.cds.port }}
+          {{- if .Values.cds.handoff.peerUrl }}
+          # Adoption blocks startup (no listener yet) up to --handoff-peer-timeout
+          # (2m default); hold liveness off until the port opens or it gets
+          # killed mid-pull. 30x10s covers the deadline with slack.
+          startupProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 10
+            failureThreshold: 30
+          {{- end }}
           {{- if .Values.kata.enabled }}
           # In-guest cds serves mutual RA-TLS: the kubelet prober presents no
           # attested client cert, so an httpGet handshake is rejected. The port

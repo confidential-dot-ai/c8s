@@ -1,6 +1,6 @@
 {{- if .Values.cds.podDisruptionBudget.enabled }}
 {{/*
-CDS holds the mesh CA and EAR signing key in process memory, so an involuntary
+CDS holds the mesh CA and EAR signing key in process memory, so a voluntary
 eviction (node drain, autoscaler) of the serving pod loses the trust root.
 maxUnavailable: 0 blocks voluntary disruptions; the operator must delete the
 pod deliberately. This bounds evictions only — it does not throttle a
