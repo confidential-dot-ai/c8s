@@ -257,12 +257,27 @@ jobs:
               print(line)
           ' "https://$IP:6443" > "$CVMKC"
           chmod 600 "$CVMKC"
-          echo "waiting for the in-CVM node Ready..."
+          # connectivity probe: can the runner reach the in-CVM kube-apiserver?
+          echo "probing runner -> CVM https://$IP:6443/healthz ..."
+          curl -sk -m5 "https://$IP:6443/healthz" -w ' <- HTTP %{http_code}\n' || echo "(curl to :6443 failed — egress/routing)"
+          echo "waiting for the in-CVM node Ready (server $IP:6443)..."
+          ready=
           for i in $(seq 1 40); do
-            kubectl --kubeconfig "$CVMKC" get nodes 2>/dev/null | grep -q ' Ready' && break
+            out=$(kubectl --kubeconfig "$CVMKC" get nodes 2>&1)
+            { [ "$i" -le 3 ] || [ $((i % 6)) -eq 0 ]; } && echo "  [$i] $(printf '%s' "$out" | head -1 | cut -c1-140)"
+            printf '%s' "$out" | grep -q ' Ready' && { ready=1; echo "node Ready on poll $i"; break; }
             sleep 10
           done
-          kubectl --kubeconfig "$CVMKC" get nodes -o wide
+          kubectl --kubeconfig "$CVMKC" get nodes -o wide 2>&1 || true
+          if [ -z "$ready" ]; then
+            echo "::error::in-CVM node not Ready / API unreachable from the runner"
+            kubectl --kubeconfig "$CVMKC" describe node 2>&1 | grep -iE 'Ready|NetworkUnavailable|taint|condition|MemoryPressure|message' | head -30 || true
+            send "echo NDIAG; /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o wide 2>&1; /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -A 2>&1 | tail -25; echo NDIAGEND" >/dev/null
+            sleep 8
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/NDIAG/{f=1} f{print} /NDIAGEND/{f=0}' | tail -40
+            exit 1
+          fi
+          echo "in-CVM node is Ready"
 
       - name: build c8s CLI at the pinned commit
         run: |
