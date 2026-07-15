@@ -241,7 +241,10 @@ jobs:
           #!/bin/bash
           set +e
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          K=/var/lib/rancher/rke2/bin/kubectl
+          # timeout-wrap every kubectl: c8s installs a mutating webhook whose backend
+          # (operator) isn't Ready immediately, which can make an un-timed-out API call
+          # block forever and silently stall the driver after HELM_DONE
+          K="timeout 25 /var/lib/rancher/rke2/bin/kubectl"
           say(){ echo "@@\$1@@"; }
           say DRIVE_START
           for i in \$(seq 1 40); do \$K get nodes --no-headers 2>/dev/null | grep -q ' Ready' && break; sleep 6; done
@@ -258,14 +261,15 @@ jobs:
             [ "\$s" = "1" ] && { say HELM_DONE; break; }
             sleep 12
           done
-          for i in \$(seq 1 40); do
+          for i in \$(seq 1 45); do
             \$K -n c8s-system get pods --no-headers 2>&1 | sed 's/^/@@POD /;s/\$/@@/'
             r=\$(\$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)
             echo "@@CDSR \$i ready=\${r:-none}@@"
             echo "\$r" | grep -qw true && { say CDS_READY; break; }
             sleep 12
           done
-          \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -12 | sed 's/^/@@EV /;s/\$/@@/'
+          \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -15 | sed 's/^/@@EV /;s/\$/@@/'
+          \$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Unhealthy|message:' | tail -20 | sed 's/^/@@DESC /;s/\$/@@/'
           say DRIVE_END
           DRIVER
           # deliver the driver into the guest (chunked base64 -> file -> decode)
