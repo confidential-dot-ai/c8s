@@ -11,7 +11,6 @@ import (
 
 const (
 	identityTranscriptDomain = types.ProtocolVersion
-	identityProofDomain      = "c8s-verify/pq-mesh-identity-proof/v1"
 	identityNonceBytes       = 32
 )
 
@@ -54,23 +53,8 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 	return sum[:], nil
 }
 
-// IdentityProofMessage returns the domain-separated message signed by the
-// mesh leaf. The TEE report authenticates transcriptHash; this signature proves
-// possession of the private key for the exact leaf committed by that report.
-func IdentityProofMessage(transcriptHash []byte) ([]byte, error) {
-	if len(transcriptHash) != sha512.Size384 {
-		return nil, fmt.Errorf("overenc: identity transcript hash must be %d bytes, got %d", sha512.Size384, len(transcriptHash))
-	}
-	message := make([]byte, 0, 8+len(identityProofDomain)+len(transcriptHash))
-	message, err := appendLengthPrefixed(message, []byte(identityProofDomain))
-	if err != nil {
-		return nil, err
-	}
-	return appendLengthPrefixed(message, transcriptHash)
-}
-
-// appendLengthPrefixed is the single owner of the LP(field) wire encoding
-// shared by the transcript and the proof message (uint32_be length || field).
+// appendLengthPrefixed is the single owner of the transcript's LP(field) wire
+// encoding (uint32_be length || field).
 func appendLengthPrefixed(dst, field []byte) ([]byte, error) {
 	if uint64(len(field)) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("overenc: identity transcript field is too large")

@@ -105,11 +105,8 @@ func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types
 	if err != nil {
 		return nil, nil, err
 	}
-	message, err := overenc.IdentityProofMessage(transcriptHash)
-	if err != nil {
-		return nil, nil, err
-	}
-	digest := sha512.Sum384(message)
+	// The transcript's leading version tag domain-separates this signature.
+	digest := sha512.Sum384(transcriptHash)
 	signature, err := ecdsa.SignASN1(rand.Reader, m.private, digest[:])
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign mesh identity proof: %w", err)

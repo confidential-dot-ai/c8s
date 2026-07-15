@@ -76,17 +76,3 @@ func TestIdentityTranscriptHashValidatesShape(t *testing.T) {
 		})
 	}
 }
-
-func TestIdentityProofMessageIsDomainSeparated(t *testing.T) {
-	h := bytes.Repeat([]byte{0x77}, sha512.Size384)
-	message, err := IdentityProofMessage(h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(message, []byte(identityProofDomain)) || !bytes.Contains(message, h) {
-		t.Fatalf("proof message does not contain its domain and transcript hash: %x", message)
-	}
-	if _, err := IdentityProofMessage(h[:len(h)-1]); err == nil {
-		t.Fatal("short transcript hash accepted")
-	}
-}

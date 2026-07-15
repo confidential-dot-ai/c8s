@@ -168,11 +168,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := overenc.IdentityProofMessage(wantReportData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha512.Sum384(message)
+	digest := sha512.Sum384(wantReportData)
 	if !ecdsa.VerifyASN1(&identity.key.PublicKey, digest[:], signature) {
 		t.Fatal("mesh identity proof signature did not verify")
 	}
