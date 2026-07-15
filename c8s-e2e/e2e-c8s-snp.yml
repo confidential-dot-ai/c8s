@@ -261,7 +261,9 @@ jobs:
             [ "\$s" = "1" ] && { say HELM_DONE; break; }
             sleep 12
           done
+          say AFTERHELMLOOP
           for i in \$(seq 1 45); do
+            say "CDSITER \$i"
             \$K -n c8s-system get pods --no-headers 2>&1 | sed 's/^/@@POD /;s/\$/@@/'
             r=\$(\$K -n c8s-system get pods -l app.kubernetes.io/name=cds -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)
             echo "@@CDSR \$i ready=\${r:-none}@@"
@@ -285,7 +287,7 @@ jobs:
           # launch the driver DETACHED with its stdout on the console. NOT nohup:
           # nohup redirects stdout to nohup.out when stdout is a terminal, which
           # swallowed all driver output. A subshell-background keeps it on ttyS0.
-          bash /tmp/gsend.sh "(setsid bash /tmp/drive.sh >/dev/ttyS0 2>&1 </dev/null &) ; echo @@LAUNCHED@@"
+          bash /tmp/gsend.sh "(setsid sh -c 'bash /tmp/drive.sh 2>&1 | tee /tmp/drive.out >/dev/ttyS0' </dev/null &) ; echo @@LAUNCHED@@"
           echo "--- polling guest-console-log for driver progress ---"
           seen=""; ok=""
           for i in $(seq 1 90); do   # ~15 min, fast host-side polls
@@ -302,6 +304,12 @@ jobs:
           if [ -z "$ok" ]; then
             echo "::error::c8s did not converge (no CDS_READY). Full driver console output:"
             kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -50
+            # retrieve the driver's own log file (tee'd) — tells us if the driver DIED
+            # (file also stops at HELM_DONE) vs the console dropped output (file has more)
+            echo "--- /tmp/drive.out (driver's own record) ---"
+            bash /tmp/gsend.sh "echo @@DOUT_START@@; tail -30 /tmp/drive.out 2>&1; echo @@DOUT_END@@"
+            sleep 5
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/DOUT_START/{f=1} f{print} /DOUT_END/{f=0}' | tail -35
             exit 1
           fi
           echo "✅ CDS attested: node is a genuine SEV-SNP TEE booted from the measured rke2 image (launch digest == $GOLDEN); c8s $SHORT installed + converged in-cluster"
