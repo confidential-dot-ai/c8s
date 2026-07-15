@@ -227,7 +227,9 @@ jobs:
                   selector: null
                   tolerations: null
                 ratlsPlatform: sev-snp
-                measurements: []
+                # ENFORCE the golden launch digest: CDS only issues workload certs
+                # to nodes attesting this measurement (doesn't gate CDS's own Ready)
+                measurements: ["$GOLDEN"]
               attestationApi:
                 image:
                   tag: "main"
@@ -245,7 +247,9 @@ jobs:
                   enabled: false
           EOF
           )
-          # build the driver ($-escaped so only SEC_B64/HC_B64 expand here; the rest runs in-guest)
+          # the canonical cw sample at the pinned commit (default ns is PSA-exempt in the rke2 image)
+          CW_B64=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
+          # build the driver ($-escaped so only SEC_B64/HC_B64/CW_B64 expand here; the rest runs in-guest)
           cat > /tmp/drive.sh <<DRIVER
           #!/bin/bash
           set +e
@@ -276,16 +280,34 @@ jobs:
             sleep 12
           done
           say AFTERHELMLOOP
+          CDSOK=0
           for i in \$(seq 1 45); do
             PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
             printf '%s\n' "\$PODS" | sed 's/^/@@POD /;s/\$/@@/'
-            # CDS ready = the c8s-cds-* pod shows N/N Running (label-agnostic; the
+            # CDS ready = the c8s-cds-* pod shows 1/1 Running (label-agnostic; the
             # jsonpath -l selector was wrong). tls-lb crashloop is separate + doesn't gate CDS.
             CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
             echo "@@CDSR \$i: \${CDS:-nopod}@@"
-            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { say CDS_READY; break; }
+            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { CDSOK=1; say CDS_READY; break; }
             sleep 12
           done
+          # consumption proof: a cw-annotated workload must run AND carry the injected
+          # c8s-cert container (cert issued by CDS under the ENFORCED golden measurement)
+          WOK=0; COK=0
+          if [ "\$CDSOK" = "1" ]; then
+            printf %s '$CW_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
+            for i in \$(seq 1 30); do
+              DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
+              echo "@@CWDEP \$i: \$DP@@"
+              printf '%s' "\$DP" | grep -qE ' 1/1 ' && { WOK=1; say WORKLOAD_OK; break; }
+              sleep 10
+            done
+            IC=\$(\$K -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name} | {.items[0].spec.containers[*].name}' 2>/dev/null)
+            echo "@@CWCONTAINERS \${IC:-none}@@"
+            printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
+            [ "\$WOK" = "1" ] && [ "\$COK" = "1" ] && say E2E_OK
+            [ "\$WOK" = "1" ] || \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason|message' | tail -12 | sed 's/^/@@CWDESC /;s/\$/@@/'
+          fi
           \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -15 | sed 's/^/@@EV /;s/\$/@@/'
           \$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Unhealthy|message:' | tail -20 | sed 's/^/@@DESC /;s/\$/@@/'
           say DRIVE_END
@@ -322,29 +344,28 @@ jobs:
           bash /tmp/gsend.sh "(setsid sh -c 'bash /tmp/drive.sh 2>&1 | tee /tmp/drive.out >/dev/ttyS0' </dev/null &) ; echo @@LAUNCHED@@"
           echo "--- polling guest-console-log for driver progress ---"
           seen=""; ok=""
-          for i in $(seq 1 90); do   # ~15 min, fast host-side polls
+          for i in $(seq 1 100); do   # fast host-side polls
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g')
             NEW=$(printf '%s' "$LOG" | grep -oE '@@[^@]{1,140}@@' | sed 's/@@//g')
-            # print only newly-appeared marker lines
             comm -13 <(printf '%s\n' "$seen" | sort -u) <(printf '%s\n' "$NEW" | sort -u) 2>/dev/null | grep -vE '^$' | sed 's/^/  · /'
             seen="$NEW"
-            printf '%s' "$LOG" | grep -q '@@CDS_READY@@' && { ok=1; echo "CDS_READY seen"; break; }
+            # SUCCESS gate = full e2e: CDS attested (golden ENFORCED) + cw workload
+            # Running + CDS-issued cert injected into it
+            printf '%s' "$LOG" | grep -q '@@E2E_OK@@' && { ok=1; echo "E2E_OK seen"; break; }
             printf '%s' "$LOG" | grep -qE '@@FAIL_' && { echo "driver reported a failure marker"; break; }
-            printf '%s' "$LOG" | grep -q '@@DRIVE_END@@' && { echo "driver ended without CDS_READY"; break; }
+            printf '%s' "$LOG" | grep -q '@@DRIVE_END@@' && { echo "driver ended without E2E_OK"; break; }
             sleep 10
           done
           if [ -z "$ok" ]; then
-            echo "::error::c8s did not converge (no CDS_READY). Full driver console output:"
-            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -50
-            # retrieve the driver's own log file (tee'd) — tells us if the driver DIED
-            # (file also stops at HELM_DONE) vs the console dropped output (file has more)
+            echo "::error::e2e did not complete (no E2E_OK). Full driver console output:"
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -60
             echo "--- /tmp/drive.out (driver's own record) ---"
             bash /tmp/gsend.sh "echo @@DOUT_START@@; tail -30 /tmp/drive.out 2>&1; echo @@DOUT_END@@"
             sleep 5
             kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/DOUT_START/{f=1} f{print} /DOUT_END/{f=0}' | tail -35
             exit 1
           fi
-          echo "✅ CDS attested: node is a genuine SEV-SNP TEE booted from the measured rke2 image (launch digest == $GOLDEN); c8s $SHORT installed + converged in-cluster"
+          echo "✅ E2E PASS on $SHORT: CDS attested (node is a genuine SEV-SNP TEE, launch digest == $GOLDEN, ENFORCED); confidential workload Running with a CDS-issued cert injected — c8s installed + exercised in-cluster on the measured RKE2-node-CVM"
 
       - name: diagnostics (on failure)
         if: failure()
