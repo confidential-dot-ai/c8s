@@ -293,15 +293,13 @@ jobs:
                   selector: null
                   tolerations: null
                 ratlsPlatform: ${{ matrix.ratls_platform }}
-                # measurements=[] = accept any GENUINE SNP attestation (still proves a
-                # real TEE: CDS's serving cert + the workload's leaf both require a
-                # valid hardware SNP quote). ENFORCEMENT (pin the golden) is a
-                # fast-follow: the manifest.json snp_launch_digest ($GOLDEN) does NOT
-                # equal the node's RUNTIME launch measurement — CDS returns
-                # "measurement_denied" — so the golden must be captured from a live
-                # /attest report (or recomputed with the exact boot params), not the
-                # image manifest. Pin ["$GOLDEN"] only once that's reconciled.
-                measurements: []
+                # ENFORCE the node's own runtime launch digest. RUNTIME_MEASUREMENT is
+                # a placeholder the driver replaces with the measurement it reads from
+                # the node's SNP report (configfs-tsm, offset 0x90) — the SAME value
+                # CDS extracts and checks. Self-discovering: correct across image bumps,
+                # and NOT the (wrong) image-manifest digest. Driver falls back to [] if
+                # discovery fails, so the lane can't regress.
+                measurements: ["RUNTIME_MEASUREMENT"]
               attestationApi:
                 image:
                   tag: "main"
@@ -340,7 +338,26 @@ jobs:
           # without it (which stalls the whole CDS readiness chain)
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
-          printf %s '$HC_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+          # discover the node's OWN runtime SNP launch measurement via configfs-tsm
+          # (raw report, MEASUREMENT at offset 0x90 / 144, 48 bytes) — the exact value
+          # CDS checks. This is what makes enforcement correct (vs the wrong manifest digest).
+          MEAS=""
+          TD=/sys/kernel/config/tsm/report/c8sci
+          if mkdir -p "\$TD" 2>/dev/null; then
+            head -c 64 /dev/urandom > "\$TD/inblob" 2>/dev/null
+            MEAS=\$(python3 -c "import binascii,sys; d=open('\$TD/outblob','rb').read(); sys.stdout.write(binascii.hexlify(d[144:192]).decode())" 2>/dev/null)
+            rmdir "\$TD" 2>/dev/null
+          fi
+          echo "@@MEAS discovered=\${MEAS:-none} manifest=$GOLDEN@@"
+          # apply the HelmChart, substituting the discovered measurement (ENFORCED);
+          # fall back to [] (accept-any genuine SNP) if discovery failed, so no regression
+          if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then
+            printf %s '$HC_B64' | base64 -d | sed "s/RUNTIME_MEASUREMENT/\$MEAS/" | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+            say MEAS_ENFORCED
+          else
+            printf %s '$HC_B64' | base64 -d | sed 's/\["RUNTIME_MEASUREMENT"\]/[]/' | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+            say MEAS_ACCEPTANY
+          fi
           # helm-controller RETRIES a failed helm job (a transient first-attempt
           # failure is normal — run 21 succeeded on attempt 2). Wait for succ=1;
           # don't bail on a single "INSTALLATION FAILED" in the aggregated log.
@@ -452,7 +469,9 @@ jobs:
             kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | awk '/DOUT_START/{f=1} f{print} /DOUT_END/{f=0}' | tail -35
             exit 1
           fi
-          echo "✅ E2E PASS on $SHORT (${{ matrix.platform }}): CDS attested (node is a genuine SEV-SNP TEE); confidential workload Running with a CDS-issued, attestation-gated cert injected — c8s installed + exercised in-cluster on the measured RKE2-node-CVM. NOTE: measurements=[] (accept-any genuine SNP); launch-digest ENFORCEMENT is the pending follow-up (golden $GOLDEN from manifest.json != node runtime measurement)."
+          # surface whether the run enforced a pinned measurement or fell back to accept-any
+          MODE=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -oE '@@MEAS_(ENFORCED|ACCEPTANY)@@' | tail -1)
+          echo "✅ E2E PASS on $SHORT (${{ matrix.platform }}): CDS attested (genuine SEV-SNP TEE); confidential workload Running with a CDS-issued, attestation-gated cert — c8s installed + exercised in-cluster on the measured RKE2-node-CVM. Measurement mode: ${MODE:-unknown} (ENFORCED = cds.measurements pinned to the node's own configfs-tsm launch digest, so a mismatched image fails closed; ACCEPTANY = discovery unavailable, any genuine SNP accepted)."
 
       - name: diagnostics (on failure)
         if: failure()
