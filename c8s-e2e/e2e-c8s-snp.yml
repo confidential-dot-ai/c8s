@@ -301,7 +301,9 @@ jobs:
           delivered=
           for att in 1 2 3 4 5; do
             bash /tmp/gsend.sh "rm -f /tmp/d.b64"
-            printf '%s' "$DB" | fold -w700 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
+            # `|| [ -n "$c" ]` processes fold's LAST line (no trailing newline) — else
+            # the final chunk is silently dropped and every delivery truncates identically
+            printf '%s' "$DB" | fold -w700 | while IFS= read -r c || [ -n "$c" ]; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
             bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); R=x; [ \"\$L\" = \"$EXPLEN\" ] && R=OK; echo \"@@DLEN\${R}${att}v\${L}@@\""
             sleep 4
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n')
