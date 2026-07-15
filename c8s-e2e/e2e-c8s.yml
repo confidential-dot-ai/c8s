@@ -74,6 +74,9 @@ jobs:
     # per-platform serialization: virtctl console is exclusive per VMI, and metal
     # cells share one host — but cells of different platforms may run concurrently
     concurrency: c8s-e2e-${{ matrix.platform }}
+    permissions:
+      contents: read
+      packages: read   # pull the private charts/c8s via GITHUB_TOKEN (org-native, no PAT)
     env:
       NS: confai-images
       VM: c8s-e2e-${{ github.run_id }}
@@ -249,8 +252,10 @@ jobs:
       # (Pattern from NVIDIA/aicr: do the work in-cluster, read the result out-of-band.)
       - name: install c8s in-cluster via in-guest driver (rke2 helm-controller, OCI chart)
         env:
-          GHCR_USER: ${{ secrets.GHCR_USER }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          # org-native: pull the private chart with the built-in GITHUB_TOKEN
+          # (packages:read). Falls back to a GHCR_TOKEN PAT if one is set (cifrai).
+          GHCR_USER: ${{ secrets.GHCR_USER || github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           # best-effort loops: disable the runner's default bash -e + pipefail, or a
           # no-match grep (e.g. "no new markers") silently kills the step
