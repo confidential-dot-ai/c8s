@@ -261,13 +261,15 @@ jobs:
           echo "delivering driver (${#DB} b64 chars) in chunks..."
           bash /tmp/gsend.sh "rm -f /tmp/d.b64"
           printf '%s' "$DB" | fold -w900 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
-          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh 2>/dev/ttyS0 && echo @@DRIVERDECODED@@ || echo @@FAIL_DECODE@@"
+          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh && echo @@DECODEOK@@ || echo @@DECODEERR@@"
           sleep 4
-          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DRIVERDECODED@@'; then
+          if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DECODEOK@@'; then
             echo "::warning::driver decode marker not seen yet; launching anyway"
           fi
-          # launch the driver detached; its stdout -> ttyS0 -> guest-console-log
-          bash /tmp/gsend.sh "nohup bash /tmp/drive.sh >/dev/ttyS0 2>&1 </dev/null & echo @@LAUNCHED@@"
+          # launch the driver DETACHED with its stdout on the console. NOT nohup:
+          # nohup redirects stdout to nohup.out when stdout is a terminal, which
+          # swallowed all driver output. A subshell-background keeps it on ttyS0.
+          bash /tmp/gsend.sh "(setsid bash /tmp/drive.sh >/dev/ttyS0 2>&1 </dev/null &) ; echo @@LAUNCHED@@"
           echo "--- polling guest-console-log for driver progress ---"
           seen=""; ok=""
           for i in $(seq 1 90); do   # ~15 min, fast host-side polls
