@@ -214,7 +214,7 @@ jobs:
             chart: oci://ghcr.io/confidential-dot-ai/charts/c8s
             version: "$CHART_VER"
             targetNamespace: c8s-system
-            createNamespace: true
+            createNamespace: false
             dockerRegistrySecret:
               name: ghcr-oci
             valuesContent: |
@@ -223,10 +223,19 @@ jobs:
               cds:
                 image:
                   tag: "$SHORT"
-                measurements: ["$GOLDEN"]
+                node:
+                  selector: null
+                  tolerations: null
+                ratlsPlatform: sev-snp
+                measurements: []
               attestationApi:
                 image:
                   tag: "main"
+                cvmMode: node
+                teeDevices:
+                  sevGuest: true
+                  tdxGuest: false
+                  tpm: false
               ratlsMesh:
                 enabled: false
               nriImagePolicy:
@@ -250,6 +259,11 @@ jobs:
           for i in \$(seq 1 40); do \$K get nodes --no-headers 2>/dev/null | grep -q ' Ready' && break; sleep 6; done
           \$K get nodes --no-headers 2>&1 | grep -q ' Ready' && say NODE_READY || { \$K get nodes 2>&1 | sed 's/^/@@ND /;s/\$/@@/'; say FAIL_NODE; exit 0; }
           printf %s '$SEC_B64' | base64 -d | \$K apply -f - >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
+          # pre-create c8s-system WITH the PSA privileged label — helm createNamespace
+          # can't set labels, and attestation-api's privileged pod is PSA-rejected
+          # without it (which stalls the whole CDS readiness chain)
+          \$K create ns c8s-system >/dev/null 2>&1
+          \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           printf %s '$HC_B64' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
           # helm-controller RETRIES a failed helm job (a transient first-attempt
           # failure is normal — run 21 succeeded on attempt 2). Wait for succ=1;
@@ -274,15 +288,26 @@ jobs:
           \$K -n c8s-system describe pods 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Unhealthy|message:' | tail -20 | sed 's/^/@@DESC /;s/\$/@@/'
           say DRIVE_END
           DRIVER
-          # deliver the driver into the guest (chunked base64 -> file -> decode)
-          DB=$(base64 -w0 /tmp/drive.sh)
-          echo "delivering driver (${#DB} b64 chars) in chunks..."
-          bash /tmp/gsend.sh "rm -f /tmp/d.b64"
-          printf '%s' "$DB" | fold -w900 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
-          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh && echo @@DECODEOK@@ || echo @@DECODEERR@@"
+          # deliver the driver into the guest (chunked base64 -> file -> decode).
+          # A dropped console chunk truncates the script (unclosed 'for' -> syntax
+          # error), so VERIFY the byte count and RETRY the whole delivery.
+          DB=$(base64 -w0 /tmp/drive.sh); EXPLEN=${#DB}
+          echo "delivering driver ($EXPLEN b64 chars) with verify+retry..."
+          delivered=
+          for att in 1 2 3 4; do
+            bash /tmp/gsend.sh "rm -f /tmp/d.b64"
+            printf '%s' "$DB" | fold -w700 | while IFS= read -r c; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
+            bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); [ \"\$L\" = \"$EXPLEN\" ] && echo @@DLEN_OK_${att}@@ || echo @@DLEN_BAD_${att}_\${L}@@"
+            sleep 4
+            LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n')
+            if printf '%s' "$LOG" | grep -q "@@DLEN_OK_${att}@@"; then delivered=1; echo "driver delivered intact (attempt $att)"; break; fi
+            printf '%s' "$LOG" | grep -oE "@@DLEN_BAD_${att}_[0-9]*@@" | tail -1 | sed 's/^/  delivery short: /'
+          done
+          [ -n "$delivered" ] || { echo "::error::driver delivery kept truncating over 4 attempts"; exit 1; }
+          bash /tmp/gsend.sh "base64 -d /tmp/d.b64 >/tmp/drive.sh && bash -n /tmp/drive.sh && echo @@DECODEOK@@ || echo @@DECODEERR@@"
           sleep 4
           if ! kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q '@@DECODEOK@@'; then
-            echo "::warning::driver decode marker not seen yet; launching anyway"
+            echo "::error::driver decoded but failed bash -n syntax check"; exit 1
           fi
           # launch the driver DETACHED with its stdout on the console. NOT nohup:
           # nohup redirects stdout to nohup.out when stdout is a terminal, which
