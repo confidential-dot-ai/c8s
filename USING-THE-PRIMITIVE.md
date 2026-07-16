@@ -111,8 +111,16 @@ You may:
 
 | flavor | you get | use when |
 |---|---|---|
-| `rke2-node` | the CVM **is** a single-node k8s cluster (measured RKE2 node image); `$K` talks to it | you're testing something that runs *on* a cluster (c8s) |
-| `base-cpu` | a plain attested CVM | you just need a real TEE to run a binary/test in |
+| `rke2-node` | the CVM **is** a single-node k8s cluster (measured RKE2 node image); `$K` talks to it | you're testing something that runs *on* a cluster (c8s) — **or any TEE payload, for now (see below)** |
+| `base-cpu` | a plain attested CVM | ⛔ **console-dead — unusable for console-delivered payloads** (probed 2026-07-15: silent after the EFI stub, no autologin). Wired in the primitive, gated on a base-images fix or the HTTP agent transport (`research/guest-transport.md`). |
+
+Until base-cpu has a console (or an in-guest agent), run "I just need a TEE"
+payloads on `rke2-node` — it's the same genuine measured SEV-SNP guest
+(`/dev/sev-guest`, configfs-tsm, glibc 2.43, python3/curl/tar, egress; probed
+green) and the k8s it boots is unused ballast. That's how the attestation-rs
+lane runs. Toolchain-less guests: build outside, ship a `cargo nextest archive`
+(+ any missing `.so`s) via a public ghcr OCI artifact, pull in-guest — see
+attestation-rs `.github/workflows/confidential-e2e.yml` for the pattern.
 
 If your payload needs a toolchain the image doesn't ship (e.g. Rust), say so —
 flavors are a knob on the primitive, not something you work around in your repo.

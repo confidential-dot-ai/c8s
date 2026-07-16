@@ -1,5 +1,33 @@
 # c8s e2e in CI — design
 
+## ✅ SELF-SUFFICIENT LANE + ALL CONSUMER PRs OUT (2026-07-15 evening)
+
+Run 29474257566 GREEN testing c8s main `70aea72` — a sha with **no chart tag
+and no image tags of its own** — proving the lane no longer depends on c8s's
+path-gated publishing. Two findings drove it (both observed live, then fixed):
+1. `chart.yml` is path-gated (`internal/helmchart/**`) → most merges have no
+   `0.1.0-g<sha>` chart. Fix: payload packages the chart FROM SOURCE at the
+   exact sha (anonymous codeload) → HelmChart `chartContent`. Also deleted
+   every payload credential (whole c8s pull chain verified anonymously public)
+   — the ghcr-token-over-console gap is GONE for this lane.
+2. `docker.yml` is path-gated too → some merges have NO Docker run, so
+   retag-unchanged never fires (70aea72: ImagePullBackOff). Fix: resolve each
+   c8s component to the newest existing sha tag ≤ the commit (ancestry walk).
+   attestation-api is NOT a c8s artifact — pinned `:main`, never ancestry-walked
+   (learned via InvalidImageName: a stdout `::warning` leaked into the tag).
+
+Golden: `rke2-image-refs.runtimeLaunchDigest` seeded `15bc9953…` from the green
+run; primitive warns on drift (fail-closed after one clean image bump).
+
+PRs opened (merge = first green): kettle#51 (roundtrip lane, ubuntu-latest),
+attestation-rs#63 (suite-in-CVM via nextest archive; rke2-node flavor — base-cpu
+probed CONSOLE-DEAD, silent after EFI stub), c8s#83 (post-merge workflow_run
+wrapper off Docker → "merge to main → integration happens"). attestation-rs
+needs a one-time flip of the `ci-tests` package to public after first push.
+
+Transport north star: research/guest-transport.md — kettle-orchestrator's
+in-guest HTTP agent pattern replaces the serial console in primitive v2.
+
 ## ARCHITECTURE (2026-07-15): primitive / payload / matrix / trigger
 
 The vision has three independent variables; each gets its own knob, so they can
