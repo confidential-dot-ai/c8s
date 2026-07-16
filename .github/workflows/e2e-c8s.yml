@@ -27,6 +27,15 @@
 # No registry credential anywhere in this payload — the whole chain is public.
 name: e2e-c8s
 on:
+  # MERGE LANE: called by c8s's own post-merge wrapper (workflow_run off Docker,
+  # passing the merge head_sha) — "merge to c8s main -> integration happens".
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: c8s commit to test
+        type: string
+        required: false
+        default: main
   workflow_dispatch:
     inputs:
       c8s_ref:
@@ -39,8 +48,10 @@ on:
       - '.github/workflows/e2e-c8s.yml'
       - '.github/workflows/cvm-e2e.yml'
       - 'c8s-e2e/**'
+  # DRIFT LANE: nightly against c8s main × the current base image — catches
+  # image/registry/orchestration drift no c8s merge triggered.
   schedule:
-    - cron: '17 8 * * *'          # daily heartbeat: catch base-image / c8s-main drift
+    - cron: '17 8 * * *'
 
 concurrency:
   group: e2e-c8s-${{ github.ref }}
