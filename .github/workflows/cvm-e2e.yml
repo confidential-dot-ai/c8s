@@ -98,18 +98,33 @@ jobs:
             echo "IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')"
           } >> "$GITHUB_ENV"
 
-      # reap-before-provision: a killed run leaks its CVM. Delete CVMs whose owning
-      # GitHub run has finished — never one belonging to a live run.
+      # reap-before-provision: a killed run leaks its CVM + its rootdisk clone.
+      # CROSS-REPO SAFE: this primitive is called from ANY org repo, so a CVM may be
+      # owned by a run in a DIFFERENT repo than the one reaping. Read the owning repo
+      # off the CVM and query THAT repo. Fail SAFE: only reap on a positive
+      # "completed" — an unknown status (403/404/no token for a foreign repo) KEEPS
+      # the CVM, or we'd kill a live run's cluster. Age is the only override.
       - name: reap leaked CVMs from finished runs
         run: |
           set +e +o pipefail
+          NOW=$(date -u +%s)
           for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
             rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
-            [ -z "$rid" ] || [ "$rid" = "${{ github.run_id }}" ] && continue
-            st=$(gh api "repos/${{ github.repository }}/actions/runs/$rid" -q .status 2>/dev/null)
-            if [ "$st" = "completed" ] || [ -z "$st" ]; then
-              echo "reaping $vm (run $rid ${st:-gone})"; kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
-            else echo "keeping $vm (run $rid $st)"; fi
+            orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
+            [ -z "$rid" ] && continue
+            [ "$rid" = "${{ github.run_id }}" ] && continue
+            # age fallback: our runs are capped well under 3h, so anything older is
+            # certainly orphaned even if we can't read its run status
+            ct=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+            age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+            st=$(gh api "repos/${orepo:-${{ github.repository }}}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ]; then
+              echo "reaping $vm (run ${orepo}#$rid completed)"; kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+            elif [ -z "$st" ] && [ "$age" -gt 10800 ]; then
+              echo "reaping $vm (status unknown, age ${age}s > 3h -> orphaned)"; kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run ${orepo}#$rid status=${st:-unknown} age=${age}s)"
+            fi
           done
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,6 +144,11 @@ jobs:
               ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
               ci.confidential.ai/platform: "${{ inputs.platform }}"
               ci.confidential.ai/flavor: "${{ inputs.flavor }}"
+            annotations:
+              # which repo's run owns this CVM — the reaper needs it because ANY org
+              # repo can call this primitive (label values can't hold the '/' in owner/repo)
+              ci.confidential.ai/repo: "${{ github.repository }}"
+              ci.confidential.ai/run-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           spec:
             runStrategy: Always
             template:
