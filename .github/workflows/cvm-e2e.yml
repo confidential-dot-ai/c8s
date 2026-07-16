@@ -286,8 +286,12 @@ jobs:
           delivered=
           for att in 1 2 3 4 5; do
             bash /tmp/gsend.sh "rm -f /tmp/d.b64"
-            # `|| [ -n "$c" ]` processes fold's LAST (newline-less) chunk
-            printf '%s' "$DB" | fold -w700 | while IFS= read -r c || [ -n "$c" ]; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
+            # 3000-char chunks (the guest tty's canonical input limit is ~4096 and the
+            # wrapper is ~30) — payloads are caller-supplied and vary in size, and at
+            # w700 a ~7KB driver was ~11 sends x ~15s = ~3min PER attempt.
+            # `|| [ -n "$c" ]` processes fold's LAST (newline-less) chunk — without it
+            # every delivery truncates identically.
+            printf '%s' "$DB" | fold -w3000 | while IFS= read -r c || [ -n "$c" ]; do bash /tmp/gsend.sh "printf %s '$c' >>/tmp/d.b64"; done
             bash /tmp/gsend.sh "L=\$(wc -c </tmp/d.b64 | tr -d ' '); R=x; [ \"\$L\" = \"$EXPLEN\" ] && R=OK; echo \"@@DLEN\${R}${att}v\${L}@@\""
             sleep 4
             LOG=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n')
