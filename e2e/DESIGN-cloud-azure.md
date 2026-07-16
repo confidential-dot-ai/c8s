@@ -11,7 +11,59 @@
 > `az_snp_live`/`az_tdx_live` (vTPM+IMDS) run nowhere else.
 > **Second maintainer directive: lift the c8s-fleet Flux/`make promote` flow
 > into CI-on-merge — do NOT invent a separate cloud install path.**
-> Build after tdx-metal (which jumped the queue).
+> Build after tdx-metal (which jumped the queue). **STARTED 2026-07-16 while
+> waiting on TDX host/image + PR reviews.**
+
+## Azure lane — concrete shape (from c8s-fleet recon, 2026-07-16)
+
+**Verified from the fleet repo (access granted — admin):**
+- **Ephemeral AKS is first-class**: `scripts/run-playbook.sh` — `PROVIDER=aks
+  ENV=dev make provision` with no CLUSTER mints `test-aks-<hex>` (ad-hoc stub
+  inventory, inherits group_vars), region auto-picked by `pick-region.sh` for
+  SEV-SNP SKU + `standardDCASv5Family` quota; ~15–30 min up (async nodepools);
+  teardown = `az group delete --no-wait`. Node sizes: `Standard_DC4as_v5` /
+  `DC48as_v5` (SEV-SNP).
+- **confidential-aks-dev is PRODUCTION-FACING — never a CI target** (public
+  domains incl. c8s-aks.confidential.ai, prod Let's Encrypt, reserved PIP,
+  fail-closed NRI). Ephemeral-only for CI.
+- **Auth is the ONLY hard blocker**: the fleet runs on interactive `az login`;
+  no SP, no OIDC federation, no azure/login usage anywhere. CI needs a
+  net-new Entra app with a GitHub-OIDC federated credential (subscription
+  d0d3b235-667c-42e0-9f9a-e8bda5598f6b — the org sub per the cert-manager SP),
+  role: enough to create/delete resource groups + AKS + read quotas
+  (Contributor on the sub, or a dedicated CI subscription). ASK: Ameen.
+- **Promote-lift boundary (respect it)**: `promote-c8s.sh` deliberately aborts
+  in CI for fail-closed component-digest bumps (needs the operator SOPS key +
+  kubeconfig — kept out of CI by design), and the promote PR is human-merged.
+  So: our lane = ephemeral validate-then-die (needs none of that);
+  CD-to-standing-clusters stays a fleet-owner decision. Also: no deployment
+  verification exists in fleet CI today (only render validation; landing is
+  verified by in-cluster Flux `tests` Kustomization healthChecks) — our lane
+  IS that missing verification, on a throwaway cluster.
+- **AKS evidence path = vTPM** (`attestationApi.cvmMode: aks`,
+  `teeDevices.tpm: true`, `/dev/tpm0`) — same path `az_snp_live` needs
+  (vTPM + IMDS). One cluster serves both payloads.
+
+**azure-e2e.yml (sibling reusable workflow, same contract as cvm-e2e):**
+1. `provision`: azure/login (OIDC) → fleet's `make provision PROVIDER=aks`
+   (checkout c8s-fleet; needs quota-read for pick-region) → kubeconfig via
+   `az aks get-credentials`.
+2. `install+verify c8s bundle at the sha`: apiserver directly reachable (no
+   console!) — `c8s install --cvm-mode aks --hardware-platform sev-snp` (the
+   blessed installer) or helm from the source-packaged chart + ancestry-
+   resolved image tags (same bundle logic as e2e-c8s payload); then the
+   consumption proof: CDS 1/1 + cw workload cert injected + Running.
+   Golden: policy-only (cloud — no measured images; maintainer-confirmed).
+3. `az-tests` (Azure's UNIQUE coverage): privileged pod on the cluster runs
+   the attestation-rs nextest archive with `--features az-snp,attest` and the
+   az_snp_live ignored tests (vTPM /dev/tpmrm0 hostPath + tpm2-tools + IMDS
+   from pod network). Plain kubectl exec/logs — no console machinery at all.
+   (az_tdx_live needs DCes_v5/TDX pools — later cell.)
+4. `teardown` `if: always()`: `az group delete` + a reaper for leaked
+   `test-aks-*` groups older than N hours (tag groups with run-id at create).
+
+Triggers: dispatch + nightly first (quota + 30-min provision cost); merge-lane
+via workflow_call once green, mirroring the metal precedent.
 
 ## The one structural decision
 
