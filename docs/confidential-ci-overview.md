@@ -22,6 +22,8 @@ Both are co-equal must-haves. The immediate unlock we were missing: *merge → i
 
 ## 2. Architecture — four independent knobs
 
+![Confidential CI/CD architecture: the primitive/payload/platform split, what runs inside a measured CVM during a run, the hardware-rooted chain of proof, the three deployment models, and the v1→v2 transport shift.](../diagram.png)
+
 The vision has four variables; each gets its own knob so they change independently.
 
 | Question | Knob | Lives in |
