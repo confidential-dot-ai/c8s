@@ -14,6 +14,29 @@
 > Build after tdx-metal (which jumped the queue). **STARTED 2026-07-16 while
 > waiting on TDX host/image + PR reviews.**
 
+## Docs-sweep addendum (2026-07-16) — build against THESE, not flagship values
+
+- Blessed install: `c8s install --single-node --cvm-mode aks --operator-keys
+  operator.pub`. aks mode = **vTPM `/dev/tpm0`** (attestation-api mounts it;
+  NOT teeDevices.sevGuest — do not copy flagship values). `--hardware-platform`
+  ignored under aks; **aks+tdx REFUSED** → az_tdx_live becomes a standalone
+  DCesv5-CVM mini-lane outside c8s (c8s TDX-on-Azure "in progress").
+- **ratlsMesh + nriImagePolicy stay ON** (AKS Ubuntu nodes support both) — the
+  Azure lane is the first to test mesh + enforcement surfaces at all.
+- **Per-run operator EC keypair** (P-256, openssl one-liners): write tokens
+  have no cluster binding — a shared key across ephemeral clusters = 5-minute
+  cross-cluster token replay.
+- Sizes: DC2as_v5 (smoke, cheap) / DC4as_v5 (dev). Preflight `az vm list-skus
+  -l <region> --size Standard_DC`; fallback branch: system pool may refuse CVM
+  sizes → user pool + label/taint + drop `--single-node`.
+- Bare-evidence verification on DCasv5 pins `generation: milan`.
+- Fetch /docs/c8s/tutorials/azure-e2e when building — it is the lane's script.
+- Docs claim private component images + PAT scopes; we verified the chain
+  anonymous-public — re-verify at build, prefer zero-cred.
+- Policy-only golden = the documented UNSAFE posture for cds.measurements —
+  assert the UNSAFE warning string deliberately + use TCB floors
+  (`--min-tcb-*`) as the cloud-viable enforcement knob.
+
 ## Azure lane — concrete shape (from c8s-fleet recon, 2026-07-16)
 
 **Verified from the fleet repo (access granted — admin):**
