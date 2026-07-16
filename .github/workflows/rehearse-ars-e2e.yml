@@ -98,7 +98,7 @@ jobs:
           export TMPDIR=/tmp
           /tmp/nx/cargo-nextest nextest run \
             --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
-            --extract-to /tmp/x --persist-extract-tempdir \
+            --extract-to /tmp/x \
             --run-ignored all -E 'not binary(capture_fixture)' \
             --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
           RC=\$?
