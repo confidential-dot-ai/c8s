@@ -99,9 +99,25 @@ jobs:
             echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)" >&2
             echo main
           }
+          # PLATFORM digest (linux/amd64), not the index digest: the NRI allowlist
+          # floor matches what the runtime resolves — an index digest would reject
+          # the very image it pins (docs/attestation/allowlist multi-arch pitfall).
+          resolve_digest(){
+            local comp=$1 tag=$2 tok m d
+            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
+            m=$(curl -fsSL -H "Authorization: Bearer $tok"               -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'               "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}")
+            d=$(printf '%s' "$m" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -1)
+            if [ -z "$d" ]; then
+              d=$(curl -fsSI -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'                 "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}" | tr -d '' | awk 'tolower($1)=="docker-content-digest:"{print $2}')
+            fi
+            [ -n "$d" ] || { echo "::error::no digest for ${comp}:${tag}"; exit 1; }
+            echo "$d"
+          }
           OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
           CDSTAG=$(resolve_tag cds)
           NRITAG=$(resolve_tag nri-image-policy)
+          CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
+          NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
           # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
           # c8s-ancestry walk can never find its tags (learned the hard way:
           # InvalidImageName, run 29473241754). :main is the canonical pointer the
@@ -124,6 +140,7 @@ jobs:
           cds:
             image:
               tag: "$CDSTAG"
+              digest: "$CDSDIG"
             node:
               selector: {}
               tolerations: []
@@ -144,6 +161,7 @@ jobs:
             distro: rke2
             image:
               tag: "$NRITAG"
+              digest: "$NRIDIG"
             policy:
               mode: audit          # bring-up: log would-be denials, admit all (chart-blessed).
                                    # enforce needs an operator-keyed allowlist first — roadmap.
@@ -153,6 +171,11 @@ jobs:
           EOF
           )
           CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
+
+          # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
+          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' > /tmp/gate-vals.yaml
+          helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
+          echo "render gate: chart+values validate clean"
 
           # ── THE PAYLOAD: runs in-guest as root. Given $K, $MEAS; emits PAYLOAD_OK.
           cat > payload.sh <<PAYLOAD
