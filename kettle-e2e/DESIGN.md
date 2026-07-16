@@ -1,7 +1,7 @@
 # Kettle e2e roundtrip in CI — design
 
 > **Status: P1 + P2 BOTH GREEN** (2026-06-26→27). [`kettle-e2e.yml`](kettle-e2e.yml)
-> runs on `confidential-bm` in `cifrai/confidential-bm-smoke`: submit a build to
+> runs on `cvm-launcher` in `cifrai/confidential-bm-smoke`: submit a build to
 > the orchestrator (`build.confidential.ai`) → CVM builds ripgrep (pinned commit
 > `4649aa97`) + hardware-signs SLSA provenance → verify, fail-closed.
 > **P1** (`kettle verify --nonce`): signature + provenance + binary checksum +
@@ -83,7 +83,7 @@ CI job (client)                         build.confidential.ai (orchestrator, dep
 
 ## Where it runs / networking
 
-- `runs-on: confidential-bm` for dogfooding/consistency — **but the TEE is remote**,
+- `runs-on: cvm-launcher` for dogfooding/consistency — **but the TEE is remote**,
   so this job doesn't need a local confidential runner; it could run on any runner.
 - **No new egress carve-out needed:** `build.confidential.ai` is public internet
   (the runner-egress policy already allows `world`), unlike the in-cluster `/attest`

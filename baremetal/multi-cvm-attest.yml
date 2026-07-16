@@ -6,7 +6,7 @@ name: multi-cvm-attest
 on: [push, workflow_dispatch]
 jobs:
   multi-cvm:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     steps:
       - uses: actions/checkout@v4
       - name: tools (kubectl + attestation-cli)

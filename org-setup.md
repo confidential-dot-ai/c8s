@@ -87,11 +87,11 @@ role); org plan is **enterprise** (custom runner groups available). So the only
 
 ```bash
 APP_ID=<id> APP_INSTALLATION_ID=<inst> APP_PRIVATE_KEY_FILE=<key.pem> \
-  ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=confidential-bm-conf \
-  RUNNER_SCALE_SET_NAME=confidential-bm RUNNER_GROUP=confidential \
+  ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=cvm-launcher-conf \
+  RUNNER_SCALE_SET_NAME=cvm-launcher RUNNER_GROUP=confidential \
   MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
 ```
 
 3. Smoke: a private confidential-dot-ai repo (e.g. `confidential-ci` itself)
-   runs a `runs-on: confidential-bm` job. Repos must be **private** and in the
+   runs a `runs-on: cvm-launcher` job. Repos must be **private** and in the
    runner group's allow-list.

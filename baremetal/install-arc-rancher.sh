@@ -11,7 +11,7 @@ set -euo pipefail
 
 KUBECONFIG="${KUBECONFIG:?point at the Rancher kubeconfig (e.g. github-runner.yaml)}"
 ORG_URL="${ORG_URL:-https://github.com/cifrai}"        # MUST back PRIVATE repos
-SCALE_SET="${SCALE_SET:-confidential-bm}"              # runs-on: <this>; unique per cluster!
+SCALE_SET="${SCALE_SET:-cvm-launcher}"              # runs-on: <this>; unique per cluster!
 GH_TOKEN="${GH_RUNNER_TOKEN:-$(gh auth token)}"        # needs admin:org for org reg
 CHART_VER="${CHART_VER:-0.14.2}"
 WORK="$(mktemp -d)"

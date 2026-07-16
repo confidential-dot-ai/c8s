@@ -1,7 +1,7 @@
 # Confidential conformance harness — design
 
 > **P0 BUILT & GREEN (2026-06-27).** `confidential-conformance.yml` on
-> `confidential-bm` spun **3 SEV-SNP CVMs from one CI job** (per-run CDI clones) and
+> `cvm-launcher` spun **3 SEV-SNP CVMs from one CI job** (per-run CDI clones) and
 > verified each is a genuine, fresh, non-debug TEE — `platform=snp`,
 > `signature_valid`, `report_data_match`, `debug_allowed:false` — **fail-closed**,
 > then tore them all down (cluster verified clean, no leftovers). Run
@@ -118,7 +118,7 @@ What it does:
    image field; today the base attestation-api image, later a c8s node image (P1).
 3. **`Lease`** on the SNP node so concurrent runs serialize (and don't fight the runners).
 4. **Guaranteed teardown** (`if: always()`), per-run isolation.
-5. Run as an **ARC job** on `confidential-bm` (`sev-snp-gh-runner`).
+5. Run as an **ARC job** on `cvm-launcher` (`sev-snp-gh-runner`).
 
 Net: P0 turns our proven `multi-cvm-attest` into the reusable conformance harness —
 **proving this host can spin multiple CVMs from CI** — and P1 runs c8s node-as-CVM on

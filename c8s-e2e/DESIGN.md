@@ -44,14 +44,14 @@ The lane now runs in `confidential-dot-ai/confidential-ci` (private,
 
 **Runner migration — done.** GitHub App `confidential-ci-runners` (id 4309649,
 installation 146850802) scoped to `organization_self_hosted_runners: write` ONLY.
-Registered the `confidential-bm` scale set to `confidential-dot-ai` via
+Registered the `cvm-launcher` scale set to `confidential-dot-ai` via
 `register.sh` APP mode (App creds in a K8s Secret BY REFERENCE, never in helm
-values), same `runs-on: confidential-bm` label. Gotchas hit:
+values), same `runs-on: cvm-launcher` label. Gotchas hit:
 - The ARC `gha-runner-scale-set` chart names the AutoscalingRunnerSet after
   `runnerScaleSetName`, so re-registering with the same label **overwrites** the
   old scale set (the cifrai one) — convenient here (that's the migration), but it
   left a stale scale-set-id → listener crash-loop `RunnerScaleSetNotFoundException
-  (identifier 3)`. Fix: a clean purge cycle (`register.sh RENAME_FROM=confidential-bm`)
+  (identifier 3)`. Fix: a clean purge cycle (`register.sh RENAME_FROM=cvm-launcher`)
   so ARC re-registers fresh and gets a new id. Then `listener: healthy`.
 - **ghcr auth — CORRECTION (was documented wrong).** I claimed the built-in
   `GITHUB_TOKEN` pulls the private `charts/c8s` "no PAT needed, confirmed
@@ -100,7 +100,7 @@ then pin THAT. The manifest value is computed under different assumptions.
 
 ## ✅ BARE-METAL SNP LANE GREEN (2026-07-15, run 29 / cifrai sandbox)
 
-`e2e-c8s-snp.yml` runs fully green end-to-end on `confidential-bm` against c8s
+`e2e-c8s-snp.yml` runs fully green end-to-end on `cvm-launcher` against c8s
 `cd361b4`: boot a measured RKE2-node-as-CVM on real SEV-SNP → assert genuine
 `sev-snp-guest` + IGVM → install that exact c8s commit **in-cluster** (rke2
 helm-controller, OCI chart `charts/c8s:0.1.0-gcd361b4`) → **CDS reaches
@@ -224,7 +224,7 @@ before the metal-SNP happy path is green; aicr's 256-cap shard machinery.
 
 ## Phase 1 build log (2026-07-15) — what's PROVEN, the wall, the pivot
 
-Building `e2e-c8s-snp.yml` (SNP-metal lane) end-to-end on `confidential-bm`, run
+Building `e2e-c8s-snp.yml` (SNP-metal lane) end-to-end on `cvm-launcher`, run
 against c8s `cd361b4`. Hard-won findings (16 live runs), so they're not redone:
 
 **PROVEN GREEN (the confidential-computing core):**
@@ -305,7 +305,7 @@ on a self-hosted SEV-SNP runner (`the-machine`, `kata-guest-base.yml`) via
 `workflow_run` chained off `Docker`, gated to `main`, never `pull_request`. That
 (a) defuses our #1 "public repos can't use self-hosted runners" gotcha (there IS
 an approved pattern in the org), and (b) is the exact trigger shape the e2e
-workflow should copy verbatim with `runs-on: confidential-bm`
+workflow should copy verbatim with `runs-on: cvm-launcher`
 (`kata-guest-base.yml` L47–126: `workflow_run` → gate `head_branch==main` →
 checkout `head_sha` → resolve `:<short-sha>` images).
 
@@ -324,7 +324,7 @@ commit under test with no chart-publish dependency.
 
 | Lane | Exists today | Gap |
 |---|---|---|
-| **SNP-metal** | ~90%: our green confidential-bm runners + attested ephemeral SNP CVMs + multi-CVM; **measured RKE2-node CVM image exists** (`ghcr.io/confidential-dot-ai/rke2@79d45313`, standing workload on dev-c8s-integration; readonly rootdisk PVC → N boots, no clone needed); `confai launch/verify/delete` wraps lifecycle + launch-digest | no workflow wires it to c8s pushes; github-runner-dev is stale vs metal main (legacy `lunal.dev/sev-snp` label, no base-image-refs CM → re-provision); serial-console kubeconfig scrape is the flaky link |
+| **SNP-metal** | ~90%: our green cvm-launcher runners + attested ephemeral SNP CVMs + multi-CVM; **measured RKE2-node CVM image exists** (`ghcr.io/confidential-dot-ai/rke2@79d45313`, standing workload on dev-c8s-integration; readonly rootdisk PVC → N boots, no clone needed); `confai launch/verify/delete` wraps lifecycle + launch-digest | no workflow wires it to c8s pushes; github-runner-dev is stale vs metal main (legacy `lunal.dev/sev-snp` label, no base-image-refs CM → re-provision); serial-console kubeconfig scrape is the flaky link |
 | **TDX-metal** | `tdx-dev-host-1` fully provisioned (RKE2 + KubeVirt v1.9 TDVF/QGS, DCAP, TDX rootdisk PVC pre-imported); `confai --platform tdx` launch+verify (MRTD/RTMRs) | no ARC scale set there; pinned attestation-cli v0.4.0 lacks `--expected-mrtd/rtmr*` (release pipeline wedged); no TDX RKE2-node image (all rootdisk/dev-vm plays gated `sev_snp_enabled`) |
 | **SNP-cloud (GKE)** | proven once by us (torn down); **c8s-fleet has ephemeral-cluster automation** (`PROVIDER=gke make provision` → `test-gke-<id>`, pick-region by quota, `make teardown AUTO_CONFIRM=1`) | wire provision→install→e2e→teardown into a nightly; secrets bootstrap (GCP SA, fleet SOPS age key, ghcr-secret); quota/latency → nightly not per-push |
 | **TDX-cloud** | software-ready only (chart + CLI + attestation-rs main verify gcp-tdx) | no TDX provisioning config exists anywhere; AKS path refuses tdx; quota unknown — weakest leg |
@@ -343,7 +343,7 @@ commit under test with no chart-publish dependency.
    says this test "needs multi-node confidential infrastructure in CI" — our green
    multi-CVM job is that primitive; team is on `feat/ca-handoff-probe` right now.
 3. **TDX-metal lane on tdx-dev-host-1** (2–4 wks; VM-level TDX e2e ~1 wk): second
-   scale set (`confidential-bm-tdx`), unwedge attestation-cli release, VM-level
+   scale set (`cvm-launcher-tdx`), unwedge attestation-cli release, VM-level
    attest e2e from the pre-imported TDX PVC first; TDX RKE2 image is the long pole.
 4. **Resurrect SNP-GKE as nightly** (1–2 wks, parallel): c8s-fleet provision →
    `c8s install --cvm-mode gke` → e2e → teardown + orphan-reaper.

@@ -1,7 +1,7 @@
 name: confidential-matrix
 # Run the same CI steps across every confidential backend.
 # Target trio: confidential-gcp (Confidential GKE), confidential-azure (Azure CVM),
-# confidential-bm (bare-metal RKE2 SEV-SNP). Only list backends that have a LIVE
+# cvm-launcher (bare-metal RKE2 SEV-SNP). Only list backends that have a LIVE
 # runner — a matrix label with no runner hangs queued forever (job timeout-minutes
 # only counts once a job is RUNNING, not while it waits for a runner).
 on:
@@ -9,7 +9,7 @@ on:
     inputs:
       backends:
         description: 'JSON array of confidential runner labels'
-        default: '["confidential-gcp","confidential-bm"]'
+        default: '["confidential-gcp","cvm-launcher"]'
         type: string
   push:
     branches: [main]
@@ -26,7 +26,7 @@ jobs:
           VAR: ${{ vars.CONFIDENTIAL_BACKENDS }}   # repo variable: enable backends as they come online
         run: |
           LIST="${INPUT:-}"; [ -z "$LIST" ] && LIST="${VAR:-}"
-          [ -z "$LIST" ] && LIST='["confidential-gcp","confidential-bm"]'
+          [ -z "$LIST" ] && LIST='["confidential-gcp","cvm-launcher"]'
           echo "list=$LIST" >> "$GITHUB_OUTPUT"
           echo "Confidential backends under test: $LIST"
 

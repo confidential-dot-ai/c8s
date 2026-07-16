@@ -1,11 +1,11 @@
-# Settles one question empirically: is the confidential-bm ARC runner INSIDE a CVM
+# Settles one question empirically: is the cvm-launcher ARC runner INSIDE a CVM
 # (an SNP guest) or ON the bare-metal SNP host? /dev/sev-guest exists only inside a
 # guest; /dev/sev is the host-side PSP interface used to LAUNCH guests.
 name: where-am-i
 on: { workflow_dispatch: {} }
 jobs:
   probe:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     timeout-minutes: 5
     steps:
       - name: am I in a TEE?

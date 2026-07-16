@@ -2,7 +2,7 @@ name: snp-e2e
 on: [push, workflow_dispatch]
 jobs:
   snp-e2e:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     steps:
       - uses: actions/checkout@v4
       - name: install kubectl

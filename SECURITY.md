@@ -45,7 +45,7 @@ and keep it out of git entirely.
    ```bash
    # bare-metal
    GH_RUNNER_TOKEN='<new>' ORG_URL=https://github.com/cifrai \
-     SCALE_SET=confidential-bm MODE=template SA=bm-e2e \
+     SCALE_SET=cvm-launcher MODE=template SA=bm-e2e \
      KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
    # gcp
    GH_RUNNER_TOKEN='<new>' ORG_URL=https://github.com/cifrai \

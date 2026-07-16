@@ -165,8 +165,8 @@ jobs:
       matrix:
         include:
           - platform: snp-metal
-            runner: confidential-bm
-          # - { platform: tdx-metal, runner: confidential-bm-tdx }  # needs a TDX rke2-node image
+            runner: cvm-launcher
+          # - { platform: tdx-metal, runner: cvm-launcher-tdx }  # needs a TDX rke2-node image
           # - { platform: gke-snp,   runner: ubuntu-latest }        # needs the c8s-fleet provisioner seam
     uses: ./.github/workflows/cvm-e2e.yml
     with:

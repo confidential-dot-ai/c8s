@@ -1,7 +1,7 @@
 # In-guest attestation — design (scope #4)
 
 > **Status: Phase 1a DONE (2026-06-26) — attested confidential CI runs GREEN on
-> `confidential-bm`.** `snp-e2e` pulls a genuine SEV-SNP report from the guest
+> `cvm-launcher`.** `snp-e2e` pulls a genuine SEV-SNP report from the guest
 > (`/attest`) and verifies it with `attestation-cli`: **signature valid, report_data
 > == our nonce, debug_allowed=false** — fail-closed. We integrate the company's
 > tooling, we did not build an attester. Phase 1b (assert `launch_digest` == golden
@@ -106,7 +106,7 @@ attestable-runner north-star, see `../MULTI-BACKEND.md` / improvement #14).
 
 | Backend | How the report is produced | Reference value (golden measurement) | Difficulty |
 |---|---|---|---|
-| **confidential-bm** (KubeVirt SNP VM) | inside the guest: `configfs-tsm` (`/sys/kernel/config/tsm/report`) or `snpguest` / attestation-rs CLI, `report_data=nonce` | **we control the IGVM** → the launch `MEASUREMENT` is computable from `guest-smpN.igvm` (`sev-snp-measure`). Golden value is ours. | **lowest — do first** |
+| **cvm-launcher** (KubeVirt SNP VM) | inside the guest: `configfs-tsm` (`/sys/kernel/config/tsm/report`) or `snpguest` / attestation-rs CLI, `report_data=nonce` | **we control the IGVM** → the launch `MEASUREMENT` is computable from `guest-smpN.igvm` (`sev-snp-measure`). Golden value is ours. | **lowest — do first** |
 | **confidential-gcp** (Confidential GKE node) | privileged pod with `/dev/sev-guest` (or configfs-tsm host mount) → SNP/TDX report; verify with attestation-go | node launch measurement is **GCP-managed** — pin it, or policy-only (valid VCEK + debug off + TCB floor + our workload RTMR/PCR) | medium |
 | **confidential-azure** (future) | `/dev/sev-guest` on the CVM, or Microsoft Azure Attestation (MAA) signed token | MAA reference values / pinned image measurement | design-only |
 

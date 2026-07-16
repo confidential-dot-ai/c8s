@@ -5,11 +5,11 @@ Run the same CI steps across every confidential backend in one workflow:
 | Backend label | Platform | Confidential mechanism | Status |
 |---|---|---|---|
 | `confidential-gcp` | Confidential GKE (GCP) | SEV-SNP/TDX confidential nodes | ✅ live (cifrai, GKE arc-host) |
-| `confidential-bm` | bare-metal RKE2 (`sev-snp-gh-runner`) | SEV-SNP KubeVirt VM (IGVM) | ✅ live (cifrai) |
+| `cvm-launcher` | bare-metal RKE2 (`sev-snp-gh-runner`) | SEV-SNP KubeVirt VM (IGVM) | ✅ live (cifrai) |
 | `confidential-azure` | Azure | SEV-SNP Azure CVM / AKS confidential nodes | ⏳ runner not deployed yet |
 
 The workflow is [`workflows/confidential-matrix.yml`](workflows/confidential-matrix.yml).
-Proven green on `confidential-gcp` + `confidential-bm` simultaneously.
+Proven green on `confidential-gcp` + `cvm-launcher` simultaneously.
 
 ## Use it in your repo
 
@@ -29,7 +29,7 @@ In any workflow, target a backend by its label:
 ```yaml
 jobs:
   build:
-    runs-on: confidential-bm        # or confidential-gcp
+    runs-on: cvm-launcher        # or confidential-gcp
     steps:
       - uses: actions/checkout@v4
       - name: build deps (self-hosted, minimal runner image)
@@ -47,7 +47,7 @@ jobs:
     outputs: { list: "${{ steps.s.outputs.list }}" }
     steps:
       - id: s
-        run: echo "list=${{ vars.CONFIDENTIAL_BACKENDS || '[\"confidential-gcp\",\"confidential-bm\"]' }}" >> "$GITHUB_OUTPUT"
+        run: echo "list=${{ vars.CONFIDENTIAL_BACKENDS || '[\"confidential-gcp\",\"cvm-launcher\"]' }}" >> "$GITHUB_OUTPUT"
   ci:
     needs: set-backends
     strategy:
@@ -61,13 +61,13 @@ This is exactly how `cifrai/attestation-rs-ci` runs `check`/`test` on every back
 
 ### Good to know
 - **Which backends run** is the org variable `CONFIDENTIAL_BACKENDS` (default
-  `["confidential-gcp","confidential-bm"]`), managed centrally — you don't set it
+  `["confidential-gcp","cvm-launcher"]`), managed centrally — you don't set it
   unless you want a subset.
 - **Runners are minimal + ephemeral** (one fresh pod per job, scale-to-zero).
   Install build deps in-job gated `runner.environment == 'self-hosted'`; on gcp the
   baked image already carries the common toolchain.
 - **`runs-on` = the backend label**: `confidential-gcp` = Confidential GKE node,
-  `confidential-bm` = bare-metal SEV-SNP KubeVirt host (see the table above).
+  `cvm-launcher` = bare-metal SEV-SNP KubeVirt host (see the table above).
 - Spinning up a confidential *VM/cluster* as the test target (vs running build/test
   *on* the runner) is the per-backend E2E — see `baremetal/snp-e2e.yml` and `e2e/`.
 
@@ -95,15 +95,15 @@ A matrix label with no registered runner **hangs queued forever**. Job
 runner, not while it waits for one. A runnerless leg keeps the whole run
 `in_progress` (until GitHub expires the queued job, ~24h). So:
 
-- **Don't** hardcode `[confidential-gcp, confidential-azure, confidential-bm]` in
+- **Don't** hardcode `[confidential-gcp, confidential-azure, cvm-launcher]` in
   the matrix while azure has no runner — the azure leg will hang.
 - **Do** drive the list from `CONFIDENTIAL_BACKENDS` (or the dispatch input) and
   add a backend only once its runner is registered:
   ```bash
   # today
-  gh variable set CONFIDENTIAL_BACKENDS -b '["confidential-gcp","confidential-bm"]' --repo <org>/<repo>
+  gh variable set CONFIDENTIAL_BACKENDS -b '["confidential-gcp","cvm-launcher"]' --repo <org>/<repo>
   # after standing up the Azure runner
-  gh variable set CONFIDENTIAL_BACKENDS -b '["confidential-gcp","confidential-azure","confidential-bm"]' --repo <org>/<repo>
+  gh variable set CONFIDENTIAL_BACKENDS -b '["confidential-gcp","confidential-azure","cvm-launcher"]' --repo <org>/<repo>
   ```
 
 `fail-fast: false` is still worth setting so a backend that *has* a runner but

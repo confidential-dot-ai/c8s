@@ -18,7 +18,7 @@
 #
 # Examples:
 #   # bare-metal (Rancher proxy -> template mode):
-#   GH_RUNNER_TOKEN=*** ORG_URL=https://github.com/cifrai SCALE_SET=confidential-bm \
+#   GH_RUNNER_TOKEN=*** ORG_URL=https://github.com/cifrai SCALE_SET=cvm-launcher \
 #     MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
 #   # GKE:
 #   GH_RUNNER_TOKEN=*** ORG_URL=https://github.com/cifrai SCALE_SET=confidential-gcp \
@@ -27,10 +27,10 @@
 #   # rename (clean): RENAME_FROM=confidential-e2e SCALE_SET=confidential-gcp ... ./register.sh
 #   # company org via GitHub App (org prod — see org-setup.md; release name differs
 #   # from the cifrai scale set so both coexist, but the runs-on LABEL stays
-#   # `confidential-bm` via RUNNER_SCALE_SET_NAME):
+#   # `cvm-launcher` via RUNNER_SCALE_SET_NAME):
 #   APP_ID=… APP_INSTALLATION_ID=… APP_PRIVATE_KEY_FILE=app.pem \
-#     ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=confidential-bm-conf \
-#     RUNNER_SCALE_SET_NAME=confidential-bm RUNNER_GROUP=confidential \
+#     ORG_URL=https://github.com/confidential-dot-ai SCALE_SET=cvm-launcher-conf \
+#     RUNNER_SCALE_SET_NAME=cvm-launcher RUNNER_GROUP=confidential \
 #     MODE=template SA=bm-e2e KUBECONFIG=~/dev/conf/github-runner.yaml ./register.sh
 set -euo pipefail
 
@@ -45,7 +45,7 @@ if [ -z "$GH_RUNNER_TOKEN" ] && { [ -z "$APP_ID" ] || [ -z "$APP_INSTALLATION_ID
 fi
 [ -n "$APP_PRIVATE_KEY_FILE" ] && [ ! -r "$APP_PRIVATE_KEY_FILE" ] && { echo "APP_PRIVATE_KEY_FILE not readable: $APP_PRIVATE_KEY_FILE" >&2; exit 1; }
 : "${ORG_URL:?set ORG_URL=https://github.com/<org>  (or a repo URL)}"
-SCALE_SET="${SCALE_SET:-confidential-bm}"
+SCALE_SET="${SCALE_SET:-cvm-launcher}"
 NS="${NS:-arc-runners}"
 SYS_NS="${SYS_NS:-arc-systems}"
 SECRET="${SECRET:-runner-github}"

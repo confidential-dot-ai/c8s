@@ -16,19 +16,19 @@ measured boot) — not a confidential node. So **Model A** is the fit:
 - **ARC installed** on the Rancher-managed RKE2 cluster via `install-arc-rancher.sh`
   (proxy-safe: CRDs applied individually + `helm template | kubectl apply`, because
   the Rancher proxy rejects the controller chart's oversized helm release secret).
-- **Scale set `confidential-bm`** registered to the **cifrai org** (private),
+- **Scale set `cvm-launcher`** registered to the **cifrai org** (private),
   listener connected (scale-set id 3).
-- **Smoke job green:** a `runs-on: confidential-bm` job ran on the box — confirmed
+- **Smoke job green:** a `runs-on: cvm-launcher` job ran on the box — confirmed
   `AMD EPYC 8224P`, kernel flags `sev / sev_es / sev_snp` present. The runner
   picks up cifrai jobs and tears the ephemeral pod down.
 - **KubeVirt RBAC** (`kubevirt-rbac.yaml`): `bm-e2e` SA, scoped to launch VMs in
   `confai-images` (incl. `pods/exec` for in-guest assertion); runner pods bound to it.
-- **SNP-VM E2E green** (`snp-e2e.yml`): a `runs-on: confidential-bm` job launches
+- **SNP-VM E2E green** (`snp-e2e.yml`): a `runs-on: cvm-launcher` job launches
   the SEV-SNP VM, waits `Pending→Scheduled→Running`, **asserts a genuine
   `sev-snp-guest` + IGVM measured boot** by reading the qemu cmdline inside the
   launcher, then tears down. End-to-end confidential-VM CI on bare metal.
 - **Full attestation-rs CI matrix green** — `cifrai/attestation-rs-ci` run with
-  `check`, `test`, `release-build·x86_64`, `audit` on **`confidential-bm`** (arm64
+  `check`, `test`, `release-build·x86_64`, `audit` on **`cvm-launcher`** (arm64
   /macOS/docker on GitHub-hosted). Functionally identical to the GKE run, and far
   faster on the 24-core EPYC: x86 release ~3 min (vs ~20 on the GKE e2-medium),
   `cargo-audit` compile ~1 min (vs ~23). `audit` correctly flags the same real CVE
@@ -74,7 +74,7 @@ chart default for *other* consumers; our E2E is unblocked today.
    VM used the stock launcher — restart/verify `virt-controller`).
 
 Once VMs launch, fill the placeholders in `snp-vm-e2e.yaml` (sidecar image, rootPvc,
-`guest-smp<cores>.igvm`) and wire it into a `runs-on: confidential-bm` workflow:
+`guest-smp<cores>.igvm`) and wire it into a `runs-on: cvm-launcher` workflow:
 apply → wait VMI `Running` → assert `launchSecurity.snp` + SNP-node placement →
 (then in-guest SNP report verification) → delete.
 
@@ -90,10 +90,10 @@ Runners are **ephemeral** — with `minRunners: 0` they only exist *while a job
 runs*, so `arc-runners` is empty when idle. Start a watch, then trigger a job:
 
 ```bash
-# the CI job's runner pod (one per job; name = confidential-bm-<id>-runner-<id>)
+# the CI job's runner pod (one per job; name = cvm-launcher-<id>-runner-<id>)
 kubectl get pods -n arc-runners -o wide -w
 
-# trigger something to watch (any runs-on: confidential-bm job)
+# trigger something to watch (any runs-on: cvm-launcher job)
 gh workflow run smoke   --repo cifrai/confidential-bm-smoke      # trivial job
 gh workflow run snp-e2e --repo cifrai/confidential-bm-smoke      # launches the SNP VM
 ```
@@ -113,7 +113,7 @@ GitHub side: `gh run watch <id> --repo cifrai/<repo>`.
 
 `multi-cvm-attest.yml` is the seed of confidential-Kubernetes (C8s) integration
 testing: **one CI job orchestrates multiple CVMs and attests each.** Proven green
-on `confidential-bm` — the job spins up two SEV-SNP CVMs (per-run CDI clones),
+on `cvm-launcher` — the job spins up two SEV-SNP CVMs (per-run CDI clones),
 waits each `/attest` endpoint ready, then verifies a genuine, fresh report from
 each (`signature_valid`, `report_data_match`, `platform: snp`), fail-closed, and
 tears both down. Generalizes to N CVMs.
@@ -176,7 +176,7 @@ producer ConfigMap (proposed) with a drift check as the stopgap.
 - `snp-vm-e2e.yaml` — the confidential SNP target VM (confirmed working values)
 - `snp-e2e.yml` — the SNP-VM E2E workflow (launch → assert sev-snp-guest → attest → teardown)
 - `multi-cvm-attest.yml` — one job spins up 2 CVMs and attests both (C8s primitive)
-- `smoke.yml` — the trivial `runs-on: confidential-bm` proof workflow
+- `smoke.yml` — the trivial `runs-on: cvm-launcher` proof workflow
 
 ## Production hardening (when wiring the real E2E)
 - **CDI-clone the base rootdisk per run — done (#8).** `snp-vm-e2e.yaml` uses

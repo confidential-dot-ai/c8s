@@ -16,7 +16,7 @@ on:
 
 # Serialize on the single SNP node so runs don't collide (KDS-429 / resources).
 concurrency:
-  group: confidential-bm-conformance
+  group: cvm-launcher-conformance
   cancel-in-progress: false
 
 env:
@@ -26,7 +26,7 @@ env:
 
 jobs:
   conformance:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4

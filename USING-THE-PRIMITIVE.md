@@ -52,7 +52,7 @@ jobs:
     uses: confidential-dot-ai/confidential-ci/.github/workflows/cvm-e2e.yml@main
     with:
       platform: snp-metal          # bare metal, SEV-SNP (more cells coming)
-      runner: confidential-bm
+      runner: cvm-launcher
       flavor: base-cpu             # plain attested VM | rke2-node = a k8s cluster
       payload_b64: ${{ needs.payload.outputs.b64 }}
     secrets:
@@ -61,6 +61,32 @@ jobs:
 ```
 
 That's it. No KubeVirt, no attestation code, no teardown logic in your repo.
+
+## `runner:` vs the TEE — read this before you trust a green check
+
+`cvm-launcher` is **not** a confidential runner. It's an ordinary container on the
+SNP *host*, and its only job is to launch and babysit the CVM. Your payload is the
+part that runs in the TEE. The renamed label (was `confidential-bm`) says so
+honestly — the old name promised a guarantee the runner never had.
+
+Proven, not assumed — `where-am-i.yml` on `cvm-launcher` reports:
+
+| probe | result |
+|---|---|
+| `systemd-detect-virt` | `docker` — a container, not a VM |
+| `/dev/sev-guest` | **absent** — cannot produce an SNP report |
+| configfs-tsm | **absent** |
+| `/proc/cpuinfo` | `sev sev_es sev_snp` ← **the trap** |
+| `uname -r` | `7.0.0-22-generic` — the *host's* kernel |
+
+Those cpuinfo flags are the host's SNP *capability* leaking into the container.
+They mean "this machine can run CVMs", not "you are inside one". Anything that
+greps `/proc/cpuinfo` to decide it's confidential is testing nothing.
+
+So a step in a `runs-on: cvm-launcher` job proves nothing about confidentiality —
+only what runs inside the payload does. The primitive gates that on a genuine
+`sev-snp-guest` assertion plus a hardware-rooted measurement (`$MEAS`) before your
+script ever executes.
 
 ## The payload contract
 

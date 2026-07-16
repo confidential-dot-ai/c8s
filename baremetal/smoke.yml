@@ -2,7 +2,7 @@ name: bm-smoke
 on: [push, workflow_dispatch]
 jobs:
   smoke:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     steps:
       - name: where am I
         run: |

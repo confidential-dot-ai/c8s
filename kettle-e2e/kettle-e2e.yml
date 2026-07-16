@@ -15,7 +15,7 @@ name: kettle-e2e
 #   again, P2 goes red (which is the point). See kettle-e2e/DESIGN.md "P2 finding".
 #
 # The TEE is REMOTE (the orchestrator's CVM), so this job is a pure HTTP client;
-# it runs on confidential-bm only for dogfooding — any runner would do.
+# it runs on cvm-launcher only for dogfooding — any runner would do.
 on:
   push:
     paths: [".github/workflows/kettle-e2e.yml"]
@@ -36,7 +36,7 @@ env:
 
 jobs:
   roundtrip:
-    runs-on: confidential-bm
+    runs-on: cvm-launcher
     timeout-minutes: 45
     steps:
       - name: tools (kettle CLI + oras + deps)
