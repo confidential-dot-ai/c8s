@@ -5,7 +5,12 @@ runtime/{pod-vs-node-cvm,kata}, verification/consumer, attestation/{cds,allowlis
 whitepaper, attested-builds) diffed against every lane. What changed, what's
 queued, what contradicts what.
 
-## Corrections APPLIED to the flagship (commit a066f0d, verifying)
+## Corrections APPLIED to the flagship — ✅ GREEN (run 29537743708)
+
+Final state: nri-image-policy ENABLED (audit) + platform digests + render gate
++ selector null (the docs' {} claim reverted after live falsification). All
+gates passed: render clean → CHART_FROM_SOURCE → MEAS_ENFORCED → HELM_DONE →
+CDS_READY → WORKLOAD_OK → CERT_INJECTED → PAYLOAD_OK.
 
 1. ~~`cds.node.selector: {}` + `tolerations: []`~~ **REVERTED — the sweep's
    correction was wrong** (run 29536583462: CDS Pending). On this chart the
