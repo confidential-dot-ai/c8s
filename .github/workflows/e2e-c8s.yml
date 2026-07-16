@@ -30,6 +30,10 @@
 # Cluster prereqs (once, via c8s-e2e/cluster-prep/apply.sh): rke2 rootdisk PVC,
 # /var/lib/igvm/rke2.igvm, rke2-image-refs CM, bm-e2e RBAC (console).
 name: e2e-c8s
+# AUTO-TRIGGER (private-first): merging to main here fires the confidential e2e
+# lane automatically — the "merge -> integration -> issues surfaced" loop, on a
+# private repo we own (no public-repo runner gate). Same pattern later moves to
+# the public c8s repo (workflow_run off its Docker build) to test c8s on merge.
 on:
   workflow_dispatch:
     inputs:
@@ -37,6 +41,18 @@ on:
         description: c8s commit to test (a chart tag charts/c8s:0.1.0-g<short-sha> must exist)
         required: false
         default: main
+  push:
+    branches: [main]
+    paths:                       # only when the lane itself changes — not docs/README
+      - 'c8s-e2e/**'
+      - '.github/workflows/e2e-c8s.yml'
+  schedule:
+    - cron: '17 8 * * *'         # daily heartbeat: catch drift (base image / c8s main) with no merge
+
+concurrency:
+  # one lane run per ref at a time; a newer push supersedes an in-flight one
+  group: e2e-c8s-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   e2e:
@@ -85,7 +101,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: confidential-dot-ai/c8s
-          ref: ${{ inputs.c8s_ref }}
+          ref: ${{ inputs.c8s_ref || 'main' }}   # push/schedule have no inputs -> test c8s main
           path: c8s
 
       - name: tools (kubectl + virtctl v1.7.0 + expect)
