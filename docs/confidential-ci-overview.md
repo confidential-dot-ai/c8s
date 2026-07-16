@@ -78,18 +78,30 @@ being the only place the Azure-specific attestation tests can run.
 
 ---
 
-## 4. How the flagship lane works
+## 4. How the lanes work — the payload is what differs
 
-`e2e-c8s.yml` (the c8s consumer) on every trigger:
+A lane = the shared primitive (WHERE) + one repo's payload (WHAT). The primitive never changes; the payload is the *entire* difference between lanes. **Only the c8s lane installs c8s** — the other lanes run completely unrelated work in (or against) a TEE. Three payload shapes exist today:
 
-1. **Build the payload** (GitHub-hosted) — package the c8s chart **from source** at the exact sha under test, resolve each component image tag, embed the install script.
-2. **Boot a measured CVM** (primitive, on bare-metal SNP) — a fresh RKE2-node-as-CVM; assert genuine SEV-SNP + IGVM measured boot; self-discover the runtime launch measurement via configfs-tsm.
-3. **Run the payload in-guest** — install that exact c8s commit in-cluster (rke2 helm-controller), pin CDS to the discovered measurement, and prove a confidential workload gets its CDS-issued cert.
-4. **Tear down** (always) + reap any leaked CVMs from finished runs.
+**① c8s — the payload installs a cluster and proves attested cert issuance.**
+1. Build the payload (hosted): package the c8s chart from source at the sha under test + resolve component image tags.
+2. Boot a measured RKE2-node CVM (primitive, SNP metal); assert genuine SEV-SNP + IGVM; self-discover the runtime launch measurement (configfs-tsm).
+3. In-guest: install that exact c8s commit (rke2 helm-controller), pin CDS to the measurement, and prove a confidential workload gets its CDS-issued cert. Under `MEAS_ENFORCED` that cert only issues if the node attests the pinned measurement, so it *is* the attestation assertion — not a separate check.
+4. Teardown (always) + reap leaked CVMs.
+> Installed in-cluster over the serial console, not from the runner: host Cilium and the in-CVM rke2 both use `10.42.0.0/16`, so the guest apiserver is unreachable — a CIDR collision.
 
-**Why install in-cluster over the serial console, not from the runner:** the host Cilium network and the in-CVM rke2 both use `10.42.0.0/16`, so the guest apiserver is unreachable from the runner (a CIDR collision). The payload is delivered once over the serial console and reports progress via `@@markers@@` polled host-side.
+**② attestation-rs — the payload runs the library's own test suite in the CVM. No c8s.**
+Boots the *same* measured RKE2-node CVM, but **does not install c8s** — the k8s it boots is unused ballast; the payload only needs a genuine TEE. The guest ships no toolchain, so the tests are compiled *outside* (a `cargo nextest archive` on a hosted runner) and pushed to a public ghcr artifact with the libtss2 runtime libs; the payload pulls them anonymously and runs `cargo nextest` against real `/dev/sev-guest` + configfs-tsm — including the `#[ignore]`d TEE tests. Rehearsal: **263/263 inside the CVM**.
 
-**Why the workload-cert step is the real test:** under `MEAS_ENFORCED`, CDS only issues that cert if the node attests the pinned measurement. So "the workload got its cert" *is* the attestation assertion — not a separate check.
+**③ kettle — no local CVM at all; it verifies a *remote* TEE.**
+kettle's confidential work happens in the build orchestrator's own CVM (`build.confidential.ai`). So this lane doesn't use the CVM primitive and needs no confidential runner — it runs on `ubuntu-latest` as a pure client: submit a nonce-bound attested build, then `kettle verify` fail-closed (signature, SLSA provenance, checksums, launch-measurement + dm-verity bind). A first-class consumer of the same goal — prove confidential behavior on every merge — that happens to verify a TEE it doesn't host.
+
+| Lane | Uses the CVM primitive? | Installs c8s? | Where the TEE is | Payload |
+|---|---|---|---|---|
+| **c8s** | ✅ (`rke2-node`) | ✅ **yes** | the booted CVM (a cluster node) | install c8s + prove a workload's CDS cert |
+| **attestation-rs** | ✅ (`rke2-node`) | ❌ no | the booted CVM | run the lib's nextest suite vs `/dev/sev-guest` |
+| **kettle** | ❌ (hosted client) | ❌ no | the *remote* orchestrator's CVM | drive an attested build + `kettle verify` |
+
+That is the whole point of the primitive/payload split: **one CVM mechanism, many unrelated payloads** — install a cluster, run a Rust test suite, or don't boot a CVM at all and verify a remote one.
 
 ---
 
