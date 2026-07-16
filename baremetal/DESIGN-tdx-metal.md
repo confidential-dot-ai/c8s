@@ -32,6 +32,18 @@
      VERIFY the offset against the TDREPORT struct (TDINFO at 512; MRTD at
      TDINFO+16 = 528, 48 bytes) before trusting it; better, parse with a tiny
      python struct reader that switches on report size.
+3b. **DOCS-SWEEP UNBLOCK (2026-07-16): a kata pod-CVM TDX lane needs NO new
+   image** — `c8s install --kata --hardware-platform=tdx` renders kata-qemu-tdx
+   RuntimeClasses, and tdx-dev-host-1 already carries the qemu-tdx shims
+   (kata-deploy 3.30.0, confidential-metal group_vars). confos PR#51 gates only
+   the node-CVM cell. One lane on existing hardware = the maintainer's
+   least-tested pod-CVM ask AND the TDX priority together. Kata specifics:
+   measured direct-kernel boot (no IGVM/UKI; dm-verity root_hash on the
+   cmdline, folded into the launch measurement), golden predicted with
+   sev-snp-measure at 1 vCPU on SNP — TDX side pins MRTD/RTMRs; guest policy
+   blocks exec/port-forward (dial pod IPs; `c8s probe-file` for init gates);
+   bootstrap allowlist is baked into kata-guest-base and IS part of the
+   measurement.
 4. **First consumer = attestation-rs, NOT c8s**: the attestation-rs lane's
    base-cpu vehicle (nextest archive) rebuilt `--features attest` runs the TDX
    attest/verify paths natively (`/dev/tdx_guest`, configfs-tsm, QGS vsock).
