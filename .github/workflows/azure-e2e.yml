@@ -83,7 +83,7 @@ jobs:
           if [ -n "${{ inputs.region }}" ]; then
             echo "REGION=${{ inputs.region }}" >> "$GITHUB_ENV"; exit 0
           fi
-          FAM_NEED=$(( $(echo "$VM_SIZE" | grep -oE '[0-9]+') ))
+          FAM_NEED=$(echo "$VM_SIZE" | grep -oE '[0-9]+' | head -1)   # DC4as_v5 -> 4 (the "5" is the family)
           for r in northeurope westeurope swedencentral uksouth germanywestcentral eastus; do
             skus=$(az vm list-skus -l "$r" --size Standard_DC --query "length([?name=='$VM_SIZE'])" -o tsv 2>/dev/null || echo 0)
             read -r cur lim <<<"$(az vm list-usage -l "$r" --query "[?name.value=='standardDCASv5Family'].[currentValue,limit]" -o tsv 2>/dev/null | head -1)"
