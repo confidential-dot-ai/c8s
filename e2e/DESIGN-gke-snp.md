@@ -1,7 +1,17 @@
-# gke-snp lane — design (build deferred until triggers+consumers land)
+# cloud lane — design (REFRAMED 2026-07-16: Azure-first; GKE demoted, possibly dropped)
 
-> Status: DESIGN-ONLY (2026-07-15 decision). Covers the rent-infra customer
-> class (Baseten/Modal/RunPod): SEV-SNP Confidential GKE. Build after Phase 0–2.
+> Status: DESIGN-ONLY. **Maintainer guidance (2026-07-16 call): the cloud cell
+> is TDX + AZURE, not GKE-SNP** — there's little GCP hardware (Ameen). Whether
+> GCP remains a cell at all is an open question. Everything structural below
+> (sibling reusable workflow, nodes-are-the-CVMs, policy-only golden,
+> always-teardown + reaper) transfers to AKS unchanged; swap gcloud for
+> c8s-fleet's `aks_provisioner` role (`az aks create`, SEV-SNP
+> `Standard_DC4as_v5` pools; TDX via DCes_v5; confidential-aks-dev cluster
+> exists). Azure also carries UNIQUE test coverage: attestation-rs's
+> `az_snp_live`/`az_tdx_live` (vTPM+IMDS) run nowhere else.
+> **Second maintainer directive: lift the c8s-fleet Flux/`make promote` flow
+> into CI-on-merge — do NOT invent a separate cloud install path.**
+> Build after tdx-metal (which jumped the queue).
 
 ## The one structural decision
 

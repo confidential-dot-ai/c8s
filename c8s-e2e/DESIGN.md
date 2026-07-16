@@ -28,6 +28,62 @@ needs a one-time flip of the `ci-tests` package to public after first push.
 Transport north star: research/guest-transport.md — kettle-orchestrator's
 in-guest HTTP agent pattern replaces the serial console in primitive v2.
 
+## MAINTAINER GUIDANCE (2026-07-16 call with João, c8s maintainer)
+
+**Validated (no changes needed):** the primitive/payload split, install-by-digest,
+one-off validate-then-die runners ("a different and currently-unvalidated path
+from the c8s-fleet long-running deployments — worth having precisely because
+it's not covered today"), push-to-main-only trigger (what c8s itself does), and
+the **bundle-versioning basis**: c8s is ONE package of components versioned
+together — the bundle at a commit hash is the unit to test, never components
+separately. (Our chart-from-source + images-at-one-sha lane is exactly this.)
+
+**Corrections to absorb (the whitelist/NRI model — do not build tests on the
+wrong mental model):**
+- The allowlist is set BEFOREHAND by an operator with a key attached to the
+  cluster — pods do NOT self-register.
+- Enforcement is BOOT-ONLY: an NRI hook on containerd checks each
+  container-start against the allowlist and kills anything not on it (and
+  kills everything running).
+- LB/CDS/OCI are whitelisted but NOT necessarily CVMs — they're only CVMs in
+  the pod-CVM model. Scaled-up workload pods attest to CDS once
+  (boot → prove TEE → RA-TLS → cert).
+- Two deployment models: **node-CVM** (KubeVirt, node IS the CVM — actively
+  developed, what CoreWeave uses; our lane) vs **pod-CVM** ("policy VM", kata
+  — LEAST tested today; João explicitly wants coverage there).
+- **Measured-image trust chain is metal-only**: steep/confidential-OS-builder's
+  deterministic measurement works because we control firmware→kernel. On cloud
+  you cannot have measured images → cloud trust is policy-only (validates our
+  golden split: metal we own, cloud is policy).
+
+**Priority shifts:**
+- **tdx-metal: deferred → FRONT** (CoreWeave is TDX-on-bare-metal, setting up
+  NOW; João: "a great part for us to make sure it keeps working").
+- **Cloud cell: Azure-first, GCP de-prioritized** (little GCP hardware per
+  Ameen). Whether GCP stays a cell at all is open.
+- **pod-CVM/kata** enters the roadmap as a named coverage gap (not ours
+  invented — maintainer-asked).
+
+**New lanes João asked for:**
+1. **base-image → boot-c8s** (CD-from-image-build): new fully-measured base
+   image lands → boot c8s on it → verify. Trigger repo undecided (maybe
+   confidential-os-builder, maybe a dedicated image repo). NOTE: this is the
+   DUAL of our nightly (nightly = c8s-main × current image; this = new image ×
+   c8s). Our probe-cvm + runtime-golden capture flow is the seed of it.
+2. **Cloud via the c8s-fleet pattern** — lift the existing Flux/`make promote`
+   flow into CI-on-merge; do NOT invent a separate cloud install.
+3. **pod-CVM/kata coverage.**
+4. Later: benchmark/simulation library as a CI capability; the confidential-ci
+   skill (skills/confidential-ci, PR #2).
+
+**Unblocks offered/needed:** c8s-fleet + base-images access (João offered);
+TDX host for `cvm-launcher-tdx` (decide: share tdx-dev-host-1 vs provision a
+dedicated `tdx-gh-runner` on OVH mirroring sev-snp-gh-runner's dedicated-CI
+pattern — ask Ameen). **Timing:** c8s isn't version-tagged yet (KPRs wrapping
+up); João suggests the merge-trigger CI ideally lands after the first version
+tag — affects when c8s#83 merges, not its content. A released `c8s install`
+binary would shrink our payload boilerplate when it exists.
+
 ## ARCHITECTURE (2026-07-15): primitive / payload / matrix / trigger
 
 The vision has three independent variables; each gets its own knob, so they can

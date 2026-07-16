@@ -1,10 +1,15 @@
-# tdx-metal lane — design (build deferred until triggers+consumers land)
+# tdx-metal lane — design (PRIORITIZED 2026-07-16: next cell after the consumer PRs land)
 
-> Status: DESIGN-ONLY (2026-07-15 decision). The hardware EXISTS and is
-> provisioned — `tdx-dev-host-1` (OVH Scale-i1, Intel TDX): RKE2 + KubeVirt
-> v1.9.0-beta.0 (TDVF/QGS), DCAP configured (qgsd + tdx-qgs-bridge vsock),
-> TDX rootdisk PVC pre-imported (`tdx-cpu-image-cdi@sha256:…`). What's missing
-> is CI plumbing, not infrastructure.
+> Status: was design-only/deferred (2026-07-15); **bumped to the FRONT of the
+> matrix on maintainer guidance (2026-07-16 call)** — CoreWeave is
+> TDX-on-bare-metal and setting up NOW; João named TDX CI as the thing to keep
+> working. Hardware EXISTS and is provisioned — `tdx-dev-host-1` (OVH
+> Scale-i1, Intel TDX): RKE2 + KubeVirt v1.9.0-beta.0 (TDVF/QGS), DCAP
+> configured (qgsd + tdx-qgs-bridge vsock), TDX rootdisk PVC pre-imported
+> (`tdx-cpu-image-cdi@sha256:…`). What's missing is CI plumbing, not
+> infrastructure. OPEN (ask Ameen): run CI on tdx-dev-host-1, or provision a
+> dedicated `tdx-gh-runner` mirroring sev-snp-gh-runner's dedicated-CI
+> pattern.
 
 ## Sequence (each step is independently verifiable)
 
