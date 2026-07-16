@@ -1,5 +1,42 @@
 # c8s e2e in CI — design
 
+## ARCHITECTURE (2026-07-15): primitive / payload / matrix / trigger
+
+The vision has three independent variables; each gets its own knob, so they can
+be built and changed separately:
+
+| question | knob | lives in |
+|---|---|---|
+| **WHAT** to test (attestation-rs? c8s? kettle? — "our whole stack") | the **payload** | the consumer repo/workflow |
+| **WHERE** (SNP/TDX × metal/cloud — power-cord vs rent-infra customers) | the **platform matrix** | consumer matrix rows → primitive |
+| **WHEN** (merge → integration → issues surfaced) | the **trigger** | the consumer |
+
+**`.github/workflows/cvm-e2e.yml` = THE PRIMITIVE (reusable, knows nothing about c8s):**
+boot a measured CVM on a platform → assert genuine `sev-snp-guest` → discover the
+node's RUNTIME launch measurement (configfs-tsm) → deliver + run a caller
+**payload** in-guest → poll progress host-side → teardown (always) + reap leaked
+CVMs from finished runs.
+- Payload contract: runs as root in-guest; gets `$K` (in-guest kubectl), `$MEAS`
+  (runtime launch measurement — the exact value verifiers compare), `$GHCR_*`;
+  must `echo "@@PAYLOAD_OK@@"` (the gate); may emit `@@…@@` progress markers.
+- Knobs: `platform` (cell), `runner`, `flavor` (`rke2-node` = a k8s cluster |
+  `base-cpu` = plain attested VM — because payloads differ: c8s needs a node-CVM,
+  `cargo test --features attest` just needs an attested VM with a toolchain).
+
+**`.github/workflows/e2e-c8s.yml` = A CONSUMER** (the flagship): builds the c8s
+payload (install c8s + prove a cw workload runs with its CDS-issued cert) and
+calls the primitive once per matrix cell. ~15 lines of real wiring.
+
+**Why NOT make "install c8s" the reusable unit:** attestation-rs calling it would
+install c8s — nonsense. It wants an attested CVM to run `cargo test` in. The reuse
+seam is the CVM, not the cluster. One primitive, N payloads = whole-stack coverage.
+
+**Next consumer (proves the seam):** `e2e-attestation-rs.yml` → `flavor: base-cpu`,
+payload = the attestation e2e. Needs a CVM flavor carrying a Rust toolchain (or run
+the verify host-side against the CVM's `/attest`) — a flavor question, not a
+redesign.
+
+
 ## ✅ MIGRATED TO THE ORG + GREEN THERE (2026-07-15)
 
 The lane now runs in `confidential-dot-ai/confidential-ci` (private,
@@ -16,9 +53,17 @@ values), same `runs-on: confidential-bm` label. Gotchas hit:
   left a stale scale-set-id → listener crash-loop `RunnerScaleSetNotFoundException
   (identifier 3)`. Fix: a clean purge cycle (`register.sh RENAME_FROM=confidential-bm`)
   so ARC re-registers fresh and gets a new id. Then `listener: healthy`.
-- **Org-native ghcr auth**: a workflow in a confidential-dot-ai repo pulls the
-  private `charts/c8s` with the built-in `GITHUB_TOKEN` (+ `permissions:
-  packages: read`) — NO PAT needed. Confirmed working (chart pulled, c8s installed).
+- **ghcr auth — CORRECTION (was documented wrong).** I claimed the built-in
+  `GITHUB_TOKEN` pulls the private `charts/c8s` "no PAT needed, confirmed
+  working". That was NOT tested and is NOT what runs: the green runs use
+  repo-level `GHCR_USER`/`GHCR_TOKEN` PAT secrets (visible masked in the job env),
+  which the payload bakes into the in-guest `ghcr-oci` dockerconfigjson for
+  helm-controller's OCI pull. Whether `GITHUB_TOKEN` would suffice is UNTESTED.
+  (Worth testing — it'd drop a PAT — but don't assume it.)
+- **Secret hygiene gap (known, unfixed):** the ghcr token is base64'd into the
+  driver and typed over the serial console, so it lands in `guest-console-log`
+  (cluster-readable) and as unmasked base64 chunks in the Actions log. Acceptable
+  for a dev sandbox; fix before this is a shared/prod lane.
 - cifrai sandbox repos (`confidential-bm-smoke`, `attestation-rs-ci`) archived.
 
 **✅ GOLDEN ENFORCEMENT NOW REAL (2026-07-15, self-discovering).** Fixed: the
