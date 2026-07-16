@@ -7,7 +7,8 @@ unset `secretBroker.openbao.*` values to it (in-release address, unattested,
 dev-cred token). `c8s uninstall` removes it with the release.
 
 Why chart-managed instead of the hand-applied Deployment the KMS demo runbook
-used: a `kubectl apply` of a Service over a previous, differently-labeled
+([docs/KMS_DEMO.md](../KMS_DEMO.md)) used to prescribe: a `kubectl apply` of
+a Service over a previous, differently-labeled
 `c8s-openbao` **merges** selectors (maps merge key-wise under client-side
 apply) into one that matches no pods — apply reports success, the Service
 silently has no endpoints (bitten on the Azure demo cluster). Helm instead
