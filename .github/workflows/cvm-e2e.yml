@@ -252,10 +252,22 @@ jobs:
           SH
 
           echo "waiting for the guest autologin shell (~180s; boot blocks on networkd-wait-online)..."
+          shell_ready=
           for i in $(seq 1 30); do
-            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { echo "shell ready"; break; }
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -q 'automatic login' && { shell_ready=1; echo "shell ready"; break; }
             sleep 15
           done
+          if [ -z "$shell_ready" ]; then
+            # don't attempt delivery into a console nobody is listening on — say WHY.
+            # (probe finding 2026-07-15: the base-cpu image emits NOTHING after the
+            # EFI stub — no kernel console, no autologin. Console delivery requires
+            # an image that autologins on the serial console, like rke2-node. For
+            # consoleless images the path forward is the in-guest HTTP agent —
+            # research/guest-transport.md.)
+            echo "::error::guest console never showed an autologin shell — this image cannot take console-delivered payloads. Console tail:"
+            kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | tail -15
+            exit 1
+          fi
 
           # DRIVER = primitive preamble + caller payload. The preamble discovers the
           # node's own runtime launch measurement (configfs-tsm: raw SNP report,
