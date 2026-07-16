@@ -21,11 +21,19 @@ plan and the Nix-over-Bazel decision; `org-setup.md` for org-wide rollout.
    (gcloud, kubectl, helm, kettle, ccvm) so jobs need no per-run installs.
 Repos then opt in with `runs-on: confidential-e2e-gcp`.
 
+## Start here
+
+**[`docs/confidential-ci-overview.md`](docs/confidential-ci-overview.md)** — the
+narrative overview & status of the whole effort (goal, architecture, what's
+proven, the open PRs, findings, roadmap). Mirrored to Notion (Confidential AI →
+Docs). Read that first; the files below are the deep dives.
+
 ## Layout
 
 ```
 confidential-ci/
 ├── README.md            you are here
+├── docs/                confidential-ci-overview.md — narrative overview & status (mirrors Notion)
 ├── config.env.example   all per-account knobs (project/region/registry/org) in one place
 ├── RUNNER-MATRIX.md     which CI jobs run on confidential; arm/macOS scoping
 ├── MULTI-BACKEND.md     run CI across [gcp, azure, bm]; how to adopt it in your repo
