@@ -85,12 +85,16 @@ jobs:
                 "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
               [ "$code" = "200" ] && { echo "$sha"; return; }
             done
-            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)"
+            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)" >&2
             echo main
           }
           OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
           CDSTAG=$(resolve_tag cds)
-          AATAG=$(resolve_tag attestation-api)
+          # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
+          # c8s-ancestry walk can never find its tags (learned the hard way:
+          # InvalidImageName, run 29473241754). :main is the canonical pointer the
+          # c8s-integration fleet uses; accepted race until c8s pins a digest.
+          AATAG=main
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
@@ -176,6 +180,10 @@ jobs:
           # Under MEAS_ENFORCED that cert is only issued if the node attests the pinned
           # measurement — so this IS the enforcement test, not a separate assertion.
           WOK=0; COK=0
+          if [ "\$CDSOK" != "1" ]; then
+            \$K -n c8s-system logs deploy/c8s-cds --tail=15 2>&1 | sed 's/^/@@CDSLOG /;s/\$/@@/'
+            \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
+          fi
           if [ "\$CDSOK" = "1" ]; then
             printf %s '$CW' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
             for i in \$(seq 1 60); do
