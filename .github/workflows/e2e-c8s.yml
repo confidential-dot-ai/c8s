@@ -10,15 +10,21 @@
 # consumer file with a different payload on the SAME primitive (e.g.
 # attestation-rs: payload = `cargo test --features attest`, flavor: base-cpu).
 #
-# CHART SOURCE (why there is no OCI pull here): c8s's chart.yml is PATH-GATED
-# (internal/helmchart/**), so the OCI tag 0.1.0-g<sha> exists ONLY for
-# chart-touching main commits — a Go-only merge has no chart tag and a pull by
-# tag 404s (that failure mode: helm-install job never succeeds, c8s-system stays
-# empty). Component IMAGE tags :<short-sha> DO exist for every main sha
-# (docker.yml retag-unchanged). So the payload packages the chart from the c8s
-# source tarball at the EXACT sha under test (public repo, anonymous codeload)
-# and inlines it via the HelmChart CR's `chartContent` — no registry credential
-# anywhere in this payload.
+# WHY NO OCI PULLS BY <sha> TAG: BOTH c8s publish workflows are PATH-GATED, so
+# a given main commit may have neither artifact under its own sha:
+#  - chart.yml (internal/helmchart/**): a Go-only merge publishes NO chart tag
+#    0.1.0-g<sha> -> helm pull 404s, c8s-system stays empty (failure mode 1).
+#  - docker.yml (source paths): a commit touching neither runs NO Docker at all,
+#    so retag-unchanged never fires and NO :<sha> image tags exist -> pods sit
+#    in ImagePullBackOff (failure mode 2; both observed live on main 70aea72).
+# Resolution, per artifact kind:
+#  - chart: packaged FROM SOURCE at the exact sha (anonymous codeload tarball),
+#    inlined via the HelmChart CR's chartContent.
+#  - images: can't be built from source here — resolve each component to the
+#    NEWEST existing sha tag at-or-before the commit under test (= what that
+#    commit would actually deploy). Under the post-merge trigger this is the
+#    head sha itself, because workflow_run chains off a completed Docker run.
+# No registry credential anywhere in this payload — the whole chain is public.
 name: e2e-c8s
 on:
   workflow_dispatch:
@@ -53,6 +59,7 @@ jobs:
           repository: confidential-dot-ai/c8s
           ref: ${{ inputs.c8s_ref || 'main' }}   # push/schedule have no inputs
           path: c8s
+          fetch-depth: 50                        # the image-tag resolver walks ancestors
 
       - id: build
         run: |
@@ -60,6 +67,31 @@ jobs:
           SHORT=$(cd c8s && git rev-parse --short=7 HEAD)
           FULL=$(cd c8s && git rev-parse HEAD)
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+          # IMAGE TAGS: docker.yml is path-gated too — a commit that touches no
+          # source paths triggers NO Docker run, so retag-unchanged never fires
+          # and :<short-sha> tags don't exist for it (found live: main 70aea72 had
+          # NO cds/c8s-operator tags -> ImagePullBackOff). The image a commit X
+          # would actually deploy is "the newest built tag at or before X" — so
+          # resolve each component by walking X's ancestry until a tag exists.
+          # Under the post-merge trigger (workflow_run off Docker) this resolves
+          # to $SHORT on the first probe. Anonymous pulls — the packages are public.
+          resolve_tag(){
+            local comp=$1 tok code
+            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
+            for sha in $(git -C c8s log --format=%h --abbrev=7 -50); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+                "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
+              [ "$code" = "200" ] && { echo "$sha"; return; }
+            done
+            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)"
+            echo main
+          }
+          OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
+          CDSTAG=$(resolve_tag cds)
+          AATAG=$(resolve_tag attestation-api)
+          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
@@ -71,10 +103,10 @@ jobs:
           #    kernel netfilter modules the monolithic guest kernel lacks (base-images ask).
           VALS=$(cat <<EOF | base64 -w0
           image:
-            tag: "$SHORT"
+            tag: "$OPTAG"
           cds:
             image:
-              tag: "$SHORT"
+              tag: "$CDSTAG"
             node:
               selector: null
               tolerations: null
@@ -82,7 +114,7 @@ jobs:
             measurements: ["RUNTIME_MEASUREMENT"]
           attestationApi:
             image:
-              tag: "main"
+              tag: "$AATAG"
             cvmMode: node
             teeDevices:
               sevGuest: true
@@ -136,6 +168,8 @@ jobs:
             CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
             echo "@@CDSR \$i: \${CDS:-nopod}@@"
             printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { CDSOK=1; say CDS_READY; break; }
+            printf '%s\n' "\$PODS" | grep -q 'ImagePullBackOff' && IPB=\$((\${IPB:-0}+1)) || IPB=0
+            [ "\$IPB" -ge 5 ] && { \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'; say FAIL_IMAGEPULL; exit 0; }
             sleep 12
           done
           # consumption proof: a cw workload must RUN with the CDS-issued cert injected.
