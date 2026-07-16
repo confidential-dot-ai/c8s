@@ -37,7 +37,48 @@ The vision has four variables; each gets its own knob so they change independent
 
 ---
 
-## 3. How the flagship lane works
+## 3. Platform support matrix
+
+The matrix is the two customer surfaces (bare metal × cloud) crossed with the two
+TEE technologies (SEV-SNP × TDX). Each cell is one **platform** value the primitive
+knows how to boot; adding a cell = adding a matrix row on a consumer, not new
+infra per repo.
+
+|  | **Bare metal** — plug in power cords (CW · Nebius · Humain) | **Cloud** — rent infra (Baseten · Modal · RunPod) |
+|---|---|---|
+| **SEV-SNP** (AMD) | ✅ **live** — `snp-metal` | 📐 designed — `gke-snp` |
+| **Intel TDX** | 📐 designed — `tdx-metal` | 📝 notes — `gke-tdx` / Azure |
+
+**Legend:** ✅ live & green · 📐 designed (spec written, hardware/seam identified, buildable) · 📝 notes (direction only).
+
+| Cell | Runner / host | Boot model | Status | Gating next step | Design |
+|---|---|---|---|---|---|
+| **`snp-metal`** | `cvm-launcher` / `sev-snp-gh-runner` | KubeVirt SNP VM (IGVM), serial console | ✅ **live & green** (flagship) | — in production | this doc + `c8s-e2e/DESIGN.md` |
+| **`tdx-metal`** | `cvm-launcher-tdx` / `tdx-dev-host-1` | KubeVirt TDX VM (TDVF/QGS) | 📐 hardware provisioned, not wired | ARC scale set + `tdx-image-refs` + a TDX RKE2-node image (the long pole) | `baremetal/DESIGN-tdx-metal.md` |
+| **`gke-snp`** | GitHub-hosted → provisions GKE | Confidential GKE nodes **are** the CVMs (no console; apiserver directly reachable) | 📐 designed, proven once (cifrai era) | a separate `gke-e2e.yml` + WIF + the c8s-fleet `gke_provisioner` seam | `e2e/DESIGN-gke-snp.md` |
+| **`gke-tdx`** | GitHub-hosted → GKE (C3) | Confidential GKE TDX nodes | 📝 notes | TDX provisioning config; confirm attestation-rs `gcp-tdx` verify path; quota | `e2e/DESIGN-gke-snp.md` (notes) |
+| **Azure** (SNP/TDX) | GitHub-hosted → AKS / CVM | Azure CVM (SNP `DCas_v5` / TDX `DCes_v5`) + vTPM | 📝 notes | c8s-fleet `aks_provisioner` wiring; **uniquely runs the `az_*_live` tests** (needs Azure vTPM + IMDS) | `baremetal/DESIGN-tdx-metal.md` (notes) |
+
+**Boot model differs by surface — and it shapes the transport.** On metal the guest
+is a KubeVirt VM reached over the serial console (the CIDR collision blocks the pod
+network). In cloud the **nodes themselves are confidential VMs**, the apiserver is
+directly reachable, and there is no console at all — which is the second reason the
+in-guest HTTP agent (primitive v2, §9) matters: it's the only transport that works
+on both surfaces.
+
+**Golden measurement per surface:** on metal **we own the IGVM**, so the runtime
+launch measurement is ours to compute and enforce (done — `snp-metal` pins it). In
+cloud the launch measurement is provider-managed, so those cells verify by **policy**
+(valid VCEK/quote, debug off, TCB floor) rather than a pinned digest.
+
+**Sequencing (decided):** build the non-metal cells only after the triggers +
+consumers land on `snp-metal`; the designs exist now so a cell is a wiring task,
+not a redesign. TDX-metal is closest (hardware ready); Azure earns its slot by
+being the only place the Azure-specific attestation tests can run.
+
+---
+
+## 4. How the flagship lane works
 
 `e2e-c8s.yml` (the c8s consumer) on every trigger:
 
@@ -52,7 +93,7 @@ The vision has four variables; each gets its own knob so they change independent
 
 ---
 
-## 4. What's built and proven
+## 5. What's built and proven
 
 | Piece | State | Evidence |
 |---|---|---|
@@ -66,7 +107,7 @@ The vision has four variables; each gets its own knob so they change independent
 
 ---
 
-## 5. The consumers (three open PRs)
+## 6. The consumers (three open PRs)
 
 | PR | What it adds | Pre-merge verification |
 |---|---|---|
@@ -78,7 +119,7 @@ The vision has four variables; each gets its own knob so they change independent
 
 ---
 
-## 6. Hard-won findings
+## 7. Hard-won findings
 
 - **Both c8s publish workflows are path-gated.** `chart.yml` (on `internal/helmchart/**`) and `docker.yml` (on source paths) skip commits that don't touch their paths — so a given merge sha often has **no chart tag and no image tags of its own**. Fix: package the chart from the source tarball at the exact sha (inlined via HelmChart `chartContent`); resolve each image to the newest existing sha tag ≤ the commit (ancestry walk). This is what makes the lane self-sufficient.
 - **The image manifest's `snp_launch_digest` is NOT the runtime launch measurement** (it's computed under different boot assumptions — wrong twice, caused `403 measurement_denied`). The authoritative value is what the node reports at runtime via configfs-tsm (`/sys/kernel/config/tsm/report` → `outblob`, MEASUREMENT at offset 0x90). The primitive self-discovers it and pins CDS to it.
@@ -87,7 +128,7 @@ The vision has four variables; each gets its own knob so they change independent
 
 ---
 
-## 7. What we learned from prior art
+## 8. What we learned from prior art
 
 Deep-read of three repos that solved adjacent problems:
 
@@ -97,7 +138,7 @@ Deep-read of three repos that solved adjacent problems:
 
 ---
 
-## 8. Roadmap
+## 9. Roadmap
 
 | Phase | Scope | State |
 |---|---|---|
@@ -113,7 +154,7 @@ Deep-read of three repos that solved adjacent problems:
 
 ---
 
-## 9. Reference
+## 10. Reference
 
 - **Adopt the primitive:** [`USING-THE-PRIMITIVE.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/USING-THE-PRIMITIVE.md) — ~15-line consumer contract, payload contract, flavors, trigger precedent.
 - **Deep-dive design docs (in-repo):** [`c8s-e2e/DESIGN.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/c8s-e2e/DESIGN.md) (architecture + NVIDIA lessons), [`attest/DESIGN.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/attest/DESIGN.md), [`kettle-e2e/DESIGN.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/kettle-e2e/DESIGN.md), [`conformance/DESIGN.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/conformance/DESIGN.md), [`research/guest-transport.md`](https://github.com/confidential-dot-ai/confidential-ci/blob/main/research/guest-transport.md).
