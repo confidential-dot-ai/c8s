@@ -1,0 +1,107 @@
+# PRE-MERGE REHEARSAL for kettle PR #51 (.github/workflows/e2e.yml on branch
+# ci/e2e-roundtrip). GitHub can't dispatch a workflow that isn't on the target
+# repo's default branch — so this runs the SAME jobs here, checking out the PR
+# branch. Proves the lane before merge; DELETE after #51 merges green.
+name: rehearse-kettle-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      kettle_ref:
+        description: kettle ref to rehearse
+        required: false
+        default: ci/e2e-roundtrip
+
+permissions:
+  contents: read
+
+env:
+  ORCH: https://build.confidential.ai
+  ORAS_VER: 1.2.0
+  REPO_URL: https://github.com/BurntSushi/ripgrep
+  REPO_REF: 4649aa9700619f94cf9c66876e9549d83420e16c
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: confidential-dot-ai/kettle
+          ref: ${{ inputs.kettle_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build kettle from the PR branch (the verifier under test) + oras
+        run: |
+          set -euo pipefail
+          cargo build --release --features cli --bin kettle
+          mkdir -p bin-e2e
+          install -m 0755 target/release/kettle bin-e2e/kettle
+          curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VER}/oras_${ORAS_VER}_linux_amd64.tar.gz" | tar -xz oras
+          install -m 0755 oras bin-e2e/oras
+          echo "$PWD/bin-e2e" >> "$GITHUB_PATH"
+          NO_COLOR=1 bin-e2e/kettle --version
+          bin-e2e/oras version
+
+      - name: submit attested build (nonce-bound)
+        run: |
+          set -euo pipefail
+          NONCE=$(openssl rand -hex 16)
+          echo "NONCE=$NONCE" >> "$GITHUB_ENV"
+          printf '{"nonce":"%s","repo_url":"%s","repo_ref":"%s"}' \
+            "$NONCE" "$REPO_URL" "$REPO_REF" > body.json
+          http=$(curl -sS -m 60 -o post.json -w '%{http_code}' \
+            -X POST "$ORCH/build" -H 'content-type: application/json' --data @body.json)
+          echo "POST /build -> $http"; cat post.json; echo
+          [ "$http" = "200" ] || { echo "::error::POST /build failed ($http)"; exit 1; }
+          JOB=$(jq -r '.job_id' post.json)
+          [ -n "$JOB" ] && [ "$JOB" != "null" ] || { echo "::error::no job_id"; exit 1; }
+          echo "JOB=$JOB" >> "$GITHUB_ENV"
+
+      - name: wait for the CVM build to complete
+        run: |
+          set -uo pipefail
+          code=000
+          for i in $(seq 1 140); do
+            curl -sS -N --max-time 6 "$ORCH/build/$JOB/events?from=0" > events.log 2>/dev/null || true
+            if grep -q '"status":"failed"' events.log; then
+              echo "::error::orchestrator reported the build FAILED"
+              grep -oE '"error[^"]*":"[^"]*"' events.log | head; exit 1
+            fi
+            code=$(curl -sS -o build.tar.gz -w '%{http_code}' "$ORCH/build/$JOB/result")
+            [ "$code" = "200" ] && { echo "[$i] /result ready (200)"; break; }
+            echo "[$i] /result=$code"; tail -n 3 events.log
+            sleep 10
+          done
+          [ "$code" = "200" ] || { echo "::error::no result in time ($code)"; tail -n 30 events.log; exit 1; }
+
+      - name: 'P1 — verify attestation (fail-closed)'
+        run: |
+          set -euo pipefail
+          mkdir -p out && tar -xzf build.tar.gz -C out
+          DIR=$(dirname "$(find out -name evidence.json | head -1)")
+          [ -n "$DIR" ] && [ -d "$DIR" ] || { echo "::error::no evidence.json"; find out | head -40; exit 1; }
+          echo "DIR=$DIR" >> "$GITHUB_ENV"
+          NO_COLOR=1 kettle verify "$DIR" --nonce "$NONCE" 2>&1 | tee verify.out
+          grep -q "Verification PASSED" verify.out || { echo "::error::no PASSED verdict"; exit 1; }
+          if grep -q "Verification FAILED" verify.out; then echo "::error::FAILED verdict"; exit 1; fi
+          echo "✅ P1 VERIFIED with the PR-branch-built kettle"
+
+      - name: 'P2 — launch-measurement bind (fail-closed)'
+        run: |
+          set -uo pipefail
+          CFG=$(curl -fsS -m 30 "$ORCH/config") || { echo "::warning title=P2 skipped::/config unreachable (infra)"; exit 0; }
+          IMG=$(echo "$CFG" | jq -r '.image.reference')
+          IGVM=$(echo "$CFG" | jq -r '.image.igvm')
+          DISK=$(echo "$CFG" | jq -r '.image.disk')
+          echo "pinned image: $IMG (igvm=$IGVM disk=$DISK)"
+          if ! oras pull "$IMG"; then echo "::warning title=P2 skipped::oras pull failed (infra)"; exit 0; fi
+          NO_COLOR=1 kettle verify "$DIR" --nonce "$NONCE" --igvm "$IGVM" --image "$DISK" 2>&1 | tee p2.out || true
+          if grep -q "Verification PASSED" p2.out; then
+            echo "✅ P2 FULL-CHAIN VERIFIED with the PR-branch-built kettle"
+          elif grep -q "IGVM launch measurement mismatch" p2.out; then
+            echo "::error title=P2 measurement mismatch::orchestrator deployment drift"; exit 1
+          else
+            echo "::error title=P2 failed::"; cat p2.out; exit 1
+          fi

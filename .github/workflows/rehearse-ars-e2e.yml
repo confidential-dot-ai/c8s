@@ -1,0 +1,120 @@
+# PRE-MERGE REHEARSAL for attestation-rs PR #63
+# (.github/workflows/confidential-e2e.yml on branch ci/confidential-e2e).
+# Same jobs, checking out the PR branch; the test archive is staged under THIS
+# repo's package namespace (ci-tests-rehearsal) since GITHUB_TOKEN can't write
+# to attestation-rs packages from here. DELETE after #63 merges green.
+#
+# ONE-TIME (also rehearses #63's real post-merge step): after the first archive
+# push auto-creates the package, flip ghcr package
+# confidential-ci/ci-tests-rehearsal to PUBLIC (org -> packages -> visibility) —
+# the in-guest pull is anonymous by design (no creds ride the console). Until
+# flipped, the CVM payload fails at FAIL_MANIFEST/FAIL_ARCHIVE_PULL.
+name: rehearse-ars-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      ars_ref:
+        description: attestation-rs ref to rehearse
+        required: false
+        default: ci/confidential-e2e
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NEXTEST_URL: https://get.nexte.st/0.9/linux
+  ORAS_VER: 1.2.0
+  PKG: confidential-dot-ai/confidential-ci   # rehearsal package namespace
+
+jobs:
+  archive:
+    runs-on: ubuntu-22.04   # glibc 2.35 <= guest 2.43 (probed)
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: confidential-dot-ai/attestation-rs
+          ref: ${{ inputs.ars_ref }}
+      - id: meta
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build test archive (--features attest, release)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "$NEXTEST_URL" | tar -xz -C "$HOME/.local/bin" cargo-nextest
+          "$HOME/.local/bin/cargo-nextest" nextest archive --workspace --features attest \
+            --release --archive-file tests.tar.zst
+          ls -la tests.tar.zst
+      - name: 'bundle tss runtime libs (probe finding: guest ships no libtss2)'
+        run: |
+          set -euo pipefail
+          mkdir -p libs && cp -av /usr/lib/x86_64-linux-gnu/libtss2*.so* libs/
+          tar -czf libs.tar.gz libs
+      - name: push archive + libs to ghcr (rehearsal package)
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VER}/oras_${ORAS_VER}_linux_amd64.tar.gz" | tar -xz oras
+          echo "${{ github.token }}" | ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ./oras push "ghcr.io/${PKG}/ci-tests-rehearsal:${{ steps.meta.outputs.sha }}" tests.tar.zst libs.tar.gz
+          echo "::notice::pushed ghcr.io/${PKG}/ci-tests-rehearsal:${{ steps.meta.outputs.sha }} — package must be PUBLIC for the in-guest anonymous pull"
+
+  payload:
+    runs-on: ubuntu-latest
+    needs: archive
+    outputs:
+      b64: ${{ steps.p.outputs.b64 }}
+    steps:
+      - id: p
+        run: |
+          set -euo pipefail
+          SHA='${{ needs.archive.outputs.sha }}'
+          PKGPATH='confidential-dot-ai/confidential-ci/ci-tests-rehearsal'
+          SRCREPO='confidential-dot-ai/attestation-rs'
+          cat > p.sh <<PAYLOAD
+          dl(){ curl -fsSL --retry 3 "\$1" -o "\$2" 2>/dev/null || python3 -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "\$1" "\$2"; }
+          TOK=\$(curl -fsSL "https://ghcr.io/token?scope=repository:$PKGPATH:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
+          [ -n "\$TOK" ] || { say FAIL_GHCR_TOKEN; exit 0; }
+          M=\$(curl -fsSL -H "Authorization: Bearer \$TOK" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/$PKGPATH/manifests/$SHA")
+          printf '%s' "\$M" | python3 -c 'import json,sys; m=json.load(sys.stdin); [print(l.get("annotations",{}).get("org.opencontainers.image.title","blob"), l["digest"]) for l in m["layers"]]' > /tmp/layers.txt 2>/dev/null
+          [ -s /tmp/layers.txt ] || { say FAIL_MANIFEST; exit 0; }
+          while read -r name dgst; do
+            curl -fsSL -H "Authorization: Bearer \$TOK" "https://ghcr.io/v2/$PKGPATH/blobs/\$dgst" -o "/tmp/\$name" || { say FAIL_ARCHIVE_PULL; exit 0; }
+            echo "@@BLOB \$name \$(wc -c </tmp/\$name | tr -d ' ') bytes@@"
+          done < /tmp/layers.txt
+          [ -f /tmp/tests.tar.zst ] || { say FAIL_ARCHIVE_PULL; exit 0; }
+          tar -xzf /tmp/libs.tar.gz -C /tmp 2>/dev/null && export LD_LIBRARY_PATH=/tmp/libs
+          mkdir -p /tmp/nx
+          dl "https://get.nexte.st/0.9/linux" /tmp/nx.tgz && tar -xzf /tmp/nx.tgz -C /tmp/nx || { say FAIL_NEXTEST_DL; exit 0; }
+          dl "https://codeload.github.com/$SRCREPO/tar.gz/$SHA" /tmp/src.tgz && tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_SRC; exit 0; }
+          SRC=\$(echo /tmp/attestation-rs-*)
+          say TOOLS_READY
+          echo "@@DF /tmp: \$(df -h /tmp 2>/dev/null | tail -1 | tr -s ' ')@@"
+          [ -e /dev/sev-guest ] && say TEE_CONFIRMED || say TEE_MISSING
+          export TMPDIR=/tmp
+          /tmp/nx/cargo-nextest nextest run \
+            --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
+            --extract-to /tmp/x --persist-extract-tempdir \
+            --run-ignored all -E 'not binary(capture_fixture)' \
+            --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
+          RC=\$?
+          B=\$(find /tmp/x -name 'attestation*' -type f -perm -u+x 2>/dev/null | head -1)
+          if [ -n "\$B" ]; then ldd "\$B" 2>/dev/null | grep 'not found' | sed 's/^/@@LDD_MISSING /;s/\$/@@/'; fi
+          grep -E 'PASS|FAIL|Summary|passed|failed|skipped' /tmp/nx.out | tail -25 | sed 's/^/@@NX /;s/\$/@@/'
+          [ \$RC -eq 0 ] && say PAYLOAD_OK || { tail -30 /tmp/nx.out | sed 's/^/@@NXTAIL /;s/\$/@@/'; say FAIL_NEXTEST; }
+          PAYLOAD
+          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: [archive, payload]
+    uses: ./.github/workflows/cvm-e2e.yml
+    with:
+      platform: snp-metal
+      runner: cvm-launcher
+      flavor: rke2-node
+      payload_b64: ${{ needs.payload.outputs.b64 }}
+      timeout_minutes: 40
