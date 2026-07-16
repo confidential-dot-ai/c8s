@@ -41,12 +41,58 @@
    (chart: `cds.ratlsPlatform=tdx`, `teeDevices.tdxGuest`, preflight requires
    nodes labeled `confidential.ai/tdx=true`).
 
-## Known blockers (tracked, not ours to fix here)
+## The TDX rke2-node image — it's confos PR #51, and it's buildable NOW
 
-- **TDX rke2-node image** — gates the c8s cell (step 5), and possibly step 4
-  too (see caveat below). **CONFIRMED IN FLIGHT (2026-07-16, joaosa): "not
-  yet, but I am working on one (it includes a few more things like
-  attestation-api and NRI)".** Asks to relay so it lands CI-drivable:
+**Reframed 2026-07-16 (user pointed at confidential-os-builder).** The image is
+NOT base-images' opaque long pole — it's a **confos mkosi profile**, in flight
+as **`confidential-dot-ai/confidential-os-builder` PR #51 (`feat/c8s-profile`):
+"measured RKE2 node-image profile for c8s"** (joaosa's "attestation-api + NRI"
+work — first target is CoreWeave TDX bare metal). Everything c8s installs via
+privileged DaemonSets is baked into the dm-verity root so the launch
+measurement covers it: RKE2 v1.34.5 (airgap image bundles baked → no first-boot
+egress), nri-image-policy (fail-closed), attestation-api by profile
+composition.
+
+**June's "wall" is gone.** The fat kernel needing BOTH confidential-guest AND
+k8s-networking symbols now exists: `kernel/c8s.config` = `gpu.config` verbatim +
+base-images `rke2/kernel/container.config` (VETH/BRIDGE/VXLAN/USER_NS/… all =y,
+no runtime modprobe). That was the one thing we couldn't produce; the PR
+produces it.
+
+**confos is dual-platform by design** (README): same rootfs, `--platform tdx`
+switches the measured-boot path to TDVF + `manifest.json` `{mrtd, rtmr1,
+rtmr2}` (vs SNP's IGVM + launch digest). And **`bin/build-c8s` already defaults
+`--platform tdx`** (line 66) — the c8s node image is TDX-first out of the box.
+
+**So "build it ourselves" = build from PR #51's branch:**
+```
+git checkout feat/c8s-profile           # confos PR #51
+bin/setup                                # mkosi v26, qemu, swtpm, rust
+C8S_STOCK_ATTEST=1 C8S_NO_GPU=1 bin/build-c8s
+#   → confos build c8s --profile attest --profile c8s --platform tdx
+#   → output/c8s/{disk.raw, manifest.json (mrtd/rtmr1/rtmr2), roothash}
+#     + a :c8s-cdi KubeVirt CDI artifact
+```
+Then stage on tdx-dev-host-1 exactly like the SNP rke2 image: import the CDI
+rootdisk as a PVC, publish `tdx-image-refs` (rootPvc + the manifest's mrtd as
+the golden), boot via the primitive's `tdx-metal` case. `C8S_STOCK_ATTEST=1` is
+CI's mode (stock attest profile, serves TDX quotes — the GPU-evidence digest
+isn't needed for our cell).
+
+**The honest catch (why this is "help land #51", not "race joaosa"):** PR #51
+is UNMERGED and its own validation plan (docs/C8S-IMAGE.md S0–S5:
+kernel-fragment → GPU-less boot → full compose → CVM-on-CoreWeave → `c8s
+install` → CI publish) is **"not yet run — this PR is the build tooling."** So
+building ourselves means being the FIRST to actually run its build+boot — which
+is precisely joaosa's S0–S5, and precisely what our primitive automates. The
+high-leverage move is to offer our harness as the **CI that executes PR #51's
+validation**, not to fork it. Build host: needs real Linux + userns/sudo (not a
+mac, not a rootless container) + ~3.5G pinned downloads; a confos runner or an
+ephemeral cloud VM.
+
+## Legacy asks (now mostly answered by PR #51 — keep only the parity item)
+
+Relay to joaosa on the image (most of these PR #51 already addresses):
   1. **Autologin shell on the serial console** (parity with the SNP rke2
      image). The primitive's delivery requires it — the SNP base-cpu image is
      console-dead (probed 2026-07-15: silent after the EFI stub) and therefore
