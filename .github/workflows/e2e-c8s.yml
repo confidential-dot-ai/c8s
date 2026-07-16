@@ -108,7 +108,7 @@ jobs:
             m=$(curl -fsSL -H "Authorization: Bearer $tok"               -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'               "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}")
             d=$(printf '%s' "$m" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -1)
             if [ -z "$d" ]; then
-              d=$(curl -fsSI -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'                 "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}" | tr -d '' | awk 'tolower($1)=="docker-content-digest:"{print $2}')
+              d=$(curl -fsSI -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}" | awk '{ gsub("\r","") } tolower($1)=="docker-content-digest:"{ print $2 }')
             fi
             [ -n "$d" ] || { echo "::error::no digest for ${comp}:${tag}"; exit 1; }
             echo "$d"
