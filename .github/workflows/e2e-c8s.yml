@@ -9,12 +9,22 @@
 # Adding a platform = adding a matrix row. Adding a DIFFERENT repo's test = a new
 # consumer file with a different payload on the SAME primitive (e.g.
 # attestation-rs: payload = `cargo test --features attest`, flavor: base-cpu).
+#
+# CHART SOURCE (why there is no OCI pull here): c8s's chart.yml is PATH-GATED
+# (internal/helmchart/**), so the OCI tag 0.1.0-g<sha> exists ONLY for
+# chart-touching main commits — a Go-only merge has no chart tag and a pull by
+# tag 404s (that failure mode: helm-install job never succeeds, c8s-system stays
+# empty). Component IMAGE tags :<short-sha> DO exist for every main sha
+# (docker.yml retag-unchanged). So the payload packages the chart from the c8s
+# source tarball at the EXACT sha under test (public repo, anonymous codeload)
+# and inlines it via the HelmChart CR's `chartContent` — no registry credential
+# anywhere in this payload.
 name: e2e-c8s
 on:
   workflow_dispatch:
     inputs:
       c8s_ref:
-        description: c8s commit to test (its chart tag 0.1.0-g<short-sha> must exist)
+        description: c8s commit to test (any ref — the chart is packaged from source at that sha)
         required: false
         default: main
   push:
@@ -48,6 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           SHORT=$(cd c8s && git rev-parse --short=7 HEAD)
+          FULL=$(cd c8s && git rev-parse HEAD)
           echo "short=$SHORT" >> "$GITHUB_OUTPUT"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
@@ -58,69 +69,66 @@ jobs:
           #    manifest's snp_launch_digest is NOT that value (CDS -> measurement_denied).
           #  - ratlsMesh/nri disabled             : matches c8s-integration; the mesh needs
           #    kernel netfilter modules the monolithic guest kernel lacks (base-images ask).
-          HC=$(cat <<EOF | base64 -w0
-          apiVersion: helm.cattle.io/v1
-          kind: HelmChart
-          metadata:
-            name: c8s
-            namespace: kube-system
-          spec:
-            chart: oci://ghcr.io/confidential-dot-ai/charts/c8s
-            version: "0.1.0-g$SHORT"
-            targetNamespace: c8s-system
-            createNamespace: false
-            dockerRegistrySecret:
-              name: ghcr-oci
-            valuesContent: |
-              image:
-                tag: "$SHORT"
-              cds:
-                image:
-                  tag: "$SHORT"
-                node:
-                  selector: null
-                  tolerations: null
-                ratlsPlatform: sev-snp
-                measurements: ["RUNTIME_MEASUREMENT"]
-              attestationApi:
-                image:
-                  tag: "main"
-                cvmMode: node
-                teeDevices:
-                  sevGuest: true
-                  tdxGuest: false
-                  tpm: false
-              ratlsMesh:
-                enabled: false
-              nriImagePolicy:
-                enabled: false
-              tlsLb:
-                hostPort:
-                  enabled: false
+          VALS=$(cat <<EOF | base64 -w0
+          image:
+            tag: "$SHORT"
+          cds:
+            image:
+              tag: "$SHORT"
+            node:
+              selector: null
+              tolerations: null
+            ratlsPlatform: sev-snp
+            measurements: ["RUNTIME_MEASUREMENT"]
+          attestationApi:
+            image:
+              tag: "main"
+            cvmMode: node
+            teeDevices:
+              sevGuest: true
+              tdxGuest: false
+              tpm: false
+          ratlsMesh:
+            enabled: false
+          nriImagePolicy:
+            enabled: false
+          tlsLb:
+            hostPort:
+              enabled: false
           EOF
           )
           CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
 
-          # ── THE PAYLOAD: runs in-guest as root. Given $K, $MEAS, $GHCR_*; emits PAYLOAD_OK.
+          # ── THE PAYLOAD: runs in-guest as root. Given $K, $MEAS; emits PAYLOAD_OK.
           cat > payload.sh <<PAYLOAD
-          DCJ=\$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "\$(printf '%s:%s' "\$GHCR_USER" "\$GHCR_TOKEN" | base64 -w0)" | base64 -w0)
-          printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: ghcr-oci\n  namespace: kube-system\ntype: kubernetes.io/dockerconfigjson\ndata:\n  .dockerconfigjson: %s\n' "\$DCJ" | \$K apply -f - >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
+          dl(){ curl -fsSL --retry 3 "\$1" -o "\$2" 2>/dev/null || wget -qO "\$2" "\$1" 2>/dev/null || python3 -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "\$1" "\$2"; }
+          dl "https://codeload.github.com/confidential-dot-ai/c8s/tar.gz/$FULL" /tmp/src.tgz || { say FAIL_CHART_FETCH; exit 0; }
+          tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_CHART_EXTRACT; exit 0; }
+          CD=\$(echo /tmp/c8s-*/internal/helmchart)
+          tar -czf /tmp/chart.tgz -C "\$CD" c8s || { say FAIL_CHART_PACK; exit 0; }
+          CC=\$(base64 -w0 /tmp/chart.tgz)
+          say CHART_FROM_SOURCE
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
-          if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then
-            printf %s '$HC' | base64 -d | sed "s/RUNTIME_MEASUREMENT/\$MEAS/" | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
-            say MEAS_ENFORCED
-          else
-            printf %s '$HC' | base64 -d | sed 's/\["RUNTIME_MEASUREMENT"\]/[]/' | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
-            say MEAS_ACCEPTANY
-          fi
+          if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
+          { printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: c8s\n  namespace: kube-system\nspec:\n  chartContent: %s\n  targetNamespace: c8s-system\n  createNamespace: false\n  valuesContent: |\n' "\$CC"
+            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed 's/^/    /'
+          } | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
+          say \$MMARK
+          HOK=0
           for i in \$(seq 1 45); do
             s=\$(\$K -n kube-system get job helm-install-c8s -o jsonpath='{.status.succeeded}' 2>/dev/null)
             echo "@@HJOB \$i succ=\${s:-0}@@"
             \$K -n kube-system logs job/helm-install-c8s --tail=2 2>/dev/null | sed 's/^/@@HLOG /;s/\$/@@/'
-            [ "\$s" = "1" ] && { say HELM_DONE; break; }
+            [ "\$s" = "1" ] && { HOK=1; say HELM_DONE; break; }
             sleep 12
           done
+          if [ "\$HOK" != "1" ]; then
+            \$K -n kube-system get helmchart c8s -o jsonpath='{.status}' 2>&1 | head -c 600 | sed 's/^/@@HCSTATUS /;s/\$/@@/'
+            \$K -n kube-system logs job/helm-install-c8s --tail=40 2>&1 | sed 's/^/@@HLOG /;s/\$/@@/'
+            say FAIL_HELM
+            exit 0
+          fi
           CDSOK=0
           for i in \$(seq 1 45); do
             PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
@@ -174,6 +182,3 @@ jobs:
       runner: ${{ matrix.runner }}
       flavor: rke2-node
       payload_b64: ${{ needs.payload.outputs.b64 }}
-    secrets:
-      ghcr_user: ${{ secrets.GHCR_USER }}
-      ghcr_token: ${{ secrets.GHCR_TOKEN }}

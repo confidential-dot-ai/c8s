@@ -331,6 +331,40 @@ jobs:
         if: failure()
         run: kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tail -60 || true
 
+      # forensics: the console log is the ONLY record of what the payload actually
+      # did (the driver's stdout goes to ttyS0). Keep it beyond teardown.
+      - name: capture console log + summary (always)
+        if: always()
+        env:
+          GHCR_USER: ${{ secrets.ghcr_user }}
+          GHCR_TOKEN: ${{ secrets.ghcr_token }}
+        run: |
+          set +e
+          kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null \
+            | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' > /tmp/console.log
+          # scrub caller secrets (raw + base64 forms). A secret base64-split across
+          # console delivery chunks is NOT fully scrubbable — treat artifacts of
+          # secret-carrying payloads as sensitive (the flagship payload carries none).
+          for s in "$GHCR_TOKEN" "$(printf %s "${GHCR_TOKEN:-}" | base64 -w0)" "$GHCR_USER"; do
+            [ -n "$s" ] && sed -i "s|$s|***|g" /tmp/console.log
+          done
+          {
+            echo "### cvm-e2e ${{ inputs.platform }}/${{ inputs.flavor }} — ${VM}"
+            echo "- runtime launch measurement: \`${{ steps.run.outputs.measurement || 'n/a' }}\`"
+            echo '```'
+            grep -oE '@@[^@]{1,140}@@' /tmp/console.log | tail -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          true
+
+      - name: upload console artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-console-${{ inputs.platform }}-${{ inputs.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/console.log
+          if-no-files-found: ignore
+
       - name: "teardown (always — tmpfs CVM: deleting the VM is total)"
         if: always()
         run: kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true
