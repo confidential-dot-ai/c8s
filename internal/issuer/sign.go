@@ -19,6 +19,12 @@ type SignCSRParams struct {
 	CSR      *x509.CertificateRequest
 	TTL      time.Duration // pre-capped by caller; not clamped here
 	Evidence []byte        // raw attestation evidence; SHA-256 embedded as audit extension
+	// ConfigClaimsExt, when set, is the DER value of the RA-TLS config-claims
+	// extension (ratls.OIDRATLSConfigClaims) to stamp on the leaf. The caller
+	// MUST have verified the claims against the requester's evidence and (for
+	// workload digests) the allowlist before passing them — SignCSR does not
+	// re-verify (docs/ratls.md).
+	ConfigClaimsExt []byte
 }
 
 // SignCSR signs csr against this CA, returning the leaf certificate PEM and
@@ -51,6 +57,12 @@ func (c *CA) SignCSR(p SignCSRParams) (certPEM []byte, serial *big.Int, err erro
 		return nil, nil, err
 	}
 	copyRATLSExtension(template, p.CSR)
+	if len(p.ConfigClaimsExt) > 0 {
+		template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
+			Id:    ratls.OIDRATLSConfigClaims,
+			Value: p.ConfigClaimsExt,
+		})
+	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, c.Cert, p.CSR.PublicKey, c.Key)
 	if err != nil {

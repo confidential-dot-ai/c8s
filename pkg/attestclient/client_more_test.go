@@ -318,12 +318,12 @@ func TestAttestBadRequestURL(t *testing.T) {
 }
 
 func TestReportDataForCSRBadPEM(t *testing.T) {
-	if _, err := reportDataForCSR("garbage", nil); err == nil {
+	if _, err := reportDataForCSR("garbage", nil, nil); err == nil {
 		t.Fatal("expected error for non-PEM input")
 	}
 	// Wrong PEM type.
 	wrongType := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	if _, err := reportDataForCSR(wrongType, nil); err == nil {
+	if _, err := reportDataForCSR(wrongType, nil, nil); err == nil {
 		t.Fatal("expected error for wrong PEM type")
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -64,6 +65,13 @@ type evidence struct {
 	certSHA256 string
 	// bindingNote explains what the REPORTDATA is bound to.
 	bindingNote string
+	// configClaims is the parsed config-claims extension the evidence binds
+	// (cert modes only; nil when the cert carries none or claimsErr is set).
+	configClaims *ratls.ConfigClaims
+	// claimsErr records a carried claims extension this build cannot interpret.
+	// The binding still folds the raw bytes, but policy against the claims is
+	// impossible — the verdict fails closed on it.
+	claimsErr error
 }
 
 // platformOrDefault returns p, or "snp" when p is empty (the historical default
@@ -122,15 +130,25 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 	if err != nil {
 		return nil, err
 	}
+	claimsRaw := ratls.ExtractConfigClaimsBytes(cert)
+	binding := "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)"
+	var claims *ratls.ConfigClaims
+	var claimsErr error
+	if len(claimsRaw) > 0 {
+		binding = "REPORTDATA binds the certificate public key and its config-claims extension (no per-request nonce — not a freshness proof)"
+		claims, claimsErr = ratls.UnmarshalConfigClaims(claimsRaw)
+	}
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:    platform,
-		rawEvidence: raw,
-		erd:         erd,
-		fresh:       false,
-		source:      source,
-		certSHA256:  hex.EncodeToString(sum[:]),
-		bindingNote: "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)",
+		platform:     platform,
+		rawEvidence:  raw,
+		erd:          erd,
+		fresh:        false,
+		source:       source,
+		certSHA256:   hex.EncodeToString(sum[:]),
+		bindingNote:  binding,
+		configClaims: claims,
+		claimsErr:    claimsErr,
 	}, nil
 }
 

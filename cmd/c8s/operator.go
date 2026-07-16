@@ -53,6 +53,7 @@ by this command.`,
 			GetCertRunAsNonRoot:     getCertRunAsNonRoot,
 			KataEnforce:             kataEnforce,
 			HardwarePlatform:        operatorHardwarePlatform,
+			WorkloadClaimsHostDir:   workloadClaimsHostDir,
 		})
 	},
 }
@@ -79,6 +80,7 @@ var (
 
 	kataEnforce              bool
 	operatorHardwarePlatform string
+	workloadClaimsHostDir    string
 )
 
 func init() {
@@ -102,5 +104,6 @@ func init() {
 	operatorCmd.Flags().BoolVar(&getCertRunAsNonRoot, "get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	operatorCmd.Flags().BoolVar(&kataEnforce, "kata-enforce", false, "inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses (set by the chart under kata.enabled)")
 	operatorCmd.Flags().StringVar(&operatorHardwarePlatform, "hardware-platform", webhook.HardwarePlatformSNP, "CPU TEE the injected confidential kata classes target: sev-snp or tdx (set by the chart to match the RuntimeClasses it renders)")
+	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy broker socket (node-CVM); when set, the webhook mounts it into c8s-cert and injects the get-cert workload-digest claim (docs/ratls.md)")
 	rootCmd.AddCommand(operatorCmd)
 }

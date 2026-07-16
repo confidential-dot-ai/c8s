@@ -77,9 +77,9 @@ signing and again for sending, any difference (key ordering, whitespace) makes
 do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
 end-to-end test (`integration_test.go`) exists to catch a regression here.
 
-## Operator key-pinning: revocation is coarse and the pin isn't attested (interim)
+## Operator key-pinning: revocation is coarse; the attested config protects only pinning verifiers
 
-`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`
+`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`, `docs/ratls.md`
 
 Allowlist writes are authorized by **pinned operator public keys**
 (`cds.operatorKeys`); `operatorauth.Verifier` accepts a token signed by any
@@ -90,14 +90,21 @@ it:
   (remove its public key from `cds.operatorKeys`). There is no per-key
   revocation short of that. Keys are long-lived; a leaked operator private key is
   usable until removed. Protect operator keys (vault/HSM/hardware token).
-- **The pinned-key list is host-supplied config, read only at CDS start, and not
-  part of CDS's attestation.** A control-plane that swaps the ConfigMap and
-  restarts CDS could pin its own key — the same unattested-config gap as the
-  allowlist seed. `c8s cds verify` now reports the pinned-key fingerprints (via
-  `GET /operator-keys`, fetched over a connection pinned to the attested serving
-  cert), which makes a swap *visible* to an operator who knows the expected
-  fingerprints — but a verifier still sees what CDS claims, not what was
-  measured. Committing the list via HOST_DATA/initdata remains the real fix.
+- **The attested config-claims digests only protect verifiers that pin them.**
+  CDS binds the digests of its loaded key set and applied seed into its
+  serving-cert evidence, but the CDS args are still host-supplied: a control
+  plane can restart CDS with different keys or seed. That swap fails closed
+  only for clients pinning the expected values (`c8s cds verify
+  --operator-keys/--allowlist-seed`, pinned from the operator's own install
+  inputs); a client that pins nothing accepts whatever the running CDS
+  attests to, and
+  in-cluster enforcers pin nothing. Verify continuously (CI), not just at
+  bootstrap, and gate ingress exposure on a passing verify.
+- **A rotated-out config stays claimable until cert expiry.** After changing
+  operator keys or the seed, the previous serving cert (and its claims)
+  remains replayable until its RA-TLS TTL (`cds.ratlsCertTTL`) runs out. A
+  config change also fails handoff by design (claims must byte-match), so a
+  rotation rolls a fresh CA lineage rather than inheriting the old one.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
 PKI (see `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`). **Longer
@@ -659,3 +666,27 @@ failed to carry the stock params forward would drop load-bearing boot args
 (`cgroup_no_v1=all`, `nvrc.smi.srs=1`). Net advice: rely on the annotation for
 ad-hoc params, keep the puller's preservation, and don't trust manual config
 edits to land until this is root-caused on a live sandbox.
+
+## Workload-claims broker socket: group must be reachable by the non-root sidecar
+
+`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `BrokerSocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
+
+The broker runs as root (nri-image-policy is a containerd-launched NRI plugin),
+so its Unix socket is created `root:root`. get-cert connects as the non-root
+sidecar (UID/GID 65532) over a **read-only** mount. A `root:root 0660` socket is
+unreachable by that caller — `connect()` needs write permission on the socket
+node — and get-cert is **fail-closed** on a broker error, so the pod hangs
+forever on its initial cert (`c8s-cert-wait` never passes). It is a silent,
+node-wide brick of every `cw` pod, not a graceful degradation.
+
+The socket must therefore be group-owned by a GID the sidecar carries: `ListenUnix`
+chgrps it to `BrokerSocketGID` and the webhook injects that same GID as a pod
+`SupplementalGroups` entry. **The two must stay equal** — they share the one
+constant, so change it in one place only. Do not "fix" a connect failure by
+relaxing fail-closed (broker error ⇒ issue claim-free): that hands an attacker
+who blocks the broker exactly the claim-free cert fail-closed exists to deny.
+Connecting to a socket is exempt from the read-only-mount write block (sockets
+are not regular files), so the RO mount still prevents a socket-file swap
+without blocking the connect. The same-process broker unit tests cannot catch
+this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
+`TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.

@@ -43,6 +43,20 @@ type VerifyPolicy struct {
 	// check is performed (TLS 1.3 already provides replay protection).
 	Nonce []byte
 
+	// Config-claims pins (docs/ratls.md). When set, the
+	// certificate must carry a config-claims extension whose corresponding
+	// digest byte-equals the pinned value:
+	//   OperatorKeysDigest — operatorauth.KeySetDigest of the expected set
+	//   SeedDigest         — allowlist.CanonicalDigest of the expected seed
+	//   WorkloadDigest     — canonical workload image-digest hash (docs/ratls.md)
+	// ratls.UnsetDigest() pins "not applicable". Empty = claims are folded
+	// into the REPORTDATA check when present but that field is not enforced.
+	// Only [VerifyCert] can enforce these (claims ride the certificate);
+	// [VerifyAttestation] fails closed when any is set.
+	OperatorKeysDigest []byte
+	SeedDigest         []byte
+	WorkloadDigest     []byte
+
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
 	// binding, debug policy, and minimum TCB. Required: there is no
@@ -92,6 +106,10 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 	if policy.AttestationApiURL == "" {
 		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
+	if len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0 {
+		// Claims ride the certificate, which this path never sees.
+		return nil, fmt.Errorf("%w: config-claims pins require VerifyCert", ErrPolicyViolation)
+	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
 	if err != nil {
@@ -102,12 +120,19 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 }
 
 // VerifyCert verifies an RA-TLS certificate: it extracts the TEE attestation
-// extension and hands it to [VerifyAttestation] with the cert's public key.
+// extension and verifies it against the cert's public key. A config-claims
+// extension, when carried, is folded into the expected REPORTDATA (the
+// evidence binds it) and checked against the policy's config-claims pins
+// (docs/ratls.md).
 //
 // Trust comes from the hardware attestation chain (AMD ARK → ASK → VCEK, or
 // Intel equivalent for TDX) as verified by the same-TCB attestation-api, not
 // from any certificate authority signature.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
+	if policy == nil {
+		policy = &VerifyPolicy{}
+	}
+
 	att, err := ExtractAttestation(cert)
 	if err != nil {
 		return nil, err
@@ -118,7 +143,56 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 		return nil, fmt.Errorf("ratls: extract public key: %w", err)
 	}
 
-	return VerifyAttestation(pub, att, policy, nonce)
+	if policy.AttestationApiURL == "" {
+		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
+	}
+
+	claimsBytes := ExtractConfigClaimsBytes(cert)
+	if err := checkClaimsPins(claimsBytes, policy); err != nil {
+		return nil, err
+	}
+
+	expectedReportData, err := ReportDataForKeyAndClaims(pub, claimsBytes, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
+	}
+
+	return verifyReport(att, policy, expectedReportData)
+}
+
+// checkClaimsPins enforces the policy's config-claims pins against the raw
+// claims extension bytes. INVARIANT: a pin can only reject; acceptance still
+// requires the evidence to bind claimsBytes (the REPORTDATA check downstream).
+func checkClaimsPins(claimsBytes []byte, policy *VerifyPolicy) error {
+	pins := []struct {
+		name     string
+		expected []byte
+		attested func(*ConfigClaims) []byte
+	}{
+		{"operator-keys", policy.OperatorKeysDigest, func(c *ConfigClaims) []byte { return c.OperatorKeysDigest }},
+		{"allowlist-seed", policy.SeedDigest, func(c *ConfigClaims) []byte { return c.SeedDigest }},
+		{"workload", policy.WorkloadDigest, func(c *ConfigClaims) []byte { return c.WorkloadDigest }},
+	}
+	anyPinned := false
+	for _, p := range pins {
+		anyPinned = anyPinned || len(p.expected) > 0
+	}
+	if !anyPinned {
+		return nil
+	}
+	if len(claimsBytes) == 0 {
+		return fmt.Errorf("%w: config-claims pin set but certificate carries no config-claims extension", ErrPolicyViolation)
+	}
+	claims, err := UnmarshalConfigClaims(claimsBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
+	}
+	for _, p := range pins {
+		if len(p.expected) > 0 && !bytes.Equal(p.attested(claims), p.expected) {
+			return fmt.Errorf("%w: attested %s digest %x does not match pinned %x", ErrPolicyViolation, p.name, p.attested(claims), p.expected)
+		}
+	}
+	return nil
 }
 
 // ExtractAttestation finds and parses the RA-TLS extension from a certificate.

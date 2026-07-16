@@ -64,6 +64,14 @@ spec:
             - --kata-enforce=true
             - --hardware-platform={{ include "c8s.hardwarePlatform" . }}
             {{- end }}
+            {{- /* Workload-digest claims (docs/ratls.md): get-cert
+                   fetches from the local broker over its compiled Unix socket,
+                   with the nri-image-policy socket mounted into c8s-cert.
+                   node-CVM only for now — the kata guest bind-mount lands with
+                   the guest-image support. */}}
+            {{- if and .Values.nriImagePolicy.enabled (not .Values.kata.enabled) }}
+            - --workload-claims-host-dir={{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+            {{- end }}
             {{- range .Values.operator.extraArgs }}
             - {{ . | quote }}
             {{- end }}

@@ -84,6 +84,11 @@ type Options struct {
 	// HardwarePlatform is the CPU TEE the confidential kata classes target
 	// (webhook.HardwarePlatformSNP or ...TDX; the operator command validates).
 	HardwarePlatform string
+
+	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy broker
+	// socket directory: the webhook mounts it into c8s-cert and injects the
+	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
+	WorkloadClaimsHostDir string
 }
 
 var scheme = runtime.NewScheme()
@@ -178,17 +183,18 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
 		if err := webhook.Register(mgr, webhook.Config{
-			GetCertImage:        opts.GetCertImage,
-			CDSURL:              opts.CDSURL,
-			AttestationApiURL:   opts.AttestationApiURL,
-			CertFSGroup:         int64Ptr(opts.CertFSGroup),
-			CertKeyMode:         opts.CertKeyMode,
-			CertRenewInterval:   opts.CertRenewInterval,
-			GetCertRunAsUser:    int64Ptr(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:   int64Ptr(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot: boolPtr(opts.GetCertRunAsNonRoot),
-			KataEnforce:         opts.KataEnforce,
-			HardwarePlatform:    opts.HardwarePlatform,
+			GetCertImage:          opts.GetCertImage,
+			CDSURL:                opts.CDSURL,
+			AttestationApiURL:     opts.AttestationApiURL,
+			CertFSGroup:           int64Ptr(opts.CertFSGroup),
+			CertKeyMode:           opts.CertKeyMode,
+			CertRenewInterval:     opts.CertRenewInterval,
+			GetCertRunAsUser:      int64Ptr(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:     int64Ptr(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:   boolPtr(opts.GetCertRunAsNonRoot),
+			KataEnforce:           opts.KataEnforce,
+			HardwarePlatform:      opts.HardwarePlatform,
+			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

@@ -63,6 +63,7 @@ func run(cfg config) error {
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
 		return fmt.Errorf("allowlist writes are disabled: set --operator-keys")
 	}
+	var operatorKeys []*ecdsa.PublicKey
 	var operatorKeysPEM []byte
 	var operatorKeysHash string
 	if cfg.operatorKeys != "" {
@@ -74,6 +75,7 @@ func run(cfg config) error {
 		if err != nil {
 			return fmt.Errorf("hash --operator-keys %q: %w", cfg.operatorKeys, err)
 		}
+		operatorKeys = keys
 		operatorKeysPEM = pemBytes
 		writeAuthorizer = operatorauth.Verifier{
 			Keys:      keys,
@@ -164,8 +166,10 @@ func run(cfg config) error {
 	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
+	seedDigest := ratls.UnsetDigest()
 	if cfg.allowlistSeed != "" {
-		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
+		var err error
+		if seedDigest, err = seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
 			return fmt.Errorf("seed allowlist: %w", err)
 		}
 	}
@@ -197,6 +201,22 @@ func run(cfg config) error {
 		OperatorKeysHash:  attestKeyOperatorPolicy,
 	}
 
+	// Config claims (docs/ratls.md): digests of the loaded
+	// operator-key set (empty set included, so "writes disabled" is
+	// attestable) and of the applied allowlist seed. Bound into the RA-TLS
+	// serving-cert evidence — verifiers pin them via `c8s cds verify`. The
+	// /handoff path commits the operator-key set separately via its
+	// REPORTDATA-bound hash (operatorKeysHash).
+	opKeysDigest, err := operatorauth.KeySetDigest(operatorKeys)
+	if err != nil {
+		return fmt.Errorf("digest operator keys: %w", err)
+	}
+	configClaims := &ratls.ConfigClaims{
+		OperatorKeysDigest: opKeysDigest,
+		SeedDigest:         seedDigest,
+		WorkloadDigest:     ratls.UnsetDigest(),
+	}
+
 	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
 	if err != nil {
 		return err
@@ -213,6 +233,7 @@ func run(cfg config) error {
 			Measurements:      measurements,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
+			AllowlistStore:    &allowlistStore,
 		},
 		SignCSRHandler: SignCSRHandler{
 			CA:             mesh,
@@ -254,10 +275,11 @@ func run(cfg config) error {
 	if cfg.ratlsPlatform != "" {
 		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
 		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
-			Platform:   cfg.ratlsPlatform,
-			AttestFunc: attestFunc,
-			CertTTL:    cfg.ratlsCertTTL,
-			Logger:     slog.Default(),
+			Platform:     cfg.ratlsPlatform,
+			AttestFunc:   attestFunc,
+			CertTTL:      cfg.ratlsCertTTL,
+			ConfigClaims: configClaims,
+			Logger:       slog.Default(),
 		})
 		if err != nil {
 			return fmt.Errorf("ratls server config: %w", err)

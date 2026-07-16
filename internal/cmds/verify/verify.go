@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +19,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -80,14 +84,19 @@ type config struct {
 	fromFile      string
 	discoveryPath string
 
-	measurements     []string
-	measurementsFile string
-	allowDebug       bool
-	minTCBBootloader uint
-	minTCBTEE        uint
-	minTCBSNP        uint
-	minTCBMicrocode  uint
-	expectedRDHex    string
+	measurements        []string
+	measurementsFile    string
+	operatorKeys        string
+	allowlistSeed       string
+	allowlistSeedDigest string
+	workloadImages      []string
+	workloadInitImages  []string
+	allowDebug          bool
+	minTCBBootloader    uint
+	minTCBTEE           uint
+	minTCBSNP           uint
+	minTCBMicrocode     uint
+	expectedRDHex       string
 
 	output       string
 	showEvidence bool
@@ -160,6 +169,11 @@ unavailable (unreachable / unparseable).`,
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE)")
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
+	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the target's attested config-claims digest matches this set (kind=cds targets)")
+	f.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "expected allowlist seed JSON file; verification fails unless the target's attested seed digest matches its canonical digest (kind=cds targets)")
+	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
+	f.StringSliceVar(&cfg.workloadImages, "workload-image", nil, "expected main container image digest(s) (sha256:...; repeatable/comma-separated); with --workload-init-image, verification fails unless the target leaf's attested workload digest matches these role sets (docs/ratls.md)")
+	f.StringSliceVar(&cfg.workloadInitImages, "workload-init-image", nil, "expected init container image digest(s) (sha256:...; repeatable/comma-separated); pairs with --workload-image")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component")
 	f.UintVar(&cfg.minTCBTEE, "min-tcb-tee", 0, "minimum TEE TCB component")
@@ -215,11 +229,13 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	return verifyEvidence(ctx, cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
 }
 
-// operatorKeysReport is the (informational) pinned-operator-key section of the
-// verdict. Keys authorize allowlist writes on CDS; they are CDS-reported config,
-// not covered by the launch measurement.
+// operatorKeysReport is the pinned-operator-key section of the verdict. Keys
+// authorize allowlist writes on CDS. The served list is informational on its
+// own; when the target's evidence binds config-claims, applyClaimsPolicy
+// requires digest to match the attested value.
 type operatorKeysReport struct {
 	fingerprints []string
+	digest       []byte // KeySetDigest of the served list (nil when not fetched)
 	note         string // non-empty when keys are absent/unavailable, explains why
 }
 
@@ -238,11 +254,11 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 	if err != nil {
 		return operatorKeysReport{note: "not fetched: " + err.Error()}
 	}
-	fps, note, err := fetchOperatorKeyFingerprints(ctx, baseURL, cfg.server, ev.certSHA256, cfg.timeout)
+	fps, digest, note, err := fetchOperatorKeyFingerprints(ctx, baseURL, cfg.server, ev.certSHA256, cfg.timeout)
 	if err != nil {
 		return operatorKeysReport{note: "not fetched: " + err.Error()}
 	}
-	return operatorKeysReport{fingerprints: fps, note: note}
+	return operatorKeysReport{fingerprints: fps, digest: digest, note: note}
 }
 
 // verifyEvidence verifies already-gathered evidence (from any source/mode)
@@ -266,6 +282,7 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 	oc := newOutcome(cfg, ev, result, verr, policy)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
+	applyClaimsPolicy(&oc, ev, policy, opKeys)
 	render(cfg, oc, out)
 	if !oc.Verified {
 		return exitFailed
@@ -304,10 +321,68 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		return nil, err
 	}
 
+	var opKeysDigest []byte
+	if cfg.operatorKeys != "" {
+		pemBytes, err := os.ReadFile(cfg.operatorKeys)
+		if err != nil {
+			return nil, fmt.Errorf("read --operator-keys: %w", err)
+		}
+		keys, err := operatorauth.ParsePublicKeysPEM(pemBytes)
+		if err != nil {
+			return nil, fmt.Errorf("--operator-keys: %w", err)
+		}
+		if opKeysDigest, err = operatorauth.KeySetDigest(keys); err != nil {
+			return nil, err
+		}
+	}
+
+	seedDigest, err := expectedSeedDigest(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	var workloadDigest []byte
+	if len(cfg.workloadInitImages) > 0 || len(cfg.workloadImages) > 0 {
+		if workloadDigest, err = workloadclaims.Digest(cfg.workloadInitImages, cfg.workloadImages); err != nil {
+			return nil, fmt.Errorf("--workload-image/--workload-init-image: %w", err)
+		}
+	}
+
 	return &ratls.VerifyPolicy{
-		Measurements: measurements,
-		AllowDebug:   cfg.allowDebug,
+		Measurements:       measurements,
+		AllowDebug:         cfg.allowDebug,
+		OperatorKeysDigest: opKeysDigest,
+		SeedDigest:         seedDigest,
+		WorkloadDigest:     workloadDigest,
 	}, nil
+}
+
+// expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON
+// file, digested canonically) or --allowlist-seed-digest (the hex digest
+// directly). Nil means no seed pin.
+func expectedSeedDigest(cfg config) ([]byte, error) {
+	switch {
+	case cfg.allowlistSeed != "" && cfg.allowlistSeedDigest != "":
+		return nil, fmt.Errorf("--allowlist-seed and --allowlist-seed-digest are mutually exclusive")
+	case cfg.allowlistSeed != "":
+		data, err := os.ReadFile(cfg.allowlistSeed)
+		if err != nil {
+			return nil, fmt.Errorf("read --allowlist-seed: %w", err)
+		}
+		seed, err := pkgallowlist.ParseJSON(data)
+		if err != nil {
+			return nil, fmt.Errorf("--allowlist-seed: %w", err)
+		}
+		return seed.CanonicalDigest()
+	case cfg.allowlistSeedDigest != "":
+		digest, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(cfg.allowlistSeedDigest), "sha256:"))
+		if err != nil || len(digest) != ratls.ClaimsDigestSize {
+			return nil, fmt.Errorf("--allowlist-seed-digest must be %d hex bytes", ratls.ClaimsDigestSize)
+		}
+		return digest, nil
+	default:
+		return nil, nil
+	}
 }
 
 func gatherEvidence(ctx context.Context, cfg config, overrideERD []byte) (*evidence, error) {
@@ -422,10 +497,64 @@ type Outcome struct {
 	Error       string    `json:"error,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
-	// operator public keys the target pins for allowlist writes. Informational:
-	// CDS-reported config, not covered by the launch measurement. kind=cds only.
-	OperatorKeys     []string `json:"operator_keys,omitempty"`
-	OperatorKeysNote string   `json:"operator_keys_note,omitempty"`
+	// operator public keys the target pins for allowlist writes (served list,
+	// kind=cds only). The *AttestedDigest fields carry the digests bound in
+	// the evidence's config-claims (docs/ratls.md); when set, the
+	// served key list was required to match, and --operator-keys /
+	// --allowlist-seed pin against them.
+	OperatorKeys               []string `json:"operator_keys,omitempty"`
+	OperatorKeysNote           string   `json:"operator_keys_note,omitempty"`
+	OperatorKeysAttestedDigest string   `json:"operator_keys_attested_digest,omitempty"`
+	SeedAttestedDigest         string   `json:"allowlist_seed_attested_digest,omitempty"`
+	WorkloadAttestedDigest     string   `json:"workload_attested_digest,omitempty"`
+}
+
+// applyClaimsPolicy surfaces the attested config-claims digests and fails the
+// verdict when a --operator-keys / --allowlist-seed pin or the
+// served-vs-attested key check does not hold. It only ever demotes Verified —
+// the claims are proven by the evidence newOutcome already judged, so nothing
+// here can rescue a failed verification (docs/ratls.md).
+func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, opKeys operatorKeysReport) {
+	if ev.configClaims != nil {
+		oc.OperatorKeysAttestedDigest = hex.EncodeToString(ev.configClaims.OperatorKeysDigest)
+		if ev.configClaims.HasSeed() {
+			oc.SeedAttestedDigest = hex.EncodeToString(ev.configClaims.SeedDigest)
+		} else {
+			oc.SeedAttestedDigest = "none (no seed configured)"
+		}
+		if ev.configClaims.HasWorkload() {
+			oc.WorkloadAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadDigest)
+		}
+	}
+	fail := func(format string, args ...any) {
+		oc.Verified = false
+		if oc.Error == "" {
+			oc.Error = fmt.Sprintf(format, args...)
+		}
+	}
+	if ev.claimsErr != nil {
+		fail("config-claims extension unparseable (newer target than this CLI?): %v", ev.claimsErr)
+		return
+	}
+	pinned := len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0
+	if pinned && ev.configClaims == nil {
+		fail("config-claims pin set but the evidence binds no config-claims (target predates config attestation, or is not a CDS serving cert)")
+		return
+	}
+	if len(policy.OperatorKeysDigest) > 0 && !bytes.Equal(ev.configClaims.OperatorKeysDigest, policy.OperatorKeysDigest) {
+		fail("attested operator-keys digest %x does not match the --operator-keys set (%x)", ev.configClaims.OperatorKeysDigest, policy.OperatorKeysDigest)
+	}
+	if len(policy.SeedDigest) > 0 && !bytes.Equal(ev.configClaims.SeedDigest, policy.SeedDigest) {
+		fail("attested allowlist-seed digest %x does not match the expected seed (%x)", ev.configClaims.SeedDigest, policy.SeedDigest)
+	}
+	if len(policy.WorkloadDigest) > 0 && !bytes.Equal(ev.configClaims.WorkloadDigest, policy.WorkloadDigest) {
+		fail("attested workload digest %x does not match the --workload-image set (%x)", ev.configClaims.WorkloadDigest, policy.WorkloadDigest)
+	}
+	// The served key list must be the set the measured code attested to
+	// loading; a mismatch means MITM on the fetch or a CDS bug.
+	if ev.configClaims != nil && len(opKeys.digest) > 0 && !bytes.Equal(opKeys.digest, ev.configClaims.OperatorKeysDigest) {
+		fail("served /operator-keys digest %x does not match the attested config-claims digest %x", opKeys.digest, ev.configClaims.OperatorKeysDigest)
+	}
 }
 
 // newOutcome maps a verifier verdict to the shared Outcome. The verifier proves
@@ -538,8 +667,21 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  cert sha256:  %s\n", oc.CertSHA256)
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
+	if oc.OperatorKeysAttestedDigest != "" {
+		fmt.Fprintf(out, "  operator-keys digest (attested via config-claims): sha256:%s\n", oc.OperatorKeysAttestedDigest)
+	}
+	if oc.SeedAttestedDigest != "" {
+		fmt.Fprintf(out, "  allowlist-seed digest (attested via config-claims): %s\n", oc.SeedAttestedDigest)
+	}
+	if oc.WorkloadAttestedDigest != "" {
+		fmt.Fprintf(out, "  workload digest (attested via config-claims): sha256:%s\n", oc.WorkloadAttestedDigest)
+	}
 	if len(oc.OperatorKeys) > 0 {
-		fmt.Fprintf(out, "  operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):\n")
+		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"
+		if oc.OperatorKeysAttestedDigest != "" {
+			label = "operator keys (allowlist writes; served list matches the attested digest):"
+		}
+		fmt.Fprintf(out, "  %s\n", label)
 		for _, fp := range oc.OperatorKeys {
 			fmt.Fprintf(out, "    sha256:%s\n", fp)
 		}

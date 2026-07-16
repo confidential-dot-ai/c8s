@@ -1,10 +1,13 @@
 package getcert
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -18,7 +21,9 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // plaintextCDSClient builds an attestclient over the default transport for
@@ -315,6 +320,34 @@ func TestCreateCSR(t *testing.T) {
 			t.Fatalf("not a CSR PEM: %q", csrPEM)
 		}
 	})
+
+	// The workload-claims flow embeds an RA-TLS attestation extension into the
+	// CSR so CDS copies it onto the leaf (docs/ratls.md). Confirm an extra
+	// extension survives into the request.
+	t.Run("carries extra extension", func(t *testing.T) {
+		want := []byte{0x30, 0x03, 0x02, 0x01, 0x2A}
+		csrPEM, err := createCSR(key, "host.example.com", pkix.Extension{Id: ratls.OIDRATLSAttestation, Value: want})
+		if err != nil {
+			t.Fatalf("createCSR: %v", err)
+		}
+		block, _ := pem.Decode(csrPEM)
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		if err != nil {
+			t.Fatalf("parse csr: %v", err)
+		}
+		found := false
+		for _, ext := range csr.Extensions {
+			if ext.Id.Equal(ratls.OIDRATLSAttestation) {
+				found = true
+				if !bytes.Equal(ext.Value, want) {
+					t.Fatalf("extension value = %x, want %x", ext.Value, want)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("RA-TLS extension not carried into the CSR")
+		}
+	})
 }
 
 func TestSnapshotReloadWatchPathsErrors(t *testing.T) {
@@ -336,6 +369,30 @@ func TestSnapshotReloadWatchPathsErrors(t *testing.T) {
 func TestReloadWatchChangedPropagatesError(t *testing.T) {
 	if _, _, err := reloadWatchChanged(nil, []string{filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Fatal("reloadWatchChanged succeeded, want error for missing file")
+	}
+}
+
+// The broker endpoint get-cert dials is a compiled Unix socket path, not a
+// control-plane-supplied value, so the fetch can't be redirected.
+func TestBrokerEndpointIsCompiledUnixPath(t *testing.T) {
+	got := workloadclaims.BrokerEndpoint()
+	if !strings.HasPrefix(got, "unix://") {
+		t.Fatalf("broker endpoint %q is not a unix socket", got)
+	}
+	if !strings.HasSuffix(got, "/"+workloadclaims.SocketName) {
+		t.Fatalf("broker endpoint %q does not end in the compiled socket name %q", got, workloadclaims.SocketName)
+	}
+}
+
+// Without --workload-claims-broker, workloadClaims is a no-op: it returns the
+// empty (claims-free) result without contacting any broker.
+func TestWorkloadClaimsWithoutFlagIsClaimFree(t *testing.T) {
+	res, err := workloadClaims(context.Background(), config{WorkloadClaimsBroker: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil {
+		t.Fatalf("no --workload-claims-broker but a claim was produced: %+v", res)
 	}
 }
 

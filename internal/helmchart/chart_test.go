@@ -3135,6 +3135,25 @@ func TestChartKataRendersPolicyAndOperatorFlag(t *testing.T) {
 	}
 }
 
+// On node-CVM the operator gets the host-dir mount source, from which the
+// webhook derives the get-cert workload-claims injection.
+func TestChartWorkloadClaimsOperatorFlags(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedOperatorArgs(t, out)
+	var hasHostDir bool
+	for _, a := range args {
+		if strings.HasPrefix(a, "--workload-claims-host-dir=") {
+			hasHostDir = true
+		}
+	}
+	if !hasHostDir {
+		t.Fatalf("operator missing workload-claims-host-dir flag: %v", args)
+	}
+}
+
 // pcie_root_port=0 disables VFIO cold-plug: a GPU pod would boot as a
 // confidential VM with no device and the only symptom is a missing
 // /dev/nvidia* in-guest. The chart must refuse the render instead of

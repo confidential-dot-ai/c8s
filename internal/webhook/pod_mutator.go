@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -178,6 +179,14 @@ type Config struct {
 	// --hardware-platform flag, which the chart derives from the same values
 	// that pick the RuntimeClasses it renders.
 	HardwarePlatform string
+
+	// WorkloadClaimsHostDir, when set (node-CVM), is the host directory holding
+	// the nri-image-policy broker socket. The webhook mounts it read-only at
+	// workloadclaims.SidecarSocketDir in the c8s-cert sidecar and injects
+	// --workload-claims-broker so get-cert binds a workload-digest claim from
+	// that socket (docs/ratls.md). Empty ⇒ no workload claims (the kata guest
+	// path is not yet wired).
+	WorkloadClaimsHostDir string
 }
 
 // Register wires the pod mutator onto the manager's webhook server.
@@ -209,6 +218,10 @@ type injection struct {
 	Discovery discoverySpec
 	Security  getCertSecuritySpec
 	Verbose   bool
+	// InitContainerNames are the pod's own init-container names (before c8s
+	// injection). get-cert uses them to split the broker's containers into the
+	// init vs main image sets for the workload digest (docs/ratls.md).
+	InitContainerNames []string
 }
 
 type certSpec struct {
@@ -714,10 +727,23 @@ func kataIncompatible(pod *corev1.Pod) bool {
 func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	cfg = cfg.withDefaults()
 	effective := inj.withDefaults(cfg)
+	// Capture the pod's own init-container names before c8s prepends its own,
+	// so get-cert can classify the broker's containers by role.
+	for _, c := range pod.Spec.InitContainers {
+		effective.InitContainerNames = append(effective.InitContainerNames, c.Name)
+	}
 	if *cfg.CertFSGroup >= 0 {
 		ensureFSGroup(pod, *cfg.CertFSGroup)
 	}
 	ensureVolume(pod, certsVolume(effective.Cert.Volume))
+	if vol, ok := workloadClaimsVolume(cfg); ok {
+		ensureVolume(pod, vol)
+		// The broker socket is group-owned by BrokerSocketGID and the non-root
+		// get-cert sidecar connects to it; without this supplemental group the
+		// connect fails closed and the pod hangs on its initial cert
+		// (docs/pitfalls.md).
+		ensureSupplementalGroup(pod, workloadclaims.BrokerSocketGID)
+	}
 
 	mountAll(pod, corev1.VolumeMount{
 		Name:      effective.Cert.Volume,
@@ -776,6 +802,15 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
+	// node-CVM: get-cert fetches from the nri-image-policy broker over its
+	// compiled socket path (mounted below). The pod's init-container names
+	// travel so get-cert can split the digest by role.
+	if cfg.WorkloadClaimsHostDir != "" {
+		args = append(args, "--workload-claims-broker")
+		for _, name := range inj.InitContainerNames {
+			args = append(args, "--workload-init-container="+name)
+		}
+	}
 	if inj.Verbose {
 		args = append(args, "--verbose")
 	}
@@ -788,7 +823,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		RestartPolicy:   &always,
 		Args:            args,
 		Env:             getCertEnv(inj),
-		VolumeMounts:    getCertVolumeMounts(inj, true),
+		VolumeMounts:    append(getCertVolumeMounts(inj, true), workloadClaimsMounts(cfg)...),
 		SecurityContext: getCertSecurityContext(inj),
 		// The workload is gated on the initial cert by the c8s-cert-wait
 		// init container (certWaitContainer), not a startupProbe here: a
@@ -988,6 +1023,40 @@ func certsVolume(name string) corev1.Volume {
 	}
 }
 
+// workloadClaimsVolumeName is the injected volume that mounts the node-CVM
+// broker socket directory into the c8s-cert sidecar.
+const workloadClaimsVolumeName = "c8s-workload-claims"
+
+// workloadClaimsVolume returns a read-only hostPath volume over the broker
+// socket's host directory, for node-CVM only (WorkloadClaimsHostDir set). Under
+// kata the guest bind-mounts the broker socket itself, so the webhook injects
+// no volume.
+func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
+	if cfg.WorkloadClaimsHostDir == "" {
+		return corev1.Volume{}, false
+	}
+	hpType := corev1.HostPathDirectory
+	return corev1.Volume{
+		Name: workloadClaimsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: cfg.WorkloadClaimsHostDir, Type: &hpType},
+		},
+	}, true
+}
+
+// workloadClaimsMounts returns the sidecar mount for the broker socket
+// directory (node-CVM only), read-only.
+func workloadClaimsMounts(cfg Config) []corev1.VolumeMount {
+	if cfg.WorkloadClaimsHostDir == "" {
+		return nil
+	}
+	return []corev1.VolumeMount{{
+		Name:      workloadClaimsVolumeName,
+		MountPath: workloadclaims.SidecarSocketDir,
+		ReadOnly:  true,
+	}}
+}
+
 func ensureVolume(pod *corev1.Pod, v corev1.Volume) {
 	for _, existing := range pod.Spec.Volumes {
 		if existing.Name == v.Name {
@@ -1004,6 +1073,22 @@ func ensureFSGroup(pod *corev1.Pod, fsGroup int64) {
 	if pod.Spec.SecurityContext.FSGroup == nil {
 		pod.Spec.SecurityContext.FSGroup = &fsGroup
 	}
+}
+
+// ensureSupplementalGroup adds gid to the pod's supplemental groups (idempotent)
+// so the non-root get-cert sidecar can reach the group-owned broker socket. It
+// is pod-level (the only place SupplementalGroups exists); the socket is mounted
+// only into the sidecar, so the group is harmless to the app containers.
+func ensureSupplementalGroup(pod *corev1.Pod, gid int64) {
+	if pod.Spec.SecurityContext == nil {
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	for _, g := range pod.Spec.SecurityContext.SupplementalGroups {
+		if g == gid {
+			return
+		}
+	}
+	pod.Spec.SecurityContext.SupplementalGroups = append(pod.Spec.SecurityContext.SupplementalGroups, gid)
 }
 
 // injectInitContainers prepends the c8s-managed init containers, in the given
