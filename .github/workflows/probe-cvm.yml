@@ -1,0 +1,64 @@
+# Probe a platform/flavor cell of the primitive with a trivial in-guest payload.
+# Use this BEFORE investing in a new consumer/flavor: it settles, for ~one CVM
+# boot, what the guest actually provides — autologin console (the delivery
+# path), glibc version, TEE devices, TLS libs, egress, tooling.
+#
+# First target (2026-07-15): snp-metal/base-cpu — the attestation-rs lane needs
+# to know: does the base-cpu image autologin on ttyS0? glibc >= 2.35 (nextest
+# archives built on ubuntu-22.04)? libtss2*.so present (--features attest test
+# binaries link it)? egress (pulls the test archive from ghcr)?
+name: probe-cvm
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'target cell'
+        required: false
+        default: snp-metal
+      flavor:
+        description: 'rke2-node | base-cpu'
+        required: false
+        default: base-cpu
+      runner:
+        description: 'runs-on label serving that platform'
+        required: false
+        default: cvm-launcher
+
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    outputs:
+      b64: ${{ steps.p.outputs.b64 }}
+    steps:
+      - id: p
+        run: |
+          set -euo pipefail
+          cat > p.sh <<'EOF'
+          say PROBE_START
+          echo "@@UNAME $(uname -r) $(uname -m)@@"
+          echo "@@GLIBC $(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || echo unknown)@@"
+          echo "@@VIRT $(systemd-detect-virt 2>/dev/null || echo unknown)@@"
+          [ -e /dev/sev-guest ] && say SEV_GUEST_PRESENT || say SEV_GUEST_ABSENT
+          [ -d /sys/kernel/config/tsm ] && say CONFIGFS_TSM_PRESENT || say CONFIGFS_TSM_ABSENT
+          ls /usr/lib/x86_64-linux-gnu/libtss2*.so* >/dev/null 2>&1 && say TSS2_PRESENT || say TSS2_ABSENT
+          for t in python3 curl wget tar zstd xz; do
+            command -v "$t" >/dev/null 2>&1 && echo "@@TOOL ${t} present@@" || echo "@@TOOL ${t} ABSENT@@"
+          done
+          (curl -fsSL -m 10 https://api.github.com/zen >/dev/null 2>&1 || wget -qO- -T 10 https://api.github.com/zen >/dev/null 2>&1) \
+            && say EGRESS_OK || say EGRESS_FAIL
+          (curl -fsSL -m 10 https://ghcr.io/v2/ -o /dev/null -w '' 2>/dev/null; [ $? -le 22 ]) && say GHCR_REACHABLE || say GHCR_UNREACHABLE
+          echo "@@DF $(df -h / | tail -1 | tr -s ' ')@@"
+          echo "@@MEM $(grep MemTotal /proc/meminfo | tr -s ' ')@@"
+          echo "@@PAYLOAD_OK@@"
+          EOF
+          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+
+  probe:
+    needs: payload
+    uses: ./.github/workflows/cvm-e2e.yml
+    with:
+      platform: ${{ inputs.platform }}
+      runner: ${{ inputs.runner }}
+      flavor: ${{ inputs.flavor }}
+      payload_b64: ${{ needs.payload.outputs.b64 }}
+      timeout_minutes: 25

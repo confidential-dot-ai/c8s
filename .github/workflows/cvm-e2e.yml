@@ -70,10 +70,15 @@ jobs:
       - name: platform config
         run: |
           set -euo pipefail
-          case '${{ inputs.platform }}' in
-            snp-metal) echo "REFS_CM=rke2-image-refs"; echo "CORES=4"; echo "MEMORY=16Gi";
-                       echo "NODE_LABEL=confidential.ai/sev-snp" ;;
-            *) echo "::error::platform '${{ inputs.platform }}' not wired yet (tdx-metal/gke-* are stubs)"; exit 1 ;;
+          # keyed on platform/flavor: the flavor picks the image (refs CM), the
+          # platform picks the hardware cell. base-cpu = plain attested VM
+          # (attestation-api :8400, /dev/sev-guest, NO toolchain — verity rootfs).
+          case '${{ inputs.platform }}/${{ inputs.flavor }}' in
+            snp-metal/rke2-node) echo "REFS_CM=rke2-image-refs"; echo "CORES=4"; echo "MEMORY=16Gi";
+                                 echo "NODE_LABEL=confidential.ai/sev-snp" ;;
+            snp-metal/base-cpu)  echo "REFS_CM=base-image-refs"; echo "CORES=4"; echo "MEMORY=8Gi";
+                                 echo "NODE_LABEL=confidential.ai/sev-snp" ;;
+            *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired yet (tdx-metal/gke-* are stubs)"; exit 1 ;;
           esac >> "$GITHUB_ENV"
 
       - name: tools (kubectl + virtctl pinned to host KubeVirt + expect)
@@ -89,13 +94,19 @@ jobs:
       - name: resolve producer image refs
         run: |
           set -euo pipefail
-          for k in rootPvc igvmFile; do
-            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}")
-            [ -n "$v" ] || { echo "::error::$REFS_CM missing $k — run c8s-e2e/cluster-prep/apply.sh"; exit 1; }
-          done
+          ROOTPVC=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.rootPvc}')
+          [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc — run c8s-e2e/cluster-prep/apply.sh"; exit 1; }
+          # rke2-image-refs pins one file (igvmFile); base-image-refs publishes a
+          # per-core-count pattern (igvmFilePattern: guest-smp{cores}.igvm)
+          IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')
+          if [ -z "$IGVMFILE" ]; then
+            PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
+            [ -n "$PAT" ] || { echo "::error::$REFS_CM has neither igvmFile nor igvmFilePattern"; exit 1; }
+            IGVMFILE=${PAT//\{cores\}/$CORES}
+          fi
           {
-            echo "ROOTPVC=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.rootPvc}')"
-            echo "IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')"
+            echo "ROOTPVC=$ROOTPVC"
+            echo "IGVMFILE=$IGVMFILE"
           } >> "$GITHUB_ENV"
 
       # reap-before-provision: a killed run leaks its CVM + its rootdisk clone.
