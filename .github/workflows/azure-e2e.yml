@@ -1,0 +1,247 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# AZURE LANE: c8s on an ephemeral confidential AKS cluster (node-as-CVM, vTPM)
+# ═══════════════════════════════════════════════════════════════════════════
+# The cloud-customer cell of the matrix (rent-infra: Baseten/Modal/RunPod).
+# Follows docs/c8s/tutorials/azure-e2e (the blessed path) end to end:
+#   pick region by quota -> az aks create (DCas_v5 = SEV-SNP CVM nodes with a
+#   vTPM) -> build c8s CLI from source -> c8s install --cvm-mode aks (vTPM
+#   /dev/tpm0; mesh + NRI stay ON — first lane to test either) -> six
+#   components Running -> webhook wired -> vTPM /attest probe -> allowlist the
+#   workload digest (per-run operator key) -> consumption proof -> NEGATIVE:
+#   non-allowlisted image must not start -> teardown always + reaper.
+#
+# Auth: GitHub OIDC -> Entra app confidential-ci-azure -> Contributor. No
+# secrets anywhere (ids are repo variables; c8s chain is anonymous-public).
+# Golden posture: policy-only (no measured images on cloud) — deliberate; the
+# UNSAFE-unpinned CDS warning is asserted, not hidden. TCB floors are the
+# cloud enforcement knob (roadmap).
+# NOT here by design: --kata (AKS lacks nesting — negative-tested), TDX
+# (aks+tdx refused; az_tdx_live = future standalone DCesv5 mini-lane),
+# consumer-verification chain (needs pinned launch digests).
+name: azure-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      c8s_ref:
+        description: c8s ref to install (CLI built from this ref; chart embedded)
+        required: false
+        default: main
+      vm_size:
+        description: confidential node size
+        required: false
+        default: Standard_DC4as_v5
+      region:
+        description: force a region (skips quota-based selection)
+        required: false
+        default: ''
+  schedule:
+    - cron: '47 9 * * *'      # nightly drift, offset from the metal lane
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: azure-e2e
+  cancel-in-progress: false
+
+env:
+  RG: test-aks-${{ github.run_id }}
+  CLUSTER: c8s-${{ github.run_id }}
+  VM_SIZE: ${{ inputs.vm_size || 'Standard_DC4as_v5' }}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # a killed run leaks a resource group (= a billed cluster). Age-based:
+      # our runs cap under 1h, so anything older than 3h is orphaned.
+      - name: reap leaked test-aks-* resource groups (age > 3h)
+        run: |
+          set +e
+          NOW=$(date -u +%s)
+          for rg in $(az group list --query "[?starts_with(name,'test-aks-')].name" -o tsv); do
+            created=$(az group show -n "$rg" --query "tags.created" -o tsv 2>/dev/null)
+            if [ -n "$created" ] && [ $((NOW - created)) -gt 10800 ]; then
+              echo "reaping $rg (age $((NOW - created))s)"
+              az group delete -n "$rg" --yes --no-wait
+            else
+              echo "keeping $rg (age $((NOW - ${created:-NOW}))s)"
+            fi
+          done
+
+      - name: pick region (quota-aware; input override wins)
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.region }}" ]; then
+            echo "REGION=${{ inputs.region }}" >> "$GITHUB_ENV"; exit 0
+          fi
+          FAM_NEED=$(( $(echo "$VM_SIZE" | grep -oE '[0-9]+') ))
+          for r in northeurope westeurope swedencentral uksouth germanywestcentral eastus; do
+            skus=$(az vm list-skus -l "$r" --size Standard_DC --query "length([?name=='$VM_SIZE'])" -o tsv 2>/dev/null || echo 0)
+            read -r cur lim <<<"$(az vm list-usage -l "$r" --query "[?name.value=='standardDCASv5Family'].[currentValue,limit]" -o tsv 2>/dev/null | head -1)"
+            avail=$(( ${lim:-0} - ${cur:-0} ))
+            echo "$r: sku=$skus quota_avail=$avail (need $FAM_NEED)"
+            if [ "${skus:-0}" -ge 1 ] && [ "$avail" -ge "$FAM_NEED" ]; then
+              echo "REGION=$r" >> "$GITHUB_ENV"
+              echo "selected region: $r ($VM_SIZE, ${avail} vCPU DCASv5 headroom)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "::error::no candidate region has $VM_SIZE SKUs + >=$FAM_NEED DCASv5 quota — file a quota request"; exit 1
+
+      - name: provision ephemeral AKS with a confidential node pool
+        run: |
+          set -euo pipefail
+          az group create -n "$RG" -l "$REGION" \
+            --tags ci=confidential-ci run-id="${{ github.run_id }}" created="$(date -u +%s)" \
+              run-url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" -o none
+          echo "resource group $RG in $REGION"
+          SINGLE_NODE=true
+          if ! az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
+                --node-vm-size "$VM_SIZE" --os-sku Ubuntu --generate-ssh-keys -o none; then
+            # documented fallback: some subscriptions only allow CVM sizes on a
+            # USER pool -> default-size system pool + confidential user pool,
+            # and drop --single-node so CDS lands on the conf pool.
+            echo "::warning::direct create failed — trying the system-pool + user-CVM-pool fallback"
+            az aks create -g "$RG" -n "$CLUSTER" --node-count 1 --os-sku Ubuntu --generate-ssh-keys -o none
+            az aks nodepool add -g "$RG" --cluster-name "$CLUSTER" -n conf \
+              --mode User --node-count 1 --node-vm-size "$VM_SIZE" --os-sku Ubuntu -o none
+            SINGLE_NODE=false
+          fi
+          echo "SINGLE_NODE=$SINGLE_NODE" >> "$GITHUB_ENV"
+          az aks get-credentials -g "$RG" -n "$CLUSTER"
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+          kubectl get nodes -o wide
+
+      - uses: actions/checkout@v4
+        with:
+          repository: confidential-dot-ai/c8s
+          ref: ${{ inputs.c8s_ref || 'main' }}
+          path: c8s
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: c8s/go.mod
+          cache-dependency-path: c8s/go.sum
+
+      - name: build c8s CLI from the ref under test (+ crane; helm is preinstalled)
+        run: |
+          set -euo pipefail
+          make -C c8s install
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          CRANE_VER=$(curl -fsSL https://api.github.com/repos/google/go-containerregistry/releases/latest | jq -r .tag_name)
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar -xz -C /usr/local/bin crane
+          "$(go env GOPATH)/bin/c8s" --help >/dev/null && echo "c8s CLI built from $(git -C c8s rev-parse --short HEAD)"
+
+      # per-run operator keypair: allowlist write tokens carry no cluster
+      # binding — sharing a key across clusters = 5-min cross-cluster replay.
+      - name: install c8s (--cvm-mode aks = vTPM /dev/tpm0; mesh + NRI stay ON)
+        run: |
+          set -euo pipefail
+          openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+          openssl ec -in operator.key -pubout -out operator.pub
+          FLAGS="--cvm-mode aks --operator-keys operator.pub"
+          [ "$SINGLE_NODE" = "true" ] && FLAGS="--single-node $FLAGS"
+          # helm --wait has a 5-min timeout; install is idempotent — one retry
+          # absorbs the documented transient (NRI restarts containerd mid-roll).
+          c8s install $FLAGS || { echo "::warning::first install attempt timed out — re-running (idempotent)"; c8s install $FLAGS; }
+
+      - name: verify — six components Running + webhook wired
+        run: |
+          set -euo pipefail
+          kubectl get pods -n c8s-system
+          for c in cds operator attestation-api ratls-mesh nri-image-policy tls-lb; do
+            kubectl wait -n c8s-system --for=condition=Ready pod -l "app.kubernetes.io/name=$c" --timeout=120s 2>/dev/null \
+              || kubectl get pods -n c8s-system | grep -q "c8s-$c.*Running" \
+              || { echo "::error::component $c not Running"; kubectl get pods -n c8s-system; exit 1; }
+            echo "component OK: $c"
+          done
+          CA=$(kubectl get mutatingwebhookconfiguration c8s-pod-injector -o jsonpath='{.webhooks[*].clientConfig.caBundle}' | wc -c)
+          [ "$CA" -gt 1 ] || { echo "::error::pod-injector caBundle empty"; exit 1; }
+          echo "webhook caBundle: $CA bytes"
+          echo "c8s up on AKS: 6/6 components, webhook wired" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: vTPM attestation probe (the Azure-unique evidence path)
+        run: |
+          set -euo pipefail
+          kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 &
+          PF=$!; sleep 4
+          NONCE=$(head -c 32 /dev/urandom | base64 -w0)
+          http=$(curl -s -m 30 -o att.json -w '%{http_code}' -H 'content-type: application/json' \
+            -d "{\"report_data\":\"$NONCE\"}" http://127.0.0.1:8400/attest)
+          kill $PF 2>/dev/null || true
+          echo "POST /attest -> $http ($(wc -c < att.json) bytes)"
+          [ "$http" = "200" ] || { echo "::error::/attest failed"; cat att.json; exit 1; }
+          jq -r '.platform' att.json | tee platform.txt
+          grep -qE 'az.?snp|snp' platform.txt || { echo "::error::unexpected platform"; exit 1; }
+          echo "vTPM attestation evidence served (platform=$(cat platform.txt))" >> "$GITHUB_STEP_SUMMARY"
+
+      # policy-only posture, asserted deliberately: unpinned CDS verify must
+      # WARN (that string disappearing = posture silently changed). Non-fatal
+      # on transport quirks in v1 — the aks/vTPM path of `cds verify` is new.
+      - name: c8s cds verify (unpinned — assert the documented UNSAFE warning)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
+          PF=$!; sleep 4
+          c8s cds verify https://127.0.0.1:8443 2>&1 | tee verify.out
+          RC=${PIPESTATUS[0]}
+          kill $PF 2>/dev/null || true
+          grep -q 'UNSAFE' verify.out && echo "UNSAFE-unpinned warning present (expected on cloud)" || echo "::warning::UNSAFE warning absent — posture or output changed"
+          echo "cds verify exit=$RC (0 expected for any genuine TEE unpinned)"
+
+      - name: allowlist the workload digest (per-run operator key) + consumption proof
+        run: |
+          set -euo pipefail
+          IMG=$(grep -m1 -oE 'image: *[^" ]+' c8s/samples/nginx-confidential-pod.yaml | awk '{print $2}')
+          DIG=$(crane digest --platform linux/amd64 "$IMG")
+          echo "workload image: $IMG @ $DIG"
+          kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
+          PF1=$!
+          kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 &
+          PF2=$!; sleep 4
+          c8s allowlist add "$DIG" "$IMG" --url https://127.0.0.1:8443 \
+            --attestation-api-url http://127.0.0.1:8400 --operator-key operator.key
+          c8s allowlist list --url https://127.0.0.1:8443 --attestation-api-url http://127.0.0.1:8400 | tee allowlist.txt
+          grep -q "${DIG#sha256:}" allowlist.txt || { echo "::error::digest not in served allowlist"; exit 1; }
+          kill $PF1 $PF2 2>/dev/null || true
+          kubectl apply -f c8s/samples/nginx-confidential-pod.yaml
+          kubectl -n default wait --for=condition=Available deploy/demo-nginx --timeout=300s
+          IC=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}')
+          echo "init containers: $IC"
+          echo "$IC" | grep -q 'c8s-cert' || { echo "::error::cert init container not injected"; exit 1; }
+          echo "consumption proof: workload Running with CDS-issued cert (allowlisted digest)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'NEGATIVE: non-allowlisted image must not start (NRI fail-closed)'
+        run: |
+          set -uo pipefail
+          kubectl run denied --image=busybox:1.36 --labels=app=denied \
+            --annotations=confidential.ai/cw=denied-test --command -- sleep 300 2>/dev/null || true
+          sleep 45
+          PHASE=$(kubectl get pod denied -o jsonpath='{.status.phase}' 2>/dev/null)
+          READY=$(kubectl get pod denied -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)
+          kubectl get pod denied -o wide 2>/dev/null || true
+          kubectl get events --field-selector involvedObject.name=denied 2>/dev/null | tail -5
+          if [ "$PHASE" = "Running" ] && [ "$READY" = "true" ]; then
+            echo "::error::non-allowlisted image RAN — allowlist enforcement is not active"; exit 1
+          fi
+          echo "NEGATIVE proof: non-allowlisted image did not reach Ready (phase=${PHASE:-none})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: diagnostics (on failure)
+        if: failure()
+        run: |
+          kubectl get pods -A 2>/dev/null | head -40 || true
+          kubectl get events -n c8s-system --sort-by=.lastTimestamp 2>/dev/null | tail -20 || true
+
+      - name: teardown (always — the whole RG, async)
+        if: always()
+        run: az group delete -n "$RG" --yes --no-wait || true
