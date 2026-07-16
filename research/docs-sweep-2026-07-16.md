@@ -7,11 +7,21 @@ queued, what contradicts what.
 
 ## Corrections APPLIED to the flagship (commit a066f0d, verifying)
 
-1. **`cds.node.selector: {}` + `tolerations: []`** (was `null`). Helm `null`
-   DELETES the key → chart default (dedicated-CDS selector) can resurface; the
-   `{}`/`[]` shape is the contract `c8s install --single-node` sets
-   (cli-reference). We were green by template accident.
-2. **`nriImagePolicy.enabled: true`, `policy.mode: audit`, `distro: rke2`.**
+1. ~~`cds.node.selector: {}` + `tolerations: []`~~ **REVERTED — the sweep's
+   correction was wrong** (run 29536583462: CDS Pending). On this chart the
+   template's `default` treats `{}` as empty → `role=cds` resurfaces. Helm
+   `null` deletes the key from the MERGED values (chart default included) →
+   renders no selector, which is why the lane was green all along. The
+   cli-reference `{}`/`[]` describes `c8s install --single-node`'s effect,
+   not raw-helm-values semantics. Lesson: verify doc claims against
+   `helm template` before "fixing" a green lane — the render gate now makes
+   that free.
+2. **`nriImagePolicy.enabled: true`, `policy.mode: audit`, `distro: rke2`** —
+   **CONFIRMED: the worker went 1/1 Running on the rke2 guest (run
+   29536583462)**; the netfilter disable-rationale is empirically dead for
+   this component. Chart validation requires cds.image.digest + the NRI
+   installer's own image.digest — both resolved as PLATFORM (linux/amd64)
+   manifest digests (index digests get rejected by the floor that pins them).
    Our disable rationale ("guest kernel lacks netfilter") was WRONG for this
    component — netfilter is ratls-mesh's constraint (L4 proxy); the NRI plugin
    is a containerd hook. Audit mode is the chart-blessed bring-up (logs
