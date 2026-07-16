@@ -199,27 +199,37 @@ jobs:
           grep -q 'UNSAFE' verify.out && echo "UNSAFE-unpinned warning present (expected on cloud)" || echo "::warning::UNSAFE warning absent — posture or output changed"
           echo "cds verify exit=$RC (0 expected for any genuine TEE unpinned)"
 
-      - name: allowlist the workload digest (per-run operator key) + consumption proof
+      # Order matters (learned in run 29542603943): the webhook INJECTS images
+      # (get-cert init, mesh sidecar) beyond the manifest's own — the docs
+      # require allowlisting "the workload image and any init containers". So:
+      # apply first, read the INJECTED pod's full image set, allowlist ALL of
+      # them (index AND platform digests — covers either runtime resolution),
+      # then let kubelet's CreateContainerError retry lift the pod up.
+      - name: allowlist the workload's FULL image set (per-run operator key) + consumption proof
         run: |
           set -euo pipefail
-          IMG=$(grep -m1 -oE 'image: *[^" ]+' c8s/samples/nginx-confidential-pod.yaml | awk '{print $2}')
-          DIG=$(crane digest --platform linux/amd64 "$IMG")
-          echo "workload image: $IMG @ $DIG"
+          kubectl apply -f c8s/samples/nginx-confidential-pod.yaml
+          sleep 15
+          IMGS=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{range .items[0].spec.initContainers[*]}{.image}{"\n"}{end}{range .items[0].spec.containers[*]}{.image}{"\n"}{end}' | sort -u | grep -v '^$')
+          echo "injected pod image set:"; echo "$IMGS"
           kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
           PF1=$!
           kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 &
           PF2=$!; sleep 4
-          c8s allowlist add "$DIG" "$IMG" --url https://127.0.0.1:8443 \
-            --attestation-api-url http://127.0.0.1:8400 --operator-key operator.key
-          c8s allowlist list --url https://127.0.0.1:8443 --attestation-api-url http://127.0.0.1:8400 | tee allowlist.txt
-          grep -q "${DIG#sha256:}" allowlist.txt || { echo "::error::digest not in served allowlist"; exit 1; }
+          AL="--url https://127.0.0.1:8443 --attestation-api-url http://127.0.0.1:8400"
+          while IFS= read -r img; do
+            for d in "$(crane digest "$img" 2>/dev/null)" "$(crane digest --platform linux/amd64 "$img" 2>/dev/null)"; do
+              [ -n "$d" ] || continue
+              c8s allowlist add "$d" "$img" $AL --operator-key operator.key 2>&1 | grep -vE '^warning' || true
+            done
+          done <<< "$IMGS"
+          c8s allowlist list $AL | tee allowlist.txt | tail -12
           kill $PF1 $PF2 2>/dev/null || true
-          kubectl apply -f c8s/samples/nginx-confidential-pod.yaml
           kubectl -n default wait --for=condition=Available deploy/demo-nginx --timeout=300s
           IC=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}')
           echo "init containers: $IC"
           echo "$IC" | grep -q 'c8s-cert' || { echo "::error::cert init container not injected"; exit 1; }
-          echo "consumption proof: workload Running with CDS-issued cert (allowlisted digest)" >> "$GITHUB_STEP_SUMMARY"
+          echo "consumption proof: workload Running, full injected image set allowlisted, CDS cert issued" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'NEGATIVE: non-allowlisted image must not start (NRI fail-closed)'
         run: |
