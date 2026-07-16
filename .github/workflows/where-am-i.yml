@@ -1,0 +1,27 @@
+# Settles one question empirically: is the confidential-bm ARC runner INSIDE a CVM
+# (an SNP guest) or ON the bare-metal SNP host? /dev/sev-guest exists only inside a
+# guest; /dev/sev is the host-side PSP interface used to LAUNCH guests.
+name: where-am-i
+on: { workflow_dispatch: {} }
+jobs:
+  probe:
+    runs-on: confidential-bm
+    timeout-minutes: 5
+    steps:
+      - name: am I in a TEE?
+        run: |
+          set +e
+          echo "=== virt type (bare metal vs vm) ==="
+          systemd-detect-virt 2>/dev/null || echo "(systemd-detect-virt unavailable)"
+          echo "=== /dev/sev* (sev-guest => we ARE a guest; sev => we are the HOST) ==="
+          ls -la /dev/sev* 2>&1
+          echo "=== configfs-tsm (the in-guest attestation report interface) ==="
+          ls -la /sys/kernel/config/tsm/report 2>&1 | head -3
+          echo "=== cpuinfo sev flags ==="
+          grep -o -m1 -E 'sev[_a-z]*' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          echo "=== node/host identity ==="
+          echo "node=$(cat /etc/hostname 2>/dev/null)  kernel=$(uname -r)"
+          echo "=== VERDICT ==="
+          if [ -e /dev/sev-guest ]; then echo "INSIDE a CVM (SNP guest): /dev/sev-guest present"
+          elif [ -e /dev/sev ]; then echo "ON the bare-metal SNP HOST: /dev/sev present, /dev/sev-guest ABSENT"
+          else echo "neither device visible from this pod"; fi
