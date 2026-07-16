@@ -1,0 +1,49 @@
+# OIDC + subscription preflight for the Azure lane. Proves the secretless auth
+# chain (GitHub OIDC -> Entra federated credential `confidential-ci-azure` ->
+# Contributor on the sub) and reads the facts the lane needs: resource-provider
+# registration + confidential-VM (DCASv5) quota per candidate region.
+# No secrets anywhere: client/tenant/sub ids are repo VARIABLES (identifiers).
+name: azure-probe
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write     # the whole point: mint the OIDC token azure/login exchanges
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: whoami + subscription
+        run: |
+          set -euo pipefail
+          az account show --query '{sub:name, subId:id, state:state}' -o json
+          echo "identity works — Contributor grant is live" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: resource providers (aks needs these registered)
+        run: |
+          set -uo pipefail
+          for p in Microsoft.ContainerService Microsoft.Compute Microsoft.Network; do
+            st=$(az provider show -n "$p" --query registrationState -o tsv 2>/dev/null || echo unknown)
+            echo "$p: $st" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: DCASv5 quota per candidate region (decides the lane's region)
+        run: |
+          set -uo pipefail
+          echo "| region | DCASv5 family vCPU quota | DC-size SKUs |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for r in northeurope westeurope swedencentral uksouth germanywestcentral eastus; do
+            q=$(az vm list-usage -l "$r" --query "[?contains(name.value, 'DCASv5')].{c:currentValue,l:limit}" -o tsv 2>/dev/null | head -1 | awk '{print $1"/"$2}')
+            s=$(az vm list-skus -l "$r" --size Standard_DC --query "length([?contains(name,'as_v5')])" -o tsv 2>/dev/null)
+            echo "$r: quota=${q:-n/a} dc-as_v5-skus=${s:-0}"
+            echo "| $r | ${q:-n/a} | ${s:-0} |" >> "$GITHUB_STEP_SUMMARY"
+          done
