@@ -343,6 +343,17 @@ jobs:
           done
           M=$(kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | grep -oE '@@MEAS [0-9a-f]{96}@@' | tail -1 | grep -oE '[0-9a-f]{96}')
           echo "measurement=${M:-}" >> "$GITHUB_OUTPUT"
+          # golden drift check (warn-mode; promote to fail-closed after one clean
+          # image bump). The reference is the RUNTIME measurement captured at
+          # image-bump time into the refs CM — NOT the image manifest's
+          # snp_launch_digest, which is computed under different boot assumptions
+          # and has been wrong twice. Capture/refresh after a bump:
+          #   kubectl -n confai-images patch cm <refs-cm> --type merge \
+          #     -p '{"data":{"runtimeLaunchDigest":"<measurement from a green run>"}}'
+          GOLD=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.runtimeLaunchDigest}' 2>/dev/null)
+          if [ -n "$GOLD" ] && [ -n "$M" ] && [ "${GOLD,,}" != "${M,,}" ]; then
+            echo "::warning title=launch measurement drift::runtime $M != $REFS_CM.runtimeLaunchDigest $GOLD — image bumped without refreshing the golden, or unexpected boot-config change"
+          fi
           if [ -z "$ok" ]; then
             echo "::error::payload did not report PAYLOAD_OK. Driver console output:"
             kubectl -n "$NS" logs "pod/$POD" -c guest-console-log 2>/dev/null | tr -cd '[:print:]\n' | sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | grep -oE '@@.*@@' | tail -60
