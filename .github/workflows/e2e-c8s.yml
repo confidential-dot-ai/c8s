@@ -142,8 +142,10 @@ jobs:
               tag: "$CDSTAG"
               digest: "$CDSDIG"
             node:
-              selector: {}
-              tolerations: []
+              selector: null      # null DELETES the key from the merged values (chart
+              tolerations: null   # default incl.) -> renders NO selector. {} counts as
+                                  # "empty" to the template's `default` -> role=cds
+                                  # resurfaces -> CDS Pending (run 29536583462).
             ratlsPlatform: sev-snp
             measurements: ["RUNTIME_MEASUREMENT"]
           attestationApi:
