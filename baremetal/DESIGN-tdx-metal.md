@@ -38,7 +38,31 @@
 
 ## Known blockers (tracked, not ours to fix here)
 
-- **TDX rke2-node image** — gates the c8s cell only (step 5).
+- **TDX rke2-node image** — gates the c8s cell (step 5), and possibly step 4
+  too (see caveat below). **CONFIRMED IN FLIGHT (2026-07-16, joaosa): "not
+  yet, but I am working on one (it includes a few more things like
+  attestation-api and NRI)".** Asks to relay so it lands CI-drivable:
+  1. **Autologin shell on the serial console** (parity with the SNP rke2
+     image). The primitive's delivery requires it — the SNP base-cpu image is
+     console-dead (probed 2026-07-15: silent after the EFI stub) and therefore
+     unusable for CI payloads. Even better: bake a small in-guest HTTP agent
+     (research/guest-transport.md) and the console dependency disappears for
+     every future image.
+  2. **Publish producer refs** (the base-image-refs/rke2-image-refs CM pattern,
+     confidential-metal#60): rootdisk PVC/OCI ref, TDVF/firmware ref, and the
+     pinned smp/cores — MRTD depends on boot config, so the pin ships with the
+     image.
+  3. **SNP parity question**: if attestation-api + NRI are joining the TDX
+     image, does the SNP rke2 image get the same? Today ratlsMesh +
+     nriImagePolicy are DISABLED in the SNP lane (missing kernel netfilter
+     modules); if the new image generation fixes that, both cells can enable
+     those rows and SNP/TDX coverage stays symmetric.
+- **Step-4 caveat (found after this doc was written):** the "no new image
+  work" claim assumed the imported `tdx-cpu-image` can take console payloads —
+  but its SNP sibling (base-cpu) proved console-dead. FIRST action when this
+  lane starts: `probe-cvm` against the tdx-cpu image. If it's also
+  console-dead, joaosa's rke2 image gates step 4 as well, and the lane's start
+  should align with his image's ETA.
 - `attestation-cli` v0.4.0 lacks `--expected-mrtd/rtmr*` (release pipeline
   wedged) — irrelevant for step 4 (the library tests verify in-process), only
   matters if a lane wants CLI-based golden pinning.
