@@ -35,10 +35,11 @@ type Config struct {
 	TLSServerName string
 	// OutPath is where the kubeconfig is written.
 	OutPath string
-	// InsecureSkipTLSVerify skips server-cert verification on the :8443 dial.
-	// v1 default true: the release is secured by the RTMR[3] attestation gate
-	// (below) + the RKE2-CA signature on the returned cert + the JWT PoP, none
-	// of which the host can forge. RA-TLS pinning of :8443 is a follow-up.
+	// InsecureSkipTLSVerify drops the :8443 dial from RA-TLS verification to a
+	// plain (unverified) TLS dial. Default false: the dial is RA-TLS-verified
+	// against the operator's local attestation-cli, so the host can't MITM the
+	// channel. Set only to bypass RA-TLS for debugging — the release is still
+	// gated by the RTMR[3] attestation check + the RKE2-CA signature + JWT PoP.
 	InsecureSkipTLSVerify bool
 	// Timeout bounds each network step.
 	Timeout time.Duration
@@ -76,12 +77,23 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("build CSR: %w", err)
 	}
 
-	// 3. Exchange the CSR for a signed cert over cred-release.
-	httpClient := &http.Client{
-		Timeout: cfg.Timeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipTLSVerify}, //nolint:gosec // see Config.InsecureSkipTLSVerify
-		},
+	// 3. Exchange the CSR for a signed cert over cred-release. By default the
+	//    :8443 dial is RA-TLS-verified against the operator's local
+	//    attestation-cli (newRATLSClient): the serving cert's embedded quote
+	//    must bind to the cert key AND carry rtmr_3 == H(op_pub), so the host
+	//    can't MITM the channel. --insecure-skip-tls-verify drops that to a
+	//    plain TLS dial (the release is still gated by attestation + the RKE2-CA
+	//    signature + JWT PoP, but the channel itself is unpinned).
+	var httpClient *http.Client
+	if cfg.InsecureSkipTLSVerify {
+		httpClient = &http.Client{
+			Timeout: cfg.Timeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // explicit opt-out via --insecure-skip-tls-verify
+			},
+		}
+	} else {
+		httpClient = newRATLSClient(cfg, pubPEM)
 	}
 	relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel2()
