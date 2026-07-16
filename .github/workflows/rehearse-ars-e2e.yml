@@ -96,6 +96,7 @@ jobs:
           echo "@@DF /tmp: \$(df -h /tmp 2>/dev/null | tail -1 | tr -s ' ')@@"
           [ -e /dev/sev-guest ] && say TEE_CONFIRMED || say TEE_MISSING
           export TMPDIR=/tmp
+          mkdir -p /tmp/x
           /tmp/nx/cargo-nextest nextest run \
             --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
             --extract-to /tmp/x \
