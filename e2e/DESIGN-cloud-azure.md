@@ -1,5 +1,22 @@
 # cloud lane — design (REFRAMED 2026-07-16: Azure-first; GKE demoted, possibly dropped)
 
+> **✅ LANE GREEN (2026-07-16, run 29544550923, 4 iterations).** Every layer
+> asserted: quota-aware region pick (northeurope) → ephemeral AKS (DC4as_v5
+> SEV-SNP pool) → CLI-from-source `c8s install --single-node --cvm-mode aks
+> --operator-keys <per-run>` → 6/6 components with **ratls-mesh + NRI live
+> (first lane to test either)** → vTPM `/attest` 200 (7802B evidence) →
+> `cds verify` verified + UNSAFE-unpinned warning pinned → allowlist CRUD via
+> per-run operator key → consumption proof over the INJECTED image set
+> (get-cert/cert-wait must be allowlisted too — found live) → **NEGATIVE:
+> non-allowlisted image denied at container-create** ("image not in allowlist",
+> NRI fail-closed — first enforcement assertion in the org) → teardown + reaper.
+> Iteration lessons in git log: vm-size digit parse; helm's baked 5-min --wait
+> vs single-node convergence (explicit gate now); webhook-injected images need
+> allowlisting (docs' "and any init containers" is load-bearing).
+> Nightly 09:47 UTC. Follow-ups: az_snp_live nextest pod, TCB floors,
+> DC2as_v5 cost trial.
+
+
 > Status: DESIGN-ONLY. **Maintainer guidance (2026-07-16 call): the cloud cell
 > is TDX + AZURE, not GKE-SNP** — there's little GCP hardware (Ameen). Whether
 > GCP remains a cell at all is an open question. Everything structural below
