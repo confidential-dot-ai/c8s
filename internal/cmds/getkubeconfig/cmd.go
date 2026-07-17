@@ -56,7 +56,6 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")
 	f.StringVar(&cfg.OutPath, "out", "", "output kubeconfig path (required)")
-	f.BoolVar(&cfg.InsecureSkipTLSVerify, "insecure-skip-tls-verify", false, "drop the :8443 RA-TLS channel check (debug only; the release stays gated by the RTMR[3] attestation check + CA signature + JWT PoP)")
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
 	return cmd
 }

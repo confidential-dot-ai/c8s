@@ -3,11 +3,9 @@ package getkubeconfig
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"net/http"
 	"os"
 	"time"
 )
@@ -35,12 +33,6 @@ type Config struct {
 	TLSServerName string
 	// OutPath is where the kubeconfig is written.
 	OutPath string
-	// InsecureSkipTLSVerify drops the :8443 dial from RA-TLS verification to a
-	// plain (unverified) TLS dial. Default false: the dial is RA-TLS-verified
-	// in-process by the operator's own verifier, so the host can't MITM the
-	// channel. Set only to bypass RA-TLS for debugging — the release is still
-	// gated by the RTMR[3] attestation check + the RKE2-CA signature + JWT PoP.
-	InsecureSkipTLSVerify bool
 	// Timeout bounds each network step.
 	Timeout time.Duration
 }
@@ -77,24 +69,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("build CSR: %w", err)
 	}
 
-	// 3. Exchange the CSR for a signed cert over cred-release. By default the
-	//    :8443 dial is RA-TLS-verified in-process by the operator's own
-	//    verifier (newRATLSClient): the serving cert's embedded quote
-	//    must bind to the cert key AND carry rtmr_3 == H(op_pub), so the host
-	//    can't MITM the channel. --insecure-skip-tls-verify drops that to a
-	//    plain TLS dial (the release is still gated by attestation + the RKE2-CA
-	//    signature + JWT PoP, but the channel itself is unpinned).
-	var httpClient *http.Client
-	if cfg.InsecureSkipTLSVerify {
-		httpClient = &http.Client{
-			Timeout: cfg.Timeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // explicit opt-out via --insecure-skip-tls-verify
-			},
-		}
-	} else {
-		httpClient = newRATLSClient(cfg, pubPEM)
-	}
+	// 3. Exchange the CSR for a signed cert over cred-release. The :8443 dial
+	//    is RA-TLS-verified in-process by the operator's own verifier
+	//    (newRATLSClient): the serving cert's embedded quote must bind to the
+	//    cert key AND carry rtmr_3 == H(op_pub), so the host can't MITM the
+	//    channel.
+	httpClient := newRATLSClient(cfg, pubPEM)
 	relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel2()
 	resp, err := requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
