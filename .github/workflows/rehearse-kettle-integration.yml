@@ -61,7 +61,14 @@ jobs:
           cat nx.out
           if [ $RC -ne 0 ] && grep -q "unexpected argument '--ignored'" nx.out; then
             echo "::warning::bin/test-integration is bitrotted (--ignored -> --run-ignored) — running the corrected invocation for the actual suite signal"
-            cargo nextest run --features attest --run-ignored all --no-fail-fast > nx.out 2>&1
+            # exclude two tests that encode DEV-MACHINE assumptions, not TEE
+            # behaviour (verified against kettle source): stored_roothash_from_real_disk
+            # hardcodes /home/ubuntu/steep/output/base/disk.raw (a dev's local steep
+            # build — un-runnable in CI, should be cfg-gated upstream);
+            # cli_attest_alejandra attests a NIX project (no nix on this runner) — its
+            # cargo twin cli_attest_ripgrep exercises the same attest path and passes.
+            cargo nextest run --features attest --run-ignored all --no-fail-fast \
+              -E 'not (test(stored_roothash_from_real_disk) | test(cli_attest_alejandra))' > nx.out 2>&1
             RC=$?
             cat nx.out
           fi
