@@ -113,7 +113,7 @@ jobs:
           set -uo pipefail
           # contract parity with the metal driver: $MEAS empty (no measured
           # image on cloud), $K available, creds absent (payloads are cred-free).
-          WRAP='export MEAS=""; export K="kubectl"; say(){ echo "@@$1@@"; }; say DRIVE_START; printf %s "$PAYLOAD_B64" | base64 -d > /p.sh; bash /p.sh; say DRIVE_END'
+          WRAP='export MEAS=""; export K="kubectl"; say(){ echo "@@$1@@"; }; export -f say; say DRIVE_START; printf %s "$PAYLOAD_B64" | base64 -d > /p.sh; bash /p.sh; say DRIVE_END'
           kubectl run tee-payload --restart=Never --image=ubuntu:24.04 \
             --overrides "$(jq -n --arg wrap "$WRAP" --arg b64 '${{ inputs.payload_b64 }}' '{
               spec: {
