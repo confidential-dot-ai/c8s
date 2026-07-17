@@ -94,6 +94,31 @@ jobs:
           grep -q '@@PAYLOAD_OK@@' /tmp/p.out || { echo "::error::payload did not report PAYLOAD_OK"; exit 1; }
           echo "✅ azure-cvm: payload ran to PAYLOAD_OK on an in-TEE ARC runner"
 
+  # The GCP-era failure mode was a job QUEUED FOREVER while everything looked
+  # healthy (scale-from-zero stall — the reason metal runs minRunners:1). A
+  # queued job never fails on its own, so this watchdog makes the stall LOUD:
+  # if the azure_cvm job hasn't STARTED within ~15 min, the run goes red with a
+  # pointed error. Needs `actions: read` from the caller; degrades to a warning
+  # without it.
+  azure_cvm_watchdog:
+    if: inputs.platform == 'azure-cvm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: alarm if the azure-cvm job is still queued after 15 min
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          sleep 900
+          J=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100" \
+                -q '.jobs[] | select(.name | contains("azure_cvm")) | select(.name | contains("watchdog") | not) | .status' 2>/dev/null | head -1)
+          case "$J" in
+            queued|pending|"") [ -z "$J" ] && { echo "::warning::watchdog cannot read job status (grant actions: read) — no verdict"; exit 0; }
+               echo "::error::azure-cvm job still '$J' after 15 min — scale-up stall (listener→pod→autoscaler→CVM capacity). This is the GCP-era silent-queue failure made visible."; exit 1 ;;
+            *) echo "azure-cvm job status: $J — no stall" ;;
+          esac
+
   # ── AZURE Model B: EPHEMERAL cluster per run; a privileged pod is the vehicle.
   #    Use when the cluster itself is under test (c8s) or a clean full-cluster
   #    lifecycle is wanted. Costs a cluster per run.
