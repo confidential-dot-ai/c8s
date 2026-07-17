@@ -32,6 +32,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (RTMR is TDX-only)")
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
+	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.DurationVar(&cfg.CertTTL, "cert-ttl", 24*time.Hour, "lifetime of issued operator certs")
 	f.StringVar(&cfg.CertOrg, "cert-org", "system:masters", "Kubernetes group (cert Subject O) for the issued cert")
 	f.StringVar(&cfg.CertCN, "cert-cn", "operator", "Kubernetes user (cert Subject CN) for the issued cert")

@@ -25,6 +25,9 @@ type Config struct {
 	// (defaults: the RKE2 paths; kubeadm works via /etc/kubernetes/pki/ca.{crt,key}).
 	ClientCACert string
 	ClientCAKey  string
+	// ServerCACert locates the CA that signs the apiserver serving cert — the
+	// trust anchor embedded in the released kubeconfig.
+	ServerCACert string
 	// CertTTL is the lifetime of issued operator certs.
 	CertTTL time.Duration
 	// CertOrg / CertCN are the Kubernetes group / user the issued cert
@@ -56,7 +59,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}
 
-	ca, err := loadClusterCA(cfg.ClientCACert, cfg.ClientCAKey)
+	ca, err := loadClusterCA(cfg.ClientCACert, cfg.ClientCAKey, cfg.ServerCACert)
 	if err != nil {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}

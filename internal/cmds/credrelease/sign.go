@@ -12,24 +12,29 @@ import (
 	"time"
 )
 
-// Default CA paths: where RKE2 (the c8s node image's distribution) keeps the
-// CA that signs client certs the apiserver trusts. The mechanism is not
-// RKE2-specific: any distribution with a client CA works by pointing
-// --client-ca-cert/--client-ca-key at it (kubeadm: /etc/kubernetes/pki/ca.{crt,key}).
+// Default CA paths: where RKE2 (the c8s node image's distribution) keeps its
+// CAs. client-ca signs the kube client certs the apiserver trusts; server-ca
+// signs the apiserver SERVING cert and is what the released kubeconfig must
+// carry as certificate-authority-data — RKE2 keeps them distinct, so releasing
+// the client CA there fails kubectl with "certificate signed by unknown
+// authority". The mechanism is not RKE2-specific: kubeadm signs both with one
+// ca.crt, so all three flags point at the same file there.
 const (
 	defaultClientCACert = "/var/lib/rancher/rke2/server/tls/client-ca.crt"
 	defaultClientCAKey  = "/var/lib/rancher/rke2/server/tls/client-ca.key"
+	defaultServerCACert = "/var/lib/rancher/rke2/server/tls/server-ca.crt"
 )
 
-// clusterCA holds the cluster's client-signing CA loaded from the guest FS.
+// clusterCA holds the cluster's client-signing CA plus the serving-CA PEM the
+// released kubeconfig anchors apiserver verification to.
 type clusterCA struct {
 	cert *x509.Certificate
 	key  crypto.Signer
-	pem  []byte // the CA cert PEM, for the returned kubeconfig's trust anchor
+	pem  []byte // the SERVING CA cert PEM — the kubeconfig's trust anchor
 }
 
-// loadClusterCA reads the cluster client-CA cert+key.
-func loadClusterCA(certPath, keyPath string) (*clusterCA, error) {
+// loadClusterCA reads the cluster client-CA cert+key and the serving-CA cert.
+func loadClusterCA(certPath, keyPath, serverCAPath string) (*clusterCA, error) {
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return nil, fmt.Errorf("read client CA cert: %w", err)
@@ -37,6 +42,10 @@ func loadClusterCA(certPath, keyPath string) (*clusterCA, error) {
 	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read client CA key: %w", err)
+	}
+	serverCAPEM, err := os.ReadFile(serverCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("read server CA cert: %w", err)
 	}
 
 	cb, _ := pem.Decode(certPEM)
@@ -56,7 +65,11 @@ func loadClusterCA(certPath, keyPath string) (*clusterCA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse client CA key: %w", err)
 	}
-	return &clusterCA{cert: cert, key: key, pem: certPEM}, nil
+	sb, _ := pem.Decode(serverCAPEM)
+	if sb == nil || sb.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("%s is not a CERTIFICATE PEM", serverCAPath)
+	}
+	return &clusterCA{cert: cert, key: key, pem: serverCAPEM}, nil
 }
 
 // parseCAKey handles the PEM encodings the supported distributions emit:
