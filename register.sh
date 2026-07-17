@@ -58,6 +58,9 @@ SA="${SA:-}"                          # optional template.spec.serviceAccountNam
 RENAME_FROM="${RENAME_FROM:-}"        # optional old scale-set name to purge first
 RUNNER_GROUP="${RUNNER_GROUP:-}"      # optional org runner group (must exist first)
 RUNNER_SCALE_SET_NAME="${RUNNER_SCALE_SET_NAME:-}"  # optional runs-on label override (default: $SCALE_SET)
+VALUES_FILE="${VALUES_FILE:-}"        # optional helm values overlay (runner pod spec:
+                                      # nodeSelector/tolerations/device mounts — e.g.
+                                      # place azure-cvm runners on the confidential pool)
 CTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && CTX_ARG=(--kube-context "$KUBE_CONTEXT")
 KCTX_ARG=(); [ -n "${KUBE_CONTEXT:-}" ] && KCTX_ARG=(--context "$KUBE_CONTEXT")
 CHART_SS=oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
@@ -126,6 +129,7 @@ install(){
   [ -n "$SA" ] && sets+=(--set "template.spec.serviceAccountName=$SA")
   [ -n "$RUNNER_GROUP" ] && sets+=(--set runnerGroup="$RUNNER_GROUP")
   [ -n "$RUNNER_SCALE_SET_NAME" ] && sets+=(--set runnerScaleSetName="$RUNNER_SCALE_SET_NAME")
+  [ -n "$VALUES_FILE" ] && sets+=(-f "$VALUES_FILE")   # runner pod overlay (last -> wins)
   if [ "$MODE" = template ]; then
     h template "$SCALE_SET" "$CHART_SS" --version "$CHART_VER" -n "$NS" \
       "${sets[@]}" \

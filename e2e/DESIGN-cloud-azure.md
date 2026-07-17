@@ -1,5 +1,25 @@
 # cloud lane — design (REFRAMED 2026-07-16: Azure-first; GKE demoted, possibly dropped)
 
+## TWO cloud models — both are selectable cells (2026-07-16)
+
+Kept BOTH, per the metal/GCP precedent (GCP ran Model A live in the cifrai era):
+
+| model | cell | vehicle | per-run cost | use for |
+|---|---|---|---|---|
+| **A — runner on the node** | `azure-cvm` | STANDING confidential AKS + ARC; runner pod runs ON a confidential node = **in the TEE**. Payload = ordinary steps, no provisioning. | ~$0 (scale-to-zero) + node cold-start | attestation-rs, kettle test-integration — payloads that just need "a confidential node". Cheap enough for per-merge. Also: this is the attestable-runner north star (#14), free on cloud. |
+| **B — cluster per run** | `azure-aks` | EPHEMERAL `az aks create` per run; payload in a privileged pod. | a cluster per run (~25min, $) | c8s (needs a clean cluster each install), multi-node, or any "spin up the whole cluster" test. Nightly, not per-merge. |
+
+Both live in the `tee-payload.yml` dispatcher as platform cells; a consumer
+picks per need. Model B is GREEN (run 29544550923). Model A is wired + waiting
+on the standing scale set: `provision-azure-cvm.yml` (one-time dispatch) stands
+up the persistent AKS + registers the `azure-cvm` ARC scale set via
+`register.sh` (new `VALUES_FILE` overlay pins runners to the confidential pool
++ vTPM). Prereqs: repo secret `ARC_APP_PRIVATE_KEY` (App 4309649 PEM — same app
+as metal, NO new org access); a standing billed resource (node_min=0 → ~$0
+idle). Verify with `where-am-i` on `runs-on: azure-cvm` (expect the runner IS
+in the node-CVM — unlike metal's cvm-launcher).
+
+
 > **✅ LANE GREEN (2026-07-16, run 29544550923, 4 iterations).** Every layer
 > asserted: quota-aware region pick (northeurope) → ephemeral AKS (DC4as_v5
 > SEV-SNP pool) → CLI-from-source `c8s install --single-node --cvm-mode aks

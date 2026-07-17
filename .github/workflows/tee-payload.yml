@@ -13,18 +13,28 @@
 # echo "@@PAYLOAD_OK@@"; may emit @@markers@@). Only the launch ADAPTER varies:
 #   snp-metal | tdx-metal : the cvm-e2e primitive (KubeVirt CVM, console
 #                           delivery, $MEAS discovered via configfs-tsm)
-#   azure-aks             : ephemeral AKS whose NODE is the CVM (vTPM); the
-#                           payload runs in a privileged pod — kubectl IS the
-#                           transport (no console exists on cloud). $MEAS is
-#                           empty (policy-only golden on cloud, by design).
-#   gke-snp               : future — same pod adapter, gcloud provisioning.
-# Caller needs `permissions: id-token: write` for cloud cells (OIDC login).
+#   azure-cvm  (Model A)  : payload runs on a STANDING ARC runner that lives ON
+#                           a confidential AKS node — the node IS the CVM, so
+#                           the runner is IN the TEE (the attestable-runner
+#                           property; free on cloud, impossible on metal where
+#                           cvm-launcher is a host-side container). No per-run
+#                           provisioning -> cheapest per-merge. Needs the
+#                           azure-cvm scale set (provision-azure-cvm.yml, once).
+#   azure-aks  (Model B)  : provision an EPHEMERAL AKS cluster per run, payload
+#                           runs in a privileged pod. Use when the CLUSTER is
+#                           the thing under test (c8s install, multi-node) or
+#                           for a clean-slate full-cluster lifecycle. Costs a
+#                           cluster per run.
+#   gke-snp / gke-cvm     : future — same two models, gcloud provisioning.
+# Both cloud models: the node is the CVM (vTPM /dev/tpm0), $MEAS empty
+# (policy-only golden on cloud, by design). Caller needs
+# `permissions: id-token: write` for cloud cells (OIDC login).
 name: tee-payload (dispatcher)
 on:
   workflow_call:
     inputs:
       platform:
-        description: 'cell: snp-metal | tdx-metal | azure-aks'
+        description: 'cell: snp-metal | tdx-metal | azure-cvm (standing) | azure-aks (ephemeral)'
         type: string
         required: true
       payload_b64:
@@ -63,7 +73,30 @@ jobs:
       payload_b64: ${{ inputs.payload_b64 }}
       timeout_minutes: ${{ inputs.timeout_minutes }}
 
-  # ── AZURE: the node IS the CVM; a privileged pod is the payload vehicle ───
+  # ── AZURE Model A: ARC runner ON a standing confidential node = runner-in-TEE.
+  #    Payload runs as ordinary steps; no per-run provisioning. Queues until the
+  #    azure-cvm scale set exists. The scale-set runner pod must expose the vTPM
+  #    (/dev/tpmrm0) and run privileged/root — set in provision-azure-cvm.yml.
+  azure_cvm:
+    if: inputs.platform == 'azure-cvm'
+    runs-on: azure-cvm
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: run payload (this runner already lives in the node-CVM)
+        run: |
+          set -uo pipefail
+          export MEAS="" K="kubectl"          # contract parity: no measured image on cloud
+          say(){ echo "@@$1@@"; }; export -f say
+          say DRIVE_START
+          printf %s '${{ inputs.payload_b64 }}' | base64 -d > /tmp/p.sh
+          bash /tmp/p.sh 2>&1 | tee /tmp/p.out
+          say DRIVE_END
+          grep -q '@@PAYLOAD_OK@@' /tmp/p.out || { echo "::error::payload did not report PAYLOAD_OK"; exit 1; }
+          echo "✅ azure-cvm: payload ran to PAYLOAD_OK on an in-TEE ARC runner"
+
+  # ── AZURE Model B: EPHEMERAL cluster per run; a privileged pod is the vehicle.
+  #    Use when the cluster itself is under test (c8s) or a clean full-cluster
+  #    lifecycle is wanted. Costs a cluster per run.
   azure:
     if: inputs.platform == 'azure-aks'
     runs-on: ubuntu-latest

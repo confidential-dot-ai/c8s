@@ -1,0 +1,130 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PROVISION the standing Model-A infra: a persistent confidential AKS cluster +
+# the `azure-cvm` ARC scale set. After this, `runs-on: azure-cvm` schedules a
+# job onto a confidential node — the runner pod runs INSIDE the node-CVM (the
+# attestable-runner property; free on cloud, impossible on metal).
+#
+# ONE-TIME, dispatch-only. Re-dispatch to reconcile (mostly idempotent). This
+# creates a STANDING BILLED RESOURCE — a provisioning decision, not a per-run
+# cost. With node_min=0 the confidential pool scales to zero (~$0 idle, ~2-4min
+# cold start); node_min=1 keeps a node warm (~$220/mo DC2as_v5) for instant
+# dispatch — the same warm-vs-cold choice we made on metal.
+#
+# SECRET REQUIRED: ARC_APP_PRIVATE_KEY = the PEM for GitHub App 4309649
+# (confidential-ci-runners, org_self_hosted_runners:write — the SAME app that
+# registers the metal cvm-launcher scale set, so NO new org access). Add it as
+# a repo secret before first dispatch. Everything else is OIDC/anonymous.
+#
+# TEARDOWN (to stop the standing cost): `az group delete -n confidential-ci-azure-cvm`.
+name: provision-azure-cvm
+on:
+  workflow_dispatch:
+    inputs:
+      node_min:
+        description: 'min confidential nodes (0 = scale-to-zero ~$0 idle; 1 = warm, instant dispatch)'
+        required: false
+        default: '0'
+      vm_size:
+        required: false
+        default: Standard_DC2as_v5
+      region:
+        required: false
+        default: northeurope
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: confidential-ci-azure-cvm
+  CLUSTER: azure-cvm
+  APP_ID: '4309649'
+  APP_INSTALLATION_ID: '146850802'
+  ORG_URL: https://github.com/confidential-dot-ai
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: actions/checkout@v4
+
+      - name: standing AKS with an autoscaling confidential node pool
+        run: |
+          set -euo pipefail
+          az group create -n "$RG" -l "${{ inputs.region }}" \
+            --tags ci=confidential-ci standing=true -o none
+          if ! az aks show -g "$RG" -n "$CLUSTER" -o none 2>/dev/null; then
+            # system pool = a cheap regular node hosting the ARC controller +
+            # listener (they don't need the TEE). conf pool = the confidential
+            # SEV-SNP nodes the runners land on, autoscaled.
+            az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
+              --node-vm-size Standard_D2s_v5 --os-sku Ubuntu --generate-ssh-keys -o none
+            az aks nodepool add -g "$RG" --cluster-name "$CLUSTER" -n conf --mode User \
+              --node-vm-size "${{ inputs.vm_size }}" --os-sku Ubuntu \
+              --enable-cluster-autoscaler --min-count "${{ inputs.node_min }}" --max-count 2 \
+              --labels confidential.ai/azure-cvm=true --node-taints confidential.ai/azure-cvm=true:NoSchedule -o none
+          else
+            echo "cluster exists — reconciling conf pool min-count"
+            az aks nodepool update -g "$RG" --cluster-name "$CLUSTER" -n conf \
+              --update-cluster-autoscaler --min-count "${{ inputs.node_min }}" --max-count 2 -o none || true
+          fi
+          az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing
+          kubectl get nodes -o wide
+
+      - name: install ARC controller
+        run: |
+          set -euo pipefail
+          helm upgrade --install arc \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+            --namespace arc-systems --create-namespace --wait
+
+      # register.sh, APP mode — same path as metal. The App PEM lands in a K8s
+      # Secret BY REFERENCE (never in helm values). The scale set's runner pod
+      # spec node-pins to the conf pool, tolerates its taint, mounts the vTPM,
+      # and runs privileged so payloads can reach /dev/tpmrm0 and apt-install.
+      - name: register the azure-cvm scale set (runners land on confidential nodes)
+        env:
+          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set — add it before first provision"; exit 1; }
+          printf '%s' "$ARC_APP_PRIVATE_KEY" > /tmp/arc-app.pem
+          # runner pod template: schedule onto conf pool, in the node-CVM, with vTPM.
+          cat > /tmp/azure-cvm-values.yaml <<'EOF'
+          template:
+            spec:
+              nodeSelector:
+                confidential.ai/azure-cvm: "true"
+              tolerations:
+                - key: confidential.ai/azure-cvm
+                  operator: Equal
+                  value: "true"
+                  effect: NoSchedule
+              containers:
+                - name: runner
+                  image: ghcr.io/actions/actions-runner:latest
+                  command: ["/home/runner/run.sh"]
+                  securityContext:
+                    privileged: true
+                  volumeMounts:
+                    - name: tpm
+                      mountPath: /dev/tpmrm0
+              volumes:
+                - name: tpm
+                  hostPath:
+                    path: /dev/tpmrm0
+          EOF
+          APP_ID="$APP_ID" APP_INSTALLATION_ID="$APP_INSTALLATION_ID" \
+            APP_PRIVATE_KEY_FILE=/tmp/arc-app.pem ORG_URL="$ORG_URL" \
+            SCALE_SET=azure-cvm MIN_RUNNERS=${{ inputs.node_min }} MAX_RUNNERS=2 \
+            VALUES_FILE=/tmp/azure-cvm-values.yaml \
+            KUBECONFIG="$HOME/.kube/config" bash register.sh
+          kubectl -n arc-runners get autoscalingrunnerset,pods 2>/dev/null || true
+          echo "azure-cvm scale set registered — dispatch where-am-i on runs-on: azure-cvm to confirm the runner is in the node-CVM"
