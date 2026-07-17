@@ -20,7 +20,46 @@ you don't build CVM plumbing. You write a **payload** and call the primitive.
 You own **WHAT** (your payload) and **WHEN** (your trigger). The primitive owns
 **WHERE** (booting/attesting/tearing down a CVM per platform).
 
-## Add it to your repo
+## The matrix is a word-array (2026-07-17 — the blessed consumer shape)
+
+Multi-platform coverage is one matrix over the **tee-payload dispatcher**;
+adding a platform = adding a word:
+
+```yaml
+jobs:
+  payload:
+    # ...emit one payload output per platform (they may differ: filtersets,
+    # tooling — pods have apt, verity guests don't)...
+  e2e:
+    needs: payload
+    permissions:
+      id-token: write        # cloud cells authenticate via OIDC (no secrets)
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [snp-metal, azure-cvm]     # ← the whole WHERE decision
+    uses: confidential-dot-ai/confidential-ci/.github/workflows/tee-payload.yml@main
+    with:
+      platform: ${{ matrix.platform }}
+      payload_b64: ${{ needs.payload.outputs[matrix.platform] }}
+```
+
+Cells and what they buy (proven live — attestation-rs runs exactly this shape):
+
+| cell | vehicle | TEE evidence | cost/latency | pick when |
+|---|---|---|---|---|
+| `snp-metal` | fresh measured KubeVirt CVM (this repo's primitive) | enforced launch digest ($MEAS) | ~10 min, our hardware | measured-boot depth; the default |
+| `azure-cvm` | **standing ARC runner INSIDE a ConfidentialVM** (vTPM; IMDS securityType proven) | node-CVM boundary, policy-only | instant warm / **130s cold** (scale-to-zero) | cheap per-merge cloud; az-snp/vTPM coverage; tests as plain steps |
+| `azure-aks` | ephemeral AKS cluster per run, payload in a privileged pod | node-CVM boundary | ~15 min + a cluster | the CLUSTER is under test (c8s), clean-slate lifecycle |
+| `tdx-metal` | (pending) primitive cell on tdx-dev-host-1 | TDX MRTD | — | when the TDX image lands |
+
+Proof this loop works: the `azure-aks` cell's FIRST run caught two latent
+az_snp_live bugs on real vTPM hardware (never runnable in hosted CI); the fix
+(attestation-rs#64) was then validated PRE-MERGE by the same matrix — 6/6 on
+azure, no metal regression. Find → fix → verify, all in the lanes.
+
+## Add it to your repo (single-cell form)
 
 ```yaml
 # .github/workflows/confidential-e2e.yml
