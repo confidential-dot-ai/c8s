@@ -21,6 +21,9 @@ jobs:
       - name: am I in a TEE?
         run: |
           set +e
+          echo "=== capability check (root + tpm OPEN — needed for real payloads) ==="
+          echo "uid=$(id -u)"
+          ( exec 3</dev/tpmrm0 ) 2>/dev/null && echo "tpmrm0: OPENABLE" || echo "tpmrm0: not openable"
           echo "=== azure signals (vTPM + IMDS; meaningful on azure-cvm) ==="
           ls -l /dev/tpmrm0 /dev/tpm0 2>/dev/null || echo "no vTPM device"
           curl -s -m3 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-12-13' 2>/dev/null | head -c 300; echo

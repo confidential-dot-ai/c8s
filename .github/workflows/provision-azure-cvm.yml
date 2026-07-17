@@ -117,8 +117,15 @@ jobs:
                 - name: runner
                   image: ghcr.io/actions/actions-runner:latest
                   command: ["/home/runner/run.sh"]
+                  env:
+                    # real payloads need root: apt tooling + /dev/tpmrm0 is
+                    # root:tss-owned. The pod is privileged on OUR node inside
+                    # the CVM boundary — root here is the same trust domain.
+                    - name: RUNNER_ALLOW_RUNASROOT
+                      value: "1"
                   securityContext:
                     privileged: true
+                    runAsUser: 0
                   volumeMounts:
                     - name: tpm
                       mountPath: /dev/tpmrm0
