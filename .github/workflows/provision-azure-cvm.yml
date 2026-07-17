@@ -64,8 +64,10 @@ jobs:
             # system pool = a cheap regular node hosting the ARC controller +
             # listener (they don't need the TEE). conf pool = the confidential
             # SEV-SNP nodes the runners land on, autoscaled.
+            # D2s_v5 is policy-blocked in this sub (northeurope); D2s_v4 is in the
+            # allowed list and plenty for the ARC controller+listener.
             az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
-              --node-vm-size Standard_D2s_v5 --os-sku Ubuntu --generate-ssh-keys -o none
+              --node-vm-size Standard_D2s_v4 --os-sku Ubuntu --generate-ssh-keys -o none
             az aks nodepool add -g "$RG" --cluster-name "$CLUSTER" -n conf --mode User \
               --node-vm-size "${{ inputs.vm_size }}" --os-sku Ubuntu \
               --enable-cluster-autoscaler --min-count "${{ inputs.node_min }}" --max-count 2 \
