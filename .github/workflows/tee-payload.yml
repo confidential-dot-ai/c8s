@@ -1,0 +1,142 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TEE-PAYLOAD DISPATCHER — one contract, N platforms. Consumers write:
+#
+#     strategy:
+#       matrix:
+#         platform: [snp-metal, azure-aks]          # <- adding a cell = adding a word
+#     uses: confidential-dot-ai/confidential-ci/.github/workflows/tee-payload.yml@main
+#     with:
+#       platform: ${{ matrix.platform }}
+#       payload_b64: ${{ needs.payload.outputs[matrix.platform] }}
+#
+# The CONTRACT is constant (payload runs as root inside a genuine TEE; must
+# echo "@@PAYLOAD_OK@@"; may emit @@markers@@). Only the launch ADAPTER varies:
+#   snp-metal | tdx-metal : the cvm-e2e primitive (KubeVirt CVM, console
+#                           delivery, $MEAS discovered via configfs-tsm)
+#   azure-aks             : ephemeral AKS whose NODE is the CVM (vTPM); the
+#                           payload runs in a privileged pod — kubectl IS the
+#                           transport (no console exists on cloud). $MEAS is
+#                           empty (policy-only golden on cloud, by design).
+#   gke-snp               : future — same pod adapter, gcloud provisioning.
+# Caller needs `permissions: id-token: write` for cloud cells (OIDC login).
+name: tee-payload (dispatcher)
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: 'cell: snp-metal | tdx-metal | azure-aks'
+        type: string
+        required: true
+      payload_b64:
+        description: base64 payload script (see contract above)
+        type: string
+        required: true
+      runner:
+        description: runs-on label for METAL cells (launcher host)
+        type: string
+        default: cvm-launcher
+      flavor:
+        description: 'METAL cells: rke2-node | base-cpu'
+        type: string
+        default: rke2-node
+      vm_size:
+        description: 'CLOUD cells: confidential node size'
+        type: string
+        default: Standard_DC2as_v5
+      timeout_minutes:
+        type: number
+        default: 45
+    outputs:
+      measurement:
+        description: runtime launch measurement (metal cells only; empty on cloud)
+        value: ${{ jobs.metal.outputs.measurement }}
+
+jobs:
+  # ── METAL: delegate to the proven primitive unchanged ──────────────────────
+  metal:
+    if: endsWith(inputs.platform, '-metal')
+    uses: ./.github/workflows/cvm-e2e.yml
+    with:
+      platform: ${{ inputs.platform }}
+      runner: ${{ inputs.runner }}
+      flavor: ${{ inputs.flavor }}
+      payload_b64: ${{ inputs.payload_b64 }}
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+
+  # ── AZURE: the node IS the CVM; a privileged pod is the payload vehicle ───
+  azure:
+    if: inputs.platform == 'azure-aks'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      RG: tee-payload-${{ github.run_id }}-${{ strategy.job-index || 0 }}
+      CLUSTER: tee-${{ github.run_id }}
+      VM_SIZE: ${{ inputs.vm_size }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: reap leaked tee-payload-* resource groups (age > 3h)
+        run: |
+          set +e
+          NOW=$(date -u +%s)
+          for rg in $(az group list --query "[?starts_with(name,'tee-payload-')].name" -o tsv); do
+            created=$(az group show -n "$rg" --query "tags.created" -o tsv 2>/dev/null)
+            [ -n "$created" ] && [ $((NOW - created)) -gt 10800 ] && { echo "reaping $rg"; az group delete -n "$rg" --yes --no-wait; }
+          done
+          true
+
+      - name: provision (quota-aware region; the node is the SEV-SNP CVM)
+        run: |
+          set -euo pipefail
+          FAM_NEED=$(echo "$VM_SIZE" | grep -oE '[0-9]+' | head -1)
+          REGION=""
+          for r in northeurope westeurope swedencentral uksouth germanywestcentral eastus; do
+            skus=$(az vm list-skus -l "$r" --size Standard_DC --query "length([?name=='$VM_SIZE'])" -o tsv 2>/dev/null || echo 0)
+            read -r cur lim <<<"$(az vm list-usage -l "$r" --query "[?name.value=='standardDCASv5Family'].[currentValue,limit]" -o tsv 2>/dev/null | head -1)"
+            [ "${skus:-0}" -ge 1 ] && [ $(( ${lim:-0} - ${cur:-0} )) -ge "$FAM_NEED" ] && { REGION=$r; break; }
+          done
+          [ -n "$REGION" ] || { echo "::error::no region with $VM_SIZE quota"; exit 1; }
+          echo "region: $REGION"
+          az group create -n "$RG" -l "$REGION" \
+            --tags ci=confidential-ci run-id="${{ github.run_id }}" created="$(date -u +%s)" -o none
+          az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
+            --node-vm-size "$VM_SIZE" --os-sku Ubuntu --generate-ssh-keys -o none
+          az aks get-credentials -g "$RG" -n "$CLUSTER"
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+
+      - name: run payload in a privileged pod on the CVM node
+        run: |
+          set -uo pipefail
+          # contract parity with the metal driver: $MEAS empty (no measured
+          # image on cloud), $K available, creds absent (payloads are cred-free).
+          WRAP='export MEAS=""; export K="kubectl"; say(){ echo "@@$1@@"; }; say DRIVE_START; printf %s "$PAYLOAD_B64" | base64 -d > /p.sh; bash /p.sh; say DRIVE_END'
+          kubectl run tee-payload --restart=Never --image=ubuntu:24.04 \
+            --overrides "$(jq -n --arg wrap "$WRAP" --arg b64 '${{ inputs.payload_b64 }}' '{
+              spec: {
+                hostNetwork: true, restartPolicy: "Never",
+                containers: [{
+                  name: "tee-payload", image: "ubuntu:24.04",
+                  command: ["bash","-c",$wrap],
+                  env: [{name:"PAYLOAD_B64", value:$b64}],
+                  securityContext: {privileged: true},
+                  volumeMounts: [{name:"dev", mountPath:"/dev"}]
+                }],
+                volumes: [{name:"dev", hostPath:{path:"/dev"}}]
+              }}')" -- placeholder
+          for i in $(seq 1 90); do
+            PHASE=$(kubectl get pod tee-payload -o jsonpath='{.status.phase}' 2>/dev/null)
+            [ "$PHASE" = "Succeeded" ] || [ "$PHASE" = "Failed" ] && break
+            sleep 10
+          done
+          echo "--- payload output (pod logs) ---"
+          kubectl logs tee-payload 2>/dev/null | tee pod.log | grep -oE '@@[^@]{1,160}@@' | sed 's/@@//g; s/^/  · /'
+          grep -q '@@PAYLOAD_OK@@' pod.log || { echo "::error::payload did not report PAYLOAD_OK (phase=$PHASE)"; tail -30 pod.log; exit 1; }
+          echo "✅ azure-aks: payload ran to PAYLOAD_OK inside the CVM node (vTPM platform)"
+
+      - name: teardown (always)
+        if: always()
+        run: az group delete -n "$RG" --yes --no-wait || true

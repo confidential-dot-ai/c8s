@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "$NEXTEST_URL" | tar -xz -C "$HOME/.local/bin" cargo-nextest
-          "$HOME/.local/bin/cargo-nextest" nextest archive --workspace --features attest \
+          "$HOME/.local/bin/cargo-nextest" nextest archive --workspace --features attest,az-snp \
             --release --archive-file tests.tar.zst
           ls -la tests.tar.zst
       - name: 'bundle tss runtime libs (probe finding: guest ships no libtss2)'
@@ -67,7 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: archive
     outputs:
-      b64: ${{ steps.p.outputs.b64 }}
+      snp-metal: ${{ steps.p.outputs.snp-metal }}
+      azure-aks: ${{ steps.p.outputs.azure-aks }}
     steps:
       - id: p
         run: |
@@ -100,7 +101,7 @@ jobs:
           /tmp/nx/cargo-nextest nextest run \
             --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
             --extract-to /tmp/x \
-            --run-ignored all -E 'not binary(capture_fixture)' \
+            --run-ignored all -E 'FILTERSET' \
             --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
           RC=\$?
           B=\$(find /tmp/x -name 'attestation*' -type f -perm -u+x 2>/dev/null | head -1)
@@ -108,14 +109,33 @@ jobs:
           grep -E 'PASS|FAIL|Summary|passed|failed|skipped' /tmp/nx.out | tail -25 | sed 's/^/@@NX /;s/\$/@@/'
           [ \$RC -eq 0 ] && say PAYLOAD_OK || { tail -30 /tmp/nx.out | sed 's/^/@@NXTAIL /;s/\$/@@/'; say FAIL_NEXTEST; }
           PAYLOAD
-          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+          # metal cell: full suite in the KubeVirt CVM (real /dev/sev-guest);
+          # az_* need vTPM+IMDS -> excluded. The guest has no apt: bundled libs.
+          sed "s/FILTERSET/not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))/" p.sh > p-metal.sh
+          echo "snp-metal=$(base64 -w0 p-metal.sh)" >> "$GITHUB_OUTPUT"
+          # azure cell: az_snp_live ONLY — the tests runnable nowhere else
+          # (Azure vTPM + IMDS). Pod has apt: install the tpm/tss runtime the
+          # tests shell out to, then run the same pulled archive.
+          { printf '%s\n' 'export DEBIAN_FRONTEND=noninteractive' \
+              'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates python3 tpm2-tools libtss2-dev jq >/dev/null && say APT_OK || { say FAIL_APT; exit 0; }' \
+              '[ -e /dev/tpmrm0 ] || [ -e /dev/tpm0 ] && say VTPM_PRESENT || { say FAIL_NO_VTPM; exit 0; }' \
+              'curl -s -m5 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-02-01" | jq -c . | sed "s/^/@@IMDS /;s/\$/@@/"'
+            sed "s/FILTERSET/binary(az_snp_live)/" p.sh
+          } > p-azure.sh
+          echo "azure-aks=$(base64 -w0 p-azure.sh)" >> "$GITHUB_OUTPUT"
 
+  # THE CELL LIST — adding a platform = adding a word to this array.
   e2e:
     needs: [archive, payload]
-    uses: ./.github/workflows/cvm-e2e.yml
+    permissions:
+      id-token: write     # cloud cells authenticate via OIDC
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [snp-metal, azure-aks]
+    uses: ./.github/workflows/tee-payload.yml
     with:
-      platform: snp-metal
-      runner: cvm-launcher
-      flavor: rke2-node
-      payload_b64: ${{ needs.payload.outputs.b64 }}
+      platform: ${{ matrix.platform }}
+      payload_b64: ${{ needs.payload.outputs[matrix.platform] }}
       timeout_minutes: 40
