@@ -1,0 +1,57 @@
+# PRE-MERGE REHEARSAL: kettle's TEE-gated suite (`bin/test-integration` =
+# cargo nextest --features attest --ignored all) on the `azure-cvm` runner —
+# a runner provably INSIDE an Azure ConfidentialVM (vTPM). Like az_snp_live,
+# these tests have NEVER run in any CI (kettle's hosted CI skips them: "no
+# attestation hardware found"). First contact with real hardware — expect
+# signal, not necessarily green.
+#
+# Model A shape: tests run as ORDINARY STEPS (the runner has apt + the vTPM —
+# no archive vehicle, no console, no cluster provisioning). This is the
+# template for kettle's future per-merge azure cell.
+name: rehearse-kettle-integration
+on:
+  workflow_dispatch:
+    inputs:
+      kettle_ref:
+        description: kettle ref to test
+        required: false
+        default: main
+
+jobs:
+  integration:
+    runs-on: azure-cvm
+    timeout-minutes: 45
+    steps:
+      - name: environment (root + vTPM + IMDS — the things hosted CI lacks)
+        run: |
+          set -euo pipefail
+          echo "uid=$(id -u)  host=$(hostname)"
+          curl -s -m3 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-12-13'; echo
+          ( exec 3</dev/tpmrm0 ) && echo "tpmrm0 openable"
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq >/dev/null
+          apt-get install -y -qq --no-install-recommends \
+            git curl ca-certificates build-essential pkg-config libtss2-dev tpm2-tools jq >/dev/null
+          echo "toolchain deps installed"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: confidential-dot-ai/kettle
+          ref: ${{ inputs.kettle_ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install cargo-nextest
+        run: |
+          set -euo pipefail
+          mkdir -p /usr/local/bin
+          curl -fsSL https://get.nexte.st/latest/linux | tar -xz -C /usr/local/bin cargo-nextest
+          cargo-nextest --version
+
+      - name: kettle TEE suite on real vTPM hardware (bin/test-integration)
+        run: |
+          set -euo pipefail
+          ./bin/test-integration 2>&1 | tee nx.out
+          echo "── summary ──"
+          grep -E 'Summary|PASS|FAIL' nx.out | tail -20 >> "$GITHUB_STEP_SUMMARY" || true
