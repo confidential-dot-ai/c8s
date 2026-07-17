@@ -17,31 +17,14 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
-// testCA builds a self-signed ECDSA CA standing in for the RKE2 client-CA.
+// testCA builds a self-signed CA standing in for the RKE2 client-CA.
 func testCA(t *testing.T) *clusterCA {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ca, err := issuer.NewCA("test-client-ca", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          bigOne(),
-		Subject:               pkix.Name{CommonName: "test-client-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &clusterCA{cert: cert, key: key}
+	return &clusterCA{cert: ca.Cert, key: ca.Key}
 }
 
 func testCSR(t *testing.T) *x509.CertificateRequest {
