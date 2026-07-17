@@ -1,5 +1,5 @@
 // Package credrelease implements the in-guest credential-release service (B4
-// of the operator-key design). It issues an operator a short-lived RKE2 client
+// of the operator-key design). It issues an operator a short-lived kube client
 // certificate, but only to a caller who proves possession of the operator
 // private key whose public half was bound into the CVM's RTMR[3] at launch —
 // giving an external operator console-free, non-TOFU admin access with no

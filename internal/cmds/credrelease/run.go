@@ -21,6 +21,10 @@ type Config struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx").
 	Platform string
+	// ClientCACert / ClientCAKey locate the cluster's client-signing CA
+	// (defaults: the RKE2 paths; kubeadm works via /etc/kubernetes/pki/ca.{crt,key}).
+	ClientCACert string
+	ClientCAKey  string
 	// CertTTL is the lifetime of issued operator certs.
 	CertTTL time.Duration
 	// CertOrg / CertCN are the Kubernetes group / user the issued cert
@@ -35,7 +39,7 @@ type Config struct {
 // Startup order matters for the trust story:
 //  1. LoadMeasuredOperatorKey — read the opkeydata pubkey and CONFIRM it
 //     matches RTMR[3]. Fails closed if the key was substituted after boot.
-//  2. loadClusterCA — the RKE2 client-CA that signs the operator's cert.
+//  2. loadClusterCA — the cluster client-CA that signs the operator's cert.
 //  3. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
 func Run(ctx context.Context, cfg Config) error {
@@ -52,7 +56,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}
 
-	ca, err := loadClusterCA()
+	ca, err := loadClusterCA(cfg.ClientCACert, cfg.ClientCAKey)
 	if err != nil {
 		return fmt.Errorf("load cluster CA: %w", err)
 	}

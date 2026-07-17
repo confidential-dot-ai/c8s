@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"testing"
@@ -114,6 +115,35 @@ func TestSignOperatorCertRejectsBadCSR(t *testing.T) {
 		csr: csr, org: "system:masters", cn: "operator", ttl: time.Hour,
 	}, time.Now()); err == nil {
 		t.Error("expected error for CSR with invalid self-signature")
+	}
+}
+
+// TestParseCAKey covers the PEM encodings the supported distributions emit:
+// SEC1 EC (RKE2), PKCS#1 RSA (kubeadm), and PKCS#8.
+func TestParseCAKey(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sec1, _ := x509.MarshalECPrivateKey(ecKey)
+	if _, err := parseCAKey(sec1, "EC PRIVATE KEY"); err != nil {
+		t.Errorf("SEC1 EC: %v", err)
+	}
+	pkcs1 := x509.MarshalPKCS1PrivateKey(rsaKey)
+	if _, err := parseCAKey(pkcs1, "RSA PRIVATE KEY"); err != nil {
+		t.Errorf("PKCS#1 RSA: %v", err)
+	}
+	pkcs8, _ := x509.MarshalPKCS8PrivateKey(ecKey)
+	if _, err := parseCAKey(pkcs8, "PRIVATE KEY"); err != nil {
+		t.Errorf("PKCS#8: %v", err)
+	}
+	if _, err := parseCAKey(sec1, "CERTIFICATE"); err == nil {
+		t.Error("unsupported PEM type accepted")
 	}
 }
 

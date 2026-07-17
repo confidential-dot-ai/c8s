@@ -1,7 +1,7 @@
 package credrelease
 
 import (
-	"crypto/ecdsa"
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -12,68 +12,75 @@ import (
 	"time"
 )
 
-// RKE2 keeps the CA that signs client certs the apiserver trusts here. The
-// baked admin identity (rke2.yaml) is O=system:masters, CN=system:admin signed
-// by this CA; the release service issues an operator a cert under the same CA.
+// Default CA paths: where RKE2 (the c8s node image's distribution) keeps the
+// CA that signs client certs the apiserver trusts. The mechanism is not
+// RKE2-specific: any distribution with a client CA works by pointing
+// --client-ca-cert/--client-ca-key at it (kubeadm: /etc/kubernetes/pki/ca.{crt,key}).
 const (
-	rke2ClientCACert = "/var/lib/rancher/rke2/server/tls/client-ca.crt"
-	rke2ClientCAKey  = "/var/lib/rancher/rke2/server/tls/client-ca.key"
+	defaultClientCACert = "/var/lib/rancher/rke2/server/tls/client-ca.crt"
+	defaultClientCAKey  = "/var/lib/rancher/rke2/server/tls/client-ca.key"
 )
 
-// clusterCA holds the RKE2 client-signing CA loaded from the guest FS.
+// clusterCA holds the cluster's client-signing CA loaded from the guest FS.
 type clusterCA struct {
 	cert *x509.Certificate
-	key  *ecdsa.PrivateKey
+	key  crypto.Signer
 	pem  []byte // the CA cert PEM, for the returned kubeconfig's trust anchor
 }
 
-// loadClusterCA reads the RKE2 client-CA cert+key. RKE2's client-CA is ECDSA
-// P-256 (confirmed on the target), so the key parses as *ecdsa.PrivateKey.
-func loadClusterCA() (*clusterCA, error) {
-	certPEM, err := os.ReadFile(rke2ClientCACert)
+// loadClusterCA reads the cluster client-CA cert+key.
+func loadClusterCA(certPath, keyPath string) (*clusterCA, error) {
+	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
-		return nil, fmt.Errorf("read client-ca.crt: %w", err)
+		return nil, fmt.Errorf("read client CA cert: %w", err)
 	}
-	keyPEM, err := os.ReadFile(rke2ClientCAKey)
+	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("read client-ca.key: %w", err)
+		return nil, fmt.Errorf("read client CA key: %w", err)
 	}
 
 	cb, _ := pem.Decode(certPEM)
 	if cb == nil || cb.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("client-ca.crt is not a CERTIFICATE PEM")
+		return nil, fmt.Errorf("%s is not a CERTIFICATE PEM", certPath)
 	}
 	cert, err := x509.ParseCertificate(cb.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("parse client-ca.crt: %w", err)
+		return nil, fmt.Errorf("parse client CA cert: %w", err)
 	}
 
 	kb, _ := pem.Decode(keyPEM)
 	if kb == nil {
-		return nil, fmt.Errorf("client-ca.key is not PEM")
+		return nil, fmt.Errorf("%s is not PEM", keyPath)
 	}
-	key, err := parseECPrivateKey(kb.Bytes, kb.Type)
+	key, err := parseCAKey(kb.Bytes, kb.Type)
 	if err != nil {
-		return nil, fmt.Errorf("parse client-ca.key: %w", err)
+		return nil, fmt.Errorf("parse client CA key: %w", err)
 	}
 	return &clusterCA{cert: cert, key: key, pem: certPEM}, nil
 }
 
-// parseECPrivateKey handles the two PEM encodings RKE2 may emit (SEC1 "EC
-// PRIVATE KEY" or PKCS#8 "PRIVATE KEY") and asserts the result is ECDSA.
-func parseECPrivateKey(der []byte, pemType string) (*ecdsa.PrivateKey, error) {
-	if pemType == "EC PRIVATE KEY" {
+// parseCAKey handles the PEM encodings the supported distributions emit:
+// SEC1 "EC PRIVATE KEY" (RKE2), PKCS#1 "RSA PRIVATE KEY" (kubeadm), or PKCS#8
+// "PRIVATE KEY".
+func parseCAKey(der []byte, pemType string) (crypto.Signer, error) {
+	switch pemType {
+	case "EC PRIVATE KEY":
 		return x509.ParseECPrivateKey(der)
+	case "RSA PRIVATE KEY":
+		return x509.ParsePKCS1PrivateKey(der)
+	case "PRIVATE KEY":
+		k, err := x509.ParsePKCS8PrivateKey(der)
+		if err != nil {
+			return nil, err
+		}
+		s, ok := k.(crypto.Signer)
+		if !ok {
+			return nil, fmt.Errorf("key is %T, which cannot sign", k)
+		}
+		return s, nil
+	default:
+		return nil, fmt.Errorf("unsupported key PEM type %q", pemType)
 	}
-	k, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil, err
-	}
-	ec, ok := k.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("client-ca.key is %T, want ECDSA", k)
-	}
-	return ec, nil
 }
 
 // signOperatorCert signs csr with the cluster CA, producing a kube CLIENT

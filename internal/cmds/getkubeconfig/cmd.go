@@ -8,7 +8,7 @@ import (
 )
 
 // NewCmd builds the `get-kubeconfig` subcommand: the operator-side client that
-// obtains an RKE2 admin kubeconfig from a measured TDX CVM by attesting the
+// obtains an admin kubeconfig from a measured TDX CVM by attesting the
 // node, confirming it was launched to trust the operator's key (RTMR[3]), and
 // exchanging a CSR for a signed client cert over the cred-release endpoint.
 func NewCmd() *cobra.Command {
@@ -21,7 +21,7 @@ func NewCmd() *cobra.Command {
 		Short: "Attest a c8s CVM and obtain an operator kubeconfig via the RTMR[3]-bound key",
 		Long: "get-kubeconfig attests a measured c8s TDX CVM, confirms rtmr[3] proves\n" +
 			"the node trusts the operator's key, then exchanges a CSR for a\n" +
-			"short-lived RKE2 client cert over the cred-release endpoint and writes\n" +
+			"short-lived kube client cert over the cred-release endpoint and writes\n" +
 			"a kubeconfig. Verification runs in-process (attestation-go).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cfg.OperatorKeyPath == "" || cfg.OutPath == "" {

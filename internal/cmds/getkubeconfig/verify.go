@@ -1,7 +1,7 @@
 // Package getkubeconfig implements the operator-side client (B4 client) that
 // obtains a kube credential from a measured TDX CVM: it attests the node,
 // confirms the node was launched to trust the operator's key (RTMR[3]), then
-// exchanges a CSR for a short-lived RKE2 client cert over the cred-release
+// exchanges a CSR for a short-lived kube client cert over the cred-release
 // endpoint and assembles a kubeconfig.
 package getkubeconfig
 

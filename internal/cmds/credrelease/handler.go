@@ -34,7 +34,7 @@ type releaseResponse struct {
 
 // Handler serves POST /release-credential. It authorizes the caller against
 // the measured operator key, validates the CSR, and issues a short-lived kube
-// client cert signed by the RKE2 cluster CA.
+// client cert signed by the cluster CA.
 type Handler struct {
 	verifier operatorauth.Verifier
 	ca       *clusterCA
