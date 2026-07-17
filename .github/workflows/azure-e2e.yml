@@ -150,9 +150,25 @@ jobs:
           openssl ec -in operator.key -pubout -out operator.pub
           FLAGS="--cvm-mode aks --operator-keys operator.pub"
           [ "$SINGLE_NODE" = "true" ] && FLAGS="--single-node $FLAGS"
-          # helm --wait has a 5-min timeout; install is idempotent — one retry
-          # absorbs the documented transient (NRI restarts containerd mid-roll).
-          c8s install $FLAGS || { echo "::warning::first install attempt timed out — re-running (idempotent)"; c8s install $FLAGS; }
+          # helm --wait has a BAKED 5-min timeout; a 4-vCPU single node bringing
+          # up all six components legitimately exceeds it (run 29543399776: two
+          # timeouts while pods were CONVERGING — 5/6 Running, tls-lb in its
+          # cert-wait backoff). Install is idempotent and applies everything on
+          # attempt 1, so: two attempts for the fast path, then replace helm's
+          # ceiling with an explicit readiness gate (~10 more min). Step 10
+          # stays the authoritative assert.
+          c8s install $FLAGS \
+            || { echo "::warning::attempt 1 timed out — retrying"; c8s install $FLAGS; } \
+            || { echo "::warning::helm --wait timed out twice; resources are applied — gating on explicit readiness"
+                 for i in $(seq 1 20); do
+                   NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
+                   echo "[$i] pods not ready: $NOTREADY"
+                   [ "$NOTREADY" = "0" ] && break
+                   sleep 30
+                 done
+                 kubectl -n c8s-system get pods
+                 [ "$NOTREADY" = "0" ] || { echo "::error::c8s-system never converged"; exit 1; }
+               }
 
       - name: verify — six components Running + webhook wired
         run: |
