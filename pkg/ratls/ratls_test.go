@@ -528,7 +528,11 @@ func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.R
 	if err != nil {
 		t.Fatal(err)
 	}
-	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: TEETypeSEVSNP, Report: embedded}, nil)
+	teeType := TEETypeSEVSNP
+	if platform == types.PlatformTdx {
+		teeType = TEETypeTDX
+	}
+	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: teeType, Report: embedded}, nil)
 	if err != nil {
 		t.Fatalf("CreateAttestedCert: %v", err)
 	}
@@ -658,6 +662,63 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	}
 	if !bytes.Equal(result.Measurement[:], measurement) {
 		t.Fatalf("Measurement = %x, want %x", result.Measurement, measurement)
+	}
+}
+
+func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
+	cert, expectedReportData := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
+	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
+
+	var observed types.VerifyRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatalf("decode verify request: %v", err)
+		}
+		resp := verifyResponse(mrtd)
+		resp["result"].(map[string]any)["platform"] = string(types.PlatformTdx)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{mrtd},
+		MinTCBVersion:     1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("VerifyCert: %v", err)
+	}
+	if observed.Platform != string(types.PlatformTdx) {
+		t.Fatalf("platform = %q, want tdx", observed.Platform)
+	}
+	if observed.Params == nil || observed.Params.ExpectedReportData == nil {
+		t.Fatal("missing expected report data")
+	}
+	if got := observed.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:]) {
+		t.Fatalf("expected_report_data = %x, want %x", got, expectedReportData)
+	}
+	if observed.Params.MinTcb != nil {
+		t.Fatal("min_tcb must not be sent on the TDX path")
+	}
+	if result.TEEType != TEETypeTDX {
+		t.Fatalf("TEEType = %v, want TDX", result.TEEType)
+	}
+	if !bytes.Equal(result.ReportData[:], expectedReportData[:]) {
+		t.Fatalf("ReportData = %x, want %x", result.ReportData, expectedReportData)
+	}
+	if !bytes.Equal(result.Measurement[:], mrtd) {
+		t.Fatalf("Measurement = %x, want MRTD %x", result.Measurement, mrtd)
+	}
+
+	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
+	_, err = VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{wrongMRTD},
+	}, nil)
+	if !errors.Is(err, ErrPolicyViolation) {
+		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
 	}
 }
 

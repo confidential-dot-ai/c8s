@@ -29,6 +29,11 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 )
 
+// maxHandoffErrorBytes caps how much of an untrusted peer's non-2xx /handoff
+// response body is read into HandoffStatusError. A few KB is plenty for an
+// error message.
+const maxHandoffErrorBytes = 8 << 10
+
 const (
 	handoffProtocolLabel            = "c8s-cds-handoff-v1"
 	handoffRequestSignaturePurpose  = "request-signature"
@@ -172,6 +177,17 @@ type HandoffClientDeps struct {
 	KeyProvider         KeyProvider
 	ExpectedIssuer      string
 	AllowedMeasurements map[string]bool
+}
+
+// HandoffStatusError is a non-2xx handoff response, typed so callers can
+// distinguish disabled (404) from not-yet-bootstrapped (503).
+type HandoffStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *HandoffStatusError) Error() string {
+	return fmt.Sprintf("handoff peer returned %d: %s", e.Status, e.Body)
 }
 
 // HandleHandoff validates a replica EAR and returns the CA material encrypted
@@ -359,12 +375,15 @@ func RunHandoffEARExpiryUpdater(ctx context.Context, src HandoffEARSource, inter
 }
 
 // RequestHandoff drives the client side of the handoff protocol against
-// peerURL and returns verified, decrypted CA material.
-func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, signer *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
+// peerURL and returns verified, decrypted CA material. requesterSigningKey is
+// the ECDSA key bound into requesterEAR and signs the request transcript. A
+// distinct, one-request X25519 key below encrypts the response; the CA private
+// key appears only inside the decrypted HandoffMaterial.
+func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, requesterSigningKey *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
 	if strings.TrimSpace(requesterEAR) == "" {
 		return nil, fmt.Errorf("handoff requester EAR is required")
 	}
-	if signer == nil {
+	if requesterSigningKey == nil {
 		return nil, fmt.Errorf("handoff requester signing key is required")
 	}
 	if len(deps.AllowedMeasurements) == 0 {
@@ -383,7 +402,7 @@ func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, reques
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signHandoffMessage(signer, requestMessage)
+	signature, err := signHandoffMessage(requesterSigningKey, requestMessage)
 	if err != nil {
 		return nil, err
 	}
@@ -404,8 +423,10 @@ func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, reques
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("handoff peer returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Untrusted peer error body: cap it so a hostile or misconfigured
+		// peer cannot balloon memory (or the retry log) with a huge response.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHandoffErrorBytes))
+		return nil, &HandoffStatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 
 	var hr HandoffResponse

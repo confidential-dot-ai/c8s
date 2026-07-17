@@ -23,12 +23,13 @@ final security model. Each bullet links to the tracking issue.
   guests. Also note the SNP launch digest covers the VMSA set, so even a correct
   pin is per-VM-shape (vCPU count). Candidate fix is operator-signed allowlist
   entries verified in-guest against a baked operator public key.
-- RA-TLS measurement pinning is SNP-only: the TDX verify path drops
-  `policy.Measurements` and `MinTCBVersion` — the attestation-api's TDX
-  verifier surfaces no launch measurement and takes no minimum-TCB parameter,
-  so `verifyTDXEvidence` sends neither (`pkg/attestationclient/verify.go`,
-  `EvidencePolicy`). A TDX deployment relying on `cds.measurements` gets
-  signature + report-data + debug checks only.
+- **TDX measurement scope is MRTD-only.** The attestation-api surfaces MRTD as
+  the normalized `claims.launch_digest`, and c8s applies `policy.Measurements`
+  to it just as it applies the same allowlist to SNP LAUNCH_DIGEST. That pins
+  the TDX guest's initial contents, but it does not pin RTMR[0..3], including
+  the per-workload RTMR[3]. `MinTCBVersion` also remains SNP-only because the
+  c8s TDX verify request has no minimum-TCB policy field. Callers must not treat
+  an MRTD match as an RTMR or workload-identity verdict.
 
 ## Mesh and certificates
 
