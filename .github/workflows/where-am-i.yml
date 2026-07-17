@@ -23,7 +23,7 @@ jobs:
           set +e
           echo "=== azure signals (vTPM + IMDS; meaningful on azure-cvm) ==="
           ls -l /dev/tpmrm0 /dev/tpm0 2>/dev/null || echo "no vTPM device"
-          curl -s -m3 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-02-01' 2>/dev/null | head -c 300; echo
+          curl -s -m3 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-12-13' 2>/dev/null | head -c 300; echo
           echo "=== virt type (bare metal vs vm) ==="
           systemd-detect-virt 2>/dev/null || echo "(systemd-detect-virt unavailable)"
           echo "=== /dev/sev* (sev-guest => we ARE a guest; sev => we are the HOST) ==="
