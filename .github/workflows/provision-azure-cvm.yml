@@ -60,20 +60,24 @@ jobs:
           set -euo pipefail
           az group create -n "$RG" -l "${{ inputs.region }}" \
             --tags ci=confidential-ci standing=true -o none
-          if ! az aks show -g "$RG" -n "$CLUSTER" -o none 2>/dev/null; then
-            # system pool = a cheap regular node hosting the ARC controller +
-            # listener (they don't need the TEE). conf pool = the confidential
-            # SEV-SNP nodes the runners land on, autoscaled.
-            # D2s_v5 is policy-blocked in this sub (northeurope); D2s_v4 is in the
-            # allowed list and plenty for the ARC controller+listener.
-            az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
-              --node-vm-size Standard_D2s_v4 --os-sku Ubuntu --generate-ssh-keys -o none
+          # system pool = a cheap regular node for the ARC controller + listener
+          # (no TEE needed; D2s_v5 is policy-blocked here, D2s_v4 is allowed).
+          # conf pool = the confidential SEV-SNP nodes runners land on, autoscaled.
+          # Idempotent at BOTH levels (run 29560490644 created the cluster then
+          # died at the pool — cluster-level else would have skipped it forever).
+          az aks show -g "$RG" -n "$CLUSTER" -o none 2>/dev/null \
+            || az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
+                 --node-vm-size Standard_D2s_v4 --os-sku Ubuntu --generate-ssh-keys -o none
+          if ! az aks nodepool show -g "$RG" --cluster-name "$CLUSTER" -n conf -o none 2>/dev/null; then
+            # nodepool add DEFAULTS --node-count to 3 (> max 2) — pin it inside
+            # the autoscaler range explicitly.
             az aks nodepool add -g "$RG" --cluster-name "$CLUSTER" -n conf --mode User \
               --node-vm-size "${{ inputs.vm_size }}" --os-sku Ubuntu \
+              --node-count "${{ inputs.node_min }}" \
               --enable-cluster-autoscaler --min-count "${{ inputs.node_min }}" --max-count 2 \
               --labels confidential.ai/azure-cvm=true --node-taints confidential.ai/azure-cvm=true:NoSchedule -o none
           else
-            echo "cluster exists — reconciling conf pool min-count"
+            echo "conf pool exists — reconciling autoscaler bounds"
             az aks nodepool update -g "$RG" --cluster-name "$CLUSTER" -n conf \
               --update-cluster-autoscaler --min-count "${{ inputs.node_min }}" --max-count 2 -o none || true
           fi
