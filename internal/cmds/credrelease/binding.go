@@ -7,6 +7,7 @@
 package credrelease
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
@@ -67,24 +68,12 @@ func verifyKeyMeasured(pubkey []byte) error {
 	}
 	want := expectedRTMR3ForKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
-	if !equalBytes(own, want) {
+	if !bytes.Equal(own, want) {
 		return fmt.Errorf(
 			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
 			hex.EncodeToString(own), hex.EncodeToString(want))
 	}
 	return nil
-}
-
-func equalBytes(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // readOperatorPubkey reads the operator public key the initrd staged from the

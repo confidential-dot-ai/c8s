@@ -39,15 +39,3 @@ func TestExpectedRTMR3MatchesHardware(t *testing.T) {
 		t.Errorf("RTMR[3] from key digest = %s, want %s (hardware-confirmed)", got, wantRTMR3)
 	}
 }
-
-func TestEqualBytes(t *testing.T) {
-	if !equalBytes([]byte{1, 2, 3}, []byte{1, 2, 3}) {
-		t.Error("equal slices reported unequal")
-	}
-	if equalBytes([]byte{1, 2, 3}, []byte{1, 2, 4}) {
-		t.Error("differing slices reported equal")
-	}
-	if equalBytes([]byte{1, 2}, []byte{1, 2, 3}) {
-		t.Error("different-length slices reported equal")
-	}
-}
