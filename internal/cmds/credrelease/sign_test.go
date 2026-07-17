@@ -226,15 +226,41 @@ func TestLoadClusterCAReleasesServerCA(t *testing.T) {
 	}
 }
 
-// TestLoadClusterCAKubeadmSingleCA covers the kubeadm case: one ca.crt signs
-// both serving and client certs, so all three paths point at the same file.
+// TestLoadClusterCAKubeadmSingleCA covers the kubeadm shape: one RSA ca.crt
+// with a PKCS#1 ca.key signs both serving and client certs, so all three
+// paths point at the same files.
 func TestLoadClusterCAKubeadmSingleCA(t *testing.T) {
-	certPath, keyPath, cert := namedCA(t, t.TempDir(), "ca")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := certutil.GenerateSerial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := certutil.NewCATemplate(serial, "kubernetes", time.Now().Add(time.Hour))
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := certutil.EncodeCertPEM(der)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.crt")
+	keyPath := filepath.Join(dir, "ca.key")
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	ca, err := loadClusterCA(certPath, keyPath, certPath)
 	if err != nil {
 		t.Fatalf("single-CA (kubeadm) load failed: %v", err)
 	}
-	if !parseLeaf(t, ca.pem).Equal(cert) {
+	if string(ca.pem) != string(certPEM) {
 		t.Error("single-CA anchor mismatch")
 	}
 }
