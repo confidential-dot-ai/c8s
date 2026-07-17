@@ -51,7 +51,20 @@ jobs:
 
       - name: kettle TEE suite on real vTPM hardware (bin/test-integration)
         run: |
-          set -euo pipefail
-          ./bin/test-integration 2>&1 | tee nx.out
+          set +e +o pipefail
+          # run THEIR script first — it pins the bitrot (nextest flag is
+          # --run-ignored, not --ignored; found on this suite's first-ever
+          # hardware execution, fix filed against kettle). When they fix it,
+          # the warning below disappears on its own.
+          ./bin/test-integration >nx.out 2>&1
+          RC=$?
+          cat nx.out
+          if [ $RC -ne 0 ] && grep -q "unexpected argument '--ignored'" nx.out; then
+            echo "::warning::bin/test-integration is bitrotted (--ignored -> --run-ignored) — running the corrected invocation for the actual suite signal"
+            cargo nextest run --features attest --run-ignored all --no-fail-fast > nx.out 2>&1
+            RC=$?
+            cat nx.out
+          fi
           echo "── summary ──"
-          grep -E 'Summary|PASS|FAIL' nx.out | tail -20 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E 'Summary|PASS|FAIL' nx.out | tail -20 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $RC
