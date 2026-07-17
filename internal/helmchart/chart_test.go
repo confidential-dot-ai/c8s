@@ -4583,6 +4583,53 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 	})
 }
 
+// TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
+// --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
+// the plugin) and kata is off, yet the baked plugin still pulls the live
+// allowlist from CDS. If the seed is not served, CDS starts empty and every
+// un-baked component (operator, ratls-mesh, tls-lb's nginx) is denied until an
+// operator hand-runs `c8s allowlist add`. Regression for that deadlock: the seed
+// ConfigMap must render, be mounted, and carry the deployed digests.
+func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
+	const (
+		opD = "sha256:00000000000000000000000000000000000000000000000000000000000000c1"
+		rmD = "sha256:00000000000000000000000000000000000000000000000000000000000000c2"
+	)
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+		"--set-string", "image.digest="+opD,
+		"--set-string", "ratlsMesh.image.digest="+rmD,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+	seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+	if err != nil {
+		t.Fatalf("node-mode seed JSON does not parse (CDS would start empty): %v\n%s", err, cm.Data["allowlist-seed.json"])
+	}
+	// The un-baked components denied in the un-seeded case: operator, ratls-mesh,
+	// and tls-lb's nginx (default digest from values.yaml).
+	if got := seed.Digests[opD]; got != "ghcr.io/confidential-dot-ai/c8s-operator@"+opD {
+		t.Errorf("node-mode seed missing operator entry; got %q\nseed: %v", got, seed.Digests)
+	}
+	if got := seed.Digests[rmD]; got != "ghcr.io/confidential-dot-ai/ratls-mesh@"+rmD {
+		t.Errorf("node-mode seed missing ratls-mesh entry; got %q\nseed: %v", got, seed.Digests)
+	}
+	const nginxD = "sha256:4359d693e04e2384cafa10a0fcdca850767dcf541457470124542356a9852c3f"
+	if _, ok := seed.Digests[nginxD]; !ok {
+		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
+	}
+	// The flag/mount must be present so CDS actually loads the seed.
+	if !strings.Contains(out, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
+		t.Errorf("node-mode CDS missing --allowlist-seed flag; seed rendered but not loaded")
+	}
+}
+
 // The nri-image-policy containerd-prep init container (rke2 only) runs busybox,
 // which is not a c8sComponent, so it is never in the derive set. The host plugin
 // enforces every container node-wide, so unless busybox is self-seeded a
@@ -4804,13 +4851,21 @@ func TestChartWiresCDSAllowlistSeedFlagAndVolume(t *testing.T) {
 
 // With host NRI disabled and no kata, nothing consumes CDS's served allowlist,
 // so the seed wiring must drop out entirely.
-func TestChartOmitsCDSSeedWhenImagePolicyDisabled(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "nriImagePolicy.enabled=false")
+func TestChartOmitsCDSSeedWhenNoAllowlistConsumer(t *testing.T) {
+	// The seed is served only when something consumes CDS's allowlist: the host
+	// NRI plugin (nriImagePolicy.enabled), the in-guest policy-monitor (kata), or
+	// the baked node-mode plugin (cvmMode=node). With all three off — a cloud
+	// mode whose host plugin is explicitly disabled — there is no consumer, so
+	// the seed ConfigMap and flag must not render.
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "nriImagePolicy.enabled=false",
+	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-cds-allowlist-seed") {
-		t.Fatalf("seed ConfigMap should not render when nriImagePolicy is disabled")
+		t.Fatalf("seed ConfigMap should not render when no allowlist consumer is enabled")
 	}
 	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 	assertContainerNoArgPrefix(t, "cds", cds.Args, "--allowlist-seed")
