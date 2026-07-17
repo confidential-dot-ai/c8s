@@ -326,11 +326,13 @@ attestationApi:
     - gcp-tdx
   ## CVM platform shape — selects (via the install CLI) the TEE device:
   ##
-  ## baremetal (default): bare-metal CVM, native /dev/sev-guest.
-  ## node: generalized node-as-CVM — our own nodes (self-managed TDX/SNP) are
-  ##   themselves confidential VMs exposing a native TEE device (/dev/sev-guest,
-  ##   or /dev/tdx-guest with --hardware-platform tdx); pods run as ordinary
-  ##   processes attested via the node's own quote. Cloud-agnostic.
+  ## pod: per-pod confidential VMs via the Kata runtime — every workload pod is
+  ##   a kata CVM; host-side attestation-api/nri/ratls-mesh are disabled and
+  ##   served by the in-guest counterparts. Native TEE device.
+  ## node (default): generalized node-as-CVM — our own nodes (self-managed
+  ##   TDX/SNP) are themselves confidential VMs exposing a native TEE device
+  ##   (/dev/sev-guest, or /dev/tdx-guest with --hardware-platform tdx); pods run
+  ##   as ordinary processes attested via the node's own quote. Cloud-agnostic.
   ## gke: GKE managed confidential VM — also native /dev/sev-guest.
   ## aks: Azure confidential VM — SEV-SNP via the vTPM at /dev/tpm0.
   ##
@@ -338,7 +340,10 @@ attestationApi:
   ## device-cgroup rule, so open() on the TEE device is EPERM from an unprivileged
   ## container regardless of SYS_RAWIO. TODO: drop privileged by routing SNP attest
   ## through the TSM configfs report interface (/sys/kernel/config/tsm/report).
-  cvmMode: baremetal
+  ##
+  ## The install CLI requires --cvm-mode explicitly (no default there); this
+  ## chart default serves GitOps/HelmRelease consumers that set values directly.
+  cvmMode: node
   ## Unused while all modes render privileged: true (see cvmMode above). Retained
   ## for the planned least-privilege configfs path.
   securityContext:

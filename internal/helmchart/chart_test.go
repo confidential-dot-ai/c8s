@@ -153,7 +153,10 @@ func containerArgValue(args []string, flag string) (string, bool) {
 }
 
 func TestChartDefaultRendersReplacementStack(t *testing.T) {
-	out, err := helmTemplate(t)
+	// gke keeps the host-side attestation-api enabled and reachable at its
+	// in-cluster Service DNS (node disables it and points components at the
+	// baked host attestation-api via HOST_IP; that path is covered separately).
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -1030,13 +1033,13 @@ func TestChartWebhookExtraExcludedFlowsToWebhookAndSweep(t *testing.T) {
 // pod-injector MutatingWebhookConfiguration carries
 // admissions.enforcer/disabled=true, so AKS's admissionsenforcer controller
 // stops rewriting the webhook namespaceSelector and conflicting with helm
-// re-applies. The default (baremetal) must NOT carry it — the annotation is
+// re-applies. The default (node) must NOT carry it — the annotation is
 // pure AKS plumbing and shouldn't appear on other platforms. A user-set
 // webhook.annotations value flows through alongside it.
 func TestChartWebhookOptsOutOfAKSAdmissionsEnforcer(t *testing.T) {
 	const annotation = "admissions.enforcer/disabled"
 
-	// Default (baremetal): no AKS opt-out annotation.
+	// Default (node): no AKS opt-out annotation.
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1046,7 +1049,7 @@ func TestChartWebhookOptsOutOfAKSAdmissionsEnforcer(t *testing.T) {
 		t.Fatalf("default chart missing MutatingWebhookConfiguration c8s-pod-injector\n%s", out)
 	}
 	if _, ok := def.Annotations[annotation]; ok {
-		t.Errorf("default (baremetal) webhook must not carry %s; got %v", annotation, def.Annotations)
+		t.Errorf("default (node) webhook must not carry %s; got %v", annotation, def.Annotations)
 	}
 
 	// aks: opt-out annotation present and "true".
@@ -1425,15 +1428,14 @@ func TestChartIntValueRejectsNonInteger(t *testing.T) {
 func TestChartAttestationApiPrivileged(t *testing.T) {
 	for _, tc := range []struct {
 		mode string
-		// baremetal is the chart default, so render it via the no-arg path to
+		// node is the chart default, so render it via the no-arg path to
 		// also guard that a plain install is privileged.
 		useDefault bool
 		// aks renders the privilege axis only — it must NOT also carry the
 		// least-privilege capabilities map (the modes are either/or, not merged).
 		noCapabilities bool
 	}{
-		{mode: "baremetal", useDefault: true},
-		{mode: "node"},
+		{mode: "node", useDefault: true},
 		{mode: "gke"},
 		{mode: "aks", noCapabilities: true},
 	} {
@@ -1466,7 +1468,7 @@ func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of baremetal, node, gke, aks (got "bogus")`)
+	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of pod, node, gke, aks (got "bogus")`)
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
@@ -1539,10 +1541,10 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 }
 
 // TestChartNonNodeModeKeepsServiceDNS proves the node-mode wiring does not leak
-// into the other cvmModes: baremetal/gke/aks still dial the in-cluster host
+// into the other cvmModes: pod/gke/aks still dial the in-cluster host
 // Service DNS and render no HOST_IP env anywhere.
 func TestChartNonNodeModeKeepsServiceDNS(t *testing.T) {
-	for _, mode := range []string{"baremetal", "gke", "aks"} {
+	for _, mode := range []string{"pod", "gke", "aks"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
 			if err != nil {
@@ -3618,7 +3620,10 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 // (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
 // --jwks-url, since signing happens in the same binary).
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
-	out, err := helmTemplate(t)
+	// gke: host-side attestation-api at its Service DNS. node points CDS at the
+	// baked host attestation-api via HOST_IP (covered separately), so pin the
+	// Service-URL mode here.
+	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
