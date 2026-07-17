@@ -45,6 +45,7 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js), verify a c8s cluster from a browser
 - [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs), the TEE evidence verification service c8s uses
 - [Threat model](docs/THREAT_MODEL.md), what c8s defends against and what it assumes
+- [RA-TLS](docs/ratls.md), how attested TLS works in c8s — the handshake step by step, the guarantees, and which certificate is used where
 
 ## Features
 
@@ -293,7 +294,7 @@ attestation and reports the operator keys it pins.
 
 | Package | Description |
 |---|---|
-| [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) |
+| [`pkg/ratls`](pkg/ratls/) | RA-TLS library for hardware-attested mTLS (AMD SEV-SNP, Intel TDX) — see [docs/ratls.md](docs/ratls.md) |
 | [`pkg/ratls/cdsclient`](pkg/ratls/cdsclient/) | CDS attestation client for certificate provisioning |
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the CDS attestation flow |
 | [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation-api |
