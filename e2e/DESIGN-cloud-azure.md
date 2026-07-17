@@ -10,7 +10,23 @@ Kept BOTH, per the metal/GCP precedent (GCP ran Model A live in the cifrai era):
 | **B — cluster per run** | `azure-aks` | EPHEMERAL `az aks create` per run; payload in a privileged pod. | a cluster per run (~25min, $) | c8s (needs a clean cluster each install), multi-node, or any "spin up the whole cluster" test. Nightly, not per-merge. |
 
 Both live in the `tee-payload.yml` dispatcher as platform cells; a consumer
-picks per need. Model B is GREEN (run 29544550923). Model A is wired + waiting
+picks per need.
+
+**Model A PROVEN (2026-07-17):** `runs-on: azure-cvm` runs INSIDE a
+Confidential VM — IMDS `securityType: ConfidentialVM` (api-version >=
+2021-12-13; older versions omit the field), secure boot on, /dev/tpm0 +
+/dev/tpmrm0 reachable from the runner (probe 29561102177). Warm dispatch:
+instant. **Scale-to-zero measured: 130s dispatch->job-start on a cold pool**
+(run 29562617388) — the GCP-era scale-from-zero stall does NOT reproduce on
+ARC 0.14.2 + the AKS autoscaler. Caveat: node-drain state couldn't be
+independently verified (no local kubectl), so treat 130s as the observed
+figure with nightly runs as the ongoing confirmation; the
+azure_cvm_watchdog turns any real stall red at 15 min. DECISION: pool runs
+min=0 (standing cost = the D2s_v4 system node only, ~$70/mo); flip back to
+node_min=1 via one provisioner dispatch if merge-latency ever matters.
+Provisioner gotchas hit: D2s_v5 policy-blocked in this sub (use D2s_v4);
+`az aks nodepool add` defaults --node-count 3 > our max 2 (pin it);
+idempotency must be POOL-level, not cluster-level. Model B is GREEN (run 29544550923). Model A is wired + waiting
 on the standing scale set: `provision-azure-cvm.yml` (one-time dispatch) stands
 up the persistent AKS + registers the `azure-cvm` ARC scale set via
 `register.sh` (new `VALUES_FILE` overlay pins runners to the confidential pool
