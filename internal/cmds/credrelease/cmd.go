@@ -20,8 +20,10 @@ func NewCmd() *cobra.Command {
 			"operator key whose public half was bound into RTMR[3] at launch.\n" +
 			"It gives an external operator console-free, non-TOFU cluster-admin\n" +
 			"access with no pre-shared secret and no trust in the host. The cert\n" +
-			"is signed by the cluster's client CA (RKE2 paths by default; any\n" +
-			"distribution works via --client-ca-cert/--client-ca-key).",
+			"is signed by the cluster's client CA and the kubeconfig anchors to\n" +
+			"the serving CA (RKE2 paths by default; any distribution works via\n" +
+			"--client-ca-cert/--client-ca-key/--server-ca-cert — on kubeadm all\n" +
+			"three are /etc/kubernetes/pki/ca.crt).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return Run(cmd.Context(), cfg)
 		},
