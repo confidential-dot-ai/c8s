@@ -13,8 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jws"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
@@ -211,19 +210,18 @@ func (h *localHandoffBootstrap) attestKey(ctx context.Context, pubDER []byte) (s
 // of the locally provisioned EAR. Handoff peers re-validate signature, issuer,
 // and expiry via ValidateEARToken before trusting any material.
 func HandoffEARExpiry(token string) (time.Time, error) {
-	msg, err := jws.Parse([]byte(token))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse JWT: %w", err)
-	}
-	claims, err := jwt.Parse(msg.Payload(), jwt.WithVerify(false), jwt.WithValidate(false))
-	if err != nil {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
 		return time.Time{}, fmt.Errorf("parse JWT claims: %w", err)
 	}
-	exp := claims.Expiration()
-	if exp.IsZero() || exp.Unix() == 0 {
+	exp, err := claims.GetExpirationTime()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read JWT exp claim: %w", err)
+	}
+	if exp == nil || exp.IsZero() || exp.Unix() == 0 {
 		return time.Time{}, fmt.Errorf("JWT missing exp claim")
 	}
-	return exp, nil
+	return exp.Time, nil
 }
 
 // nextRefreshAfter returns the duration until the next refresh attempt for
