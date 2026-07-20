@@ -8,10 +8,8 @@ a manual per-node procedure.
 This document covers what the feature installs, the design decisions behind
 it, the threat model, and the constraints to read before shipping it.
 
-It implements [confidential-dot-ai/c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97)
-(privileged Kata installation) and
-[confidential-dot-ai/c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) (RuntimeClass
-injection and enforcement).
+It implements privileged Kata installation and RuntimeClass
+injection and enforcement.
 
 ## What it installs
 
@@ -181,7 +179,7 @@ Enforcement is two cooperating pieces, installed together with the stack.
    workload pod requesting a `runtimeClassName` outside the installed set:
    `kata-qemu` / `kata-clh` plus the platform's confidential (CPU, GPU) pair.
 
-[c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) asked for a
+An earlier design asked for a
 `ValidatingAdmissionWebhook`. A **`ValidatingAdmissionPolicy`** (built-in CEL,
 no webhook server, no TLS) is the lighter equivalent, and it is what
 `bare-metal-infra-management` already uses for its `kata-cc-mode` policy.
@@ -347,7 +345,7 @@ nsenters PID 1 to restart the runtime. That is inherent to installing a
 runtime onto a host — there is no less-privileged way to do it.
 
 For **pod-as-kata-cvm this does not weaken the threat model**, and that is the
-core reasoning of [c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97):
+core reasoning behind privileged Kata:
 
 - The host (L0) is already outside the trust boundary. With `kata-qemu-snp`
   the trust boundary is the SEV-SNP guest, not the node.

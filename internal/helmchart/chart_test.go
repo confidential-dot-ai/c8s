@@ -1862,7 +1862,7 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 
 	kata, err := helmTemplateKata(t)
 	if err != nil {
-		t.Fatalf("helm template --kata: %v\n%s", err, kata)
+		t.Fatalf("helm template --cvm-mode=pod: %v\n%s", err, kata)
 	}
 	nginx = renderedDeploymentContainer(t, kata, "c8s-tls-lb", "nginx")
 	for _, p := range []namedProbe{
@@ -2816,7 +2816,7 @@ func TestChartGpuAbsentWithoutKata(t *testing.T) {
 	}
 }
 
-// TestChartKataRendersGpuStack: a plain --kata install (no GPU flag) ships the
+// TestChartKataRendersGpuStack: a plain --cvm-mode=pod install (no GPU flag) ships the
 // confidential-GPU stack — the GPU RuntimeClass (handler kata-qemu-nvidia-gpu-snp),
 // the GPU shim in SHIMS_X86_64, the enforcement allowlist entry, the GPU image
 // puller, and the privileged digest-pinned sandbox device plugin. GPU is part of
@@ -4482,7 +4482,7 @@ func TestChartSeedsCDSAllowlistFromFloor(t *testing.T) {
 // TestChartDerivesComponentDigestsIntoAllowlist proves that when the c8s
 // component images are digest-pinned, each is auto-derived into the NRI
 // allowlist seed with a repo@digest reference matching the rendered pod image —
-// so a digest-pinned install self-allows the c8s components it deploys (#51).
+// so a digest-pinned install self-allows the c8s components it deploys.
 func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 	const (
 		opD  = "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
@@ -4510,7 +4510,7 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 	}
 
 	// Each derived entry's reference must be repo@digest for the image the chart
-	// actually deploys (#51: refs match the rendered pod images).
+	// actually deploys.
 	want := map[string]string{
 		opD:  "ghcr.io/confidential-dot-ai/c8s-operator@" + opD,
 		asD:  "ghcr.io/confidential-dot-ai/attestation-api@" + asD,
@@ -4537,7 +4537,7 @@ func TestChartDerivesComponentDigestsIntoAllowlist(t *testing.T) {
 // The tls-lb nginx image is a chart-deployed non-c8s system image: it is not in
 // the tag-locked c8sComponents derive set, so a default install would otherwise
 // leave it out of the allowlist and the NRI plugin would reject the tls-lb
-// nginx container (#250). It must be self-seeded from its pinned digest whenever
+// nginx container. It must be self-seeded from its pinned digest whenever
 // tls-lb is enabled — independent of deriveComponents (off here) — and dropped
 // when tls-lb is disabled.
 func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {

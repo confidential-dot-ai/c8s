@@ -466,7 +466,7 @@ kata:
     ## Set false to skip the kata-image-puller DaemonSet — e.g. for local
     ## testing where the kata-guest-base artifact isn't published to a
     ## registry and you place it on the node + patch the kata config by hand.
-    ## Default true: under --kata the puller fetches the published artifact.
+    ## Default true: under --cvm-mode=pod the puller fetches the published artifact.
     enabled: true
     repository: ghcr.io/confidential-dot-ai
     ## Default tracks the same floating tag c8s itself falls back to for

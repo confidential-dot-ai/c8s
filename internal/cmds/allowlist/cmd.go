@@ -157,7 +157,7 @@ func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
 // door serves a CDS-issued cert with no RA-TLS extension; its trust path is
 // the discovery document, so probe for that first and fall back to direct
 // RA-TLS serving-cert verification (a port-forwarded CDS) when the target
-// serves none — the same routing `c8s verify` uses in auto mode (#285). A
+// serves none — the same routing `c8s verify` uses in auto mode. A
 // discovery document that fails verification is a hard error, never a
 // fallback.
 func (o *options) httpsClient(ctx context.Context, measurements [][]byte) (*http.Client, error) {
