@@ -16,8 +16,10 @@ section of `docs/ratls.md`.
 
 ## The one-paragraph version
 
-`get-cert` (the injected `c8s-cert` sidecar) asks a node-local **broker**
-"what images does my pod run?" — *without saying who it is*. The broker learns
+`get-cert` (the injected `c8s-cert` sidecar) asks a node-local **broker** —
+part of the image-admission component itself (`nri-image-policy` on node-CVM,
+`policy-monitor` on kata), not a standalone service — "what images does my pod
+run?" *without saying who it is*. The broker learns
 the caller's identity from the **kernel** (unix-socket peer credentials), maps
 it to a pod, and returns that pod's admitted container image digests.
 `get-cert` hashes them into one `workloadDigest`, binds it into its CSR's
