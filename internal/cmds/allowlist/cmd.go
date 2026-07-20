@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -52,21 +53,28 @@ var defaultRequiredComponents = []string{
 
 // options holds the flags shared by every subcommand.
 type options struct {
-	url               string
-	measurements      []string
-	measurementsFile  string
-	attestationAPIURL string
-	timeout           time.Duration
+	url              string
+	measurements     []string
+	measurementsFile string
+	timeout          time.Duration
 
 	operatorKey string
 
 	output   string // "text" | "json"
 	insecure bool
+
+	// verify is the evidence verifier; a stub in tests.
+	verify localverify.VerifyFunc
 }
 
 // NewCmd returns the `c8s allowlist` command tree.
 func NewCmd() *cobra.Command {
-	o := &options{}
+	return newCmd(localverify.Verify)
+}
+
+// newCmd is the injectable constructor behind NewCmd.
+func newCmd(verify localverify.VerifyFunc) *cobra.Command {
+	o := &options{verify: verify}
 	cmd := &cobra.Command{
 		Use:   "allowlist",
 		Short: "Manage the CDS image-digest allowlist",
@@ -89,7 +97,6 @@ README ("Operator allowlist credentials").`,
 	pf.StringVar(&o.url, "url", "", "CDS base URL (required). CDS has no public ingress: reach it via 'kubectl port-forward svc/c8s-cds 8443:8443' then --url https://localhost:8443, or via the tls-lb")
 	pf.StringSliceVar(&o.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) of the attested endpoint — CDS directly, or the tls-lb's discovery evidence when fronted (repeatable/comma-separated); empty = no pinning (UNSAFE)")
 	pf.StringVar(&o.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
-	pf.StringVar(&o.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS RA-TLS evidence (required for https unless measurements make it self-contained)")
 	pf.DurationVar(&o.timeout, "timeout", 15*time.Second, "per-request timeout")
 	pf.StringVar(&o.operatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+envOperatorKey+"); required for writes")
 	pf.StringVarP(&o.output, "output", "o", "text", "output format: text or json")
@@ -161,22 +168,15 @@ func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
 // discovery document that fails verification is a hard error, never a
 // fallback.
 func (o *options) httpsClient(ctx context.Context, measurements [][]byte) (*http.Client, error) {
-	if o.attestationAPIURL == "" {
-		return nil, fmt.Errorf("--attestation-api-url is required for an https --url (evidence verification is delegated to it)")
-	}
 	probeCtx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
-	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.url, measurements, o.attestationAPIURL)
+	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.url, measurements, o.verify)
 	switch {
 	case err == nil:
 		fmt.Fprintln(os.Stderr, "note: target is a tls-lb front door; verified its discovery attestation and bound this session to the attested connection")
 		return hc, nil
 	case errors.Is(err, lbdiscovery.ErrNoDiscovery):
-		hc, err = ratls.NewVerifyingHTTPClient(measurements, o.attestationAPIURL)
-		if err != nil {
-			return nil, fmt.Errorf("build CDS RA-TLS client: %w", err)
-		}
-		return hc, nil
+		return localverify.NewRATLSHTTPClient(measurements, o.verify, o.timeout), nil
 	default:
 		return nil, err
 	}
