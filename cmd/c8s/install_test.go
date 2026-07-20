@@ -85,7 +85,7 @@ func TestResolveImageTag(t *testing.T) {
 	}
 }
 
-// labelSelector feeds the --kata SNP-node preflight: it must produce a stable
+// labelSelector feeds the --cvm-mode=pod SNP-node preflight: it must produce a stable
 // kubectl -l selector from the chart's kata.snpNodeSelector map, and report
 // ok=false for the empty (opt-out) and malformed shapes so the preflight
 // skips rather than guesses.
@@ -749,7 +749,7 @@ func TestCheckImagePullSecret(t *testing.T) {
 
 func TestAppendDistroInstallArgsSetsBothComponents(t *testing.T) {
 	// The detected distro feeds both the kata-deploy and nri-image-policy
-	// installers; nri-image-policy installs regardless of --kata, so the two
+	// installers; nri-image-policy installs regardless of --cvm-mode=pod, so the two
 	// values always travel together.
 	for _, distro := range []string{"k8s", "rke2"} {
 		t.Run(distro, func(t *testing.T) {
