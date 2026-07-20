@@ -9,10 +9,10 @@ final security model.
 - Chart-managed CDS runs as a singleton and keeps the active CA key in memory.
 - CDS allowlist persistence is off by default (`cds.persistence.enabled=false`). A restart without a surviving adoption peer resets the served allowlist to the install seed and loses operator-added digests (`c8s allowlist add`) — workloads using them are denied ~30s later. Planned CA-adoption rolls now transfer the complete allowlist in the encrypted handoff snapshot, with a documented concurrent-write race. See `docs/operator.md` "Operator-added allowlist entries across restarts".
 - Active/active CDS remains unimplemented. Attested handoff plus a singleton RollingUpdate provides active/standby restart continuity; per-pod EAR keys still block simultaneous serving.
-- Application-secret release is not implemented (tracked at [#46](https://github.com/confidential-dot-ai/c8s/issues/46)).
-- Per-workload measurement allowlists are not enforced at `/attest` (tracked at [#57](https://github.com/confidential-dot-ai/c8s/issues/57)).
+- Application-secret release is not implemented.
+- Per-workload measurement allowlists are not enforced at `/attest`.
 - Allowlist writes are authorized by pinned, long-lived operator public keys (`cds.operatorKeys`), verified at the app layer. Revocation is coarse — no CRL/OCSP, so revoking one operator means removing its key and re-installing. Write tokens are bound to body, method, and path, with a server-enforced 5-minute maximum validity, but carry no `aud`/cluster binding: clusters that pin the **same** operator key accept each other's captured tokens within that window, so pin distinct keys per cluster. Handoff now commits the canonical key-set hash into requester and issuer REPORTDATA and requires an exact match, preventing policy substitution between replicas. The general CDS serving attestation still does not commit this list (or the seed and startup flags), and because the keys are public the handoff commitment is not proof of operator private-key possession. `c8s cds verify` reports pinned-key fingerprints over the attested serving connection. Longer term: commit all startup policy to attested init data and move to a CA + short-lived operator certificates. See `docs/pitfalls.md` and `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
-- The c8s infrastructure images are not pinned into NRI policy by default (tracked at [#51](https://github.com/confidential-dot-ai/c8s/issues/51)).
+- The c8s infrastructure images are not pinned into NRI policy by default.
 - The in-guest CDS allowlist refresh is disabled on every default kata install:
   it fail-closed-refuses to run without `C8S_CDS_MEASUREMENTS`, and no shipping
   path can deliver that pin — baking it is self-referential (CDS runs from the
@@ -33,11 +33,11 @@ final security model.
 
 ## Mesh and certificates
 
-- Mesh peer verification checks the CA chain but does not pin peer measurement (tracked at [#47](https://github.com/confidential-dot-ai/c8s/issues/47)).
-- Leaf certificates do not embed a verified TEE measurement (tracked at [#47](https://github.com/confidential-dot-ai/c8s/issues/47)).
-- SPIFFE-style URI SANs are not implemented (tracked at [#47](https://github.com/confidential-dot-ai/c8s/issues/47)).
-- Strict/permissive mTLS modes are not configurable (tracked at [#47](https://github.com/confidential-dot-ai/c8s/issues/47)).
-- Per-workload `allowedPeers` policy is not enforced (tracked at [#47](https://github.com/confidential-dot-ai/c8s/issues/47)).
+- Mesh peer verification checks the CA chain but does not pin peer measurement.
+- Leaf certificates do not embed a verified TEE measurement.
+- SPIFFE-style URI SANs are not implemented.
+- Strict/permissive mTLS modes are not configurable.
+- Per-workload `allowedPeers` policy is not enforced.
 - The in-guest mesh exempts all UID-0 egress so attestation-service can reach
   AMD KDS, so a workload running as root egresses in plaintext and bypasses the
   mesh. Workloads MUST run non-root; the exemption should be scoped to
@@ -46,7 +46,7 @@ final security model.
 ## Image and pod spec
 
 - The NRI plugin gates image digest, not args, env, mounts, capabilities, or
-  other pod-spec fields (tracked at [#49](https://github.com/confidential-dot-ai/c8s/issues/49)).
+  other pod-spec fields.
 
 ## Confidential GPU
 
@@ -122,7 +122,7 @@ final security model.
 ## Operations
 
 - Chart-managed CDS is not highly available by default. Restart continuity ships via CA adoption + RollingUpdate (active/standby); true active/active is blocked by per-pod EAR signing keys (design: [decisions/2026-07-14-cds-active-active-ear-jwks.md](decisions/2026-07-14-cds-active-active-ear-jwks.md); scope: [decisions/2026-07-14-cds-active-active-scope.md](decisions/2026-07-14-cds-active-active-scope.md)).
-- Multi-tenancy isolation has no complete design (tracked at [#56](https://github.com/confidential-dot-ai/c8s/issues/56)).
+- Multi-tenancy isolation has no complete design.
 - Federation and multi-cluster orchestration remain fleet-level concerns.
 - No operator↔chart capability handshake: the chart renders webhook-dependent
   features (e.g. GPU class injection) without knowing whether the deployed
@@ -146,7 +146,7 @@ final security model.
 - The default PQ binding commits `report_data` to the X25519/ML-KEM session keys
   and nonce, but not to the serving SPKI or mesh identity. The public mesh leaf
   and CA are fetched separately, so an allowed-measurement attacker can copy them
-  without proving possession of a CA-issued key. The in-flight #314 binds the
+  without proving possession of a CA-issued key. In-flight work binds the
   mesh leaf and issuing CA into a domain-separated PQ transcript with per-session
   proof of possession of the leaf key; until it lands, measurement + CA pins are
   not cluster authentication.
