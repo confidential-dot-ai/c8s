@@ -1862,7 +1862,7 @@ func TestTLSLBProbesAvoidMTLSHandshakeUnderKata(t *testing.T) {
 
 	kata, err := helmTemplateKata(t)
 	if err != nil {
-		t.Fatalf("helm template --kata: %v\n%s", err, kata)
+		t.Fatalf("helm template --cvm-mode=pod: %v\n%s", err, kata)
 	}
 	nginx = renderedDeploymentContainer(t, kata, "c8s-tls-lb", "nginx")
 	for _, p := range []namedProbe{
@@ -2816,7 +2816,7 @@ func TestChartGpuAbsentWithoutKata(t *testing.T) {
 	}
 }
 
-// TestChartKataRendersGpuStack: a plain --kata install (no GPU flag) ships the
+// TestChartKataRendersGpuStack: a plain --cvm-mode=pod install (no GPU flag) ships the
 // confidential-GPU stack — the GPU RuntimeClass (handler kata-qemu-nvidia-gpu-snp),
 // the GPU shim in SHIMS_X86_64, the enforcement allowlist entry, the GPU image
 // puller, and the privileged digest-pinned sandbox device plugin. GPU is part of

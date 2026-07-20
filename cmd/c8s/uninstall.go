@@ -93,7 +93,7 @@ type kataUninstallConfig struct {
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
 	Short: "Uninstall the c8s Helm release and sweep kata artifacts off the hosts",
-	Long: `Removes the release 'c8s install' deployed and, for a --kata install,
+	Long: `Removes the release 'c8s install' deployed and, for a --cvm-mode=pod install,
 sweeps the host-side kata artifacts off every node.
 
 'helm uninstall' already unwinds most of the install: the release resources
@@ -664,7 +664,7 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallNamespace, "namespace", "c8s-system", "namespace the release was installed into")
 	uninstallCmd.Flags().StringVar(&uninstallRelease, "release", "c8s", "Helm release name")
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
-	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep the kata host artifacts (/opt/kata, containerd drop-in, kata-guest-base image, RKE2 prep template, node labels) off every kata node via a short-lived privileged DaemonSet. Skipped automatically when the release was installed without --kata")
+	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep the kata host artifacts (/opt/kata, containerd drop-in, kata-guest-base image, RKE2 prep template, node labels) off every kata node via a short-lived privileged DaemonSet. Skipped automatically when the release was installed without --cvm-mode=pod")
 	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the kata host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry kata artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
 	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart)")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")
