@@ -88,6 +88,10 @@ type VerifyResult struct {
 	// PlatformInfo contains platform-specific metadata from the
 	// attestation-api response. Only set on the SNP path.
 	PlatformInfo []byte
+	// ConfigClaims is the parsed config-claims extension the certificate
+	// carried and the evidence bound, or nil when it carried none. Set only by
+	// VerifyCert; VerifyAttestation has no certificate to read.
+	ConfigClaims *ConfigClaims
 }
 
 // VerifyAttestation verifies a raw attestation report against a public key by
@@ -157,7 +161,18 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
 	}
 
-	return verifyReport(att, policy, expectedReportData)
+	result, err := verifyReport(att, policy, expectedReportData)
+	if err != nil {
+		return nil, err
+	}
+	if len(claimsBytes) > 0 {
+		claims, err := UnmarshalConfigClaims(claimsBytes)
+		if err != nil {
+			return nil, fmt.Errorf("ratls: parse config-claims: %w", err)
+		}
+		result.ConfigClaims = claims
+	}
+	return result, nil
 }
 
 // checkClaimsPins enforces the policy's config-claims pins against the raw
