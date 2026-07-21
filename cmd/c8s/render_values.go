@@ -110,7 +110,7 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 		if cmd.Flags().Changed("distro") {
 			distro = renderValuesDistro
 		}
-		setArgs, err := buildValueArgs(cmd.Context(), cmd, components, resolveImageTag(), distro, appendResolvedDigestArgs)
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, resolveImageTag(), distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
 		}
@@ -134,7 +134,10 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 // digestResolver appends the --set flags that pin each component's resolved
 // registry digest. Both commands pass appendResolvedDigestArgs (crane-backed);
 // it is injected so the full builder is testable offline without a registry.
-type digestResolver func(ctx context.Context, setArgs []string, imageTag string, components []c8sComponent) ([]string, error)
+// chartPath lets the resolver read the chart's default values (to skip
+// components the effective config disables); setArgs carries the overrides
+// assembled so far, which drive that disable.
+type digestResolver func(ctx context.Context, chartPath string, setArgs []string, imageTag string, components []c8sComponent) ([]string, error)
 
 // buildValueArgs assembles the helm --set/--set-string value args shared by
 // install and render-values. distro is passed in (install autodetects it from
@@ -143,7 +146,7 @@ type digestResolver func(ctx context.Context, setArgs []string, imageTag string,
 // returned slice is value args only — install prepends the `upgrade --install
 // <release> <chart>` verb and appends -f / wait flags, render-values converts
 // these to a values tree.
-func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sComponent, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
+func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, components []c8sComponent, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
 	// Derive the upstream address from the same deduped adoptions install's RunE
 	// validates against, so the address the chart receives and the id the RunE
 	// checks can never diverge on duplicate refs.
@@ -203,7 +206,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sCom
 	}
 	if installResolveDigests {
 		var err error
-		setArgs, err = resolveDigests(ctx, setArgs, imageTag, components)
+		setArgs, err = resolveDigests(ctx, chartPath, setArgs, imageTag, components)
 		if err != nil {
 			return nil, err
 		}

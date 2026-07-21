@@ -173,7 +173,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	installResolveDigests = false
 	defer func() { installResolveDigests = prev }()
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 		t.Fatalf("unset distro should emit no distro keys, got %v", args)
 	}
 
-	args, err = buildValueArgs(context.Background(), cmd, nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err = buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	installResolveDigests = false // tag is the sole image ref only when digests are off
 	defer func() { installResolveDigests = prev }()
 
-	args, err := buildValueArgs(context.Background(), cmd,
+	args, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
 		"0640", "", appendResolvedDigestArgs)
 	if err != nil {
@@ -233,7 +233,7 @@ func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	prevFlag := installResolveDigests
 	defer func() { installResolveDigests = prevFlag }()
 	installResolveDigests = true
-	stubResolver := func(_ context.Context, args []string, _ string, comps []c8sComponent) ([]string, error) {
+	stubResolver := func(_ context.Context, _ string, args []string, _ string, comps []c8sComponent) ([]string, error) {
 		for _, c := range comps {
 			args = append(args, "--set-string", c.valuePrefix+".repository="+c.repository,
 				"--set-string", c.valuePrefix+".digest=sha256:abc")
@@ -241,7 +241,7 @@ func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 		return append(args, "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true"), nil
 	}
 
-	got, err := buildValueArgs(context.Background(), cmd,
+	got, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
 		"main", "", stubResolver)
 	if err != nil {
@@ -354,14 +354,15 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	installUpstream = "infer"
 	installOperatorKeys = writeTestOperatorKeys(t)
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}
 	// Add the digest helper's repository/digest tokens (stubbed resolver, no crane).
 	args, err = buildDigestArgs(args, "main",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
-		func(string) (string, error) { return "sha256:abc", nil })
+		func(string) (string, error) { return "sha256:abc", nil },
+		func(string) (bool, error) { return true, nil })
 	if err != nil {
 		t.Fatalf("buildDigestArgs: %v", err)
 	}
@@ -416,7 +417,7 @@ func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	installWorkloadRefs = []string{"infer=vllm/deployment/x:8000", "infer=vllm/deployment/x:8000"}
 	installUpstream = "infer"
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}

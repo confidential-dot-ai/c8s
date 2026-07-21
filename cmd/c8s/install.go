@@ -87,6 +87,7 @@ func cvmModeIsPod(cvmMode string) bool { return cvmMode == "pod" }
 type c8sComponent struct {
 	valuePrefix string // values path, e.g. "cds.image" (renders {repository}@{digest})
 	repository  string // values.yaml default repository resolved against
+	enabledPath string // values path guarding the render, e.g. "attestationApi.enabled" ("" = always rendered)
 }
 
 // chartComponents reads the component set from the chart at chartPath via
@@ -125,7 +126,9 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 		if err != nil {
 			return nil, fmt.Errorf("component %q: %w", valuePath, err)
 		}
-		comps = append(comps, c8sComponent{valuePrefix: valuePath, repository: repo})
+		// enabledPath is optional; absent/empty means the component always renders.
+		enabledPath, _ := m["enabledPath"].(string)
+		comps = append(comps, c8sComponent{valuePrefix: valuePath, repository: repo, enabledPath: enabledPath})
 	}
 	return comps, nil
 }
@@ -704,7 +707,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// override an operator's -f is preserved by ordering: the computed file
 		// is the LAST -f, so it wins on the keys it sets (matching the previous
 		// "--set beats -f" precedence) while the operator's files supply the rest.
-		setArgs, err := buildValueArgs(cmd.Context(), cmd, components, imageTag, distro, appendResolvedDigestArgs)
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, imageTag, distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
 		}
@@ -1640,9 +1643,13 @@ func craneDigest(ctx context.Context, ref string) (string, error) {
 
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
 // registry digest (via crane) and appends the helm --set flags that pin it.
-func appendResolvedDigestArgs(ctx context.Context, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
+func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
 	if _, err := exec.LookPath("crane"); err != nil {
 		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f: %w", err)
+	}
+	enabled, err := componentEnabledPredicate(ctx, chartPath, helmArgs)
+	if err != nil {
+		return nil, err
 	}
 	return buildDigestArgs(helmArgs, tag, components, func(ref string) (string, error) {
 		digest, err := craneDigest(ctx, ref)
@@ -1653,7 +1660,55 @@ func appendResolvedDigestArgs(ctx context.Context, helmArgs []string, tag string
 		// so stdout must stay clean. Install's stdout is diagnostic too.
 		fmt.Fprintf(os.Stderr, "+ resolved %s -> %s\n", ref, digest)
 		return digest, nil
-	})
+	}, enabled)
+}
+
+// componentEnabledPredicate reports the effective enabled value at a component's
+// enabledPath, given the chart defaults and the --set overrides assembled so
+// far. attestationApi.enabled / nriImagePolicy.enabled are plain values fields
+// (default true) that the --cvm-mode=node/pod args flip to false via --set, so
+// the base values overlaid with those --set flags is the authoritative answer.
+// The merged tree is built once and shared across the per-component calls.
+func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []string) (func(valuePath string) (bool, error), error) {
+	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("helm show values %q: %w", chartPath, err)
+	}
+	var tree map[string]any
+	if err := yaml.Unmarshal(out, &tree); err != nil {
+		return nil, fmt.Errorf("parse chart values: %w", err)
+	}
+	if err := overlaySetArgs(tree, setArgs); err != nil {
+		return nil, err
+	}
+	return func(valuePath string) (bool, error) {
+		return boolAtPath(tree, valuePath), nil
+	}, nil
+}
+
+// overlaySetArgs applies the scalar --set/--set-string overrides in setArgs onto
+// tree (--set values are type-coerced, --set-string stay strings). --set-file is
+// skipped: it names a file and never carries a component enable toggle.
+func overlaySetArgs(tree map[string]any, setArgs []string) error {
+	for i := 0; i+1 < len(setArgs); i += 2 {
+		flag, kv := setArgs[i], setArgs[i+1]
+		eq := strings.IndexByte(kv, '=')
+		if eq < 0 {
+			continue
+		}
+		path, raw := kv[:eq], kv[eq+1:]
+		var err error
+		switch flag {
+		case "--set":
+			err = setNested(tree, strings.Split(path, "."), coerce(raw, true))
+		case "--set-string":
+			err = setNested(tree, strings.Split(path, "."), raw)
+		}
+		if err != nil {
+			return fmt.Errorf("overlay %s %s: %w", flag, kv, err)
+		}
+	}
+	return nil
 }
 
 // buildDigestArgs appends, for every component, the --set flags that pin both
@@ -1666,8 +1721,21 @@ func appendResolvedDigestArgs(ctx context.Context, helmArgs []string, tag string
 // partially-pinned floor would let the render guard pass while the served
 // allowlist pointed at the wrong digest. The resolver is injected so the arg
 // assembly is testable without a registry.
-func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, resolve func(ref string) (string, error)) ([]string, error) {
+func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, resolve func(ref string) (string, error), enabled func(valuePath string) (bool, error)) ([]string, error) {
 	for _, c := range components {
+		// Skip components the effective config disables: they never render, so
+		// resolving their tag is pointless and aborts a valid install if that
+		// baked-only image (e.g. attestationApi under --cvm-mode=node) is
+		// unpublished at the install tag.
+		if c.enabledPath != "" {
+			on, err := enabled(c.enabledPath)
+			if err != nil {
+				return nil, fmt.Errorf("component %s: resolve %s: %w", c.valuePrefix, c.enabledPath, err)
+			}
+			if !on {
+				continue
+			}
+		}
 		repo := c.repository
 		digest, err := resolve(repo + ":" + tag)
 		if err != nil {
