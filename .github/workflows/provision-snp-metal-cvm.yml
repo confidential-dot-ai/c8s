@@ -34,9 +34,9 @@ on:
   workflow_dispatch:
     inputs:
       max_runners:
-        description: 'max concurrent runner pods in the guest (scale-to-zero at idle)'
+        description: 'max concurrent runner pods in the guest. Default 1: the standing CVM is ONE 4-core/16Gi node — 2 concurrent in-guest rust compiles OOM it (both metal cells died when attestation-rs + kettle merges landed together, runs 29854690919/29854809091). One job at a time; concurrent lib merges queue. azure-cvm can be >1 because AKS gives each pod its own node.'
         required: false
-        default: '2'
+        default: '1'
 
 permissions:
   contents: read
