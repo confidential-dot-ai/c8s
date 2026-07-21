@@ -45,6 +45,14 @@ on:
       timeout_minutes:
         type: number
         default: 55
+      keep_alive:
+        description: 'leave the CVM running after PAYLOAD_OK (standing-runner provisioner) — skips teardown; the VM is labelled standing so the reaper spares it'
+        type: boolean
+        default: false
+      vm_name:
+        description: 'stable VM name for a standing CVM (default: cvm-<run_id>-<attempt>, ephemeral)'
+        type: string
+        default: ''
     secrets:
       ghcr_user:
         required: false
@@ -65,7 +73,7 @@ jobs:
       measurement: ${{ steps.run.outputs.measurement }}
     env:
       NS: confai-images
-      VM: cvm-${{ github.run_id }}-${{ github.run_attempt }}
+      VM: ${{ inputs.vm_name || format('cvm-{0}-{1}', github.run_id, github.run_attempt) }}
     steps:
       - name: platform config
         run: |
@@ -122,6 +130,11 @@ jobs:
           for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
             rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
             orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
+            # standing runner CVMs (provision-*-cvm.yml, keep_alive) have a manual
+            # lifecycle — never reap them, even though their owning provision run
+            # has long since "completed" (that check would otherwise kill the runner).
+            standing=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/standing}' 2>/dev/null)
+            [ "$standing" = "true" ] && { echo "keeping $vm (standing runner — manual lifecycle)"; continue; }
             [ -z "$rid" ] && continue
             [ "$rid" = "${{ github.run_id }}" ] && continue
             # age fallback: our runs are capped well under 3h, so anything older is
@@ -151,6 +164,7 @@ jobs:
             namespace: $NS
             labels:
               ci.confidential.ai/managed: "true"
+              ci.confidential.ai/standing: "${{ inputs.keep_alive }}"
               ci.confidential.ai/run-id: "${{ github.run_id }}"
               ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
               ci.confidential.ai/platform: "${{ inputs.platform }}"
@@ -400,5 +414,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: "teardown (always — tmpfs CVM: deleting the VM is total)"
-        if: always()
+        # keep_alive leaves the CVM Running as a standing runner (provisioner path);
+        # every other caller (c8s, ephemeral lib runs) tears down as before.
+        if: ${{ always() && !inputs.keep_alive }}
         run: kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true
