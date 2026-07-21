@@ -56,7 +56,9 @@ Ranked (all `snp-metal`, build→boot-under-SNP→assert hw-measurement == manif
 
 ## none — 16 repos, do not revisit
 
-attestation-go (verify-only, offline fixtures), TEErminator (client-side relying
+attestation-go (verify-only offline fixtures; thin go-sev-guest shim + a
+verifier-parity port of attestation-rs — RE-CONFIRMED 2026-07-21, see below),
+TEErminator (client-side relying
 party), rust-tss-esapi (upstream mirror, swtpm software TPM), confidential-metal
 (control plane, digests computed outside the TEE), c8s-fleet (Flux YAML),
 teefarm (orchestrator on a plain VM), kettle-orchestrator (untrusted host,
@@ -67,6 +69,38 @@ tee-benchmarking (perf, disclaims security), c8s-verify-js (WASM client
 verifier), denv (local docker), vllm-private (upstream mirror). Common thread:
 control planes, client-side verifiers, mirrors, and orchestrators — all
 correct-on-ubuntu-latest.
+
+## RE-CONFIRMED NONE 2026-07-21 — attestation-go (raised again; settled)
+
+Re-examined against the code, not just the classification, because it *looks*
+like it might need a TEE: it has `GetReport` (SNP/TDX report generation) in
+`attestation/snp/snp.go` + `attestation/tdx/tdx.go` and a `go-configfs-tsm` dep.
+It does not need the rail:
+
+- **Every test is offline fixture verification** (`//go:embed testdata/…` — reports
+  captured once from real hardware, then verified in software). NO test calls
+  `GetReport`, touches `/dev/sev-guest`, or is hardware-gated; CI is
+  `runs-on: ubuntu-latest`, `go test ./...`.
+- attestation-go is a **thin parameter-mapping shim over Google's
+  `go-sev-guest`/`go-tdx-guest`** (snp.go header: *"delegated to go-sev-guest …
+  mapping teetypes.VerifyParams onto go-sev-guest's verify/validate options"*)
+  AND a **verifier-parity port of attestation-rs** (`PARITY.md`, "Go ↔ Rust
+  **verifier** parity", audited check-by-check vs attestation-rs `e967531`). Both
+  `Verify` and `GetReport` delegate down to the Google libs.
+- So a CVM would re-test Google's (already-tested) library + a mapping shim that
+  the offline fixtures already cover. Near-zero new signal. A port DOES need its
+  own tests (the Rust tests execute Rust, never the Go shim; parity-by-audit
+  drifts) — but it HAS them, offline, which is the right coverage for a verifier
+  shim and needs no CVM.
+- The attestation-rs tests that genuinely needed the rail (`attest_endpoint`,
+  `attest_then_verify_roundtrip`, `az_*_live`) are **generation** tests (fetch a
+  live report off the silicon) with **no attestation-go counterpart** — it's a
+  verifier port. Do NOT port them here.
+
+**Only flip:** an explicit *defense-in-depth-on-own-silicon* compliance
+requirement (prove the whole Go generate→verify path on our hardware rather than
+trusting go-sev-guest's tests transitively). That's a posture choice, not a
+technical coverage gap — pursue only if stated as a requirement.
 
 ## Sequencing
 
