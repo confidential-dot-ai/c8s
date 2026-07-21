@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1031,14 +1032,9 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 				"--set-string", "ratlsMesh.platform=tdx",
 			)
 		}
-		// node: the node image bakes attestation-api + nri-image-policy, so the
-		// chart copies are skipped (ratlsMesh is not baked, stays on).
-		if mode == "node" {
-			out = append(out,
-				"--set", "attestationApi.enabled=false",
-				"--set", "nriImagePolicy.enabled=false",
-			)
-		}
+		// By default the chart deploys the host attestation-api + nri-image-policy
+		// in every mode (generic CVM node / base mode). The node-baked shape that
+		// skips them is behind --node-baked-host-services, covered separately.
 		return out
 	}
 	cases := map[string]struct {
@@ -1064,6 +1060,31 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 			}
 			assertArgsEqual(t, got, tc.want)
 		})
+	}
+}
+
+func TestAppendCvmModeInstallArgsNodeBakedHostServicesSkipsChartCopies(t *testing.T) {
+	// --node-baked-host-services (node only): the node image bakes the host
+	// attestation-api + nri-image-policy, so the chart copies are skipped
+	// (ratlsMesh is not baked, stays on).
+	defer func(prev bool) { installNodeBakedHostServices = prev }(installNodeBakedHostServices)
+	installNodeBakedHostServices = true
+
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(got, "attestationApi.enabled=false") || !slices.Contains(got, "nriImagePolicy.enabled=false") {
+		t.Fatalf("--node-baked-host-services on node did not skip the chart copies; args = %v", got)
+	}
+
+	// The flag is node-only: it must NOT skip anything under aks/gke/pod.
+	gotAks, err := appendCvmModeInstallArgs([]string{"upgrade"}, "aks", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if slices.Contains(gotAks, "attestationApi.enabled=false") {
+		t.Fatalf("--node-baked-host-services leaked into aks mode; args = %v", gotAks)
 	}
 }
 
