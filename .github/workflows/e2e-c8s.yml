@@ -36,10 +36,19 @@ on:
         type: string
         required: false
         default: main
+      aa_ref:
+        description: attestation-api image ref (tag or sha-<short>). Pin to a known-good build to avoid floating :main drift; default main keeps prior behaviour.
+        type: string
+        required: false
+        default: main
   workflow_dispatch:
     inputs:
       c8s_ref:
         description: c8s commit to test (any ref — the chart is packaged from source at that sha)
+        required: false
+        default: main
+      aa_ref:
+        description: attestation-api image ref (tag or sha-<short>). Pin to a known-good build to avoid floating :main drift; default main keeps prior behaviour.
         required: false
         default: main
   push:
@@ -122,7 +131,10 @@ jobs:
           # c8s-ancestry walk can never find its tags (learned the hard way:
           # InvalidImageName, run 29473241754). :main is the canonical pointer the
           # c8s-integration fleet uses; accepted race until c8s pins a digest.
-          AATAG=main
+          # aa_ref lets a caller PIN it (tag or sha-<short>) — floating :main drifts
+          # (e.g. attestation-rs enforce-VMPL0/reject-debug-policy landed on :main and
+          # broke this dev-sandbox CVM while the boot image was unchanged).
+          AATAG="${{ inputs.aa_ref || 'main' }}"
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
