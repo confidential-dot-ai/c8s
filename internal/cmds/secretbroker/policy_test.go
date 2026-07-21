@@ -53,6 +53,12 @@ func TestRuleMatchesWorkloadID(t *testing.T) {
 	if ruleMatches(Rule{WorkloadID: "api", Allow: []string{"x"}}, PeerIdentity{WorkloadID: "evil"}) {
 		t.Error("workloadId mismatch should deny")
 	}
+	// A ratls-mode caller carries no WorkloadID (the self-signed SAN is not read
+	// as identity), so a workloadId-scoped rule must fail closed rather than
+	// match on the empty value.
+	if ruleMatches(Rule{WorkloadID: "api", Allow: []string{"x"}}, PeerIdentity{Measurement: "aabbcc"}) {
+		t.Error("workloadId rule must fail closed for a caller with no WorkloadID")
+	}
 }
 
 func TestAllowedPathsDenyByDefault(t *testing.T) {

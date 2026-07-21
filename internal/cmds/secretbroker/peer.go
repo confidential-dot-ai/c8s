@@ -83,13 +83,22 @@ func (v *peerVerifier) Identity(r *http.Request) (PeerIdentity, error) {
 	}
 	cert := r.TLS.PeerCertificates[0]
 
-	id := PeerIdentity{WorkloadID: workloadIDFromCert(cert)}
-	if v.mode == peerVerifyRATLS {
+	var id PeerIdentity
+	switch v.mode {
+	case peerVerifyRATLS:
+		// An RA-TLS leaf is self-signed and its REPORTDATA binds only the key,
+		// not the SAN — so the SAN is caller-asserted and must NOT be read as
+		// identity here. ratls mode authorizes on the attested measurement only;
+		// a workloadId-scoped rule fails closed for a ratls caller.
 		res, err := ratls.VerifyCert(cert, v.policy, nil)
 		if err != nil {
 			return PeerIdentity{}, fmt.Errorf("verify client attestation: %w", err)
 		}
 		id.Measurement = hex.EncodeToString(res.Measurement[:])
+	case peerVerifyCA:
+		// RequireAndVerifyClientCert chain-verified the leaf against the mesh CA,
+		// so the SAN is a CDS-vouched identity.
+		id.WorkloadID = workloadIDFromCert(cert)
 	}
 	return id, nil
 }

@@ -9,8 +9,12 @@ import (
 
 // PeerIdentity is the attestation-rooted identity the broker derives from a
 // verified caller TLS connection. Measurement is the lowercase-hex SHA-384
-// launch digest (set only in --peer-verify=ratls mode, where the hardware
-// chain has been verified); WorkloadID is the caller's CDS-issued SAN/CN.
+// launch digest, set only in --peer-verify=ratls mode where the hardware chain
+// has been verified. WorkloadID is the caller's CDS-issued SAN, set only in
+// --peer-verify=ca mode where the mesh CA chain-verified the leaf: an RA-TLS
+// leaf is self-signed and its REPORTDATA binds only the key, not the SAN, so in
+// ratls mode the SAN is caller-asserted and is left unset — a workloadId-scoped
+// rule fails closed there.
 type PeerIdentity struct {
 	Measurement string
 	WorkloadID  string
