@@ -1,0 +1,118 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PROVISION the standing tdx-metal-cvm ARC runner — the TDX twin of snp-metal-cvm.
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGED (2026-07-21) — CANNOT RUN YET. Identical mechanism to snp-metal-cvm (ARC
+# console-installed into a standing rke2-node CVM; GitHub is the control plane
+# after bootstrap), on a TDX guest instead of SNP. Blocked on TWO things, neither
+# of which this file needs to exist:
+#   1. the TDX rke2-node image (joaosa building it) → its refs land in a
+#      `tdx-rke2-image-refs` ConfigMap that cvm-e2e's tdx-metal case reads.
+#   2. a TDX CI runner host + a `cvm-launcher-tdx` host-side runner to DRIVE the
+#      boot. tdx-dev-host-1 is a DEV host, not a runner host — the TDX CI host is
+#      a separate decision (dedicated tdx-gh-runner vs sharing). Until it exists,
+#      `runner: cvm-launcher-tdx` below resolves to nothing and dispatch queues.
+# The TDX boot itself is SIMPLER than SNP (no IGVM): cvm-e2e's tdx-metal case uses
+# launchSecurity.tdx + TDVF, node label kubevirt.io/tdx.
+#
+# SECRET REQUIRED: ARC_APP_PRIVATE_KEY = the PEM for GitHub App 4309649 (SAME app
+# as snp-metal-cvm/azure-cvm — no new access).
+#
+# ⚠️ KNOWN GAP (console transport): the App PEM travels the serial console
+# UNSCRUBBED (base64-chunk-split → not scrubbable). Same gap as snp-metal-cvm; the
+# fix is the in-guest HTTP agent (primitive v2). Accepted dev-sandbox posture.
+name: provision-tdx-metal-cvm
+on:
+  workflow_dispatch:
+    inputs:
+      max_runners:
+        description: 'max concurrent runner pods in the guest (scale-to-zero at idle)'
+        required: false
+        default: '2'
+
+permissions:
+  contents: read
+
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    outputs:
+      b64: ${{ steps.p.outputs.b64 }}
+    steps:
+      - id: p
+        env:
+          APP_ID: '4309649'
+          APP_INSTALLATION_ID: '146850802'
+          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+          MAXR: ${{ inputs.max_runners }}
+        run: |
+          set -euo pipefail
+          [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set — add it before first provision"; exit 1; }
+          PEM_B64=$(printf '%s' "$ARC_APP_PRIVATE_KEY" | base64 -w0)
+          CHART=oci://ghcr.io/actions/actions-runner-controller-charts
+          # payload runs as root IN the guest. rke2 ships helm-controller (HelmChart
+          # CRD) — no helm binary needed, the same path c8s installs through. $K is
+          # cvm-e2e's in-guest kubectl; say() is defined by the driver preamble.
+          cat > p.sh <<PAYLOAD
+          # ARC pods need PodSecurity=privileged (same as c8s-system; without it the
+          # replicaset can't create a pod: deploy 0/1, rs 1/0 — spike run 2).
+          \$K create ns arc-systems >/dev/null 2>&1; \$K create ns arc-runners >/dev/null 2>&1
+          for ns in arc-systems arc-runners; do \$K label ns \$ns pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1; done
+          say NS_PRIVILEGED
+          # App creds secret ARC consumes (App auth: id / installation / private key)
+          printf '%s' '$PEM_B64' | base64 -d > /tmp/arc.pem
+          \$K -n arc-runners create secret generic arc-app \
+            --from-literal=github_app_id='$APP_ID' \
+            --from-literal=github_app_installation_id='$APP_INSTALLATION_ID' \
+            --from-file=github_app_private_key=/tmp/arc.pem >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
+          rm -f /tmp/arc.pem
+          # 1) ARC controller
+          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: arc\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set-controller\n  version: "0.14.2"\n  targetNamespace: arc-systems\n  createNamespace: true\n' | \$K apply -f - 2>&1 | sed 's/^/@@CTL /;s/\$/@@/'
+          CTLOK=0
+          for i in \$(seq 1 45); do
+            dep=\$(\$K -n arc-systems get deploy -o jsonpath='{range .items[*]}{.metadata.name}={.status.availableReplicas}/{.status.replicas} {end}' 2>/dev/null)
+            echo "@@CTLW \$i deploy=\${dep:-none}@@"
+            printf '%s' "\$dep" | grep -qE '=1/1' && { CTLOK=1; say CTL_UP; break; }
+            sleep 12
+          done
+          if [ "\$CTLOK" != "1" ]; then
+            \$K -n kube-system logs job/helm-install-arc --tail=25 2>&1 | sed 's/^/@@HJLOG /;s/\$/@@/'
+            \$K -n arc-systems get events --field-selector reason=FailedCreate --sort-by=.lastTimestamp 2>&1 | tail -4 | sed 's/^/@@RSEV /;s/\$/@@/'
+            say FAIL_CONTROLLER; exit 0
+          fi
+          # 2) the STANDING scale set: tdx-metal-cvm, scale-to-zero (minRunners:0).
+          # runner overlay = privileged + /dev/tdx-guest (reads the TDX report = in
+          # the TEE) + root (RUNNER_ALLOW_RUNASROOT/runAsUser:0) so jobs can apt-install
+          # libtss2 etc. — the snp-metal-cvm overlay pattern, on TDX.
+          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: tdx-metal-cvm\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: tdx-metal-cvm\n    minRunners: 0\n    maxRunners: $MAXR\n    template:\n      spec:\n        containers:\n          - name: runner\n            image: ghcr.io/actions/actions-runner:latest\n            command: ["/home/runner/run.sh"]\n            env:\n              - name: RUNNER_ALLOW_RUNASROOT\n                value: "1"\n            securityContext:\n              privileged: true\n              runAsUser: 0\n            volumeMounts:\n              - name: tdx\n                mountPath: /dev/tdx-guest\n        volumes:\n          - name: tdx\n            hostPath:\n              path: /dev/tdx-guest\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
+          # 3) GATE: the listener authenticates to github + polls => "Getting next
+          # message" — the scale set is live and registered (scaled to zero; a runner
+          # pod only materialises when a job is dispatched to runs-on: tdx-metal-cvm).
+          LOK=0
+          for i in \$(seq 1 40); do
+            LP=\$(\$K -n arc-systems get pods --no-headers 2>/dev/null | grep -i listener | awk '{print \$1" "\$3}')
+            echo "@@LST \$i: \${LP:-none}@@"
+            L=\$(\$K -n arc-systems get pods -o name 2>/dev/null | grep -i listener | head -1)
+            [ -n "\$L" ] && \$K -n arc-systems logs "\$L" --tail=3 2>/dev/null | grep -q 'Getting next message' && { LOK=1; say LISTENER_REGISTERED; break; }
+            sleep 12
+          done
+          [ "\$LOK" = "1" ] || { \$K -n arc-systems get pods 2>&1 | sed 's/^/@@DBG /;s/\$/@@/'; say FAIL_LISTENER; exit 0; }
+          say PAYLOAD_OK
+          PAYLOAD
+          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+
+  # boot a STANDING rke2-node TDX CVM (stable name, reaper-exempt, no teardown) and
+  # console-deliver the ARC install into it. Reuses the proven cvm-e2e primitive
+  # (tdx-metal case: launchSecurity.tdx, no IGVM). runner=cvm-launcher-tdx is the
+  # host-side runner on the TDX CI host — pending (see header).
+  provision:
+    needs: payload
+    uses: ./.github/workflows/cvm-e2e.yml
+    with:
+      platform: tdx-metal
+      runner: cvm-launcher-tdx
+      flavor: rke2-node
+      keep_alive: true
+      vm_name: tdx-metal-cvm
+      payload_b64: ${{ needs.payload.outputs.b64 }}
+      timeout_minutes: 45
+    secrets: inherit

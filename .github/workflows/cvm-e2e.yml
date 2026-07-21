@@ -83,10 +83,19 @@ jobs:
           # (attestation-api :8400, /dev/sev-guest, NO toolchain — verity rootfs).
           case '${{ inputs.platform }}/${{ inputs.flavor }}' in
             snp-metal/rke2-node) echo "REFS_CM=rke2-image-refs"; echo "CORES=4"; echo "MEMORY=16Gi";
-                                 echo "NODE_LABEL=confidential.ai/sev-snp" ;;
+                                 echo "NODE_LABEL=confidential.ai/sev-snp"; echo "GUEST_MARKER=sev-snp-guest" ;;
             snp-metal/base-cpu)  echo "REFS_CM=base-image-refs"; echo "CORES=4"; echo "MEMORY=8Gi";
-                                 echo "NODE_LABEL=confidential.ai/sev-snp" ;;
-            *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired yet (tdx-metal/gke-* are stubs)"; exit 1 ;;
+                                 echo "NODE_LABEL=confidential.ai/sev-snp"; echo "GUEST_MARKER=sev-snp-guest" ;;
+            # ── TDX metal (STAGED, not yet runnable) ──────────────────────────────
+            # Native QEMU launchSecurity.tdx + TDVF — NO IGVM (confidential-metal
+            # manifests/examples/tdx-vm.yaml). Node label kubevirt.io/tdx is set by
+            # KubeVirt's node-labeller on TDX hosts. REFS_CM=tdx-rke2-image-refs is the
+            # FUTURE TDX rke2-node image refs (joaosa's image, pending). This cell
+            # cannot run until that CM AND a TDX CI runner exist — tdx-dev-host-1 is a
+            # dev host, not a runner host, so the runner is a separate later decision.
+            tdx-metal/rke2-node) echo "REFS_CM=tdx-rke2-image-refs"; echo "CORES=4"; echo "MEMORY=16Gi";
+                                 echo "NODE_LABEL=kubevirt.io/tdx"; echo "GUEST_MARKER=tdx-guest" ;;
+            *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired yet (gke-* are stubs)"; exit 1 ;;
           esac >> "$GITHUB_ENV"
 
       - name: tools (kubectl + virtctl pinned to host KubeVirt + expect)
@@ -104,18 +113,19 @@ jobs:
           set -euo pipefail
           ROOTPVC=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.rootPvc}')
           [ -n "$ROOTPVC" ] || { echo "::error::$REFS_CM missing rootPvc — run c8s-e2e/cluster-prep/apply.sh"; exit 1; }
-          # rke2-image-refs pins one file (igvmFile); base-image-refs publishes a
-          # per-core-count pattern (igvmFilePattern: guest-smp{cores}.igvm)
-          IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')
-          if [ -z "$IGVMFILE" ]; then
-            PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
-            [ -n "$PAT" ] || { echo "::error::$REFS_CM has neither igvmFile nor igvmFilePattern"; exit 1; }
-            IGVMFILE=${PAT//\{cores\}/$CORES}
+          echo "ROOTPVC=$ROOTPVC" >> "$GITHUB_ENV"
+          # TDX boots via native TDVF — NO IGVM file. Only SNP resolves one.
+          if [ '${{ inputs.platform }}' != tdx-metal ]; then
+            # rke2-image-refs pins one file (igvmFile); base-image-refs publishes a
+            # per-core-count pattern (igvmFilePattern: guest-smp{cores}.igvm)
+            IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')
+            if [ -z "$IGVMFILE" ]; then
+              PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
+              [ -n "$PAT" ] || { echo "::error::$REFS_CM has neither igvmFile nor igvmFilePattern"; exit 1; }
+              IGVMFILE=${PAT//\{cores\}/$CORES}
+            fi
+            echo "IGVMFILE=$IGVMFILE" >> "$GITHUB_ENV"
           fi
-          {
-            echo "ROOTPVC=$ROOTPVC"
-            echo "IGVMFILE=$IGVMFILE"
-          } >> "$GITHUB_ENV"
 
       # reap-before-provision: a killed run leaks its CVM + its rootdisk clone.
       # CROSS-REPO SAFE: this primitive is called from ANY org repo, so a CVM may be
@@ -156,6 +166,70 @@ jobs:
       - name: boot the measured CVM
         run: |
           set -euo pipefail
+          if [ '${{ inputs.platform }}' = tdx-metal ]; then
+          # TDX: native launchSecurity.tdx + TDVF/EFI — NO IGVM sidecar, NO igvm file
+          # annotation, host-passthrough CPU, node label kubevirt.io/tdx (confidential-
+          # metal manifests/examples/tdx-vm.yaml). Mirrors the SNP rke2-node manifest
+          # otherwise; bridge networking kept for the console-delivery model — CONFIRM
+          # against the real TDX rke2 image (the base tdx-vm.yaml sample uses masquerade).
+          kubectl apply -f - <<EOF
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: $VM
+            namespace: $NS
+            labels:
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/standing: "${{ inputs.keep_alive }}"
+              ci.confidential.ai/run-id: "${{ github.run_id }}"
+              ci.confidential.ai/run-attempt: "${{ github.run_attempt }}"
+              ci.confidential.ai/platform: "${{ inputs.platform }}"
+              ci.confidential.ai/flavor: "${{ inputs.flavor }}"
+            annotations:
+              ci.confidential.ai/repo: "${{ github.repository }}"
+              ci.confidential.ai/run-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          spec:
+            runStrategy: Always
+            template:
+              metadata:
+                labels:
+                  vm.kubevirt.io/name: $VM
+              spec:
+                nodeSelector:
+                  ${NODE_LABEL}: "true"
+                domain:
+                  cpu:
+                    model: host-passthrough
+                    cores: ${CORES}
+                  memory:
+                    guest: ${MEMORY}
+                  resources:
+                    requests:
+                      memory: ${MEMORY}
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                  launchSecurity:
+                    tdx: {}
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                    interfaces:
+                      - name: default
+                        bridge: {}
+                    rng: {}
+                networks:
+                  - name: default
+                    pod: {}
+                volumes:
+                  - name: rootdisk
+                    persistentVolumeClaim:
+                      claimName: $ROOTPVC
+          EOF
+          else
           kubectl apply -f - <<EOF
           apiVersion: kubevirt.io/v1
           kind: VirtualMachine
@@ -218,6 +292,7 @@ jobs:
                     persistentVolumeClaim:
                       claimName: $ROOTPVC
           EOF
+          fi
           for i in $(seq 1 70); do
             PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             [ "$PHASE" = Running ] && break; sleep 6
@@ -230,9 +305,11 @@ jobs:
       - name: assert genuine confidential boot
         run: |
           set -uo pipefail
+          # GUEST_MARKER = the qemu-cmdline token proving the confidential guest type
+          # (sev-snp-guest for SNP; tdx-guest for TDX's launchSecurity object).
           kubectl -n "$NS" exec "$POD" -c compute -- sh -c \
-            "tr '\0' '\n' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline | grep -cE 'sev-snp-guest'" | tee /tmp/snp.cnt
-          [ "$(cat /tmp/snp.cnt 2>/dev/null)" = "1" ] && echo 'OK: genuine sev-snp-guest' || { echo '::error::not a sev-snp-guest'; exit 1; }
+            "tr '\0' '\n' < /proc/\$(pgrep -f qemu-system | head -1)/cmdline | grep -cE '$GUEST_MARKER'" | tee /tmp/g.cnt
+          [ "$(cat /tmp/g.cnt 2>/dev/null)" = "1" ] && echo "OK: genuine $GUEST_MARKER" || { echo "::error::not a $GUEST_MARKER"; exit 1; }
 
       - name: run payload in the CVM
         id: run
@@ -300,11 +377,17 @@ jobs:
             \$K get nodes --no-headers 2>&1 | grep -q ' Ready' && say NODE_READY || { say FAIL_NODE; exit 0; }
           fi
           MEAS=""
-          TD=/sys/kernel/config/tsm/report/cvmci
-          if mkdir -p "\$TD" 2>/dev/null; then
-            head -c 64 /dev/urandom > "\$TD/inblob" 2>/dev/null
-            MEAS=\$(python3 -c "import binascii,sys; d=open('\$TD/outblob','rb').read(); sys.stdout.write(binascii.hexlify(d[144:192]).decode())" 2>/dev/null)
-            rmdir "\$TD" 2>/dev/null
+          # SNP: runtime launch measurement = the SNP report's MEASUREMENT field
+          # (configfs-tsm outblob, offset 0x90/144, 48 bytes). TDX uses a different
+          # report (MRTD/RTMRs) — extraction is TBD against the real TDX rke2 image, so
+          # the tdx cell runs without a golden (the drift check is warn-mode/fail-open).
+          if [ '${{ inputs.platform }}' != tdx-metal ]; then
+            TD=/sys/kernel/config/tsm/report/cvmci
+            if mkdir -p "\$TD" 2>/dev/null; then
+              head -c 64 /dev/urandom > "\$TD/inblob" 2>/dev/null
+              MEAS=\$(python3 -c "import binascii,sys; d=open('\$TD/outblob','rb').read(); sys.stdout.write(binascii.hexlify(d[144:192]).decode())" 2>/dev/null)
+              rmdir "\$TD" 2>/dev/null
+            fi
           fi
           export MEAS
           echo "@@MEAS \${MEAS:-none}@@"
