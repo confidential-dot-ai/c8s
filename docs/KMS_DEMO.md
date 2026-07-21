@@ -106,16 +106,23 @@ tlsLb:
 
 secretBroker:
   enabled: true
-  peerVerify: ratls    # broker re-verifies each caller's TEE attestation at TLS
-  # measurements pins WHICH CODE may call — the node image's SHA-384 launch
-  # digest, from your confidential-os-builder pipeline. Empty accepts any
-  # attested TEE (UNSAFE for production) — fine for a demo since identity
-  # policy still gates release (the deny-by-default beat still works).
-  measurements: []
+  # peerVerify=ca: the caller's mesh cert is chain-verified to the CDS mesh CA
+  # and its identity is the CDS-issued SAN. This is what makes the identity
+  # deny-by-default beat (Part 5) work: the SAN is present on the cert at first
+  # issuance, so a workloadId rule matches immediately. Do NOT use `ratls` with a
+  # workloadId rule — an RA-TLS leaf is self-signed and its SAN is caller-asserted,
+  # so the broker refuses to read it as identity (fix 7d3f7bc) and a workloadId
+  # rule fails closed for EVERY caller, api included. (For a measurement-gated
+  # ratls demo see the Measurement-pinning deep-dive; for the attested per-workload
+  # digest bind see the workloadImages note below.)
+  peerVerify: ca
   releasePolicy:
     rules:
       # workloadId matches the CDS-issued cert SAN, which for cw id "api" in
-      # namespace "default" is c8s-api.default.svc — NOT the bare id.
+      # namespace "default" is c8s-api.default.svc — NOT the bare id. The SAN is
+      # trustworthy here because peerVerify=ca chain-verified the leaf, and CDS
+      # only issued it after attesting the node — so release is still
+      # attestation-rooted, just gated on identity rather than a live measurement.
       - workloadId: c8s-api.default.svc
         allow: ["secret/data/api/*"]
   # No openbao: block — `--kms` (P.5) deploys the in-chart dev store and
@@ -376,10 +383,12 @@ c8s-secrets-config     ← agent config rendered in-image (never a ConfigMap)
 c8s-secrets-agent-init ← UNMODIFIED bao agent: cert-auth to broker, template, exit
 ```
 
-The agent authenticates with the pod's mesh cert; the broker checks the
-policy (identity — `c8s-api.default.svc` matches; measurement — empty pin
-means "any attested TEE", which this node is), brokers the KV read; the
-secret lands in an **in-memory tmpfs** at `/vault/secrets/db`. Then, live:
+The agent authenticates with the pod's mesh cert; the broker chain-verifies
+that cert to the CDS mesh CA and reads its SAN — `c8s-api.default.svc`, which
+matches the policy rule — then brokers the KV read. The cert is
+attestation-rooted (CDS issued it only after attesting the node), so releasing
+on its identity is still gated on attestation. The secret lands in an
+**in-memory tmpfs** at `/vault/secrets/db`. Then, live:
 
 ```sh
 kubectl logs kms-demo
@@ -436,9 +445,11 @@ kubectl logs kms-intruder -c c8s-secrets-agent-init   # → 403 permission denie
 ```
 
 Note what *passed*: the intruder pod runs on the same attested node (same
-measurement as `kms-demo`) — identity-scoped policy is what stops it.
-Fail-closed: an app that would come up without its secrets doesn't come up
-at all. Clean up: `kubectl delete pod kms-intruder --force`.
+measurement as `kms-demo`) and holds a valid CDS-issued mesh cert — its SAN is
+just `c8s-intruder.default.svc`, which no rule grants. Identity-scoped policy is
+what stops it, and under `peerVerify=ca` the SAN is CA-verified so the broker
+trusts it as identity. Fail-closed: an app that would come up without its
+secrets doesn't come up at all. Clean up: `kubectl delete pod kms-intruder --force`.
 
 ### Part 6 — Live renewal
 
@@ -572,11 +583,21 @@ kubectl logs kms-luks-demo
 ### Part 10 — Cleanup
 
 ```sh
-kubectl delete pod kms-demo kms-luks-demo --ignore-not-found
-# On the provisioning node (detaches the loop device, removes the backing
-# file and the KV entry; refuses while attached unless --force):
+kubectl delete pod kms-luks-demo --ignore-not-found
+# CAVEAT (node-CVM / kata off): deleting the pod does NOT close the LUKS
+# dm-crypt mapper — it is a kernel-global device, not pod-scoped (see
+# docs/pitfalls.md "LUKS local volumes leak a dm-crypt mapper..."). So the loop
+# stays busy, and `luks destroy` (even with --force) unlinks the backing file
+# but leaves /dev/mapper/c8s-data + /dev/loop* dangling. Close it by hand until
+# the teardown fix lands:  sudo cryptsetup close c8s-data  (the loop then
+# auto-detaches). The passphrase + backing file ARE removed, so the data is
+# unrecoverable — the leftover is only a host-resource leak.
+kubectl delete pod kms-demo --ignore-not-found
+# On the provisioning node (removes the backing file and the KV entry; refuses
+# while the loop is attached unless --force):
 sudo -E c8s luks destroy --workload api --name data \
   --openbao-addr $BAO_ADDR --openbao-token root
+sudo cryptsetup close c8s-data 2>/dev/null || true   # reap the dangling mapper (see caveat above)
 bao kv delete secret/api/db
 
 # Optional final beat — retire the busybox digest from the allowlist, live:
@@ -592,14 +613,30 @@ To fully tear down the demo cluster: `c8s uninstall`.
 
 ## Optional deep-dives (time permitting)
 
-- **Measurement pinning.** The demo values file has `measurements: []` for
-  simplicity. To pin: read the node launch digest off the live cluster
-  with `c8s cds verify https://localhost:8443` (verifies CDS's RA-TLS
-  in-process, fetches the VCEK from AMD KDS, prints the SHA-384 digest),
-  add it to `secretBroker.measurements`, and `helm upgrade`. Then repeat
-  Part 5 with a slightly-different node image and watch the broker reject
-  it at the TLS handshake — measurement pin catches "same identity, wrong
-  code".
+- **Measurement pinning.** The main flow gates on identity (`peerVerify: ca`);
+  to *also* gate on the launch measurement, switch the broker to
+  `peerVerify: ratls` and add a `measurements:` list. Read the node launch
+  digest off the live cluster with `c8s cds verify https://localhost:8443`
+  (verifies CDS's RA-TLS in-process, fetches the VCEK from AMD KDS, prints the
+  SHA-384 digest), put it in `secretBroker.measurements`, and `helm upgrade`
+  (the broker rolls itself — the pod template hashes the policy). Then boot a
+  slightly-different node image and watch the broker reject it at the TLS
+  handshake — the measurement pin catches "wrong code". NOTE: under `ratls` the
+  `workloadId` rule stops matching (an RA-TLS SAN is caller-asserted, fix
+  7d3f7bc), so pair the measurement pin with a `workloadImages` rule (next
+  bullet) or accept that *any* attested TEE on that measurement is released to.
+- **Attested per-workload digest bind (`workloadImages`).** The strongest,
+  ratls-mode identity: pin `workloadImages: { main: ["sha256:…"] }` and the
+  broker releases only to the pod whose *whole* attested image set hashes to it
+  (docs/getcert-workload-binding.md). Caveat — it does **not** work through the
+  secret-injection path used in Part 3: the injected agent-init gates the app,
+  but the workload digest only binds at the *next* cert renewal (first issuance
+  is claim-free), so the app never starts and the digest never binds — a
+  deadlock (getcert-workload-binding.md "Corner 4"). Demonstrate it instead
+  against a running pod that doesn't gate on the secret: `c8s verify
+  --workload-image sha256:…` against the pod's mesh leaf (passes for the right
+  digest, fails for any other), or a non-gating caller that fetches from the
+  broker after startup.
 - **Token ↔ cert binding.** A token minted on `cert/login` is bound to the
   caller's client cert — replaying it over a connection with a different
   cert is rejected. Covered by the broker's tests; for a live showing use
@@ -625,7 +662,7 @@ To fully tear down the demo cluster: `c8s uninstall`.
 |---|---|
 | Pod denied: `image not in allowlist: …` | Fail-closed NRI policy — Part 1. Add the digest (`c8s allowlist add`), wait ≤30 s, recreate the pod. Reference images by digest so a tag can't drift off the allowed sha256. |
 | `allowlist add` → authorization error | CDS doesn't pin your key: install pinned a different `--operator-keys`, or none. `c8s cds verify https://localhost:8443` shows the pinned fingerprints. |
-| Pod stuck in `Init` at `c8s-secrets-agent-init` | Policy denial (deny-by-default — check `workloadId` is the SAN form `c8s-<id>.<ns>.svc`, not the bare id), measurement mismatch (only if you pinned `secretBroker.measurements`), broker unreachable, or wrong KV path. `kubectl logs <pod> -c c8s-secrets-agent-init` shows which. |
+| Pod stuck in `Init` at `c8s-secrets-agent-init` | Policy denial (deny-by-default — check `workloadId` is the SAN form `c8s-<id>.<ns>.svc`, not the bare id). If you switched to `peerVerify: ratls`, a `workloadId` rule matches NOTHING (an RA-TLS SAN is caller-asserted, fix 7d3f7bc) — every caller 403s, so use `ca` (this demo's default) for identity rules. Also: measurement mismatch (only under `ratls` with a pinned `secretBroker.measurements`), broker unreachable, or wrong KV path. `kubectl logs <pod> -c c8s-secrets-agent-init` shows which. |
 | Broker pod `CrashLoopBackOff` at startup | Bad `measurements` hex (only if pinned), unreachable `openbao.address` (external store only — `--kms` wires the address itself), or missing `credentialSecret`. `kubectl logs` the broker container. A brief crashloop right after P.5 is expected (dev store still starting) and clears on its own within a poll. |
 | `helm upgrade` fails: `invalid ownership metadata` on `c8s-openbao` | A previous run hand-applied the old P.6 Deployment/Service. `kubectl -n c8s-system delete deploy/c8s-openbao svc/c8s-openbao` and re-run the install — `--kms` owns those resources now. |
 | `crane digest attestation-api:kms-test` fails / `MANIFEST_UNKNOWN` during install | Attestation-api is versioned separately from c8s and doesn't publish at `:kms-test`. Retag main as kms-test (P.4), or when working on the branch mark `attestationApi.image` as `externalImage: true` in `c8sComponents`. |
@@ -636,5 +673,5 @@ To fully tear down the demo cluster: `c8s uninstall`.
 | Admission: `luks-<name> … require secrets-inject` | LUKS annotations demand `confidential.ai/secrets-inject: "true"` and a matching `secret-<name>` — `c8s luks create` prints both. |
 | Chart render fails `kind=luks_plain_baremetal` | LUKS + broker enabled with neither kata nor host attestation-api — the privileged luks-open injection is refused outside a TEE boundary. In this demo's shape `attestationApi.enabled=true` satisfies it; don't disable it. |
 | Chart render fails `kind=uncovered_component_digest` | Fail-closed image policy without derivation: install with `--resolve-digests` (enables `deriveComponents`), or add the pinned openbao agent digest to `nriImagePolicy.bootstrapAllowlist.digests`. |
-| Chart render fails `kind=broker_ratls_under_kata` | Only on kata-shaped clusters — `peerVerify: ratls` is inert there (the in-guest mesh already attests callers); this node-as-CVM demo is exactly where `ratls` belongs. |
+| Chart render fails `kind=broker_ratls_under_kata` | Only on kata-shaped clusters — `peerVerify: ratls` is inert there (the in-guest mesh already attests callers). This node-as-CVM demo defaults to `peerVerify: ca` (identity via the CDS-issued SAN); `ratls` is the measurement-pinning variant (see the deep-dive), and node-as-CVM is where it belongs. |
 | Secret file readable but renewal never lands | The Part 3 pod is one-shot; renewal needs `confidential.ai/secrets-renew: "true"` (Part 6) and patience (~5 min default re-render interval). |
