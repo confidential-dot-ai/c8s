@@ -385,11 +385,30 @@ Installing without `--operator-keys` leaves allowlist writes disabled, and
 acknowledge. Supply the private key to the CLI by flag (`--operator-key`) or
 environment (`C8S_OPERATOR_KEY`). Write tokens are short-lived and bound to
 the request body, so a captured token cannot be replayed against a different
-payload. `c8s cds verify` reports the key fingerprints a CDS actually pins.
+payload.
+
+CDS attests its allowlist governance: the digests of its loaded operator-key
+set and of the allowlist seed it applied are bound into its serving-cert
+attestation (the config-claims extension — see
+[docs/ratls.md](docs/ratls.md)). Verify the root of trust —
+measurement, operator keys, seed — before exposing public ingress, pinning
+from your own install inputs (the operator public-key bundle and the seed
+JSON; verify computes the digests):
+
+```sh
+c8s cds verify https://<cds>:8443 \
+  --measurements <launch-digest> \
+  --operator-keys operator.pub \
+  --allowlist-seed seed.json        # or --allowlist-seed-digest <hex>
+```
+
+A swapped key set or tampered seed fails this closed. The pins protect the
+verifier that holds them, so run the verify continuously (CI), not only at
+bootstrap.
 
 Two caveats worth knowing before production: revocation is currently coarse
-(remove the key from `cds.operatorKeys` and re-install), and the pinned-key
-list is not yet covered by CDS's attestation. See
+(remove the key from `cds.operatorKeys` and re-install), and the attested
+config protects only verifiers that pin it. See
 [docs/GAPS.md](docs/GAPS.md) and [docs/pitfalls.md](docs/pitfalls.md). For
 GitOps consumers, `c8s render-values --operator-keys operator.pub` embeds the
 PEM content (the chart value takes content, never a file path); the chart

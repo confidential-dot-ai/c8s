@@ -118,6 +118,18 @@ func (s *Store) ListAll() (string, map[types.Digest]string, error) {
 	return version, digests, nil
 }
 
+// Contains reports whether digest is currently in the allowlist. Used by the
+// CDS /attest handler to gate workload-digest claims (docs/ratls.md): a
+// workload's images must be allowlisted for its identity to bind them.
+func (s *Store) Contains(digest types.Digest) (bool, error) {
+	_, digests, err := s.ListAll()
+	if err != nil {
+		return false, err
+	}
+	_, ok := digests[digest]
+	return ok, nil
+}
+
 // queryAll reads all rows under the lock and returns them as a slice.
 func (s *Store) queryAll() ([]row, error) {
 	s.mu.Lock()

@@ -2,11 +2,14 @@ package attestclient
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha512"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -33,6 +36,51 @@ func MakeSNPRATLSAttestFunc(client Client, attestationApiURL string) func(contex
 		}
 		return RATLSEvidence(resp)
 	}
+}
+
+// TEETypeForPlatform maps an attestation-api platform string to the RA-TLS
+// extension's TEEType: the SNP variants (bare-metal, Azure, GCP) are SEV-SNP,
+// the TDX variants are TDX. The RA-TLS extension records only the family; the
+// per-variant evidence shape is auto-detected by ratls.UnmarshalExtension.
+func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
+	switch types.Platform(platform) {
+	case types.PlatformSnp, types.PlatformAzSnp, types.PlatformGcpSnp:
+		return ratls.TEETypeSEVSNP, nil
+	case types.PlatformTdx, types.PlatformAzTdx:
+		return ratls.TEETypeTDX, nil
+	default:
+		return 0, fmt.Errorf("attestclient: no RA-TLS TEE type for platform %q", platform)
+	}
+}
+
+// AttestationExtensionForClaims builds a nonce-free RA-TLS attestation
+// extension binding pub and the config-claims DER via the local
+// attestation-api, for embedding in a CSR (docs/ratls.md). CDS copies the
+// extension onto the issued leaf, which is how a workload leaf carries hardware
+// evidence a verifier can check against the leaf's config-claims — the same
+// embed the mesh client uses for its own leaf (cdsclient.attestationExtension),
+// with the claims folded in. It is nonce-free by design: the serving cert
+// carries no per-request nonce, so [ratls.VerifyCert] recomputes the anchor
+// with nonce=nil. claimsDER nil binds the key alone.
+func (c Client) AttestationExtensionForClaims(ctx context.Context, attestationApiURL string, pub crypto.PublicKey, claimsDER []byte) (pkix.Extension, error) {
+	reportData, err := ratls.ReportDataForKeyAndClaims(pub, claimsDER, nil)
+	if err != nil {
+		return pkix.Extension{}, err
+	}
+	resp, err := c.GenerateEvidenceContext(ctx, attestationApiURL, reportData[:sha512.Size384])
+	if err != nil {
+		return pkix.Extension{}, fmt.Errorf("attestation-api: %w", err)
+	}
+	report, err := RATLSEvidence(resp)
+	if err != nil {
+		return pkix.Extension{}, err
+	}
+	teeType, err := TEETypeForPlatform(resp.Platform)
+	if err != nil {
+		return pkix.Extension{}, err
+	}
+	att := &ratls.Attestation{TEEType: teeType, Report: []byte(report)}
+	return att.MarshalExtension()
 }
 
 // RATLSEvidence returns the payload to embed in an RA-TLS certificate

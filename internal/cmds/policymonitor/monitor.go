@@ -51,6 +51,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // runMonitor is the long-running entry. It's package-private rather
@@ -92,6 +93,17 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		revalidateInterval: 10 * time.Second,
 	}
 
+	// Workload-claims broker (docs/ratls.md): serve the guest
+	// pod's admitted digests to the in-guest get-cert over a Unix socket the
+	// guest bind-mounts into the pod.
+	if cfg.WorkloadClaimsSocketDir != "" {
+		m.broker = newWorkloadBroker()
+		socketPath := filepath.Join(cfg.WorkloadClaimsSocketDir, workloadclaims.SocketName)
+		if err := startWorkloadClaimsBroker(ctx, logger, m.broker, socketPath); err != nil {
+			return fmt.Errorf("start workload-claims broker: %w", err)
+		}
+	}
+
 	// Hybrid refresh: when a CDS URL is configured (via the cloud-init
 	// env the systemd unit loads), keep the allowlist current with CDS
 	// additions on top of the baked seed. The goroutine shares the
@@ -115,6 +127,7 @@ type monitor struct {
 	logger             *slog.Logger
 	allowlist          *allowlist
 	killer             containerKiller
+	broker             *workloadBroker // serves the workload-claims flow (docs/ratls.md)
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
 	revalidateInterval time.Duration
@@ -360,6 +373,9 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 
 	if m.allowlist.Contains(digest) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
+		if m.broker != nil {
+			m.broker.record(cid, containerName(spec.Annotations), digest)
+		}
 		return
 	}
 	m.logger.Warn("deny container: digest not allowlisted", "cid", cid, "digest", digest)

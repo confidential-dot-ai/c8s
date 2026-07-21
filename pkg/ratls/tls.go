@@ -60,6 +60,11 @@ type ServerConfig struct {
 	// The certificate is rotated automatically at 50% of TTL.
 	CertTTL time.Duration
 
+	// ConfigClaims, when non-nil, is embedded in the serving certificate and
+	// bound into its attestation evidence (docs/ratls.md). Self-signed
+	// provisioning only; ignored when CertProvider is set.
+	ConfigClaims *ConfigClaims
+
 	// ClientPolicy, when set, enables mTLS: the server requires client
 	// certificates and verifies their RA-TLS attestation against this policy.
 	// When nil, the server does not request client certificates.
@@ -413,9 +418,10 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 			Platform:   cfg.Platform,
 			AttestFunc: cfg.AttestFunc,
 			Opts: &CertOptions{
-				Subject:  cfg.Subject,
-				TTL:      cfg.CertTTL,
-				DNSNames: cfg.DNSNames,
+				Subject:      cfg.Subject,
+				TTL:          cfg.CertTTL,
+				DNSNames:     cfg.DNSNames,
+				ConfigClaims: cfg.ConfigClaims,
 			},
 		}
 	}

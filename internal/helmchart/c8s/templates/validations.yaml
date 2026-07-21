@@ -50,6 +50,32 @@
 {{- fail (printf "VALIDATION_ERROR kind=enforce_host_components: kata.enabled=true requires %s =false. kata is enforcing — every workload runs as a kata CVM, where these host-side components are replaced by their in-guest counterparts in the kata-guest-base image (in-VM ratls routing, in-guest attestation-api on loopback, in-guest policy-monitor image admission). `c8s install --cvm-mode=pod` sets them for you." (join ", " .)) -}}
 {{- end -}}
 {{- end -}}
+{{- /*
+  Under kata.enabled, the in-guest ratls-mesh terminates every inbound TLS
+  connection to a pod and enforces mesh-CA + attestation on the caller before
+  forwarding plaintext to the app on loopback. The secret-broker never sees the
+  external TLS handshake or the caller's raw client cert, so its own
+  --peer-verify (ca or ratls) is dead code — peer verification is already done
+  by the mesh. In particular --peer-verify=ratls + --measurements=… reads as
+  "measurement pinning at the broker" but the pin is actually held by the mesh
+  (ratlsMesh.measurements / CDS allowlist).
+*/ -}}
+{{- if and .Values.kata.enabled .Values.secretBroker.enabled (eq .Values.secretBroker.peerVerify "ratls") -}}
+{{- fail "VALIDATION_ERROR kind=broker_ratls_under_kata: secretBroker.peerVerify=ratls is inert under kata.enabled=true — the in-guest ratls-mesh terminates the broker's inbound TLS and enforces caller attestation before the broker sees the request, so the broker never gets to verify the client cert or match measurements. Pin caller measurements at the mesh (ratlsMesh.measurements) or CDS instead, and set secretBroker.peerVerify=ca (identity-only, matches the mesh-delivered peer SAN)." -}}
+{{- end -}}
+{{- /*
+  The LUKS-open init container the webhook injects is privileged and mounts
+  /dev host-wide (cryptsetup needs the raw block device). That is tolerable
+  only when "the host" it touches is itself inside a TEE boundary: per-pod
+  kata CVMs (kata.enabled) or node-as-CVM shapes (host attestation-api
+  enabled). With neither, a luks-<name> annotation converts secrets-inject
+  into a privileged container on the real host — refuse to arm the webhook.
+  The webhook is armed only when the operator renders --luks-open-image,
+  i.e. secretBroker.enabled && luks.enabled (see operator.yaml).
+*/ -}}
+{{- if and .Values.secretBroker.enabled .Values.luks.enabled (not .Values.kata.enabled) (not .Values.attestationApi.enabled) -}}
+{{- fail "VALIDATION_ERROR kind=luks_plain_baremetal: luks.enabled=true but neither kata.enabled nor attestationApi.enabled is set. The injected c8s-luks-open init container is privileged and mounts /dev; without per-pod kata CVMs or a node-as-CVM shape (host attestation-api) that privilege lands on the real host, so a luks-<name> annotation would grant workloads host access. Set luks.enabled=false, or install a confidential shape (`c8s install --kata`, or a CVM node pool with attestationApi.enabled=true)." -}}
+{{- end -}}
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
 {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}
 {{- fail "VALIDATION_ERROR kind=cds_image_digest: nriImagePolicy.enabled requires cds.image.digest to be set. The CDS digest is pinned in every plugin's always_allow floor so image policy admits CDS on its own node. A floating tag cannot be admitted by digest. Pass --resolve-digests to c8s install, or set cds.image.digest via -f." -}}
@@ -103,4 +129,17 @@
 {{- else -}}
 {{- include "tls-lb.requireSecuredBackend" (dict "protocol" $tlsLB.upstream.protocol "tls" $tlsLB.upstream.tls "address" $tlsLB.upstream.address "label" "tlsLb.upstream" "kind" "tlslb_unsecured_upstream" "suggest" "To reach a confidential workload adopt it with --workload-ref <id>=<ns>/<kind>/<name>:<port> and pass --upstream <id> (the mesh wraps that plaintext hop in attested mTLS); ") -}}
 {{- end -}}
+{{- end -}}
+{{- /*
+  Dev-mode KMS (kms.enabled) sanity. The dev store exists solely for the
+  secret-broker to front — without the broker it is dead weight with a root
+  token lying around. And an explicit secretBroker.openbao.address alongside
+  it is a contradiction: an external store AND a managed dev store, with the
+  broker only speaking to the former. Fail both shapes at render.
+*/ -}}
+{{- if and .Values.kms.enabled (not .Values.secretBroker.enabled) -}}
+{{- fail "VALIDATION_ERROR kind=kms_without_broker: kms.enabled=true requires secretBroker.enabled=true — the dev store is only reachable through the attestation-gated broker. `c8s install --kms` sets both." -}}
+{{- end -}}
+{{- if and .Values.kms.enabled .Values.secretBroker.openbao.address -}}
+{{- fail "VALIDATION_ERROR kind=kms_conflicting_store: kms.enabled=true deploys an in-chart dev OpenBao and points the broker at it, but secretBroker.openbao.address is also set. Unset the address to use the dev store, or drop --kms / kms.enabled to use the external store." -}}
 {{- end -}}

@@ -110,6 +110,16 @@ func (c Client) ObtainCertificateWithEvidence(attestationApiURL, csrPEM string) 
 // caller-controlled cancellation across authenticate, local attest, and CDS
 // attest requests.
 func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationApiURL, csrPEM string) (CertificateResult, error) {
+	return c.ObtainCertificateWithClaimsContext(ctx, attestationApiURL, csrPEM, nil, nil, nil)
+}
+
+// ObtainCertificateWithClaimsContext is ObtainCertificateWithEvidenceContext
+// that additionally binds an RA-TLS config-claims extension into the evidence
+// REPORTDATA and forwards it (plus the role-partitioned container-digest lists
+// it commits to) to CDS for verification and leaf embedding
+// (docs/ratls.md). claimsDER nil ⇒ the plain, claims-free flow
+// (byte-identical to before).
+func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestationApiURL, csrPEM string, claimsDER []byte, initDigests, mainDigests []string) (CertificateResult, error) {
 	ctx = contextOrBackground(ctx)
 
 	// Step 1: get challenge from CDS
@@ -118,13 +128,14 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
 	}
 
-	// Step 2: generate TEE evidence bound to the CSR public key and challenge.
+	// Step 2: generate TEE evidence bound to the CSR public key, the config
+	// claims (if any), and the challenge.
 	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
 	if err != nil {
 		return CertificateResult{}, fmt.Errorf("invalid base64 in challenge: %w", err)
 	}
 
-	reportData, err := reportDataForCSR(csrPEM, challengeBytes)
+	reportData, err := reportDataForCSR(csrPEM, claimsDER, challengeBytes)
 	if err != nil {
 		return CertificateResult{}, err
 	}
@@ -144,7 +155,12 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 			Platform: asResp.Platform,
 			Evidence: asResp.Evidence,
 		},
-		CSR: csrPEM,
+		CSR:                  csrPEM,
+		InitContainerDigests: initDigests,
+		ContainerDigests:     mainDigests,
+	}
+	if len(claimsDER) > 0 {
+		attestReq.WorkloadClaims = base64.StdEncoding.EncodeToString(claimsDER)
 	}
 	certPEM, err := c.AttestContext(ctx, attestReq)
 	if err != nil {
@@ -272,9 +288,12 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge string         `json:"challenge"`
-	Evidence  attestEvidence `json:"evidence"`
-	CSR       string         `json:"csr"`
+	Challenge            string         `json:"challenge"`
+	Evidence             attestEvidence `json:"evidence"`
+	CSR                  string         `json:"csr"`
+	WorkloadClaims       string         `json:"workload_claims,omitempty"`
+	InitContainerDigests []string       `json:"init_container_digests,omitempty"`
+	ContainerDigests     []string       `json:"container_digests,omitempty"`
 }
 
 type attestEvidence struct {
@@ -352,7 +371,7 @@ func contextOrBackground(ctx context.Context) context.Context {
 	return ctx
 }
 
-func reportDataForCSR(csrPEM string, challenge []byte) ([]byte, error) {
+func reportDataForCSR(csrPEM string, claimsDER, challenge []byte) ([]byte, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, fmt.Errorf("CSR must be a PEM-encoded certificate request")
@@ -364,7 +383,9 @@ func reportDataForCSR(csrPEM string, challenge []byte) ([]byte, error) {
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("CSR signature invalid: %w", err)
 	}
-	reportData, err := ratls.ReportDataForKey(csr.PublicKey, challenge)
+	// claimsDER nil ⇒ SHA-384(pubkey || challenge), identical to the
+	// pre-claims binding CDS recomputes for a claims-free request.
+	reportData, err := ratls.ReportDataForKeyAndClaims(csr.PublicKey, claimsDER, challenge)
 	if err != nil {
 		return nil, err
 	}

@@ -67,6 +67,19 @@ type Options struct {
 	GetCertRunAsGroup   int64
 	GetCertRunAsNonRoot bool
 
+	// SecretAgentImage is the OpenBao/Vault Agent image the webhook injects for
+	// pods opting in to secrets injection. Empty disables secrets injection.
+	// SecretAgentCommand is the agent binary ("bao"/"vault"), SecretBrokerURL
+	// the default broker the injected agent dials.
+	SecretAgentImage   string
+	SecretAgentCommand string
+	SecretBrokerURL    string
+
+	// LUKSOpenImage is the container image the webhook injects to open
+	// openbao-gated LUKS volumes for pods carrying confidential.ai/luks-<name>
+	// annotations. Empty disables LUKS injection.
+	LUKSOpenImage string
+
 	// ExcludeNamespaces are namespaces the startup reinject sweep and the
 	// workload-service reconciler skip, on top of the release namespace and
 	// the kube-system family. Mirrors webhook.extraExcluded so the sweep,
@@ -84,6 +97,11 @@ type Options struct {
 	// HardwarePlatform is the CPU TEE the confidential kata classes target
 	// (webhook.HardwarePlatformSNP or ...TDX; the operator command validates).
 	HardwarePlatform string
+
+	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy broker
+	// socket directory: the webhook mounts it into c8s-cert and injects the
+	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
+	WorkloadClaimsHostDir string
 }
 
 var scheme = runtime.NewScheme()
@@ -178,17 +196,22 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("bootstrap webhook PKI: %w", err)
 		}
 		if err := webhook.Register(mgr, webhook.Config{
-			GetCertImage:        opts.GetCertImage,
-			CDSURL:              opts.CDSURL,
-			AttestationApiURL:   opts.AttestationApiURL,
-			CertFSGroup:         int64Ptr(opts.CertFSGroup),
-			CertKeyMode:         opts.CertKeyMode,
-			CertRenewInterval:   opts.CertRenewInterval,
-			GetCertRunAsUser:    int64Ptr(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:   int64Ptr(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot: boolPtr(opts.GetCertRunAsNonRoot),
-			KataEnforce:         opts.KataEnforce,
-			HardwarePlatform:    opts.HardwarePlatform,
+			GetCertImage:          opts.GetCertImage,
+			CDSURL:                opts.CDSURL,
+			AttestationApiURL:     opts.AttestationApiURL,
+			CertFSGroup:           int64Ptr(opts.CertFSGroup),
+			CertKeyMode:           opts.CertKeyMode,
+			CertRenewInterval:     opts.CertRenewInterval,
+			GetCertRunAsUser:      int64Ptr(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:     int64Ptr(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:   boolPtr(opts.GetCertRunAsNonRoot),
+			SecretAgentImage:      opts.SecretAgentImage,
+			LUKSOpenImage:         opts.LUKSOpenImage,
+			SecretAgentCommand:    opts.SecretAgentCommand,
+			SecretBrokerURL:       opts.SecretBrokerURL,
+			KataEnforce:           opts.KataEnforce,
+			HardwarePlatform:      opts.HardwarePlatform,
+			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

@@ -37,6 +37,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // config holds all CLI configuration for get-cert.
@@ -62,6 +63,9 @@ type config struct {
 	DiscoveryCDSCertURL    string
 	DiscoveryMeshCAURL     string
 	DiscoveryPublicTLSMode string
+	WorkloadClaimsBroker   bool
+	WorkloadClaimsTimeout  time.Duration
+	WorkloadInitContainers []string
 }
 
 var (
@@ -119,6 +123,9 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
+	flags.BoolVar(&cfg.WorkloadClaimsBroker, "workload-claims-broker", false, "Bind a workload-digest claim by fetching this pod's admitted containers from the local broker at get-cert's compiled Unix socket path (docs/ratls.md) — nri-image-policy on node-CVM, policy-monitor in the kata guest. The path is baked in, not supplied, so the control plane cannot redirect the fetch; fail-closed if the broker is unreachable")
+	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the workload-claims broker fetch")
+	flags.StringArrayVar(&cfg.WorkloadInitContainers, "workload-init-container", nil, "Name of a pod-spec init container (repeatable); the broker's containers are split into the init vs main image sets by these names for the workload digest (docs/ratls.md)")
 
 	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
@@ -286,19 +293,82 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 		return err
 	}
 
-	csrPEM, err := createCSR(privateKey, cfg.SAN)
+	wc, err := workloadClaims(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN)
-	result, err := client.ObtainCertificateWithEvidenceContext(ctx, cfg.AttestationApiURL, string(csrPEM))
+	// Always embed a nonce-free RA-TLS .1.1 extension so a downstream ratls-mode
+	// verifier (secret-broker --peer-verify=ratls) can re-verify the leaf. When
+	// the pod binds a workload claim the extension covers the claims too
+	// (`c8s verify --workload-image`); with no claim it binds the bare key — the
+	// same nonce-free embed the mesh client uses (docs/ratls.md).
+	ext, err := client.AttestationExtensionForClaims(ctx, cfg.AttestationApiURL, &privateKey.PublicKey, wc.claimsDER)
+	if err != nil {
+		return fmt.Errorf("build RA-TLS attestation extension: %w", err)
+	}
+
+	csrPEM, err := createCSR(privateKey, cfg.SAN, ext)
+	if err != nil {
+		return err
+	}
+
+	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN, "workload_claims", wc.claimsDER != nil)
+	result, err := client.ObtainCertificateWithClaimsContext(ctx, cfg.AttestationApiURL, string(csrPEM), wc.claimsDER, wc.initDigests, wc.mainDigests)
 	if err != nil {
 		return fmt.Errorf("attestation failed: %w", err)
 	}
 	slog.Info("certificate obtained")
 
 	return writeOutputs(cfg, keyPEM, result)
+}
+
+// workloadClaimsResult carries the claims DER to bind plus the role-partitioned
+// digest lists to forward to CDS. All nil ⇒ the plain, claims-free flow.
+type workloadClaimsResult struct {
+	claimsDER   []byte
+	initDigests []string
+	mainDigests []string
+}
+
+// workloadClaims fetches this pod's admitted containers from the broker, splits
+// them into init/main by the pod-spec-declared init names, and builds the
+// config-claims extension to bind (docs/ratls.md). Without
+// --workload-claims-broker it returns an empty (claims-free) result; with it a
+// broker error is fail-closed — issuance aborts rather than silently dropping
+// the workload binding.
+func workloadClaims(ctx context.Context, cfg config) (workloadClaimsResult, error) {
+	if !cfg.WorkloadClaimsBroker {
+		return workloadClaimsResult{}, nil
+	}
+	containers, err := workloadclaims.Fetch(ctx, workloadclaims.BrokerEndpoint(), cfg.WorkloadClaimsTimeout)
+	if err != nil {
+		return workloadClaimsResult{}, fmt.Errorf("fetch workload claims: %w", err)
+	}
+	if len(containers) == 0 {
+		// Expected at first issuance: the c8s-cert native sidecar runs before
+		// the app containers, so the broker has admitted none yet. Issue
+		// without a claim now; a renewal (re-attestation) binds them once the
+		// app is up (docs/ratls.md).
+		slog.Info("workload-claims broker reports no app containers admitted yet; issuing without a workload claim (renewal will bind it)")
+		return workloadClaimsResult{}, nil
+	}
+
+	initNames := make(map[string]struct{}, len(cfg.WorkloadInitContainers))
+	for _, n := range cfg.WorkloadInitContainers {
+		initNames[n] = struct{}{}
+	}
+	initDigests, mainDigests := workloadclaims.Partition(containers, initNames)
+
+	claims, err := workloadclaims.BuildConfigClaims(initDigests, mainDigests)
+	if err != nil {
+		return workloadClaimsResult{}, fmt.Errorf("build workload claims: %w", err)
+	}
+	ext, err := claims.MarshalExtension()
+	if err != nil {
+		return workloadClaimsResult{}, err
+	}
+	return workloadClaimsResult{claimsDER: ext.Value, initDigests: initDigests, mainDigests: mainDigests}, nil
 }
 
 // reloadNginx sends SIGHUP to the nginx master process to reload certs.
@@ -507,10 +577,13 @@ func generateKey() (*ecdsa.PrivateKey, []byte, error) {
 	return key, keyPEM, nil
 }
 
-// createCSR builds a PEM-encoded certificate signing request with the given SAN.
-func createCSR(key *ecdsa.PrivateKey, san string) ([]byte, error) {
+// createCSR builds a PEM-encoded certificate signing request with the given
+// SAN. extraExts are carried as CSR extensions (e.g. the RA-TLS attestation
+// extension CDS copies onto the leaf); nil for the plain flow.
+func createCSR(key *ecdsa.PrivateKey, san string, extraExts ...pkix.Extension) ([]byte, error) {
 	template := x509.CertificateRequest{
-		Subject: pkix.Name{},
+		Subject:         pkix.Name{},
+		ExtraExtensions: extraExts,
 	}
 
 	if isIPSAN(san) {
@@ -577,15 +650,9 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 		slog.Warn("ephemeral key used but --key-out not set, private key will be lost")
 	}
 
-	if cfg.OutPath != "" {
-		if err := fileutil.WriteAtomic(cfg.OutPath, []byte(result.Certificate), 0644); err != nil {
-			return fmt.Errorf("failed to write cert to %s: %w", cfg.OutPath, err)
-		}
-		slog.Info("certificate written", "path", cfg.OutPath)
-	} else {
-		fmt.Print(result.Certificate)
-	}
-
+	// The CA bundle lands before the cert: the cert file is the readiness
+	// sentinel c8s-cert-wait probes, so consumers gated on it (the injected
+	// secrets agent) must find the CA already on disk.
 	if cfg.CAOutPath != "" {
 		caPEM, err := caBundleFromChain([]byte(result.Certificate))
 		if err != nil {
@@ -595,6 +662,15 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 			return fmt.Errorf("failed to write mesh CA to %s: %w", cfg.CAOutPath, err)
 		}
 		slog.Info("mesh CA bundle written", "path", cfg.CAOutPath)
+	}
+
+	if cfg.OutPath != "" {
+		if err := fileutil.WriteAtomic(cfg.OutPath, []byte(result.Certificate), 0644); err != nil {
+			return fmt.Errorf("failed to write cert to %s: %w", cfg.OutPath, err)
+		}
+		slog.Info("certificate written", "path", cfg.OutPath)
+	} else {
+		fmt.Print(result.Certificate)
 	}
 
 	if cfg.DiscoveryOutPath != "" {

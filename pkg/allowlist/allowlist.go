@@ -2,6 +2,7 @@
 package allowlist
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
@@ -25,6 +26,27 @@ func (w *Allowlist) Contains(digest string) bool {
 	}
 	_, ok := w.Digests[parsed.String()]
 	return ok
+}
+
+// Canonical returns the canonical byte serialization of the allowlist: Go's
+// json.Marshal of the struct (fixed field order, map keys sorted, digests
+// already lowercased by ParseJSON) — a function of content, never of the
+// source file's formatting.
+func (w *Allowlist) Canonical() ([]byte, error) {
+	return json.Marshal(w)
+}
+
+// CanonicalDigest returns SHA-256 of the canonical serialization
+// (docs/ratls.md). This is the value CDS binds into its
+// attestation config-claims (ratls.ConfigClaims.SeedDigest) and verifiers pin
+// against — anyone holding an equivalent copy of the seed reproduces it.
+func (w *Allowlist) CanonicalDigest() ([]byte, error) {
+	canonical, err := w.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return sum[:], nil
 }
 
 // ParseJSON parses a allowlist from JSON data. An empty Digests map is

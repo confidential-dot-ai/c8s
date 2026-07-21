@@ -161,8 +161,9 @@ func mayMissVCEK(platform string) bool {
 }
 
 // CertEnvelope extracts the RA-TLS attestation from a certificate and returns
-// the evidence envelope plus the expected REPORTDATA anchor (SHA-384 of the
-// certificate public key; no per-request nonce, so no freshness proof).
+// the evidence envelope plus the expected REPORTDATA anchor — SHA-384 over the
+// public key and any config-claims extension the cert carries (no per-request
+// nonce, so no freshness proof).
 func CertEnvelope(cert *x509.Certificate) (platform string, evidence json.RawMessage, expectedReportData []byte, err error) {
 	att, err := ratls.ExtractAttestation(cert)
 	if err != nil {
@@ -172,7 +173,7 @@ func CertEnvelope(cert *x509.Certificate) (platform string, evidence json.RawMes
 	if err != nil {
 		return "", nil, nil, err
 	}
-	rd, err := ratls.ReportDataForKey(cert.PublicKey, nil)
+	rd, err := ratls.ReportDataForKeyAndClaims(cert.PublicKey, ratls.ExtractConfigClaimsBytes(cert), nil)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
 	}

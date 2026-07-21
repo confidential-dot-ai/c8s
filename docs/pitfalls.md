@@ -77,9 +77,9 @@ signing and again for sending, any difference (key ordering, whitespace) makes
 do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
 end-to-end test (`integration_test.go`) exists to catch a regression here.
 
-## Operator key-pinning: revocation is coarse and the pin isn't attested (interim)
+## Operator key-pinning: revocation is coarse; the attested config protects only pinning verifiers
 
-`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`
+`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`, `docs/ratls.md`
 
 Allowlist writes are authorized by **pinned operator public keys**
 (`cds.operatorKeys`); `operatorauth.Verifier` accepts a token signed by any
@@ -90,14 +90,21 @@ it:
   (remove its public key from `cds.operatorKeys`). There is no per-key
   revocation short of that. Keys are long-lived; a leaked operator private key is
   usable until removed. Protect operator keys (vault/HSM/hardware token).
-- **The pinned-key list is host-supplied config, read only at CDS start, and not
-  part of CDS's attestation.** A control-plane that swaps the ConfigMap and
-  restarts CDS could pin its own key — the same unattested-config gap as the
-  allowlist seed. `c8s cds verify` now reports the pinned-key fingerprints (via
-  `GET /operator-keys`, fetched over a connection pinned to the attested serving
-  cert), which makes a swap *visible* to an operator who knows the expected
-  fingerprints — but a verifier still sees what CDS claims, not what was
-  measured. Committing the list via HOST_DATA/initdata remains the real fix.
+- **The attested config-claims digests only protect verifiers that pin them.**
+  CDS binds the digests of its loaded key set and applied seed into its
+  serving-cert evidence, but the CDS args are still host-supplied: a control
+  plane can restart CDS with different keys or seed. That swap fails closed
+  only for clients pinning the expected values (`c8s cds verify
+  --operator-keys/--allowlist-seed`, pinned from the operator's own install
+  inputs); a client that pins nothing accepts whatever the running CDS
+  attests to, and
+  in-cluster enforcers pin nothing. Verify continuously (CI), not just at
+  bootstrap, and gate ingress exposure on a passing verify.
+- **A rotated-out config stays claimable until cert expiry.** After changing
+  operator keys or the seed, the previous serving cert (and its claims)
+  remains replayable until its RA-TLS TTL (`cds.ratlsCertTTL`) runs out. A
+  config change also fails handoff by design (claims must byte-match), so a
+  rotation rolls a fresh CA lineage rather than inheriting the old one.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
 PKI (see `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`). **Longer
@@ -659,3 +666,157 @@ failed to carry the stock params forward would drop load-bearing boot args
 (`cgroup_no_v1=all`, `nvrc.smi.srs=1`). Net advice: rely on the annotation for
 ad-hoc params, keep the puller's preservation, and don't trust manual config
 edits to land until this is root-caused on a live sandbox.
+
+## Workload-claims broker socket: group must be reachable by the non-root sidecar
+
+`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `BrokerSocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
+
+The broker runs as root (nri-image-policy is a containerd-launched NRI plugin),
+so its Unix socket is created `root:root`. get-cert connects as the non-root
+sidecar (UID/GID 65532) over a **read-only** mount. A `root:root 0660` socket is
+unreachable by that caller — `connect()` needs write permission on the socket
+node — and get-cert is **fail-closed** on a broker error, so the pod hangs
+forever on its initial cert (`c8s-cert-wait` never passes). It is a silent,
+node-wide brick of every `cw` pod, not a graceful degradation.
+
+The socket must therefore be group-owned by a GID the sidecar carries: `ListenUnix`
+chgrps it to `BrokerSocketGID` and the webhook injects that same GID as a pod
+`SupplementalGroups` entry. **The two must stay equal** — they share the one
+constant, so change it in one place only. Do not "fix" a connect failure by
+relaxing fail-closed (broker error ⇒ issue claim-free): that hands an attacker
+who blocks the broker exactly the claim-free cert fail-closed exists to deny.
+Connecting to a socket is exempt from the read-only-mount write block (sockets
+are not regular files), so the RO mount still prevents a socket-file swap
+without blocking the connect. The same-process broker unit tests cannot catch
+this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
+`TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.
+
+## `c8s install --resolve-digests` walks `attestation-api` at the c8s CI tag, but its image is built out-of-repo
+
+`cmd/c8s/install.go` (`chartComponents`, `appendResolvedDigestArgs`),
+`internal/helmchart/c8s/values.yaml` (`c8sComponents`)
+
+`c8s install --resolve-digests` (default on) reads every `c8sComponents` entry
+from `values.yaml` and hits GHCR for `<repository>:<--image-tag>` on each one.
+`attestation-api` is in that list (deploy toggle
+`attestationApi.enabled`), but its image is built by
+`github.com/confidential-dot-ai/attestation-rs`, not by this repo's `docker.yml`
+matrix. So a branch install pinned to a c8s-side CI tag (e.g.
+`kms-test` from `.github/workflows/kms-test-images.yml`) fails on
+`crane digest ghcr.io/confidential-dot-ai/attestation-api:kms-test` — the tag
+does not exist on that side.
+
+Two paths out until `attestation-api` is built in-repo (or `c8sComponents`
+gains a per-entry `resolveFrom` for a separate tag stream):
+
+- `c8s install --resolve-digests=false --image-tag <c8s-side-tag>` — the CLI
+  sets `.tag=<c8s-side-tag>` on every entry (skipping any with
+  `externalImage: true`) and does not shell out to `crane`. The chart still
+  boots; the digest floor is not pinned, so this is dev/test only.
+- Or hand-retag `attestation-api:main → :<c8s-side-tag>` (`crane tag`),
+  which needs a PAT with write scope for that package.
+
+## In-guest CDH sends the baked `ghcr-auth.json` unconditionally — a stale PAT hard-fails, not falls back to anonymous
+
+`kata-guest-base/scripts/fetch.sh` (bakes `ghcr-auth.json` from
+`READ_PRIVATE_GHCR_TOKEN`), `internal/helmchart/c8s/values.yaml`
+(`kata.guestImage.registryAuth`)
+
+The kata guest kernel cmdline carries `agent.image_registry_auth=file:///run/image-security/auth.json`
+and the in-guest Confidential Data Hub always sends those credentials on the
+guest-pull. If the baked PAT is **stale/rejected**, GHCR returns 401 and the
+sandbox startup fails with `[CDH] [ERROR]: Image Pull error: ... Not
+authorized` — there is no fallback to anonymous. So rotating
+`READ_PRIVATE_GHCR_TOKEN` requires **re-baking `kata-guest-base` and
+re-pinning the digest** in the same rollout, otherwise every kata pod on the
+node starts failing.
+
+Symptom on the host: `kubectl describe pod` for any kata workload shows
+repeated `FailedCreatePodSandBox … Not authorized: url
+https://ghcr.io/v2/confidential-dot-ai/<image>/manifests/<tag>` events.
+
+Break-glass on a test cluster while a rebuild is pending: set
+`kata.guestImage.registryAuth: ""` in the install values, restart the
+`c8s-kata-deploy-image-puller` DS. That strips `agent.image_registry_auth`
+from the guest cmdline, and CDH pulls anonymously — works only while the
+target packages are unauthenticated-pullable. Production must rebuild.
+
+## `secretBroker.peerVerify=ratls` is inert under `kata.enabled=true`
+
+`internal/cmds/secretbroker/peer.go`, `internal/helmchart/c8s/templates/secret-broker.yaml`,
+`docs/decisions/2026-07-09-broker-peer-verify-under-kata.md`
+
+Under `kata.enabled=true`, the in-guest `ratls-mesh` sidecar (baked into
+`kata-guest-base`) transparently intercepts every inbound TLS connection to a
+pod, terminates it with its own bootstrap RA-TLS cert, enforces mesh-CA +
+attestation on the caller against the mesh's policy, and forwards plaintext
+to the app on loopback. The secret-broker therefore never sees the external
+TLS handshake or the caller's client cert — its `--peer-verify` (whether
+`ca` or `ratls`) is dead code. In particular `secretBroker.peerVerify=ratls`
++ `secretBroker.measurements=[…]` reads as "measurement pinning at the
+broker" but the pin is actually held at the mesh
+(`ratlsMesh.measurements` / CDS allowlist).
+
+Additionally the injected mesh leaf (from `get-cert`) carries extension
+`.1.2` (EAR claims) but **not** `.1.1` (raw RA-TLS attestation) — so
+`ratls.VerifyCert` on a mesh cert fails regardless.
+
+The chart's `validations.yaml` fails the render fast on the combination
+(`kind=broker_ratls_under_kata`). Under `--kata`, set
+`secretBroker.peerVerify=ca` (identity-only, matches the mesh-delivered peer
+SAN) and pin measurements at the mesh instead. The design-decision doc has
+the full write-up and the two candidate real fixes (embed workload SNP into
+mesh leaves; or expose an out-of-mesh broker port).
+
+**In-cluster kata-workload path is not yet functional in `--cvm-mode
+baremetal` + `--kata`.** During Stage 3 (2026-07-09) the injected
+`c8s-cert` init container in workload pods (annotated
+`confidential.ai/cw`, running under kata-qemu-snp) could not obtain a mesh
+cert from CDS: outbound `POST /authenticate` was consistently reset before
+reaching CDS's HTTP layer, while the same CDS successfully served the
+mesh sidecars of non-workload pods (broker, CDS itself) on the same boot.
+The kata-guest CDH also intermittently failed guest-pull of
+`ghcr.io/confidential-dot-ai/cds:kms-test` (`[CDH] [ERROR]: Image Pull
+error`), which is a known kata-CC failure class independent of the mesh
+issue but likely a contributing factor. Root cause not pinned down.
+
+Break-glass for now: use `c8s install --cvm-mode node` (node-as-CVM: the
+whole node is confidential, workload pods run as ordinary processes
+without the per-pod kata VM). The mesh, get-cert, and broker peer
+verification then run on the host without the kata-guest interception
+that seems to be biting the workload path. Full kata-CVM workload
+support is still the goal; this bullet gets deleted when the workload
+get-cert path is stable end-to-end.
+
+The end-to-end software story (broker + openbao + release policy + KV
+read via mTLS) is proven separately by
+`scratchpad/broker-openbao-e2e.sh` (adapts
+`scripts/secret-broker-demo.sh` to hit the deployed openbao via
+port-forward, hardware-free) — so the failure above is scoped to the
+mesh integration, not the broker.
+
+**Note on Path A step 1 (mesh leaves now carry `.1.1`)** —
+`internal/issuer/sign.go` and `internal/cmds/cds/attest.go` were updated so
+CDS embeds the just-verified attestation into the leaf under OID `.1.1`
+(SNP: raw report; TDX: `/verify` envelope). That fixes the "mesh certs lack
+`.1.1`" half of the story, so `ratls.VerifyCert` on a fresh mesh leaf now
+sees an attestation — but the other half (the in-guest `ratls-mesh` still
+terminates TLS in front of the broker and forwards a plain TCP stream with
+no peer identity) is still open, so the validation stays. Lift it once
+`ratls-mesh` propagates the caller's identity (or the broker exposes an
+out-of-mesh port) — see the follow-up list in the decision doc.
+
+## The openbao image needs CHOWN+SETGID+SETUID — `drop: ALL` alone crashloops it
+
+`internal/helmchart/c8s/templates/kms-openbao.yaml` (container securityContext)
+
+The `ghcr.io/openbao/openbao` entrypoint starts as root, chowns its data
+dirs, and `su-exec`s down to the service user. Under `capabilities.drop: ALL`
+that dies instantly with `su-exec: setgroups: Operation not permitted` — the
+pod crashloops before a single log line from openbao itself. The dev-KMS
+template drops ALL and adds back exactly `CHOWN`, `SETGID`, `SETUID` (still a
+subset of the runtime default set; `allowPrivilegeEscalation: false` is fine —
+su-exec uses the caps, not setuid binaries). Anything running this image with
+a hardened securityContext needs the same floor. The injected secrets *agent*
+runs the same image but as `bao agent` under the pod's own user — it never
+su-execs, so this floor does not apply there.

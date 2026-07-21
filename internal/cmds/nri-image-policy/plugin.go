@@ -46,6 +46,9 @@ type plugin struct {
 	logger   *slog.Logger
 	ready    atomic.Bool
 
+	// broker serves the workload-claims flow (docs/ratls.md).
+	broker *workloadBroker
+
 	// Deferred sweep: pods/containers observed during Synchronize before
 	// the plugin is ready, replayed once the cache has a allowlist.
 	deferredMu   sync.Mutex
@@ -66,6 +69,13 @@ func newPlugin(
 		cache:    policyCache,
 		audit:    auditLogger,
 		logger:   logger,
+	}
+	if cfg.WorkloadClaims.SocketDir != "" {
+		procRoot := cfg.WorkloadClaims.ProcRoot
+		if procRoot == "" {
+			procRoot = "/proc"
+		}
+		p.broker = newWorkloadBroker(procRoot)
 	}
 
 	// Check if running as pre-installed plugin (containerd sets these env vars)
@@ -125,7 +135,43 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 
 	var mask api.EventMask
 	mask.Set(api.Event_CREATE_CONTAINER)
+	if p.broker != nil {
+		// The broker needs eviction on stop to stay correct across pod churn.
+		mask.Set(api.Event_REMOVE_CONTAINER)
+	}
 	return mask, nil
+}
+
+// RemoveContainer evicts a stopped container from the workload-claims broker.
+// Only subscribed when the broker is enabled (see Configure).
+func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) ([]*api.ContainerUpdate, error) {
+	if p.broker != nil {
+		p.broker.remove(ctr.GetId())
+	}
+	return nil, nil
+}
+
+// recordForBroker resolves a container's admitted image digest and records it
+// for the workload-claims broker. A resolve failure records an empty digest,
+// which the broker omits from its answer — so the pod's workload claim commits
+// a SUBSET of its images. That weakens `--workload-image` (a pin-holding
+// verifier still catches the resulting mismatch, but the whole-set property is
+// lost for that image), so it is logged at error, not swallowed. It never
+// blocks the create path: admission already decided the container.
+// See docs/getcert-workload-binding.md, Corner 3 (whole-set-per-role).
+func (p *plugin) recordForBroker(ctx context.Context, ctr *api.Container, imageRef string) {
+	if p.broker == nil {
+		return
+	}
+	digest := extractDigest(imageRef)
+	if digest == "" && imageRef != "" {
+		if resolved, err := p.resolver.Resolve(ctx, imageRef); err == nil {
+			digest = extractDigest(resolved)
+		} else {
+			p.logger.Error("workload-claims: cannot resolve admitted image digest; container will be absent from the workload claim", "image", imageRef, "error", err)
+		}
+	}
+	p.broker.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)
 }
 
 // evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.
@@ -336,6 +382,8 @@ func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandb
 			imgVerdict, _ := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef)
 			if imgVerdict == verdictDeny {
 				denied = true
+			} else {
+				p.recordForBroker(ctx, ctr, imageRef)
 			}
 		}
 
@@ -449,6 +497,8 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			}
 			return nil, nil, fmt.Errorf("%s", reason)
 		}
+		// Admitted: record for the workload-claims broker.
+		p.recordForBroker(ctx, ctr, imageRef)
 	}
 
 	return nil, nil, nil

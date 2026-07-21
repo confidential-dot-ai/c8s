@@ -35,6 +35,11 @@ write_file() {
 
 mkdir -p "/host{{ $root.Values.nriImagePolicy.hostPaths.cacheDir }}"
 mkdir -p "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
+# The workload-claims broker socket lives here; the non-root get-cert sidecar
+# must traverse the dir (o+x) to connect. Pin it explicitly so a strict root
+# umask can't drop o+x (get-cert is fail-closed — no traversal, no cert). Not
+# world-writable, so an untrusted pod can't swap the socket (docs/pitfalls.md).
+chmod 0711 "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
 
 config_changed=0
 if write_file "/host{{ include "nri-image-policy.hostConfigPath" $root }}" 0644 <<'IMAGE_POLICY_EOF'
@@ -171,6 +176,11 @@ install image + CDS digest so chart upgrades can roll.
 {{- $attestationNodePort := int $root.Values.attestationApi.service.nodePort -}}
 plugin:
   health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" $root) | quote }}
+workload_claims:
+  socket_dir: {{ $root.Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
+  # The plugin is launched by containerd on the host, so its /proc is the
+  # host's — a caller PID from SO_PEERCRED resolves directly.
+  proc_root: "/proc"
 allowlist:
   pull:
     url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}
