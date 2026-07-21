@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1089,12 +1090,16 @@ func TestAppendCvmModeInstallArgsAcceptsAksWithTdx(t *testing.T) {
 // which exercise buildDigestArgs without reading a real chart. The chart-read
 // path (chartComponents) is covered separately by TestChartComponentsFromValues.
 var testComponents = []c8sComponent{
-	{"image", "ghcr.io/confidential-dot-ai/c8s-operator"},
-	{"attestationApi.image", "ghcr.io/confidential-dot-ai/attestation-api"},
-	{"cds.image", "ghcr.io/confidential-dot-ai/cds"},
-	{"ratlsMesh.image", "ghcr.io/confidential-dot-ai/ratls-mesh"},
-	{"nriImagePolicy.image", "ghcr.io/confidential-dot-ai/nri-image-policy"},
+	{valuePrefix: "image", repository: "ghcr.io/confidential-dot-ai/c8s-operator"},
+	{valuePrefix: "attestationApi.image", repository: "ghcr.io/confidential-dot-ai/attestation-api", enabledPath: "attestationApi.enabled"},
+	{valuePrefix: "cds.image", repository: "ghcr.io/confidential-dot-ai/cds"},
+	{valuePrefix: "ratlsMesh.image", repository: "ghcr.io/confidential-dot-ai/ratls-mesh", enabledPath: "ratlsMesh.enabled"},
+	{valuePrefix: "nriImagePolicy.image", repository: "ghcr.io/confidential-dot-ai/nri-image-policy", enabledPath: "nriImagePolicy.enabled"},
 }
+
+// allEnabled is the buildDigestArgs predicate for tests that resolve every
+// component (the skip path is covered by TestBuildDigestArgsSkipsDisabledComponent).
+func allEnabled(string) (bool, error) { return true, nil }
 
 func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 	// Deterministic fake resolver: digest derived from the ref so each
@@ -1116,7 +1121,7 @@ func TestBuildDigestArgsPinsEveryComponent(t *testing.T) {
 		return "", nil
 	}
 
-	got, err := buildDigestArgs([]string{"upgrade"}, "v1", testComponents, resolve)
+	got, err := buildDigestArgs([]string{"upgrade"}, "v1", testComponents, resolve, allEnabled)
 	if err != nil {
 		t.Fatalf("buildDigestArgs: %v", err)
 	}
@@ -1147,13 +1152,73 @@ func TestBuildDigestArgsResolvesEachComponentOnce(t *testing.T) {
 		calls[ref]++
 		return "sha256:1111111111111111111111111111111111111111111111111111111111111111", nil
 	}
-	if _, err := buildDigestArgs(nil, "v1", testComponents, resolve); err != nil {
+	if _, err := buildDigestArgs(nil, "v1", testComponents, resolve, allEnabled); err != nil {
 		t.Fatalf("buildDigestArgs: %v", err)
 	}
 	for ref, n := range calls {
 		if n != 1 {
 			t.Errorf("ref %q resolved %d times, want 1", ref, n)
 		}
+	}
+}
+
+// A component whose enabledPath resolves to false never renders, so its tag
+// must not be resolved (that image may be unpublished at the install tag — e.g.
+// attestationApi under --cvm-mode=node) and it must contribute no --set args.
+// Enabled components still resolve and pin.
+func TestBuildDigestArgsSkipsDisabledComponent(t *testing.T) {
+	resolved := map[string]bool{}
+	resolve := func(ref string) (string, error) {
+		resolved[ref] = true
+		return "sha256:3333333333333333333333333333333333333333333333333333333333333333", nil
+	}
+	// Node-mode shape: attestation-api and nri-image-policy are baked into the
+	// node image and disabled in the chart.
+	disabled := map[string]bool{"attestationApi.enabled": true, "nriImagePolicy.enabled": true}
+	enabled := func(path string) (bool, error) { return !disabled[path], nil }
+
+	args, err := buildDigestArgs(nil, "v1", testComponents, resolve, enabled)
+	if err != nil {
+		t.Fatalf("buildDigestArgs: %v", err)
+	}
+	for _, ref := range []string{
+		"ghcr.io/confidential-dot-ai/attestation-api:v1",
+		"ghcr.io/confidential-dot-ai/nri-image-policy:v1",
+	} {
+		if resolved[ref] {
+			t.Errorf("disabled component %q was resolved, want skipped", ref)
+		}
+	}
+	joined := strings.Join(args, " ")
+	for _, prefix := range []string{"attestationApi.image", "nriImagePolicy.image"} {
+		if strings.Contains(joined, prefix+".repository") || strings.Contains(joined, prefix+".digest") {
+			t.Errorf("disabled component %q emitted --set args: %v", prefix, args)
+		}
+	}
+	// Enabled components still pin both repository and digest.
+	for _, want := range []string{
+		"cds.image.repository=ghcr.io/confidential-dot-ai/cds",
+		"ratlsMesh.image.repository=ghcr.io/confidential-dot-ai/ratls-mesh",
+		"image.repository=ghcr.io/confidential-dot-ai/c8s-operator",
+	} {
+		if !slices.Contains(args, want) {
+			t.Errorf("enabled component arg %q missing from %v", want, args)
+		}
+	}
+	if !resolved["ghcr.io/confidential-dot-ai/cds:v1"] {
+		t.Error("enabled component cds was not resolved")
+	}
+}
+
+// A predicate error (the effective-enabled read failed) must abort rather than
+// silently resolve or skip the component.
+func TestBuildDigestArgsFailsClosedOnEnabledError(t *testing.T) {
+	resolve := func(string) (string, error) {
+		return "sha256:4444444444444444444444444444444444444444444444444444444444444444", nil
+	}
+	enabled := func(string) (bool, error) { return false, errTestResolve }
+	if _, err := buildDigestArgs(nil, "v1", testComponents, resolve, enabled); err == nil {
+		t.Fatal("buildDigestArgs ignored an enabled-predicate error, want fail-closed")
 	}
 }
 
@@ -1167,7 +1232,7 @@ func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
 		}
 		return "sha256:2222222222222222222222222222222222222222222222222222222222222222", nil
 	}
-	if _, err := buildDigestArgs(nil, "v1", testComponents, resolve); err == nil {
+	if _, err := buildDigestArgs(nil, "v1", testComponents, resolve, allEnabled); err == nil {
 		t.Fatal("buildDigestArgs ignored a resolver error, want fail-closed")
 	}
 }
@@ -1178,7 +1243,7 @@ func TestBuildDigestArgsFailsClosedOnResolveError(t *testing.T) {
 func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 	notFound := errors.New(`crane digest "ghcr.io/confidential-dot-ai/c8s-operator:gpu-test": exit status 1: MANIFEST_UNKNOWN: manifest unknown`)
 	resolve := func(string) (string, error) { return "", notFound }
-	_, err := buildDigestArgs(nil, "gpu-test", testComponents, resolve)
+	_, err := buildDigestArgs(nil, "gpu-test", testComponents, resolve, allEnabled)
 	if err == nil {
 		t.Fatal("buildDigestArgs accepted a missing tag, want fail-closed")
 	}
@@ -1202,7 +1267,7 @@ func TestBuildDigestArgsExplainsTagCouplingOnMissingTag(t *testing.T) {
 // wrong path.
 func TestBuildDigestArgsLeavesOtherResolveErrorsUnhinted(t *testing.T) {
 	resolve := func(string) (string, error) { return "", errTestResolve }
-	_, err := buildDigestArgs(nil, "v1", testComponents, resolve)
+	_, err := buildDigestArgs(nil, "v1", testComponents, resolve, allEnabled)
 	if err == nil {
 		t.Fatal("buildDigestArgs ignored a resolver error, want fail-closed")
 	}
