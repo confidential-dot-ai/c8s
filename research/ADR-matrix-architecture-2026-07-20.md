@@ -88,6 +88,30 @@ jobs:
     permissions: { id-token: write, contents: read }
 ```
 
+## ✅ SPIKE PROVEN (2026-07-21, run 29791698959): ARC runs IN the metal node-CVM
+
+The load-bearing assumption under the lib rail is confirmed on real SNP hardware
+(`probe-arc-in-cvm.yml`, reusing the cvm-e2e primitive): ARC installs into the
+in-guest rke2, its **listener authenticates to GitHub + registers a runner from
+inside the SNP guest** (egress + App auth work in-TEE), an **ephemeral runner
+pod comes up Running**, and that pod **reads /dev/sev-guest = genuinely in the
+TEE**. Full marker chain green: NS_PRIVILEGED → CTL_UP → LISTENER_REGISTERED →
+RUNNER_POD_UP → RUNNER_IN_TEE → PAYLOAD_OK.
+
+Every failure across 4 iterations was standard k8s friction, not a fundamental
+blocker — the two load-bearing config facts for the real `snp-metal-cvm` build:
+1. **PSA**: label `arc-systems` + `arc-runners` `pod-security…/enforce=privileged`
+   (same as c8s-system) or the controller/runner pods never get created
+   (deploy 0/1, rs DESIRED=1/CURRENT=0).
+2. **Runner overlay**: the runner pod needs `securityContext.privileged: true` +
+   hostPath `/dev/sev-guest` (the azure-cvm VALUES_FILE pattern) to read the SNP
+   device — lib tests need this. Reuse register.sh's VALUES_FILE.
+
+=> Phase 1 is a BUILD of proven pieces (boot measured rke2-node CVM + register
+ARC with the two facts above), not a research risk. The remaining unproven bit
+(a real job ROUTING to the in-guest runner) is standard ARC once a runner is
+online — cheap follow-up, not a gate.
+
 ## Migration path
 
 - **Phase 0 — SOONEST c8s unblock (days):** relocate `e2e-c8s.yml` + the metal
