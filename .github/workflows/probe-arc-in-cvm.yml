@@ -40,6 +40,11 @@ jobs:
           # rke2 ships helm-controller (HelmChart CRD) — no helm binary needed,
           # same path c8s installs through. \$K is the in-guest kubectl.
           \$K create ns arc-systems >/dev/null 2>&1; \$K create ns arc-runners >/dev/null 2>&1
+          # the rke2 guest enforces PodSecurity; ARC pods need privileged (same fix
+          # as c8s-system in the flagship — without it the replicaset can't create a
+          # pod: deploy 0/1, rs DESIRED=1/CURRENT=0, which is exactly what run 2 hit).
+          for ns in arc-systems arc-runners; do \$K label ns \$ns pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1; done
+          say NS_PRIVILEGED
           # App creds secret ARC consumes (App auth: id / installation / private key)
           printf '%s' '$PEM_B64' | base64 -d > /tmp/arc.pem
           \$K -n arc-runners create secret generic arc-app \
@@ -63,6 +68,7 @@ jobs:
             \$K -n kube-system get job helm-install-arc -o wide 2>&1 | sed 's/^/@@HJ /;s/\$/@@/'
             \$K -n kube-system logs job/helm-install-arc --tail=25 2>&1 | sed 's/^/@@HJLOG /;s/\$/@@/'
             \$K -n arc-systems get all 2>&1 | sed 's/^/@@ARCSYS /;s/\$/@@/'
+            \$K -n arc-systems get events --field-selector reason=FailedCreate --sort-by=.lastTimestamp 2>&1 | tail -4 | sed 's/^/@@RSEV /;s/\$/@@/'
             \$K -n kube-system get helmchart arc -o jsonpath='{.status}' 2>&1 | sed 's/^/@@HCST /;s/\$/@@/'
             say FAIL_CONTROLLER; exit 0
           fi
