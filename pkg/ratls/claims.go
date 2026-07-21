@@ -100,10 +100,10 @@ type configClaimsASN1 struct {
 // binding covers exactly what the certificate carries (docs/ratls.md).
 func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 	for name, d := range map[string][]byte{
-		"operator-keys":  c.OperatorKeysDigest,
-		"seed":           c.SeedDigest,
-		"workload":       c.WorkloadDigest,
-		"workload-args":  c.WorkloadArgsDigest,
+		"operator-keys": c.OperatorKeysDigest,
+		"seed":          c.SeedDigest,
+		"workload":      c.WorkloadDigest,
+		"workload-args": c.WorkloadArgsDigest,
 	} {
 		if len(d) != ClaimsDigestSize {
 			return pkix.Extension{}, fmt.Errorf("ratls: %s claims digest must be %d bytes, got %d", name, ClaimsDigestSize, len(d))

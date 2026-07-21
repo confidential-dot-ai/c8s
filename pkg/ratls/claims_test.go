@@ -113,10 +113,10 @@ func TestConfigClaimsSentinels(t *testing.T) {
 func TestConfigClaimsMarshalRejectsWrongDigestSize(t *testing.T) {
 	full := bytes.Repeat([]byte{1}, ClaimsDigestSize)
 	for name, c := range map[string]*ConfigClaims{
-		"operator-keys":  {OperatorKeysDigest: []byte{1, 2}, SeedDigest: full, WorkloadDigest: full, WorkloadArgsDigest: full},
-		"seed":           {OperatorKeysDigest: full, SeedDigest: []byte{1, 2}, WorkloadDigest: full, WorkloadArgsDigest: full},
-		"workload":       {OperatorKeysDigest: full, SeedDigest: full, WorkloadDigest: []byte{1, 2}, WorkloadArgsDigest: full},
-		"workload-args":  {OperatorKeysDigest: full, SeedDigest: full, WorkloadDigest: full, WorkloadArgsDigest: []byte{1, 2}},
+		"operator-keys": {OperatorKeysDigest: []byte{1, 2}, SeedDigest: full, WorkloadDigest: full, WorkloadArgsDigest: full},
+		"seed":          {OperatorKeysDigest: full, SeedDigest: []byte{1, 2}, WorkloadDigest: full, WorkloadArgsDigest: full},
+		"workload":      {OperatorKeysDigest: full, SeedDigest: full, WorkloadDigest: []byte{1, 2}, WorkloadArgsDigest: full},
+		"workload-args": {OperatorKeysDigest: full, SeedDigest: full, WorkloadDigest: full, WorkloadArgsDigest: []byte{1, 2}},
 	} {
 		if _, err := c.MarshalExtension(); err == nil {
 			t.Errorf("%s: marshal accepted a wrong-size digest", name)
