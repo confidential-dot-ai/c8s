@@ -143,12 +143,97 @@ func TestNormalizeTarget(t *testing.T) {
 }
 
 func TestBuildPolicy_RejectsOutOfRangeMinTCB(t *testing.T) {
-	if _, err := buildPolicy(config{minTCBSNP: 256}); err == nil {
+	if _, _, err := buildPolicy(config{minTCBSNP: 256}); err == nil {
 		t.Fatal("expected --min-tcb-snp 256 to be rejected (would truncate to 0)")
 	}
-	if _, err := buildPolicy(config{minTCBBootloader: 255, minTCBTEE: 1}); err != nil {
+	if _, _, err := buildPolicy(config{minTCBBootloader: 255, minTCBTEE: 1}); err != nil {
 		t.Errorf("in-range min-tcb values should be accepted: %v", err)
 	}
+}
+
+// The --workload-spec flag is the operator-facing pin for the (image, argv)
+// commitment. These tests cover the JSON shape, inline sourcing, wildcarding
+// semantics, and the mutual-exclusion guard against the flat image flags.
+func TestBuildPolicy_WorkloadSpec(t *testing.T) {
+	inline := func(s string) string { return "@inline:" + s }
+
+	t.Run("concrete spec pins both digests", func(t *testing.T) {
+		policy, note, err := buildPolicy(config{workloadSpec: inline(`{
+            "init": [{"image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":["/init"]}],
+            "main": [{"image":"sha256:2222222222222222222222222222222222222222222222222222222222222222","args":["/app","--serve"]}]
+        }`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.WorkloadDigest) == 0 || len(policy.WorkloadArgsDigest) == 0 {
+			t.Fatal("both digests should be pinned for a concrete spec")
+		}
+		if note == "" || !strings.Contains(note, "pinned") {
+			t.Fatalf("expected pinned note, got %q", note)
+		}
+	})
+
+	t.Run("wildcard degrades to image-only", func(t *testing.T) {
+		policy, note, err := buildPolicy(config{workloadSpec: inline(`{
+            "main": [
+                {"image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":"*"},
+                {"image":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}
+            ]
+        }`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.WorkloadDigest) == 0 {
+			t.Fatal("image-only digest must still be pinned when args wildcarded")
+		}
+		if len(policy.WorkloadArgsDigest) != 0 {
+			t.Fatal("args digest must NOT be pinned when any container wildcards args")
+		}
+		if !strings.Contains(note, "not pinned") {
+			t.Fatalf("expected not-pinned note, got %q", note)
+		}
+	})
+
+	t.Run("mutually exclusive with --workload-image", func(t *testing.T) {
+		_, _, err := buildPolicy(config{
+			workloadSpec:   inline(`{"main":[{"image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":["/a"]}]}`),
+			workloadImages: []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		})
+		if err == nil {
+			t.Fatal("mixing --workload-spec with --workload-image should be rejected")
+		}
+	})
+
+	t.Run("empty spec fails closed", func(t *testing.T) {
+		if _, _, err := buildPolicy(config{workloadSpec: inline(`{}`)}); err == nil {
+			t.Fatal("empty spec accepted")
+		}
+	})
+
+	t.Run("unknown args string rejected", func(t *testing.T) {
+		if _, _, err := buildPolicy(config{workloadSpec: inline(`{"main":[{"image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":"any"}]}`)}); err == nil {
+			t.Fatal("args:\"any\" accepted — only \"*\" is a valid string form")
+		}
+	})
+
+	t.Run("file source works", func(t *testing.T) {
+		f, err := os.CreateTemp("", "workload-spec-*.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.WriteString(`{"main":[{"image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":["/x"]}]}`); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		policy, _, err := buildPolicy(config{workloadSpec: f.Name()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(policy.WorkloadArgsDigest) == 0 {
+			t.Fatal("file-sourced spec did not pin args digest")
+		}
+	})
 }
 
 func TestParseExpectedReportData(t *testing.T) {
