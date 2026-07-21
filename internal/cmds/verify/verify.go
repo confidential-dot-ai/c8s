@@ -91,6 +91,7 @@ type config struct {
 	allowlistSeedDigest string
 	workloadImages      []string
 	workloadInitImages  []string
+	workloadSpec        string
 	allowDebug          bool
 	minTCBBootloader    uint
 	minTCBTEE           uint
@@ -174,6 +175,7 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
 	f.StringSliceVar(&cfg.workloadImages, "workload-image", nil, "expected main container image digest(s) (sha256:...; repeatable/comma-separated); with --workload-init-image, verification fails unless the target leaf's attested workload digest matches these role sets (docs/ratls.md)")
 	f.StringSliceVar(&cfg.workloadInitImages, "workload-init-image", nil, "expected init container image digest(s) (sha256:...; repeatable/comma-separated); pairs with --workload-image")
+	f.StringVar(&cfg.workloadSpec, "workload-spec", "", "expected pod spec as JSON: {\"init\":[{image,args?}],\"main\":[{image,args?}]}. Path to a file, or @inline:<JSON literal>. Pins the image-only WorkloadDigest AND, when every container has concrete args, the (image, argv) WorkloadArgsDigest. args:\"*\" (or absent) wildcards that container's argv — image pin still holds, args pin degrades to image-only (docs/ratls.md). Mutually exclusive with --workload-image/--workload-init-image")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component")
 	f.UintVar(&cfg.minTCBTEE, "min-tcb-tee", 0, "minimum TEE TCB component")
@@ -197,7 +199,7 @@ func orDefault(v, fallback string) string {
 // run performs the whole verification and renders the result, returning the
 // process exit code. It is the unit-testable core (no os.Exit inside).
 func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
-	policy, err := buildPolicy(cfg)
+	policy, workloadArgsNote, err := buildPolicy(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return exitUsage
@@ -226,7 +228,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(ctx, cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
+	return verifyEvidence(ctx, cfg, policy, workloadArgsNote, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
 }
 
 // operatorKeysReport is the pinned-operator-key section of the verdict. Keys
@@ -268,7 +270,7 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // both work — then renders the verdict. The verification attempt (including the
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
-func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy, ev *evidence, opKeys operatorKeysReport, out, errOut io.Writer) int {
+func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy, workloadArgsNote string, ev *evidence, opKeys operatorKeysReport, out, errOut io.Writer) int {
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -282,6 +284,7 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 	oc := newOutcome(cfg, ev, result, verr, policy)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
+	oc.WorkloadArgsNote = workloadArgsNote
 	applyClaimsPolicy(&oc, ev, policy, opKeys)
 	render(cfg, oc, out)
 	if !oc.Verified {
@@ -294,7 +297,7 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 // launch-measurement pin and min-TCB are enforced on the verifier verdict
 // (newOutcome / verifyInProcess); only Measurements and AllowDebug are read
 // downstream.
-func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
+func buildPolicy(cfg config) (*ratls.VerifyPolicy, string, error) {
 	// Each TCB component is a single byte; reject >255 rather than silently
 	// truncating it (byte(256)==0 would weaken the policy without warning).
 	for name, v := range map[string]uint{
@@ -304,7 +307,7 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		"--min-tcb-microcode":  cfg.minTCBMicrocode,
 	} {
 		if v > 255 {
-			return nil, fmt.Errorf("%s is %d, must be 0-255", name, v)
+			return nil, "", fmt.Errorf("%s is %d, must be 0-255", name, v)
 		}
 	}
 
@@ -312,39 +315,61 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 	if cfg.measurementsFile != "" {
 		data, err := os.ReadFile(cfg.measurementsFile)
 		if err != nil {
-			return nil, fmt.Errorf("read --measurements-file: %w", err)
+			return nil, "", fmt.Errorf("read --measurements-file: %w", err)
 		}
 		hexes = append(hexes, strings.Split(string(data), "\n")...)
 	}
 	measurements, err := ratls.ParseHexMeasurementsList(hexes)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var opKeysDigest []byte
 	if cfg.operatorKeys != "" {
 		pemBytes, err := os.ReadFile(cfg.operatorKeys)
 		if err != nil {
-			return nil, fmt.Errorf("read --operator-keys: %w", err)
+			return nil, "", fmt.Errorf("read --operator-keys: %w", err)
 		}
 		keys, err := operatorauth.ParsePublicKeysPEM(pemBytes)
 		if err != nil {
-			return nil, fmt.Errorf("--operator-keys: %w", err)
+			return nil, "", fmt.Errorf("--operator-keys: %w", err)
 		}
 		if opKeysDigest, err = operatorauth.KeySetDigest(keys); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
 	seedDigest, err := expectedSeedDigest(cfg)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	var workloadDigest []byte
-	if len(cfg.workloadInitImages) > 0 || len(cfg.workloadImages) > 0 {
+	var workloadDigest, workloadArgsDigest []byte
+	var workloadArgsNote string
+	switch {
+	case cfg.workloadSpec != "" && (len(cfg.workloadInitImages) > 0 || len(cfg.workloadImages) > 0):
+		return nil, "", fmt.Errorf("--workload-spec is mutually exclusive with --workload-image/--workload-init-image")
+	case cfg.workloadSpec != "":
+		spec, err := loadWorkloadSpec(cfg.workloadSpec)
+		if err != nil {
+			return nil, "", fmt.Errorf("--workload-spec: %w", err)
+		}
+		initCs, initImgs := spec.initContainers()
+		mainCs, mainImgs := spec.mainContainers()
+		if workloadDigest, err = workloadclaims.Digest(initImgs, mainImgs); err != nil {
+			return nil, "", fmt.Errorf("--workload-spec: %w", err)
+		}
+		if spec.everyArgsConcrete() {
+			if workloadArgsDigest, err = workloadclaims.ArgsDigest(initCs, mainCs); err != nil {
+				return nil, "", fmt.Errorf("--workload-spec: %w", err)
+			}
+			workloadArgsNote = "pinned (concrete argv)"
+		} else {
+			workloadArgsNote = "not pinned (--workload-spec contained args:\"*\" — image-only pin still enforced)"
+		}
+	case len(cfg.workloadInitImages) > 0 || len(cfg.workloadImages) > 0:
 		if workloadDigest, err = workloadclaims.Digest(cfg.workloadInitImages, cfg.workloadImages); err != nil {
-			return nil, fmt.Errorf("--workload-image/--workload-init-image: %w", err)
+			return nil, "", fmt.Errorf("--workload-image/--workload-init-image: %w", err)
 		}
 	}
 
@@ -354,7 +379,141 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		OperatorKeysDigest: opKeysDigest,
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     workloadDigest,
-	}, nil
+		WorkloadArgsDigest: workloadArgsDigest,
+	}, workloadArgsNote, nil
+}
+
+// workloadSpec is the JSON shape --workload-spec accepts (docs/ratls.md).
+// Each container's args is one of: a concrete []string, the string "*"
+// (wildcard for that container's argv), or absent (equivalent to "*").
+// Wildcarded containers still contribute their image to WorkloadDigest but
+// cause WorkloadArgsDigest to skip pinning — the operator opts out per pod.
+type workloadSpec struct {
+	Init []specContainer
+	Main []specContainer
+}
+
+// specContainer is the normalized in-memory representation: image and either
+// a concrete argv or the wildcard marker. The JSON layer has already
+// validated the args shape (loadWorkloadSpec), so downstream never needs to
+// re-decode.
+type specContainer struct {
+	Image    string
+	Args     []string // concrete argv when !ArgsWildcard
+	Wildcard bool
+}
+
+// specContainerJSON is the on-the-wire form: args is a RawMessage so we can
+// accept []string OR the string "*" without two distinct fields, then
+// normalize in loadWorkloadSpec.
+type specContainerJSON struct {
+	Image string          `json:"image"`
+	Args  json.RawMessage `json:"args,omitempty"`
+}
+
+// loadWorkloadSpec reads the spec from a file or from an `@inline:<JSON>`
+// literal, then normalizes each entry so callers work with specContainer
+// directly. Fails closed on any unparseable args value.
+func loadWorkloadSpec(source string) (*workloadSpec, error) {
+	var raw []byte
+	if literal, ok := strings.CutPrefix(source, "@inline:"); ok {
+		raw = []byte(literal)
+	} else {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", source, err)
+		}
+		raw = data
+	}
+	var jsonSpec struct {
+		Init []specContainerJSON `json:"init"`
+		Main []specContainerJSON `json:"main"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&jsonSpec); err != nil {
+		return nil, fmt.Errorf("parse JSON: %w", err)
+	}
+	if len(jsonSpec.Init) == 0 && len(jsonSpec.Main) == 0 {
+		return nil, fmt.Errorf("spec has no containers")
+	}
+	normalize := func(cs []specContainerJSON) ([]specContainer, error) {
+		out := make([]specContainer, 0, len(cs))
+		for _, c := range cs {
+			if c.Image == "" {
+				return nil, fmt.Errorf("container entry missing image")
+			}
+			args, wildcard, err := decodeSpecArgs(c.Args)
+			if err != nil {
+				return nil, fmt.Errorf("container %s: %w", c.Image, err)
+			}
+			out = append(out, specContainer{Image: c.Image, Args: args, Wildcard: wildcard})
+		}
+		return out, nil
+	}
+	init, err := normalize(jsonSpec.Init)
+	if err != nil {
+		return nil, err
+	}
+	main, err := normalize(jsonSpec.Main)
+	if err != nil {
+		return nil, err
+	}
+	return &workloadSpec{Init: init, Main: main}, nil
+}
+
+func (s *workloadSpec) initContainers() ([]workloadclaims.Container, []string) {
+	return specContainersToClaims(s.Init)
+}
+
+func (s *workloadSpec) mainContainers() ([]workloadclaims.Container, []string) {
+	return specContainersToClaims(s.Main)
+}
+
+// everyArgsConcrete reports whether every container in the spec pinned a
+// concrete argv — the precondition for re-deriving WorkloadArgsDigest.
+func (s *workloadSpec) everyArgsConcrete() bool {
+	for _, c := range append(append([]specContainer{}, s.Init...), s.Main...) {
+		if c.Wildcard {
+			return false
+		}
+	}
+	return true
+}
+
+// specContainersToClaims materializes a role's containers as
+// (workloadclaims.Container tuples for ArgsDigest, image-only list for
+// Digest). A wildcarded container stores an empty argv — safe because
+// everyArgsConcrete gates ArgsDigest re-derivation before that slice is used.
+func specContainersToClaims(cs []specContainer) ([]workloadclaims.Container, []string) {
+	tuples := make([]workloadclaims.Container, 0, len(cs))
+	images := make([]string, 0, len(cs))
+	for _, c := range cs {
+		tuples = append(tuples, workloadclaims.Container{Digest: c.Image, Args: c.Args})
+		images = append(images, c.Image)
+	}
+	return tuples, images
+}
+
+// decodeSpecArgs parses one container's args field. Returns (concrete argv,
+// wildcard flag, error). Wildcard is signaled by absent (empty raw) or the
+// literal string "*"; anything else must decode as []string.
+func decodeSpecArgs(raw json.RawMessage) ([]string, bool, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, true, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if s == "*" {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("args string must be \"*\" (wildcard), got %q", s)
+	}
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil, false, fmt.Errorf("args must be an array of strings or \"*\", got %s", raw)
+	}
+	return arr, false, nil
 }
 
 // expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON
@@ -507,6 +666,13 @@ type Outcome struct {
 	OperatorKeysAttestedDigest string   `json:"operator_keys_attested_digest,omitempty"`
 	SeedAttestedDigest         string   `json:"allowlist_seed_attested_digest,omitempty"`
 	WorkloadAttestedDigest     string   `json:"workload_attested_digest,omitempty"`
+	// WorkloadArgsAttestedDigest is the (image, argv) role hash attested by
+	// the target's config-claims (docs/ratls.md). Non-empty only when the
+	// evidence carries a v2 claim with the field set — i.e. the workload
+	// bound its argv. WorkloadArgsNote states what --workload-spec did with
+	// it: "pinned (concrete argv)", "not pinned (…)" or empty.
+	WorkloadArgsAttestedDigest string `json:"workload_args_attested_digest,omitempty"`
+	WorkloadArgsNote           string `json:"workload_args_note,omitempty"`
 }
 
 // applyClaimsPolicy surfaces the attested config-claims digests and fails the
@@ -525,6 +691,9 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 		if ev.configClaims.HasWorkload() {
 			oc.WorkloadAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadDigest)
 		}
+		if ev.configClaims.HasWorkloadArgs() {
+			oc.WorkloadArgsAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadArgsDigest)
+		}
 	}
 	fail := func(format string, args ...any) {
 		oc.Verified = false
@@ -536,7 +705,7 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 		fail("config-claims extension unparseable (newer target than this CLI?): %v", ev.claimsErr)
 		return
 	}
-	pinned := len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0
+	pinned := len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0 || len(policy.WorkloadArgsDigest) > 0
 	if pinned && ev.configClaims == nil {
 		fail("config-claims pin set but the evidence binds no config-claims (target predates config attestation, or is not a CDS serving cert)")
 		return
@@ -549,6 +718,9 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	}
 	if len(policy.WorkloadDigest) > 0 && !bytes.Equal(ev.configClaims.WorkloadDigest, policy.WorkloadDigest) {
 		fail("attested workload digest %x does not match the --workload-image set (%x)", ev.configClaims.WorkloadDigest, policy.WorkloadDigest)
+	}
+	if len(policy.WorkloadArgsDigest) > 0 && !bytes.Equal(ev.configClaims.WorkloadArgsDigest, policy.WorkloadArgsDigest) {
+		fail("attested workload-args digest %x does not match --workload-spec (%x)", ev.configClaims.WorkloadArgsDigest, policy.WorkloadArgsDigest)
 	}
 	// The served key list must be the set the measured code attested to
 	// loading; a mismatch means MITM on the fetch or a CDS bug.
@@ -675,6 +847,12 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.WorkloadAttestedDigest != "" {
 		fmt.Fprintf(out, "  workload digest (attested via config-claims): sha256:%s\n", oc.WorkloadAttestedDigest)
+	}
+	if oc.WorkloadArgsAttestedDigest != "" {
+		fmt.Fprintf(out, "  workload-args digest (attested via config-claims): sha256:%s\n", oc.WorkloadArgsAttestedDigest)
+	}
+	if oc.WorkloadArgsNote != "" {
+		fmt.Fprintf(out, "  workload-args pin: %s\n", oc.WorkloadArgsNote)
 	}
 	if len(oc.OperatorKeys) > 0 {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"
