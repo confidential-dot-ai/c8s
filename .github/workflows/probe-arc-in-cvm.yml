@@ -73,7 +73,7 @@ jobs:
             say FAIL_CONTROLLER; exit 0
           fi
           # 2) the scale set (label snp-metal-cvm-spike, minRunners:1 so a runner comes up now)
-          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: snp-metal-cvm-spike\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: snp-metal-cvm-spike\n    minRunners: 1\n    maxRunners: 1\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
+          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: snp-metal-cvm-spike\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: snp-metal-cvm-spike\n    minRunners: 1\n    maxRunners: 1\n    template:\n      spec:\n        containers:\n          - name: runner\n            image: ghcr.io/actions/actions-runner:latest\n            command: ["/home/runner/run.sh"]\n            securityContext:\n              privileged: true\n            volumeMounts:\n              - name: sev\n                mountPath: /dev/sev-guest\n        volumes:\n          - name: sev\n            hostPath:\n              path: /dev/sev-guest\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
           # 3) THE CRUX: listener authenticates to github + polls => "Getting next message"
           LOK=0
           for i in \$(seq 1 40); do
