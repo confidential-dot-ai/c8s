@@ -277,26 +277,29 @@ func Serve(ctx context.Context, l net.Listener, resolver Resolver) error {
 	return nil
 }
 
-// Fetch queries the broker at endpoint and returns the caller pod's
-// containers. In both deployment shapes endpoint is a "unix:///path/to.sock"
-// socket (node-CVM: peer credentials bind the caller; kata: one pod per guest,
-// see docs/getcert-workload-binding.md "Why a unix socket"). A plain
-// "http://host:port" endpoint is also accepted but carries no peer credentials
-// and is used only by tests.
+// Fetch queries the broker at endpoint and returns the caller pod's containers.
+// endpoint must be a "unix:///path/to.sock" socket — the only transport that
+// carries the peer credentials the answer is bound to, and the shape both
+// deployments use (docs/getcert-workload-binding.md "Why a unix socket").
 func Fetch(ctx context.Context, endpoint string, timeout time.Duration) ([]Container, error) {
-	client := &http.Client{Timeout: timeout}
-	url := endpoint + DigestsPath
-	if path, ok := strings.CutPrefix(endpoint, "unix://"); ok {
-		client.Transport = &http.Transport{
+	path, ok := strings.CutPrefix(endpoint, "unix://")
+	if !ok {
+		return nil, fmt.Errorf("workloadclaims: endpoint must be unix://, got %q", endpoint)
+	}
+	client := &http.Client{
+		Timeout: timeout,
+		// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose.
+		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", path)
 			},
-		}
-		url = "http://workload-claims" + DigestsPath
+		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// Host placeholder — the dialer above ignores it and connects to path.
+	// .invalid is RFC 2606-reserved, so it can never resolve.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker.invalid"+DigestsPath, nil)
 	if err != nil {
 		return nil, err
 	}

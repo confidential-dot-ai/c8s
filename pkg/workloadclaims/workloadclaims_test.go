@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -136,6 +137,9 @@ func TestBrokerUnixSocketBindsCaller(t *testing.T) {
 	}
 }
 
+// A TCP conn carries no peer credentials, so the resolver is called with pid 0
+// and the node-CVM broker rejects it. Driven with a plain GET, not Fetch: Fetch
+// is unix-only by construction, and this is a server-side property.
 func TestBrokerLoopbackHasNoPeerPID(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -146,15 +150,32 @@ func TestBrokerLoopbackHasNoPeerPID(t *testing.T) {
 	defer cancel()
 	go func() { _ = Serve(ctx, l, resolver) }()
 
-	got, err := Fetch(context.Background(), "http://"+l.Addr().String(), 5*time.Second)
+	resp, err := http.Get("http://" + l.Addr().String() + DigestsPath)
 	if err != nil {
-		t.Fatalf("fetch: %v", err)
+		t.Fatalf("get: %v", err)
 	}
-	if len(got) != 1 || got[0].Digest != digestB {
-		t.Fatalf("containers = %v", got)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if resolver.pid != 0 {
 		t.Fatalf("loopback peer pid = %d, want 0 (no binding available)", resolver.pid)
+	}
+}
+
+// Fetch must be unable to reach anything but the baked unix socket — that is
+// what keeps the broker un-redirectable (docs/getcert-workload-binding.md,
+// Corner 5).
+func TestFetchRejectsNonUnixEndpoint(t *testing.T) {
+	for _, ep := range []string{
+		"http://127.0.0.1:8080",
+		"https://broker.example",
+		"/run/c8s/workload-claims/workload-claims.sock",
+		"",
+	} {
+		if _, err := Fetch(context.Background(), ep, time.Second); err == nil {
+			t.Fatalf("endpoint %q accepted; only unix:// may be dialed", ep)
+		}
 	}
 }
 
