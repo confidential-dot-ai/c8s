@@ -1,0 +1,232 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PROVISION the standing azure-tdx-cvm ARC runner: a STANDALONE Intel TDX CVM.
+# ═══════════════════════════════════════════════════════════════════════════
+# Why standalone and not an AKS node pool like azure-cvm: AKS does not accept
+# Intel TDX CVM sizes today. MS Learn (use-cvm, updated 2026-06-24) states
+# "Intel TDX-based Confidential VMs aren't currently supported on AKS"; open
+# known issue Azure/AKS#5618, no ETA. Nodepool add fails with "VM size ... not
+# supported ... with '<NULL>' security type" (the AKS RP only wires CVM
+# security profiles for AMD SEV-SNP families). TDX CVMs are GA at the plain
+# VM/VMSS level in westeurope/westus/westus3 (DC/EC es_v6 + eds_v6), so the
+# runner rides a raw CVM instead: the ADR's documented fallback
+# (research/ADR-matrix-architecture-2026-07-20.md).
+#
+# Shape: ONE mechanism on N substrates. Like snp-metal-cvm this installs ARC
+# inside the guest (k3s + gha-runner-scale-set, minRunners 0) so the runner
+# pod lands IN the TEE; unlike metal there is no CIDR collision and no console,
+# so bootstrap is cloud-init + az vm run-command instead of the serial driver.
+# GitHub is the control plane: the in-guest listener polls over egress.
+#
+# In-guest attestation surface (why the overlay mounts /dev/tpmrm0, same as
+# the SNP azure-cvm overlay): Azure TDX CVMs attest via vTPM + IMDS. The HCL
+# report lives at TPM NV 0x01400001, and the TD quote comes from POSTing that
+# report to IMDS /acc/tdquote. attestation-rs az_tdx_live needs exactly
+# /dev/tpmrm0 + IMDS + tpm2-tools; /dev/tdx_guest is not part of the Azure
+# path.
+#
+# Cost: DC4es_v6 (4 vCPU / 16 GiB) runs ~= $0.36/hr standing. Unlike the metal
+# CVM (tmpfs rootfs, loses ARC on restart) this VM's disk PERSISTS: idle-cost
+# control is `az vm deallocate` (disk-only, ~$10/mo) and `az vm start` to wake
+# with ARC intact. Teardown: az group delete -n confidential-ci-azure-tdx.
+#
+# ONE-TIME, dispatch-only, idempotent: re-dispatch reconciles (VM create is
+# skipped if the VM exists; the secret + ARC install re-verify).
+#
+# SECRET REQUIRED: ARC_APP_PRIVATE_KEY = the PEM for GitHub App 4309649
+# (confidential-ci-runners; SAME app as azure-cvm/snp-metal-cvm, no new access).
+# Secret transport: the PEM goes to the guest via `az vm run-command` (VM
+# agent channel), NOT via cloud-init custom-data (customData persists in the
+# VM model) and NOT via a serial console (the metal lane's known gap). Run
+# Command payloads are transient but ARE visible in-flight to subscription
+# readers; acceptable dev-sandbox posture, same rotation story as the App.
+name: provision-azure-tdx-cvm
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'Azure region with GA TDX v6 CVMs (capability-verified: westeurope, westus, westus3; quota Standard DCEV6 Family 0/350 confirmed in westeurope)'
+        required: false
+        default: 'westeurope'
+      vm_size:
+        description: 'TDX CVM size (ConfidentialComputingType=TDX). DC4es_v6 = 4 vCPU/16GiB, double the proven DC2as_v5 SNP node; fits the documented in-guest compile constraints with headroom'
+        required: false
+        default: 'Standard_DC4es_v6'
+      max_runners:
+        description: 'max concurrent runner pods in the guest. Default 1: one 4-core/16Gi node; two concurrent rust compiles OOM the metal twin (runs 29854690919/29854809091), same budget applies'
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RG: confidential-ci-azure-tdx
+  VM: azure-tdx-runner-1
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: resource group
+        run: |
+          set -euo pipefail
+          az group create -n "$RG" -l "${{ inputs.region }}" \
+            --tags purpose=confidential-ci lane=azure-tdx-cvm -o none
+          echo "rg $RG ready in ${{ inputs.region }}"
+
+      - name: create TDX CVM (skipped if it exists)
+        run: |
+          set -euo pipefail
+          if az vm show -g "$RG" -n "$VM" -o none 2>/dev/null; then
+            echo "vm $VM already exists; skipping create (idempotent reconcile)"
+            exit 0
+          fi
+          # cloud-init: k3s (helm-controller included, same install path the
+          # metal guest uses via rke2) + the two ARC HelmChart manifests. The
+          # arc-app secret arrives separately via run-command; the listener
+          # crashloops harmlessly until it exists.
+          cat > cloud-init.yaml <<'EOF'
+          #cloud-config
+          package_update: true
+          write_files:
+            - path: /var/lib/rancher/k3s/server/manifests/arc-controller.yaml
+              permissions: '0644'
+              content: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: arc
+                  namespace: kube-system
+                spec:
+                  chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+                  version: "0.14.2"
+                  targetNamespace: arc-systems
+                  createNamespace: true
+            - path: /var/lib/rancher/k3s/server/manifests/arc-scaleset.yaml
+              permissions: '0644'
+              content: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: azure-tdx-cvm
+                  namespace: kube-system
+                spec:
+                  chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+                  version: "0.14.2"
+                  targetNamespace: arc-runners
+                  createNamespace: true
+                  valuesContent: |
+                    githubConfigUrl: https://github.com/confidential-dot-ai
+                    githubConfigSecret: arc-app
+                    runnerScaleSetName: azure-tdx-cvm
+                    minRunners: 0
+                    maxRunners: MAXR_PLACEHOLDER
+                    template:
+                      spec:
+                        containers:
+                          - name: runner
+                            image: ghcr.io/actions/actions-runner:latest
+                            command: ["/home/runner/run.sh"]
+                            env:
+                              - name: RUNNER_ALLOW_RUNASROOT
+                                value: "1"
+                            securityContext:
+                              privileged: true
+                              runAsUser: 0
+                            volumeMounts:
+                              - name: tpm
+                                mountPath: /dev/tpmrm0
+                        volumes:
+                          - name: tpm
+                            hostPath:
+                              path: /dev/tpmrm0
+          runcmd:
+            - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik" sh -
+          EOF
+          sed -i "s/MAXR_PLACEHOLDER/${{ inputs.max_runners }}/" cloud-init.yaml
+          # ConfidentialVM flags are EXPLICIT here (unlike AKS, where SKU
+          # implied them): security type, VMGuestStateOnly disk encryption,
+          # secure boot + vTPM on. Canonical publishes a dedicated CVM image
+          # line. NSG: no inbound at all; the public IP exists only because
+          # default outbound access is retired for new VMs and the guest needs
+          # egress (GitHub, ghcr, apt, IMDS is link-local anyway).
+          az vm create -g "$RG" -n "$VM" \
+            --image Canonical:ubuntu-24_04-lts:cvm:latest \
+            --size "${{ inputs.vm_size }}" \
+            --security-type ConfidentialVM \
+            --os-disk-security-encryption-type VMGuestStateOnly \
+            --enable-secure-boot true --enable-vtpm true \
+            --os-disk-size-gb 64 \
+            --admin-username confai --generate-ssh-keys \
+            --public-ip-sku Standard --nsg-rule NONE \
+            --custom-data cloud-init.yaml \
+            --tags purpose=confidential-ci lane=azure-tdx-cvm standing=true \
+            -o table
+
+      - name: deliver App secret (run-command, not cloud-init)
+        env:
+          APP_ID: '4309649'
+          APP_INSTALLATION_ID: '146850802'
+          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set"; exit 1; }
+          PEM_B64=$(printf '%s' "$ARC_APP_PRIVATE_KEY" | base64 -w0)
+          # wait for k3s to be up before creating the secret (cloud-init races us)
+          az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+            --scripts '
+              set -e
+              export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+              for i in $(seq 1 60); do [ -f "$KUBECONFIG" ] && /usr/local/bin/kubectl get node >/dev/null 2>&1 && break; sleep 10; done
+              /usr/local/bin/kubectl get node >/dev/null 2>&1 || { echo K3S_NOT_UP; exit 1; }
+              /usr/local/bin/kubectl create ns arc-runners 2>/dev/null || true
+              printf "%s" "'"$PEM_B64"'" | base64 -d > /tmp/arc.pem
+              /usr/local/bin/kubectl -n arc-runners delete secret arc-app 2>/dev/null || true
+              /usr/local/bin/kubectl -n arc-runners create secret generic arc-app \
+                --from-literal=github_app_id='"$APP_ID"' \
+                --from-literal=github_app_installation_id='"$APP_INSTALLATION_ID"' \
+                --from-file=github_app_private_key=/tmp/arc.pem
+              rm -f /tmp/arc.pem
+              echo SECRET_OK
+            ' --query 'value[0].message' -o tsv | tail -5
+        # note: run-command output can echo script text on failure; the PEM is
+        # base64 inside the script body, mirroring the metal lane's accepted
+        # exposure. Rotate App 4309649 if this posture is ever judged material.
+
+      - name: gate on the listener registering with GitHub
+        run: |
+          set -euo pipefail
+          # Same green gate as every other rail: the listener authenticates to
+          # GitHub and polls ("Getting next message") = scale set live at zero.
+          # The listener may crashloop until the secret lands; give it time.
+          for i in $(seq 1 30); do
+            OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+              --scripts '
+                export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+                P=$(/usr/local/bin/kubectl -n arc-systems get pod -l app.kubernetes.io/component=runner-scale-set-listener -o name 2>/dev/null | head -1)
+                [ -n "$P" ] && /usr/local/bin/kubectl -n arc-systems logs "$P" --tail 5 2>/dev/null | grep -q "Getting next message" && echo LISTENER_OK && exit 0
+                /usr/local/bin/kubectl -n arc-systems get pods 2>/dev/null | tail -3
+                /usr/local/bin/kubectl -n kube-system get pods 2>/dev/null | grep helm-install | tail -2
+                echo WAITING
+              ' --query 'value[0].message' -o tsv 2>/dev/null || echo RUNCMD_RETRY)
+            echo "== poll $i =="; printf '%s\n' "$OUT" | tail -6
+            printf '%s' "$OUT" | grep -q LISTENER_OK && { echo "scale set azure-tdx-cvm registered; runs-on: azure-tdx-cvm is live (scaled to zero)"; exit 0; }
+            sleep 30
+          done
+          echo "::error::listener never reached 'Getting next message' — check helm-install-azure-tdx-cvm job logs in the guest"
+          exit 1
+
+      - name: next steps
+        if: success()
+        run: |
+          echo "verify:   dispatch where-am-i.yml with runner=azure-tdx-cvm (expect /dev/tpmrm0 openable, IMDS securityType=ConfidentialVM)"
+          echo "consume:  uncomment the azure-tdx cell in attestation-rs confidential-e2e.yml (expect 14 executed az_tdx_live tests, not skips)"
+          echo "          add azure-tdx-cvm to kettle e2e.yml tee matrix (one token)"
+          echo "idle:     az vm deallocate -g $RG -n $VM   (disk-only cost; az vm start to wake, ARC persists)"
