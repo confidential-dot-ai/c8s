@@ -228,19 +228,31 @@ jobs:
           sleep 15
           IMGS=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{range .items[0].spec.initContainers[*]}{.image}{"\n"}{end}{range .items[0].spec.containers[*]}{.image}{"\n"}{end}' | sort -u | grep -v '^$')
           echo "injected pod image set:"; echo "$IMGS"
+          # allowlist writes go to CDS over its RA-TLS endpoint with the operator
+          # key. --attestation-api-url is NOT a flag on `allowlist add` (only on
+          # `c8s cds`): c8s moved that verification in-process and dropped the
+          # flag, so cobra now rejects the whole command. Don't mask the exit
+          # either. A swallowed add otherwise surfaces as an opaque workload
+          # timeout 300s downstream. Count the adds and fail on zero.
           kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
-          PF1=$!
-          kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 &
-          PF2=$!; sleep 4
-          AL="--url https://127.0.0.1:8443 --attestation-api-url http://127.0.0.1:8400"
+          PF1=$!; sleep 4
+          AL="--url https://127.0.0.1:8443 --operator-key operator.key"
+          ADDED=0
           while IFS= read -r img; do
+            [ -n "$img" ] || continue
             for d in "$(crane digest "$img" 2>/dev/null)" "$(crane digest --platform linux/amd64 "$img" 2>/dev/null)"; do
               [ -n "$d" ] || continue
-              c8s allowlist add "$d" "$img" $AL --operator-key operator.key 2>&1 | grep -vE '^warning' || true
+              if c8s allowlist add "$d" "$img" $AL; then
+                ADDED=$((ADDED+1))
+              else
+                echo "::error::allowlist add failed for $img ($d)"
+              fi
             done
           done <<< "$IMGS"
           c8s allowlist list $AL | tee allowlist.txt | tail -12
-          kill $PF1 $PF2 2>/dev/null || true
+          kill $PF1 2>/dev/null || true
+          [ "$ADDED" -gt 0 ] || { echo "::error::no allowlist entries added (operator key / CDS write path)"; exit 1; }
+          echo "allowlist entries added: $ADDED"
           kubectl -n default wait --for=condition=Available deploy/demo-nginx --timeout=300s
           IC=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}')
           echo "init containers: $IC"
