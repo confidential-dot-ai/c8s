@@ -162,7 +162,11 @@ jobs:
 
       - name: poll the driver for @@E2E_PASS@@ / @@E2E_FAIL@@
         run: |
-          set -uo pipefail
+          # NO errexit: GitHub runs `bash -e`, and the STAGE=$(... | grep ...)
+          # below returns 1 whenever the driver log has no marker yet (every
+          # early iteration) — under -e that kills the poll on iteration 1. The
+          # loop handles absence via its own if-greps; it must not die on it.
+          set +e
           START=$(date -u +%s)
           # ~45 poll iters; each is sleep 40 + a synchronous run-command
           # round-trip (~30s), so real wall-clock is ~50min — reported as true
@@ -170,7 +174,7 @@ jobs:
           for i in $(seq 1 45); do
             LOG=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --scripts 'tail -40 /tmp/azure-tdx-e2e.log 2>/dev/null' --query 'value[0].message' -o tsv 2>/dev/null || echo retry)
-            STAGE=$(printf '%s\n' "$LOG" | grep -oE '@@(STAGE_[A-Z_]+|REF_SHA[^@]*|BUILD_OK|ALL_READY|CDS_ATTESTS_TDX|ATTEST_PROBE_OK|CONSUMPTION_OK|NEGATIVE_OK|E2E_PASS|E2E_FAIL[^@]*)@@' | tail -1)
+            STAGE=$(printf '%s\n' "$LOG" | grep -oE '@@(STAGE_[A-Z_]+|REF_SHA[^@]*|BUILD_OK|ALL_READY|CDS_ATTESTS_TDX|ATTEST_PROBE_OK|CONSUMPTION_OK|NEGATIVE_OK|E2E_PASS|E2E_FAIL[^@]*)@@' | tail -1 || true)
             echo "[$(( $(date -u +%s) - START ))s] ${STAGE:-...}"
             if printf '%s\n' "$LOG" | grep -q '@@E2E_PASS@@'; then
               echo "### c8s on Azure TDX: PASS" >> "$GITHUB_STEP_SUMMARY"
