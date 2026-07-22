@@ -3,10 +3,9 @@
 > **Release:** v0.1.0 · **Milestone:** operator-consolidation · **Last updated:** 2026-07-10 (v0.1.0).
 > **Living document** — update it whenever a gate, default, or gap changes; a
 > stale threat model is worse than none. Companion docs, treated as the same
-> source of truth: `docs/GAPS.md` (the deferred-work register, issue-linked),
-> `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper §3 (adversary /
-> asset model this section is lifted from), and the c8s-docs `architecture/
-> threat-model.mdx` (public framing).
+> source of truth: `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper
+> §3 (adversary / asset model this section is lifted from), and the c8s-docs
+> `architecture/threat-model.mdx` (public framing).
 >
 > **How this is organised** — following the seven questions every threat model
 > should answer: what we protect (§1 Assets), who from (§2 Adversaries), how the
@@ -127,8 +126,7 @@ these away.
 Status vocabulary: **Prevented** (attacker cannot, by construction) · **Mitigated**
 (reduced, residual noted) · **Addressable** (a real threat *now*, with a committed
 or designed fix — "threat today, not tomorrow") · **Open** (real now, no committed
-fix) · **Accepted** (deliberate non-goal, §7). Deferred items link `docs/GAPS.md`
-rather than restating it.
+fix) · **Accepted** (deliberate non-goal, §7).
 
 ### Prevented / Mitigated
 
@@ -146,7 +144,8 @@ rather than restating it.
 
 | Threat | Adversary | Planned fix | Reference |
 |---|---|---|---|
-| CDS's host-supplied startup inputs are not in its attestation — a control-plane swap-restart pins attacker-chosen values on any of them: (a) the **operator-keys** ConfigMap (`cds.operatorKeys`); (b) the **allowlist-seed** ConfigMap (`--allowlist-seed`; `internal/cmds/cds/seed.go` additively inserts every digest into the store before the server serves, no operator write-token, no signature); (c) the **CDS pod arguments** themselves (which select the seed path, the op-keys file, `--measurements`, and every other flag). Revocation of op-keys is coarse (no CRL/OCSP). | control plane / host | Commit the operator-key list, the allowlist seed, and the load-bearing CDS startup arguments to attested init data (HOST_DATA/initdata) **in one commit** — closing only one input leaves the swap-restart attack alive on the others. Move op-keys to a CA + short-lived operator certs (`x5c`), CA-based revocation. Interim: `c8s cds verify` surfaces pinned-key fingerprints over the attested serving cert. | pitfalls "Operator key-pinning"; GAPS §Trust model; decision 2026-07-01; `internal/cmds/cds/seed.go` |
+| A control-plane **config swap-restart** on CDS is detected only by pin-holding verifiers, never prevented at boot. The operator-key list and allowlist seed are attested: CDS binds their canonical digests into its serving-cert evidence (config-claims, `docs/ratls.md`), verifiers pin them (`c8s cds verify --operator-keys/--allowlist-seed`, `ratls.VerifyPolicy`), and `/handoff` releases the mesh CA only on byte-equal claims. Residual: the **CDS pod arguments** stay host-supplied — dropping `--operator-keys` downgrades to the attested empty key set — and enforcers/in-cluster clients pin nothing (their config is host-supplied too), so between a swap-restart and the next pinned verify the cluster serves and enforces the attacker's allowlist. Revocation of op-keys is coarse (no CRL/OCSP). | control plane / host | Run pinned verifies continuously (CI gate on `c8s verify` exit codes), not only at bootstrap; expose public ingress only behind a passing verify. Move op-keys to a CA + short-lived operator certs (`x5c`), CA-based revocation. Detection by pinning verifiers — not boot-time prevention — is the accepted posture. | `docs/ratls.md` (Config-claims); pitfalls "Operator key-pinning"; decision 2026-07-01 |
+| The **workload-image pin** (`c8s verify --workload-image`) distinguishes honest workloads only. A CDS-issued leaf commits the pod's container-image digest (config-claims), but CDS binds the claim to nothing the pod actually runs: it checks only that the forwarded list hashes to the evidence-bound digest and that every image is allowlisted. Any admitted workload can run the attest flow itself (the attestation-api binds caller-chosen REPORTDATA) and assert **any allowlisted image set** — a victim workload's included — satisfying a pin against that victim. It can never assert a *non-allowlisted* image, and image integrity is untouched (everything running is still independently allowlisted). So the pin detects an honest workload drifting or a config swap, not a lying workload asserting another's identity. | admitted (allowlisted) workload | Per-workload measurement enforced at `/attest` (bind the claim to the pod's admitted/measured images). Interim: treat the pin as honest-workload detection, not identity. | `docs/getcert-workload-binding.md` (Corner 5/6); `docs/ratls.md` (Config-claims) |
 | Bootstrap allowlist is baked from whatever the floating `:main` tag resolved to at guest-build time; an unpinned `:main`-everywhere deploy can bake a seed that rejects the deployed CDS. | CI / whoever moves `:main` | Atomic floating-tag promotion (roll `:main`/`:latest` only after Docker **and** kata-guest-base succeed for one commit); `oras pull @digest` for `kata.guestImage`. Runtime mitigation: policy-monitor grow-only CDS refresh. | pitfalls "bootstrap allowlist … floating :main" |
 | In-guest CDS allowlist refresh is **disabled on every default kata install**: policy-monitor fail-closed refuses to run without `C8S_CDS_MEASUREMENTS`, and no shipping path can deliver the pin — baking it is self-referential (CDS runs from the same guest image the pin would be baked into, so the value would change the launch measurement it pins) and per-pod cloud-init is host-controlled (a host-chosen pin defeats the point). Guests therefore enforce the baked seed alone; operator `c8s allowlist add` reaches host-side enforcement and CDS but **not running guests**. Also: the SNP launch digest covers the VMSA set, so even a correct pin is per-VM-shape (vCPU count). Stricter than ratls-mesh (which warns and proceeds on an empty pin) by intent — for the refresh, "any attested TEE" is not enough because the host can boot its own CVM from the same guest image and pass "attested" while serving an attacker-chosen allowlist, and grow-only merging is no defence when additions are the attack. | host / operator drift | Operator-signed allowlist entries verified in-guest against a baked operator public key (candidate design). Interim: the deliberate fail-closed posture — guests enforce the measured seed and nothing else. | kata-image-policy.md; GAPS §Trust model |
 | GPU guest boots **kata's** GPU kernel with NVIDIA modules grafted from kata's rootfs — kernel/driver provenance is the kata release, not the c8s build. | supply chain | A confos GPU kernel flavor (`CONFIG_MODULES=y` + `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build key) compiling/signing the NVIDIA modules. Interim: module loading locked after bring-up (`kernel.modules_disabled=1`). | pitfalls; GAPS §Confidential GPU |
@@ -255,13 +254,12 @@ If any of these is false, the corresponding guarantee does not hold.
 
 ## 7. Non-goals
 
-### Deferred this milestone (tracked, expected to close — see `docs/GAPS.md`)
+### Deferred this milestone (expected to close)
 
 - Pod-spec integrity beyond image digest; per-workload peer allowlists and measurement
   pinning in the mesh; attestation-gated application secret release (the whitepaper's
   Secrets Manager Proxy / wrapped-vs-direct key brokering); active/active CDS HA;
-  multi-tenant isolation and federated multi-cluster control planes. Each has a
-  tracking issue in GAPS.md — this list is intentionally a pointer, not a copy.
+  multi-tenant isolation and federated multi-cluster control planes.
 
 ### Accepted / permanent non-goals (whitepaper §3.4, §9)
 
@@ -320,13 +318,19 @@ binary:
   its TTL. Anyone holding a pinned operator key can rewrite the image-integrity
   control. Keys are long-lived and CDS consults no CRL/OCSP, so revoking an
   operator means removing its public key from `cds.operatorKeys` and
-  re-installing; protect operator keys accordingly. The pinned-key list is
-  host-supplied config. Handoff EARs commit its canonical set hash into
-  REPORTDATA, but the general CDS serving attestation still does not commit the
-  list, seed, or startup flags — an interim tradeoff, see `docs/pitfalls.md`
-  (§5 Addressable).
-  With `cds.operatorKeys` unset, writes are rejected and only reads are served.
-  See `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
+  re-installing; protect operator keys accordingly. The loaded key set and the
+  applied allowlist seed are attested: their canonical digests ride the
+  config-claims extension bound into CDS's serving-cert evidence
+  (`docs/ratls.md`), and verifiers pin them (`c8s cds verify
+  --operator-keys/--allowlist-seed`, pinned from the operator's own install
+  inputs). The `/handoff` path additionally commits the operator-key-set hash
+  into requester and issuer REPORTDATA and requires an exact match, so a replica
+  cannot inherit the mesh CA under a substituted operator policy. The remaining
+  CDS startup flags are still un-attested — an interim tradeoff, see
+  `docs/pitfalls.md` (§5 Addressable). The protection is detection by
+  pin-holding verifiers, not boot-time enforcement. With `cds.operatorKeys`
+  unset, writes are rejected and only reads are served (the empty set is itself
+  attested).
 
 ### Endpoint surface (beyond the gates in §4)
 

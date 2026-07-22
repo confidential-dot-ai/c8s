@@ -16,11 +16,12 @@ import (
 
 // config represents the plugin configuration.
 type config struct {
-	Plugin     pluginConfig     `yaml:"plugin"`
-	Allowlist  allowlistConfig  `yaml:"allowlist"`
-	Containerd containerdConfig `yaml:"containerd"`
-	Policy     policyConfig     `yaml:"policy"`
-	Logging    loggingConfig    `yaml:"logging"`
+	Plugin         pluginConfig         `yaml:"plugin"`
+	Allowlist      allowlistConfig      `yaml:"allowlist"`
+	Containerd     containerdConfig     `yaml:"containerd"`
+	Policy         policyConfig         `yaml:"policy"`
+	Logging        loggingConfig        `yaml:"logging"`
+	WorkloadClaims workloadClaimsConfig `yaml:"workload_claims"`
 }
 
 // pluginConfig contains plugin runtime settings.
@@ -29,6 +30,19 @@ type pluginConfig struct {
 	// server. `host:port` selects TCP; `unix:///path/to.sock` selects a
 	// Unix socket.
 	HealthAddr string `yaml:"health_addr"`
+}
+
+// workloadClaimsConfig configures the node-CVM workload-claims broker
+// (docs/ratls.md).
+type workloadClaimsConfig struct {
+	// SocketDir is the host directory the broker creates its socket in (as the
+	// compiled workloadclaims.SocketName); the webhook mounts it into c8s-cert
+	// sidecars so get-cert can fetch its pod's digests. The filename is fixed
+	// so get-cert can bake the dial path — see workloadclaims.BrokerEndpoint.
+	SocketDir string `yaml:"socket_dir"`
+	// ProcRoot is the /proc mount used to resolve a caller PID to its
+	// container cgroup. Defaults to "/proc".
+	ProcRoot string `yaml:"proc_root"`
 }
 
 // allowlistConfig groups the digest-source mechanisms.
@@ -188,6 +202,11 @@ func (c *config) Validate() error {
 	}
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
+	}
+	// Both broker record sites sit under AllowlistEnabled, so without one the
+	// broker answers every get-cert fetch empty-handed, forever.
+	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the broker only records digest-checked containers")
 	}
 	return validateLabelRules(c.Policy.LabelRules)
 }

@@ -604,7 +604,7 @@ the preStop-hook cleanup, but none of the sweep guarantees above.
 - A confos GPU kernel flavor for the `<tag>-nvidia` guest: compile and sign
   the NVIDIA open GPU kernel modules against a c8s-built kernel, replacing
   the modules/kernel grafted from kata's GPU rootfs — see
-  [`docs/kata-gpu.md`](kata-gpu.md) "Threat-model gaps" and `docs/GAPS.md`.
+  [`docs/kata-gpu.md`](kata-gpu.md) "Threat-model gaps".
 - A persistent TEE-capability reconciler. The install labels kata nodes once,
   at install time, from the declared `--hardware-platform`; a long-lived
   controller that labels nodes added after install (and verifies the declared

@@ -14,14 +14,11 @@
 // FUTURE IMPROVEMENT — a CA + operator certificates (chain carried in the JWT
 // x5c header), giving delegated issuance and CA-based revocation instead of
 // editing a pinned-key list, plus single-file (cert+key) operator credentials.
-// See docs/decisions/2026-07-01-operator-cert-allowlist-write.md and
-// docs/GAPS.md.
 //
 // Either way this is the sole authorization path for allowlist writes.
 package operatorauth
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -32,7 +29,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -73,43 +69,21 @@ var validMethods = []string{
 	jwt.SigningMethodES512.Alg(),
 }
 
-const keySetHashDomain = "c8s-operator-key-set-v1\x00"
-
-// KeySetHash returns a canonical SHA-256 commitment to a non-empty operator
-// public-key set. Each key is first reduced to its SPKI fingerprint, then the
-// fixed-size fingerprints are sorted before hashing, so PEM formatting and key
-// order do not change the result. Handoff attestation uses this value to prove
-// that both CDS replicas started with the same allowlist-write policy.
+// KeySetHash returns the lowercase-hex form of KeySetDigest for a non-empty
+// operator public-key set — the string commitment CDS binds into a
+// handoff/attest-key EAR's REPORTDATA (operator_keys_hash claim) to prove both
+// replicas started with the same allowlist-write policy. Empty sets are
+// rejected here (config-claims uses KeySetDigest directly, where the empty set
+// is a defined value).
 func KeySetHash(keys []*ecdsa.PublicKey) (string, error) {
 	if len(keys) == 0 {
 		return "", fmt.Errorf("operator key set is empty")
 	}
-
-	fingerprints := make([][]byte, 0, len(keys))
-	for i, key := range keys {
-		if key == nil {
-			return "", fmt.Errorf("operator key %d is nil", i)
-		}
-		der, err := x509.MarshalPKIXPublicKey(key)
-		if err != nil {
-			return "", fmt.Errorf("marshal operator key %d: %w", i, err)
-		}
-		sum := sha256.Sum256(der)
-		fingerprints = append(fingerprints, append([]byte(nil), sum[:]...))
+	digest, err := KeySetDigest(keys)
+	if err != nil {
+		return "", err
 	}
-	sort.Slice(fingerprints, func(i, j int) bool {
-		return bytes.Compare(fingerprints[i], fingerprints[j]) < 0
-	})
-
-	h := sha256.New()
-	_, _ = h.Write([]byte(keySetHashDomain))
-	for i, fingerprint := range fingerprints {
-		if i > 0 && bytes.Equal(fingerprint, fingerprints[i-1]) {
-			continue
-		}
-		_, _ = h.Write(fingerprint)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(digest), nil
 }
 
 // ValidateKeySetHash accepts only the canonical lowercase hex encoding

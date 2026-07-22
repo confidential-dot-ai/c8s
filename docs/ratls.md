@@ -14,9 +14,9 @@ guarantee, how it operates under the two confidential shapes (node-as-CVM and
 pod-as-CVM), and which certificate is used where.
 
 Companion docs: [THREAT_MODEL.md](THREAT_MODEL.md) (adversaries, gates,
-residual risk), [GAPS.md](GAPS.md) (known limitations),
-[`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh dataplane),
-[install-flows.md](install-flows.md) (which components deploy in which mode).
+residual risk), [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh
+dataplane), [install-flows.md](install-flows.md) (which components deploy in
+which mode).
 The implementation is [`pkg/ratls`](../pkg/ratls/), with the CDS client flow in
 [`pkg/attestclient`](../pkg/attestclient/) and
 [`pkg/ratls/cdsclient`](../pkg/ratls/cdsclient/).
@@ -73,9 +73,14 @@ can sign a report, and only code inside the TEE ever holds the private key.
    zero-padded to the 64-byte REPORTDATA field (same layout on SEV-SNP and
    TDX). The nonce is optional on mesh handshakes (TLS 1.3 already prevents
    replay of the *session*) and mandatory in the CDS issuance flow (it proves
-   report freshness). Flows that bind extra protocol context (e.g. the CDS
-   handoff's operator-key commitment) use a domain-separated, length-framed
-   variant, `ReportDataForKeyWithContext`.
+   report freshness). Flows that bind extra context fold it into REPORTDATA
+   under a domain separator so the report vouches for that context too, via a
+   domain-separated, length-framed transcript: the CDS handoff's operator-key
+   commitment (`ReportDataForKeyWithContext`) and a cert's **config-claims**
+   (operator-key set, allowlist seed, and the workload's **container-image
+   digest**; see the Config-claims section) both use
+   `ReportDataForKeyAndClaims`-style framing so no two distinct field triples can
+   share a preimage.
 3. **Evidence.** The component asks its **local attestation-api** (`POST
    /attest`, the Rust service from
    [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs))
@@ -257,8 +262,8 @@ coexist for the transition window, updated at runtime from `/ca` polling
 The trade to know about: a CA-chain-verified peer proved its measurement **at
 issuance time**, not at handshake time, and today's leaf certificates do not
 embed the verified measurement — post-bootstrap mesh peers are "chains to the
-mesh CA", not "runs launch digest X" ([GAPS.md](GAPS.md), peer measurement
-pinning).
+mesh CA", not "runs launch digest X" (peer measurement pinning is not
+implemented).
 
 ## What RA-TLS guarantees — and what it does not
 
@@ -299,13 +304,86 @@ What it does **not** guarantee:
 - **Full TDX runtime measurement.** Policy pins MRTD; RTMR[0..3] are not yet
   pinned, and `MinTCBVersion` is dropped on the TDX path (GAPS).
 - **Workload-granular identity beyond the TEE boundary.** The unit of
-  attestation is the TEE: the whole node in node-as-CVM, one pod under
-  pod-as-CVM. See the next section.
+  hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
+  pod-as-CVM. Config-claims narrow this — a workload's cert commits its
+  container-image digest (see Config-claims), pinnable with
+  `c8s verify --workload-image` — but that binding rests on the in-TCB broker,
+  not on a fresh hardware measurement of the running container, and CDS does not
+  bind the claim to what the pod runs. So the pin distinguishes **honest
+  workloads only**: any admitted workload can assert any *allowlisted* image set
+  (it can never assert a non-allowlisted one). Enforcing per-workload
+  measurement at `/attest` is unimplemented (GAPS §Trust model).
 - **Post-boot integrity.** The launch digest covers boot state; runtime
   compromise inside a measured guest is out of scope (that is the image
   allowlist and guest lockdown's job — [kata-image-policy.md](kata-image-policy.md)).
 - **Availability.** A hostile host can always refuse service; RA-TLS turns
   host compromise into DoS, not data exposure.
+
+## Config-claims: attesting configuration and workload identity
+
+The attestation so far binds the *key* and the *launch measurement* — the image
+that booted. It says nothing about **host-supplied configuration** (which
+operator keys, which allowlist seed) or **which workload** stands behind a mesh
+key when the TEE holds more than one. Config-claims close that gap: a second,
+optional X.509 extension carrying a small set of digests the attesting
+component vouches for, folded into the *same* hardware evidence as the key.
+
+```text
+OID 1.3.6.1.4.1.59888.1.3  (RA-TLS config-claims extension)
+C8SConfigClaims ::= SEQUENCE {
+    version             INTEGER,
+    operatorKeysDigest  OCTET STRING (32),  -- unset = 32 zero bytes
+    seedDigest          OCTET STRING (32),
+    workloadDigest      OCTET STRING (32)
+}
+```
+
+**Binding.** The claims DER is folded into REPORTDATA as a domain-separated,
+length-framed transcript —
+`SHA-384("c8s/config-claims/v1\0" ‖ framed(pubkey) ‖ framed(claimsDER) ‖ framed(nonce))`,
+where `framed(x) = uint64-BE(len(x)) ‖ x` (`ReportDataForKeyAndClaims`) — so the
+hardware report vouches for the digests, not just the key. The framing makes the
+preimage unambiguous: no two distinct `(key, claims, nonce)` triples collide,
+regardless of field lengths, so the binding does not rest on any field being
+fixed-length or on the nonce's provenance. A certificate with no claims skips the
+transcript and is byte-identical to a plain RA-TLS cert
+(`SHA-384(pubkey ‖ nonce)`). A verifier that pins the expected digests turns a
+config or
+workload swap into a fail-closed error, the same way pinning a launch
+measurement turns an image swap into one. This is **detection by pin-holding
+verifiers**, not boot-time prevention.
+
+**What commits what:**
+
+- **CDS's serving cert** commits its loaded **operator-key set** and applied
+  **allowlist seed** (workload digest unset). The empty key set has its own
+  defined digest, so "writes disabled" is itself attestable. Verifiers pin with
+  `c8s cds verify --operator-keys/--allowlist-seed`, which also cross-checks the
+  served `/operator-keys` list against the attested digest. (The `/handoff`
+  path commits the operator-key set separately, as a REPORTDATA-bound hash — see
+  the CDS regime section above.)
+- **A workload's mesh cert** commits its **container-image digest**: a
+  role-partitioned hash over the pod's admitted init and main image digests
+  (operator/seed unset). Verifiers pin with
+  `c8s verify --workload-init-image/--workload-image`.
+
+**How the container digest is obtained and why it can be trusted is its own
+story** — get-cert fetches the pod's admitted images from a node-local broker
+that binds the caller by kernel credentials, and CDS gates issuance on every
+image being allowlisted. That flow, its corners, and its residual trust
+assumptions are in
+**[getcert-workload-binding.md](getcert-workload-binding.md)**. Wire format and
+verification rules live in `pkg/ratls` (`claims.go`, `extension.go`,
+`verify.go`).
+
+**Cross-implementation note.** Any non-Go verifier (e.g. `c8s-verify-js`) must
+reproduce these byte formats exactly to pin a config-claim: the SHA-384
+REPORTDATA fold above, and the canonical digests it commits — the operator
+key-set digest (`pkg/operatorauth` `KeySetDigest`), the seed digest
+(`pkg/allowlist` `CanonicalDigest`, which is Go `json.Marshal` output, HTML
+escaping included), and the role-partitioned workload digest
+(`pkg/workloadclaims` `Digest`). A one-byte divergence in any of them fails the
+pin. Keep the two implementations tested against shared vectors.
 
 ## Operation under the two confidential shapes
 
@@ -430,4 +508,7 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
    challenge–attest–certify flow.
 4. [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) — the dataplane
    that puts it on every connection.
-5. [THREAT_MODEL.md](THREAT_MODEL.md) — what all of this is for.
+5. [getcert-workload-binding.md](getcert-workload-binding.md) — how a workload's
+   container-image digest is fetched, bound into its cert's config-claims, and
+   enforced.
+6. [THREAT_MODEL.md](THREAT_MODEL.md) — what all of this is for.

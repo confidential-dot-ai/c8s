@@ -248,8 +248,9 @@ the host-side enforcer but not running guests. Baking the pin is
 structurally impossible (under kata, CDS runs from this same guest
 image, so the pin's value would change the launch measurement it pins),
 and per-pod cloud-init injection is host-controlled, so a host-supplied
-pin could point at the host's own fake CDS. See GAPS.md ("in-guest CDS
-allowlist refresh") for the status and the candidate fix.
+pin could point at the host's own fake CDS. The candidate fix is
+operator-signed allowlist entries, verified in-guest against a baked
+operator public key.
 
 ## Scenarios
 

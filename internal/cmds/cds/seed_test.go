@@ -1,6 +1,7 @@
 package cds
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,7 +41,7 @@ func TestSeedStore_AddsAllEntries(t *testing.T) {
 	defer store.Close()
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1","`+digestB+`":"ghcr.io/x/as:v1"}}`)
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
@@ -67,7 +68,7 @@ func TestSeedStore_IdempotentDoesNotBumpVersion(t *testing.T) {
 	defer store.Close()
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
 	v1, _, err := store.ListAll()
@@ -75,7 +76,7 @@ func TestSeedStore_IdempotentDoesNotBumpVersion(t *testing.T) {
 		t.Fatalf("ListAll: %v", err)
 	}
 
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
 	v2, _, err := store.ListAll()
@@ -101,7 +102,7 @@ func TestSeedStore_PreservesExistingEntries(t *testing.T) {
 	}
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
-	if err := seedStore(&store, path); err != nil {
+	if _, err := seedStore(&store, path); err != nil {
 		t.Fatalf("seedStore: %v", err)
 	}
 
@@ -126,8 +127,43 @@ func TestSeedStore_FailsClosedOnBadDigest(t *testing.T) {
 
 	// "sha256:bad" fails ParseJSON's digest validation.
 	path := writeSeed(t, `{"version":"1","digests":{"sha256:bad":"ghcr.io/x/cds:v1"}}`)
-	if err := seedStore(&store, path); err == nil {
+	if _, err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore accepted a malformed digest; want fail-closed error")
+	}
+}
+
+// The returned digest feeds the serving cert's config-claims; it must be a
+// function of seed content only, so a verifier holding an equivalent copy of
+// the seed (any formatting) reproduces it.
+func TestSeedStore_ReturnsCanonicalDigest(t *testing.T) {
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	compact := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	d1, err := seedStore(&store, compact)
+	if err != nil {
+		t.Fatalf("seedStore: %v", err)
+	}
+
+	pretty := writeSeed(t, "{\n  \"digests\": {\n    \""+digestA+"\": \"ghcr.io/x/cds:v1\"\n  },\n  \"version\": \"1\"\n}")
+	d2, err := seedStore(&store, pretty)
+	if err != nil {
+		t.Fatalf("seedStore: %v", err)
+	}
+	if !bytes.Equal(d1, d2) {
+		t.Fatalf("seed digest depends on formatting: %x != %x", d1, d2)
+	}
+
+	other := writeSeed(t, `{"version":"1","digests":{"`+digestB+`":"ghcr.io/x/as:v1"}}`)
+	d3, err := seedStore(&store, other)
+	if err != nil {
+		t.Fatalf("seedStore: %v", err)
+	}
+	if bytes.Equal(d1, d3) {
+		t.Fatal("different seed content produced the same digest")
 	}
 }
 
@@ -138,7 +174,7 @@ func TestSeedStore_FailsClosedOnMissingFile(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := seedStore(&store, filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
+	if _, err := seedStore(&store, filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
 		t.Fatal("seedStore accepted a missing seed file; want fail-closed error")
 	}
 }

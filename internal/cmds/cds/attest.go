@@ -1,8 +1,11 @@
 package cds
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha512"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,6 +22,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // AttestHandler serves POST /attest by verifying TEE evidence and signing the
@@ -52,6 +56,18 @@ type AttestHandler struct {
 	// RemoteAddr at handler time. When false, Policy.SourceIP stays empty and
 	// ValidateCSR rejects any CSR carrying IP SANs.
 	SANValidation bool
+
+	// AllowlistStore, when set, is consulted to gate workload-digest claims:
+	// every container digest a requester commits to must be allowlisted
+	// (docs/ratls.md). nil disables workload-claims verification —
+	// a request carrying claims is then rejected, since they cannot be checked.
+	AllowlistStore workloadDigestChecker
+}
+
+// workloadDigestChecker reports whether an image digest is currently
+// allowlisted. Satisfied by *internal/allowlist.Store.
+type workloadDigestChecker interface {
+	Contains(digest types.Digest) (bool, error)
 }
 
 func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +106,31 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
 		return
 	}
-	expectedReportData, err := ratls.ReportDataForKey(csrPubKey, challengeBytes)
+	// Workload claims (docs/ratls.md): the requester binds a
+	// config-claims extension into its evidence REPORTDATA and forwards both
+	// the DER and the container-digest list it commits to. Decode the DER
+	// first so the SAME bytes are folded into the expected REPORTDATA below —
+	// a tampered claim then fails the evidence check.
+	var claimsDER []byte
+	if req.WorkloadClaims != "" {
+		claimsDER, err = base64.StdEncoding.DecodeString(req.WorkloadClaims)
+		if err != nil {
+			attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid workload_claims encoding")
+			return
+		}
+		// A stamped workload claim is downstream-verifiable only if the leaf
+		// carries hardware evidence binding it. get-cert embeds a nonce-free
+		// RA-TLS attestation extension into the CSR for exactly this, and
+		// SignCSR copies it onto the leaf. Verify at issuance that the embedded
+		// evidence actually binds these claims — fail fast here instead of
+		// leaving a leaf that only fails at relying-party time (docs/ratls.md).
+		if err := verifyEmbeddedClaimsBinding(csr, csrPubKey, claimsDER); err != nil {
+			attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
+			return
+		}
+	}
+
+	expectedReportData, err := ratls.ReportDataForKeyAndClaims(csrPubKey, claimsDER, challengeBytes)
 	if err != nil {
 		attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
 		return
@@ -132,15 +172,27 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The evidence bound claimsDER (folded into expectedReportData above and
+	// confirmed by VerifyEnforced), so the claims are TEE-attested. Now verify
+	// the requester's init/main digest lists hash to the attested workload
+	// digest and that every listed image is allowlisted, then stamp the claims
+	// on the leaf so peers and `c8s verify` can read the attested workload.
+	if err := h.verifyWorkloadClaims(claimsDER, req.InitContainerDigests, req.ContainerDigests); err != nil {
+		slog.Warn("workload claims rejected", "error", err)
+		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
+		return
+	}
+
 	if ctx.Err() != nil {
 		attestation.WriteError(w, http.StatusGatewayTimeout, types.ErrorCodeTimeout, "request timeout")
 		return
 	}
 
 	certPEM, _, err := h.CA.SignCSR(issuer.SignCSRParams{
-		CSR:      csr,
-		TTL:      issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
-		Evidence: evidenceJSON,
+		CSR:             csr,
+		TTL:             issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
+		Evidence:        evidenceJSON,
+		ConfigClaimsExt: claimsDER,
 	})
 	if err != nil {
 		slog.Error("in-process sign failed", "error", err)
@@ -157,6 +209,74 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("certificate issued (in-process)", "cn", csr.Subject.CommonName)
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(slices.Concat(certPEM, caChainPEM))
+}
+
+// verifyEmbeddedClaimsBinding fails closed unless the CSR carries an RA-TLS
+// attestation extension whose evidence binds the config-claims (docs/ratls.md).
+// SignCSR copies that extension onto the leaf; if it is absent — or binds
+// different claims — the leaf's config-claims could never verify against the
+// evidence at a relying party. For SEV-SNP the REPORTDATA is compared locally
+// (no attestation-api call); envelope evidence (az-snp/TDX) has no in-process
+// parser, so it is accepted on presence and its binding is proven at
+// relying-party time.
+func verifyEmbeddedClaimsBinding(csr *x509.CertificateRequest, pub crypto.PublicKey, claimsDER []byte) error {
+	extValue := csrRATLSExtensionValue(csr)
+	if extValue == nil {
+		return fmt.Errorf("workload claims require an embedded RA-TLS attestation extension on the CSR")
+	}
+	att, err := ratls.UnmarshalExtension(extValue)
+	if err != nil {
+		return fmt.Errorf("embedded RA-TLS attestation does not parse: %w", err)
+	}
+	expected, err := ratls.ReportDataForKeyAndClaims(pub, claimsDER, nil)
+	if err != nil {
+		return err
+	}
+	if reportData, ok := att.ReportData(); ok && !bytes.Equal(reportData[:sha512.Size384], expected[:sha512.Size384]) {
+		return fmt.Errorf("embedded RA-TLS evidence does not bind the config-claims")
+	}
+	return nil
+}
+
+// csrRATLSExtensionValue returns the value of the CSR's RA-TLS attestation
+// extension (the one SignCSR copies onto the leaf), or nil when absent.
+func csrRATLSExtensionValue(csr *x509.CertificateRequest) []byte {
+	for _, ext := range csr.Extensions {
+		if ext.Id.Equal(ratls.OIDRATLSAttestation) {
+			return ext.Value
+		}
+	}
+	return nil
+}
+
+// verifyWorkloadClaims checks that the requester's container-digest list
+// matches the attested workload digest and that every listed image is
+// allowlisted (docs/ratls.md). claimsDER nil ⇒ nothing to verify.
+// It fails closed if claims are present but no allowlist store is wired.
+func (h AttestHandler) verifyWorkloadClaims(claimsDER []byte, initDigests, mainDigests []string) error {
+	if len(claimsDER) == 0 {
+		return nil
+	}
+	if h.AllowlistStore == nil {
+		return fmt.Errorf("workload claims presented but this CDS cannot verify them")
+	}
+	if _, err := workloadclaims.VerifyWorkloadDigest(claimsDER, initDigests, mainDigests); err != nil {
+		return err
+	}
+	for _, d := range append(append([]string{}, initDigests...), mainDigests...) {
+		digest, err := types.ParseDigest(d)
+		if err != nil {
+			return fmt.Errorf("container digest %q: %w", d, err)
+		}
+		allowed, err := h.AllowlistStore.Contains(digest)
+		if err != nil {
+			return fmt.Errorf("check allowlist: %w", err)
+		}
+		if !allowed {
+			return fmt.Errorf("container image %s is not allowlisted", digest)
+		}
+	}
+	return nil
 }
 
 func (h AttestHandler) caChainPEM() []byte {

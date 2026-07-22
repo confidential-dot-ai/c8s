@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // Pull-startup retry parameters. Declared as vars so tests can shrink
@@ -152,6 +154,13 @@ func Run(args []string) error {
 		pluginErrCh <- plugin.Run(ctx)
 	}()
 
+	if plugin.broker != nil {
+		socketPath := filepath.Join(cfg.WorkloadClaims.SocketDir, workloadclaims.SocketName)
+		if err := startWorkloadClaimsBroker(ctx, logger, plugin.broker, socketPath); err != nil {
+			return fmt.Errorf("start workload-claims broker: %w", err)
+		}
+	}
+
 	var initialETag string
 	if cfg.PullEnabled() {
 		initialETag, err = pullInitial(ctx, pullArgs{
@@ -196,7 +205,7 @@ func Run(args []string) error {
 		})
 	}
 
-	plugin.RunDeferredSweep(ctx)
+	plugin.RunDeferredCheck(ctx)
 
 	select {
 	case err := <-pluginErrCh:
@@ -425,6 +434,22 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			cfg.logger.Error("health server shutdown error", "error", err)
+		}
+	}()
+	return nil
+}
+
+// startWorkloadClaimsBroker serves the node-CVM workload-claims broker on a
+// Unix socket (docs/ratls.md).
+func startWorkloadClaimsBroker(ctx context.Context, logger *slog.Logger, broker *workloadBroker, socketPath string) error {
+	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.BrokerSocketGID)
+	if err != nil {
+		return err
+	}
+	go func() {
+		logger.Info("starting workload-claims broker", "socket", socketPath)
+		if err := workloadclaims.Serve(ctx, l, broker); err != nil {
+			logger.Error("workload-claims broker error", "error", err)
 		}
 	}()
 	return nil
