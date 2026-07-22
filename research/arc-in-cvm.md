@@ -38,6 +38,10 @@ container that LAUNCHES CVMs (proven not-a-TEE by where-am-i.yml);
    holds a CVM). Needs scale-to-zero CVMs or a pool sized honestly against the
    host.
 
+   See `metal-runner-scaling.md` for the concrete A/B/C on scaling the built
+   `snp-metal-cvm` rail — C (ephemeral per-job CVMs) is this doc's north star
+   reached from the scaling angle, and shares the agent-transport prerequisite.
+
 ## Cheapest credible path (when we pick this up)
 
 rke2-node flavor already boots a measured single-node k8s cluster as a CVM.
