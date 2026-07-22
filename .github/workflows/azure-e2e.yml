@@ -274,11 +274,34 @@ jobs:
           fi
           echo "NEGATIVE proof: non-allowlisted image did not reach Ready (phase=${PHASE:-none})" >> "$GITHUB_STEP_SUMMARY"
 
+      # Pod lists and events alone are not enough: a crashlooping container and a
+      # stuck init container both report as one opaque line, and the RG is torn
+      # down seconds later, so the reason is gone for good. Dump describe + the
+      # logs of every container (init containers included, plus --previous for
+      # anything that has restarted) for each c8s-system pod, so a failed run is
+      # diagnosable from the log alone without re-running the lane.
       - name: diagnostics (on failure)
         if: failure()
         run: |
-          kubectl get pods -A 2>/dev/null | head -40 || true
-          kubectl get events -n c8s-system --sort-by=.lastTimestamp 2>/dev/null | tail -20 || true
+          set +e
+          kubectl get pods -A -o wide | head -40
+          echo "===== events (c8s-system) ====="
+          kubectl get events -n c8s-system --sort-by=.lastTimestamp | tail -30
+          for p in $(kubectl -n c8s-system get pods -o name); do
+            echo "===== $p ====="
+            kubectl -n c8s-system describe "$p" | sed -n '/^Init Containers:/,$p' | head -60
+            for c in $(kubectl -n c8s-system get "$p" \
+              -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}'); do
+              echo "----- logs $p/$c"
+              kubectl -n c8s-system logs "$p" -c "$c" --tail=40 2>&1 | tail -40
+              prev=$(kubectl -n c8s-system logs "$p" -c "$c" --previous --tail=40 2>/dev/null)
+              [ -n "$prev" ] && { echo "----- logs $p/$c (PREVIOUS, pre-restart)"; echo "$prev"; }
+            done
+          done
+          echo "===== workload (default ns) ====="
+          kubectl -n default get pods -o wide
+          kubectl -n default describe pods -l app=demo-nginx | sed -n '/^Init Containers:/,$p' | head -60
+          exit 0
 
       - name: teardown (always — the whole RG, async)
         if: always()
