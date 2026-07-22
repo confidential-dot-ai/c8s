@@ -168,6 +168,9 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	// (e.g. 0640 -> 640).
 	if !installResolveDigests {
 		for _, c := range components {
+			if c.externalImage {
+				continue
+			}
 			setArgs = append(setArgs, "--set-string", c.valuePrefix+".tag="+imageTag)
 		}
 	}
@@ -186,6 +189,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	}
 	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug)
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
+	setArgs = appendKMSInstallArgs(setArgs, installKMS)
 	// --upstream derives a c8s-<id>.<ns>.svc.cluster.local address; the chart
 	// recognizes that headless-Service shape as mesh-wrapped and admits plaintext
 	// http. Empty means "not plumbed" so an operator's -f (or the chart's
@@ -345,6 +349,7 @@ func init() {
 	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod kata CVMs; disables host-side ratls-mesh/attestation-api/nri-image-policy) or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0)")
 	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "sev-snp", "CPU-level TEE hardware (orthogonal to --cvm-mode): sev-snp (default, /dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks")
 	renderValuesCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (requires --cvm-mode=pod)")
+	renderValuesCmd.Flags().BoolVar(&installKMS, "kms", false, "emit the dev-mode in-chart OpenBao values (kms.enabled=true, secretBroker.enabled=true); dev/demo only")
 	renderValuesCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "adopted workload as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Used here only to derive --upstream's address (render-values patches nothing)")
 	renderValuesCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives tlsLb.upstream.address c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>")
 	renderValuesCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each component image tag to its registry digest (via crane), pin it, and enable the NRI allowlist derivation")
