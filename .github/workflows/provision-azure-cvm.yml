@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # PROVISION the standing Model-A infra: a persistent confidential AKS cluster +
-# the `azure-cvm` ARC scale set. After this, `runs-on: azure-cvm` schedules a
+# the `azure-snp-cvm` ARC scale set. After this, `runs-on: azure-snp-cvm` schedules a
 # job onto a confidential node — the runner pod runs INSIDE the node-CVM (the
 # attestable-runner property; free on cloud, impossible on metal).
 #
@@ -105,7 +105,7 @@ jobs:
       # Secret BY REFERENCE (never in helm values). The scale set's runner pod
       # spec node-pins to the conf pool, tolerates its taint, mounts the vTPM,
       # and runs privileged so payloads can reach /dev/tpmrm0 and apt-install.
-      - name: register the azure-cvm scale set (runners land on confidential nodes)
+      - name: register the azure-snp-cvm scale set (runners land on confidential nodes)
         env:
           ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
         run: |
@@ -113,6 +113,10 @@ jobs:
           [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set — add it before first provision"; exit 1; }
           printf '%s' "$ARC_APP_PRIVATE_KEY" > /tmp/arc-app.pem
           # runner pod template: schedule onto conf pool, in the node-CVM, with vTPM.
+          # NOTE: the node taint/label key confidential.ai/azure-cvm predates the
+          # label rename (azure-cvm -> azure-snp-cvm) and is cluster-internal —
+          # nothing schedules on it by hand, so it keeps the old spelling rather
+          # than forcing nodepool surgery on a live cluster.
           cat > /tmp/azure-cvm-values.yaml <<'EOF'
           template:
             spec:
@@ -146,8 +150,8 @@ jobs:
           EOF
           APP_ID="$APP_ID" APP_INSTALLATION_ID="$APP_INSTALLATION_ID" \
             APP_PRIVATE_KEY_FILE=/tmp/arc-app.pem ORG_URL="$ORG_URL" \
-            SCALE_SET=azure-cvm MIN_RUNNERS=${{ inputs.node_min }} MAX_RUNNERS=2 \
+            SCALE_SET=azure-snp-cvm MIN_RUNNERS=${{ inputs.node_min }} MAX_RUNNERS=2 \
             VALUES_FILE=/tmp/azure-cvm-values.yaml \
             KUBECONFIG="$HOME/.kube/config" bash register.sh
           kubectl -n arc-runners get autoscalingrunnerset,pods 2>/dev/null || true
-          echo "azure-cvm scale set registered — dispatch where-am-i on runs-on: azure-cvm to confirm the runner is in the node-CVM"
+          echo "azure-snp-cvm scale set registered — dispatch where-am-i on runs-on: azure-snp-cvm to confirm the runner is in the node-CVM"

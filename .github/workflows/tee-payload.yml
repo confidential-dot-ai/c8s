@@ -13,13 +13,13 @@
 # echo "@@PAYLOAD_OK@@"; may emit @@markers@@). Only the launch ADAPTER varies:
 #   snp-metal | tdx-metal : the cvm-e2e primitive (KubeVirt CVM, console
 #                           delivery, $MEAS discovered via configfs-tsm)
-#   azure-cvm  (Model A)  : payload runs on a STANDING ARC runner that lives ON
+#   azure-snp-cvm (Model A): payload runs on a STANDING ARC runner that lives ON
 #                           a confidential AKS node — the node IS the CVM, so
 #                           the runner is IN the TEE (the attestable-runner
 #                           property; free on cloud, impossible on metal where
 #                           cvm-launcher is a host-side container). No per-run
 #                           provisioning -> cheapest per-merge. Needs the
-#                           azure-cvm scale set (provision-azure-cvm.yml, once).
+#                           azure-snp-cvm scale set (provision-azure-cvm.yml, once).
 #   azure-aks  (Model B)  : provision an EPHEMERAL AKS cluster per run, payload
 #                           runs in a privileged pod. Use when the CLUSTER is
 #                           the thing under test (c8s install, multi-node) or
@@ -34,7 +34,7 @@ on:
   workflow_call:
     inputs:
       platform:
-        description: 'cell: snp-metal | tdx-metal | azure-cvm (standing) | azure-aks (ephemeral)'
+        description: 'cell: snp-metal | tdx-metal | azure-snp-cvm (standing) | azure-aks (ephemeral)'
         type: string
         required: true
       payload_b64:
@@ -75,11 +75,11 @@ jobs:
 
   # ── AZURE Model A: ARC runner ON a standing confidential node = runner-in-TEE.
   #    Payload runs as ordinary steps; no per-run provisioning. Queues until the
-  #    azure-cvm scale set exists. The scale-set runner pod must expose the vTPM
+  #    azure-snp-cvm scale set exists. The scale-set runner pod must expose the vTPM
   #    (/dev/tpmrm0) and run privileged/root — set in provision-azure-cvm.yml.
   azure_cvm:
-    if: inputs.platform == 'azure-cvm'
-    runs-on: azure-cvm
+    if: inputs.platform == 'azure-snp-cvm'
+    runs-on: azure-snp-cvm
     timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
       - name: run payload (this runner already lives in the node-CVM)
@@ -92,7 +92,7 @@ jobs:
           bash /tmp/p.sh 2>&1 | tee /tmp/p.out
           say DRIVE_END
           grep -q '@@PAYLOAD_OK@@' /tmp/p.out || { echo "::error::payload did not report PAYLOAD_OK"; exit 1; }
-          echo "✅ azure-cvm: payload ran to PAYLOAD_OK on an in-TEE ARC runner"
+          echo "✅ azure-snp-cvm: payload ran to PAYLOAD_OK on an in-TEE ARC runner"
 
   # The GCP-era failure mode was a job QUEUED FOREVER while everything looked
   # healthy (scale-from-zero stall — the reason metal runs minRunners:1). A
@@ -101,11 +101,11 @@ jobs:
   # pointed error. Needs `actions: read` from the caller; degrades to a warning
   # without it.
   azure_cvm_watchdog:
-    if: inputs.platform == 'azure-cvm'
+    if: inputs.platform == 'azure-snp-cvm'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: alarm if the azure-cvm job is still queued after 15 min
+      - name: alarm if the azure-snp-cvm job is still queued after 15 min
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -115,8 +115,8 @@ jobs:
                 -q '.jobs[] | select(.name | contains("azure_cvm")) | select(.name | contains("watchdog") | not) | .status' 2>/dev/null | head -1)
           case "$J" in
             queued|pending|"") [ -z "$J" ] && { echo "::warning::watchdog cannot read job status (grant actions: read) — no verdict"; exit 0; }
-               echo "::error::azure-cvm job still '$J' after 15 min — scale-up stall (listener→pod→autoscaler→CVM capacity). This is the GCP-era silent-queue failure made visible."; exit 1 ;;
-            *) echo "azure-cvm job status: $J — no stall" ;;
+               echo "::error::azure-snp-cvm job still '$J' after 15 min — scale-up stall (listener→pod→autoscaler→CVM capacity). This is the GCP-era silent-queue failure made visible."; exit 1 ;;
+            *) echo "azure-snp-cvm job status: $J — no stall" ;;
           esac
 
   # ── AZURE Model B: EPHEMERAL cluster per run; a privileged pod is the vehicle.

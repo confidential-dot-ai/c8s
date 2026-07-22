@@ -1,7 +1,7 @@
 # Settles one question empirically: is the cvm-launcher ARC runner INSIDE a CVM
 # (an SNP guest) or ON the bare-metal SNP host? /dev/sev-guest exists only inside a
 # guest; /dev/sev is the host-side PSP interface used to LAUNCH guests.
-# Also probes the Azure signals: on `azure-cvm` (runner pod ON a confidential
+# Also probes the Azure signals: on `azure-snp-cvm` (runner pod ON a confidential
 # AKS node) expect virt=container BUT /dev/tpmrm0 present + IMDS
 # securityProfile=ConfidentialVM — the TEE boundary is the NODE, evidenced by
 # the vTPM, not /dev/sev-guest (Azure never exposes the native device).
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'runs-on label to probe (cvm-launcher | azure-cvm | ...)'
+        description: 'runs-on label to probe (cvm-launcher | azure-snp-cvm | azure-tdx-cvm | ...)'
         required: false
         default: cvm-launcher
 jobs:
@@ -24,7 +24,7 @@ jobs:
           echo "=== capability check (root + tpm OPEN — needed for real payloads) ==="
           echo "uid=$(id -u)"
           ( exec 3</dev/tpmrm0 ) 2>/dev/null && echo "tpmrm0: OPENABLE" || echo "tpmrm0: not openable"
-          echo "=== azure signals (vTPM + IMDS; meaningful on azure-cvm) ==="
+          echo "=== azure signals (vTPM + IMDS; meaningful on azure-snp-cvm) ==="
           ls -l /dev/tpmrm0 /dev/tpm0 2>/dev/null || echo "no vTPM device"
           curl -s -m3 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/compute/securityProfile?api-version=2021-12-13' 2>/dev/null | head -c 300; echo
           echo "=== virt type (bare metal vs vm) ==="
