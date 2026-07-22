@@ -44,9 +44,9 @@ on:
   workflow_dispatch:
     inputs:
       region:
-        description: 'Azure region with GA TDX v6 CVMs (capability-verified: westeurope, westus, westus3; quota Standard DCEV6 Family 0/350 confirmed in westeurope)'
+        description: 'Azure region with GA TDX v6 CVMs (capability-verified: westus, westus3, westeurope). westus is the org default: all Azure CI colocates there (westus3 is cheaper for TDX but sells no SEV-SNP sizes at all)'
         required: false
-        default: 'westeurope'
+        default: 'westus'
       vm_size:
         description: 'TDX CVM size (ConfidentialComputingType=TDX). DC4es_v6 = 4 vCPU/16GiB, double the proven DC2as_v5 SNP node; fits the documented in-guest compile constraints with headroom'
         required: false
@@ -89,9 +89,14 @@ jobs:
             exit 0
           fi
           # cloud-init: k3s (helm-controller included, same install path the
-          # metal guest uses via rke2) + the two ARC HelmChart manifests. The
-          # arc-app secret arrives separately via run-command; the listener
-          # crashloops harmlessly until it exists.
+          # metal guest uses via rke2) + ONLY the controller chart. The scale
+          # set chart is deliberately NOT here: it installs from the
+          # run-command step AFTER the arc-app secret exists. Installing it
+          # secretless at boot creates one ARC generation, the retry after the
+          # secret lands creates a second, and the listener stays bound to the
+          # dead one (observed on the first westeurope bring-up: listener
+          # wanted ers -fz78t, live set was -ttlft). Same ordering the metal
+          # payload uses: secret first, then charts.
           cat > cloud-init.yaml <<'EOF'
           #cloud-config
           package_update: true
@@ -109,48 +114,9 @@ jobs:
                   version: "0.14.2"
                   targetNamespace: arc-systems
                   createNamespace: true
-            - path: /var/lib/rancher/k3s/server/manifests/arc-scaleset.yaml
-              permissions: '0644'
-              content: |
-                apiVersion: helm.cattle.io/v1
-                kind: HelmChart
-                metadata:
-                  name: azure-tdx-cvm
-                  namespace: kube-system
-                spec:
-                  chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
-                  version: "0.14.2"
-                  targetNamespace: arc-runners
-                  createNamespace: true
-                  valuesContent: |
-                    githubConfigUrl: https://github.com/confidential-dot-ai
-                    githubConfigSecret: arc-app
-                    runnerScaleSetName: azure-tdx-cvm
-                    minRunners: 0
-                    maxRunners: MAXR_PLACEHOLDER
-                    template:
-                      spec:
-                        containers:
-                          - name: runner
-                            image: ghcr.io/actions/actions-runner:latest
-                            command: ["/home/runner/run.sh"]
-                            env:
-                              - name: RUNNER_ALLOW_RUNASROOT
-                                value: "1"
-                            securityContext:
-                              privileged: true
-                              runAsUser: 0
-                            volumeMounts:
-                              - name: tpm
-                                mountPath: /dev/tpmrm0
-                        volumes:
-                          - name: tpm
-                            hostPath:
-                              path: /dev/tpmrm0
           runcmd:
             - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik" sh -
           EOF
-          sed -i "s/MAXR_PLACEHOLDER/${{ inputs.max_runners }}/" cloud-init.yaml
           # ConfidentialVM flags are EXPLICIT here (unlike AKS, where SKU
           # implied them): security type, VMGuestStateOnly disk encryption,
           # secure boot + vTPM on. Canonical publishes a dedicated CVM image
@@ -170,15 +136,55 @@ jobs:
             --tags purpose=confidential-ci lane=azure-tdx-cvm standing=true \
             -o table
 
-      - name: deliver App secret (run-command, not cloud-init)
+      - name: deliver App secret, then the scale set (order matters)
         env:
           APP_ID: '4309649'
           APP_INSTALLATION_ID: '146850802'
           ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+          MAXR: ${{ inputs.max_runners }}
         run: |
           set -euo pipefail
           [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set"; exit 1; }
           PEM_B64=$(printf '%s' "$ARC_APP_PRIVATE_KEY" | base64 -w0)
+          # scale-set chart, applied by the guest only after the secret exists
+          cat > scaleset.yaml <<EOF
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: azure-tdx-cvm
+            namespace: kube-system
+          spec:
+            chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+            version: "0.14.2"
+            targetNamespace: arc-runners
+            createNamespace: true
+            valuesContent: |
+              githubConfigUrl: https://github.com/confidential-dot-ai
+              githubConfigSecret: arc-app
+              runnerScaleSetName: azure-tdx-cvm
+              minRunners: 0
+              maxRunners: $MAXR
+              template:
+                spec:
+                  containers:
+                    - name: runner
+                      image: ghcr.io/actions/actions-runner:latest
+                      command: ["/home/runner/run.sh"]
+                      env:
+                        - name: RUNNER_ALLOW_RUNASROOT
+                          value: "1"
+                      securityContext:
+                        privileged: true
+                        runAsUser: 0
+                      volumeMounts:
+                        - name: tpm
+                          mountPath: /dev/tpmrm0
+                  volumes:
+                    - name: tpm
+                      hostPath:
+                        path: /dev/tpmrm0
+          EOF
+          MAN_B64=$(base64 -w0 scaleset.yaml)
           # wait for k3s to be up before creating the secret (cloud-init races us)
           az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
             --scripts '
@@ -195,7 +201,9 @@ jobs:
                 --from-file=github_app_private_key=/tmp/arc.pem
               rm -f /tmp/arc.pem
               echo SECRET_OK
-            ' --query 'value[0].message' -o tsv | tail -5
+              printf "%s" "'"$MAN_B64"'" | base64 -d > /var/lib/rancher/k3s/server/manifests/arc-scaleset.yaml
+              echo SCALESET_MANIFEST_OK
+            ' --query 'value[0].message' -o tsv | tail -6
         # note: run-command output can echo script text on failure; the PEM is
         # base64 inside the script body, mirroring the metal lane's accepted
         # exposure. Rotate App 4309649 if this posture is ever judged material.
