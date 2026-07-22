@@ -1,0 +1,193 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# azure-tdx-e2e — c8s cluster-under-test on Intel TDX (Azure vTPM).
+# ═══════════════════════════════════════════════════════════════════════════
+# The TDX twin of azure-e2e.yml (SNP Model-B), with one structural difference:
+# there is no AKS. AKS refuses TDX node pools (Azure/AKS#5618), so this boots an
+# EPHEMERAL standalone DC4es_v6 ConfidentialVM running k3s, installs the c8s ref
+# under test IN-GUEST, asserts, and deletes the whole RG. Because the k3s
+# apiserver is not exposed (NSG closed) and there is no `az aks get-credentials`,
+# every kubectl/c8s/crane call runs on the node via `az vm run-command` — the
+# driver (c8s-e2e/azure-tdx-driver.sh) emits @@markers@@ to a log this job polls,
+# the same contract the metal serial-console lane uses.
+#
+# Proven on hardware 2026-07-22 (manual trial): `c8s install --single-node
+# --cvm-mode aks --hardware-platform tdx` brings the node up self-attesting
+# az-tdx over the vTPM (CDS serves /ca over az-tdx RA-TLS). The CLI auto-sets
+# cds.ratlsPlatform=tdx + attestationApi.cvmMode=aks; no /dev/tdx_guest, no qgsd.
+# The one k3s wrinkle (nri-image-policy) is handled by the driver's -f override.
+#
+# DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+name: azure-tdx-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      c8s_ref:
+        description: 'c8s git ref to install + test (branch, tag, or SHA)'
+        required: false
+        default: 'main'
+      region:
+        description: 'Azure region (must have GA TDX v6 + DCEV6 quota: westus, westus3, westeurope). Empty = quota-aware pick.'
+        required: false
+        default: ''
+      vm_size:
+        description: 'TDX CVM size (ConfidentialComputingType=TDX)'
+        required: false
+        default: 'Standard_DC4es_v6'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: azure-tdx-e2e
+  cancel-in-progress: false
+
+env:
+  RG: c8s-tdx-e2e-${{ github.run_id }}
+  VM: c8s-tdx-e2e-${{ github.run_id }}
+  VM_SIZE: ${{ inputs.vm_size || 'Standard_DC4es_v6' }}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90     # setup ~15m + in-guest build/install/converge/assert
+                            # ~40m; each poll iter also pays a run-command round-trip
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # a killed run leaks a resource group (= a billed VM). Age-based: our runs
+      # cap under 1h, so anything older than 3h is orphaned.
+      - name: reap leaked c8s-tdx-e2e-* resource groups (age > 3h)
+        run: |
+          set +e
+          NOW=$(date -u +%s)
+          for rg in $(az group list --query "[?starts_with(name,'c8s-tdx-e2e-')].name" -o tsv); do
+            created=$(az group show -n "$rg" --query "tags.created" -o tsv 2>/dev/null)
+            if [ -n "$created" ] && [ $((NOW - created)) -gt 10800 ]; then
+              echo "reaping $rg (age $((NOW - created))s)"; az group delete -n "$rg" --yes --no-wait
+            else
+              echo "keeping $rg (age $((NOW - ${created:-NOW}))s)"
+            fi
+          done
+
+      - name: pick region (quota-aware; input override wins)
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.region }}" ]; then echo "REGION=${{ inputs.region }}" >> "$GITHUB_ENV"; exit 0; fi
+          NEED=$(echo "$VM_SIZE" | grep -oE '[0-9]+' | head -1)   # DC4es_v6 -> 4 vCPUs
+          for r in westus westus3 westeurope; do
+            skus=$(az vm list-skus -l "$r" --resource-type virtualMachines --query "length([?name=='$VM_SIZE'])" -o tsv 2>/dev/null || echo 0)
+            read -r cur lim <<<"$(az vm list-usage -l "$r" --query "[?name.value=='standardDCEV6Family'].[currentValue,limit]" -o tsv 2>/dev/null | head -1)"
+            avail=$(( ${lim:-0} - ${cur:-0} ))
+            echo "$r: sku=$skus DCEV6_avail=$avail (need $NEED)"
+            if [ "${skus:-0}" -ge 1 ] && [ "$avail" -ge "$NEED" ]; then
+              echo "REGION=$r" >> "$GITHUB_ENV"
+              echo "region: $r ($VM_SIZE, ${avail} vCPU DCEV6 headroom)" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            fi
+          done
+          echo "::error::no candidate region has $VM_SIZE + >=$NEED DCEV6 quota"; exit 1
+
+      - name: provision ephemeral TDX CVM (k3s)
+        run: |
+          set -euo pipefail
+          az group create -n "$RG" -l "$REGION" \
+            --tags purpose=c8s-tdx-e2e transient=true created="$(date -u +%s)" -o none
+          cat > cloud-init.yaml <<'EOF'
+          #cloud-config
+          package_update: true
+          runcmd:
+            - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --write-kubeconfig-mode 644" sh -
+          EOF
+          # ConfidentialVM flags are explicit (vTPM attestation): security type,
+          # VMGuestStateOnly disk encryption, secure boot + vTPM on. NSG has no
+          # inbound; the public IP exists only for egress (k3s/ghcr/go/apt; IMDS
+          # is link-local). All cluster access is via az vm run-command.
+          az vm create -g "$RG" -n "$VM" \
+            --image Canonical:ubuntu-24_04-lts:cvm:latest \
+            --size "$VM_SIZE" \
+            --security-type ConfidentialVM \
+            --os-disk-security-encryption-type VMGuestStateOnly \
+            --enable-secure-boot true --enable-vtpm true \
+            --os-disk-size-gb 64 \
+            --admin-username confai --generate-ssh-keys \
+            --public-ip-sku Standard --nsg-rule NONE \
+            --custom-data cloud-init.yaml \
+            --tags purpose=c8s-tdx-e2e transient=true \
+            -o table
+
+      - name: wait for k3s + confirm the TDX vTPM surface
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts '
+              export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+              /usr/local/bin/kubectl get node --no-headers 2>/dev/null | grep -q " Ready " && echo K3S_READY
+              [ -e /dev/tpmrm0 ] && echo TPM_OK
+              curl -s -H Metadata:true --max-time 5 "http://169.254.169.254/metadata/instance/compute?api-version=2021-12-13" 2>/dev/null \
+                | python3 -c "import json,sys;print(\"SECTYPE\", json.load(sys.stdin).get(\"securityProfile\",{}).get(\"securityType\"))" 2>/dev/null
+            ' --query 'value[0].message' -o tsv 2>/dev/null || echo retry)
+            echo "[$i] $(echo "$OUT" | grep -oE 'K3S_READY|TPM_OK|SECTYPE [A-Za-z]+' | tr '\n' ' ')"
+            echo "$OUT" | grep -q K3S_READY && echo "$OUT" | grep -q 'SECTYPE ConfidentialVM' && exit 0
+            sleep 20
+          done
+          echo "::error::k3s never became Ready / not a ConfidentialVM"; exit 1
+
+      - name: deliver + launch the e2e driver in-guest
+        env:
+          # via env, never spliced into the shell string — a dispatched ref is
+          # untrusted input and would otherwise run as root in the guest.
+          C8S_REF: ${{ inputs.c8s_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          # both the script and the ref travel base64 (the alphabet has no
+          # quote/$/backtick, so no injection through the run-command string).
+          DRV=$(base64 -w0 c8s-e2e/azure-tdx-driver.sh)
+          REF_B64=$(printf '%s' "$C8S_REF" | base64 -w0)
+          # setsid + </dev/null detaches into a NEW session so the Azure guest
+          # agent does not reap it when this run-command invoke returns (the
+          # metal lane's proven pattern; a bare nohup shares the session).
+          az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts "
+            printf '%s' '$DRV' | base64 -d > /tmp/e2e.sh
+            REF=\$(printf '%s' '$REF_B64' | base64 -d)
+            chmod +x /tmp/e2e.sh
+            (setsid /tmp/e2e.sh \"\$REF\" </dev/null >/dev/null 2>&1 &)
+            echo launched
+          " --query 'value[0].message' -o tsv | tail -2
+
+      - name: poll the driver for @@E2E_PASS@@ / @@E2E_FAIL@@
+        run: |
+          set -uo pipefail
+          START=$(date -u +%s)
+          # ~45 poll iters; each is sleep 40 + a synchronous run-command
+          # round-trip (~30s), so real wall-clock is ~50min — reported as true
+          # elapsed, not iter*40 (which undercounts the run-command latency).
+          for i in $(seq 1 45); do
+            LOG=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+              --scripts 'tail -40 /tmp/azure-tdx-e2e.log 2>/dev/null' --query 'value[0].message' -o tsv 2>/dev/null || echo retry)
+            STAGE=$(printf '%s\n' "$LOG" | grep -oE '@@(STAGE_[A-Z_]+|REF_SHA[^@]*|BUILD_OK|ALL_READY|CDS_ATTESTS_TDX|ATTEST_PROBE_OK|CONSUMPTION_OK|NEGATIVE_OK|E2E_PASS|E2E_FAIL[^@]*)@@' | tail -1)
+            echo "[$(( $(date -u +%s) - START ))s] ${STAGE:-...}"
+            if printf '%s\n' "$LOG" | grep -q '@@E2E_PASS@@'; then
+              echo "### c8s on Azure TDX: PASS" >> "$GITHUB_STEP_SUMMARY"
+              printf '%s\n' "$LOG" | grep -oE '@@[A-Z].*@@' | sed 's/@@//g' | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if printf '%s\n' "$LOG" | grep -q '@@E2E_FAIL'; then
+              echo "::error::e2e driver reported failure:"; printf '%s\n' "$LOG" | grep -oE '@@.*@@' | tail -20
+              exit 1
+            fi
+            sleep 40
+          done
+          echo "::error::driver did not reach a terminal marker in time"
+          az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+            --scripts 'tail -60 /tmp/azure-tdx-e2e.log 2>/dev/null' --query 'value[0].message' -o tsv 2>/dev/null | tail -40
+          exit 1
+
+      - name: teardown (always — the whole RG, async)
+        if: always()
+        run: az group delete -n "$RG" --yes --no-wait || true
