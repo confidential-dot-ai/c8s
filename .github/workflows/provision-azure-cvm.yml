@@ -27,6 +27,10 @@ on:
       vm_size:
         required: false
         default: Standard_DC2as_v5
+      system_vm_size:
+        description: 'system-pool node size (no TEE needed). D2s_v4 works in northeurope; it is NotAvailableForSubscription in westus — use Standard_D2s_v3 there (D2s_v5 and the D2as line are also sub-restricted)'
+        required: false
+        default: 'Standard_D2s_v4'
       region:
         required: false
         default: northeurope
@@ -61,13 +65,15 @@ jobs:
           az group create -n "$RG" -l "${{ inputs.region }}" \
             --tags ci=confidential-ci standing=true -o none
           # system pool = a cheap regular node for the ARC controller + listener
-          # (no TEE needed; D2s_v5 is policy-blocked here, D2s_v4 is allowed).
+          # (no TEE needed). Size is an input because availability is per-region:
+          # D2s_v4 works in northeurope but is sub-restricted in westus (use
+          # D2s_v3 there); D2s_v5 and the D2as line are sub-restricted in both.
           # conf pool = the confidential SEV-SNP nodes runners land on, autoscaled.
           # Idempotent at BOTH levels (run 29560490644 created the cluster then
           # died at the pool — cluster-level else would have skipped it forever).
           az aks show -g "$RG" -n "$CLUSTER" -o none 2>/dev/null \
             || az aks create -g "$RG" -n "$CLUSTER" --node-count 1 \
-                 --node-vm-size Standard_D2s_v4 --os-sku Ubuntu --generate-ssh-keys -o none
+                 --node-vm-size "${{ inputs.system_vm_size }}" --os-sku Ubuntu --generate-ssh-keys -o none
           if ! az aks nodepool show -g "$RG" --cluster-name "$CLUSTER" -n conf -o none 2>/dev/null; then
             # nodepool add DEFAULTS --node-count to 3 (> max 2) — pin it inside
             # the autoscaler range explicitly.
