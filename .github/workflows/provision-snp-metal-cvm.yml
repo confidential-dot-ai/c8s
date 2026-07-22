@@ -34,9 +34,9 @@ on:
   workflow_dispatch:
     inputs:
       max_runners:
-        description: 'max concurrent runner pods in the guest. Default 1: the standing CVM is ONE 4-core/16Gi node — 2 concurrent in-guest rust compiles OOM it (both metal cells died when attestation-rs + kettle merges landed together, runs 29854690919/29854809091). One job at a time; concurrent lib merges queue. azure-cvm can be >1 because AKS gives each pod its own node.'
+        description: 'max concurrent runner pods in the guest. Default 3: paired with memory_override 48Gi in the cvm-e2e call below (see metal-runner-scaling.md, option A). Ceiling is memory, not the scale set — the guest is still smp4, so 3 jobs SHARE 4 vCPUs (more jobs at once, not faster jobs). Raising this without raising the guest RAM re-introduces the OOM (runs 29854690919/29854809091).'
         required: false
-        default: '1'
+        default: '3'
 
 permissions:
   contents: read
@@ -120,6 +120,12 @@ jobs:
       flavor: rke2-node
       keep_alive: true
       vm_name: snp-metal-cvm
+      # 48Gi for 3 concurrent runner pods: the rootfs is a tmpfs overlay, so
+      # each job's target/ + cargo cache lives in guest RAM. 3 build trees +
+      # 3×2 rustc + rke2 need the headroom (16Gi OOM'd even ONE compile after a
+      # fresh re-provision, ars run 29953651811). Host has 93GB — 48Gi guest
+      # reserves ~50GB and still leaves the cvm-launcher room.
+      memory_override: 48Gi
       payload_b64: ${{ needs.payload.outputs.b64 }}
       timeout_minutes: 45
     secrets: inherit

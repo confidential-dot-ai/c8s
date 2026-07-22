@@ -53,6 +53,10 @@ on:
         description: 'stable VM name for a standing CVM (default: cvm-<run_id>-<attempt>, ephemeral)'
         type: string
         default: ''
+      memory_override:
+        description: 'override the per-platform guest RAM (e.g. 48Gi for a standing multi-runner CVM). vCPU is NOT overridable — it is baked into the measured IGVM (smp4). RAM is not in the launch measurement, so this keeps the same golden digest. Empty = per-platform default.'
+        type: string
+        default: ''
     secrets:
       ghcr_user:
         required: false
@@ -97,6 +101,13 @@ jobs:
                                  echo "NODE_LABEL=kubevirt.io/tdx"; echo "GUEST_MARKER=tdx-guest" ;;
             *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired yet (gke-* are stubs)"; exit 1 ;;
           esac >> "$GITHUB_ENV"
+          # RAM override (standing multi-runner CVM). Overrides ONLY memory —
+          # CORES stays the measured smp4, or attestation breaks. Not in the
+          # launch digest, so the golden is unchanged.
+          if [ -n '${{ inputs.memory_override }}' ]; then
+            echo "MEMORY=${{ inputs.memory_override }}" >> "$GITHUB_ENV"
+            echo "guest RAM overridden to ${{ inputs.memory_override }} (cores unchanged: measured smp4)"
+          fi
 
       - name: tools (kubectl + virtctl pinned to host KubeVirt + expect)
         run: |
