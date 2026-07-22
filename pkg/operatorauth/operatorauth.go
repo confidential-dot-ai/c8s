@@ -14,8 +14,6 @@
 // FUTURE IMPROVEMENT — a CA + operator certificates (chain carried in the JWT
 // x5c header), giving delegated issuance and CA-based revocation instead of
 // editing a pinned-key list, plus single-file (cert+key) operator credentials.
-// See docs/decisions/2026-07-01-operator-cert-allowlist-write.md and
-// docs/GAPS.md.
 //
 // Either way this is the sole authorization path for allowlist writes.
 package operatorauth

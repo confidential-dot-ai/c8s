@@ -92,8 +92,8 @@ type EvidencePolicy struct {
 	// Measurements is the set of acceptable launch measurements; empty
 	// accepts any (callers are expected to warn). The attestation-api
 	// normalizes both the SNP LAUNCH_DIGEST and the TDX MRTD into
-	// claims.launch_digest. This policy does not pin TDX RTMRs; see the TDX
-	// measurement note in docs/GAPS.md.
+	// claims.launch_digest. This policy does not pin TDX RTMRs, including the
+	// per-workload RTMR[3].
 	Measurements [][]byte
 }
 

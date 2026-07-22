@@ -171,9 +171,9 @@ func TestCreateContainer_ImageFromPodAnnotation(t *testing.T) {
 	}
 }
 
-// --- runSweep via deferred sweep (audit mode → no container kill attempted) ---
+// --- checkExisting via deferred check (audit mode → no container kill attempted) ---
 
-func TestRunDeferredSweep_AuditMode_NoKill(t *testing.T) {
+func TestRunDeferredCheck_AuditMode_NoKill(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy: policyConfig{
@@ -185,7 +185,7 @@ func TestRunDeferredSweep_AuditMode_NoKill(t *testing.T) {
 
 	pod := makePod("default", "pod1")
 	// Container image is NOT in the allowlist → would be denied, but audit
-	// mode means runSweep continues without attempting a kill.
+	// mode means checkExisting continues without attempting a kill.
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestB)
 
 	p.deferredMu.Lock()
@@ -193,11 +193,11 @@ func TestRunDeferredSweep_AuditMode_NoKill(t *testing.T) {
 	p.deferredCtrs = []*api.Container{ctr}
 	p.deferredMu.Unlock()
 
-	// Should run the sweep without panicking or touching the (nil) resolver.
-	p.RunDeferredSweep(context.Background())
+	// Should run the check without panicking or touching the (nil) resolver.
+	p.RunDeferredCheck(context.Background())
 }
 
-func TestRunDeferredSweep_OrphanContainer_Skipped(t *testing.T) {
+func TestRunDeferredCheck_OrphanContainer_Skipped(t *testing.T) {
 	// A container whose pod sandbox is absent is skipped (podByID miss).
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
@@ -211,10 +211,10 @@ func TestRunDeferredSweep_OrphanContainer_Skipped(t *testing.T) {
 	p.deferredCtrs = []*api.Container{ctr}
 	p.deferredMu.Unlock()
 
-	p.RunDeferredSweep(context.Background())
+	p.RunDeferredCheck(context.Background())
 }
 
-func TestRunDeferredSweep_ExemptNamespace_Skipped(t *testing.T) {
+func TestRunDeferredCheck_ExemptNamespace_Skipped(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy: policyConfig{
@@ -232,12 +232,12 @@ func TestRunDeferredSweep_ExemptNamespace_Skipped(t *testing.T) {
 	p.deferredCtrs = []*api.Container{ctr}
 	p.deferredMu.Unlock()
 
-	// Exempt namespace → checkLabels returns verdictSkip → sweep continues,
+	// Exempt namespace → checkLabels returns verdictSkip → check continues,
 	// fail-closed mode but no kill because the container is skipped entirely.
-	p.RunDeferredSweep(context.Background())
+	p.RunDeferredCheck(context.Background())
 }
 
-func TestRunDeferredSweep_EnforceExistingDisabled_NoOp(t *testing.T) {
+func TestRunDeferredCheck_EnforceExistingDisabled_NoOp(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
@@ -252,10 +252,69 @@ func TestRunDeferredSweep_EnforceExistingDisabled_NoOp(t *testing.T) {
 	p.deferredMu.Unlock()
 
 	// EnforceExisting=false → early return before clearing deferred state.
-	p.RunDeferredSweep(context.Background())
+	p.RunDeferredCheck(context.Background())
 }
 
-func TestSynchronize_Ready_AuditMode_RunsSweep(t *testing.T) {
+// --- enforce_existing=false still rebuilds broker state across a restart ---
+
+func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *testing.T) {
+	p, _ := newCachedPlugin(&config{
+		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
+	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	p.broker = newWorkloadBroker("/proc")
+	p.SetReady()
+
+	pod := makePod("default", "pod1")
+	allowed := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA)
+	denied := makeCtrWithImage(pod.Id, "ctr2", "registry/repo@"+pushDigestB)
+
+	// Fail-closed, but enforce_existing off: the denied container must not reach
+	// resolver.StopContainer (nil containerd client → panic).
+	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{allowed, denied}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec, ok := p.broker.containers[allowed.Id]
+	if !ok {
+		t.Fatalf("allowlisted container not recorded for the broker: %v", p.broker.containers)
+	}
+	if rec.digest != pushDigestA {
+		t.Fatalf("recorded digest = %q, want %q", rec.digest, pushDigestA)
+	}
+	if _, ok := p.broker.containers[denied.Id]; ok {
+		t.Fatal("denied container must not be recorded for the broker")
+	}
+}
+
+// The restart sequence in full: NRI replays Synchronize before the initial CDS
+// pull completes, so recovery runs through the deferred path.
+func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testing.T) {
+	p, _ := newCachedPlugin(&config{
+		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
+		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
+	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	p.broker = newWorkloadBroker("/proc")
+
+	pod := makePod("default", "pod1")
+	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA)
+
+	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(p.broker.containers) != 0 {
+		t.Fatal("nothing should be recorded before the plugin is ready")
+	}
+
+	p.SetReady()
+	p.RunDeferredCheck(context.Background())
+
+	if _, ok := p.broker.containers[ctr.Id]; !ok {
+		t.Fatalf("deferred check did not record the container: %v", p.broker.containers)
+	}
+}
+
+func TestSynchronize_Ready_AuditMode_RunsCheck(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeAudit, EnforceExisting: true},

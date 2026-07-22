@@ -261,12 +261,11 @@ commits to both:
   it as init.
 - **Whole-set per role.** You cannot add, drop, or re-role an image without
   changing the digest. A verifier pins with `--workload-init-image` (init set)
-  and `--workload-image` (main set). One exception weakens this: if the broker
-  cannot resolve an admitted container's image digest, it records an empty
-  digest and omits that container (logged at error, see
-  `recordForBroker`) — the claim then commits a *subset*. A pin-holding
-  verifier still catches the resulting mismatch, but the whole-set guarantee
-  does not hold for an image the broker failed to resolve.
+  and `--workload-image` (main set). The set is all-or-nothing: if the broker
+  cannot resolve an admitted container's image digest it records an empty one
+  (logged at error, see `recordForBroker`), and rather than answer with the
+  containers it *can* describe — a subset passed off as the whole set — it
+  fails the whole fetch, which get-cert treats as fail-closed.
 - **CDS re-derives the same role-partitioned digest** from the forwarded init
   and main lists and checks every image against the allowlist, so the leaf's
   compact hash is a faithful commitment to exactly those role sets.
@@ -325,6 +324,42 @@ after GC rebinds with an **empty init set**. `--workload-init-image` pins are
 therefore reliable only until init-container GC — a digest *change* at renewal
 here is expected, not tampering. The same expected-container-count hardening
 would fix it; not baked in.
+
+**A plugin restart empties the broker, and the startup check is what refills
+it.** The node-CVM broker is in-memory only. `nri-image-policy` is not a pod —
+it is a host process containerd launches from `/opt/nri/plugins`, and NRI does
+not respawn it on exit — so it restarts when containerd does: a chart upgrade
+that bumps the plugin binary or its config (the installer restarts containerd),
+a node reboot, or a crash. Running containers survive that restart, so their
+digests must be re-derived; NRI replays `Synchronize` with the full container
+list on every plugin start, and `checkExisting` records what it admits. That
+recovery deliberately does **not** depend on `policy.enforce_existing` —
+that knob gates only the *kill* step, because "learn what is running" and
+"kill what shouldn't be" are separate concerns.
+
+Until the check completes there is a real window: the broker socket comes up
+before the initial CDS pull, so a fetch landing in between resolves no tracked
+container and get-cert **fails closed** and retries at the next renewal
+interval. That is the correct outcome — the broker genuinely does not yet know
+what is running, and answering "no containers" instead would silently downgrade
+the pod to a claim-free cert. The window is bounded by the plugin's initial
+pull (backoff plus fetch timeouts, tens of seconds), against a renewal interval
+measured in hours.
+
+**The check can also repopulate *partially*.** The `c8s-cert` image sits in the
+plugin's `always_allow` floor, so the check always admits it; a tenant app image
+does not, and a check running after the allowlist changed can deny one. The
+sidecar is then recorded and the app container is not, so the caller resolves
+against an empty sibling set — which get-cert reads as "app containers not up
+yet" and issues claim-free. An *unresolvable* digest is caught (the broker
+fails the whole fetch, Corner 3), but a *denied* container is not recorded at
+all, so the broker cannot tell it from one that has not started. With
+`enforce_existing` on, the same check kills the offending container and the
+state cannot persist; with it off, tolerating that container is the operator's
+stated intent, and the pod keeps a claim-free cert until it is recreated. This
+is the same "empty means *not yet*, never *not vouched for*" ambiguity as the
+two cases above, and the same expected-container-count hardening would settle
+all three.
 
 ---
 

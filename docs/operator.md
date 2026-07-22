@@ -350,8 +350,7 @@ only Ready Service endpoint while it starts. `peerUrl` cannot be combined with
 allowlist is instead restored from the encrypted handoff snapshot). Replicas
 stay fixed at 1 either way: EAR signing keys are per pod, so a second
 steady-state endpoint would break EAR verification even though adoption shares
-the CA (see
-[the active/active memo](decisions/2026-07-14-cds-active-active-ear-jwks.md)).
+the CA.
 
 The operator-key hash is a **configuration-continuity check**, not proof of
 operator private-key possession. The public bundle is intentionally readable,

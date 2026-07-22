@@ -252,8 +252,7 @@ RAM — the host never sees plaintext and never holds a key. The volume
 is reformatted every boot (pure scratch). No scratch disk → no-op, the
 tmpfs default stands.
 
-Integrity status and the qemu wrapper's shim nature are tracked in
-[`GAPS.md`](GAPS.md) ("Confidential kata guest (TDX)").
+Integrity status and the qemu wrapper's shim nature remain known gaps.
 
 ## Reproducible root_hash
 

@@ -203,6 +203,11 @@ func (c *config) Validate() error {
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
 	}
+	// Both broker record sites sit under AllowlistEnabled, so without one the
+	// broker answers every get-cert fetch empty-handed, forever.
+	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the broker only records digest-checked containers")
+	}
 	return validateLabelRules(c.Policy.LabelRules)
 }
 

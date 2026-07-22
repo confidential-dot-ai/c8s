@@ -205,7 +205,7 @@ func TestSynchronize_NotReady_EnforceExistingDisabled_NoDeferral(t *testing.T) {
 	}
 }
 
-func TestRunDeferredSweep_NothingDeferred(t *testing.T) {
+func TestRunDeferredCheck_NothingDeferred(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{
 			Mode:            "fail-closed",
@@ -215,7 +215,7 @@ func TestRunDeferredSweep_NothingDeferred(t *testing.T) {
 	p.SetReady()
 
 	// Should be a no-op without panic
-	p.RunDeferredSweep(context.Background())
+	p.RunDeferredCheck(context.Background())
 }
 
 func TestCreateContainer_Ready_PassesThrough(t *testing.T) {

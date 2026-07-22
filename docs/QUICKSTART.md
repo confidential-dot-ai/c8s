@@ -165,4 +165,3 @@ See:
 
 - `docs/DEMO.md` for a minimal demo flow.
 - `docs/THREAT_MODEL.md` for what the chart does and does not prove.
-- `docs/GAPS.md` for remaining production-readiness gaps.

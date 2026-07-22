@@ -88,11 +88,19 @@ func (b *workloadBroker) ContainersForPeer(peerPID int) ([]workloadclaims.Contai
 
 	var out []workloadclaims.Container
 	for _, rec := range b.containers {
-		if rec.sandboxID != caller.sandboxID || rec.digest == "" {
+		if rec.sandboxID != caller.sandboxID {
 			continue
 		}
+		// Injected containers are never part of the claim, so an unresolved
+		// digest on one does not make the answer incomplete.
 		if workloadclaims.IsInjectedContainer(rec.name) {
 			continue
+		}
+		// Serving the rest would commit a subset of the pod's images as if it
+		// were the whole set; refuse the answer instead (docs/getcert-workload-
+		// binding.md, Corner 3).
+		if rec.digest == "" {
+			return nil, fmt.Errorf("container %q has no resolved image digest", rec.name)
 		}
 		out = append(out, workloadclaims.Container{Name: rec.name, Digest: rec.digest})
 	}

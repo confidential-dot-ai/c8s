@@ -93,8 +93,7 @@ additionally runs golangci-lint, a CRD/chart consistency check
   `feat(ratls-mesh): ...`, `fix(chart): ...`, `docs: ...`, `test(e2e): ...`.
 - **CI must be green** before requesting review.
 - **Update docs in the same PR.** Behavior changes update the affected docs —
-  concept docs under [docs/](docs/), decision records in `docs/decisions`,
-  pitfalls in `docs/pitfalls.md`.
+  concept docs under [docs/](docs/), pitfalls in `docs/pitfalls.md`.
 - Maintainers review and merge at their discretion; expect requests for
   changes.
 

@@ -107,8 +107,7 @@ metadata:
     confidential.ai/trust-root-mode: "inMemory"
 spec:
   {{/* Fixed at 1: EAR signing keys are per pod, so a second Ready endpoint
-       breaks EAR verification even though adoption shares the CA (see
-       docs/decisions/2026-07-14-cds-active-active-ear-jwks.md). */}}
+       breaks EAR verification even though adoption shares the CA. */}}
   replicas: 1
   {{- if .Values.cds.handoff.peerUrl }}
   # Surge the new pod so it adopts the CA from the still-serving old pod before

@@ -49,7 +49,7 @@ type plugin struct {
 	// broker serves the workload-claims flow (docs/ratls.md).
 	broker *workloadBroker
 
-	// Deferred sweep: pods/containers observed during Synchronize before
+	// Deferred check: pods/containers observed during Synchronize before
 	// the plugin is ready, replayed once the cache has a allowlist.
 	deferredMu   sync.Mutex
 	deferredPods []*api.PodSandbox
@@ -153,12 +153,10 @@ func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 // recordForBroker resolves a container's admitted image digest and records it
 // for the workload-claims broker. A resolve failure records an empty digest,
-// which the broker omits from its answer — so the pod's workload claim commits
-// a SUBSET of its images. That weakens `--workload-image` (a pin-holding
-// verifier still catches the resulting mismatch, but the whole-set property is
-// lost for that image), so it is logged at error, not swallowed. It never
-// blocks the create path: admission already decided the container.
-// See docs/getcert-workload-binding.md, Corner 3 (whole-set-per-role).
+// which makes the broker refuse the pod's whole answer rather than commit a
+// subset — fail-closed, and logged at error because it costs the pod its
+// claim. It never blocks the create path: admission already decided the
+// container.
 func (p *plugin) recordForBroker(ctx context.Context, ctr *api.Container, imageRef string) {
 	if p.broker == nil {
 		return
@@ -325,19 +323,26 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	return verdictAllow, ""
 }
 
-// Synchronize is called when the plugin connects to containerd.
-// It checks all existing containers against the allowlist and kills violations.
+// shouldCheckExisting reports whether the startup check has work — enforcement,
+// broker recovery, or both. See docs/getcert-workload-binding.md, Corner 4.
+func (p *plugin) shouldCheckExisting() bool {
+	return p.cfg.Policy.EnforceExisting || p.broker != nil
+}
+
+// Synchronize is called when the plugin connects to containerd. It checks all
+// existing containers against the allowlist, records the admitted ones for the
+// broker, and kills violations when enforce_existing is set.
 func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
 	cfg := p.cfg
 
-	if !cfg.Policy.EnforceExisting {
-		p.logger.Info("startup sweep disabled", "pods", len(pods), "containers", len(ctrs))
+	if !p.shouldCheckExisting() {
+		p.logger.Info("startup check disabled", "pods", len(pods), "containers", len(ctrs))
 		return nil, nil
 	}
 
-	// If not ready yet, defer the sweep until after CDS init completes.
+	// If not ready yet, defer the check until after CDS init completes.
 	if !p.Ready() {
-		p.logger.Info("plugin not ready, deferring startup sweep",
+		p.logger.Info("plugin not ready, deferring startup check",
 			"pods", len(pods), "containers", len(ctrs))
 		p.deferredMu.Lock()
 		p.deferredPods = pods
@@ -346,13 +351,16 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 		return nil, nil
 	}
 
-	p.runSweep(ctx, cfg, pods, ctrs)
+	p.checkExisting(ctx, cfg, pods, ctrs)
 	return nil, nil
 }
 
-// runSweep checks all existing containers against the allowlist and kills violations.
-func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandbox, ctrs []*api.Container) {
-	p.logger.Info("startup sweep: checking existing containers", "pods", len(pods), "containers", len(ctrs))
+// checkExisting checks all existing containers against the allowlist, records
+// the admitted ones for the broker, and kills violations when enforce_existing
+// is set.
+func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.PodSandbox, ctrs []*api.Container) {
+	p.logger.Info("checking existing containers",
+		"pods", len(pods), "containers", len(ctrs), "enforcing", cfg.Policy.EnforceExisting)
 
 	// Build pod lookup by sandbox ID
 	podByID := make(map[string]*api.PodSandbox, len(pods))
@@ -391,7 +399,8 @@ func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandb
 			continue
 		}
 
-		if cfg.Policy.Mode == ModeAudit {
+		// enforce_existing off: the check only feeds the broker.
+		if cfg.Policy.Mode == ModeAudit || !cfg.Policy.EnforceExisting {
 			continue
 		}
 
@@ -403,16 +412,16 @@ func (p *plugin) runSweep(ctx context.Context, cfg *config, pods []*api.PodSandb
 		}
 	}
 
-	p.logger.Info("startup sweep complete", "killed", killed, "failed", failed, "checked", len(ctrs))
+	p.logger.Info("existing-container check complete",
+		"killed", killed, "failed", failed, "checked", len(ctrs), "enforcing", cfg.Policy.EnforceExisting)
 }
 
-// RunDeferredSweep runs the startup sweep on pods/containers that were seen
-// during Synchronize before the plugin was ready. Should be called after
-// SetReady and CDS init.
-func (p *plugin) RunDeferredSweep(ctx context.Context) {
+// RunDeferredCheck checks the pods/containers that were seen during Synchronize
+// before the plugin was ready. Should be called after SetReady and CDS init.
+func (p *plugin) RunDeferredCheck(ctx context.Context) {
 	cfg := p.cfg
 
-	if !cfg.Policy.EnforceExisting {
+	if !p.shouldCheckExisting() {
 		return
 	}
 
@@ -424,12 +433,12 @@ func (p *plugin) RunDeferredSweep(ctx context.Context) {
 	p.deferredMu.Unlock()
 
 	if len(ctrs) == 0 {
-		p.logger.Info("no deferred containers to sweep")
+		p.logger.Info("no deferred containers to check")
 		return
 	}
 
-	p.logger.Info("running deferred startup sweep", "pods", len(pods), "containers", len(ctrs))
-	p.runSweep(ctx, cfg, pods, ctrs)
+	p.logger.Info("running deferred startup check", "pods", len(pods), "containers", len(ctrs))
+	p.checkExisting(ctx, cfg, pods, ctrs)
 }
 
 // CreateContainer is called when a container is being created.

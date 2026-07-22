@@ -107,10 +107,10 @@ it:
   rotation rolls a fresh CA lineage rather than inheriting the old one.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
-PKI (see `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`). **Longer
-term** we want a CA + short-lived operator certificates (chain carried in the
-JWT `x5c` header), giving delegated issuance and CA-based revocation instead of
-editing a pinned-key list, plus single-file (cert+key) operator credentials.
+PKI. **Longer term** we want a CA + short-lived operator certificates (chain
+carried in the JWT `x5c` header), giving delegated issuance and CA-based
+revocation instead of editing a pinned-key list, plus single-file (cert+key)
+operator credentials.
 
 ## Operator-key auth is app-layer on purpose (do not switch CDS to mTLS)
 
@@ -152,8 +152,7 @@ the registry (via crane, best-effort) before anything touches the cluster. Do
 **not** dodge the error by falling back to `:main` for the components — a
 mismatched operator is the silent mis-injection above. A real
 operator↔chart capability handshake (operator reports its webhook feature
-set; the render fails if the chart needs more) is future work — see
-`docs/GAPS.md`.
+set; the render fails if the chart needs more) is future work.
 
 ## A GPU request alone forces the confidential GPU class — no annotation needed
 
@@ -201,7 +200,7 @@ and cannot load the driver. Module loading is locked down after driver
 bring-up (`kernel.modules_disabled=1`), and everything grafted sits inside
 the measured verity root — but the kernel/driver provenance is the kata
 release, not the c8s build. Compiling signed modules against a confos GPU
-kernel flavor closes this — see `docs/GAPS.md`. Also remember GPU SPDM
+kernel flavor closes this. Also remember GPU SPDM
 attestation is not wired yet (`docs/kata-gpu.md` "Threat-model gaps").
 
 ## kata-qemu-snp on a non-SNP host is a QEMU crash-loop, not a clean rejection
@@ -590,7 +589,7 @@ runs. Neither kata-runtime nor kata-agent has a name-resolution fallback (the
 runtime spec carries only a numeric uid). Fix: set a numeric
 `securityContext.runAsUser` in the pod spec (which skips the lookup), or bake
 a numeric `USER <uid>` into the image. Prefer non-root regardless — the
-in-guest mesh exempts UID-0 egress (GAPS.md "Mesh and certificates").
+in-guest mesh exempts UID-0 egress.
 
 ## kubelet's `runtime-request-timeout` (default 2m) caps kata pod creation
 

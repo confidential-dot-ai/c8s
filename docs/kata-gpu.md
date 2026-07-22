@@ -160,8 +160,8 @@ Two deliberate deltas from the non-GPU guest:
   `CONFIG_MODULES=n`. The GPU kernel is measured and version-pinned like
   everything else; building the modules against a confos GPU kernel flavor
   (module signing + `CONFIG_MODULE_SIG_FORCE`) is the remaining hardening
-  step, tracked in [`docs/GAPS.md`](GAPS.md). Until then, boot-time module
-  loading is closed after driver load (`kernel.modules_disabled=1`, set by
+  step. Until then, boot-time module loading is closed after driver load
+  (`kernel.modules_disabled=1`, set by
   `nvidia-gpu-ready.service`).
 - **GPU bring-up is systemd units, not NVRC.** Upstream's GPU image boots
   NVIDIA's NVRC as PID 1; the c8s guest boots systemd (the in-guest stack
@@ -209,8 +209,7 @@ self-hosted runner serializes jobs anyway.
   `maxvcpus = 1` means CPU hotplug cannot raise it at runtime. TDX installs
   are unaffected (no pin — the verified TDX measurement is vCPU-invariant).
   This is a **policy pin, not a hard limit** — see "Raising the vCPU pin"
-  below — accepted as the default for now and tracked in
-  [`docs/GAPS.md`](GAPS.md).
+  below — accepted as the default for now.
 - **No memory limits on GPU pods** (memcg + cold-plug VFIO interaction — see
   "Using it"). CPU limits are fine.
 - **One GPU model per pod, advertised per-model.** The sandbox device plugin
@@ -252,8 +251,7 @@ To raise it:
    values, not as tampering — rotate the references, don't widen them.
 
 Removing the pin entirely (or a hot-plug scheme that keeps the boot-time
-VMSA count fixed while adding vCPUs later) stays tracked in
-[`docs/GAPS.md`](GAPS.md).
+VMSA count fixed while adding vCPUs later) remains future work.
 
 ## Out of scope (assumed already provisioned on the host)
 
@@ -307,8 +305,8 @@ reach.
   `nvidia-gpu-ready.service` rather than compiled out) and the driver
   modules/userland are grafted from kata's digest-pinned GPU rootfs. Building
   the modules signed against a confos GPU kernel flavor is the remaining
-  hardening step — [`docs/GAPS.md`](GAPS.md). Everything grafted is inside
-  the measured verity root, so it is attested — just not c8s-compiled.
+  hardening step. Everything grafted is inside the measured verity root, so it
+  is attested — just not c8s-compiled.
 - **GPU attestation is not wired.** The NVIDIA GPU's own attestation (SPDM /
   `nvidia-smi conf-compute`) is out of scope for this iteration — CC mode is
   assumed correct on the host. A malicious host could present a non-CC GPU

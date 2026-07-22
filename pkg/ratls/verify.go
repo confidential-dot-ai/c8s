@@ -21,7 +21,7 @@ type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
 	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
-	// covered by this policy; see the TDX measurement note in docs/GAPS.md.
+	// covered by this policy, including the per-workload RTMR[3].
 	Measurements [][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.

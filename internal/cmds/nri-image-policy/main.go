@@ -205,7 +205,7 @@ func Run(args []string) error {
 		})
 	}
 
-	plugin.RunDeferredSweep(ctx)
+	plugin.RunDeferredCheck(ctx)
 
 	select {
 	case err := <-pluginErrCh:

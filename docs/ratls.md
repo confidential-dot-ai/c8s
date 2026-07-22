@@ -14,9 +14,9 @@ guarantee, how it operates under the two confidential shapes (node-as-CVM and
 pod-as-CVM), and which certificate is used where.
 
 Companion docs: [THREAT_MODEL.md](THREAT_MODEL.md) (adversaries, gates,
-residual risk), [GAPS.md](GAPS.md) (known limitations),
-[`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh dataplane),
-[install-flows.md](install-flows.md) (which components deploy in which mode).
+residual risk), [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh
+dataplane), [install-flows.md](install-flows.md) (which components deploy in
+which mode).
 The implementation is [`pkg/ratls`](../pkg/ratls/), with the CDS client flow in
 [`pkg/attestclient`](../pkg/attestclient/) and
 [`pkg/ratls/cdsclient`](../pkg/ratls/cdsclient/).
@@ -262,8 +262,8 @@ coexist for the transition window, updated at runtime from `/ca` polling
 The trade to know about: a CA-chain-verified peer proved its measurement **at
 issuance time**, not at handshake time, and today's leaf certificates do not
 embed the verified measurement — post-bootstrap mesh peers are "chains to the
-mesh CA", not "runs launch digest X" ([GAPS.md](GAPS.md), peer measurement
-pinning).
+mesh CA", not "runs launch digest X" (peer measurement pinning is not
+implemented).
 
 ## What RA-TLS guarantees — and what it does not
 

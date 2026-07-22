@@ -138,6 +138,43 @@ func TestBrokerRejectsNestedVictimCgroup(t *testing.T) {
 	}
 }
 
+// An unresolved digest must fail the whole fetch: serving the siblings that did
+// resolve would pass a subset off as the pod's whole image set.
+func TestBrokerRefusesUnresolvedDigest(t *testing.T) {
+	procRoot := t.TempDir()
+	b := newWorkloadBroker(procRoot)
+
+	const pod1 = "sandbox-1"
+	b.record(cidGetCert, pod1, "c8s-cert", digestOther)
+	b.record(cidApp1, pod1, "app", digestApp)
+	b.record(cidApp2, pod1, "worker", "") // resolve failed at admission
+	writeCgroup(t, procRoot, 4242, cidGetCert)
+
+	if _, err := digestsOf(b, 4242); err == nil {
+		t.Fatal("served a subset of the pod's images as if it were the whole set")
+	}
+}
+
+// The sidecar is excluded from the claim, so its own digest never gates the
+// answer — otherwise a first issuance could not proceed.
+func TestBrokerIgnoresUnresolvedInjectedDigest(t *testing.T) {
+	procRoot := t.TempDir()
+	b := newWorkloadBroker(procRoot)
+
+	const pod1 = "sandbox-1"
+	b.record(cidGetCert, pod1, "c8s-cert", "")
+	b.record(cidApp1, pod1, "app", digestApp)
+	writeCgroup(t, procRoot, 4242, cidGetCert)
+
+	got, err := digestsOf(b, 4242)
+	if err != nil {
+		t.Fatalf("unresolved sidecar digest blocked the answer: %v", err)
+	}
+	if !slices.Equal(got, []string{digestApp}) {
+		t.Fatalf("digests = %v, want %v", got, []string{digestApp})
+	}
+}
+
 func TestBrokerEvicts(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newWorkloadBroker(procRoot)

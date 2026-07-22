@@ -3,10 +3,9 @@
 > **Release:** v0.1.0 · **Milestone:** operator-consolidation · **Last updated:** 2026-07-10 (v0.1.0).
 > **Living document** — update it whenever a gate, default, or gap changes; a
 > stale threat model is worse than none. Companion docs, treated as the same
-> source of truth: `docs/GAPS.md` (the deferred-work register, issue-linked),
-> `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper §3 (adversary /
-> asset model this section is lifted from), and the c8s-docs `architecture/
-> threat-model.mdx` (public framing).
+> source of truth: `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper
+> §3 (adversary / asset model this section is lifted from), and the c8s-docs
+> `architecture/threat-model.mdx` (public framing).
 >
 > **How this is organised** — following the seven questions every threat model
 > should answer: what we protect (§1 Assets), who from (§2 Adversaries), how the
@@ -127,8 +126,7 @@ these away.
 Status vocabulary: **Prevented** (attacker cannot, by construction) · **Mitigated**
 (reduced, residual noted) · **Addressable** (a real threat *now*, with a committed
 or designed fix — "threat today, not tomorrow") · **Open** (real now, no committed
-fix) · **Accepted** (deliberate non-goal, §7). Deferred items link `docs/GAPS.md`
-rather than restating it.
+fix) · **Accepted** (deliberate non-goal, §7).
 
 ### Prevented / Mitigated
 
@@ -256,13 +254,12 @@ If any of these is false, the corresponding guarantee does not hold.
 
 ## 7. Non-goals
 
-### Deferred this milestone (tracked, expected to close — see `docs/GAPS.md`)
+### Deferred this milestone (expected to close)
 
 - Pod-spec integrity beyond image digest; per-workload peer allowlists and measurement
   pinning in the mesh; attestation-gated application secret release (the whitepaper's
   Secrets Manager Proxy / wrapped-vs-direct key brokering); active/active CDS HA;
-  multi-tenant isolation and federated multi-cluster control planes. Each has a
-  tracking issue in GAPS.md — this list is intentionally a pointer, not a copy.
+  multi-tenant isolation and federated multi-cluster control planes.
 
 ### Accepted / permanent non-goals (whitepaper §3.4, §9)
 
@@ -333,7 +330,7 @@ binary:
   `docs/pitfalls.md` (§5 Addressable). The protection is detection by
   pin-holding verifiers, not boot-time enforcement. With `cds.operatorKeys`
   unset, writes are rejected and only reads are served (the empty set is itself
-  attested). See `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
+  attested).
 
 ### Endpoint surface (beyond the gates in §4)
 

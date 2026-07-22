@@ -409,7 +409,7 @@ bootstrap.
 Two caveats worth knowing before production: revocation is currently coarse
 (remove the key from `cds.operatorKeys` and re-install), and the attested
 config protects only verifiers that pin it. See
-[docs/GAPS.md](docs/GAPS.md) and [docs/pitfalls.md](docs/pitfalls.md). For
+[docs/pitfalls.md](docs/pitfalls.md). For
 GitOps consumers, `c8s render-values --operator-keys operator.pub` embeds the
 PEM content (the chart value takes content, never a file path); the chart
 wiring is described in [docs/operator.md](docs/operator.md).
@@ -435,8 +435,8 @@ evidence verification service, which is built and published from
 ## Known gaps and open items
 
 c8s is built around a strong threat model, and we would rather list the holes
-than let you discover them. The canonical, always-current list is
-[docs/GAPS.md](docs/GAPS.md); hard-won operational lessons are in
+than let you discover them. [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) covers
+what the platform does and does not prove; hard-won operational lessons are in
 [docs/pitfalls.md](docs/pitfalls.md). Highlights:
 
 - **Measurements are not pinned by default.** Until `cds.measurements` and
