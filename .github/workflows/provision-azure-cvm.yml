@@ -31,6 +31,10 @@ on:
         description: 'system-pool node size (no TEE needed). D2s_v4 works in northeurope; it is NotAvailableForSubscription in westus — use Standard_D2s_v3 there (D2s_v5 and the D2as line are also sub-restricted)'
         required: false
         default: 'Standard_D2s_v4'
+      rg:
+        description: 'resource group for the standing cluster. RG names are subscription-unique, so a region move needs a NEW name while the old region still holds the default (the label cutover happens at scale-set registration, not at RG level): use confidential-ci-azure-snp for the westus lane, delete the old RG after the new listener is verified'
+        required: false
+        default: 'confidential-ci-azure-cvm'
       region:
         required: false
         default: northeurope
@@ -40,7 +44,7 @@ permissions:
   contents: read
 
 env:
-  RG: confidential-ci-azure-cvm
+  RG: ${{ inputs.rg }}
   CLUSTER: azure-cvm
   APP_ID: '4309649'
   APP_INSTALLATION_ID: '146850802'
