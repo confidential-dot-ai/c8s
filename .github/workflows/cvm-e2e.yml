@@ -219,7 +219,12 @@ jobs:
                           bus: virtio
                     interfaces:
                       - name: default
-                        bridge: {}
+                        # VALIDATED against the working tdx-e2e VM on tdx-dev-host-1
+                        # (2026-07-21): real TDX uses masquerade. bridge is an SNP-only
+                        # workaround ("masquerade is broken under SNP") that does NOT
+                        # apply to TDX — and masquerade also sidesteps the host/guest
+                        # 10.42/16 CIDR collision that forces console delivery on SNP.
+                        masquerade: {}
                     rng: {}
                 networks:
                   - name: default
