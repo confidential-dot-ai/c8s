@@ -177,6 +177,16 @@ jobs:
       - name: boot the measured CVM
         run: |
           set -euo pipefail
+          # keep_alive re-provision: a standing VM already exists under this stable
+          # name. `kubectl apply` alone updates the VM template but never restarts the
+          # running VMI, so spec changes (e.g. rootdisk readonly) silently never take
+          # — the poll below just sees the old VMI already Running. Delete it first,
+          # waiting for the VMI and its exclusive disk lock to release, so the apply
+          # boots a fresh VM with the current spec. Ephemeral runs use unique names,
+          # so this is a no-op for them.
+          if [ '${{ inputs.keep_alive }}' = 'true' ]; then
+            kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true
+          fi
           if [ '${{ inputs.platform }}' = tdx-metal ]; then
           # TDX: native launchSecurity.tdx + TDVF/EFI — NO IGVM sidecar, NO igvm file
           # annotation, host-passthrough CPU, node label kubevirt.io/tdx (confidential-
@@ -228,6 +238,13 @@ jobs:
                       - name: rootdisk
                         disk:
                           bus: virtio
+                          # Golden rootfs is a SHARED ROX verity PVC — open it readonly
+                          # so QEMU takes a SHARED lock and the standing keep_alive runner
+                          # + any ephemeral c8s e2e CVM coexist on it. Writable takes an
+                          # EXCLUSIVE lock, so only the first VM boots and every other CVM
+                          # on the same node is blocked (empty console / VMI stuck
+                          # Scheduled). Matches confidential-metal manifests/examples/rke2-cvm.yaml.
+                          readonly: true
                     interfaces:
                       - name: default
                         # VALIDATED against the working tdx-e2e VM on tdx-dev-host-1
@@ -296,6 +313,13 @@ jobs:
                       - name: rootdisk
                         disk:
                           bus: virtio
+                          # Golden rootfs is a SHARED ROX verity PVC — open it readonly
+                          # so QEMU takes a SHARED lock and the standing keep_alive runner
+                          # + any ephemeral c8s e2e CVM coexist on it. Writable takes an
+                          # EXCLUSIVE lock, so only the first VM boots and every other CVM
+                          # on the same node is blocked (empty console / VMI stuck
+                          # Scheduled). Matches confidential-metal manifests/examples/rke2-cvm.yaml.
+                          readonly: true
                     interfaces:
                       - name: default
                         bridge: {}           # masquerade is broken under SNP
