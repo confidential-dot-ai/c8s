@@ -99,6 +99,12 @@ func LoadPolicy(path string) (*Policy, error) {
 			if pat == "" {
 				return nil, fmt.Errorf("policy rule %d has an allow entry with an empty path (%q)", i, entry)
 			}
+			segs := strings.Split(strings.Trim(pat, "/"), "/")
+			for j, s := range segs {
+				if s == "**" && j != len(segs)-1 {
+					return nil, fmt.Errorf("policy rule %d allow entry %q: '**' must be the final path segment", i, entry)
+				}
+			}
 			// A '#' with no usable field is a scoping typo, not "all fields" —
 			// silently widening to all fields would invert the operator's
 			// least-privilege intent, so reject it.

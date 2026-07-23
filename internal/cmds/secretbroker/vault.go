@@ -172,6 +172,10 @@ func (b *broker) handleLookupSelf(w http.ResponseWriter, r *http.Request) {
 		writeVaultError(w, http.StatusForbidden, "permission denied")
 		return
 	}
+	if fp, ok := peerCertFP(r); !ok || fp != sess.certFP {
+		writeVaultError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	ttl := int(time.Until(sess.expiry).Seconds())
 	if ttl < 0 {
 		ttl = 0
