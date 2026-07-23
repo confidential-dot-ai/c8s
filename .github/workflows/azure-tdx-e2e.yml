@@ -219,9 +219,16 @@ jobs:
               # the whole marker set (the tail-40 window above only holds the
               # last few — grep the full driver log so the az-tdx attestation
               # evidence lands in the summary, not just PASS).
+              #
+              # tee, not >>. The step summary is not reachable through the REST
+              # API (check-runs exposes no output for Actions jobs), so a marker
+              # set that lands only there cannot be read back when
+              # reconstructing a run afterwards. On a PASS that loses the healthy
+              # IMG_PROV + D_* baseline, which is exactly what you want to diff
+              # the next regression against. Send it to the log too.
               az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
                 --scripts 'grep -oE "@@[A-Z][^@]*@@" /tmp/azure-tdx-e2e.log 2>/dev/null' --query 'value[0].message' -o tsv 2>/dev/null \
-                | grep -oE '@@[A-Z][^@]*@@' | sed 's/@@//g; s/^/- /' >> "$GITHUB_STEP_SUMMARY"
+                | grep -oE '@@[A-Z][^@]*@@' | sed 's/@@//g; s/^/- /' | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             if printf '%s\n' "$LOG" | grep -q '@@E2E_FAIL'; then
