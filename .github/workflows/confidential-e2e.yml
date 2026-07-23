@@ -26,7 +26,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The pin in `e2e` below is defensible, but it must never be SILENT. A lane
+  # that reports success against a head SHA it never installed is worse than a
+  # red one: it looks like coverage. This job says what actually got tested, and
+  # fails once the pin outlives its justification so it cannot rot unnoticed.
+  # It has already outlived one c8s regression that reached main behind this
+  # lane's green checks (a stale nri-image-policy image, c8s#115).
+  pin-guard:
+    name: pin guard (what did this run actually test?)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+       (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: state what was tested, and time-box the pin
+        env:
+          PINNED_REF: 70aea72fac1f3dc7c96e016ecc95667366cf7837
+          PINNED_SINCE: '2026-07-21'
+          MAX_AGE_DAYS: '14'
+          REQUESTED: ${{ inputs.c8s_ref }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          EFFECTIVE="${REQUESTED:-$PINNED_REF}"
+          {
+            echo "### confidential-e2e: what this run actually tested"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| c8s ref installed | \`$EFFECTIVE\` |"
+            echo "| merge head        | \`${HEAD_SHA:-n/a (manual dispatch)}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$EFFECTIVE" != "$PINNED_REF" ]; then
+            echo "| pin | overridden for this run |" >> "$GITHUB_STEP_SUMMARY"
+            echo "not pinned: this run tested $EFFECTIVE"
+            exit 0
+          fi
+
+          {
+            echo "| pin | ACTIVE since $PINNED_SINCE, waiting on confos#51 |"
+            echo
+            echo "> This run did **not** validate the merge head. It installed the pinned"
+            echo "> bundle \`$PINNED_REF\`. Read its result as signal about that commit only."
+            echo "> To test a real ref now: \`gh workflow run confidential-e2e.yml -f c8s_ref=main\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::pinned to $PINNED_REF; this run does NOT validate ${HEAD_SHA:-the merge head}"
+
+          # python3, not `date -d`: the GNU-only flag cannot be exercised on a
+          # non-GNU box, and a tripwire nobody can test is not a tripwire.
+          AGE=$(python3 -c 'import datetime,os; print((datetime.date.today() - datetime.date.fromisoformat(os.environ["PINNED_SINCE"])).days)')
+          echo "pin age: ${AGE}d (budget ${MAX_AGE_DAYS}d)"
+          [ "$AGE" -le "$MAX_AGE_DAYS" ] || {
+            echo "::error::the interim c8s_ref pin is ${AGE} days old (budget ${MAX_AGE_DAYS}). It has stopped being interim. Either confos#51 landed and this reverts to github.event.workflow_run.head_sha, or the pin needs a deliberate new budget."
+            exit 1; }
+
   e2e:
+    name: e2e (testing ${{ inputs.c8s_ref || 'PINNED 70aea72, NOT the merge head' }})
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -44,5 +103,12 @@ jobs:
       # 70aea72 + attestation-api sha-63a97d3 is the last set proven green here.
       # REVERT to `${{ inputs.c8s_ref || github.event.workflow_run.head_sha }}`
       # and drop aa_ref once the baked-AA node image is staged.
-      c8s_ref: 70aea72fac1f3dc7c96e016ecc95667366cf7837
+      #
+      # The default is the pin, but a DISPATCH still wins: the c8s_ref input was
+      # documented as "defaults to main" while the hardcoded value silently ate
+      # it, so the one escape hatch for asking "is main actually OK?" was dead.
+      # Keep the interim default, keep the override:
+      #   gh workflow run confidential-e2e.yml -f c8s_ref=main
+      # See the pin-guard job above for why this must announce itself.
+      c8s_ref: ${{ inputs.c8s_ref || '70aea72fac1f3dc7c96e016ecc95667366cf7837' }}
       aa_ref: sha-63a97d3
