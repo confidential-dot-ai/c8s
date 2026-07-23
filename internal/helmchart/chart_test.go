@@ -1335,10 +1335,17 @@ func TestChartSecretBrokerRendersMeshComponent(t *testing.T) {
 		t.Fatalf("secret-broker container missing; have %v", containerNames(dep.Spec.Template.Spec.Containers))
 	}
 	assertContainerArgs(t, broker,
-		"--client-ca=/etc/c8s/certs/ca.crt",
+		"--tls-cert=/etc/c8s/certs/tls.crt",
 		"--openbao-addr=https://c8s-openbao.c8s-system.svc:8200",
 		"--openbao-attested=true",
 	)
+	// The broker derives the mesh CA from ca.crt beside --tls-cert; the chart
+	// must not pass --client-ca (that would let the control plane pick the CA).
+	for _, a := range broker.Args {
+		if strings.HasPrefix(a, "--client-ca") {
+			t.Errorf("chart must not render --client-ca, got %q", a)
+		}
+	}
 	operatorArgs := renderedOperatorArgs(t, out)
 	for _, want := range []string{
 		"--secret-agent-command=bao",
