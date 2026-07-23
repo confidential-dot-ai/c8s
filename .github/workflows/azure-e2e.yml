@@ -237,10 +237,18 @@ jobs:
           kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 &
           PF1=$!; sleep 4
           AL="--url https://127.0.0.1:8443 --operator-key operator.key"
-          ADDED=0
+          ADDED=0; FAILED=0
           while IFS= read -r img; do
             [ -n "$img" ] || continue
-            for d in "$(crane digest "$img" 2>/dev/null)" "$(crane digest --platform linux/amd64 "$img" 2>/dev/null)"; do
+            # Gate PER IMAGE, not just on the total. A registry hiccup on one
+            # image (docker.io rate-limits anonymous pulls from shared runner
+            # IPs) resolves no digest for it, while the other image's adds keep
+            # the total above zero. That skips it silently and hands back the
+            # 300s "never Available" timeout this step exists to prevent, with
+            # "entries added: 2" actively misdirecting. crane keeps its stderr
+            # for the same reason: an unresolved digest must say why.
+            BEFORE=$ADDED
+            for d in "$(crane digest "$img")" "$(crane digest --platform linux/amd64 "$img")"; do
               [ -n "$d" ] || continue
               if c8s allowlist add "$d" "$img" $AL; then
                 ADDED=$((ADDED+1))
@@ -248,10 +256,12 @@ jobs:
                 echo "::error::allowlist add failed for $img ($d)"
               fi
             done
+            [ "$ADDED" -gt "$BEFORE" ] || { echo "::error::no allowlist entry added for $img (digest resolution or CDS write failed)"; FAILED=1; }
           done <<< "$IMGS"
           c8s allowlist list $AL | tee allowlist.txt | tail -12
           kill $PF1 2>/dev/null || true
           [ "$ADDED" -gt 0 ] || { echo "::error::no allowlist entries added (operator key / CDS write path)"; exit 1; }
+          [ "$FAILED" -eq 0 ] || { echo "::error::at least one injected image was not allowlisted; the workload would fail closed 300s from now"; exit 1; }
           echo "allowlist entries added: $ADDED"
           kubectl -n default wait --for=condition=Available deploy/demo-nginx --timeout=300s
           IC=$(kubectl -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}')
@@ -280,8 +290,18 @@ jobs:
       # logs of every container (init containers included, plus --previous for
       # anything that has restarted) for each c8s-system pod, so a failed run is
       # diagnosable from the log alone without re-running the lane.
+      # cancelled() as well as failure(): a run killed by timeout-minutes is the
+      # most diagnosis-hungry kind there is, and it is NOT a failure() for step
+      # conditions, so the old gate skipped the dump while the always() teardown
+      # still deleted the RG. The step is set +e and ends in exit 0, so it can
+      # never change a job outcome.
       - name: diagnostics (on failure)
-        if: failure()
+        if: failure() || cancelled()
+        # Bounded: these are ~30 kubectl calls, and against a NotReady node each
+        # one waits out its own dial timeout. Unbounded, the dump itself can push
+        # a near-limit run past timeout-minutes and truncate mid-stream. A partial
+        # dump in 5 minutes beats a complete one that never prints.
+        timeout-minutes: 5
         run: |
           set +e
           kubectl get pods -A -o wide | head -40
@@ -289,7 +309,11 @@ jobs:
           kubectl get events -n c8s-system --sort-by=.lastTimestamp | tail -30
           for p in $(kubectl -n c8s-system get pods -o name); do
             echo "===== $p ====="
-            kubectl -n c8s-system describe "$p" | sed -n '/^Init Containers:/,$p' | head -60
+            # Open the range on EITHER heading. cds, operator and attestation-api
+            # declare no init containers, so an Init-only range printed nothing
+            # at all for them: no waiting reason, no exit code, no Events, for
+            # exactly the crashlooping-cds case this dump was written to catch.
+            kubectl -n c8s-system describe "$p" | sed -E -n '/^(Init )?Containers:/,$p' | head -120
             for c in $(kubectl -n c8s-system get "$p" \
               -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}'); do
               echo "----- logs $p/$c"
@@ -300,7 +324,16 @@ jobs:
           done
           echo "===== workload (default ns) ====="
           kubectl -n default get pods -o wide
-          kubectl -n default describe pods -l app=demo-nginx | sed -n '/^Init Containers:/,$p' | head -60
+          kubectl -n default describe pods -l app=demo-nginx | sed -E -n '/^(Init )?Containers:/,$p' | head -120
+          # An NRI denial reports itself as a namespace Event, not in the pod
+          # describe, so a workload that never goes Available was previously
+          # undiagnosable from this dump. The `denied` pod is the NEGATIVE step's
+          # subject: when that step fails (a non-allowlisted image RAN) its state
+          # is the whole evidence, and nothing was capturing it.
+          echo "===== events (default) ====="
+          kubectl get events -n default --sort-by=.lastTimestamp | tail -30
+          echo "===== NEGATIVE probe pod ====="
+          kubectl -n default describe pod denied 2>/dev/null | tail -40
           exit 0
 
       - name: teardown (always — the whole RG, async)
