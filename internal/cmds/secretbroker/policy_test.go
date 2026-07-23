@@ -215,6 +215,18 @@ func TestLoadPolicy(t *testing.T) {
 		t.Error("rule with empty allow must be rejected")
 	}
 
+	noSelector := filepath.Join(dir, "noselector.json")
+	mustWrite(t, noSelector, `{"rules":[{"allow":["secret/data/x"]}]}`)
+	if _, err := LoadPolicy(noSelector); err == nil {
+		t.Error("rule with no identity selector must be rejected (would match every caller)")
+	}
+	// An explicit wildcard selector is the sanctioned way to match any caller.
+	wildcard := filepath.Join(dir, "wildcard.json")
+	mustWrite(t, wildcard, `{"rules":[{"workloadId":"*","allow":["secret/data/shared/*"]}]}`)
+	if _, err := LoadPolicy(wildcard); err != nil {
+		t.Errorf("explicit workloadId:\"*\" rule must be accepted: %v", err)
+	}
+
 	unknown := filepath.Join(dir, "unknown.json")
 	mustWrite(t, unknown, `{"rules":[{"workloadId":"api","allow":["x"]}],"oops":1}`)
 	if _, err := LoadPolicy(unknown); err == nil {

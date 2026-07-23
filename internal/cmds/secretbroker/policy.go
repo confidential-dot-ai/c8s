@@ -91,6 +91,12 @@ func LoadPolicy(path string) (*Policy, error) {
 	}
 	for i := range p.Rules {
 		r := &p.Rules[i]
+		// A rule with no identity selector matches every authenticated caller,
+		// inverting deny-by-default. Require an explicit selector; matching any
+		// attested caller must be spelled out as workloadId:"*".
+		if r.WorkloadID == "" && r.WorkloadImages == nil {
+			return nil, fmt.Errorf("policy rule %d has no identity selector (set workloadId or workloadImages; use workloadId:\"*\" to match any attested caller)", i)
+		}
 		if len(r.Allow) == 0 {
 			return nil, fmt.Errorf("policy rule %d grants no paths (allow is empty)", i)
 		}
