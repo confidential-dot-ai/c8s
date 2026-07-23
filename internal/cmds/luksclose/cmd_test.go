@@ -13,10 +13,14 @@ func TestRunRequiresVolumes(t *testing.T) {
 }
 
 func TestCloseOneNoOpOnMissingMount(t *testing.T) {
-	// The mount branch is the one we can drive without root or dm — an unmounted
-	// path returns nil from unmountIfMounted, so closeOne then reaches devmapper
-	// which needs /dev/mapper/control. Test hosts without that device (this
-	// devcontainer) exercise the unmount branch only; a node has both.
+	// closeOne's mapper branch opens /dev/mapper/control, which needs root
+	// (DM_DEV_REMOVE is a privileged ioctl). Init containers running this
+	// subcommand ARE root; CI and devcontainers are not. Skip when we can't
+	// meaningfully exercise the branch — the missing-device case (absent
+	// /dev/mapper/control) is subsumed by the not-root case.
+	if os.Geteuid() != 0 {
+		t.Skip("skip: needs root to open /dev/mapper/control (test-env limitation, not a code path)")
+	}
 	if _, err := os.Stat("/dev/mapper/control"); os.IsNotExist(err) {
 		t.Skip("skip: /dev/mapper/control absent (not a node with device-mapper)")
 	}
