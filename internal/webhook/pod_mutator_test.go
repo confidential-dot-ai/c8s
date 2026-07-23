@@ -1030,3 +1030,29 @@ func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
 		t.Fatalf("initContainers patch = %+v, want injected c8s-cert + c8s-cert-wait despite the preset marker", inits)
 	}
 }
+
+// TestCertContainerCDSMeasurementsPin proves the RT-001 fix: when the
+// operator supplies CDSMeasurements, the injected get-cert sidecar pins CDS's
+// serving measurement; when empty, no (unpinnable-default) flag is added.
+func TestCertContainerCDSMeasurementsPin(t *testing.T) {
+	base := Config{
+		GetCertImage:      "img",
+		CDSURL:            "https://c8s-cds.c8s-system.svc:8443",
+		AttestationApiURL: "http://127.0.0.1:8400",
+		CertDir:           "/etc/c8s/certs",
+	}
+
+	pinned := base
+	pinned.CDSMeasurements = "aa11,bb22"
+	got := certContainer(&injection{WorkloadID: "api", SAN: "api"}, pinned)
+	if !hasArg(got.Args, "--cds-measurements=aa11,bb22") {
+		t.Fatalf("pinned config must inject --cds-measurements, args = %v", got.Args)
+	}
+
+	got = certContainer(&injection{WorkloadID: "api", SAN: "api"}, base)
+	for _, a := range got.Args {
+		if strings.HasPrefix(a, "--cds-measurements") {
+			t.Fatalf("empty config must not inject --cds-measurements, args = %v", got.Args)
+		}
+	}
+}
