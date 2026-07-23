@@ -113,6 +113,9 @@ func validateConfig(cfg config) error {
 	if cfg.openbaoRoleID != "" && cfg.openbaoSecretID == "" {
 		return fmt.Errorf("--openbao-approle-role-id requires --openbao-approle-secret-id")
 	}
+	if cfg.openbaoCertRole != "" && !cfg.openbaoCertAuth {
+		return fmt.Errorf("--openbao-cert-role requires --openbao-cert-auth")
+	}
 	if cfg.tokenTTL <= 0 {
 		return fmt.Errorf("--token-ttl must be positive")
 	}
