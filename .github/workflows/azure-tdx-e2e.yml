@@ -34,6 +34,10 @@ on:
         description: 'TDX CVM size (ConfidentialComputingType=TDX)'
         required: false
         default: 'Standard_DC4es_v6'
+      rke2_version:
+        description: 'Pin rke2 (e.g. v1.35.6+rke2r1). Empty = the stable channel. The driver records what actually installed as @@SUBSTRATE@@ either way.'
+        required: false
+        default: ''
 
 permissions:
   id-token: write
@@ -95,16 +99,37 @@ jobs:
           echo "::error::no candidate region has $VM_SIZE + >=$NEED DCEV6 quota"; exit 1
 
       - name: provision ephemeral TDX CVM (rke2)
+        env:
+          RKE2_VERSION: ${{ inputs.rke2_version }}
         run: |
           set -euo pipefail
           az group create -n "$RG" -l "$REGION" \
             --tags purpose=c8s-tdx-e2e transient=true created="$(date -u +%s)" -o none
+          # A dispatch input reaches a shell string inside cloud-init and would
+          # run as root in the guest, so validate its shape before splicing. That
+          # is the same reason c8s_ref travels base64 further down.
+          RKE2_ENV=""
+          if [ -n "${RKE2_VERSION:-}" ]; then
+            printf '%s' "$RKE2_VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+\+rke2r[0-9]+$' \
+              || { echo "::error::rke2_version must look like v1.35.6+rke2r1"; exit 1; }
+            RKE2_ENV="INSTALL_RKE2_VERSION=$RKE2_VERSION "
+          fi
+          echo "rke2: ${RKE2_VERSION:-stable channel}" >> "$GITHUB_STEP_SUMMARY"
           # RKE2 (not k3s): c8s treats rke2 as a first-class distro (auto-detected
           # from the kubelet's +rke2 suffix), so tls-lb's CoreDNS name, the NRI
           # containerd socket, and every path wire up natively — the same
           # substrate the metal lane runs on. rke2's built-in ingress-nginx is
           # disabled so it cannot contend with c8s tls-lb.
-          cat > cloud-init.yaml <<'EOF'
+          #
+          # The version is NOT pinned by default. Pinning is how the metal lane
+          # hid a stale-image bug for a week; the driver instead RECORDS what
+          # installed as @@SUBSTRATE@@, so a channel move shows up in the
+          # evidence rather than being frozen out of it. Pass rke2_version at
+          # dispatch when you need a frozen substrate for an A/B.
+          #
+          # Unquoted heredoc: ${RKE2_ENV} is the ONLY expansion. The body
+          # carries no other $ or backtick. Keep it that way.
+          cat > cloud-init.yaml <<EOF
           #cloud-config
           package_update: true
           write_files:
@@ -113,7 +138,7 @@ jobs:
                 disable:
                   - rke2-ingress-nginx
           runcmd:
-            - [ bash, -c, "curl -sfL https://get.rke2.io | sh - && systemctl enable --now rke2-server.service" ]
+            - [ bash, -c, "curl -sfL https://get.rke2.io | ${RKE2_ENV}sh - && systemctl enable --now rke2-server.service" ]
           EOF
           # ConfidentialVM flags are explicit (vTPM attestation): security type,
           # VMGuestStateOnly disk encryption, secure boot + vTPM on. NSG has no
@@ -201,6 +226,15 @@ jobs:
             fi
             if printf '%s\n' "$LOG" | grep -q '@@E2E_FAIL'; then
               echo "::error::e2e driver reported failure:"; printf '%s\n' "$LOG" | grep -oE '@@.*@@' | tail -20
+              # Harvest the FULL marker set the same way the PASS branch does.
+              # tail -40 of an xtrace log is mostly trace noise, so the D_*
+              # diagnostics (the entire point of a failed run) would otherwise
+              # scroll away unread. Markers-only greps stay well inside the
+              # run-command message cap; do NOT widen the poll window instead.
+              echo "### c8s on Azure TDX: FAIL" >> "$GITHUB_STEP_SUMMARY"
+              az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+                --scripts 'grep -oE "@@[A-Z][^@]*@@" /tmp/azure-tdx-e2e.log 2>/dev/null | tail -80' --query 'value[0].message' -o tsv 2>/dev/null \
+                | grep -oE '@@[A-Z][^@]*@@' | sed 's/@@//g; s/^/- /' | tee -a "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
             sleep 40

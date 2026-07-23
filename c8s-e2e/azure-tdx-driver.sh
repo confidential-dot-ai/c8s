@@ -15,6 +15,20 @@
 # RA-TLS). This driver automates that plus the consumption + negative
 # enforcement proofs.
 #
+# All SIX c8s components are required, nri-image-policy included. It was
+# best-effort until 2026-07-23 on the theory that its NRI plugin could not
+# register on a vanilla get.rke2.io node, a "substrate gap" the metal lane was
+# said to sidestep via its rke2-node image. That theory was wrong twice over:
+# `base-images` bakes no NRI configuration at all, and the metal lane pins
+# `c8s_ref: 70aea72` (2026-07-15), which predates the nri v0.12.1 bump. The real
+# cause was a stale plugin IMAGE. c8s#103 fixed a RemoveContainer signature that
+# left the stub rejecting its own event mask; c8s#115 fixed the paths-filter
+# glob that had aliased `:main` onto a two-month-old digest, so #103's fix never
+# shipped. `:main` was rebuilt from b828a9b at 2026-07-23T02:29:20Z, half an
+# hour AFTER the last run of this lane. No run here has ever exercised a
+# correct plugin binary. Hence @@IMG_PROV@@ below: never trust an NRI result
+# without knowing which binary produced it.
+#
 # Arg: $1 = c8s git ref to test (default main).
 set -uo pipefail
 exec > /tmp/azure-tdx-e2e.log 2>&1
@@ -39,6 +53,79 @@ fail() {
   exit 0
 }
 mark() { echo "@@$*@@"; }
+
+# ── NRI diagnostics ──────────────────────────────────────────────────────────
+# The poller only ever sees @@markers@@ and the last 40 lines of an xtrace-heavy
+# log, so EVERY diagnostic has to be a marker or it is lost. The harvest regex
+# is `@@[A-Z][^@]*@@`: markers start uppercase and carry no `@`, hence the strip
+# in m180. xtrace is off inside so the tail window holds signal, not trace.
+#
+# This block exists because the previous four runs threw away every piece of
+# evidence: the NRI runtime wires a launched plugin's stdout and stderr to
+# /dev/null, the DaemonSet's only long-running container is `sleep infinity`, so
+# nothing is kubelet-captured, and the driver never dumped a log. The one
+# surviving record is containerd's own, which on rke2 goes to a FILE, not
+# journald: rke2 runs containerd as a child and redirects it to
+# /var/lib/rancher/rke2/agent/containerd/containerd.log.
+NRI_DS=c8s-nri-image-policy-worker
+CTRD_DIR=/var/lib/rancher/rke2/agent/etc/containerd
+CTRD_LOG=/var/lib/rancher/rke2/agent/containerd/containerd.log
+HEALTH_SOCK=/var/run/nri-image-policy/health.sock
+PLUGIN_BIN=/opt/nri/plugins/10-nri-image-policy
+NRI_REV=""; NRI_BEHIND=""     # set by the provenance block; referenced under set -u
+
+m180() { mark "$1 $(printf '%.180s' "${2//@/}")"; }
+diag_nri() {
+  set +x
+  PLINE=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | grep '^c8s-nri-image-policy' | head -1)
+  PNAME=$(awk '{print $1}' <<<"$PLINE")
+  mark "D_POD ${PLINE:-none}"
+
+  # (a) is the plugin process alive, and does its health socket answer?
+  #     curl_exit=7        -> socket absent/refused: never launched, or exited
+  #     curl_exit=0 503    -> alive but not Ready: timing / CDS pull
+  #     curl_exit=0 200    -> healthy
+  HC=$(curl --unix-socket "$HEALTH_SOCK" -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost/healthz 2>/dev/null); CE=$?
+  mark "D_HEALTH http=${HC:-none} curl_exit=$CE"
+  PID=$(pgrep -f "$PLUGIN_BIN" 2>/dev/null | head -1)
+  mark "D_HOST nrisock=$([ -S /var/run/nri/nri.sock ] && echo yes || echo NO) healthsock=$([ -S "$HEALTH_SOCK" ] && echo yes || echo NO) pid=${PID:-none} bin=$(stat -c '%s:%a' "$PLUGIN_BIN" 2>/dev/null || echo MISSING)"
+  # a single stray file that does not match NN-name hard-aborts ALL discovery
+  mark "D_PLUGDIR $(ls -1 /opt/nri/plugins 2>/dev/null | tr '\n' ',') cfg=$(ls -1 /etc/nri/conf.d 2>/dev/null | tr '\n' ',')"
+
+  # (b) provenance of the binary that actually ran (see @@IMG_PROV@@)
+  mark "D_IMG rev=${NRI_REV:0:12} behind=${NRI_BEHIND:-unknown}"
+
+  # (c) containerd's side of the story, the only surviving record.
+  J=$( { cat "$CTRD_LOG" 2>/dev/null; journalctl -u rke2-server --no-pager 2>/dev/null; } )
+  mark "D_JCNT discovered=$(grep -ac 'discovered plugin' <<<"$J") start=$(grep -ac 'starting pre-installed NRI plugin' <<<"$J") failstart=$(grep -ac 'failed to start pre-installed NRI plugin' <<<"$J") failinit=$(grep -ac 'failed to initialize pre-installed NRI plugin' <<<"$J") valdisabled=$(grep -ac 'default validator is disabled' <<<"$J")"
+  while IFS= read -r l; do m180 D_JERR "$l"; done \
+    < <(grep -aE 'failed to (start|initialize) pre-installed NRI plugin|unhandled events' <<<"$J" | tail -3)
+
+  # (d) the installer's own words, this attempt and the previous one. Identical
+  #     text across both confirms the retry is a no-op (the restart is gated on
+  #     containerd/binary/config having CHANGED, and after attempt 1 none have).
+  if [ -n "$PNAME" ]; then
+    while IFS= read -r l; do m180 D_INST "$l"; done < <(kubectl -n c8s-system logs "$PNAME" -c install --tail=5 2>/dev/null)
+    while IFS= read -r l; do m180 D_INSTP "$l"; done < <(kubectl -n c8s-system logs "$PNAME" -c install --previous --tail=5 2>/dev/null)
+  fi
+
+  # (e) the EFFECTIVE merged containerd config, not the file on disk. Expect
+  #     disable=false. imports=2 would mean duplicate root keys, which containerd
+  #     refuses to start on, and this is a single-node control plane.
+  mark "D_DROPIN $([ -f "$CTRD_DIR/config-v3.toml.d/nri-image-policy.toml" ] && echo present || echo MISSING) imports=$(grep -c '^[[:space:]]*imports[[:space:]]*=' "$CTRD_DIR/config.toml" 2>/dev/null) tmpl=$([ -f "$CTRD_DIR/config-v3.toml.tmpl" ] && echo present || echo absent)"
+  m180 D_CFG "$(/var/lib/rancher/rke2/bin/containerd -c "$CTRD_DIR/config.toml" config dump 2>/dev/null | grep -aA10 'nri\.v1\.nri' | tr -d '\n"')"
+
+  # (f) the last unobserved assumption. The plugin is a HOST process, so unlike
+  #     the five components that converge it reaches CDS over a loopback
+  #     NodePort. Any 3-digit code proves reachability; 000 is new information.
+  mark "D_LOOPBACK cds=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:30808/ca 2>/dev/null) att=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:30840/healthz 2>/dev/null) route_localnet=$(sysctl -n net.ipv4.conf.all.route_localnet 2>/dev/null)"
+  set -x
+}
+
+# ── the substrate under test. Recorded, not pinned: a stale pin is precisely
+#    how the metal lane hid this bug for a week. Pass rke2_version at dispatch
+#    to freeze it when you need a reproducible comparison.
+mark "SUBSTRATE rke2=$(rke2 --version 2>/dev/null | head -1 | awk '{print $3}') containerd=$(/var/lib/rancher/rke2/bin/containerd --version 2>/dev/null | awk '{print $3}')"
 
 # ── toolchain (fresh CVM: no make; nohup strips HOME/GOPATH — both learned in
 #    the trial) ────────────────────────────────────────────────────────────────
@@ -74,20 +161,51 @@ c8s install $FLAGS \
   || mark INSTALL_WAIT_TIMEOUT
 mark INSTALL_APPLIED
 
-# ── converge. The REQUIRED core is the 5 control-plane components; the 6th,
-#    nri-image-policy (image-admission enforcement), is BEST-EFFORT here: its
-#    NRI plugin does not come healthy on a vanilla get.rke2.io node (the
-#    c8s-written NRI drop-in is imported but the plugin never registers on
-#    containerd 2.2-k3s — a substrate gap the metal rke2-node IMAGE sidesteps,
-#    orthogonal to TDX). So we gate on the core + CDS az-tdx attestation, and
-#    run the consumption/negative enforcement proofs only if NRI actually came
-#    up. Tracked as a follow-up. ────────────────────────────────────────────────
+# ── provenance. The CLI is built from $C8S_REF, but every component IMAGE comes
+#    from a registry tag: this build is unstamped, so version.Version is "dev"
+#    and the install falls back to tag `:main`. That indirection is how a stale
+#    plugin binary got tested four times without anyone noticing (c8s#115), so
+#    assert what we are actually running before believing any NRI result.
+#    A warning, not a fail: on a branch that touches plugin source the matching
+#    image legitimately does not exist yet, and a reported run beats an aborted
+#    one. Read this marker before trusting CONSUMPTION_OK / NEGATIVE_OK.
+set +x
+NRI_IMG=$(kubectl -n c8s-system get ds "$NRI_DS" \
+  -o jsonpath='{.spec.template.spec.initContainers[?(@.name=="install")].image}' 2>/dev/null)
+NRI_REV=$(crane config "$NRI_IMG" 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["config"]["Labels"].get("org.opencontainers.image.revision",""))' 2>/dev/null)
+if [ -n "$NRI_REV" ]; then
+  # commits on this ref that touch plugin source but are NOT in the image
+  NRI_BEHIND=$(git -C /root/c8s log --oneline "$NRI_REV..HEAD" \
+    -- internal/cmds/nri-image-policy cmd/nri-image-policy 2>/dev/null | wc -l | tr -d ' ')
+else
+  NRI_BEHIND=unknown   # never let an empty rev read as "behind=0"
+fi
+set -x
+# --resolve-digests is on by default, so NRI_IMG is digest-pinned and carries a
+# bare `@`. A marker containing one is invisible to the summary harvest regex
+# (`@@[A-Z][^@]*@@` cannot cross it), which would silently drop the single most
+# important assertion in this lane. Render the `@` as a field separator instead.
+IMG_SHORT="${NRI_IMG##*/}"; IMG_SHORT="${IMG_SHORT//@/ digest=}"
+mark "IMG_PROV img=${IMG_SHORT:-none} rev=${NRI_REV:0:12} plugin_commits_behind=${NRI_BEHIND:-unknown}"
+[ "$NRI_BEHIND" = "0" ] \
+  || mark "IMG_STALE_WARN plugin image is ${NRI_BEHIND} plugin-source commits behind this ref"
+
+# ── converge. All SIX components are required. The 6th, nri-image-policy, IS
+#    the image-admission enforcement plane. A lane that passes without it
+#    proves nothing about enforcement, which is most of what this lane is for.
+#    The two-tier loop is kept only so diagnostics fire after a bounded NRI
+#    window instead of after all 50 iterations; the gate itself is hard. ───────
 CORE='c8s-attestation-api c8s-cds c8s-operator c8s-ratls-mesh c8s-tls-lb'
 core_ready() {
   for c in $CORE; do
     kubectl -n c8s-system get pods --no-headers 2>/dev/null \
       | awk -v p="$c" '$1 ~ "^"p {split($2,a,"/"); if (a[1]==a[2] && $3=="Running") ok=1} END {exit ok?0:1}' || return 1
   done
+}
+nri_ready() {
+  kubectl -n c8s-system get pods --no-headers 2>/dev/null \
+    | awk '$1 ~ /nri-image-policy/ {split($2,a,"/"); if (a[1]==a[2] && $3=="Running") ok=1} END {exit ok?0:1}'
 }
 mark STAGE_CONVERGE
 NRI_UP=0
@@ -96,17 +214,18 @@ for i in $(seq 1 50); do
   TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
   echo "@@CONVERGE $i ready=${READY:-0}/${TOTAL:-0}@@"
   if core_ready; then
-    # core is up; give NRI a little longer to also converge, but don't block on it
-    kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '$1 ~ /nri-image-policy/ {split($2,a,"/"); if (a[1]==a[2] && $3=="Running") ok=1} END {exit ok?0:1}' && NRI_UP=1
-    [ "$NRI_UP" = 1 ] && { mark ALL_READY; break; }
-    [ "$i" -ge 25 ] && break   # core up, NRI clearly not converging — proceed
+    nri_ready && { NRI_UP=1; mark ALL_READY; break; }
+    [ "$i" -ge 25 ] && break   # core up, NRI over budget: stop and diagnose
   fi
   sleep 20
 done
 kubectl -n c8s-system get pods -o wide
-core_ready || fail "core control-plane not Ready (attestation-api/cds/operator/ratls-mesh/tls-lb)"
+core_ready || { diag_nri; fail "core control-plane not Ready (attestation-api/cds/operator/ratls-mesh/tls-lb)"; }
 echo "@@CORE_READY nri_up=$NRI_UP@@"
-[ "$NRI_UP" = 1 ] || mark NRI_PENDING_substrate_gap_vanilla_rke2_containerd
+# Always: on FAIL these markers ARE the answer, on PASS they are the healthy
+# baseline the next regression gets compared against.
+diag_nri
+[ "$NRI_UP" = 1 ] || fail "nri-image-policy never became healthy (read the D_* markers)"
 mark COMPONENTS_READY
 
 # ── the proof: CDS serves its CA over an az-tdx RA-TLS cert ───────────────────
@@ -136,16 +255,16 @@ echo "@@ATTEST /attest=$HTTP platform=$PLATFORM@@"
 echo "$PLATFORM" | grep -qiE 'az.?tdx|tdx' || fail "attest platform=$PLATFORM (want az-tdx)"
 mark ATTEST_PROBE_OK
 
-# ── consumption + negative enforcement proofs. These exercise NRI image
-#    admission, so they run only when NRI actually came up. On vanilla rke2
-#    (NRI_UP=0) they are skipped as known-pending — the core az-tdx attestation
-#    above is the lane's required assertion. ────────────────────────────────────
-if [ "$NRI_UP" != 1 ]; then
-  mark CONSUMPTION_SKIPPED_no_nri
-  mark NEGATIVE_SKIPPED_no_nri
-  mark E2E_PASS
-  exit 0
-fi
+# ── consumption + negative enforcement proofs. Unconditional: the converge gate
+#    above already hard-failed if NRI is not healthy, so reaching here means
+#    image admission is live and these two assertions are load-bearing. There is
+#    deliberately no skip path: a soft gate plus a comment explaining it away
+#    is exactly how this rotted for a week. If a green run is needed for an
+#    unrelated reason, dispatch a known-good c8s_ref instead of reintroducing
+#    the bypass. NOTE: enforcement here comes from the c8s plugin's own
+#    fail-closed deny path (the chart default; this lane passes no -f), not from
+#    containerd's default_validator, which the chart writes at the wrong TOML
+#    nesting level and is therefore inert everywhere. Filed separately. ─────────
 
 # ── consumption proof: allowlist the injected image set, workload goes Ready ──
 mark STAGE_CONSUMPTION
