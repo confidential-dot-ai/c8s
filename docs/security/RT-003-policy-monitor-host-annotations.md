@@ -1,6 +1,17 @@
 # RT-003 — In-guest policy-monitor enforces the allowlist on host-forgeable annotations, not on the pulled image
 
-**Status:** confirmed by code audit (repro test in this branch)
+**Status:** LIVE-VERIFIED on tdx-dev-host-1 (2026-07-23): host→vsock→kata-agent
+`CreateContainerRequest` with an attacker-chosen in-guest pull
+(`docker.io/library/alpine:3.20`) and a forged
+`io.kubernetes.cri.image-id: sha256:fcb75f…a186` (the allowlisted
+`hashicorp/http-echo:1.0.0` digest) created and **ran** a container inside the
+running `cw-server` TDX CVM (tool: `test/redteam/katahostcreate`; container
+survived 15s of stats polling, then cleaned up). The deployed guest image
+(2026-07-09, predates policy-monitor) has no in-guest enforcer at all, so the
+host-to-CVM container-creation path itself — the exact ttRPC surface the
+finding relies on — is proven live; the annotation-trust decision logic is
+proven by the unit repro (`rt003_repro_test.go`) and by kata source
+(`setup_bundle` writes host annotations verbatim).
 **Severity:** Critical — total bypass of the in-guest image-integrity enforcer by exactly the adversary it exists to stop
 **Adversary:** the host (containerd / kata-shim / direct kata-agent ttRPC over vsock — explicitly in scope: `docs/kata-image-policy.md` trust-boundary table, "Can call kata-agent RPCs via vsock")
 
@@ -116,3 +127,29 @@ under the new path (proves the fix):
 ```
 go test ./internal/cmds/policymonitor/ -run RT003 -v
 ```
+
+Live reproduction (tdx-dev-host-1, kata-qemu-tdx): `test/redteam/katahostcreate`
+dials the guest's kata-agent over vsock and sends the attack
+`CreateContainerRequest` directly — no shim or containerd cooperation needed:
+
+```
+# guest CID from: ps aux | grep 'sandbox-<id>' | grep -oE 'guest-cid=[0-9]+'
+sudo ./katahostcreate \
+  -cid <guest-cid> -sandbox <sandbox-id> \
+  -image docker.io/library/alpine:3.20 \
+  -forged-image-id sha256:<allowlisted-digest> \
+  -cmd "sleep 600" -probe 15
+# [RESULT] container survived 15s — arbitrary host-chosen code running in the CVM
+sudo ./katahostcreate -cid <guest-cid> -sandbox <sandbox-id> -remove-only
+```
+
+Build needs the kata-containers checkout for the generated agent bindings
+(`go mod edit -replace github.com/kata-containers/kata-containers/src/runtime=<kata>/src/runtime`).
+
+Deployment-gap note surfaced by the live test: the cluster's guest image
+(2026-07-09) predates policy-monitor entirely, so today **no** in-guest image
+enforcement exists — an allowlisted-*looking* annotation isn't even required.
+Separately, a plain non-allowlisted pod (`alpine:3.20` via the normal kubelet
+path) runs unchallenged. Rebuilding and rolling the guest image from current
+main is what arms the monitor; this finding is what makes the monitor's
+decision input sound once armed.
