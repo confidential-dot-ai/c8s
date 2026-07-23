@@ -425,6 +425,34 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
+	// Preferred decision input (RT-003): the kata-agent-stamped pull
+	// reference (<bundle>/c8s-pulled-image). This is the reference the
+	// guest actually pulled — written by kata-agent, not the host — so a
+	// @sha256-pinned value cryptographically binds the running content.
+	// The OCI annotations below are host-authored and forgeable (the host
+	// can name an allowlisted digest in image-id while pulling anything),
+	// so whenever the stamp exists it is the ONLY input trusted. A
+	// digest-less stamp (tag pull) is denied: nothing binds the content.
+	if stamp, err := readPulledImageStamp(filepath.Join(dir, pulledImageStampName)); err == nil && stamp != "" {
+		digest, ok := digestFromPullReference(stamp)
+		if !ok {
+			m.logger.Warn("deny container: stamped pull reference carries no digest", "cid", cid, "pull_ref", stamp)
+			m.kill(cid)
+			return
+		}
+		m.decideDigest(cid, digest, "pulled-image-stamp", spec)
+		return
+	}
+	if m.cfg.RequirePulledImageStamp {
+		m.logger.Warn("deny container: no kata-agent pull-reference stamp (require-pulled-image-stamp)", "cid", cid)
+		m.kill(cid)
+		return
+	}
+	// LEGACY path (forgeable by the host — see RT-003): kept for kata
+	// builds without the stamp. Do not extend it; remove it once the stamp
+	// is universal.
+	m.logger.Debug("no pull-reference stamp; falling back to host-authored annotations (forgeable, RT-003)", "cid", cid)
+
 	digest, ok := extractDigest(spec.Annotations)
 	if !ok {
 		// A non-sandbox container with no digest annotation we recognise
@@ -439,20 +467,31 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// Effective argv (OCI process.args): the merged entrypoint+cmd the container
-	// runs. Floor digests ignore it; workload digests are gated on it.
+	m.decideDigest(cid, digest, "oci-annotations", spec)
+}
+
+// decideDigest applies the admission policy — the baked floor plus the CDS
+// workload overlay (digest + effective argv) — to an already-extracted
+// digest and records the admission for the workload-claims broker. source
+// labels the decision input in logs ("pulled-image-stamp" when the kata
+// agent's stamp vouched for the digest, "oci-annotations" for the legacy
+// host-authored path).
+func (m *monitor) decideDigest(cid, digest, source string, spec *ociSpec) {
+	// Effective argv (OCI process.args): the merged entrypoint+cmd the
+	// container runs. Floor digests ignore it; workload digests are gated
+	// on it.
 	var argv []string
 	if spec.Process != nil {
 		argv = spec.Process.Args
 	}
 	if m.admits(digest, argv) {
-		m.logger.Info("allow container", "cid", cid, "digest", digest)
+		m.logger.Info("allow container", "cid", cid, "digest", digest, "source", source)
 		if m.broker != nil {
 			m.broker.record(cid, containerName(spec.Annotations), digest)
 		}
 		return
 	}
-	m.logger.Warn("deny container: digest/argv not allowlisted", "cid", cid, "digest", digest, "argv", argv)
+	m.logger.Warn("deny container: digest/argv not allowlisted", "cid", cid, "digest", digest, "argv", argv, "source", source)
 	m.kill(cid)
 }
 

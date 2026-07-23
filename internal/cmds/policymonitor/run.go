@@ -162,6 +162,7 @@ rather than a transient runtime problem.`,
 	fs.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "local attestation-service URL for in-guest RA-TLS evidence (default $C8S_ATTESTATION_SERVICE_URL or http://127.0.0.1:8400)")
 	fs.DurationVar(&cfg.RefreshInterval, "allowlist-refresh-interval", defaultRefreshInterval, "interval to poll CDS for allowlist updates (only when --cds-url is set)")
 	fs.StringVar(&cfg.WorkloadClaimsSocketDir, "workload-claims-socket-dir", "", "guest directory to serve this pod's admitted container digests from, over a Unix socket for in-guest get-cert (default $C8S_WORKLOAD_CLAIMS_SOCKET_DIR)")
+	fs.BoolVar(&cfg.RequirePulledImageStamp, "require-pulled-image-stamp", false, "fail closed when a container bundle lacks the kata-agent-stamped pull reference (c8s-pulled-image). Set once the stamping kata-agent ships; without the stamp the decision falls back to host-authored OCI annotations, which are forgeable by the host (RT-003)")
 	return cmd
 }
 
@@ -220,6 +221,16 @@ type Config struct {
 	// run get-cert with that supplemental group (on node-CVM the webhook injects
 	// it; wiring the kata guest to do the same is the remaining follow-up).
 	WorkloadClaimsSocketDir string
+
+	// RequirePulledImageStamp fails the admission decision closed when a
+	// bundle lacks the kata-agent-stamped pull reference
+	// (<bundle>/c8s-pulled-image). Without the stamp the monitor can only
+	// read host-authored OCI annotations (io.kubernetes.cri.image-id et
+	// al.), which the adversarial host can forge to name any allowlisted
+	// digest while pulling something else (RT-003). Default false keeps
+	// the legacy path working until the stamping kata-agent is rolled out;
+	// set true in the guest unit afterwards.
+	RequirePulledImageStamp bool
 }
 
 func (c *Config) fillDefaults() {

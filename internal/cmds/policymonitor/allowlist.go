@@ -200,6 +200,43 @@ func extractDigest(annotations map[string]string) (string, bool) {
 	return "", false
 }
 
+// pulledImageStampName is the filename kata-agent (patched for RT-003)
+// writes the true pull reference into, inside the container bundle: the
+// storage.source it passed to the in-guest puller. Unlike the OCI
+// annotations in config.json — which the host authors verbatim — this
+// value is written by kata-agent itself, so the host cannot forge it
+// without compromising the in-guest agent (already in the TCB).
+const pulledImageStampName = "c8s-pulled-image"
+
+// readPulledImageStamp reads the stamped pull reference, returning ("",
+// nil) when the stamp does not exist (pre-stamp kata-agent: caller falls
+// back to the legacy annotation path).
+func readPulledImageStamp(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+// digestFromPullReference extracts the sha256 digest from a pull
+// reference. Only a "@sha256:<64hex>"-pinned reference binds the pulled
+// content; anything else (tag, digest-less) is not a binding and returns
+// false — the caller must fail closed.
+func digestFromPullReference(ref string) (string, bool) {
+	if !strings.Contains(ref, "@") {
+		return "", false
+	}
+	norm, err := normalizeDigest(ref)
+	if err != nil {
+		return "", false
+	}
+	return "sha256:" + norm, true
+}
+
 // k8sContainerTypeKeys mirrors kata-agent's K8S_CONTAINER_TYPE_KEYS
 // (src/agent/src/confidential_data_hub/image.rs in kata-containers
 // 3.30.0): the annotation keys a CRI runtime uses to mark a container's
