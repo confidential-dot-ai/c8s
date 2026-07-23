@@ -142,6 +142,15 @@ type Config struct {
 	// CDSURL points at the CDS Service in-cluster.
 	CDSURL string
 
+	// CDSMeasurements is the comma-separated SHA-384 hex launch digests
+	// injected as get-cert's --cds-measurements. Without it every workload's
+	// cert bootstrap accepts ANY RA-TLS-attested peer as CDS, and the CA
+	// bundle in the forged issuance response becomes the victim's mesh root
+	// of trust (docs/security/RT-001-cds-bootstrap-identity.md). Empty logs a
+	// loud warning at registration and leaves the sidecars unpinned — safe
+	// only on a fully trusted pod network.
+	CDSMeasurements string
+
 	// AttestationApiURL points at the node-local attestation-api.
 	AttestationApiURL string
 
@@ -192,6 +201,9 @@ type Config struct {
 // Register wires the pod mutator onto the manager's webhook server.
 func Register(mgr ctrl.Manager, cfg Config) error {
 	cfg = cfg.withDefaults()
+	if cfg.GetCertImage != "" && cfg.CDSMeasurements == "" {
+		ctrl.Log.WithName("c8s-webhook").Info("WARNING: CDSMeasurements is empty — injected get-cert sidecars will accept ANY RA-TLS-attested peer as CDS; a pod-network attacker serving genuine TEE evidence can replace the mesh root of trust (docs/security/RT-001-cds-bootstrap-identity.md)")
+	}
 	mgr.GetWebhookServer().Register("/mutate-pods", &admission.Webhook{
 		Handler: &podMutator{
 			decoder: admission.NewDecoder(mgr.GetScheme()),
@@ -797,6 +809,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
+	}
+	// Pin the CDS serving measurement into the bootstrap handshake; without
+	// this the sidecar accepts any attested peer as CDS (RT-001).
+	if cfg.CDSMeasurements != "" {
+		args = append(args, "--cds-measurements="+cfg.CDSMeasurements)
 	}
 	for _, path := range inj.Reload.WatchPaths {
 		args = append(args, "--reload-watch="+path)

@@ -40,6 +40,7 @@ by this command.`,
 			DisableStatusMirror:     !statusMirrorEnabled,
 			GetCertImage:            getCertImage,
 			CDSURL:                  cdsURL,
+			CDSMeasurements:         cdsMeasurements,
 			AttestationApiURL:       attestationApiURL,
 			ExcludeNamespaces:       excludeNamespaces,
 			WebhookConfigName:       webhookConfigName,
@@ -66,6 +67,7 @@ var (
 	statusMirrorEnabled     bool
 	getCertImage            string
 	cdsURL                  string
+	cdsMeasurements         string
 	attestationApiURL       string
 	webhookConfigName       string
 	webhookServiceName      string
@@ -91,6 +93,7 @@ func init() {
 	operatorCmd.Flags().BoolVar(&statusMirrorEnabled, "status-mirror-enabled", true, "enable CRD-backed ConfidentialWorkload status mirror controller")
 	operatorCmd.Flags().StringVar(&getCertImage, "get-cert-image", "", "image reference the admission webhook injects for get-cert containers (empty = webhook disabled)")
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
+	operatorCmd.Flags().StringVar(&cdsMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch digests injected as get-cert's --cds-measurements (empty = workload cert bootstrap accepts any RA-TLS-attested peer as CDS; UNSAFE outside dev)")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")

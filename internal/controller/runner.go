@@ -51,6 +51,11 @@ type Options struct {
 	// injected get-cert containers POST evidence + CSR to).
 	CDSURL string
 
+	// CDSMeasurements is the comma-separated SHA-384 hex launch digests
+	// injected as get-cert's --cds-measurements. Empty leaves workload cert
+	// bootstrap accepting any RA-TLS-attested peer as CDS (RT-001).
+	CDSMeasurements string
+
 	// AttestationApiURL points at the attestation-api.
 	AttestationApiURL string
 
@@ -185,6 +190,7 @@ func Run(ctx context.Context, opts Options) error {
 		if err := webhook.Register(mgr, webhook.Config{
 			GetCertImage:          opts.GetCertImage,
 			CDSURL:                opts.CDSURL,
+			CDSMeasurements:       opts.CDSMeasurements,
 			AttestationApiURL:     opts.AttestationApiURL,
 			CertFSGroup:           int64Ptr(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
