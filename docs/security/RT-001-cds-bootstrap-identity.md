@@ -1,6 +1,6 @@
 # RT-001 — CDS bootstrap identity: workloads accept any TEE-attested peer as CDS, and the flat measurement list cannot separate CDS from co-measured workloads
 
-**Status:** confirmed by code audit (dynamic PoC scaffolding in `test/redteam/fakecds/`)
+**Status:** CONFIRMED BY LIVE EXPLOIT on a TDX pod-as-CVM cluster (2026-07-23) — see "Live PoC" below
 **Severity:** Critical
 **Adversary (in scope per `docs/THREAT_MODEL.md` §2):** host / hypervisor; pod-network attacker able to serve genuine TEE attestation
 **Affected modes:** all chart modes; pod-as-CVM (kata) is the primary target since it is the mode that claims host-adversary resistance
@@ -141,12 +141,45 @@ exposes them, and run CDS from a distinct, pinned guest configuration.
 Until then the wired pin still has value: it excludes non-co-measured
 attackers (the common pod-network case) from the get-cert path.
 
+## Live PoC (2026-07-23, tdx-dev-host-1, RKE2 + c8s kata-qemu-tdx)
+
+Executed end-to-end on a live c8s pod-as-CVM deployment on Intel TDX:
+
+1. **Rogue CDS**: `c8s cds` (the stock multi-mode binary, no custom code)
+   deployed as a kata-qemu-tdx pod in `c8s-system`, labeled to match the
+   `c8s-cds` Service selector (`app.kubernetes.io/component=cds`), with the
+   real CDS scaled to 0. It self-provisioned a **genuine TDX RA-TLS serving
+   cert** from its in-guest attestation-api — no credentials, no allowlist
+   entry, no c8s modifications. (A control-plane-free variant — DNAT of the
+   CDS pod IP — was attempted first; Cilium eBPF service translation bypasses
+   host iptables, so the endpoint-identity takeover was done at the Service
+   layer instead. Both are host/control-plane capabilities the threat model
+   grants the adversary.)
+2. **Trust-root theft**: a victim kata pod running the stock injected
+   `get-cert` flow (`--cds-url=https://c8s-cds.c8s-system.svc:8443`) logged
+   `--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS
+   measurement`, accepted the rogue's evidence, and installed the rogue's
+   self-generated mesh CA as its trust root ("mesh CA bundle written").
+   The rogue's log shows the corresponding `certificate issued (in-process)`.
+3. **Cross-workload identity forgery**: a second victim requested and was
+   issued a leaf for `c8s-echo.demo.svc` — an existing workload's mesh
+   identity — under the rogue CA.
+4. **Defect 2 demonstrated**: `c8s cds verify` against both endpoints shows
+   **identical launch measurements** (MRTD
+   `c78e2b8b2f66207f3807d8d999f51e04f5eab8f7aa02614a86ddd81b61f4e79c5d7616664fcb190b8eaae2e26d60b12a`)
+   for the real CDS and the rogue — co-measured kata guests. Even a
+   fully-pinned `--cds-measurements=<real CDS MRTD>` client would have
+   accepted the rogue. On TDX kata direct-kernel boot the MRTD covers only
+   the shared TDVF; RTMRs (which would distinguish) are not pinned anywhere
+   in the client policy.
+
+All attack artifacts were removed after the run (rogue/victim pods deleted,
+real CDS rescaled; its restart minted a fresh CA per the documented
+singleton behavior).
+
 ## Reproduction
 
-`test/redteam/fakecds/` contains the fake CDS (genuine-TEE RA-TLS serving
-cert, `/authenticate`, `/attest`, `/ca`) and a runbook for a local
-k3s + c8s (kata-qemu-tdx) cluster on a TDX host: DNAT the CDS ClusterIP to
-the fake, create a `confidential.ai/cw` workload, and observe its
-`get-cert` sidecar accept the attacker CA bundle. The fake runs anywhere it
-can present genuine TDX evidence; it needs no c8s credentials, no allowlist
-entry, and no cluster RBAC.
+`test/redteam/fakecds/` contains a standalone fake CDS (for TEEs without the
+c8s binary) and a runbook; the live PoC above needs nothing but the stock
+c8s image and pod-create RBAC in `c8s-system` (or the host's network
+control), both inside the threat model's adversary set.
