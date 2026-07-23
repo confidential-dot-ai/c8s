@@ -217,6 +217,9 @@ spec:
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
+            {{- if and (not .Values.cds.measurements) .Values.cds.allowUnpinnedMeasurements }}
+            - --allow-unpinned-measurements
+            {{- end }}
             {{- if .Values.cds.operatorKeys }}
             - --operator-keys=/etc/cds-operator-keys/keys.pem
             {{- end }}

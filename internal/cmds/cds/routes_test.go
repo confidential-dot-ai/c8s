@@ -308,6 +308,9 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		maxTTL:            time.Hour,
 		maxRequestSize:    1,
 		readinessInterval: time.Second,
+		// Most tests in this package exercise unpinned dev-mode CDS;
+		// opt in explicitly (the RT-005 default is fail-closed).
+		allowUnpinnedMeasurements: true,
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -364,6 +367,37 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	peerValid.handoffPeerTimeout = time.Minute
 	if err := validateConfig(peerValid); err != nil {
 		t.Fatalf("valid peer config rejected: %v", err)
+	}
+}
+
+// RT-005: with no measurement pin, /attest issues any workload's mesh
+// identity to any genuine TEE platform that can reach the port. CDS must
+// refuse to start in that posture unless the operator explicitly opts in.
+func TestValidateConfigFailsClosedOnEmptyMeasurements(t *testing.T) {
+	base := config{
+		maxHeaderBytes:    1,
+		maxTTL:            time.Hour,
+		maxRequestSize:    1,
+		readinessInterval: time.Second,
+	}
+
+	// Empty measurements without opt-in: rejected.
+	if err := validateConfig(base); err == nil {
+		t.Fatal("empty --measurements without --allow-unpinned-measurements must be rejected")
+	}
+
+	// Empty measurements with explicit opt-in: accepted (dev mode).
+	optIn := base
+	optIn.allowUnpinnedMeasurements = true
+	if err := validateConfig(optIn); err != nil {
+		t.Fatalf("explicit --allow-unpinned-measurements should be accepted: %v", err)
+	}
+
+	// Non-empty measurements: accepted without the dev flag.
+	pinned := base
+	pinned.measurements = []string{"abcd1234"}
+	if err := validateConfig(pinned); err != nil {
+		t.Fatalf("pinned measurements should be accepted: %v", err)
 	}
 }
 

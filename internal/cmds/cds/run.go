@@ -125,7 +125,9 @@ func run(cfg config) error {
 
 	measurements := parseMeasurementAllowlist(cfg.measurements)
 	if len(measurements) == 0 {
-		slog.Warn("--measurements empty: /attest accepts any TEE measurement. UNSAFE outside development.")
+		// validateConfig has already refused this unless the operator
+		// explicitly opted in; the warn here is the runtime reminder.
+		slog.Warn("--measurements empty: /attest accepts any TEE measurement from any platform (--allow-unpinned-measurements). UNSAFE outside development.")
 	} else {
 		slog.Info("measurement pinning enabled for /attest", "count", len(measurements))
 	}
@@ -397,6 +399,14 @@ func normalizeHTTPServerConfig(cfg config) config {
 }
 
 func validateConfig(cfg config) error {
+	if len(cfg.measurements) == 0 && !cfg.allowUnpinnedMeasurements {
+		// RT-005: with no measurement pin, /attest issues any workload's
+		// mesh identity to ANY genuine TEE platform that can route to this
+		// port — no cluster membership, no k8s identity required. Fail
+		// closed at startup; --allow-unpinned-measurements restores the
+		// old warn-and-accept posture for development.
+		return fmt.Errorf("--measurements is empty: /attest would accept any TEE measurement from any platform (see docs/security/RT-005-cds-no-instance-binding.md); pass --allow-unpinned-measurements to run unpinned (development only)")
+	}
 	for _, timeout := range []struct {
 		name  string
 		value time.Duration

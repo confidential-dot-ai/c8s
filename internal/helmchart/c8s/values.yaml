@@ -219,6 +219,11 @@ cds:
   ##      serving cert against it when they dial CDS.
   ## Empty = no pinning (UNSAFE outside dev).
   measurements: []
+  ## Explicitly permit CDS to start with measurements empty (it otherwise
+  ## fails closed — see docs/security/RT-005-cds-no-instance-binding.md: an
+  ## unpinned /attest issues any workload's mesh identity to any TEE platform
+  ## that can reach the port). Development only.
+  allowUnpinnedMeasurements: false
   ## PEM bundle of operator EC public keys (public material, not a secret).
   ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a
   ## short-lived token signed by one of the matching operator private keys (see
