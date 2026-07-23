@@ -607,7 +607,25 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		})
 		if chainErr == nil {
-			// A valid CA chain authenticates the issuer, but any configured
+			// A valid CA chain authenticates the issuer; what else must hold
+			// depends on the trust mode (see VerifyPolicy.RequireCAEvidence).
+			if policy != nil && policy.RequireCAEvidence {
+				// Production mode: the CA chain alone is not sufficient. The leaf
+				// must carry re-verifiable RA-TLS evidence (issuer.SignCSR copies
+				// the requester's nonce-free .1.1 extension onto the leaf), which
+				// we re-verify here so a CA compromise or wrong issuance policy is
+				// caught at the peer instead of trusted from the chain. VerifyCert
+				// checks the hardware evidence, launch measurement, config-claims
+				// pins, and the key/claims binding via the attestation-api. The
+				// embedded evidence is nonce-free by construction, so verify with
+				// a nil nonce; TLS 1.3 supplies connection liveness. A leaf with
+				// no (or stale/forged) evidence fails closed.
+				if _, err := VerifyCert(cert, policy, nil); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
+				}
+				return nil
+			}
+			// Legacy/dev mode: trust the CA chain, but any configured
 			// config-claims pins (operator-keys/seed/workload) still must hold —
 			// they ride the certificate, so a CA-signed leaf with absent or
 			// mismatched claims must not be accepted when a pin is configured.
