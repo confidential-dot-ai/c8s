@@ -1064,8 +1064,10 @@ tlsLb:
     allowOrigins: []
     # -- Methods advertised in Access-Control-Allow-Methods.
     allowMethods: ["GET", "POST", "OPTIONS"]
-    # -- Headers advertised in Access-Control-Allow-Headers.
-    allowHeaders: ["Authorization", "Content-Type"]
+    # -- Headers advertised in Access-Control-Allow-Headers. X-C8s-Session is
+    # sent by browser clients on the /tunnel request, so it must be allowed for
+    # the over-encrypted channel to work cross-origin.
+    allowHeaders: ["Authorization", "Content-Type", "X-C8s-Session"]
     # -- Headers advertised in Access-Control-Expose-Headers. Always emitted
     # by tls-lb (and merged in front of the upstream's value in pass-through
     # mode) so browsers can read these headers from JS regardless of what

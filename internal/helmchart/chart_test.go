@@ -2006,6 +2006,22 @@ func TestTLSLBVerifyDerivesProxySSLNameFromUpstream(t *testing.T) {
 	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 }
 
+func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
+	// Browser clients send X-C8s-Session on the /tunnel request, so the default
+	// CORS allow-headers must include it or the over-encrypted channel breaks
+	// cross-origin.
+	out, err := helmTemplateTLSLB(t,
+		"--set", "cors.enabled=true",
+		"--set", "cors.allowOrigins={https://example.github.io}",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "X-C8s-Session") {
+		t.Fatalf("CORS Access-Control-Allow-Headers missing X-C8s-Session:\n%s", out)
+	}
+}
+
 func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	// Route backends must be secured (https + verify); the location/upstream
 	// wiring under test is protocol-independent.
