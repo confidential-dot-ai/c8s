@@ -127,7 +127,7 @@ func TestParseLUKSVolumesSortsByName(t *testing.T) {
 
 func luksTestConfig() Config {
 	c := secretsTestConfig()
-	c.LUKSOpenImage = "ghcr.io/confidential-dot-ai/c8s-operator:test"
+	c.LUKSOpenImage = "ghcr.io/confidential-dot-ai/luks-open:test"
 	return c
 }
 

@@ -23,7 +23,7 @@
 #
 # Inputs (env), each "true"/"false" from the dorny/paths-filter step:
 #   SHARED             shared-core || shared-cmdsutil || shared-root
-#   C8S, CDS, GET_CERT, RATLS_MESH, NRI_IMAGE_POLICY
+#   C8S, LUKS_OPEN, CDS, GET_CERT, RATLS_MESH, NRI_IMAGE_POLICY
 #   GITHUB_REF         the triggering ref (for the tag-push fan-out)
 #   GITHUB_EVENT_NAME  the triggering event; "workflow_dispatch" fans out to all
 #                      (paths-filter is skipped on dispatch, so the flags above
@@ -51,6 +51,7 @@ maybe_add() {
 }
 
 maybe_add "$C8S" c8s ghcr.io/confidential-dot-ai/c8s-operator cmd/c8s/Dockerfile
+maybe_add "$LUKS_OPEN" luks-open ghcr.io/confidential-dot-ai/luks-open cmd/luks-open/Dockerfile
 maybe_add "$CDS" cds ghcr.io/confidential-dot-ai/cds cmd/cds/Dockerfile
 maybe_add "$GET_CERT" get-cert ghcr.io/confidential-dot-ai/get-cert cmd/get-cert/Dockerfile
 maybe_add "$RATLS_MESH" ratls-mesh ghcr.io/confidential-dot-ai/ratls-mesh cmd/ratls-mesh/Dockerfile
