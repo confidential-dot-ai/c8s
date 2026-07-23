@@ -2,10 +2,24 @@ package luks
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/confidential-dot-ai/c8s/internal/devmapper"
 )
+
+// runtimeMapperClose removes the pod-runtime dm-crypt mapper (c8s-<name>) if
+// one is still active. Returns nil when the mapper is already gone
+// (idempotent). Kept in destroy's util so create.go's transient
+// c8s-luks-<workload>-<name> mapper (a separate lifecycle) stays untouched.
+func runtimeMapperClose(name string) error {
+	if err := devmapper.Remove(name); err != nil && !errors.Is(err, devmapper.ErrNotFound) {
+		return err
+	}
+	return nil
+}
 
 func jsonEncoder() *json.Encoder {
 	enc := json.NewEncoder(os.Stdout)

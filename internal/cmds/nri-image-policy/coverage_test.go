@@ -299,6 +299,10 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 	}
 	var want api.EventMask
 	want.Set(api.Event_CREATE_CONTAINER)
+	// The plugin also drives the LUKS mapper reap on pod-sandbox removal — the
+	// abrupt-path backstop for the injected c8s-luks-open preStop hook. See
+	// docs/pitfalls.md — LUKS leak.
+	want.Set(api.Event_REMOVE_POD_SANDBOX)
 	if mask != want {
 		t.Fatalf("mask = %v, want %v", mask, want)
 	}

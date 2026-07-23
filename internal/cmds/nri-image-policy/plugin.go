@@ -2,6 +2,7 @@ package nriimagepolicy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,7 +18,13 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	"github.com/confidential-dot-ai/c8s/internal/cache"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/internal/devmapper"
 )
+
+// luksAnnotationPrefix mirrors internal/webhook/luks.go — the pod annotations
+// the webhook stamps for each openbao-gated LUKS volume. The reap key is the
+// suffix; the runtime mapper name is "c8s-<suffix>" (see luksopen).
+const luksAnnotationPrefix = "confidential.ai/luks-"
 
 const (
 	pluginName = "image-policy"
@@ -139,7 +146,56 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 		// The broker needs eviction on stop to stay correct across pod churn.
 		mask.Set(api.Event_REMOVE_CONTAINER)
 	}
+	// Pod-sandbox removal drives the LUKS mapper reap — belt-and-suspenders
+	// for the injected c8s-luks-open preStop hook, which is skipped on
+	// SIGKILL / node crash / grace-period=0. See docs/pitfalls.md — LUKS leak.
+	mask.Set(api.Event_REMOVE_POD_SANDBOX)
 	return mask, nil
+}
+
+// RemovePodSandbox reaps the dm-crypt mappers owned by a departing pod. The
+// mapper is a global kernel object under node-CVM (kata off) and leaks when
+// the injected preStop can't run (abrupt paths). Best-effort: no error return
+// is fatal — the pod sandbox is going away regardless.
+func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	names := luksMapperNamesFor(pod.GetAnnotations())
+	if len(names) == 0 {
+		return nil
+	}
+	for _, mapper := range names {
+		if err := devmapper.Remove(mapper); err != nil {
+			if errors.Is(err, devmapper.ErrNotFound) {
+				continue // already closed (preStop won the race, kata guest disposed it)
+			}
+			p.logger.Error("luks reap: cannot remove mapper",
+				"mapper", mapper, "namespace", pod.GetNamespace(), "pod", pod.GetName(),
+				"error", err)
+			continue
+		}
+		p.logger.Info("luks reap: mapper removed",
+			"mapper", mapper, "namespace", pod.GetNamespace(), "pod", pod.GetName())
+	}
+	return nil
+}
+
+// luksMapperNamesFor returns the runtime mapper names for every
+// confidential.ai/luks-<name> annotation on the pod. The mapper name is
+// "c8s-<name>" (see internal/cmds/luksopen). Sorted for deterministic reap
+// order.
+func luksMapperNamesFor(annotations map[string]string) []string {
+	var names []string
+	for k := range annotations {
+		if !strings.HasPrefix(k, luksAnnotationPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(k, luksAnnotationPrefix)
+		if name == "" {
+			continue
+		}
+		names = append(names, "c8s-"+name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // RemoveContainer evicts a stopped container from the workload-claims broker.

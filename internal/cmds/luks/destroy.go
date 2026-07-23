@@ -113,6 +113,16 @@ func localImgPath(cfg destroyCfg) string {
 }
 
 func destroyLocal(cfg destroyCfg, loop string) error {
+	// Close the runtime mapper before detaching the loop: the injected
+	// c8s-luks-open (init container) creates /dev/mapper/c8s-<name>, and a
+	// dm-crypt mapper holds the loop device open — losetup -d on a held loop
+	// only sets LO_FLAGS_AUTOCLEAR (returns success) and the loop lingers,
+	// leaving destroy unable to actually detach. Best-effort: NotFound is
+	// expected on a healthy shutdown (preStop / NRI reap already closed it);
+	// only surface unexpected errors. See docs/pitfalls.md — LUKS leak.
+	if err := runtimeMapperClose("c8s-" + cfg.name); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: runtime mapper close for c8s-%s: %v (continuing)\n", cfg.name, err)
+	}
 	if loop != "" {
 		if err := losetupDetach(loop); err != nil {
 			return err
