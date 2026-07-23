@@ -3,8 +3,8 @@
 #
 # Stands up a real OpenBao (dev mode) behind the broker and fetches a secret as
 # an attested workload, using a stock curl client in place of a Vault Agent.
-# It uses --peer-verify=ca (identity-gated) because the measurement-gated
-# (--peer-verify=ratls) path needs SEV-SNP/TDX hardware.
+# The broker verifies callers by X.509 chain to a demo CA standing in for the
+# CDS mesh CA (CDS is the trust root); no TEE hardware is needed.
 #
 # Requires `bao` (or set BAO=/path/to/bao), `c8s` (or set C8S=/path/to/c8s),
 # plus openssl, curl, and jq on PATH.
@@ -38,7 +38,7 @@ curl -fsS --retry 30 --retry-connrefused --retry-delay 1 http://127.0.0.1:8200/v
 
 echo "### 4. start the secret-broker"
 nohup "$C8S" secret-broker --host 127.0.0.1 --port 8443 \
-  --peer-verify=ca --client-ca ca.crt --tls-cert server.crt --tls-key server.key \
+  --client-ca ca.crt --tls-cert server.crt --tls-key server.key \
   --policy policy.json \
   --openbao-addr http://127.0.0.1:8200 --openbao-attested=false --openbao-token root \
   >broker.log 2>&1 &
