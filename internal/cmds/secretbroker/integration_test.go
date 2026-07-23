@@ -1,6 +1,7 @@
 package secretbroker
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -12,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -261,6 +264,59 @@ func TestLoginAcceptsPostAndPut(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("login via %s failed: %d", method, rec.Code)
 		}
+	}
+}
+
+// TestConcurrentLoginSingleFlight proves concurrent first reads on an AppRole
+// client trigger exactly one login: loginMu serializes it and the double-check
+// lets late callers reuse the freshly set token instead of logging in again.
+func TestConcurrentLoginSingleFlight(t *testing.T) {
+	var logins int32
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/approle/login" {
+			atomic.AddInt32(&logins, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"appr-token"}}`))
+			return
+		}
+		if r.Header.Get("X-Vault-Token") != "appr-token" {
+			http.Error(w, `{"errors":["permission denied"]}`, http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"data":{"password":"s3cr3t"},"metadata":{"version":1}}}`))
+	}))
+	defer stub.Close()
+
+	store, err := newVaultClient(config{
+		openbaoAddr:     stub.URL,
+		openbaoAttested: false,
+		openbaoRoleID:   "r",
+		openbaoSecretID: "s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.readKV(context.Background(), "secret", "api/db"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent readKV failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&logins); got != 1 {
+		t.Fatalf("expected exactly one AppRole login, got %d", got)
 	}
 }
 

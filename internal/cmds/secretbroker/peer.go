@@ -20,10 +20,9 @@ import (
 type peerVerifier struct{}
 
 // buildServerTLS constructs the broker's TLS config and the peerVerifier. The
-// server certificate is always loaded from files (in-cluster: the injected
-// get-cert sidecar's c8s-certs tmpfs; demo: a generated cert), so stock agents
-// trust the broker via their configured CA bundle. Callers are verified by
-// X.509 chain to the CDS mesh CA (--client-ca).
+// server certificate is the injected get-cert sidecar's cert (the shared
+// c8s-certs tmpfs), so stock agents trust the broker via their configured CA
+// bundle. Callers are verified by X.509 chain to the CDS mesh CA (--client-ca).
 func buildServerTLS(cfg config) (*tls.Config, *peerVerifier, error) {
 	srvCert, err := tls.LoadX509KeyPair(cfg.tlsCert, cfg.tlsKey)
 	if err != nil {

@@ -65,6 +65,7 @@ func run(cfg config) error {
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
 	logStartup(cfg, addr, len(policy.Rules))
+	// Cert/key come from srv.TLSConfig; the empty filename args are intentional.
 	if err := srv.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
 		return err
 	}

@@ -31,8 +31,10 @@ type vaultClient struct {
 	roleID   string
 	secretID string
 
-	mu    sync.Mutex
-	token string // current store token (static or last AppRole login)
+	// mu guards token; loginMu serializes AppRole logins (no double-login).
+	mu      sync.Mutex
+	loginMu sync.Mutex
+	token   string
 }
 
 // kvSecret is the decoded inner payload of a KV v2 read.
@@ -86,7 +88,8 @@ func storeHTTPClient(cfg config) (*http.Client, error) {
 }
 
 // login obtains a store token via AppRole when no token is held yet. A static
-// token (set at construction) needs no login.
+// token (set at construction) needs no login. loginMu serializes concurrent
+// callers so at most one AppRole login is in flight and the token is set once.
 func (c *vaultClient) login(ctx context.Context) error {
 	c.mu.Lock()
 	have, role, secret := c.token, c.roleID, c.secretID
@@ -96,6 +99,12 @@ func (c *vaultClient) login(ctx context.Context) error {
 	}
 	if role == "" {
 		return fmt.Errorf("no OpenBao auth configured (set --openbao-token or --openbao-approle-*)")
+	}
+
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	if c.currentToken() != "" {
+		return nil // another goroutine logged in while we waited
 	}
 
 	body, _ := json.Marshal(map[string]string{"role_id": role, "secret_id": secret})

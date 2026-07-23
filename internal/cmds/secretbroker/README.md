@@ -10,12 +10,12 @@ and CSI tooling work against it unchanged — point the agent's `vault.address` 
 the broker.
 
 ```
- workload pod (CDS mesh identity)                in TCB                    store
+ workload pod (CDS mesh identity)          in TCB                   store
  ┌───────────────────────────────┐         ┌──────────────────┐     ┌──────────────┐
- │ app ← /vault/secrets (tmpfs)   │ mTLS    │ secret-broker    │     │ OpenBao      │
- │ Vault Agent (UNMODIFIED) ──────┼────────►│  verify peer     │     │ (attested by │
- │   auth=cert (the c8s cert)     │ (broker │  policy check    │────►│  default, or │
- │   address=https://broker:8443  │  ends   │  Vault translate │     │  external)   │
+ │ app ← /vault/secrets (tmpfs)  │ mTLS    │ secret-broker    │     │ OpenBao      │
+ │ Vault Agent (UNMODIFIED) ─────┼────────►│  verify peer     │     │ (attested by │
+ │   auth=cert (the c8s cert)    │ (broker │  policy check    │────►│ default, or  │
+ │   address=https://broker:8443 │  ends   │  Vault translate │     │ external)    │
  └───────────────────────────────┘  TLS)   └──────────────────┘     └──────────────┘
    caller identity is read off the CDS-issued client cert
 ```
@@ -144,12 +144,3 @@ set `secretAgent.image` to a Vault image and `secretAgent.command: vault`.
 make build-c8s                 # or: go build -o c8s ./cmd/c8s
 C8S=./build/c8s ./scripts/secret-broker-demo.sh   # needs `bao` on PATH too
 ```
-
-## Status
-
-Implemented and tested: the broker, the `secret-agent-config` renderer, the
-webhook agent injection, and the Helm wiring. Validated hardware-free against a
-real OpenBao (broker + unmodified `bao agent` → templated file). Pending a TEE
-cluster: live in-cluster injection ordering. Future: scoped/least-privilege
-OpenBao tokens (the broker uses one identity today), KV v1, and dynamic/transit
-engines.

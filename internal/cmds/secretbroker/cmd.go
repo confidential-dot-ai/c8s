@@ -47,9 +47,9 @@ func NewCmd() *cobra.Command {
 	flags.IntVarP(&cfg.port, "port", "p", 8443, "listen port")
 	flags.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
-	// Broker server identity. In-cluster these are produced by the injected
-	// c8s get-cert sidecar (the shared c8s-certs tmpfs); in the demo they are a
-	// generated cert. The stock agent trusts this via its configured CA bundle.
+	// Broker server identity: the injected c8s get-cert sidecar's cert on the
+	// shared c8s-certs tmpfs, as for every other component. Stock agents trust
+	// it via their configured CA bundle.
 	flags.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate the broker presents to callers (required)")
 	flags.StringVar(&cfg.tlsKey, "tls-key", "", "PEM private key for --tls-cert (required)")
 
