@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # c8s-on-Azure-TDX e2e driver — runs IN-GUEST on an ephemeral DC4es_v6
-# ConfidentialVM (k3s), delivered + launched by azure-tdx-e2e.yml via
-# `az vm run-command`. There is no AKS and the k3s apiserver is NOT exposed, so
+# ConfidentialVM (RKE2), delivered + launched by azure-tdx-e2e.yml via
+# `az vm run-command`. There is no AKS and the rke2 apiserver is NOT exposed, so
 # every kubectl/c8s/crane call runs here on the node rather than from the CI
 # runner. The workflow polls /tmp/azure-tdx-e2e.log for the @@markers@@ this
 # emits and gates on @@E2E_PASS@@ / @@E2E_FAIL@@ — the same marker-polling
@@ -22,8 +22,13 @@ set -x
 
 C8S_REF="${1:-main}"
 export HOME=/root GOPATH=/root/go GOMODCACHE=/root/go/pkg/mod
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-export PATH="$PATH:/usr/local/go/bin:/root/go/bin:/usr/local/bin"
+# RKE2, not k3s: c8s auto-detects distro=rke2 from the kubelet's +rke2 suffix,
+# so every rke2-ism (containerd socket, CoreDNS service name, config dir) is
+# native — no -f override. k3s looks like rke2 for the containerd socket but
+# NOT for CoreDNS (tls-lb's nginx resolves rke2-coredns-*, absent on k3s →
+# crashloop) — the reason this lane runs on rke2 like the metal lane does.
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH="$PATH:/usr/local/go/bin:/root/go/bin:/var/lib/rancher/rke2/bin:/usr/local/bin"
 
 fail() { echo "@@E2E_FAIL $*@@"; kubectl -n c8s-system get pods -o wide 2>/dev/null; exit 0; }
 mark() { echo "@@$*@@"; }
@@ -48,20 +53,13 @@ echo "@@REF_SHA $(git -C /root/c8s rev-parse HEAD)@@"
 command -v c8s >/dev/null || fail "c8s not on PATH after build"
 mark BUILD_OK
 
-# ── install: the az-tdx vTPM path + the k3s NRI override (chart distro=rke2
-#    points at the k3s containerd socket; configDir/restartCommand are the two
-#    k3s-vs-rke2 corrections — verified in nri-image-policy-helpers.tpl) ────────
+# ── install: the az-tdx vTPM path. No -f override — c8s auto-detects the rke2
+#    distro from the kubelet version and wires the containerd socket, config
+#    dir and CoreDNS naming natively (the metal lane installs the same way). ────
 mark STAGE_INSTALL
 openssl ecparam -name prime256v1 -genkey -noout -out /root/operator.key
 openssl ec -in /root/operator.key -pubout -out /root/operator.pub
-cat > /root/k3s-nri.yaml <<'YAML'
-nriImagePolicy:
-  distro: rke2
-  containerd:
-    configDir: /var/lib/rancher/k3s/agent/etc/containerd
-    restartCommand: systemctl restart k3s
-YAML
-FLAGS="--single-node --cvm-mode aks --hardware-platform tdx --operator-keys /root/operator.pub -f /root/k3s-nri.yaml"
+FLAGS="--single-node --cvm-mode aks --hardware-platform tdx --operator-keys /root/operator.pub"
 # helm --wait's baked 5-min ceiling loses to a 4-vCPU single node bringing up
 # six components; install is idempotent, so two attempts then an explicit gate.
 c8s install $FLAGS \
@@ -70,11 +68,10 @@ c8s install $FLAGS \
 mark INSTALL_APPLIED
 
 # ── converge: all six components Ready (real count, never zero-pod false-pass).
-#    WIDE budget (~17min): the nri-image-policy install initContainer runs
-#    `systemctl restart k3s` (the restartCommand override), which bounces the
-#    apiserver and every pod mid-install — kubectl calls transiently fail
-#    (swallowed by 2>/dev/null; the loop retries) and the cluster re-converges
-#    from scratch. 30x20s was too tight for that double convergence. ─────────────
+#    WIDE budget (~17min): the nri-image-policy install restarts rke2-server to
+#    reload containerd with the NRI drop-in, which briefly bounces the apiserver
+#    and pods mid-install — kubectl calls transiently fail (swallowed by
+#    2>/dev/null; the loop retries) and the cluster re-converges. ────────────────
 mark STAGE_CONVERGE
 for i in $(seq 1 50); do
   TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
@@ -87,7 +84,7 @@ kubectl -n c8s-system get pods -o wide
 NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
 TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
 [ "${TOTAL:-0}" -ge 6 ] || fail "only ${TOTAL:-0} components (want >=6)"
-[ "${NOTREADY:-1}" = "0" ] || fail "${NOTREADY} components not Ready (the k3s NRI override, or tls-lb klipper LB, did not converge)"
+[ "${NOTREADY:-1}" = "0" ] || fail "${NOTREADY} components not Ready"
 mark COMPONENTS_READY
 
 # ── the proof: CDS serves its CA over an az-tdx RA-TLS cert ───────────────────

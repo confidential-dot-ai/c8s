@@ -3,8 +3,8 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # The TDX twin of azure-e2e.yml (SNP Model-B), with one structural difference:
 # there is no AKS. AKS refuses TDX node pools (Azure/AKS#5618), so this boots an
-# EPHEMERAL standalone DC4es_v6 ConfidentialVM running k3s, installs the c8s ref
-# under test IN-GUEST, asserts, and deletes the whole RG. Because the k3s
+# EPHEMERAL standalone DC4es_v6 ConfidentialVM running RKE2, installs the c8s ref
+# under test IN-GUEST, asserts, and deletes the whole RG. Because the rke2
 # apiserver is not exposed (NSG closed) and there is no `az aks get-credentials`,
 # every kubectl/c8s/crane call runs on the node via `az vm run-command` — the
 # driver (c8s-e2e/azure-tdx-driver.sh) emits @@markers@@ to a log this job polls,
@@ -14,7 +14,8 @@
 # --cvm-mode aks --hardware-platform tdx` brings the node up self-attesting
 # az-tdx over the vTPM (CDS serves /ca over az-tdx RA-TLS). The CLI auto-sets
 # cds.ratlsPlatform=tdx + attestationApi.cvmMode=aks; no /dev/tdx_guest, no qgsd.
-# The one k3s wrinkle (nri-image-policy) is handled by the driver's -f override.
+# c8s auto-detects the rke2 distro, so no chart overrides are needed — the
+# same substrate the metal lane installs on.
 #
 # DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
 name: azure-tdx-e2e
@@ -93,20 +94,30 @@ jobs:
           done
           echo "::error::no candidate region has $VM_SIZE + >=$NEED DCEV6 quota"; exit 1
 
-      - name: provision ephemeral TDX CVM (k3s)
+      - name: provision ephemeral TDX CVM (rke2)
         run: |
           set -euo pipefail
           az group create -n "$RG" -l "$REGION" \
             --tags purpose=c8s-tdx-e2e transient=true created="$(date -u +%s)" -o none
+          # RKE2 (not k3s): c8s treats rke2 as a first-class distro (auto-detected
+          # from the kubelet's +rke2 suffix), so tls-lb's CoreDNS name, the NRI
+          # containerd socket, and every path wire up natively — the same
+          # substrate the metal lane runs on. rke2's built-in ingress-nginx is
+          # disabled so it cannot contend with c8s tls-lb.
           cat > cloud-init.yaml <<'EOF'
           #cloud-config
           package_update: true
+          write_files:
+            - path: /etc/rancher/rke2/config.yaml
+              content: |
+                disable:
+                  - rke2-ingress-nginx
           runcmd:
-            - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --write-kubeconfig-mode 644" sh -
+            - [ bash, -c, "curl -sfL https://get.rke2.io | sh - && systemctl enable --now rke2-server.service" ]
           EOF
           # ConfidentialVM flags are explicit (vTPM attestation): security type,
           # VMGuestStateOnly disk encryption, secure boot + vTPM on. NSG has no
-          # inbound; the public IP exists only for egress (k3s/ghcr/go/apt; IMDS
+          # inbound; the public IP exists only for egress (rke2/ghcr/go/apt; IMDS
           # is link-local). All cluster access is via az vm run-command.
           az vm create -g "$RG" -n "$VM" \
             --image Canonical:ubuntu-24_04-lts:cvm:latest \
@@ -121,22 +132,24 @@ jobs:
             --tags purpose=c8s-tdx-e2e transient=true \
             -o table
 
-      - name: wait for k3s + confirm the TDX vTPM surface
+      - name: wait for rke2 + confirm the TDX vTPM surface
         run: |
           set -euo pipefail
-          for i in $(seq 1 30); do
+          # rke2 is heavier than k3s (pulls server images on first boot), so a
+          # wider wait — up to ~13min.
+          for i in $(seq 1 40); do
             OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts '
-              export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-              /usr/local/bin/kubectl get node --no-headers 2>/dev/null | grep -q " Ready " && echo K3S_READY
+              export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+              /var/lib/rancher/rke2/bin/kubectl get node --no-headers 2>/dev/null | grep -q " Ready " && echo RKE2_READY
               [ -e /dev/tpmrm0 ] && echo TPM_OK
               curl -s -H Metadata:true --max-time 5 "http://169.254.169.254/metadata/instance/compute?api-version=2021-12-13" 2>/dev/null \
                 | python3 -c "import json,sys;print(\"SECTYPE\", json.load(sys.stdin).get(\"securityProfile\",{}).get(\"securityType\"))" 2>/dev/null
             ' --query 'value[0].message' -o tsv 2>/dev/null || echo retry)
-            echo "[$i] $(echo "$OUT" | grep -oE 'K3S_READY|TPM_OK|SECTYPE [A-Za-z]+' | tr '\n' ' ')"
-            echo "$OUT" | grep -q K3S_READY && echo "$OUT" | grep -q 'SECTYPE ConfidentialVM' && exit 0
+            echo "[$i] $(echo "$OUT" | grep -oE 'RKE2_READY|TPM_OK|SECTYPE [A-Za-z]+' | tr '\n' ' ')"
+            echo "$OUT" | grep -q RKE2_READY && echo "$OUT" | grep -q 'SECTYPE ConfidentialVM' && exit 0
             sleep 20
           done
-          echo "::error::k3s never became Ready / not a ConfidentialVM"; exit 1
+          echo "::error::rke2 never became Ready / not a ConfidentialVM"; exit 1
 
       - name: deliver + launch the e2e driver in-guest
         env:
