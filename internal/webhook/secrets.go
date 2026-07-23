@@ -16,7 +16,6 @@ import (
 const (
 	AnnotationSecretsInject = "confidential.ai/secrets-inject"
 	AnnotationSecretsDir    = "confidential.ai/secrets-dir"
-	AnnotationSecretsBroker = "confidential.ai/secrets-broker"
 	AnnotationSecretsRenew  = "confidential.ai/secrets-renew"
 	secretAnnotationPrefix  = "confidential.ai/secret-"
 )
@@ -39,9 +38,10 @@ type secretEntry struct {
 }
 
 // secretsInjection captures the secrets-injection request parsed from a pod.
+// The broker URL is deliberately absent: it comes only from the operator's
+// (measured) config, never a pod annotation. See docs/pitfalls.md — broker URL.
 type secretsInjection struct {
 	Entries    []secretEntry
-	BrokerURL  string // override; falls back to Config.SecretBrokerURL
 	SecretsDir string
 	Renew      bool
 }
@@ -62,7 +62,6 @@ func parseSecretsInjection(annotations map[string]string) (*secretsInjection, er
 	}
 
 	si := &secretsInjection{
-		BrokerURL:  strings.TrimSpace(annotations[AnnotationSecretsBroker]),
 		SecretsDir: strings.TrimSpace(annotations[AnnotationSecretsDir]),
 	}
 	if si.Renew, err = boolAnnotation(annotations, AnnotationSecretsRenew); err != nil {
@@ -126,11 +125,6 @@ func injectSecrets(pod *corev1.Pod, eff injection, cfg Config) {
 	if secretsDir == "" {
 		secretsDir = defaultSecretsDir
 	}
-	brokerURL := si.BrokerURL
-	if brokerURL == "" {
-		brokerURL = cfg.SecretBrokerURL
-	}
-
 	ensureVolume(pod, memoryVolume(secretsConfigVolume))
 	ensureVolume(pod, memoryVolume(secretsDataVolume))
 
@@ -138,7 +132,7 @@ func injectSecrets(pod *corev1.Pod, eff injection, cfg Config) {
 	mountAll(pod, corev1.VolumeMount{Name: secretsDataVolume, MountPath: secretsDir, ReadOnly: true})
 
 	inits := []corev1.Container{
-		agentConfigContainer(cfg, eff, brokerURL, secretsDir),
+		agentConfigContainer(cfg, eff, secretsDir),
 		agentContainer("c8s-secrets-agent-init", cfg, eff, secretsDir, true),
 	}
 	if si.Renew {
@@ -149,12 +143,12 @@ func injectSecrets(pod *corev1.Pod, eff injection, cfg Config) {
 
 // agentConfigContainer renders the agent config inside the measured c8s image,
 // so no control-plane object carries it.
-func agentConfigContainer(cfg Config, eff injection, brokerURL, secretsDir string) corev1.Container {
+func agentConfigContainer(cfg Config, eff injection, secretsDir string) corev1.Container {
 	certDir := eff.Cert.Dir
 	args := []string{
 		"secret-agent-config",
 		"--out=" + secretsConfigPath,
-		"--broker-addr=" + brokerURL,
+		"--broker-addr=" + cfg.SecretBrokerURL,
 		"--ca=" + certPath(certDir, "ca.crt"),
 		"--client-cert=" + certPath(certDir, eff.Cert.CertFile),
 		"--client-key=" + certPath(certDir, eff.Cert.KeyFile),
@@ -218,11 +212,10 @@ func (cfg Config) secretAgentCommand() string {
 // agentSecurityContext is the strict context for the c8s-owned config-render
 // init container, which runs the c8s image and needs no privileged bits.
 func agentSecurityContext() *corev1.SecurityContext {
-	f, tr := false, true
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: &f,
-		ReadOnlyRootFilesystem:   &tr,
-		RunAsNonRoot:             &tr,
+		AllowPrivilegeEscalation: boolPtr(false),
+		ReadOnlyRootFilesystem:   boolPtr(true),
+		RunAsNonRoot:             boolPtr(true),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
@@ -238,13 +231,11 @@ func agentSecurityContext() *corev1.SecurityContext {
 // docker-entrypoint.sh's chown-then-su-exec dance doesn't run — the `bao`
 // binary runs directly, which happily starts as an arbitrary non-root UID.
 func vaultAgentSecurityContext() *corev1.SecurityContext {
-	f, tr := false, true
-	var uid, gid int64 = 65532, 65532
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: &f,
-		RunAsNonRoot:             &tr,
-		RunAsUser:                &uid,
-		RunAsGroup:               &gid,
+		AllowPrivilegeEscalation: boolPtr(false),
+		RunAsNonRoot:             boolPtr(true),
+		RunAsUser:                int64Ptr(65532),
+		RunAsGroup:               int64Ptr(65532),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}

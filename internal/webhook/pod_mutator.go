@@ -173,14 +173,16 @@ type Config struct {
 	// OpenBao, "vault" for HashiCorp Vault). Empty defaults to "bao".
 	SecretAgentCommand string
 
-	// SecretBrokerURL is the default secret-broker base URL the injected agent
-	// dials (a pod can override with confidential.ai/secrets-broker).
+	// SecretBrokerURL is the secret-broker base URL the injected agent dials.
+	// Operator-set only — a pod cannot override it. See docs/pitfalls.md —
+	// broker URL.
 	SecretBrokerURL string
 
 	// LUKSOpenImage is the container image the webhook injects to open
 	// openbao-gated LUKS volumes (confidential.ai/luks-<name> annotations).
-	// Empty disables LUKS injection. The image must expose `c8s luks-open`
-	// as its entrypoint; the standard c8s-operator image satisfies that.
+	// Empty disables LUKS injection. It runs `c8s luks-open`, which shells out
+	// to cryptsetup/mkfs/mount, so it must be the debian-slim luks-open image
+	// (cmd/luks-open) — not the distroless operator image.
 	LUKSOpenImage string
 
 	// KataEnforce turns on kata runtimeClass injection. When set, the webhook
@@ -429,7 +431,6 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 		AnnotationGetCertVerbose,
 		AnnotationSecretsInject,
 		AnnotationSecretsDir,
-		AnnotationSecretsBroker,
 		AnnotationSecretsRenew,
 		// luks-<name> annotations are variadic so they're handled by
 		// hasLUKSAnnotations() rather than the fixed-name list — see below.

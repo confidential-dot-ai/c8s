@@ -658,48 +658,17 @@ this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
 `TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.
 
 
-## LUKS `local` volumes leak a dm-crypt mapper + loop device on pod teardown (node-CVM)
+## Secret-broker URL is operator-set only — never a pod annotation
 
-`internal/cmds/luksopen/cmd.go:6-10` (the lifecycle comment) · `internal/cmds/luksopen/cmd.go:121`
-(`mapperName := "c8s-" + v.Name`) · `internal/webhook/luks.go:259` (injected as a plain
-init container) · `internal/cmds/luks/destroy.go:115` (`destroyLocal`)
+`internal/webhook/secrets.go` (`secretsInjection` has no broker field) ·
+`internal/webhook/pod_mutator.go` (`Config.SecretBrokerURL`)
 
-`c8s-luks-open` is a **plain init container**: it runs once, `cryptsetup luksOpen`s the
-backing loop device to the kernel mapper `/dev/mapper/c8s-<name>`, mounts the ext4 onto
-the shared emptyDir, and exits. Its package doc claims teardown is free — "the mapper and
-mount are torn down by containerd when the pod is destroyed ... the mapper node is on /dev
-... scoped to the pod's mount namespace." That holds **under kata** (the whole guest kernel
-is disposed with the pod) but is **false under node-CVM** (kata off, shared host kernel): a
-dm-crypt target is a *global* device-mapper object, not a mount-namespaced file. Deleting
-the pod unmounts `/data` and drops the pod's `/dev/mapper` view, but the kernel dm-crypt
-mapping stays active — and it holds the loop device open.
-
-Consequence: every LUKS `local`-volume pod deletion leaks `/dev/mapper/c8s-<name>` + its
-loop device on the node; they accumulate across pod churn. `c8s luks destroy` cannot clean
-it up either — `losetup -d` on a loop the mapper still holds only sets `LO_FLAGS_AUTOCLEAR`
-(returns success), so destroy unlinks the backing file (the loop then shows `…img (deleted)`)
-but the loop lingers until the mapper is closed. Observed live on the node-CVM/TDX demo:
-after `c8s luks destroy --force`, `/dev/mapper/c8s-data` was still open and `/dev/loop0`
-still attached to the deleted file. This is **not** a confidentiality gap — the OpenBao
-passphrase and the backing file are removed, so the ciphertext is unrecoverable; the leftover
-is a dangling mapper/loop (a host-resource leak, worst case exhausts loop devices / blocks
-re-creating a volume of the same name).
-
-**Fix — two parts:**
-
-1. *Make `destroy` self-sufficient.* In `destroyLocal` (and the in-use pre-check), close the
-   runtime mapper before detaching the loop: reuse the package's `luksClose` helper on
-   `c8s-<name>` (note: the runtime mapper is `c8s-<name>`, distinct from create.go's transient
-   `c8s-luks-<workload>-<name>`), then `losetup -d`. This lets destroy actually detach, and
-   reaps mappers leaked by an earlier crash. Small, contained.
-
-2. *Prevent the per-pod leak.* Give the injected open a teardown counterpart, gated on kata
-   being off (under kata the guest disposal already handles it). Cleanest k8s-native option:
-   make `c8s-luks-open` (or a dedicated `c8s-luks-close`) a **native sidecar**
-   (`restartPolicy: Always`) with a **preStop** hook running a new `c8s luks-close --name
-   <name>` (umount + `cryptsetup close c8s-<name>`); native sidecars terminate after the app
-   and run preStop on graceful deletion. preStop is skipped on SIGKILL / node crash /
-   `--grace-period=0`, so back it with a **node-side NRI hook** — the c8s NRI plugin already
-   runs on every node and sees `RemovePodSandbox`; have it close any mapper owned by the
-   departing pod. Belt-and-suspenders: preStop for the common path, NRI for the abrupt path,
-   destroy-side close (part 1) for whatever still slips through.
+The injected agent dials the broker at `Config.SecretBrokerURL`, sourced from the
+operator's `--secret-broker-url` flag — part of the measured operator deployment.
+It is deliberately **not** overridable per pod. Pod annotations are written by the
+(untrusted) control plane, so a per-pod broker override would let a naughty control
+plane point the agent at an attacker-run broker; unattested, that broker hands the
+workload attacker-chosen secret values (and is handed the mesh client cert the
+agent presents) — a full secrets compromise. The endpoint is therefore pinned to
+trusted operator config; a pod chooses only which secret *paths* to fetch, and the
+broker authorizes those against the workload's mesh identity.
