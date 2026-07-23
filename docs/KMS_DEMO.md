@@ -328,7 +328,7 @@ init chain in Part 3.
 >
 > ```sh
 > kubectl -n c8s-system delete pod -l app.kubernetes.io/component=secret-broker
-> kubectl -n c8s-system delete pod -l app.kubernetes.io/component=tls-lb
+> kubectl -n c8s-system delete pod -l app.kubernetes.io/name=tls-lb
 > ```
 >
 > Confirm the cause before deleting — `kubectl logs <pod> -c c8s-cert` ends
