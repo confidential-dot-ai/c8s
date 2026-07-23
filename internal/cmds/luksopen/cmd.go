@@ -111,12 +111,12 @@ func openOne(cfg Config, v Volume) error {
 	if err != nil {
 		return fmt.Errorf("read passphrase %s: %w", passphrasePath, err)
 	}
-	if len(passphrase) == 0 {
-		return fmt.Errorf("passphrase file %s is empty", passphrasePath)
-	}
 	// cryptsetup accepts a trailing newline but reads the whole file as the
 	// passphrase — templated files often end with a newline, so strip it.
 	passphrase = trimTrailingNewline(passphrase)
+	if len(passphrase) == 0 {
+		return fmt.Errorf("passphrase file %s is empty", passphrasePath)
+	}
 
 	mapperName := "c8s-" + v.Name
 	mapperPath := "/dev/mapper/" + mapperName
