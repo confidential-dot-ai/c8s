@@ -1243,12 +1243,10 @@ secretBroker:
   imagePullSecrets: []
   service:
     type: ClusterIP
-  ## Caller verification: "ratls" (re-verify the caller's TEE measurement; needs
-  ## SEV-SNP/TDX or the in-guest attestation-api) or "ca" (trust the CDS mesh-CA
-  ## issuance decision, identity taken from the cert SAN).
-  peerVerify: ratls
-  ## Measurements accepted from callers in ratls mode (empty = any TEE, UNSAFE).
-  measurements: []
+  ## Callers are verified by X.509 chain to the CDS mesh CA — CDS is the trust
+  ## root, and it checked the caller's attestation at issuance. Identity is read
+  ## from the CDS-vouched leaf (SAN + config-claims); there is no per-caller
+  ## measurement pin at the broker.
   certProvisioning:
     ## Renewal interval for the broker's own get-cert mesh-identity sidecar.
     renewInterval: "1h"

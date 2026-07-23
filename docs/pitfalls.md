@@ -743,32 +743,15 @@ Break-glass on a test cluster while a rebuild is pending: set
 from the guest cmdline, and CDH pulls anonymously — works only while the
 target packages are unauthenticated-pullable. Production must rebuild.
 
-## `secretBroker.peerVerify=ratls` is inert under `kata.enabled=true`
+## kata-workload mesh path: in-guest `get-cert` is not yet functional end-to-end
 
-`internal/cmds/secretbroker/peer.go`, `internal/helmchart/c8s/templates/secret-broker.yaml`,
-`docs/decisions/2026-07-09-broker-peer-verify-under-kata.md`
-
-Under `kata.enabled=true`, the in-guest `ratls-mesh` sidecar (baked into
-`kata-guest-base`) transparently intercepts every inbound TLS connection to a
-pod, terminates it with its own bootstrap RA-TLS cert, enforces mesh-CA +
-attestation on the caller against the mesh's policy, and forwards plaintext
-to the app on loopback. The secret-broker therefore never sees the external
-TLS handshake or the caller's client cert — its `--peer-verify` (whether
-`ca` or `ratls`) is dead code. In particular `secretBroker.peerVerify=ratls`
-+ `secretBroker.measurements=[…]` reads as "measurement pinning at the
-broker" but the pin is actually held at the mesh
-(`ratlsMesh.measurements` / CDS allowlist).
-
-Additionally the injected mesh leaf (from `get-cert`) carries extension
-`.1.2` (EAR claims) but **not** `.1.1` (raw RA-TLS attestation) — so
-`ratls.VerifyCert` on a mesh cert fails regardless.
-
-The chart's `validations.yaml` fails the render fast on the combination
-(`kind=broker_ratls_under_kata`). Under `--kata`, set
-`secretBroker.peerVerify=ca` (identity-only, matches the mesh-delivered peer
-SAN) and pin measurements at the mesh instead. The design-decision doc has
-the full write-up and the two candidate real fixes (embed workload SNP into
-mesh leaves; or expose an out-of-mesh broker port).
+The secret-broker verifies callers by X.509 chain to the CDS mesh CA — CDS is
+the single trust root, and the broker does not re-verify hardware evidence at
+the handshake (there is no broker-side measurement pin). Under `kata.enabled`
+the in-guest `ratls-mesh` sidecar terminates inbound TLS and enforces mesh-CA +
+attestation on the caller before forwarding plaintext to the app on loopback,
+so the broker's own client-cert check is the same CDS-rooted decision the mesh
+already made.
 
 **In-cluster kata-workload path is not yet functional in `--cvm-mode
 baremetal` + `--kata`.** During Stage 3 (2026-07-09) the injected

@@ -1335,7 +1335,7 @@ func TestChartSecretBrokerRendersMeshComponent(t *testing.T) {
 		t.Fatalf("secret-broker container missing; have %v", containerNames(dep.Spec.Template.Spec.Containers))
 	}
 	assertContainerArgs(t, broker,
-		"--peer-verify=ratls",
+		"--client-ca=/etc/c8s/certs/ca.crt",
 		"--openbao-addr=https://c8s-openbao.c8s-system.svc:8200",
 		"--openbao-attested=true",
 	)
@@ -1549,19 +1549,6 @@ func TestChartKMSStoreNetworkPolicy(t *testing.T) {
 	}
 	if from.NamespaceSelector != nil {
 		t.Errorf("ingress must not widen to a namespace selector, got %+v", from.NamespaceSelector)
-	}
-}
-
-// TestChartRejectsBrokerRatlsUnderKata: under kata the in-guest mesh already
-// terminates and attests the broker's inbound TLS, so peerVerify=ratls is inert
-// — the chart must refuse it (see validations.yaml).
-func TestChartRejectsBrokerRatlsUnderKata(t *testing.T) {
-	out, err := helmTemplateKata(t, secretBrokerArgs()...)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want broker_ratls_under_kata failure\n%s", out)
-	}
-	if got := parseValidationErrorKind(out); got != "broker_ratls_under_kata" {
-		t.Fatalf("validation kind = %q, want broker_ratls_under_kata\n%s", got, out)
 	}
 }
 

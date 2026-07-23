@@ -64,19 +64,6 @@
 {{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires kata.enabled=true or attestationApi.cvmMode=node. On a non-kata, non-node cluster host nri-image-policy is the only image-admission enforcement; disabling it leaves confidential workloads with no attested allowlist gate. Under kata the in-guest policy-monitor replaces it and under cvmMode=node the node image bakes the plugin (`c8s install --cvm-mode=pod` and `--cvm-mode=node` set nriImagePolicy.enabled=false for you)." -}}
 {{- end -}}
 {{- /*
-  Under kata.enabled, the in-guest ratls-mesh terminates every inbound TLS
-  connection to a pod and enforces mesh-CA + attestation on the caller before
-  forwarding plaintext to the app on loopback. The secret-broker never sees the
-  external TLS handshake or the caller's raw client cert, so its own
-  --peer-verify (ca or ratls) is dead code — peer verification is already done
-  by the mesh. In particular --peer-verify=ratls + --measurements=… reads as
-  "measurement pinning at the broker" but the pin is actually held by the mesh
-  (ratlsMesh.measurements / CDS allowlist).
-*/ -}}
-{{- if and .Values.kata.enabled .Values.secretBroker.enabled (eq .Values.secretBroker.peerVerify "ratls") -}}
-{{- fail "VALIDATION_ERROR kind=broker_ratls_under_kata: secretBroker.peerVerify=ratls is inert under kata.enabled=true — the in-guest ratls-mesh terminates the broker's inbound TLS and enforces caller attestation before the broker sees the request, so the broker never gets to verify the client cert or match measurements. Pin caller measurements at the mesh (ratlsMesh.measurements) or CDS instead, and set secretBroker.peerVerify=ca (identity-only, matches the mesh-delivered peer SAN)." -}}
-{{- end -}}
-{{- /*
   The LUKS-open init container the webhook injects is privileged and mounts
   /dev host-wide (cryptsetup needs the raw block device). That is tolerable
   only when "the host" it touches is itself inside a TEE boundary: per-pod
