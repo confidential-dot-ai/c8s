@@ -191,7 +191,12 @@ jobs:
             echo "[$(( $(date -u +%s) - START ))s] ${STAGE:-...}"
             if printf '%s\n' "$LOG" | grep -q '@@E2E_PASS@@'; then
               echo "### c8s on Azure TDX: PASS" >> "$GITHUB_STEP_SUMMARY"
-              printf '%s\n' "$LOG" | grep -oE '@@[A-Z].*@@' | sed 's/@@//g' | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+              # the whole marker set (the tail-40 window above only holds the
+              # last few — grep the full driver log so the az-tdx attestation
+              # evidence lands in the summary, not just PASS).
+              az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+                --scripts 'grep -oE "@@[A-Z][^@]*@@" /tmp/azure-tdx-e2e.log 2>/dev/null' --query 'value[0].message' -o tsv 2>/dev/null \
+                | grep -oE '@@[A-Z][^@]*@@' | sed 's/@@//g; s/^/- /' >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             if printf '%s\n' "$LOG" | grep -q '@@E2E_FAIL'; then
