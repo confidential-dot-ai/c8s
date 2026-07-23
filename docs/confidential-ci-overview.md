@@ -6,6 +6,80 @@
 
 > **What this is.** Automated CI that runs our tests **inside real confidential VMs** (SEV-SNP today, TDX/cloud designed) so the whole confidential-computing stack is tested on every change — replacing the test clusters we stand up by hand each week. The one-line goal: **merge to main → integration happens in a CVM → issues surfaced.**
 
+## At a glance: the lane matrix
+
+_Verified live 2026-07-23. Full detail, per-lane files, and dispatch commands: [`ci-lane-matrix.md`](./ci-lane-matrix.md)._
+
+```
+  MODEL 1 · NODE-as-CVM        c8s   (the confidential Kubernetes distro itself)
+  ──────────────────────────────────────────────────────────────────────────────────────────────
+
+     merge to c8s main              c8s repo (PUBLIC)                 runs on the metal        boots an EPHEMERAL
+                                                                      SNP launcher HOST        measured CVM = the cluster:
+      push ─▶ "Docker"           confidential-e2e.yml                 ────────────────         install THIS c8s commit, attest
+              image build ─▶       └─▶ e2e-c8s.yml        ──────▶     label: cvm-launcher      the launch measurement, prove a
+              └─▶ workflow_run         └─▶ cvm-e2e.yml                                          workload gets a CDS cert, teardown
+                                       (vendored primitive)
+
+     LANE snp-metal  ✓ ON-MERGE   run 29978275402 (VMI Running + attested)
+     LANE azure-snp / azure-tdx   ◐ exist HUB-side (MODEL 3), not wired to a c8s merge
+
+        ┌──────────────────────────────────────────┐
+        │  SEV-SNP BARE METAL   EPYC Genoa         │
+        │  /dev/sev-guest   IGVM measured boot     │
+        │  shared ROX rootdisk, readonly (PR#24)   │
+        └──────────────────────────────────────────┘
+
+
+  MODEL 2 · RUNNER-in-CVM      attestation-rs & kettle   (libraries: run the suite INSIDE a standing runner)
+  ──────────────────────────────────────────────────────────────────────────────────────────────
+
+     merge to main ─▶  attestation-rs : confidential-e2e.yml  ( job `tee`, matrix )
+                       kettle         : e2e.yml               ( job `tee`, matrix + roundtrip* )
+                       each matrix cell = runs-on: <label> ─▶ cargo nextest --features attest --run-ignored all
+
+     LANE snp-metal               LANE azure-snp               LANE azure-tdx               LANE tdx-metal
+     runs-on: snp-metal-cvm       runs-on: azure-snp-cvm       runs-on: azure-tdx-cvm       runs-on: tdx-metal-cvm
+         ▼                            ▼                            ▼                            ▼
+     ┌────────────────────┐       ┌────────────────────┐       ┌────────────────────┐       ┌────────────────────┐
+     │ SEV-SNP BARE METAL │       │ Azure SEV-SNP      │       │ Azure Intel TDX    │       │ Intel TDX METAL    │
+     │ EPYC Genoa         │       │ AKS node = CVM     │       │ VM (DC4es_v6)      │       │                    │
+     │ /dev/sev-guest     │       │ vTPM /dev/tpmrm0   │       │ vTPM + /acc/tdquote│       │ ✗ NO host          │
+     │                    │       │ scale-to-zero      │       │                    │       │ ✗ NO TDX image     │
+     └────────────────────┘       └────────────────────┘       └────────────────────┘       └────────────────────┘
+     ars ✓  kettle ✓              ars ✓  kettle ✓              ars ✓  kettle ✓              ✗ commented out,
+     29979358753 / 29979359926    6/6 az_snp_live              14/14 az_tdx_live            no runner exists
+
+
+  MODEL 3 · c8s-on-CLOUD       confidential-ci hub    (full c8s CLUSTER on cloud · NIGHTLY / DISPATCH, not merge)
+  ──────────────────────────────────────────────────────────────────────────────────────────────
+
+     azure-e2e.yml     ─▶ ephemeral confidential AKS (Model B, DC4as_v5 SEV-SNP) ─▶ c8s install --cvm-mode aks,
+                                                                                   6 components, NRI enforce,
+                                                                                   consumption + NEGATIVE deny
+                                                                                   ✓ 29979488305 (busybox NRI-denied)
+     azure-tdx-e2e.yml ─▶ ephemeral Azure Intel TDX VM + RKE2 (AKS refuses TDX)  ─▶ c8s install, az-tdx RA-TLS attest
+                                                                                   ✓ 29979489430 (E2E_PASS @ 320s)
+
+
+  STANDING-RUNNER PROVISIONERS (confidential-ci, dispatch)          POD-as-CVM / kata
+  ───────────────────────────────────────────────────────           ─────────────────
+  provision-snp-metal-cvm.yml ─▶ snp-metal-cvm (readonly ROX)       ✗ NO e2e lane anywhere.
+  provision-azure-cvm.yml     ─▶ azure-snp-cvm (Model A)            kata-guest-base.yml only BUILDS
+  provision-azure-tdx-cvm.yml ─▶ azure-tdx-cvm (standing TDX VM)    the guest image; nothing
+  provision-tdx-metal-cvm.yml ─▶ tdx-metal-cvm ✗ 0 runs (stub)      installs/attests it.
+
+   * kettle roundtrip = GitHub-hosted HTTP client to the REMOTE orchestrator (build.confidential.ai); not a self-hosted runner.
+```
+
+| REPO \ LANE | snp-metal | azure-snp | azure-tdx | tdx-metal | pod/kata |
+|---|---|---|---|---|---|
+| **c8s** (node-as-cvm) | ✅ ON-MERGE | ◐ hub nightly | ◐ hub dispatch | ⛔ stub | ⛔ none |
+| **attestation-rs** (runner-in-cvm) | ✅ ON-MERGE | ✅ ON-MERGE | ✅ ON-MERGE | ⛔ commented | ⛔ none |
+| **kettle** (runner-in-cvm) | ✅ ON-MERGE | ✅ ON-MERGE | ✅ ON-MERGE | n/a | ⛔ none |
+
+`✅` verified green on merge · `◐` green but hub-triggered (nightly / dispatch), not on a c8s merge · `⛔` not wired
+
 ---
 
 ## 1. The goal
