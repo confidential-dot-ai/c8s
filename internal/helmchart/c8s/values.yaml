@@ -1333,7 +1333,9 @@ kms:
 ## as one of its subcommands. Override if you want to run luks-open from a
 ## dedicated (e.g. cryptsetup-only) image.
 luks:
-  enabled: true
+  # Opt-in, like secretBroker/kms: enabling it arms the privileged c8s-luks-open
+  # webhook injection (see the luks_plain_baremetal validation).
+  enabled: false
   image:
     ## Empty repository = fall back to the operator image (.Values.image), which
     ## exposes `c8s luks-open`. Set here for a dedicated image.

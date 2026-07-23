@@ -1563,15 +1563,35 @@ func TestChartKMSStoreNetworkPolicy(t *testing.T) {
 // privileged; without per-pod kata CVMs or a node-as-CVM shape that privilege
 // would land on the real host, so the chart must refuse to arm the webhook.
 func TestChartRejectsLUKSWithoutTEEShape(t *testing.T) {
+	// baremetal (neither kata nor cvmMode=node) with luks armed → rejected.
+	// nri stays enabled (else require_host_image_policy fires first) with
+	// deriveComponents=true (else the digest guard fires first).
 	out, err := helmTemplate(t, secretBrokerArgs(
-		"--set", "attestationApi.enabled=false",
-		"--set", "nriImagePolicy.enabled=false",
+		"--set", "luks.enabled=true",
+		"--set-string", "attestationApi.cvmMode=baremetal",
+		"--set", "nriImagePolicy.deriveComponents=true",
 	)...)
 	if err == nil {
 		t.Fatalf("helm template succeeded, want luks_plain_baremetal failure\n%s", out)
 	}
 	if got := parseValidationErrorKind(out); got != "luks_plain_baremetal" {
 		t.Fatalf("validation kind = %q, want luks_plain_baremetal\n%s", got, out)
+	}
+}
+
+// TestChartAllowsLUKSOnBakedNode: a node-as-CVM shape with
+// attestationApi.enabled=false (the baked-node image runs host services) is
+// still confidential, so the guard must NOT reject luks there — it keys on
+// cvmMode, not attestationApi.enabled.
+func TestChartAllowsLUKSOnBakedNode(t *testing.T) {
+	_, err := helmTemplate(t, secretBrokerArgs(
+		"--set", "luks.enabled=true",
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+	)...)
+	if err != nil {
+		t.Fatalf("baked-node LUKS shape (cvmMode=node, attestationApi.enabled=false) must render, got: %v", err)
 	}
 }
 

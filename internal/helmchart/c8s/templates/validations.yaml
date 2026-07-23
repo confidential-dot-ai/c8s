@@ -73,8 +73,8 @@
   The webhook is armed only when the operator renders --luks-open-image,
   i.e. secretBroker.enabled && luks.enabled (see operator.yaml).
 */ -}}
-{{- if and .Values.secretBroker.enabled .Values.luks.enabled (not .Values.kata.enabled) (not .Values.attestationApi.enabled) -}}
-{{- fail "VALIDATION_ERROR kind=luks_plain_baremetal: luks.enabled=true but neither kata.enabled nor attestationApi.enabled is set. The injected c8s-luks-open init container is privileged and mounts /dev; without per-pod kata CVMs or a node-as-CVM shape (host attestation-api) that privilege lands on the real host, so a luks-<name> annotation would grant workloads host access. Set luks.enabled=false, or install a confidential shape (`c8s install --kata`, or a CVM node pool with attestationApi.enabled=true)." -}}
+{{- if and .Values.secretBroker.enabled .Values.luks.enabled (not .Values.kata.enabled) (ne (.Values.attestationApi.cvmMode | default "baremetal") "node") -}}
+{{- fail "VALIDATION_ERROR kind=luks_plain_baremetal: luks.enabled=true but the cluster is neither kata (kata.enabled) nor node-as-CVM (attestationApi.cvmMode=node). The injected c8s-luks-open init container is privileged and mounts /dev; without per-pod kata CVMs or a node-as-CVM shape that privilege lands on the real host, so a luks-<name> annotation would grant workloads host access. Set luks.enabled=false, or install a confidential shape (`c8s install --cvm-mode=pod` for kata, or `--cvm-mode=node`). Note: a baked-node shape sets attestationApi.enabled=false yet is still node-as-CVM — this guard keys on cvmMode, not attestationApi.enabled." -}}
 {{- end -}}
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
 {{- /* Structured marker (kind=...) lets tests discriminate this fail without substring-matching the prose. */ -}}
