@@ -607,7 +607,19 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		})
 		if chainErr == nil {
-			return nil // CA-signed cert — valid.
+			// A valid CA chain authenticates the issuer, but any configured
+			// config-claims pins (operator-keys/seed/workload) still must hold —
+			// they ride the certificate, so a CA-signed leaf with absent or
+			// mismatched claims must not be accepted when a pin is configured.
+			// Without this, configuring claim pins silently degrades to CA-only
+			// trust for every CA-signed peer (the RA-TLS path already enforces
+			// them via VerifyCert). checkClaimsPins is a no-op when no pin is set.
+			if policy != nil {
+				if err := checkClaimsPins(ExtractConfigClaimsBytes(cert), policy); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed config-claims pins: %w", err)
+				}
+			}
+			return nil // CA-signed cert with satisfied claim pins — valid.
 		}
 
 		// Fall back to RA-TLS attestation verification.

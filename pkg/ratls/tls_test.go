@@ -780,6 +780,75 @@ func TestDualVerifyPeerCallback_BothFail(t *testing.T) {
 	}
 }
 
+func TestDualVerifyPeerCallback_CASignedEnforcesClaimPins(t *testing.T) {
+	caKey, caCert := generateCACert(t)
+	shared := newSharedCACerts([]*x509.Certificate{caCert})
+
+	// makeLeaf builds a CA-signed leaf, optionally carrying a config-claims
+	// extension (nil = none).
+	makeLeaf := func(t *testing.T, ext []byte) []byte {
+		t.Helper()
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(400),
+			Subject:      pkix.Name{CommonName: "workload"},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		}
+		if ext != nil {
+			tmpl.ExtraExtensions = []pkix.Extension{{Id: OIDRATLSConfigClaims, Value: ext}}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	claimsExt := func(t *testing.T, operatorKeys []byte) []byte {
+		t.Helper()
+		c := &ConfigClaims{
+			OperatorKeysDigest: operatorKeys,
+			SeedDigest:         UnsetDigest(),
+			WorkloadDigest:     UnsetDigest(),
+		}
+		ext, err := c.MarshalExtension()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ext.Value
+	}
+
+	pinned := bytes.Repeat([]byte{0x11}, ClaimsDigestSize)
+	verify := dualVerifyPeerCallback(&VerifyPolicy{OperatorKeysDigest: pinned}, shared)
+
+	t.Run("missing claims rejected", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, nil)}, nil); err == nil {
+			t.Fatal("CA-signed leaf without config-claims accepted despite a configured pin")
+		}
+	})
+	t.Run("mismatched claims rejected", func(t *testing.T) {
+		wrong := bytes.Repeat([]byte{0x22}, ClaimsDigestSize)
+		if err := verify([][]byte{makeLeaf(t, claimsExt(t, wrong))}, nil); err == nil {
+			t.Fatal("CA-signed leaf with mismatched operator-keys digest accepted")
+		}
+	})
+	t.Run("matching claims accepted", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, claimsExt(t, pinned))}, nil); err != nil {
+			t.Fatalf("CA-signed leaf with matching pin rejected: %v", err)
+		}
+	})
+	t.Run("no pin accepts CA-signed", func(t *testing.T) {
+		v := dualVerifyPeerCallback(&VerifyPolicy{}, shared)
+		if err := v([][]byte{makeLeaf(t, nil)}, nil); err != nil {
+			t.Fatalf("CA-signed leaf rejected when no pin configured: %v", err)
+		}
+	})
+}
+
 func TestSwapProvider(t *testing.T) {
 	// Create a server TLS config with fakeAttestFunc.
 	cfg := testServerConfig()
