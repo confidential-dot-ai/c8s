@@ -28,7 +28,9 @@ func newDestroyCmd() *cobra.Command {
 			"for --driver pvc. Refuses without --force while the volume looks " +
 			"in use (local: the loop device is held by an open LUKS mapping; " +
 			"pvc: a pod mounts the claim) — the KV entry is left intact on " +
-			"refusal.",
+			"refusal. Deleting the KV passphrase is the crypto-shred: without " +
+			"it the LUKS data is unrecoverable. Removing the backing device " +
+			"is cleanup, not a wipe.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := bf.client()
 			if err != nil {

@@ -4,11 +4,12 @@
 // Volumes are backed by:
 //
 //   - openbao KV v2 at secret/data/<workload>/luks-<name>, {passphrase: <hex>}
-//   - one of the pluggable "drivers" (Stage 6 ships `local` for a
-//     hostPath-loop-file dev-cluster path; `pvc` and `csi` come later).
+//   - one of the pluggable "drivers": `local` (hostPath-loop-file, dev
+//     clusters only) or `pvc` (raw-block PersistentVolumeClaim via kubectl);
+//     `csi` is not yet implemented.
 //
 // The command emits pod annotations (confidential.ai/luks-<name> +
-// confidential.ai/secret-<name>) matching Stage 5's parser. It does NOT
+// confidential.ai/secret-<name>) consumed by the c8s webhook. It does NOT
 // modify any workload — printing annotations to stdout is the intended UX,
 // letting the caller pipe them into kubectl / Helm / their GitOps repo.
 package luks
@@ -29,8 +30,8 @@ func NewCmd() *cobra.Command {
 		Short: "Manage openbao-gated LUKS volumes for confidential workloads",
 		Long: "luks provisions encrypted volumes and stores their passphrase " +
 			"in openbao behind an attestation-gated release policy. Emits the " +
-			"pod annotations the c8s webhook (Stage 5) expects; does not " +
-			"deploy the workload itself.",
+			"pod annotations the c8s webhook expects; does not deploy the " +
+			"workload itself.",
 	}
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newListCmd())
