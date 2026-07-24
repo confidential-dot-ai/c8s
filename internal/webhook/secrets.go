@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -71,6 +72,11 @@ func parseSecretsInjection(annotations map[string]string) (*secretsInjection, er
 	si := &secretsInjection{
 		SecretsDir: strings.TrimSpace(annotations[AnnotationSecretsDir]),
 	}
+	if si.SecretsDir != "" {
+		if err := validateSecretsDir(si.SecretsDir); err != nil {
+			return nil, err
+		}
+	}
 	if si.Renew, err = boolAnnotation(annotations, AnnotationSecretsRenew); err != nil {
 		return nil, err
 	}
@@ -103,6 +109,29 @@ func parseSecretEntry(name, value string) (secretEntry, error) {
 		return secretEntry{}, fmt.Errorf("%w: secret %q has an empty path", errInvalidInjectionAnnotation, name)
 	}
 	return secretEntry{Name: name, Path: path, Field: field}, nil
+}
+
+// validateSecretsDir vets the secrets-dir annotation override: a clean
+// absolute path (mirroring the luks mount= check), not "/", and not
+// overlapping the injected agent config dir — mounting the secrets emptyDir
+// over /vault/config would swallow the rendered agent config. The cert-dir
+// overlap is checked in Handle, where the effective cert dir is known.
+func validateSecretsDir(dir string) error {
+	if !strings.HasPrefix(dir, "/") || filepath.Clean(dir) != dir || dir == "/" {
+		return fmt.Errorf("%w: %s must be a clean absolute path other than /",
+			errInvalidInjectionAnnotation, AnnotationSecretsDir)
+	}
+	if pathsOverlap(dir, secretsConfigDir) {
+		return fmt.Errorf("%w: %s must not equal or shadow the injected agent config dir %s",
+			errInvalidInjectionAnnotation, AnnotationSecretsDir, secretsConfigDir)
+	}
+	return nil
+}
+
+// pathsOverlap reports whether clean absolute paths a and b are equal or one
+// contains the other.
+func pathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 func hasSecretEntryAnnotations(annotations map[string]string) bool {

@@ -638,6 +638,13 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if err := rejectReservedVolumes(pod, reservedVolumesFor(eff, m.cfg, getCertNeeded)); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
+		// The secrets mount must not swallow the cert dir the agent reads its
+		// mesh cert from (the /vault/config overlap is checked at parse).
+		if eff.Secrets != nil && eff.Secrets.SecretsDir != "" && pathsOverlap(eff.Secrets.SecretsDir, eff.Cert.Dir) {
+			return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+				"%w: %s %q must not equal or shadow the cert dir %q",
+				errInvalidInjectionAnnotation, AnnotationSecretsDir, eff.Secrets.SecretsDir, eff.Cert.Dir))
+		}
 	}
 
 	if getCertNeeded {

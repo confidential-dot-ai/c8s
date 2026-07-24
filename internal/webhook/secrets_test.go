@@ -346,3 +346,56 @@ func hasReadOnlyMount(c corev1.Container, name, path string) bool {
 	}
 	return false
 }
+
+func TestParseSecretsInjectionValidatesSecretsDir(t *testing.T) {
+	withDir := func(dir string) map[string]string {
+		return map[string]string{
+			AnnotationSecretsInject:       "true",
+			AnnotationSecretsDir:          dir,
+			secretAnnotationPrefix + "db": "secret/data/api/db#password",
+		}
+	}
+	for _, dir := range []string{
+		"vault/secrets",       // relative
+		"/",                   // root
+		"/run/secrets/",       // trailing slash (not Clean-stable)
+		"/run/../etc",         // not Clean-stable
+		"/vault/config",       // the injected agent config dir
+		"/vault/config/inner", // inside it
+		"/vault",              // shadows it
+	} {
+		if _, err := parseSecretsInjection(withDir(dir)); err == nil {
+			t.Errorf("secrets-dir %q must be rejected", dir)
+		}
+	}
+	si, err := parseSecretsInjection(withDir("/run/secrets"))
+	if err != nil || si == nil || si.SecretsDir != "/run/secrets" {
+		t.Fatalf("valid secrets-dir rejected: (%#v, %v)", si, err)
+	}
+}
+
+// The secrets emptyDir must not mount over the cert dir the agent reads its
+// mesh client cert from; the effective cert dir is only known in Handle.
+func TestHandleRejectsSecretsDirShadowingCertDir(t *testing.T) {
+	newPod := func(dir string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationWorkload:            "api",
+				AnnotationSecretsInject:       "true",
+				AnnotationSecretsDir:          dir,
+				secretAnnotationPrefix + "db": "secret/data/api/db#password",
+			}},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		}
+	}
+	cfg := secretsTestConfig()
+	if resp := handleAdmission(t, cfg, newPod("/etc/c8s/certs")); resp.Allowed {
+		t.Fatal("secrets-dir equal to the cert dir must be rejected")
+	}
+	if resp := handleAdmission(t, cfg, newPod("/etc/c8s")); resp.Allowed {
+		t.Fatal("secrets-dir shadowing the cert dir must be rejected")
+	}
+	if resp := handleAdmission(t, cfg, newPod("/run/secrets")); !resp.Allowed {
+		t.Fatalf("valid secrets-dir denied: %+v", resp.Result)
+	}
+}
