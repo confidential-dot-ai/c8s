@@ -293,7 +293,7 @@ func injectLUKS(pod *corev1.Pod, eff injection, cfg Config) {
 
 // luksOpenContainer runs `c8s luks-open` — one process, all requested
 // volumes at once. Runs privileged, with /dev bind-mounted so cryptsetup
-// can create /dev/mapper/c8s-<name> nodes.
+// can create /dev/mapper/c8s-<podUID>-<name> nodes.
 func luksOpenContainer(cfg Config, eff injection) corev1.Container {
 	args := []string{"luks-open", "--secrets-dir=" + defaultSecretsDir, "--mount-root=" + luksDataDir}
 	var devices []corev1.VolumeDevice
@@ -321,8 +321,16 @@ func luksOpenContainer(cfg Config, eff injection) corev1.Container {
 		Image:           cfg.LUKSOpenImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Args:            args,
-		VolumeDevices:   devices,
-		VolumeMounts:    mounts,
+		// luks-open derives per-pod mapper names (c8s-<podUID>-<name>) from
+		// this env — the UID does not exist yet at CREATE admission.
+		Env: []corev1.EnvVar{{
+			Name: "C8S_POD_UID",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
+			},
+		}},
+		VolumeDevices: devices,
+		VolumeMounts:  mounts,
 		SecurityContext: &corev1.SecurityContext{
 			// Privileged is required for cryptsetup ioctls and to create
 			// /dev/mapper nodes. Root is required to open the raw block

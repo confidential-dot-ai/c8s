@@ -253,6 +253,17 @@ func TestMutatePodInjectsLUKSContainer(t *testing.T) {
 	if !strings.Contains(joined, "--volume=data=/dev/vdb:data:ext4:open") {
 		t.Errorf("volume spec missing from args: %v", openC.Args)
 	}
+	// Downward-API pod UID for the per-pod mapper names.
+	uidEnv := false
+	for _, e := range openC.Env {
+		if e.Name == "C8S_POD_UID" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
+			e.ValueFrom.FieldRef.FieldPath == "metadata.uid" {
+			uidEnv = true
+		}
+	}
+	if !uidEnv {
+		t.Errorf("c8s-luks-open missing the downward-API C8S_POD_UID env: %+v", openC.Env)
+	}
 	// App container gets a volume mount at /data
 	found := false
 	for _, vm := range pod.Spec.Containers[0].VolumeMounts {

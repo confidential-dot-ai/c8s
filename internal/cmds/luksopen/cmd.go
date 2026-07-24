@@ -3,11 +3,11 @@
 // the decrypted filesystem into a per-pod emptyDir the app container
 // consumes. Runs once per pod as an init container, then exits.
 //
-// It does not manage lifecycle — the mapper and mount are torn down by
-// containerd when the pod is destroyed (the mount is on an emptyDir, and
-// the mapper node is on /dev which is a hostPath but scoped to the pod's
-// mount namespace only when kata is off; under kata everything is inside
-// the guest, which is disposed with the pod).
+// Mapper names are per-pod — c8s-<podUID>-<name>, with the pod UID taken from
+// the downward-API C8S_POD_UID env the webhook injects — so two pods can never
+// collide on, or adopt, each other's mappers. Nothing here tears a mapper down
+// when its pod goes away; that closure is the LUKS teardown work
+// (feat/luks-teardown: NRI reaper + luks-close).
 package luksopen
 
 import (
@@ -18,9 +18,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
+
+// podUIDEnv carries the pod UID (downward API, injected by the webhook) the
+// per-pod mapper names are derived from.
+const podUIDEnv = "C8S_POD_UID"
 
 // NewCmd returns the cobra subcommand.
 func NewCmd() *cobra.Command {
@@ -71,8 +76,12 @@ func Run(cfg Config) error {
 	if len(vols) == 0 {
 		return errors.New("no --volume specs supplied")
 	}
+	podUID := os.Getenv(podUIDEnv)
+	if podUID == "" {
+		return fmt.Errorf("%s is not set (the webhook injects it via the downward API); cannot derive per-pod mapper names", podUIDEnv)
+	}
 	for _, v := range vols {
-		if err := openOne(cfg, v); err != nil {
+		if err := openOne(cfg, podUID, v); err != nil {
 			return fmt.Errorf("volume %q: %w", v.Name, err)
 		}
 	}
@@ -105,7 +114,7 @@ func ParseVolumeSpecs(specs []string) ([]Volume, error) {
 	return out, nil
 }
 
-func openOne(cfg Config, v Volume) error {
+func openOne(cfg Config, podUID string, v Volume) error {
 	passphrasePath := filepath.Join(cfg.SecretsDir, v.SecretName)
 	passphrase, err := os.ReadFile(passphrasePath)
 	if err != nil {
@@ -118,7 +127,7 @@ func openOne(cfg Config, v Volume) error {
 		return fmt.Errorf("passphrase file %s is empty", passphrasePath)
 	}
 
-	mapperName := "c8s-" + v.Name
+	mapperName := "c8s-" + podUID + "-" + v.Name
 	mapperPath := "/dev/mapper/" + mapperName
 	mountPoint := filepath.Join(cfg.MountRoot, v.Name)
 
@@ -140,22 +149,40 @@ func openOne(cfg Config, v Volume) error {
 		if v.Mode != "format-if-empty" {
 			return fmt.Errorf("device %s is not LUKS-formatted and mode=%s (use mode=format-if-empty to init on first use)", v.Dev, v.Mode)
 		}
+		// Even in format-if-empty, only format a device that carries no
+		// signature at all: an existing filesystem or partition table means
+		// the annotation points at the wrong device.
+		blank, err := devBlank(v.Dev)
+		if err != nil {
+			return err
+		}
+		if !blank {
+			return fmt.Errorf("device %s is not LUKS but carries an existing filesystem/partition-table signature; refusing to luksFormat it", v.Dev)
+		}
 		slog.Info("luks-open: formatting device", "dev", v.Dev)
 		if err := runCryptsetup(passphrase, "luksFormat", "--batch-mode", v.Dev); err != nil {
 			return fmt.Errorf("luksFormat %s: %w", v.Dev, err)
 		}
 	}
 
-	if _, err := os.Stat(mapperPath); os.IsNotExist(err) {
+	if _, err := statMapper(mapperPath); err == nil {
+		// The mapper already exists — legitimate only when our own restarted
+		// init container left it behind (names are per-pod). Adopt it only
+		// when it is provably backed by the requested device.
+		if err := verifyAdoptedMapper(mapperName, v.Dev); err != nil {
+			return err
+		}
+	} else if os.IsNotExist(err) {
 		if err := runCryptsetup(passphrase, "luksOpen", v.Dev, mapperName); err != nil {
 			return fmt.Errorf("luksOpen %s: %w", v.Dev, err)
 		}
-	} else if err != nil {
+	} else {
 		return fmt.Errorf("stat %s: %w", mapperPath, err)
 	}
 
-	// If we just formatted the device, mkfs the mapper. Detect a fresh mapper
-	// by asking blkid for a filesystem signature; empty = needs mkfs.
+	// mkfs only ever runs on a mapper that is known to be ours: either just
+	// luksOpened above, or adopted after verifyAdoptedMapper matched its
+	// backing device.
 	needsMkfs, err := mapperNeedsMkfs(mapperPath)
 	if err != nil {
 		return err
@@ -180,9 +207,62 @@ func openOne(cfg Config, v Volume) error {
 	return nil
 }
 
-// --- process helpers (exec.LookPath fallbacks) ---
+// verifyAdoptedMapper confirms an existing mapper is backed by exactly dev,
+// comparing device numbers (st_rdev) so path aliases cannot fool the check.
+// A missing path, parse failure, or mismatch is an error — never adopt (and
+// never mkfs) a mapping we cannot prove is over the requested device.
+func verifyAdoptedMapper(mapperName, dev string) error {
+	out, err := runCryptsetupStatus(mapperName)
+	if err != nil {
+		return err
+	}
+	backing, err := parseStatusDevice(out)
+	if err != nil {
+		return fmt.Errorf("mapper %s: %w", mapperName, err)
+	}
+	backingRdev, err := statRdev(backing)
+	if err != nil {
+		return fmt.Errorf("mapper %s backing device: %w", mapperName, err)
+	}
+	wantRdev, err := statRdev(dev)
+	if err != nil {
+		return fmt.Errorf("requested device: %w", err)
+	}
+	if backingRdev != wantRdev {
+		return fmt.Errorf("mapper %s is backed by %s, not the requested %s; refusing to adopt it", mapperName, backing, dev)
+	}
+	return nil
+}
 
-func runCryptsetup(passphrase []byte, args ...string) error {
+// parseStatusDevice extracts the "device:" line from `cryptsetup status`
+// output.
+func parseStatusDevice(out string) (string, error) {
+	for _, line := range strings.Split(out, "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && key == "device" {
+			if dev := strings.TrimSpace(val); dev != "" {
+				return dev, nil
+			}
+		}
+	}
+	return "", errors.New("cryptsetup status output has no device: line")
+}
+
+// --- process/syscall seams (package vars so tests can stub them) ---
+
+var (
+	runCryptsetup       = execCryptsetup
+	runCryptsetupCheck  = execCryptsetupCheck
+	runCryptsetupStatus = execCryptsetupStatus
+	devBlank            = execDevBlank
+	mapperNeedsMkfs     = execMapperNeedsMkfs
+	mkfs                = execMkfs
+	mount               = execMount
+	statMapper          = os.Stat
+	statRdev            = execStatRdev
+)
+
+func execCryptsetup(passphrase []byte, args ...string) error {
 	cmd := exec.Command("cryptsetup", args...)
 	cmd.Stdin = bytesReader(passphrase)
 	out, err := cmd.CombinedOutput()
@@ -192,10 +272,10 @@ func runCryptsetup(passphrase []byte, args ...string) error {
 	return nil
 }
 
-// runCryptsetupCheck runs `cryptsetup <cmd> <dev>` and treats exit 0 as true,
+// execCryptsetupCheck runs `cryptsetup <cmd> <dev>` and treats exit 0 as true,
 // non-zero as false (used for isLuks). Only non-zero exit codes are treated
 // as "false" — an exec error (binary missing) is a real error.
-func runCryptsetupCheck(sub, dev string) (bool, error) {
+func execCryptsetupCheck(sub, dev string) (bool, error) {
 	if _, err := exec.LookPath("cryptsetup"); err != nil {
 		return false, fmt.Errorf("cryptsetup not on PATH: %w", err)
 	}
@@ -210,7 +290,35 @@ func runCryptsetupCheck(sub, dev string) (bool, error) {
 	return true, nil
 }
 
-func mapperNeedsMkfs(mapperPath string) (bool, error) {
+func execCryptsetupStatus(mapperName string) (string, error) {
+	cmd := exec.Command("cryptsetup", "status", mapperName)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("cryptsetup status %s: %w", mapperName, err)
+	}
+	return string(out), nil
+}
+
+// execDevBlank probes dev with blkid -p (superblocks and partition tables).
+// Exit 2 = no signature found (blank); exit 0 = something found. Anything
+// else — including blkid missing — is an error: when we cannot prove the
+// device is blank, we refuse to format it.
+func execDevBlank(dev string) (bool, error) {
+	if _, err := exec.LookPath("blkid"); err != nil {
+		return false, fmt.Errorf("blkid not on PATH: %w", err)
+	}
+	cmd := exec.Command("blkid", "-p", "-o", "export", dev)
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+			return true, nil
+		}
+		return false, fmt.Errorf("blkid -p %s: %w", dev, err)
+	}
+	return false, nil
+}
+
+func execMapperNeedsMkfs(mapperPath string) (bool, error) {
 	if _, err := exec.LookPath("blkid"); err != nil {
 		// Fall back to conservative "no": if we can't check, don't destroy.
 		return false, nil
@@ -229,7 +337,7 @@ func mapperNeedsMkfs(mapperPath string) (bool, error) {
 	return strings.TrimSpace(string(out)) == "", nil
 }
 
-func mkfs(fstype, dev string) error {
+func execMkfs(fstype, dev string) error {
 	binary := "mkfs." + fstype
 	if _, err := exec.LookPath(binary); err != nil {
 		return fmt.Errorf("mkfs binary %s not on PATH: %w", binary, err)
@@ -242,13 +350,25 @@ func mkfs(fstype, dev string) error {
 	return nil
 }
 
-func mount(fstype, src, dst string) error {
+func execMount(fstype, src, dst string) error {
 	cmd := exec.Command("mount", "-t", fstype, src, dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mount -t %s %s %s: %w: %s", fstype, src, dst, err, string(out))
 	}
 	return nil
+}
+
+// execStatRdev returns the device number of the block-device node at path.
+func execStatRdev(path string) (uint64, error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return 0, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
+		return 0, fmt.Errorf("%s is not a block device", path)
+	}
+	return uint64(st.Rdev), nil
 }
 
 func isMounted(path string) (bool, error) {
