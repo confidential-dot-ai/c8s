@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/confidential-dot-ai/c8s/internal/luksfs"
 )
 
 func newCreateCmd() *cobra.Command {
@@ -196,6 +199,13 @@ func validateCreate(cfg createConfig) error {
 	}
 	if cfg.mount == "" || cfg.mount[0] != '/' {
 		return errors.New("--mount must be an absolute path")
+	}
+	// The annotation value splits on these, so they must never appear in mount.
+	if strings.ContainsAny(cfg.mount, ",=#\n\r") {
+		return fmt.Errorf("--mount %q must not contain ',', '=', '#', or newlines", cfg.mount)
+	}
+	if !luksfs.Allowed(cfg.fstype) {
+		return fmt.Errorf("--fstype %q: want ext4 or xfs", cfg.fstype)
 	}
 	switch cfg.driver {
 	case "local", "pvc", "csi":

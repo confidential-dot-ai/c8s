@@ -52,10 +52,16 @@ func TestKVPathShape(t *testing.T) {
 func TestValidateCreate(t *testing.T) {
 	base := createConfig{
 		workload: "api", name: "data", mount: "/data", driver: "local",
-		output: "yaml", size: resource.MustParse("1Gi"), namespace: "default",
+		fstype: "ext4", output: "yaml", size: resource.MustParse("1Gi"),
+		namespace: "default",
 	}
 	if err := validateCreate(base); err != nil {
 		t.Errorf("baseline should be valid: %v", err)
+	}
+	xfs := base
+	xfs.fstype = "xfs"
+	if err := validateCreate(xfs); err != nil {
+		t.Errorf("xfs should be allowed: %v", err)
 	}
 	tests := []struct {
 		name string
@@ -73,6 +79,12 @@ func TestValidateCreate(t *testing.T) {
 		{"bad namespace", func(c *createConfig) { c.namespace = "Bad_NS" }, "DNS-1123"},
 		{"traversal workload", func(c *createConfig) { c.workload = "../etc" }, "DNS-1123"},
 		{"flag-shaped name", func(c *createConfig) { c.name = "--all" }, "DNS-1123"},
+		{"unknown fstype", func(c *createConfig) { c.fstype = "btrfs" }, "ext4 or xfs"},
+		{"empty fstype", func(c *createConfig) { c.fstype = "" }, "ext4 or xfs"},
+		{"fstype argv injection", func(c *createConfig) { c.fstype = "ext4 -E hack" }, "ext4 or xfs"},
+		{"mount comma injection", func(c *createConfig) { c.mount = "/data,secret=evil#x" }, "must not contain"},
+		{"mount equals", func(c *createConfig) { c.mount = "/data=x" }, "must not contain"},
+		{"mount newline", func(c *createConfig) { c.mount = "/data\nmode=open" }, "must not contain"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
