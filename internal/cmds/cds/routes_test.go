@@ -309,7 +309,7 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		maxRequestSize:    1,
 		readinessInterval: time.Second,
 		// Most tests in this package exercise unpinned dev-mode CDS;
-		// opt in explicitly (the RT-005 default is fail-closed).
+		// opt in explicitly (fail-closed is the default).
 		allowUnpinnedMeasurements: true,
 	}
 	if err := validateConfig(valid); err != nil {
@@ -370,7 +370,7 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
-// RT-005: with no measurement pin, /attest issues any workload's mesh
+// With no measurement pin, /attest issues any workload's mesh
 // identity to any genuine TEE platform that can reach the port. CDS must
 // refuse to start in that posture unless the operator explicitly opts in.
 func TestValidateConfigFailsClosedOnEmptyMeasurements(t *testing.T) {

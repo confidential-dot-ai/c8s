@@ -41,7 +41,7 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.attestationApiURL, "attestation-api-url", "", "URL of the attestation-api service")
 	flags.StringVar(&cfg.caCommonName, "ca-common-name", issuer.DefaultCACommonName, "common name for the in-memory generated mesh CA")
 	flags.DurationVar(&cfg.caCertValidity, "ca-cert-validity", 8760*time.Hour, "validity period of the in-memory mesh CA certificate")
-	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest. CDS refuses to start when empty unless --allow-unpinned-measurements is passed (see RT-005: an unpinned /attest issues any workload identity to any TEE platform that can reach the port)")
+	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest. CDS refuses to start when empty unless --allow-unpinned-measurements is passed (an unpinned /attest issues any workload identity to any TEE platform that can reach the port)")
 
 	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
 	flags.StringVar(&cfg.expectedIssuer, "expected-issuer", "", "EAR JWT issuer claim required on /sign-csr (empty disables)")
@@ -67,7 +67,7 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
 	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA and allowlist via /handoff; requires --operator-keys so both replicas attest the same policy (empty = /handoff disabled)")
-	flags.BoolVar(&cfg.allowUnpinnedMeasurements, "allow-unpinned-measurements", false, "start with --measurements empty: /attest then accepts any TEE measurement (RT-005). Development only — never set in production")
+	flags.BoolVar(&cfg.allowUnpinnedMeasurements, "allow-unpinned-measurements", false, "start with --measurements empty: /attest then accepts any TEE measurement. Development only — never set in production")
 	flags.StringVar(&cfg.handoffPeerURL, "handoff-peer-url", "", "https URL of a surviving CDS peer to adopt the mesh CA and allowlist from on startup via attested /handoff (empty = generate a fresh CA). When set, startup fails closed if the peer cannot be reached, denies handoff, or attests a different operator-key policy. Pins the peer with --handoff-measurements.")
 	flags.DurationVar(&cfg.handoffPeerTimeout, "handoff-peer-timeout", 2*time.Minute, "deadline for adopting the CA from --handoff-peer-url before failing startup")
 
@@ -110,44 +110,44 @@ func NewCmd() *cobra.Command {
 }
 
 type config struct {
-	host                string
-	port                int
-	logLevel            string
-	attestationApiURL   string
-	caCommonName        string
-	caCertValidity      time.Duration
-	measurements        []string
+	host                      string
+	port                      int
+	logLevel                  string
+	attestationApiURL         string
+	caCommonName              string
+	caCertValidity            time.Duration
+	measurements              []string
 	allowUnpinnedMeasurements bool
-	earIssuerName       string
-	expectedIssuer      string
-	jwtClockSkew        int64
-	maxTTL              time.Duration
-	certTTL             time.Duration
-	challengeTTL        time.Duration
-	requestTimeout      time.Duration
-	maxRequestSize      int64
-	readTimeout         time.Duration
-	readHeaderTimeout   time.Duration
-	writeTimeout        time.Duration
-	idleTimeout         time.Duration
-	maxHeaderBytes      int
-	sanValidation       bool
-	dnsSANPatterns      []string
-	allowedCNPattern    string
-	readinessInterval   time.Duration
-	minCAValidity       time.Duration
-	allowlistDB         string
-	allowlistPersistent bool
-	allowlistSeed       string
-	operatorKeys        string
-	handoffMeasurements []string
-	handoffPeerURL      string
-	handoffPeerTimeout  time.Duration
-	rotationInterval    time.Duration
-	rotationOverlap     time.Duration
-	rotationJitter      float64
-	ratlsPlatform       string
-	ratlsCertTTL        time.Duration
+	earIssuerName             string
+	expectedIssuer            string
+	jwtClockSkew              int64
+	maxTTL                    time.Duration
+	certTTL                   time.Duration
+	challengeTTL              time.Duration
+	requestTimeout            time.Duration
+	maxRequestSize            int64
+	readTimeout               time.Duration
+	readHeaderTimeout         time.Duration
+	writeTimeout              time.Duration
+	idleTimeout               time.Duration
+	maxHeaderBytes            int
+	sanValidation             bool
+	dnsSANPatterns            []string
+	allowedCNPattern          string
+	readinessInterval         time.Duration
+	minCAValidity             time.Duration
+	allowlistDB               string
+	allowlistPersistent       bool
+	allowlistSeed             string
+	operatorKeys              string
+	handoffMeasurements       []string
+	handoffPeerURL            string
+	handoffPeerTimeout        time.Duration
+	rotationInterval          time.Duration
+	rotationOverlap           time.Duration
+	rotationJitter            float64
+	ratlsPlatform             string
+	ratlsCertTTL              time.Duration
 
 	rateLimit                float64
 	rateBurst                int

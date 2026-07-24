@@ -400,7 +400,7 @@ func normalizeHTTPServerConfig(cfg config) config {
 
 func validateConfig(cfg config) error {
 	if len(cfg.measurements) == 0 && !cfg.allowUnpinnedMeasurements {
-		// RT-005: with no measurement pin, /attest issues any workload's
+		// With no measurement pin, /attest issues any workload's
 		// mesh identity to ANY genuine TEE platform that can route to this
 		// port — no cluster membership, no k8s identity required. Fail
 		// closed at startup; --allow-unpinned-measurements restores the
