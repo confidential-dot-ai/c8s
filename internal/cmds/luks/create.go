@@ -154,9 +154,13 @@ func runCreate(ctx context.Context, bf *baoFlags, cfg createConfig) error {
 	prov, err := provision(ctx, cfg, passphrase)
 	if err != nil {
 		// The KV write above was create-only (cas=0), so this entry is one this
-		// call just created — safe to roll it back so a retry gets a fresh
-		// passphrase. Best-effort; log on failure.
-		_ = client.deleteVolume(ctx, cfg.workload, cfg.name)
+		// call just created — roll it back so a retry gets a fresh passphrase.
+		// A failed rollback leaves a stale entry that blocks retry, so surface it.
+		if delErr := client.deleteVolume(ctx, cfg.workload, cfg.name); delErr != nil {
+			return errors.Join(err, fmt.Errorf(
+				"rollback of openbao entry %s/luks-%s failed (the stale entry blocks retry until `c8s luks destroy`): %w",
+				cfg.workload, cfg.name, delErr))
+		}
 		return err
 	}
 
