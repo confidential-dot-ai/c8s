@@ -811,7 +811,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		"--continue-on-initial-error",
 	}
 	// Pin the CDS serving measurement into the bootstrap handshake; without
-	// this the sidecar accepts any attested peer as CDS (RT-001).
+	// this the sidecar accepts any attested peer as CDS.
 	if cfg.CDSMeasurements != "" {
 		args = append(args, "--cds-measurements="+cfg.CDSMeasurements)
 	}

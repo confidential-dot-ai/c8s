@@ -60,7 +60,7 @@ its own genuine TEE attestation and try to impersonate CDS / a mesh peer at
 bootstrap", §2).
 
 1. Attacker starts any TEE (TDX VM, or a kata pod running an allowlisted
-   image) and runs `test/redteam/fakecds`: an HTTPS server presenting a
+   image) and runs `test/rogue-cds`: an HTTPS server presenting a
    self-signed RA-TLS certificate whose evidence binds its own key — genuine
    hardware-signed evidence, produced exactly like CDS's own self-provisioned
    serving cert.
@@ -179,7 +179,7 @@ singleton behavior).
 
 ## Reproduction
 
-`test/redteam/fakecds/` contains a standalone fake CDS (for TEEs without the
+`test/rogue-cds/` contains a standalone fake CDS (for TEEs without the
 c8s binary) and a runbook; the live PoC above needs nothing but the stock
 c8s image and pod-create RBAC in `c8s-system` (or the host's network
 control), both inside the threat model's adversary set.

@@ -1,4 +1,4 @@
-// Command fakecds is a red-team PoC for RT-001
+// Command rogue-cds is a PoC for the CDS bootstrap-identity issue
 // (docs/security/RT-001-cds-bootstrap-identity.md): a fake Certificate
 // Distribution Service that any workload's get-cert sidecar will accept as
 // the real CDS because the injected sidecars never receive
@@ -13,7 +13,7 @@
 // Usage (inside any TEE that can reach an attestation-api — a TDX TD, an SNP
 // guest, or a kata pod running any allowlisted image):
 //
-//	fakecds --addr 0.0.0.0:8443 \
+//	rogue-cds --addr 0.0.0.0:8443 \
 //	  --platform tdx \
 //	  --attestation-api-url http://127.0.0.1:8400
 //
@@ -58,7 +58,7 @@ func main() {
 		caCN              = flag.String("ca-cn", "c8s Mesh CA (attacker)", "CN of the attacker mesh CA")
 	)
 	flag.Parse()
-	slog.Info("fakecds starting", "addr", *addr, "platform", *platform)
+	slog.Info("rogue-cds starting", "addr", *addr, "platform", *platform)
 
 	f, err := newFakeCDS(*caCN)
 	if err != nil {

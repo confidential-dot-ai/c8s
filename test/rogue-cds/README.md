@@ -1,6 +1,6 @@
-# fakecds — PoC for RT-001 (CDS bootstrap identity)
+# rogue-cds - PoC for the CDS bootstrap-identity issue
 
-`fakecds` impersonates the Certificate Distribution Service to any c8s
+`rogue-cds` impersonates the Certificate Distribution Service to any c8s
 workload whose `get-cert` sidecar bootstraps a mesh certificate. The serving
 certificate carries **genuine hardware attestation** (minted by whatever TEE
 this binary runs in); the attack succeeds because workload-side `get-cert`
@@ -22,7 +22,7 @@ root of trust. See `docs/security/RT-001-cds-bootstrap-identity.md`.
 ## Build
 
 ```sh
-go build -o fakecds ./test/redteam/fakecds
+go build -o rogue-cds ./test/rogue-cds
 ```
 
 ## Runbook (TDX host, k3s + c8s pod-as-CVM)
@@ -36,7 +36,7 @@ go build -o fakecds ./test/redteam/fakecds
    allowlisted image. Run an attestation-api inside it, then:
 
    ```sh
-   ./fakecds --addr 0.0.0.0:8443 --platform tdx \
+   ./rogue-cds --addr 0.0.0.0:8443 --platform tdx \
      --attestation-api-url http://127.0.0.1:8400
    ```
 

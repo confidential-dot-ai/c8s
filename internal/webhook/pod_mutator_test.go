@@ -1031,7 +1031,7 @@ func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
 	}
 }
 
-// TestCertContainerCDSMeasurementsPin proves the RT-001 fix: when the
+// TestCertContainerCDSMeasurementsPin proves that when the
 // operator supplies CDSMeasurements, the injected get-cert sidecar pins CDS's
 // serving measurement; when empty, no (unpinnable-default) flag is added.
 func TestCertContainerCDSMeasurementsPin(t *testing.T) {

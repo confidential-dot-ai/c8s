@@ -49,7 +49,7 @@ spec:
             - --cds-url={{ include "c8s.trustRootURL" . }}
             {{- with .Values.cds.measurements }}
             # Pin the CDS serving measurement into every injected get-cert
-            # sidecar (RT-001); without it workload cert bootstrap accepts
+            # sidecar; without it workload cert bootstrap accepts
             # any RA-TLS-attested peer as CDS.
             - --cds-measurements={{ join "," . | quote }}
             {{- end }}

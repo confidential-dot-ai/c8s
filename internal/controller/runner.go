@@ -53,7 +53,7 @@ type Options struct {
 
 	// CDSMeasurements is the comma-separated SHA-384 hex launch digests
 	// injected as get-cert's --cds-measurements. Empty leaves workload cert
-	// bootstrap accepting any RA-TLS-attested peer as CDS (RT-001).
+	// bootstrap accepting any RA-TLS-attested peer as CDS.
 	CDSMeasurements string
 
 	// AttestationApiURL points at the attestation-api.

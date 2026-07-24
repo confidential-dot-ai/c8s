@@ -388,7 +388,7 @@ Caller passes a dict:
     - --cds-url={{ include "c8s.cdsURL" $root }}
     - --attestation-api-url={{ include "c8s.attestationApiURL" $root }}
     {{- with $root.Values.cds.measurements }}
-    # Pin the CDS serving measurement for the bootstrap handshake (RT-001).
+    # Pin the CDS serving measurement for the bootstrap handshake.
     - --cds-measurements={{ join "," . | quote }}
     {{- end }}
     - --san={{ .san }}
