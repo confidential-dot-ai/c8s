@@ -399,7 +399,17 @@ func normalizeHTTPServerConfig(cfg config) config {
 }
 
 func validateConfig(cfg config) error {
-	if len(cfg.measurements) == 0 && !cfg.allowUnpinnedMeasurements {
+	// Validate entries and compute the EFFECTIVE pin: blank entries are
+	// dropped by the parser, so checking the raw flag slice would let an
+	// all-blank list start CDS unpinned without the opt-in — check and
+	// enforcement must see the same value. Malformed entries (non-hex or
+	// wrong length) are rejected outright: a typo'd pin otherwise becomes
+	// a silent deny-all on /attest.
+	parsed, err := ratls.ParseHexMeasurementsList(cfg.measurements)
+	if err != nil {
+		return fmt.Errorf("--measurements: %w", err)
+	}
+	if len(parsed) == 0 && !cfg.allowUnpinnedMeasurements {
 		// With no measurement pin, /attest issues any workload's
 		// mesh identity to ANY genuine TEE platform that can route to this
 		// port — no cluster membership, no k8s identity required. Fail

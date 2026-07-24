@@ -992,7 +992,52 @@ func TestHostPortConflict(t *testing.T) {
 	}
 }
 
+
+// TestInstallFailsClosedWithoutPinOrOptIn pins the installer contract: with
+// neither --measurements nor --allow-unpinned-measurements, the install fails
+// (rather than rendering a CDS that refuses to start); the opt-in proceeds
+// and sets the chart value.
+func TestInstallFailsClosedWithoutPinOrOptIn(t *testing.T) {
+	prevM, prevA := installMeasurements, installAllowUnpinned
+	t.Cleanup(func() { installMeasurements, installAllowUnpinned = prevM, prevA })
+
+	installMeasurements = nil
+	installAllowUnpinned = false
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err == nil {
+		t.Fatal("node mode with no pin and no opt-in must fail the install")
+	}
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", "tdx"); err == nil {
+		t.Fatal("pod mode with no pin and no opt-in must fail the install")
+	}
+
+	installAllowUnpinned = true
+	args, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", "tdx")
+	if err != nil {
+		t.Fatalf("opt-in must proceed: %v", err)
+	}
+	found := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--set" && args[i+1] == "cds.allowUnpinnedMeasurements=true" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("opt-in must set cds.allowUnpinnedMeasurements=true, args = %v", args)
+	}
+}
+
+// allowUnpinnedForTest opts the arg-builder into the unpinned-CDS dev posture
+// for tests that exercise unrelated args — the builder fails closed when
+// neither --measurements nor --allow-unpinned-measurements is set.
+func allowUnpinnedForTest(t *testing.T) {
+	t.Helper()
+	prev := installAllowUnpinned
+	installAllowUnpinned = true
+	t.Cleanup(func() { installAllowUnpinned = prev })
+}
+
 func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
+	allowUnpinnedForTest(t)
 	// The attestation sidecar is on by default; the arg-builder reads the
 	// package flag, which cobra would set. Mirror that default here.
 	prevAttest := installAttestEnabled
@@ -1061,7 +1106,17 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			assertArgsEqual(t, got, tc.want)
+			// allowUnpinnedForTest (above) makes the builder emit the dev
+			// opt-in pair; it is not what this test exercises.
+			filtered := got[:0]
+			for i := 0; i < len(got); i++ {
+				if got[i] == "--set" && i+1 < len(got) && got[i+1] == "cds.allowUnpinnedMeasurements=true" {
+					i++
+					continue
+				}
+				filtered = append(filtered, got[i])
+			}
+			assertArgsEqual(t, filtered, tc.want)
 		})
 	}
 }
@@ -1133,6 +1188,7 @@ func TestAppendCvmModeInstallArgsRejectsUnknownHardwarePlatform(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsAcceptsAksWithTdx(t *testing.T) {
+	allowUnpinnedForTest(t)
 	// aks + tdx is the Azure-vTPM TDX (az-tdx) shape: the node's vTPM HCL report
 	// wraps a TD quote, so it needs the vTPM device (tpm=true, no guest device)
 	// and the TDX RA-TLS platform on CDS/mesh — not a refusal.

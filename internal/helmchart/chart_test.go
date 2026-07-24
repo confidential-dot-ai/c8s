@@ -4009,6 +4009,15 @@ func TestChartCDSAllowUnpinnedMeasurementsRender(t *testing.T) {
 	args = renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
 	assertContainerNoArgPrefix(t, "cds", args, "--allow-unpinned-measurements")
 
+	// String "false" (--set-string, stringified CI values): must NOT render
+	// the fail-open flag — truthiness would treat it as true.
+	out, err = helmTemplate(t, "--set-string", "cds.allowUnpinnedMeasurements=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args = renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerNoArgPrefix(t, "cds", args, "--allow-unpinned-measurements")
+
 	// Opt-in value set but measurements pinned: flag must not render (the
 	// binary would accept it, but rendering both is contradictory config).
 	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"

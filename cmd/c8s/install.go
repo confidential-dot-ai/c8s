@@ -63,6 +63,7 @@ var (
 	installResolveDigests bool
 	installAttestEnabled  bool
 	installMeasurements   []string
+	installAllowUnpinned  bool
 )
 
 // Flag names referenced in more than one place (registration plus a Changed()
@@ -844,10 +845,10 @@ func printAttestVerifyHint(w io.Writer, attestEnabled bool) {
 		fmt.Fprintln(w, "  Clients verify with the same M: c8s verify https://<tls-lb> --measurements <M>")
 		return
 	}
-	fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled, but the mesh is UNPINNED (accepts any")
-	fmt.Fprintln(w, "  attested TEE). Pin it with the node image's launch measurement M (its")
-	fmt.Fprintln(w, "  manifest.json): reinstall with --measurements <M>. Clients verify with the")
-	fmt.Fprintln(w, "  same M: c8s verify https://<tls-lb> --measurements <M>.")
+	fmt.Fprintln(w, "+ tls-lb attestation sidecar enabled, but the mesh is UNPINNED (CDS started")
+	fmt.Fprintln(w, "  with --allow-unpinned-measurements: /attest accepts any TEE platform that can")
+	fmt.Fprintln(w, "  reach the port — development only). Pin it by reinstalling with --measurements <M>")
+	fmt.Fprintln(w, "  (node image's manifest.json); clients then verify with the same M.")
 }
 
 // extractChart writes the embedded chart tree to a fresh tmpdir and returns
@@ -1177,6 +1178,19 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	// mis-pin.
 	if len(measurements) > 0 && cvmMode == "pod" {
 		return nil, fmt.Errorf("--measurements pins the node CVM's launch measurement; it does not apply to --cvm-mode=pod (per-pod kata guests are measured separately)")
+	}
+	// Fail the INSTALL, not the pod: with no pin and no explicit opt-in the
+	// chart renders a CDS that refuses to start (an unpinned /attest issues
+	// any workload's mesh identity to any TEE platform that can route to the
+	// port). Surface the choice here, where the operator can act on it.
+	if len(measurements) == 0 && !installAllowUnpinned {
+		if cvmMode == "pod" {
+			return nil, fmt.Errorf("CDS would start unpinned: pinning per-pod kata guest measurements is not yet supported by the installer, so --cvm-mode=pod requires --allow-unpinned-measurements (development only) to proceed")
+		}
+		return nil, fmt.Errorf("CDS would start unpinned: pass --measurements <M> from the node image's manifest.json, or --allow-unpinned-measurements (development only)")
+	}
+	if installAllowUnpinned && len(measurements) == 0 {
+		helmArgs = append(helmArgs, "--set", "cds.allowUnpinnedMeasurements=true")
 	}
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
@@ -1853,7 +1867,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Pins the internal mesh (cds.measurements + ratlsMesh.measurements) on this install; empty = no pinning (UNSAFE). Not valid with --cvm-mode=pod")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Pins the internal mesh (cds.measurements + ratlsMesh.measurements) on this install; empty = CDS refuses to start unless --allow-unpinned-measurements is passed. Not valid with --cvm-mode=pod")
+	installCmd.Flags().BoolVar(&installAllowUnpinned, "allow-unpinned-measurements", false, "start CDS with no measurement pin: /attest then accepts any TEE measurement from any platform that can reach the port. Development only — never in production")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")

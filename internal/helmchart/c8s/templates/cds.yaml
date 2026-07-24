@@ -217,7 +217,11 @@ spec:
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
-            {{- if and (not .Values.cds.measurements) .Values.cds.allowUnpinnedMeasurements }}
+            {{- /* Explicit string comparison: truthiness would render the
+                   fail-open flag for a value supplied as the STRING "false"
+                   (--set-string, stringified CI values) — the opposite of
+                   the operator's written intent. */}}
+            {{- if and (not .Values.cds.measurements) (eq (.Values.cds.allowUnpinnedMeasurements | toString) "true") }}
             - --allow-unpinned-measurements
             {{- end }}
             {{- if .Values.cds.operatorKeys }}

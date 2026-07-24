@@ -217,7 +217,8 @@ cds:
   ##      narrower handoff allowlist.
   ##   2. The ratls-mesh daemonset and nri-image-policy plugin pin CDS's RA-TLS
   ##      serving cert against it when they dial CDS.
-  ## Empty = no pinning (UNSAFE outside dev).
+  ## Empty = CDS refuses to start unless allowUnpinnedMeasurements is set
+  ## (fail closed — see docs/security/RT-005-cds-no-instance-binding.md).
   measurements: []
   ## Explicitly permit CDS to start with measurements empty (it otherwise
   ## fails closed — see docs/security/RT-005-cds-no-instance-binding.md: an

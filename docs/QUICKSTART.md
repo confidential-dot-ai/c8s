@@ -18,8 +18,16 @@ This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
 webhook, attestation-api, and CDS.
 
 ```sh
-c8s install --namespace c8s-system --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --namespace c8s-system --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm \
+  --allow-unpinned-measurements
 ```
+
+`--allow-unpinned-measurements` runs CDS without a measurement pin (any TEE
+platform that can reach CDS can request mesh identities — development only).
+Without it the install refuses to proceed, because an unpinned CDS is a
+fail-closed startup error. On node-as-CVM installs pass `--measurements <M>`
+from the node image's manifest.json instead; pinning per-pod kata guests is
+not installer-supported yet.
 
 tls-lb ships no default upstream: `--upstream` (with the port on its
 `--workload-ref`) points tls-lb at an adopted workload's mesh-wrapped headless Service.

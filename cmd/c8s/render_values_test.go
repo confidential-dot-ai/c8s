@@ -195,6 +195,7 @@ func setCvmModeForTest(t *testing.T, mode string) {
 // an unset --distro (distro == "") emits no distro keys, leaving the chart
 // default to stand; a set --distro plumbs both component distro keys.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
+	allowUnpinnedForTest(t)
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	setCvmModeForTest(t, "node")
@@ -229,6 +230,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 // tag) must survive as a string: buildValueArgs emits .tag via --set-string, so
 // coerce never int-coerces it (0640 -> 640 would pin the wrong image).
 func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
+	allowUnpinnedForTest(t)
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	setCvmModeForTest(t, "node")
@@ -258,6 +260,7 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 // also confirms allowlist derivation survives to the tree, and keeps crane off
 // PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
+	allowUnpinnedForTest(t)
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	setCvmModeForTest(t, "node")
@@ -346,6 +349,7 @@ var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+(\[[0-9]+\])?=[^,]*$`
 // non-value flag would silently break BOTH install and render-values (the
 // shared path hides the divergence) with every existing test still green.
 func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
+	allowUnpinnedForTest(t)
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	cmd.Flags().Int64("webhook-cert-fs-group", 0, "")
@@ -452,6 +456,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 // c8s-<id> headless-Service address the chart recognizes as mesh-wrapped). A
 // duplicate ref dedups to one adoption, so --upstream still resolves it.
 func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
+	allowUnpinnedForTest(t)
 	cmd := &cobra.Command{}
 	cmd.Flags().String(flagCvmMode, "node", "")
 	setCvmModeForTest(t, "node")

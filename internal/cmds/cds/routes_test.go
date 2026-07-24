@@ -395,9 +395,43 @@ func TestValidateConfigFailsClosedOnEmptyMeasurements(t *testing.T) {
 
 	// Non-empty measurements: accepted without the dev flag.
 	pinned := base
-	pinned.measurements = []string{"abcd1234"}
+	pinned.measurements = []string{"001122334455667788990011223344556677889900112233445566778899001122334455667788990011223344556677"}
 	if err := validateConfig(pinned); err != nil {
 		t.Fatalf("pinned measurements should be accepted: %v", err)
+	}
+}
+
+// The fail-closed check must look at the EFFECTIVE pin, not the raw flag:
+// an all-blank list parses to an empty allowlist at enforcement time, so
+// accepting it here would start CDS unpinned without the opt-in. And a
+// malformed entry (non-hex or wrong length) must be rejected outright —
+// silently keeping it would make /attest a deny-all.
+func TestValidateConfigRejectsBlankAndMalformedMeasurements(t *testing.T) {
+	base := config{
+		maxHeaderBytes:    1,
+		maxTTL:            time.Hour,
+		maxRequestSize:    1,
+		readinessInterval: time.Second,
+	}
+
+	for name, ms := range map[string][]string{
+		"single blank":        {" "},
+		"only blanks":         {"", "  ", ""},
+		"non-hex":             {"zz11223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566"},
+		"right hex too short": {"abcd1234"},
+	} {
+		cfg := base
+		cfg.measurements = ms
+		if err := validateConfig(cfg); err == nil {
+			t.Errorf("%s: must be rejected (effective pin is empty or entry malformed)", name)
+		}
+	}
+
+	// Blanks mixed with one valid entry: the valid entry pins, accepted.
+	cfg := base
+	cfg.measurements = []string{" ", "001122334455667788990011223344556677889900112233445566778899001122334455667788990011223344556677"}
+	if err := validateConfig(cfg); err != nil {
+		t.Errorf("blank plus valid entry should pin on the valid entry: %v", err)
 	}
 }
 
