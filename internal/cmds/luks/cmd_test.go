@@ -38,6 +38,28 @@ func TestGeneratePassphraseEntropyBounds(t *testing.T) {
 	}
 }
 
+func TestZero(t *testing.T) {
+	b := []byte("secret")
+	zero(b)
+	for i, c := range b {
+		if c != 0 {
+			t.Fatalf("b[%d] = %#x, want 0", i, c)
+		}
+	}
+}
+
+// putPassphrase hand-builds its JSON body; bytes that would need escaping
+// must be rejected before any request is attempted.
+func TestPutPassphraseRejectsJSONUnsafeBytes(t *testing.T) {
+	c := newBao("https://unreachable.invalid", "root")
+	for _, p := range [][]byte{[]byte(`pa"ss`), []byte("pa\\ss"), []byte("pa\nss"), {0xff}} {
+		err := c.putPassphrase(context.Background(), "api", "data", p)
+		if err == nil || !strings.Contains(err.Error(), "JSON-unsafe") {
+			t.Errorf("passphrase %q: err = %v, want JSON-unsafe rejection", p, err)
+		}
+	}
+}
+
 func TestKVPathShape(t *testing.T) {
 	if got := kvPath("api", "data"); got != "v1/secret/data/api/luks-data" {
 		t.Errorf("kvPath = %q, want v1/secret/data/api/luks-data", got)

@@ -1,6 +1,7 @@
 package luks
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,7 +15,14 @@ func jsonEncoder() *json.Encoder {
 	return enc
 }
 
-func bytesReader(b []byte) *strings.Reader { return strings.NewReader(string(b)) }
+func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
+
+// zero wipes secret bytes best-effort; copies Go made elsewhere are out of reach.
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
 
 func trimNewline(s string) string { return strings.TrimRight(s, "\r\n") }
 

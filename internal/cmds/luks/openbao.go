@@ -73,13 +73,22 @@ func kvMetaPath(workload, name string) string {
 // POST /v1/<mount>/data/<path> {"data": {...}}; see
 // https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2.
 func (b *bao) putPassphrase(ctx context.Context, workload, name string, passphrase []byte) error {
+	// Hand-built JSON so the secret never becomes an immutable Go string; the
+	// body is zeroized after the request. Requires JSON-safe passphrase bytes
+	// (the hex from generatePassphrase always is).
+	for _, c := range passphrase {
+		if c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return fmt.Errorf("passphrase contains a JSON-unsafe byte (0x%02x)", c)
+		}
+	}
 	// cas=0 makes this a create-only write: KV v2 rejects it if any version
 	// already exists at the path, so `create` never overwrites (and later
 	// destroys, via rollback) a passphrase it did not just create.
-	body, _ := json.Marshal(map[string]any{
-		"data":    map[string]any{"passphrase": string(passphrase)},
-		"options": map[string]any{"cas": 0},
-	})
+	body := make([]byte, 0, len(passphrase)+64)
+	body = append(body, `{"data":{"passphrase":"`...)
+	body = append(body, passphrase...)
+	body = append(body, `"},"options":{"cas":0}}`...)
+	defer zero(body)
 	if err := b.do(ctx, http.MethodPost, kvPath(workload, name), body, nil); err != nil {
 		if isCASConflict(err) {
 			return errVolumeExists
@@ -219,6 +228,7 @@ func generatePassphrase(bytesN int) ([]byte, error) {
 	}
 	out := make([]byte, hex.EncodedLen(len(raw)))
 	hex.Encode(out, raw)
+	zero(raw)
 	return out, nil
 }
 

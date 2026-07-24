@@ -135,6 +135,7 @@ func runCreate(ctx context.Context, bf *baoFlags, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
+	defer zero(passphrase)
 
 	// 2. openbao write — before any host mutation, so a KV failure doesn't
 	//    leave a formatted-but-unrecoverable disk lying around.
