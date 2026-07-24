@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -253,10 +252,13 @@ func provision(ctx context.Context, cfg createConfig, passphrase []byte) (provis
 // (unless --defer-format), mkfs, and luksCloses so the emitted annotation
 // can be consumed by the workload's kata guest reopening the device.
 func provisionLocal(cfg createConfig, passphrase []byte) (device string, notes []string, volume any, mount any, err error) {
+	imgPath, err := localImgPath(cfg.localBackingDir, cfg.workload, cfg.name)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
 	if err := os.MkdirAll(cfg.localBackingDir, 0o700); err != nil {
 		return "", nil, nil, nil, fmt.Errorf("mkdir %s: %w", cfg.localBackingDir, err)
 	}
-	imgPath := filepath.Join(cfg.localBackingDir, cfg.workload+"-"+cfg.name+".img")
 	if _, err := os.Stat(imgPath); err == nil {
 		return "", nil, nil, nil, fmt.Errorf("backing file %s already exists — delete it first or use `c8s luks destroy`", imgPath)
 	}

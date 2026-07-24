@@ -73,15 +73,18 @@ func runDestroy(ctx context.Context, c *bao, cfg destroyCfg) error {
 	// KV entry intact — deleting the passphrase under a live volume orphans
 	// its data at the next open), then the KV delete, then device teardown
 	// (so a KV failure doesn't leave an orphaned block device).
-	loop := ""
+	loop, img := "", ""
 	switch cfg.driver {
 	case "local":
 		var err error
-		if loop, err = losetupLookup(localImgPath(cfg)); err != nil {
+		if img, err = localImgPath(cfg.localBackingDir, cfg.workload, cfg.name); err != nil {
+			return err
+		}
+		if loop, err = losetupLookup(img); err != nil {
 			return err
 		}
 		if loop != "" && !cfg.force {
-			return fmt.Errorf("backing file %s is still attached at %s — pass --force to detach and delete anyway", localImgPath(cfg), loop)
+			return fmt.Errorf("backing file %s is still attached at %s — pass --force to detach and delete anyway", img, loop)
 		}
 	case "pvc":
 		users, err := pvcConsumers(ctx, claimName(cfg.workload, cfg.name), cfg.namespace)
@@ -110,21 +113,31 @@ func runDestroy(ctx context.Context, c *bao, cfg destroyCfg) error {
 	if cfg.driver == "pvc" {
 		return destroyPVC(ctx, cfg)
 	}
-	return destroyLocal(cfg, loop)
+	return destroyLocal(loop, img)
 }
 
-func localImgPath(cfg destroyCfg) string {
-	return filepath.Join(cfg.localBackingDir, cfg.workload+"-"+cfg.name+".img")
+// localImgPath builds the backing-file path, refusing a --local-dir that is
+// not absolute+clean or a result outside it (cf. cmd/c8s/uninstall.go
+// validateSweepPath).
+func localImgPath(dir, workload, name string) (string, error) {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return "", fmt.Errorf("--local-dir %q must be an absolute, clean path", dir)
+	}
+	p := filepath.Join(dir, workload+"-"+name+".img")
+	if filepath.Dir(p) != dir {
+		return "", fmt.Errorf("backing file path %q escapes --local-dir %q", p, dir)
+	}
+	return p, nil
 }
 
-func destroyLocal(cfg destroyCfg, loop string) error {
+func destroyLocal(loop, imgPath string) error {
 	if loop != "" {
 		if err := losetupDetach(loop); err != nil {
 			return err
 		}
 	}
-	if err := os.Remove(localImgPath(cfg)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove backing file %s: %w", localImgPath(cfg), err)
+	if err := os.Remove(imgPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove backing file %s: %w", imgPath, err)
 	}
 	return nil
 }

@@ -117,6 +117,27 @@ func TestValidateWorkloadName(t *testing.T) {
 	}
 }
 
+// localImgPath must confine the backing file to a direct child of --local-dir
+// even for unvalidated inputs (defense in depth behind DNS-1123 validation).
+func TestLocalImgPathConfinement(t *testing.T) {
+	got, err := localImgPath("/var/lib/c8s/luks", "api", "data")
+	if err != nil || got != "/var/lib/c8s/luks/api-data.img" {
+		t.Fatalf("got (%q, %v), want /var/lib/c8s/luks/api-data.img", got, err)
+	}
+	for _, tc := range []struct{ dir, workload, name string }{
+		{"relative/dir", "api", "data"},
+		{"/var/lib/c8s/luks/../luks", "api", "data"},
+		{"/var/lib/c8s/luks/", "api", "data"},
+		{"/var/lib/c8s/luks", "../snap", "data"},
+		{"/var/lib/c8s/luks", "api", "../../etc/shadow"},
+		{"/var/lib/c8s/luks", "api", "x/y"},
+	} {
+		if p, err := localImgPath(tc.dir, tc.workload, tc.name); err == nil {
+			t.Errorf("dir=%q workload=%q name=%q: want error, got %q", tc.dir, tc.workload, tc.name, p)
+		}
+	}
+}
+
 func TestLUKSModeAlias(t *testing.T) {
 	if got := luksMode(true); got != "format-if-empty" {
 		t.Errorf("deferFormat=true → %q, want format-if-empty", got)
