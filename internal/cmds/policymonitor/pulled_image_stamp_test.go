@@ -121,6 +121,57 @@ func TestStampedAllowlistedPullIsAllowed(t *testing.T) {
 	}
 }
 
+// TestUnreadableStampFailsClosed: a stamp path that exists but cannot be
+// read (here: a directory) must deny, not fall back to the forgeable
+// legacy annotation path.
+func TestUnreadableStampFailsClosed(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
+	dir := writeBundle(t, `{
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
+	}`, "")
+	if err := os.Mkdir(filepath.Join(dir, pulledImageStampName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.handleNewContainer(context.Background(), dir)
+	if len(fk.snapshot()) == 0 {
+		t.Fatal("unreadable stamp must fail closed, not fall back to host-authored annotations")
+	}
+}
+
+// TestOversizedStampFailsClosed: a stamp larger than any real image
+// reference is not a stamp the agent wrote; deny.
+func TestOversizedStampFailsClosed(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
+	dir := writeBundle(t, `{
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
+	}`, "")
+	if err := os.WriteFile(filepath.Join(dir, pulledImageStampName),
+		make([]byte, maxPulledImageStampSize+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.handleNewContainer(context.Background(), dir)
+	if len(fk.snapshot()) == 0 {
+		t.Fatal("oversized stamp must fail closed")
+	}
+}
+
+// TestRequireStampAllowlistedStampAllowed: under fail-closed mode an
+// honest digest-pinned pull of an allowlisted image still passes (the
+// flag must not break honest workloads).
+func TestRequireStampAllowlistedStampAllowed(t *testing.T) {
+	m, fk := stampTestMonitor(t, true)
+	dir := writeBundle(t, `{
+		"io.kubernetes.cri.image-name": "registry.example/app@sha256:`+stampAllowedDigest+`"
+	}`, "registry.example/app@sha256:"+stampAllowedDigest)
+
+	m.handleNewContainer(context.Background(), dir)
+	if len(fk.snapshot()) != 0 {
+		t.Fatal("require-pulled-image-stamp must allow an allowlisted digest-pinned stamp")
+	}
+}
+
 // TestRequireStampFailsClosed: with --require-pulled-image-stamp, a
 // bundle without any stamp is denied even if its (forgeable) annotations
 // name an allowlisted digest.

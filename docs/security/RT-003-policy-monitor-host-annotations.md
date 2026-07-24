@@ -10,7 +10,7 @@ survived 15s of stats polling, then cleaned up). The deployed guest image
 (2026-07-09, predates policy-monitor) has no in-guest enforcer at all, so the
 host-to-CVM container-creation path itself — the exact ttRPC surface the
 finding relies on — is proven live; the annotation-trust decision logic is
-proven by the unit repro (`rt003_repro_test.go`) and by kata source
+proven by the unit repro (`pulled_image_stamp_test.go`) and by kata source
 (`setup_bundle` writes host annotations verbatim).
 **Severity:** Critical — total bypass of the in-guest image-integrity enforcer by exactly the adversary it exists to stop
 **Adversary:** the host (containerd / kata-shim / direct kata-agent ttRPC over vsock — explicitly in scope: `docs/kata-image-policy.md` trust-boundary table, "Can call kata-agent RPCs via vsock")
@@ -109,23 +109,44 @@ reference cryptographically binds the pulled content — so:
   only for transition; after the kata-agent stamp is ubiquitous, fail-closed
   is the intended steady state.
 
-Residual (separate, already partially documented): `CopyFileRequest` is
-allowed by the guest OPA policy and is not path-scoped, so the host can
-tamper with the unpacked rootfs *after* a legitimate pull — the stamp binds
-what was pulled, not what later runs. Closing that needs either
-path-scoping CopyFile or re-verifying content at exec (the BPF-LSM path in
-`docs/kata-image-policy.md` G4).
+Residuals (separate, already partially documented):
+
+1. **`CopyFileRequest` is allowed by the guest OPA policy and is not
+   path-scoped.** The host can therefore tamper with the unpacked rootfs
+   *after* a legitimate pull — and it can also overwrite
+   `c8s-pulled-image` itself post-pull, forging the stamp the same way it
+   forged annotations (a timed guest write racing the monitor's read, or a
+   pull-allowlisted-then-overwrite-content variant with no race at all).
+   The stamp raises the bar — the annotation forgery needed no guest write
+   at all — but it is NOT unforgeable until the guest policy path-scopes
+   CopyFile to exclude the bundle tree (note: scoping that blanket-allows
+   `/run/kata-containers/` does NOT close this; the stamp lives there).
+   The durable fix is path-scoped CopyFile plus, longer term, re-verifying
+   content at exec (the BPF-LSM path in `docs/kata-image-policy.md` G4).
+2. **Found during re-review: the decision clock started at pull start.**
+   The monitor's `configReadDeadline` was 2s, but the bundle dir appears
+   when the pull STARTS (image-rs `create_dir_all`) and config.json only
+   lands after the full download+unpack — so any pull over 2s expired the
+   budget and the container ran with NO decision at all (fail-open, on
+   main and in the first version of this fix). The budget is now 10m; the
+   per-event goroutine makes that safe. Re-verify live that a deny
+   decision actually kills (the unit sets `ProtectControlGroups=yes`,
+   which may make the cgroup write fail — untested live).
+
+The stamp is written by kata-agent BEFORE the pull begins, so it predates
+image-rs's own (annotation-less) config.json in the bundle — the monitor
+can never see a bundle whose only decision input is that config.json.
 
 ## Reproduce
 
-`internal/cmds/policymonitor/rt003_repro_test.go` — a host-forged bundle
+`internal/cmds/policymonitor/pulled_image_stamp_test.go` — a host-forged bundle
 (`image-name` tag + forged allowlisted `image-id`) is **allowed** by the
 current decision path (documents the vulnerability), and the same bundle
 with a stamped pull reference to a non-allowlisted image is **denied**
 under the new path (proves the fix):
 
 ```
-go test ./internal/cmds/policymonitor/ -run RT003 -v
+go test ./internal/cmds/policymonitor/ -run 'Stamp|RequireStamp|ForgedAnnotations' -v
 ```
 
 Live reproduction (tdx-dev-host-1, kata-qemu-tdx): `test/kata-host-create`

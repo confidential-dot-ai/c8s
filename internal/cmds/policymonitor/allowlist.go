@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -204,20 +205,42 @@ func extractDigest(annotations map[string]string) (string, bool) {
 // writes the true pull reference into, inside the container bundle: the
 // storage.source it passed to the in-guest puller. Unlike the OCI
 // annotations in config.json — which the host authors verbatim — this
-// value is written by kata-agent itself, so the host cannot forge it
-// without compromising the in-guest agent (already in the TCB).
+// value is written by kata-agent itself.
+//
+// INTEGRITY CAVEAT: the stamp is only as unforgeable as the guest's OPA
+// policy makes it. The stock kata policy allows CopyFileRequest to any
+// guest path, so a host can overwrite the stamp post-pull (and replace
+// rootfs content outright); closing that needs path-scoped CopyFile rules
+// that exclude the bundle tree (tracked as a residual in
+// docs/security/RT-003-policy-monitor-host-annotations.md). The stamp
+// still raises the bar over annotations: forging it requires an extra,
+// timed guest-write the annotation path never needed.
 const pulledImageStampName = "c8s-pulled-image"
+
+// maxPulledImageStampSize bounds the stamp read. An image reference is a
+// few hundred bytes; anything larger is not a stamp the agent wrote.
+const maxPulledImageStampSize = 4096
 
 // readPulledImageStamp reads the stamped pull reference, returning ("",
 // nil) when the stamp does not exist (pre-stamp kata-agent: caller falls
-// back to the legacy annotation path).
+// back to the legacy annotation path). A present-but-unreadable or
+// oversized stamp is an ERROR: the caller must fail closed, not fall
+// back to host-authored annotations.
 func readPulledImageStamp(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxPulledImageStampSize+1))
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > maxPulledImageStampSize {
+		return "", fmt.Errorf("pulled-image stamp exceeds %d bytes", maxPulledImageStampSize)
 	}
 	return strings.TrimSpace(string(raw)), nil
 }

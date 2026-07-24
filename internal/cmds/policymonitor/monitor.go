@@ -87,11 +87,19 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		allowlist: a,
 		overlay:   &policyOverlay{},
 		killer:    newCgroupKiller(cfg.CgroupRoot),
-		// configReadDeadline is the budget for re-reading config.json
-		// after the initial CREATE event. kata-agent's setup_bundle
-		// finishes well under this; the limit is just to bound a
-		// pathological case.
-		configReadDeadline: 2 * time.Second,
+		// configReadDeadline is the budget for config.json (and the
+		// pulled-image stamp) to appear after the CREATE event. In
+		// guest-pull mode the CREATE fires when image-rs creates the
+		// bundle dir at pull START (pull_image's create_dir_all), and
+		// config.json only lands after the whole image is downloaded and
+		// unpacked — a 2s budget here meant every real pull expired
+		// mid-download and the container ran with NO allowlist decision
+		// at all (fail-open). The budget must cover a cold-registry pull
+		// of a large image; the per-event goroutine makes a long budget
+		// safe. The decision still lands before container start because
+		// kata-agent writes config.json in setup_bundle before forking
+		// the container process.
+		configReadDeadline: 10 * time.Minute,
 		configReadInterval: 25 * time.Millisecond,
 		revalidateInterval: 10 * time.Second,
 	}
@@ -433,7 +441,17 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	// can name an allowlisted digest in image-id while pulling anything),
 	// so whenever the stamp exists it is the ONLY input trusted. A
 	// digest-less stamp (tag pull) is denied: nothing binds the content.
-	if stamp, err := readPulledImageStamp(filepath.Join(dir, pulledImageStampName)); err == nil && stamp != "" {
+	stamp, err := readPulledImageStamp(filepath.Join(dir, pulledImageStampName))
+	if err != nil {
+		// Present but unreadable/corrupt: fail closed, exactly like an
+		// unreadable config.json. Falling back to host-authored
+		// annotations here would re-open the forgery path via induced
+		// read errors.
+		m.logger.Warn("deny container: pulled-image stamp unreadable", "cid", cid, "error", err)
+		m.kill(cid)
+		return
+	}
+	if stamp != "" {
 		digest, ok := digestFromPullReference(stamp)
 		if !ok {
 			m.logger.Warn("deny container: stamped pull reference carries no digest", "cid", cid, "pull_ref", stamp)
