@@ -1163,6 +1163,28 @@ func TestChartOperatorDialsTrustRootOverHTTPS(t *testing.T) {
 // this the RA-TLS handshake accepts any measurement and the H1 defence
 // collapses to "trust the cluster network". ratls-mesh reads the parent's
 // cds.measurements directly, so there is no mirror to drift.
+func TestChartOperatorCDSMeasurementsFlagsThrough(t *testing.T) {
+	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+
+	// Pinned: the operator passes --cds-measurements to the webhook, which
+	// injects it into every get-cert sidecar.
+	out, err := helmTemplate(t,
+		"--set", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerHasArg(t, "operator", renderedOperatorArgs(t, out), "--cds-measurements="+measurement)
+
+	// Default (unpinned): no flag, matching get-cert's accept-any-attested-CDS
+	// fallback. The webhook logs a loud warning at startup in this posture.
+	out, err = helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerNoArgPrefix(t, "operator", renderedOperatorArgs(t, out), "--cds-measurements")
+}
+
 func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
 	out, err := helmTemplate(t,

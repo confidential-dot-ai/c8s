@@ -51,7 +51,7 @@ spec:
             # Pin the CDS serving measurement into every injected get-cert
             # sidecar; without it workload cert bootstrap accepts
             # any RA-TLS-attested peer as CDS.
-            - --cds-measurements={{ join "," . | quote }}
+            - --cds-measurements={{ join "," . }}
             {{- end }}
             - --webhook-config-name={{ include "c8s.fullname" . }}-pod-injector
             - --webhook-service-name={{ include "c8s.operatorName" . }}
