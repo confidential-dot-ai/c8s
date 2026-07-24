@@ -47,7 +47,7 @@ go build -o rogue-cds ./test/rogue-cds
    ```sh
    CDS_IP=$(kubectl -n c8s-system get svc c8s-cds -o jsonpath='{.spec.clusterIP}')
    iptables -t nat -A PREROUTING -d "$CDS_IP" -p tcp --dport 8443 \
-     -j DNAT --to-destination <fake-ip>:8443
+     -j DNAT --to-destination <rogue-cds-ip>:8443
    ```
 
    (Tenant-only variant: shadow the `c8s-cds` Endpoints/EndpointSlice or win

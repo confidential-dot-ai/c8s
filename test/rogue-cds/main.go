@@ -44,7 +44,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-type fakeCDS struct {
+type rogueCDS struct {
 	caKey  *ecdsa.PrivateKey
 	caCert *x509.Certificate
 	caPEM  []byte
@@ -60,7 +60,7 @@ func main() {
 	flag.Parse()
 	slog.Info("rogue-cds starting", "addr", *addr, "platform", *platform)
 
-	f, err := newFakeCDS(*caCN)
+	f, err := newRogueCDS(*caCN)
 	if err != nil {
 		slog.Error("CA setup failed", "error", err)
 		os.Exit(1)
@@ -102,9 +102,9 @@ func main() {
 	}
 }
 
-// newFakeCDS mints the attacker's own "mesh CA". Victim get-cert sidecars
+// newRogueCDS mints the attacker's own "mesh CA". Victim get-cert sidecars
 // install this as their root of trust from the /attest response.
-func newFakeCDS(cn string) (*fakeCDS, error) {
+func newRogueCDS(cn string) (*rogueCDS, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -127,12 +127,12 @@ func newFakeCDS(cn string) (*fakeCDS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fakeCDS{caKey: key, caCert: cert, caPEM: certutil.EncodeCertPEM(der)}, nil
+	return &rogueCDS{caKey: key, caCert: cert, caPEM: certutil.EncodeCertPEM(der)}, nil
 }
 
 // handleAuthenticate mints a throwaway challenge. The fake never validates it
 // on /attest; get-cert only needs well-formed base64.
-func (f *fakeCDS) handleAuthenticate(w http.ResponseWriter, _ *http.Request) {
+func (f *rogueCDS) handleAuthenticate(w http.ResponseWriter, _ *http.Request) {
 	nonce := make([]byte, 32)
 	_, _ = rand.Read(nonce)
 	w.Header().Set("Content-Type", "application/json")
@@ -145,7 +145,7 @@ func (f *fakeCDS) handleAuthenticate(w http.ResponseWriter, _ *http.Request) {
 // verification of any kind — and returns leaf || attacker-CA. get-cert
 // installs certs[1:] as the mesh trust root
 // (pkg/ratls/cdsclient/client.go RequestCert).
-func (f *fakeCDS) handleAttest(w http.ResponseWriter, r *http.Request) {
+func (f *rogueCDS) handleAttest(w http.ResponseWriter, r *http.Request) {
 	var req types.AttestRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusUnprocessableEntity)
@@ -188,7 +188,7 @@ func (f *fakeCDS) handleAttest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCA serves the attacker CA bundle for the unauthenticated /ca poll.
-func (f *fakeCDS) handleCA(w http.ResponseWriter, _ *http.Request) {
+func (f *rogueCDS) handleCA(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(f.caPEM)
 }
