@@ -26,8 +26,9 @@ func newDestroyCmd() *cobra.Command {
 		Long: "destroy removes the KV entry and the backing device: the loop " +
 			"device + backing file for --driver local, the PersistentVolumeClaim " +
 			"for --driver pvc. Refuses without --force while the volume looks " +
-			"in use (local: backing file attached to a loop device; pvc: a pod " +
-			"mounts the claim) — the KV entry is left intact on refusal.",
+			"in use (local: the loop device is held by an open LUKS mapping; " +
+			"pvc: a pod mounts the claim) — the KV entry is left intact on " +
+			"refusal.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := bf.client()
 			if err != nil {
@@ -44,7 +45,7 @@ func newDestroyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workload, "workload", "", "confidential.ai/cw workload id (required)")
 	cmd.Flags().StringVar(&name, "name", "", "volume name (required)")
 	cmd.Flags().StringVar(&driver, "driver", "local", "backing driver that provisioned it (local | pvc | csi)")
-	cmd.Flags().BoolVar(&force, "force", false, "proceed even if the loop device is still attached")
+	cmd.Flags().BoolVar(&force, "force", false, "proceed even if the volume looks in use (held loop device / mounted claim)")
 	cmd.Flags().StringVar(&localBackingDir, "local-dir", "/var/lib/c8s/luks",
 		"host directory where the local driver stores backing .img files")
 	cmd.Flags().StringVar(&namespace, "namespace", "default",
@@ -84,7 +85,13 @@ func runDestroy(ctx context.Context, c *bao, cfg destroyCfg) error {
 			return err
 		}
 		if loop != "" && !cfg.force {
-			return fmt.Errorf("backing file %s is still attached at %s — pass --force to detach and delete anyway", img, loop)
+			held, err := loopHeld(loop)
+			if err != nil {
+				return err
+			}
+			if held {
+				return fmt.Errorf("loop device %s for %s is held by an open mapping — luksClose it, or pass --force to destroy anyway", loop, img)
+			}
 		}
 	case "pvc":
 		users, err := pvcConsumers(ctx, claimName(cfg.workload, cfg.name), cfg.namespace)
@@ -140,6 +147,16 @@ func destroyLocal(loop, imgPath string) error {
 		return fmt.Errorf("remove backing file %s: %w", imgPath, err)
 	}
 	return nil
+}
+
+// loopHeld reports whether dev has kernel holders (an open dm-crypt mapping).
+// Mere attachment is create's normal end state, not in-use.
+func loopHeld(dev string) (bool, error) {
+	entries, err := os.ReadDir(filepath.Join("/sys/block", filepath.Base(dev), "holders"))
+	if err != nil {
+		return false, fmt.Errorf("check holders of %s: %w", dev, err)
+	}
+	return len(entries) > 0, nil
 }
 
 // losetupLookup returns the loop device backing imgPath, or "" if none.
