@@ -93,7 +93,7 @@ The decision input must be bound to the pull. `storage.source` is the only
 value that determines what the guest pulls, and a `@sha256:`-pinned pull
 reference cryptographically binds the pulled content — so:
 
-- **kata-containers (`redteam/stamp-pulled-image-ref`)**:
+- **kata-containers (`fix/stamp-pulled-image-ref`)**:
   `ImagePullHandler::create_device` records the true pull reference into the
   bundle at `/run/kata-containers/<cid>/c8s-pulled-image` immediately after
   the pull succeeds. (A stronger future variant has CDH/image-rs return the
