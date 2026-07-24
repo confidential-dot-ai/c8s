@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,10 +47,28 @@ func TestClassifyVerifyError(t *testing.T) {
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
-			name:       "api 4xx is client fault",
+			name:       "api 400 is client fault",
 			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "api 403 is client fault",
+			err:        &attestationclient.APIError{Status: http.StatusForbidden},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "api 408 is retryable unavailability",
+			err:        &attestationclient.APIError{Status: http.StatusRequestTimeout},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+		{
+			name:       "api 429 is retryable unavailability",
+			err:        &attestationclient.APIError{Status: http.StatusTooManyRequests},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
 		},
 		{
 			name:       "transport failure is unreachable",
@@ -246,21 +265,67 @@ func TestSignCSR_RejectsTamperedCSRSignature(t *testing.T) {
 	}
 }
 
+// csrForIP builds a CSR carrying a single IP SAN, exercising the source-IP
+// binding branch of issuer.ValidateCSR.
+func csrForIP(t *testing.T, subject pkix.Name, ip net.IP) (*x509.CertificateRequest, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen csr key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:     subject,
+		IPAddresses: []net.IP{ip},
+	}, key)
+	if err != nil {
+		t.Fatalf("create csr: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatalf("parse csr: %v", err)
+	}
+	return csr, key
+}
+
 func TestSignCSR_SANValidationBindsSourceIP(t *testing.T) {
-	h, earKey, _ := newTestSignCSRHandler(t)
-	h.SANValidation = true
-	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
-	ear := signEAR(t, earKey, earClaimsLite{
-		Issuer:    "cds",
-		IssuedAt:  time.Now().Unix(),
-		Expiry:    time.Now().Add(time.Minute).Unix(),
-		TEEPubKey: teePubKeyB64(t, csrKey),
+	// postSignCSR uses httptest.NewRequest, whose RemoteAddr defaults to
+	// "192.0.2.1:1234", so that is the source IP the handler binds against.
+	t.Run("matching IP SAN accepted", func(t *testing.T) {
+		h, earKey, _ := newTestSignCSRHandler(t)
+		h.SANValidation = true
+		csr, csrKey := csrForIP(t, pkix.Name{CommonName: "test-node"}, net.ParseIP("192.0.2.1"))
+		ear := signEAR(t, earKey, earClaimsLite{
+			Issuer:    "cds",
+			IssuedAt:  time.Now().Unix(),
+			Expiry:    time.Now().Add(time.Minute).Unix(),
+			TEEPubKey: teePubKeyB64(t, csrKey),
+		})
+
+		w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+		}
 	})
 
-	w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
-	}
+	t.Run("mismatched IP SAN rejected", func(t *testing.T) {
+		h, earKey, _ := newTestSignCSRHandler(t)
+		h.SANValidation = true
+		csr, csrKey := csrForIP(t, pkix.Name{CommonName: "test-node"}, net.ParseIP("10.0.0.99"))
+		ear := signEAR(t, earKey, earClaimsLite{
+			Issuer:    "cds",
+			IssuedAt:  time.Now().Unix(),
+			Expiry:    time.Now().Add(time.Minute).Unix(),
+			TEEPubKey: teePubKeyB64(t, csrKey),
+		})
+
+		w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status: got %d, want 403; body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), types.ErrorCodeCSRDenied) {
+			t.Errorf("body should mention %s; got %s", types.ErrorCodeCSRDenied, w.Body.String())
+		}
+	})
 }
 
 // cancelKeyProvider cancels the request context when the EAR key is fetched,

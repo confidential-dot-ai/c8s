@@ -186,7 +186,7 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 	}
 	tamperedCSR := csrPEMFromKey(t, ecKey)
 	// Flip the final signature byte: still parses, fails CheckSignature at
-	// sign time — the 500 branch.
+	// CSR validation time — a client fault, the 400 branch.
 	der := decodeOnePEM(t, tamperedCSR, "CERTIFICATE REQUEST")
 	der[len(der)-1] ^= 0xFF
 	tamperedCSR = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
@@ -244,10 +244,12 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 			wantBody:   "want ECDSA",
 		},
 		{
-			name:       "CSR with tampered self-signature",
+			// Client fault: a tampered CSR is the caller's garbage, not a
+			// server-side signing failure.
+			name:       "CSR with tampered self-signature is a client fault",
 			req:        authorized(mustJSON(releaseRequest{CSRPEM: string(tamperedCSR)})),
-			wantStatus: http.StatusInternalServerError,
-			wantBody:   "sign",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "bad CSR",
 		},
 	}
 	for _, tc := range tests {

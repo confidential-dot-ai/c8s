@@ -257,8 +257,9 @@ func TestGatherOperatorKeys(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("skipped for non-cds kinds and file targets", func(t *testing.T) {
-		if got := gatherOperatorKeys(ctx, config{kind: "lb", url: "x"}, &evidence{}); got.note != "" || got.fingerprints != nil {
-			t.Errorf("non-cds kind should be a no-op, got %+v", got)
+		got := gatherOperatorKeys(ctx, config{kind: "lb", url: "x"}, &evidence{})
+		if !strings.Contains(got.note, "cross-check skipped") || !strings.Contains(got.note, "--kind cds") || got.fingerprints != nil {
+			t.Errorf("non-cds kind must announce the skipped cross-check, got %+v", got)
 		}
 		if got := gatherOperatorKeys(ctx, config{kind: "cds"}, &evidence{}); got.note != "" {
 			t.Errorf("no url should be a no-op, got %+v", got)
@@ -428,14 +429,11 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("auto surfaces a security error without cert fallback", func(t *testing.T) {
-		// Discovery responds 200 with an endpoint-shaped body? No — auto tries
-		// discovery first; make the discovery doc parse fail with a connect-free
-		// path by serving a wrong-nonce attestation endpoint via discovery: the
-		// simplest security error in auto mode comes from the endpoint flow, so
-		// instead prove the discovery 404 + dead TLS combination yields the
-		// cert-path error (fall-through), which the existing tests cover, and
-		// that a discovery parse failure also falls through to the cert path.
+	t.Run("auto falls through to the cert path on discovery parse failure", func(t *testing.T) {
+		// auto tries discovery first; serve a discovery doc that is not JSON so
+		// parsing fails. That failure is not a security error, so auto must fall
+		// through to the cert path (which then errors on the self-signed test
+		// cert) rather than aborting with a security verdict.
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("not json"))
 		}))

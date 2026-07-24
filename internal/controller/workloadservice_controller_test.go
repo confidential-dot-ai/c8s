@@ -323,17 +323,23 @@ func TestWorkloadServiceMissingWorkloadIsNoOp(t *testing.T) {
 }
 
 func TestWorkloadServiceGetErrorSurfaces(t *testing.T) {
+	injected := apierrors.NewInternalError(errors.New("boom"))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return apierrors.NewInternalError(errors.New("boom"))
+			return injected
 		},
 	}).Build()
 	r := reconcilerWithClient(c)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
 	})
-	if err == nil {
-		t.Fatal("Reconcile = nil, want get error")
+	// The reconciler returns the Get failure unwrapped (only NotFound is
+	// swallowed), so the exact injected error must surface.
+	if !errors.Is(err, injected) {
+		t.Fatalf("Reconcile err = %v, want the injected internal error", err)
+	}
+	if !apierrors.IsInternalError(err) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Reconcile err = %v, want an internal-error wrap of \"boom\"", err)
 	}
 }
 

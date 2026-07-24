@@ -307,11 +307,101 @@ func TestRunIptablesSyncCommandValidation(t *testing.T) {
 }
 
 func TestRunIptablesCleanupCommand(t *testing.T) {
-	env := installFakeNetfilter(t)
-	if err := Run([]string{"iptables-cleanup"}); err != nil {
-		t.Fatalf("Run(iptables-cleanup) = %v, want nil", err)
+	t.Run("removes installed chains, jumps, and ipsets", func(t *testing.T) {
+		env := installFakeNetfilter(t)
+		if err := initIptablesClients(); err != nil {
+			t.Fatal(err)
+		}
+		// Install real state via the production path so the cleanup has
+		// something to tear down: managed chains with rules, the base-chain
+		// jumps (including the cw guard jump), and live pod ipsets.
+		jumps := append(jumpRules(), cwJumpRule())
+		rules := buildInGuestIptablesRules(15001, 15006, 15021, nil)
+		if err := installIptablesRules(testLogger(), rules, jumps); err != nil {
+			t.Fatalf("installIptablesRules: %v", err)
+		}
+		for _, name := range managedIPSetNames {
+			env.seedIpset(t, name, "1024")
+			env.seedIpset(t, name+ipSetTmpSuffix, "1024")
+		}
+
+		// Sanity-check the state actually exists before cleanup, so the
+		// "gone afterwards" assertions below cannot pass vacuously.
+		for _, bin := range []string{"iptables", "ip6tables"} {
+			for _, mc := range managedChains {
+				if !fakeChainExists(env, bin, mc.table, mc.chain) {
+					t.Fatalf("chain %s/%s not installed on %s before cleanup", mc.table, mc.chain, bin)
+				}
+			}
+			for _, jump := range jumps {
+				if !containsRule(env.chainRules(t, bin, jump.table, jump.chain), jump.args) {
+					t.Fatalf("jump %s missing from %s/%s on %s before cleanup", jump.label, jump.table, jump.chain, bin)
+				}
+			}
+		}
+		if got := env.chainRules(t, "iptables", "nat", chainName); len(got) == 0 {
+			t.Fatalf("no rules in %s before cleanup", chainName)
+		}
+		for _, name := range managedIPSetNames {
+			if !env.ipsetExists(name) {
+				t.Fatalf("ipset %s not seeded before cleanup", name)
+			}
+		}
+
+		if err := Run([]string{"iptables-cleanup"}); err != nil {
+			t.Fatalf("Run(iptables-cleanup) = %v, want nil", err)
+		}
+
+		for _, bin := range []string{"iptables", "ip6tables"} {
+			for _, mc := range managedChains {
+				if fakeChainExists(env, bin, mc.table, mc.chain) {
+					t.Errorf("chain %s/%s still present on %s after cleanup: %v",
+						mc.table, mc.chain, bin, env.chainRules(t, bin, mc.table, mc.chain))
+				}
+			}
+			for _, jump := range jumps {
+				if containsRule(env.chainRules(t, bin, jump.table, jump.chain), jump.args) {
+					t.Errorf("jump %s still present in %s/%s on %s after cleanup", jump.label, jump.table, jump.chain, bin)
+				}
+			}
+		}
+		for _, name := range managedIPSetNames {
+			if env.ipsetExists(name) {
+				t.Errorf("ipset %s still present after cleanup", name)
+			}
+			if env.ipsetExists(name + ipSetTmpSuffix) {
+				t.Errorf("ipset %s still present after cleanup", name+ipSetTmpSuffix)
+			}
+		}
+	})
+
+	t.Run("tolerates absent chains", func(t *testing.T) {
+		env := installFakeNetfilter(t)
+		if err := Run([]string{"iptables-cleanup"}); err != nil {
+			t.Fatalf("Run(iptables-cleanup) on empty state = %v, want nil", err)
+		}
+		if rules := env.chainRules(t, "iptables", "nat", chainName); rules != nil {
+			t.Errorf("chain %s present after cleanup of empty state: %v", chainName, rules)
+		}
+	})
+}
+
+// fakeChainExists reports whether the fake-iptables state file for the chain
+// exists at all. chainRules cannot distinguish a missing chain from an empty
+// one (both read as nil), so chain existence is checked on the state file.
+func fakeChainExists(env *fakeNetfilterEnv, bin, table, chain string) bool {
+	_, err := os.Stat(filepath.Join(env.iptState, bin, table+"__"+chain))
+	return err == nil
+}
+
+// containsRule reports whether any fake-iptables rule line equals the joined
+// rule args.
+func containsRule(lines []string, args []string) bool {
+	want := strings.Join(args, " ")
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
 	}
-	if rules := env.chainRules(t, "iptables", "nat", chainName); rules != nil {
-		t.Errorf("chain %s still present after cleanup: %v", chainName, rules)
-	}
+	return false
 }

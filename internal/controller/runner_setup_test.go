@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,6 +135,26 @@ func TestSetupManagerFullWiring(t *testing.T) {
 			t.Fatalf("webhook %q caBundle not patched", wh.Name)
 		}
 	}
+
+	// The pod-mutating admission handler must be registered on the webhook
+	// server's mux at its fixed path (webhook.Register wires /mutate-pods).
+	mux := mgr.GetWebhookServer().WebhookMux()
+	if mux == nil {
+		t.Fatal("webhook server mux is nil; no handler was registered")
+	}
+	_, pattern := mux.Handler(httptest.NewRequest(http.MethodPost, "/mutate-pods", nil))
+	if pattern != "/mutate-pods" {
+		t.Fatalf("mux pattern for /mutate-pods = %q, want an exact registration", pattern)
+	}
+
+	// Not asserted, deliberately: (a) the healthz/readyz registrations —
+	// controller-runtime stores the checks in an unexported map that only
+	// materializes as an HTTP handler on Start, and AddHealthzCheck silently
+	// overwrites duplicates, so there is no observable to probe; (b) the
+	// reinject-sweep runnable and the controller registrations — both go
+	// through mgr.Add, whose runnable set is likewise unexported with no
+	// accessor short of Start()ing the manager against a live API server.
+	// Neither can be observed without adding a production seam.
 }
 
 func TestSetupManagerStatusMirror(t *testing.T) {

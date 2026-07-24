@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
 	imagesapi "github.com/containerd/containerd/api/services/images/v1"
@@ -279,9 +280,24 @@ func TestResolveReconnects(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("server saw %d Get calls, want 2 (original + post-reconnect retry)", calls)
 	}
+	// The un-throttled reconnect must have stamped the throttle window.
+	r.reconnectMu.Lock()
+	if r.lastReconnect.IsZero() {
+		r.reconnectMu.Unlock()
+		t.Fatal("lastReconnect still zero after a reconnecting Resolve")
+	}
+	r.reconnectMu.Unlock()
 
 	// A second outage inside the throttle window skips the re-dial but still
-	// retries the operation on the shared connection.
+	// retries the operation on the shared connection. Pin the window
+	// deterministically: reset lastReconnect to now so the attempt below is
+	// guaranteed to land inside minReconnectInterval regardless of how long
+	// the first phase took.
+	r.reconnectMu.Lock()
+	r.lastReconnect = time.Now()
+	throttledSince := r.lastReconnect
+	r.reconnectMu.Unlock()
+
 	images.mu.Lock()
 	images.unavailable = 1
 	images.mu.Unlock()
@@ -294,6 +310,15 @@ func TestResolveReconnects(t *testing.T) {
 	images.mu.Unlock()
 	if calls != 4 {
 		t.Fatalf("server saw %d Get calls, want 4", calls)
+	}
+	// The throttled branch must NOT have advanced the reconnect stamp: an
+	// unchanged lastReconnect proves the re-dial was skipped and the retry ran
+	// on the shared connection, distinguishing throttling from a real re-dial.
+	r.reconnectMu.Lock()
+	last := r.lastReconnect
+	r.reconnectMu.Unlock()
+	if !last.Equal(throttledSince) {
+		t.Fatalf("lastReconnect advanced from %v to %v; throttled attempt re-dialed", throttledSince, last)
 	}
 }
 

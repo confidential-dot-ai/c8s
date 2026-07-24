@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,9 +239,23 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
 	stubVerify(t, verifiedResult("00"), nil) // overrides the env's stub
 
-	err := Run(context.Background(), env.config())
+	// Count cred-release hits on a plain-HTTP server so any request — even one
+	// that would fail the RA-TLS handshake — reaches the handler and is counted.
+	var releaseHits atomic.Int32
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		releaseHits.Add(1)
+		releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
+	}))
+	t.Cleanup(release.Close)
+	cfg := env.config()
+	cfg.ReleaseBaseURL = release.URL
+
+	err := Run(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "RTMR[3] mismatch") {
 		t.Fatalf("want RTMR[3] mismatch, got %v", err)
+	}
+	if n := releaseHits.Load(); n != 0 {
+		t.Fatalf("cred-release hits = %d, want 0 (Run must stop at the trust gate)", n)
 	}
 }
 
@@ -254,8 +269,10 @@ func TestRATLSClientRejectsPlainCert(t *testing.T) {
 	cfg := env.config()
 	cfg.ReleaseBaseURL = plain.URL
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "credential release") {
-		t.Fatalf("want RA-TLS handshake failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "credential release") ||
+		!strings.Contains(err.Error(), "ratls") ||
+		!strings.Contains(err.Error(), "missing RA-TLS extension") {
+		t.Fatalf("want RA-TLS handshake failure (ratls: missing RA-TLS extension), got %v", err)
 	}
 }
 

@@ -214,6 +214,9 @@ func TestReadConfigInvalidJSONAndMissingFile(t *testing.T) {
 // unrecordLast trims the in-memory order even when the log rewrite fails, and
 // only logs the rewrite error.
 func TestUnrecordLastRewriteFailureIsLoggedNotFatal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0500 does not block writes, so the rewrite-failure path is not exercised")
+	}
 	dir := t.TempDir()
 	state := filepath.Join(dir, "measured")
 	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
