@@ -5,7 +5,7 @@
 (`docker.io/library/alpine:3.20`) and a forged
 `io.kubernetes.cri.image-id: sha256:fcb75f…a186` (the allowlisted
 `hashicorp/http-echo:1.0.0` digest) created and **ran** a container inside the
-running `cw-server` TDX CVM (tool: `test/redteam/katahostcreate`; container
+running `cw-server` TDX CVM (tool: `test/kata-host-create`; container
 survived 15s of stats polling, then cleaned up). The deployed guest image
 (2026-07-09, predates policy-monitor) has no in-guest enforcer at all, so the
 host-to-CVM container-creation path itself — the exact ttRPC surface the
@@ -128,19 +128,19 @@ under the new path (proves the fix):
 go test ./internal/cmds/policymonitor/ -run RT003 -v
 ```
 
-Live reproduction (tdx-dev-host-1, kata-qemu-tdx): `test/redteam/katahostcreate`
+Live reproduction (tdx-dev-host-1, kata-qemu-tdx): `test/kata-host-create`
 dials the guest's kata-agent over vsock and sends the attack
 `CreateContainerRequest` directly — no shim or containerd cooperation needed:
 
 ```
 # guest CID from: ps aux | grep 'sandbox-<id>' | grep -oE 'guest-cid=[0-9]+'
-sudo ./katahostcreate \
+sudo ./kata-host-create \
   -cid <guest-cid> -sandbox <sandbox-id> \
   -image docker.io/library/alpine:3.20 \
   -forged-image-id sha256:<allowlisted-digest> \
   -cmd "sleep 600" -probe 15
 # [RESULT] container survived 15s — arbitrary host-chosen code running in the CVM
-sudo ./katahostcreate -cid <guest-cid> -sandbox <sandbox-id> -remove-only
+sudo ./kata-host-create -cid <guest-cid> -sandbox <sandbox-id> -remove-only
 ```
 
 Build needs the kata-containers checkout for the generated agent bindings

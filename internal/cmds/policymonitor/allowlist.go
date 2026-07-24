@@ -200,7 +200,7 @@ func extractDigest(annotations map[string]string) (string, bool) {
 	return "", false
 }
 
-// pulledImageStampName is the filename kata-agent (patched for RT-003)
+// pulledImageStampName is the filename the patched kata-agent
 // writes the true pull reference into, inside the container bundle: the
 // storage.source it passed to the in-guest puller. Unlike the OCI
 // annotations in config.json — which the host authors verbatim — this

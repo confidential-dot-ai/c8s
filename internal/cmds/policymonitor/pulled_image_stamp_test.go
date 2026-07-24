@@ -2,7 +2,8 @@
 
 package policymonitor
 
-// RT-003 repro + regression test (docs/security/RT-003-policy-monitor-host-annotations.md).
+// Repro + regression tests for the host-forged annotation bypass
+// (docs/security/RT-003-policy-monitor-host-annotations.md).
 //
 // The vulnerability: policy-monitor's allowlist decision consumed
 // host-authored OCI annotations (io.kubernetes.cri.image-id et al.), which
@@ -19,17 +20,17 @@ import (
 )
 
 const (
-	rt003AllowedDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	rt003EvilDigest    = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	stampAllowedDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	stampEvilDigest    = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 )
 
-func rt003Monitor(t *testing.T, requireStamp bool) (*monitor, *fakeKiller) {
+func stampTestMonitor(t *testing.T, requireStamp bool) (*monitor, *fakeKiller) {
 	t.Helper()
 	fk := &fakeKiller{}
 	m := &monitor{
 		cfg:       &Config{RequirePulledImageStamp: requireStamp},
 		logger:    testLogger(t),
-		allowlist: &allowlist{digests: map[string]struct{}{rt003AllowedDigest: {}}},
+		allowlist: &allowlist{digests: map[string]struct{}{stampAllowedDigest: {}}},
 		killer:    fk,
 	}
 	return m, fk
@@ -56,16 +57,16 @@ func writeBundle(t *testing.T, annotationsJSON string, stamp string) string {
 	return cidDir
 }
 
-// TestRT003ForgedAnnotationsAreTrusted documents the vulnerability: a
+// TestForgedAnnotationsAreTrustedByLegacyPath documents the vulnerability: a
 // host-forged bundle whose image-name is a digest-less tag but whose
 // image-id names an allowlisted digest is ALLOWED by the legacy path —
 // while the guest could have pulled anything. This is the exploit; it must
 // keep passing until the legacy path is removed, to document the hole.
-func TestRT003ForgedAnnotationsAreTrusted(t *testing.T) {
-	m, fk := rt003Monitor(t, false)
+func TestForgedAnnotationsAreTrustedByLegacyPath(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
 	dir := writeBundle(t, `{
 		"io.kubernetes.cri.image-name": "attacker.example/malware:latest",
-		"io.kubernetes.cri.image-id": "sha256:`+rt003AllowedDigest+`"
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
 	}`, "")
 
 	m.handleNewContainer(context.Background(), dir)
@@ -75,15 +76,15 @@ func TestRT003ForgedAnnotationsAreTrusted(t *testing.T) {
 	}
 }
 
-// TestRT003StampedNonAllowlistedPullIsDenied proves the fix: the same
+// TestStampedNonAllowlistedPullIsDenied proves the fix: the same
 // forged annotations, but with a kata-agent stamp showing the real pull
 // reference (a non-allowlisted digest) — the container is killed.
-func TestRT003StampedNonAllowlistedPullIsDenied(t *testing.T) {
-	m, fk := rt003Monitor(t, false)
+func TestStampedNonAllowlistedPullIsDenied(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
 	dir := writeBundle(t, `{
 		"io.kubernetes.cri.image-name": "attacker.example/malware:latest",
-		"io.kubernetes.cri.image-id": "sha256:`+rt003AllowedDigest+`"
-	}`, "attacker.example/malware@sha256:"+rt003EvilDigest)
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
+	}`, "attacker.example/malware@sha256:"+stampEvilDigest)
 
 	m.handleNewContainer(context.Background(), dir)
 	if len(fk.snapshot()) == 0 {
@@ -91,13 +92,13 @@ func TestRT003StampedNonAllowlistedPullIsDenied(t *testing.T) {
 	}
 }
 
-// TestRT003StampedTagPullIsDenied: a tag-only stamped pull reference binds
+// TestStampedTagPullIsDenied: a tag-only stamped pull reference binds
 // nothing — fail closed even when the forged annotations look allowlisted.
-func TestRT003StampedTagPullIsDenied(t *testing.T) {
-	m, fk := rt003Monitor(t, false)
+func TestStampedTagPullIsDenied(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
 	dir := writeBundle(t, `{
 		"io.kubernetes.cri.image-name": "attacker.example/malware:latest",
-		"io.kubernetes.cri.image-id": "sha256:`+rt003AllowedDigest+`"
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
 	}`, "attacker.example/malware:latest")
 
 	m.handleNewContainer(context.Background(), dir)
@@ -106,13 +107,13 @@ func TestRT003StampedTagPullIsDenied(t *testing.T) {
 	}
 }
 
-// TestRT003StampedAllowlistedPullIsAllowed: honest digest-pinned pull of an
+// TestStampedAllowlistedPullIsAllowed: honest digest-pinned pull of an
 // allowlisted image passes.
-func TestRT003StampedAllowlistedPullIsAllowed(t *testing.T) {
-	m, fk := rt003Monitor(t, false)
+func TestStampedAllowlistedPullIsAllowed(t *testing.T) {
+	m, fk := stampTestMonitor(t, false)
 	dir := writeBundle(t, `{
-		"io.kubernetes.cri.image-name": "registry.example/app@sha256:`+rt003AllowedDigest+`"
-	}`, "registry.example/app@sha256:"+rt003AllowedDigest)
+		"io.kubernetes.cri.image-name": "registry.example/app@sha256:`+stampAllowedDigest+`"
+	}`, "registry.example/app@sha256:"+stampAllowedDigest)
 
 	m.handleNewContainer(context.Background(), dir)
 	if len(fk.snapshot()) != 0 {
@@ -120,13 +121,13 @@ func TestRT003StampedAllowlistedPullIsAllowed(t *testing.T) {
 	}
 }
 
-// TestRT003RequireStampFailsClosed: with --require-pulled-image-stamp, a
+// TestRequireStampFailsClosed: with --require-pulled-image-stamp, a
 // bundle without any stamp is denied even if its (forgeable) annotations
 // name an allowlisted digest.
-func TestRT003RequireStampFailsClosed(t *testing.T) {
-	m, fk := rt003Monitor(t, true)
+func TestRequireStampFailsClosed(t *testing.T) {
+	m, fk := stampTestMonitor(t, true)
 	dir := writeBundle(t, `{
-		"io.kubernetes.cri.image-id": "sha256:`+rt003AllowedDigest+`"
+		"io.kubernetes.cri.image-id": "sha256:`+stampAllowedDigest+`"
 	}`, "")
 
 	m.handleNewContainer(context.Background(), dir)

@@ -425,7 +425,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// Preferred decision input (RT-003): the kata-agent-stamped pull
+	// Preferred decision input: the kata-agent-stamped pull
 	// reference (<bundle>/c8s-pulled-image). This is the reference the
 	// guest actually pulled — written by kata-agent, not the host — so a
 	// @sha256-pinned value cryptographically binds the running content.
@@ -448,10 +448,10 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		m.kill(cid)
 		return
 	}
-	// LEGACY path (forgeable by the host — see RT-003): kept for kata
+	// LEGACY path (forgeable by the host): kept for kata
 	// builds without the stamp. Do not extend it; remove it once the stamp
 	// is universal.
-	m.logger.Debug("no pull-reference stamp; falling back to host-authored annotations (forgeable, RT-003)", "cid", cid)
+	m.logger.Debug("no pull-reference stamp; falling back to host-authored annotations (forgeable)", "cid", cid)
 
 	digest, ok := extractDigest(spec.Annotations)
 	if !ok {
