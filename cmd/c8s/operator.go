@@ -55,6 +55,7 @@ by this command.`,
 			SecretAgentCommand:      secretAgentCommand,
 			SecretBrokerURL:         secretBrokerURL,
 			LUKSOpenImage:           luksOpenImage,
+			LUKSDeviceAllowlist:     luksDeviceAllowlist,
 			KataEnforce:             kataEnforce,
 			HardwarePlatform:        operatorHardwarePlatform,
 			WorkloadClaimsHostDir:   workloadClaimsHostDir,
@@ -82,10 +83,11 @@ var (
 	getCertRunAsGroup       int64
 	getCertRunAsNonRoot     bool
 
-	secretAgentImage   string
-	secretAgentCommand string
-	secretBrokerURL    string
-	luksOpenImage      string
+	secretAgentImage    string
+	secretAgentCommand  string
+	secretBrokerURL     string
+	luksOpenImage       string
+	luksDeviceAllowlist []string
 
 	kataEnforce              bool
 	operatorHardwarePlatform string
@@ -115,6 +117,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&secretAgentCommand, "secret-agent-command", "bao", "agent binary in --secret-agent-image (bao for OpenBao, vault for HashiCorp Vault)")
 	operatorCmd.Flags().StringVar(&secretBrokerURL, "secret-broker-url", "", "secret-broker base URL the injected agent dials (operator-set only; pods cannot override it)")
 	operatorCmd.Flags().StringVar(&luksOpenImage, "luks-open-image", "", "container image the webhook injects to open openbao-gated LUKS volumes for pods with confidential.ai/luks-<name> annotations (empty = LUKS injection disabled). Runs `c8s luks-open`, so use the debian-slim luks-open image (cmd/luks-open), not the distroless operator image.")
+	operatorCmd.Flags().StringSliceVar(&luksDeviceAllowlist, "luks-device-allowlist", nil, "filepath.Match patterns for host block devices confidential.ai/luks-<name> dev= may name, e.g. /dev/vdb,/dev/disk/by-id/virtio-luks-* (empty = every dev= rejected)")
 	operatorCmd.Flags().BoolVar(&kataEnforce, "kata-enforce", false, "inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses (set by the chart under kata.enabled)")
 	operatorCmd.Flags().StringVar(&operatorHardwarePlatform, "hardware-platform", webhook.HardwarePlatformSNP, "CPU TEE the injected confidential kata classes target: sev-snp or tdx (set by the chart to match the RuntimeClasses it renders)")
 	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy broker socket (node-CVM); when set, the webhook mounts it into c8s-cert and injects the get-cert workload-digest claim (docs/ratls.md)")

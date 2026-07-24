@@ -185,6 +185,11 @@ type Config struct {
 	// (cmd/luks-open) — not the distroless operator image.
 	LUKSOpenImage string
 
+	// LUKSDeviceAllowlist is the set of filepath.Match patterns a LUKS dev=
+	// device must match (validateLUKSDevice). Empty rejects every dev= volume
+	// — fail closed.
+	LUKSDeviceAllowlist []string
+
 	// KataEnforce turns on kata runtimeClass injection. When set, the webhook
 	// injects a runtimeClassName into every in-scope workload pod that does
 	// not already request one. Independent of get-cert injection — a pod with
@@ -563,6 +568,19 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	if inj != nil && len(inj.LUKS) > 0 && m.cfg.LUKSOpenImage == "" {
 		return admission.Errored(http.StatusBadRequest,
 			fmt.Errorf("pod requests LUKS injection (%s<name>) but the operator has no --luks-open-image configured", luksAnnotationPrefix))
+	}
+	// dev= names a host block device the privileged injected container opens
+	// (and luksFormats in mode=format-if-empty), so only operator-allowlisted
+	// devices may be named. pvc= volumes are unaffected.
+	if inj != nil {
+		for _, lv := range inj.LUKS {
+			if lv.Dev == "" {
+				continue
+			}
+			if err := validateLUKSDevice(lv.Dev, m.cfg.LUKSDeviceAllowlist); err != nil {
+				return admission.Errored(http.StatusBadRequest, err)
+			}
+		}
 	}
 	// The injected agent + luks-open dial the broker with the get-cert mesh
 	// cert, and injection only runs when GetCertImage is set (getCertNeeded

@@ -81,6 +81,10 @@ type Options struct {
 	// annotations. Empty disables LUKS injection.
 	LUKSOpenImage string
 
+	// LUKSDeviceAllowlist is forwarded to the webhook: filepath.Match patterns
+	// a LUKS dev= device must match. Empty rejects every dev= volume.
+	LUKSDeviceAllowlist []string
+
 	// ExcludeNamespaces are namespaces the startup reinject sweep and the
 	// workload-service reconciler skip, on top of the release namespace and
 	// the kube-system family. Mirrors webhook.extraExcluded so the sweep,
@@ -208,6 +212,7 @@ func Run(ctx context.Context, opts Options) error {
 			GetCertRunAsNonRoot:   boolPtr(opts.GetCertRunAsNonRoot),
 			SecretAgentImage:      opts.SecretAgentImage,
 			LUKSOpenImage:         opts.LUKSOpenImage,
+			LUKSDeviceAllowlist:   opts.LUKSDeviceAllowlist,
 			SecretAgentCommand:    opts.SecretAgentCommand,
 			SecretBrokerURL:       opts.SecretBrokerURL,
 			KataEnforce:           opts.KataEnforce,

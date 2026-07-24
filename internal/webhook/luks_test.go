@@ -128,7 +128,86 @@ func TestParseLUKSVolumesSortsByName(t *testing.T) {
 func luksTestConfig() Config {
 	c := secretsTestConfig()
 	c.LUKSOpenImage = "ghcr.io/confidential-dot-ai/luks-open:test"
+	c.LUKSDeviceAllowlist = []string{"/dev/vdb", "/dev/vdc"}
 	return c
+}
+
+func TestValidateLUKSDevice(t *testing.T) {
+	allow := []string{"/dev/vdb", "/dev/disk/by-id/virtio-luks-*"}
+	cases := []struct {
+		name, dev string
+		allowlist []string
+		wantErr   string // empty = allowed
+	}{
+		{"allowed exact", "/dev/vdb", allow, ""},
+		{"allowed glob", "/dev/disk/by-id/virtio-luks-data", allow, ""},
+		{"empty allowlist fails closed", "/dev/vdb", nil, "no --luks-device-allowlist"},
+		{"no match", "/dev/vdc", allow, "matches no"},
+		{"relative", "dev/vdb", allow, "under /dev"},
+		{"outside /dev", "/tmp/vdb", allow, "under /dev"},
+		{"dot-dot escape", "/dev/../etc/passwd", allow, "under /dev"},
+		{"trailing slash", "/dev/vdb/", allow, "under /dev"},
+		{"bare /dev", "/dev", allow, "under /dev"},
+		{"bad pattern fails closed", "/dev/vdb", []string{"[unclosed"}, "pattern"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateLUKSDevice(tc.dev, tc.allowlist)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want allowed, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A dev= LUKS pod is denied at admission unless the device matches the
+// operator's --luks-device-allowlist; pvc= volumes need no allowlist.
+func TestHandleEnforcesLUKSDeviceAllowlist(t *testing.T) {
+	devPod := func() *corev1.Pod {
+		pod := luksHandlePod()
+		pod.Annotations[luksAnnotationPrefix+"data"] = "dev=/dev/vdb,mount=/data,secret=secret/data/api/luks#passphrase"
+		return pod
+	}
+
+	t.Run("denied with empty allowlist", func(t *testing.T) {
+		cfg := luksTestConfig()
+		cfg.LUKSDeviceAllowlist = nil
+		resp := handleAdmission(t, cfg, devPod())
+		if resp.Allowed {
+			t.Fatal("dev= admitted with no --luks-device-allowlist configured")
+		}
+		if resp.Result == nil || !strings.Contains(resp.Result.Message, "luks-device-allowlist") {
+			t.Fatalf("denial message = %+v, want it to mention the allowlist", resp.Result)
+		}
+	})
+	t.Run("denied when no pattern matches", func(t *testing.T) {
+		cfg := luksTestConfig()
+		cfg.LUKSDeviceAllowlist = []string{"/dev/disk/by-id/virtio-luks-*"}
+		if resp := handleAdmission(t, cfg, devPod()); resp.Allowed {
+			t.Fatal("dev= admitted for a device outside the allowlist")
+		}
+	})
+	t.Run("allowed when a pattern matches", func(t *testing.T) {
+		if resp := handleAdmission(t, luksTestConfig(), devPod()); !resp.Allowed {
+			t.Fatalf("dev= denied despite matching the allowlist: %+v", resp.Result)
+		}
+	})
+	t.Run("pvc= needs no allowlist", func(t *testing.T) {
+		cfg := luksTestConfig()
+		cfg.LUKSDeviceAllowlist = nil
+		if resp := handleAdmission(t, cfg, luksHandlePod()); !resp.Allowed {
+			t.Fatalf("pvc= denied by the device allowlist: %+v", resp.Result)
+		}
+	})
 }
 
 func TestMutatePodInjectsLUKSContainer(t *testing.T) {

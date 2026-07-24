@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -183,6 +184,34 @@ func parseLUKSValue(name, value string) (luksVolume, error) {
 			errInvalidInjectionAnnotation, name)
 	}
 	return lv, nil
+}
+
+// validateLUKSDevice enforces the operator's --luks-device-allowlist on a
+// dev= LUKS device: the privileged injected container opens it — and, in
+// mode=format-if-empty, luksFormats it — so only devices the operator
+// explicitly allowlisted may be named. Fail closed: an empty allowlist
+// rejects every dev=.
+func validateLUKSDevice(dev string, allowlist []string) error {
+	if !filepath.IsAbs(dev) || filepath.Clean(dev) != dev || !strings.HasPrefix(dev, "/dev/") {
+		return fmt.Errorf("%w: luks dev= %q must be a clean absolute path under /dev",
+			errInvalidInjectionAnnotation, dev)
+	}
+	if len(allowlist) == 0 {
+		return fmt.Errorf("%w: luks dev= %q rejected: the operator has no --luks-device-allowlist configured",
+			errInvalidInjectionAnnotation, dev)
+	}
+	for _, pattern := range allowlist {
+		ok, err := filepath.Match(pattern, dev)
+		if err != nil {
+			return fmt.Errorf("%w: --luks-device-allowlist pattern %q: %v",
+				errInvalidInjectionAnnotation, pattern, err)
+		}
+		if ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: luks dev= %q matches no --luks-device-allowlist pattern",
+		errInvalidInjectionAnnotation, dev)
 }
 
 func hasLUKSAnnotations(annotations map[string]string) bool {
