@@ -393,9 +393,9 @@ func mkfs(fstype, dev string) error {
 }
 
 func losetupFind(imgPath string) (string, error) {
-	out, err := exec.Command("losetup", "--find", "--show", imgPath).CombinedOutput()
+	out, err := exec.Command("losetup", "--find", "--show", "--nooverlap", imgPath).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("losetup --find --show %s: %w: %s", imgPath, err, out)
+		return "", fmt.Errorf("losetup --find --show --nooverlap %s: %w: %s", imgPath, err, out)
 	}
 	return trimNewline(string(out)), nil
 }
