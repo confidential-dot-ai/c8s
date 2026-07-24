@@ -31,6 +31,11 @@ by this command.`,
 			return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
 				webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, operatorHardwarePlatform)
 		}
+		// Fail at start, not at first injection: without a broker URL the
+		// injected agent config cannot render and every secrets pod crashloops.
+		if secretAgentImage != "" && secretBrokerURL == "" {
+			return fmt.Errorf("--secret-agent-image requires --secret-broker-url (the injected agent has no broker to dial)")
+		}
 		return controller.Run(cmd.Context(), controller.Options{
 			MetricsAddr:             metricsAddr,
 			HealthAddr:              healthAddr,
