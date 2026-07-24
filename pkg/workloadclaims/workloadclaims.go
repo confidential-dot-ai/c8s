@@ -27,13 +27,21 @@ import (
 )
 
 // ReservedInjectedNames are the container names the c8s webhook injects into a
-// workload pod (the get-cert sidecar and its wait gate). Brokers exclude them
-// from the workload digest: injected infrastructure is vouched by the node
-// measurement or the measured guest image, and self-assertion by the asserter
-// adds nothing (docs/ratls.md). The webhook rejects user pods that
+// workload pod: the get-cert sidecar and its wait gate, the secrets
+// config-render and agent containers, and the LUKS opener. Brokers exclude
+// them from the workload digest: injected infrastructure is vouched by the
+// node measurement or the measured guest image, and self-assertion by the
+// asserter adds nothing (docs/ratls.md). The webhook rejects user pods that
 // define a container with one of these names, so exclusion-by-name cannot be
 // abused to hide a workload image.
-var ReservedInjectedNames = []string{"c8s-cert", "c8s-cert-wait"}
+var ReservedInjectedNames = []string{
+	"c8s-cert",
+	"c8s-cert-wait",
+	"c8s-secrets-config",
+	"c8s-secrets-agent-init",
+	"c8s-secrets-agent",
+	"c8s-luks-open",
+}
 
 // IsInjectedContainer reports whether name is a c8s-injected container to
 // exclude from the workload digest.
