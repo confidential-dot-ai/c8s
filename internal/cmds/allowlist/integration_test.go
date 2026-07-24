@@ -279,11 +279,11 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 	entry := map[string]any{
 		"api": map[string]any{
 			"containers": []map[string]any{{
-				"digest":     digA,
-				"image":      "registry.example.com/team/api@" + digA,
-				"entrypoint": map[string]any{"policy": "exact", "argv": []string{"/app/server"}},
-				"cmd":        map[string]any{"policy": "exact", "argv": []string{"--port=8080"}},
-				"paths":      map[string]any{"policy": "deny"},
+				"digest":  digA,
+				"image":   "registry.example.com/team/api@" + digA,
+				"command": map[string]any{"policy": "exact", "argv": []string{"/app/server"}},
+				"args":    map[string]any{"policy": "exact", "argv": []string{"--port=8080"}},
+				"paths":   map[string]any{"policy": "deny"},
 			}},
 		},
 	}
@@ -304,8 +304,8 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 	if len(wl.Containers) != 1 || wl.Containers[0].Digest.String() != digA {
 		t.Fatalf("stored workload has unexpected containers: %#v", wl.Containers)
 	}
-	if wl.Containers[0].Entrypoint.Policy != "exact" {
-		t.Fatalf("entrypoint policy = %q, want exact", wl.Containers[0].Entrypoint.Policy)
+	if wl.Containers[0].Command.Policy != "exact" {
+		t.Fatalf("command policy = %q, want exact", wl.Containers[0].Command.Policy)
 	}
 
 	out, _, err := runCmd("workload", "get", "api", "--url", srv.URL, "--insecure", "-o", "json")

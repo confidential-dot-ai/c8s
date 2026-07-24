@@ -58,17 +58,18 @@ type Workload struct {
 
 // Container binds a digest to the process and path policy permitted for it.
 type Container struct {
-	Digest     types.Digest `json:"digest"`
-	Image      string       `json:"image,omitempty"`
-	Entrypoint ArgvPolicy   `json:"entrypoint"`
-	Cmd        ArgvPolicy   `json:"cmd"`
-	Paths      PathPolicy   `json:"paths"`
+	Digest  types.Digest `json:"digest"`
+	Image   string       `json:"image,omitempty"`
+	Command ArgvPolicy   `json:"command"`
+	Args    ArgvPolicy   `json:"args"`
+	Paths   PathPolicy   `json:"paths"`
 }
 
-// ArgvPolicy governs one segment of a container's effective argv (the OCI
-// process.args a pod actually runs): Entrypoint governs argv[0], Cmd governs
-// argv[1:]. Deny requires the segment to be empty, Any leaves it unconstrained,
-// Exact requires it to equal Argv. An absent policy defaults to Deny.
+// ArgvPolicy governs part of a container's effective argv (the OCI process.args
+// a pod actually runs), mirroring the Kubernetes command/args split: Command is
+// matched as an exact prefix of the argv, and Args governs the remainder after
+// it. Exact requires equality, Any leaves it unconstrained, Deny requires it to
+// be empty. An absent policy defaults to Deny.
 type ArgvPolicy struct {
 	Policy string   `json:"policy"`
 	Argv   []string `json:"argv,omitempty"`
@@ -192,11 +193,11 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if c.Digest.String() == "" {
 			return fmt.Errorf("workload %q %s[%d]: digest is required", workload, field, i)
 		}
-		if err := normalizeArgv(&c.Entrypoint); err != nil {
-			return fmt.Errorf("workload %q %s %s entrypoint: %w", workload, field, c.Digest, err)
+		if err := normalizeArgv(&c.Command); err != nil {
+			return fmt.Errorf("workload %q %s %s command: %w", workload, field, c.Digest, err)
 		}
-		if err := normalizeArgv(&c.Cmd); err != nil {
-			return fmt.Errorf("workload %q %s %s cmd: %w", workload, field, c.Digest, err)
+		if err := normalizeArgv(&c.Args); err != nil {
+			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
 		}
 		if err := normalizePaths(&c.Paths); err != nil {
 			return fmt.Errorf("workload %q %s %s paths: %w", workload, field, c.Digest, err)
@@ -303,7 +304,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Entrypoint, c.Cmd, c.Paths})
+	b, _ := json.Marshal([]any{c.Command, c.Args, c.Paths})
 	return string(b)
 }
 

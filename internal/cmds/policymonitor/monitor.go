@@ -159,6 +159,13 @@ func (o *policyOverlay) index() *allowlistpkg.Index {
 // apply installs al's Index when version advances past the last applied — epoch
 // anti-rollback; a lower or equal version is ignored. The first apply always
 // installs. Reports whether it applied.
+// apply replaces the overlay with the pulled policy only when the version
+// advances the epoch, so a withheld/rolled-back CDS can't reinstate a looser
+// policy. The version is process-local (zero until the first apply), so rollback
+// is rejected only within a process lifetime: after a (re)start the first pull is
+// trusted whatever its version, then state re-syncs from CDS. A guest reboot is a
+// fresh CVM, so this resets every boot; a reboot-durable guarantee needs an
+// attested freshness/monotonic-counter mechanism, out of scope here.
 func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()

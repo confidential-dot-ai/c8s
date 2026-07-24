@@ -116,9 +116,9 @@ func workloadAllowlist(t *testing.T, floorDigest, wlDigest string, entrypoint []
 		Digests: map[string]string{floorDigest: "floor-image"},
 		Workloads: map[string]allowlist.Workload{
 			"w": {Containers: []allowlist.Container{{
-				Digest:     mustDigest(t, wlDigest),
-				Entrypoint: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: entrypoint},
-				Cmd:        allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+				Digest:  mustDigest(t, wlDigest),
+				Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyExact, Argv: entrypoint},
+				Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 			}}},
 		},
 	}

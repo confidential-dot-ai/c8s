@@ -38,20 +38,20 @@ func TestParseJSON_RejectsBadFloorDigest(t *testing.T) {
 func TestParseJSON_AbsentPolicyDefaultsToDeny(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"`+digestA+`"}]}}}`)
 	c := al.Workloads["w"].Containers[0]
-	if c.Entrypoint.Policy != PolicyDeny || c.Cmd.Policy != PolicyDeny || c.Paths.Policy != PolicyDeny {
+	if c.Command.Policy != PolicyDeny || c.Args.Policy != PolicyDeny || c.Paths.Policy != PolicyDeny {
 		t.Fatalf("absent policies should default to deny, got %#v", c)
 	}
 }
 
 func TestParseJSON_ExactRequiresArgv(t *testing.T) {
-	_, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","cmd":{"policy":"exact"}}]}}}`))
+	_, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","args":{"policy":"exact"}}]}}}`))
 	if err == nil || !strings.Contains(err.Error(), "exact policy requires") {
 		t.Fatalf("expected exact-needs-argv error, got %v", err)
 	}
 }
 
 func TestParseJSON_DenyRejectsArgv(t *testing.T) {
-	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","cmd":{"policy":"deny","argv":["x"]}}]}}}`)); err == nil {
+	if _, err := ParseJSON([]byte(`{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` + digestA + `","args":{"policy":"deny","argv":["x"]}}]}}}`)); err == nil {
 		t.Fatal("expected deny-takes-no-argv error")
 	}
 }
@@ -82,11 +82,11 @@ func TestParseJSON_PathValidation(t *testing.T) {
 
 func TestCanonicalDigest_OrderIndependent(t *testing.T) {
 	a := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestB+`","cmd":{"policy":"any"}},
-		{"digest":"`+digestA+`","cmd":{"policy":"any"}}]}}}`)
+		{"digest":"`+digestB+`","args":{"policy":"any"}},
+		{"digest":"`+digestA+`","args":{"policy":"any"}}]}}}`)
 	b := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","cmd":{"policy":"any"}},
-		{"digest":"`+digestB+`","cmd":{"policy":"any"}}]}}}`)
+		{"digest":"`+digestA+`","args":{"policy":"any"}},
+		{"digest":"`+digestB+`","args":{"policy":"any"}}]}}}`)
 	da, _ := a.CanonicalDigest()
 	db, _ := b.CanonicalDigest()
 	if !bytes.Equal(da, db) {
@@ -107,8 +107,8 @@ func TestCanonicalDigest_FormattingIndependent(t *testing.T) {
 func TestRoundTripCanonical(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"},
 		"workloads":{"w":{"label":"img","containers":[
-		{"digest":"`+digestB+`","entrypoint":{"policy":"exact","argv":["/app"]},
-		 "cmd":{"policy":"any"},"paths":{"policy":"allow","read":["/s/**"]}}]}}}`)
+		{"digest":"`+digestB+`","command":{"policy":"exact","argv":["/app"]},
+		 "args":{"policy":"any"},"paths":{"policy":"allow","read":["/s/**"]}}]}}}`)
 	canon, err := al.Canonical()
 	if err != nil {
 		t.Fatal(err)

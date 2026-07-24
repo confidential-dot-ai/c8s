@@ -22,8 +22,8 @@ func newWorkloadCmd(o *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workload",
 		Short: "Manage named workload policy entries",
-		Long: `Workload entries pin an init/main container set; each container carries an
-entrypoint/cmd (argv) and path policy that is enforced by container digest, not
+		Long: `Workload entries pin an init/main container set; each container carries a
+command/args (argv) and path policy that is enforced by container digest, not
 by name or image ref.`,
 	}
 	cmd.AddCommand(

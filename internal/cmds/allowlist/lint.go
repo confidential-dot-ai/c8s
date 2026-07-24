@@ -122,16 +122,16 @@ func lintOffline(al *pkgallowlist.Allowlist) []string {
 				entriesByDigest[d] = map[string]bool{}
 			}
 			entriesByDigest[d][name] = true
-			if c.Entrypoint.Policy == pkgallowlist.PolicyAny && c.Cmd.Policy == pkgallowlist.PolicyAny {
+			if c.Command.Policy == pkgallowlist.PolicyAny && c.Args.Policy == pkgallowlist.PolicyAny {
 				fullyAny[d] = true
 			}
-			if argvPolicyName(c.Entrypoint) == pkgallowlist.PolicyDeny {
-				warnings = append(warnings, fmt.Sprintf("workload %q container %s entrypoint is deny; argv[0] must be empty, so the container can never start", name, d))
+			if argvPolicyName(c.Command) == pkgallowlist.PolicyDeny {
+				warnings = append(warnings, fmt.Sprintf("workload %q container %s command is deny; the effective argv must be empty, so the container can never start", name, d))
 			}
-			if c.Entrypoint.Policy == pkgallowlist.PolicyAny {
+			if c.Command.Policy == pkgallowlist.PolicyAny {
 				anyCount++
 			}
-			if c.Cmd.Policy == pkgallowlist.PolicyAny {
+			if c.Args.Policy == pkgallowlist.PolicyAny {
 				anyCount++
 			}
 			if c.Paths.Policy == pkgallowlist.PolicyAny {

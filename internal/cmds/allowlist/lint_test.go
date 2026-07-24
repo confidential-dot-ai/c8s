@@ -14,8 +14,8 @@ func TestLintFloorWorkloadOverlap(t *testing.T) {
 	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1",
 		"digests":{"` + digA + `":"base"},
 		"workloads":{"w":{"containers":[
-			{"digest":"` + digA + `","entrypoint":{"policy":"exact","argv":["/app"]},"cmd":{"policy":"deny"}},
-			{"digest":"` + digC + `","entrypoint":{"policy":"exact","argv":["/x"]},"cmd":{"policy":"deny"}}]}}}`))
+			{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
+			{"digest":"` + digC + `","command":{"policy":"exact","argv":["/x"]},"args":{"policy":"deny"}}]}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestLintNoFloorOverlap(t *testing.T) {
 	al, err := pkgallowlist.ParseJSON([]byte(`{"schema":"c8s.allowlist/v1",
 		"digests":{"` + digB + `":"infra"},
 		"workloads":{"w":{"containers":[
-			{"digest":"` + digA + `","entrypoint":{"policy":"exact","argv":["/app"]},"cmd":{"policy":"deny"}}]}}}`))
+			{"digest":"` + digA + `","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}

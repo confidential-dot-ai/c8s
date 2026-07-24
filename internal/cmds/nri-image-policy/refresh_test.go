@@ -76,7 +76,7 @@ func TestMergeAllowlistsCarriesWorkloads(t *testing.T) {
 	a := floorAllowlist(map[string]string{pushDigestA: "floor"})
 	b := &allowlist.Allowlist{
 		Schema:    allowlist.Schema,
-		Workloads: map[string]allowlist.Workload{"w": {Containers: []allowlist.Container{{Digest: mustDigest(t, pushDigestB), Entrypoint: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}, Cmd: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}}}}},
+		Workloads: map[string]allowlist.Workload{"w": {Containers: []allowlist.Container{{Digest: mustDigest(t, pushDigestB), Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}, Args: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny}}}}},
 	}
 	merged := mergeAllowlists(a, b)
 	idx := merged.BuildIndex()
@@ -183,6 +183,24 @@ func TestPolicyStoreEpochAntiRollback(t *testing.T) {
 	}
 	if !admitsDigest(store, pushDigestC) {
 		t.Fatal("forward digest not admitted")
+	}
+}
+
+// After a restart the store is fresh (version 0), so it trusts the first pull it
+// sees whatever its version — even one below what a prior process had applied.
+// Rollback protection is per-process-lifetime; state re-syncs from CDS.
+func TestPolicyStoreTrustsFirstVersionAfterRestart(t *testing.T) {
+	// A prior process reached version 9.
+	prior := newPolicyStore(floorAllowlist(map[string]string{}))
+	prior.apply(floorAllowlist(map[string]string{pushDigestB: "v9"}), 9)
+
+	// A restart is a brand-new store; its first apply is trusted regardless of value.
+	fresh := newPolicyStore(floorAllowlist(map[string]string{}))
+	if !fresh.apply(floorAllowlist(map[string]string{pushDigestC: "v3"}), 3) {
+		t.Fatal("fresh store must trust the first version seen after a restart")
+	}
+	if fresh.current().version != 3 {
+		t.Fatalf("version = %d, want 3", fresh.current().version)
 	}
 }
 

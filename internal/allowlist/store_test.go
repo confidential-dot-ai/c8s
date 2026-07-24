@@ -462,8 +462,8 @@ func TestPutAndDeleteWorkloadRoundtrip(t *testing.T) {
 		t.Fatalf("stored workload = %#v", doc.Workloads)
 	}
 	// Absent policies must have normalized to deny on the way in.
-	if w.Containers[0].Entrypoint.Policy != pkgallowlist.PolicyDeny {
-		t.Fatalf("entrypoint policy = %q, want deny", w.Containers[0].Entrypoint.Policy)
+	if w.Containers[0].Command.Policy != pkgallowlist.PolicyDeny {
+		t.Fatalf("entrypoint policy = %q, want deny", w.Containers[0].Command.Policy)
 	}
 
 	// The container digest is now admitted via the workload index.

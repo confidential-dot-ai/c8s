@@ -51,9 +51,9 @@ func exactEntrypointOverlay(t *testing.T, wlDigest string, entrypoint []string) 
 		Schema: allowlistpkg.Schema,
 		Workloads: map[string]allowlistpkg.Workload{
 			"w": {Containers: []allowlistpkg.Container{{
-				Digest:     mustParseDigest(t, wlDigest),
-				Entrypoint: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyExact, Argv: entrypoint},
-				Cmd:        allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
+				Digest:  mustParseDigest(t, wlDigest),
+				Command: allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyExact, Argv: entrypoint},
+				Args:    allowlistpkg.ArgvPolicy{Policy: allowlistpkg.PolicyAny},
 			}}},
 		},
 	}
@@ -216,6 +216,23 @@ func TestPolicyOverlayAntiRollback(t *testing.T) {
 	}
 	if o.index().AdmitsContainer(wl, []string{"/bin/other"}) {
 		t.Fatal("rolled-back argv policy took effect")
+	}
+}
+
+// A guest reboot / process restart is a fresh overlay (version 0), so it trusts
+// the first pull whatever its version — even one below a prior lifetime's.
+// Rollback protection is per-process-lifetime; state re-syncs from CDS.
+func TestPolicyOverlayTrustsFirstVersionAfterRestart(t *testing.T) {
+	wl := "sha256:" + strings.Repeat("b", 64)
+	prior := &policyOverlay{}
+	prior.apply(exactEntrypointOverlay(t, wl, []string{"/bin/app"}), 9)
+
+	fresh := &policyOverlay{}
+	if !fresh.apply(exactEntrypointOverlay(t, wl, []string{"/bin/other"}), 3) {
+		t.Fatal("fresh overlay must trust the first version seen after a restart")
+	}
+	if fresh.version != 3 {
+		t.Fatalf("version = %d, want 3", fresh.version)
 	}
 }
 

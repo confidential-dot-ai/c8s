@@ -9,10 +9,10 @@ import (
 func TestDiffAllowlistsWorkloads(t *testing.T) {
 	mk := func(argv string) pkgallowlist.Container {
 		return pkgallowlist.Container{
-			Digest:     mustDigest(t, digB),
-			Entrypoint: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{argv}},
-			Cmd:        pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			Paths:      pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyDeny},
+			Digest:  mustDigest(t, digB),
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{argv}},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyDeny},
 		}
 	}
 	live := &pkgallowlist.Allowlist{

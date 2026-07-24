@@ -26,7 +26,7 @@ The allowlist has two layers.
 
 - **Workloads** — `workloads`: named entries, each pinning an init/main
   container set. Every container binds a **digest** to the process policy
-  (`entrypoint`, `cmd`) and path policy (`paths`) permitted for those bytes. The
+  (`command`, `args`) and path policy (`paths`) permitted for those bytes. The
   entry name is operator-chosen; the entry `label` and per-container `image` are
   informational. Policy is always resolved by container digest.
 
@@ -52,9 +52,9 @@ semantics](#a-digest-may-run-many-ways).
         {
           "digest": "sha256:<vllm>",
           "image":  "docker.io/vllm/vllm-openai:v0.6.3",
-          "entrypoint": { "policy": "exact", "argv": ["python3"] },
-          "cmd":        { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] },
-          "paths":      { "policy": "deny" }
+          "command": { "policy": "exact", "argv": ["python3"] },
+          "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] },
+          "paths":   { "policy": "deny" }
         }
       ]
     }
@@ -68,7 +68,7 @@ verifier pins the exact format. It also makes a malformed or foreign body fail
 loud instead of parsing as an empty (and therefore deny-all or, worse,
 allow-nothing-changed) allowlist.
 
-## Process policy: entrypoint and cmd
+## Process policy: command and args
 
 An image digest already pins the image's baked `ENTRYPOINT`/`CMD` — they are in
 the OCI config the digest covers. So a process policy does not restate the
@@ -77,44 +77,48 @@ matters because an image with an overridable entrypoint can otherwise be pointed
 at an arbitrary command — credential extraction, a reverse shell — while keeping
 an allowlisted digest.
 
+The two policy fields mirror the Kubernetes container fields an operator already
+sets: `command` overrides the image `ENTRYPOINT`, `args` overrides `CMD`.
+
 ### What the enforcers see
 
 The enforcers that gate container start (the host NRI plugin, and the in-guest
 policy-monitor under kata) observe the container's **effective argv**: the OCI
 `process.args`, which is the already-merged result of the image config and any
 pod-spec `command`/`args` override. They do not see the override as an override,
-and they do not fetch the image config. Policy is therefore defined over the
-effective argv directly:
+and they do not fetch the image config. Policy is matched against that effective
+argv:
 
-- **`entrypoint`** governs `argv[0]` (the executable).
-- **`cmd`** governs `argv[1:]` (the arguments).
+- **`command`** is matched as an exact **prefix** of the argv (it may be several
+  tokens — `/docker-entrypoint.sh nginx`, `/bin/sh -c`, `python3`).
+- **`args`** governs the **remainder** of the argv after the command prefix.
 
-Each is one of:
+Each field is one of:
 
-| policy  | meaning                                   |
-|---------|-------------------------------------------|
-| `deny`  | the governed segment must be **empty**    |
-| `any`   | the governed segment is unconstrained     |
-| `exact` | the governed segment must **equal** `argv`|
+| policy  | `command` (a prefix)                     | `args` (the remainder)          |
+|---------|------------------------------------------|---------------------------------|
+| `exact` | argv must **start with** its `argv`      | the remainder must **equal** its `argv` |
+| `any`   | no prefix constraint                     | the remainder is unconstrained  |
+| `deny`  | the whole argv must be empty (see below) | there must be **no** remainder  |
+
+So the boundary between the two is `len(command.argv)` when `command` is `exact`,
+and `0` when it is `any` — which makes every combination well-defined: `command
+exact + args any` pins the executable and lets flags vary; `command exact + args
+exact` pins the whole argv; `args deny` means "no arguments beyond the command".
 
 An absent policy normalizes to `deny`, so a minimally specified container is
-maximally restrictive. `cmd: deny` is a useful control in its own right — "this
-container runs with no arguments". `entrypoint: deny` requires an empty `argv[0]`
-and therefore can never start; `lint` flags it.
-
-Kubernetes `command` overrides the image `ENTRYPOINT` and `args` overrides `CMD`,
-and the effective argv is their concatenation. When a pod sets both `command` and
-`args`, the effective argv is fully known from the spec and can be pinned exactly.
-When the pod relies on the image's baked entrypoint, the effective argv depends on
-the image config; `inspect-image` shows the baked argv so an operator can choose
-what to pin.
+maximally restrictive. `command: deny` requires an empty argv and therefore can
+never start (a workload that wants any argv should say `command: any`); `lint`
+flags it. Because `command`/`args` map 1:1 to the Kubernetes fields, `derive` (on
+its own branch) reads them straight off a pod spec, and `inspect-image` shows an
+image's baked `ENTRYPOINT`/`CMD` so an operator can see what to pin.
 
 ### A digest may run many ways
 
 A single digest can appear under several containers — in one entry or across
-entries — each with a different argv policy. Admission at the per-container gate
-is the **union**: the container is admitted if its effective argv satisfies *some*
-allowing container's entrypoint and cmd policy. This is deliberate. A shared base
+entries — each with a different policy. Admission at the per-container gate is
+the **union**: the container is admitted if its effective argv satisfies *some*
+allowing container's command and args policy. This is deliberate. A shared base
 image (busybox, a distroless runtime) is legitimately invoked with different
 command lines by different workloads; the operator allowlists each invocation,
 and any of them may run those bytes.
@@ -229,10 +233,15 @@ failure modes:
 - The **workload policy overlay swaps wholesale, gated by a monotonic epoch**
   (the version counter). A consumer applies a pulled overlay only if its version
   is greater than the last applied, and ignores a regression. This matters
-  because workload policy can *tighten* (narrow a `cmd`, revoke a `paths` grant);
+  because workload policy can *tighten* (narrow `args`, revoke a `paths` grant);
   a plain additive merge would let a host that withholds an update keep a laxer
   policy live forever. Epoch-gated replacement makes a withheld or rolled-back
-  update fail toward the last-known-good policy, not toward the laxest one.
+  update fail toward the last-known-good policy, not toward the laxest one. The
+  high-water-mark is process-local, so this rejects rollback only within a
+  consumer's lifetime: after a restart (a fresh CVM, for the in-guest monitor)
+  the first version seen is trusted and state re-syncs from CDS. A reboot-durable
+  guarantee needs an attested freshness / monotonic-counter mechanism the host
+  cannot reset — a tracked follow-on.
 
 ## Bootstrap
 
@@ -295,7 +304,7 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 ### lint
 
 `lint` catches the semantic traps before a write: an entry that admits nothing
-(both lists empty), an `entrypoint: deny` container that can never start, a
+(both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry, a digest that is
 floor-listed while also carrying a workload policy — the floor admits it by
 digest alone, so the argv/paths policy is silently not enforced — tag-form labels

@@ -72,6 +72,13 @@ func (s *policyStore) current() *policySnapshot {
 // one — an epoch rollback a withheld/rolled-back CDS must not use to loosen a
 // tightened policy. Reports whether it applied. Single-writer: only the pull
 // loop calls it, so the read-compare-store needs no lock against other writers.
+//
+// The applied version is process-local (newPolicyStore starts at 0), so
+// rollback is only rejected within a process lifetime: after a restart the first
+// pull is trusted, whatever its version, and state re-syncs from CDS. Surviving a
+// restart would need a monotonic counter the host cannot reset — out of scope; on
+// the untrusted host a persisted file is itself host-controlled. See
+// docs/allowlist-and-capabilities.md.
 func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 	if cur := s.snap.Load(); cur != nil && version < cur.version {
 		return false

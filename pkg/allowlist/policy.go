@@ -47,8 +47,8 @@ func (i *Index) AdmitsDigest(digest string) bool {
 // AdmitsContainer reports whether a container with the given digest may run the
 // given effective argv (its OCI process.args). Floor digests are admitted
 // regardless of argv. For a workload digest, admission is the union across every
-// entry that lists it: the argv must satisfy some container's entrypoint
-// (argv[0]) and cmd (argv[1:]) policy.
+// entry that lists it: the argv must satisfy some container's command (an exact
+// prefix) and args (the remainder) policy.
 func (i *Index) AdmitsContainer(digest string, argv []string) bool {
 	d, err := types.ParseDigest(digest)
 	if err != nil {
@@ -58,37 +58,47 @@ func (i *Index) AdmitsContainer(digest string, argv []string) bool {
 		return true
 	}
 	for _, c := range i.byDigest[d.String()] {
-		if c.Entrypoint.matches(entrypointSegment(argv)) && c.Cmd.matches(cmdSegment(argv)) {
+		if rest, ok := c.Command.matchCommand(argv); ok && c.Args.matchArgs(rest) {
 			return true
 		}
 	}
 	return false
 }
 
-// entrypointSegment is argv[0] (the executable), empty if argv is empty.
-func entrypointSegment(argv []string) []string {
-	if len(argv) == 0 {
-		return nil
+// matchCommand matches a command policy against the front of argv. exact pins a
+// prefix (argv must start with Argv) and returns the remaining args; any pins no
+// prefix and passes the whole argv through; deny requires an empty argv.
+func (p ArgvPolicy) matchCommand(argv []string) (rest []string, ok bool) {
+	switch p.Policy {
+	case PolicyAny:
+		return argv, true
+	case PolicyDeny:
+		return argv, len(argv) == 0
+	case PolicyExact:
+		if len(argv) < len(p.Argv) {
+			return nil, false
+		}
+		for i, tok := range p.Argv {
+			if argv[i] != tok {
+				return nil, false
+			}
+		}
+		return argv[len(p.Argv):], true
+	default:
+		return nil, false
 	}
-	return argv[:1]
 }
 
-// cmdSegment is argv[1:] (the arguments), empty if argv has fewer than two elements.
-func cmdSegment(argv []string) []string {
-	if len(argv) < 2 {
-		return nil
-	}
-	return argv[1:]
-}
-
-func (p ArgvPolicy) matches(segment []string) bool {
+// matchArgs matches an args policy against the argv left after the command:
+// any accepts anything, deny requires none, exact requires equality.
+func (p ArgvPolicy) matchArgs(rest []string) bool {
 	switch p.Policy {
 	case PolicyAny:
 		return true
 	case PolicyDeny:
-		return len(segment) == 0
+		return len(rest) == 0
 	case PolicyExact:
-		return equalStrings(segment, p.Argv)
+		return equalStrings(rest, p.Argv)
 	default:
 		return false
 	}

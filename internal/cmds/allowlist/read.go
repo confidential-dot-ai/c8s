@@ -166,24 +166,24 @@ func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload)
 	sort.Strings(names)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tINIT\tCTRS\tENTRYPOINT/CMD\tPATHS")
+	fmt.Fprintln(tw, "NAME\tINIT\tCTRS\tCOMMAND/ARGS\tPATHS")
 	for _, name := range names {
 		wl := workloads[name]
-		ep, cmd, paths := summarizeWorkload(wl)
+		command, args, paths := summarizeWorkload(wl)
 		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n", name, len(wl.InitContainers), len(wl.Containers),
-			"ep="+ep+" cmd="+cmd, paths)
+			"command="+command+" args="+args, paths)
 	}
 	tw.Flush()
 }
 
-// summarizeWorkload aggregates the entrypoint policies, cmd policies, and path
+// summarizeWorkload aggregates the command policies, args policies, and path
 // grant/deny counts across every container (init and main) in an entry.
-func summarizeWorkload(w pkgallowlist.Workload) (ep, cmd, paths string) {
-	epSet, cmdSet := map[string]bool{}, map[string]bool{}
+func summarizeWorkload(w pkgallowlist.Workload) (command, args, paths string) {
+	commandSet, argsSet := map[string]bool{}, map[string]bool{}
 	var readN, writeN, anyN int
 	for _, c := range allContainers(w) {
-		epSet[argvPolicyName(c.Entrypoint)] = true
-		cmdSet[argvPolicyName(c.Cmd)] = true
+		commandSet[argvPolicyName(c.Command)] = true
+		argsSet[argvPolicyName(c.Args)] = true
 		switch c.Paths.Policy {
 		case pkgallowlist.PolicyAllow:
 			readN += len(c.Paths.Read)
@@ -196,7 +196,7 @@ func summarizeWorkload(w pkgallowlist.Workload) (ep, cmd, paths string) {
 	if anyN > 0 {
 		pathStr += fmt.Sprintf(" any=%d", anyN)
 	}
-	return joinSet(epSet), joinSet(cmdSet), pathStr
+	return joinSet(commandSet), joinSet(argsSet), pathStr
 }
 
 // allContainers returns the init containers followed by the main containers.
@@ -254,9 +254,9 @@ func pathSummary(p pkgallowlist.PathPolicy) string {
 }
 
 // containerSummary renders one container's policy triple, e.g.
-// "ep=exact[/bin/sh -c] cmd=any paths=deny".
+// "command=exact[/bin/sh -c] args=any paths=deny".
 func containerSummary(c pkgallowlist.Container) string {
-	return fmt.Sprintf("ep=%s cmd=%s paths=%s", argvSummary(c.Entrypoint), argvSummary(c.Cmd), pathSummary(c.Paths))
+	return fmt.Sprintf("command=%s args=%s paths=%s", argvSummary(c.Command), argvSummary(c.Args), pathSummary(c.Paths))
 }
 
 func shellJoin(argv []string) string {

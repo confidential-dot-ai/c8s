@@ -67,9 +67,9 @@ func TestPutWorkloadBindsBody(t *testing.T) {
 	defer srv.Close()
 
 	wl := allowlist.Workload{Containers: []allowlist.Container{{
-		Digest:     mustDigest(t, testDigest),
-		Entrypoint: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
-		Cmd:        allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Digest:  mustDigest(t, testDigest),
+		Command: allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
+		Args:    allowlist.ArgvPolicy{Policy: allowlist.PolicyAny},
 	}}}
 	if err := NewClient(srv.URL).PutWorkload(context.Background(), "my-app", wl, stubAuth{}); err != nil {
 		t.Fatal(err)

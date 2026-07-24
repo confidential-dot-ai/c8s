@@ -12,37 +12,55 @@ func TestIndex_FloorAdmitsAnyArgv(t *testing.T) {
 	}
 }
 
-func TestIndex_DenyRequiresEmptySegment(t *testing.T) {
+// A multi-token command is matched as an exact prefix; args:any leaves the rest
+// free. This is the case an entrypoint like "/docker-entrypoint.sh nginx" needs.
+func TestIndex_MultiTokenCommandPrefix(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","entrypoint":{"policy":"any"},"cmd":{"policy":"deny"}}]}}}`).BuildIndex()
-	if !idx.AdmitsContainer(digestA, []string{"/app"}) {
-		t.Fatal("cmd deny should admit an argv with no arguments")
+		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/docker-entrypoint.sh","nginx"]},
+		 "args":{"policy":"any"}}]}}}`).BuildIndex()
+	if !idx.AdmitsContainer(digestA, []string{"/docker-entrypoint.sh", "nginx", "-g", "daemon off;"}) {
+		t.Fatal("argv starting with the command prefix should be admitted")
 	}
-	if idx.AdmitsContainer(digestA, []string{"/app", "--exfil"}) {
-		t.Fatal("cmd deny must reject any arguments")
+	if idx.AdmitsContainer(digestA, []string{"/docker-entrypoint.sh"}) {
+		t.Fatal("argv shorter than the command prefix must be rejected")
+	}
+	if idx.AdmitsContainer(digestA, []string{"/bin/sh", "nginx", "-g"}) {
+		t.Fatal("a different prefix must be rejected")
 	}
 }
 
-func TestIndex_ExactMatch(t *testing.T) {
+func TestIndex_FullExact(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
-		{"digest":"`+digestA+`","entrypoint":{"policy":"exact","argv":["/app"]},
-		 "cmd":{"policy":"exact","argv":["--serve","--port=8080"]}}]}}}`).BuildIndex()
+		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},
+		 "args":{"policy":"exact","argv":["--serve","--port=8080"]}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(digestA, []string{"/app", "--serve", "--port=8080"}) {
-		t.Fatal("exact argv should match")
+		t.Fatal("exact command+args should match the concatenation")
 	}
 	if idx.AdmitsContainer(digestA, []string{"/bin/sh", "--serve", "--port=8080"}) {
-		t.Fatal("a swapped entrypoint must be rejected")
+		t.Fatal("a swapped command must be rejected")
 	}
 	if idx.AdmitsContainer(digestA, []string{"/app", "--serve"}) {
-		t.Fatal("a truncated cmd must be rejected")
+		t.Fatal("truncated args must be rejected")
 	}
 }
 
-// A shared digest may run under several argv policies; admission is the union.
+func TestIndex_ArgsDenyMeansNoArgs(t *testing.T) {
+	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}}]}}}`).BuildIndex()
+	if !idx.AdmitsContainer(digestA, []string{"/app"}) {
+		t.Fatal("args:deny should admit the command with no extra args")
+	}
+	if idx.AdmitsContainer(digestA, []string{"/app", "--exfil"}) {
+		t.Fatal("args:deny must reject any extra args")
+	}
+}
+
+// A shared digest may run under several command/args policies; admission is the
+// union across entries.
 func TestIndex_SharedDigestUnion(t *testing.T) {
 	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{
-		"a":{"containers":[{"digest":"`+digestA+`","entrypoint":{"policy":"any"},"cmd":{"policy":"exact","argv":["sleep","1"]}}]},
-		"b":{"containers":[{"digest":"`+digestA+`","entrypoint":{"policy":"any"},"cmd":{"policy":"exact","argv":["echo","hi"]}}]}}}`).BuildIndex()
+		"a":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","sleep"]},"args":{"policy":"exact","argv":["1"]}}]},
+		"b":{"containers":[{"digest":"`+digestA+`","command":{"policy":"exact","argv":["busybox","echo"]},"args":{"policy":"any"}}]}}}`).BuildIndex()
 	if !idx.AdmitsContainer(digestA, []string{"busybox", "sleep", "1"}) {
 		t.Fatal("first entry's argv should be admitted")
 	}
