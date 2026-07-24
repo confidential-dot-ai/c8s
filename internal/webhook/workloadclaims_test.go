@@ -8,19 +8,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// The broker excludes the webhook-injected sidecars from the workload digest
+// The broker excludes the webhook-injected containers from the workload digest
 // by name (workloadclaims.ReservedInjectedNames). Those names are defined
-// independently from the webhook's own reserved-name constants, and nothing
-// couples them: a rename here that misses the other side would silently let an
-// injected image pollute a pod's workload claim. Guard the coupling.
+// independently from the webhook's own reserved-name list, and nothing couples
+// them: a name added on one side but missed on the other would either let an
+// injected image pollute a pod's workload claim, or let a digest-excluded name
+// go unreserved and hide a workload image. Guard exact equality both ways.
 func TestReservedInjectedNamesMatchWebhookConstants(t *testing.T) {
-	want := map[string]bool{reservedCertContainerName: true, reservedCertWaitContainerName: true}
-	if len(workloadclaims.ReservedInjectedNames) != len(want) {
-		t.Fatalf("ReservedInjectedNames = %v, want the webhook's injected containers %v", workloadclaims.ReservedInjectedNames, want)
+	want := map[string]bool{}
+	for _, name := range reservedInjectedContainerNames() {
+		want[name] = true
 	}
+	got := map[string]bool{}
 	for _, name := range workloadclaims.ReservedInjectedNames {
+		if got[name] {
+			t.Fatalf("ReservedInjectedNames lists %q twice", name)
+		}
+		got[name] = true
 		if !want[name] {
-			t.Fatalf("ReservedInjectedNames has %q, not a webhook-injected container name", name)
+			t.Errorf("ReservedInjectedNames has %q, not a webhook-injected container name", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("webhook injects %q but ReservedInjectedNames does not exclude it from the digest", name)
 		}
 	}
 }

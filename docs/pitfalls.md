@@ -656,3 +656,19 @@ are not regular files), so the RO mount still prevents a socket-file swap
 without blocking the connect. The same-process broker unit tests cannot catch
 this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
 `TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.
+
+
+## Secret-broker URL is operator-set only — never a pod annotation
+
+`internal/webhook/secrets.go` (`secretsInjection` has no broker field) ·
+`internal/webhook/pod_mutator.go` (`Config.SecretBrokerURL`)
+
+The injected agent dials the broker at `Config.SecretBrokerURL`, sourced from the
+operator's `--secret-broker-url` flag — part of the measured operator deployment.
+It is deliberately **not** overridable per pod. Pod annotations are written by the
+(untrusted) control plane, so a per-pod broker override would let a naughty control
+plane point the agent at an attacker-run broker; unattested, that broker hands the
+workload attacker-chosen secret values (and is handed the mesh client cert the
+agent presents) — a full secrets compromise. The endpoint is therefore pinned to
+trusted operator config; a pod chooses only which secret *paths* to fetch, and the
+broker authorizes those against the workload's mesh identity.

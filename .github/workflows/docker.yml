@@ -122,6 +122,10 @@ jobs:
               # cmd/c8s is the multi-mode binary used by the operator image;
               # it imports every internal/cmds subcommand, including get-cert.
               - '{cmd/c8s/**,internal/cmds/**}'
+            luks-open:
+              # Same c8s binary, debian-slim image (cryptsetup et al.). Rebuild
+              # on its Dockerfile or the luks-open subcommand's own code.
+              - '{cmd/luks-open/**,internal/cmds/luksopen/**}'
             cds:
               - '{cmd/cds/**,internal/cmds/cds/**}'
             get-cert:
@@ -135,6 +139,7 @@ jobs:
         env:
           SHARED: ${{ steps.filter.outputs['shared-core'] == 'true' || steps.filter.outputs['shared-cmdsutil'] == 'true' || steps.filter.outputs['shared-root'] == 'true' }}
           C8S: ${{ steps.filter.outputs.c8s }}
+          LUKS_OPEN: ${{ steps.filter.outputs['luks-open'] }}
           CDS: ${{ steps.filter.outputs.cds }}
           GET_CERT: ${{ steps.filter.outputs['get-cert'] }}
           RATLS_MESH: ${{ steps.filter.outputs['ratls-mesh'] }}

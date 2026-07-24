@@ -164,6 +164,32 @@ type Config struct {
 	GetCertRunAsGroup   *int64
 	GetCertRunAsNonRoot *bool
 
+	// SecretAgentImage is the OpenBao/Vault Agent image injected for pods that
+	// opt in to secrets injection (confidential.ai/secrets-inject). Empty
+	// disables secrets injection.
+	SecretAgentImage string
+
+	// SecretAgentCommand is the agent binary in SecretAgentImage ("bao" for
+	// OpenBao, "vault" for HashiCorp Vault). Empty defaults to "bao".
+	SecretAgentCommand string
+
+	// SecretBrokerURL is the secret-broker base URL the injected agent dials.
+	// Operator-set only — a pod cannot override it. See docs/pitfalls.md —
+	// broker URL.
+	SecretBrokerURL string
+
+	// LUKSOpenImage is the container image the webhook injects to open
+	// openbao-gated LUKS volumes (confidential.ai/luks-<name> annotations).
+	// Empty disables LUKS injection. It runs `c8s luks-open`, which shells out
+	// to cryptsetup/mkfs/mount, so it must be the debian-slim luks-open image
+	// (cmd/luks-open) — not the distroless operator image.
+	LUKSOpenImage string
+
+	// LUKSDeviceAllowlist is the set of filepath.Match patterns a LUKS dev=
+	// device must match (validateLUKSDevice). Empty rejects every dev= volume
+	// — fail closed.
+	LUKSDeviceAllowlist []string
+
 	// KataEnforce turns on kata runtimeClass injection. When set, the webhook
 	// injects a runtimeClassName into every in-scope workload pod that does
 	// not already request one. Independent of get-cert injection — a pod with
@@ -222,6 +248,11 @@ type injection struct {
 	// injection). get-cert uses them to split the broker's containers into the
 	// init vs main image sets for the workload digest (docs/ratls.md).
 	InitContainerNames []string
+	// Secrets is non-nil when the pod opts in to secrets injection.
+	Secrets *secretsInjection
+	// LUKS is populated from confidential.ai/luks-<name> annotations. Empty
+	// when the pod requests no encrypted volumes.
+	LUKS []luksVolume
 }
 
 type certSpec struct {
@@ -307,6 +338,12 @@ func parseAnnotations(pod *corev1.Pod) (*injection, error) {
 		return nil, err
 	}
 	if inj.Verbose, err = boolAnnotation(annotations, AnnotationGetCertVerbose); err != nil {
+		return nil, err
+	}
+	if inj.Secrets, err = parseSecretsInjection(annotations); err != nil {
+		return nil, err
+	}
+	if inj.LUKS, err = parseLUKSVolumes(annotations, inj.Secrets); err != nil {
 		return nil, err
 	}
 	if err := inj.validate(); err != nil {
@@ -397,12 +434,17 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 		AnnotationGetCertRunAsGroup,
 		AnnotationGetCertRunAsNonRoot,
 		AnnotationGetCertVerbose,
+		AnnotationSecretsInject,
+		AnnotationSecretsDir,
+		AnnotationSecretsRenew,
+		// luks-<name> annotations are variadic so they're handled by
+		// hasLUKSAnnotations() rather than the fixed-name list — see below.
 	} {
 		if annotations[name] != "" {
 			return true
 		}
 	}
-	return false
+	return hasSecretEntryAnnotations(annotations) || hasLUKSAnnotations(annotations)
 }
 
 func (inj *injection) validate() error {
@@ -516,6 +558,54 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		// admission with an empty metadata.namespace.
 		inj.SAN = workloadSAN(inj.WorkloadID, req.Namespace)
 	}
+	// Fail closed: a pod that asks for secrets must not start without them. If
+	// the operator has no agent image configured, reject rather than admit a
+	// pod whose app would come up missing its secret files.
+	if inj != nil && inj.Secrets != nil && m.cfg.SecretAgentImage == "" {
+		return admission.Errored(http.StatusBadRequest,
+			fmt.Errorf("pod requests secrets injection (%s) but the operator has no --secret-agent-image configured", AnnotationSecretsInject))
+	}
+	if inj != nil && len(inj.LUKS) > 0 && m.cfg.LUKSOpenImage == "" {
+		return admission.Errored(http.StatusBadRequest,
+			fmt.Errorf("pod requests LUKS injection (%s<name>) but the operator has no --luks-open-image configured", luksAnnotationPrefix))
+	}
+	// dev= names a host block device the privileged injected container opens
+	// (and luksFormats in mode=format-if-empty), so only operator-allowlisted
+	// devices may be named. pvc= volumes are unaffected.
+	if inj != nil {
+		for _, lv := range inj.LUKS {
+			if lv.Dev == "" {
+				continue
+			}
+			if err := validateLUKSDevice(lv.Dev, m.cfg.LUKSDeviceAllowlist); err != nil {
+				return admission.Errored(http.StatusBadRequest, err)
+			}
+		}
+	}
+	// The injected luks-open container is privileged, which is only tolerable
+	// under kata (see injectLUKS). With kata enforcement on, refuse a LUKS pod
+	// that would not end up under a kata class. With enforcement off the
+	// deployment-level guard is the chart's luks_plain_baremetal validation.
+	if inj != nil && len(inj.LUKS) > 0 && m.cfg.KataEnforce {
+		podClass := ""
+		if pod.Spec.RuntimeClassName != nil {
+			podClass = *pod.Spec.RuntimeClassName
+		}
+		if kataRuntimeClassFor(pod, m.cfg) == "" && !isKataClass(podClass) {
+			return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+				"%w: pod requests LUKS injection but would not run under kata (the privileged luks-open container requires kata confinement); set a kata runtimeClassName or drop host namespaces",
+				errInvalidInjectionAnnotation))
+		}
+	}
+	// The injected agent + luks-open dial the broker with the get-cert mesh
+	// cert, and injection only runs when GetCertImage is set (getCertNeeded
+	// below). Without it the pod would be admitted unmutated — its app starting
+	// with no secrets — so a secrets/LUKS request with no --get-cert-image must
+	// fail closed too, not just the missing agent/luks images above.
+	if inj != nil && (inj.Secrets != nil || len(inj.LUKS) > 0) && m.cfg.GetCertImage == "" {
+		return admission.Errored(http.StatusBadRequest,
+			fmt.Errorf("pod requests secrets/LUKS injection but the operator has no --get-cert-image configured (the injected agent needs the get-cert mesh cert)"))
+	}
 
 	// confidential.ai/cw drives both get-cert injection and confidential
 	// class selection: a pod that opts in to a c8s workload identity also
@@ -537,25 +627,27 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("no c8s annotation — passthrough")
 	}
 
-	// Only the webhook may place a container under the reserved c8s-cert name.
-	// The init sidecar is rebuilt below (injectInitContainers), but a
-	// regular/ephemeral collision cannot be, so reject it. See docs/pitfalls.md —
-	// "get-cert injection integrity is name-based".
+	// Only the webhook may use the reserved injected container and volume
+	// names (rejectReservedContainers, rejectReservedVolumes). See
+	// docs/pitfalls.md — "get-cert injection integrity is name-based".
 	if inj != nil {
-		if err := rejectReservedCertContainer(pod); err != nil {
+		eff := inj.withDefaults(m.cfg)
+		if err := rejectReservedContainers(pod, injectedThisAdmission(eff, m.cfg, getCertNeeded)); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
+		}
+		if err := rejectReservedVolumes(pod, reservedVolumesFor(eff, m.cfg, getCertNeeded)); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		// The secrets mount must not swallow the cert dir the agent reads its
+		// mesh cert from (the /vault/config overlap is checked at parse).
+		if eff.Secrets != nil && eff.Secrets.SecretsDir != "" && pathsOverlap(eff.Secrets.SecretsDir, eff.Cert.Dir) {
+			return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+				"%w: %s %q must not equal or shadow the cert dir %q",
+				errInvalidInjectionAnnotation, AnnotationSecretsDir, eff.Secrets.SecretsDir, eff.Cert.Dir))
 		}
 	}
 
 	if getCertNeeded {
-		// ensureVolume keeps a pre-declared same-named volume rather than
-		// overwriting it, so a pod that declares the reserved cert volume as a
-		// hostPath/PVC/disk-backed emptyDir would have its private keys written
-		// to persistent, host-visible storage outside the TEE memory boundary.
-		// Reject anything but the expected memory-backed emptyDir.
-		if err := rejectReservedCertVolume(pod, inj.withDefaults(m.cfg).Cert.Volume); err != nil {
-			return admission.Errored(http.StatusBadRequest, err)
-		}
 		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
 		mutatePod(pod, inj, m.cfg)
 	}
@@ -697,6 +789,16 @@ func kataRuntimeClassFor(pod *corev1.Pod, cfg Config) string {
 	return kataRuntimeClass
 }
 
+// isKataClass reports whether name is one of the fixed kata RuntimeClasses
+// the chart installs (the same set the kata-enforcement VAP allows).
+func isKataClass(name string) bool {
+	switch name {
+	case kataRuntimeClass, kataSnpRuntimeClass, kataSnpGpuRuntimeClass, kataTdxRuntimeClass, kataTdxGpuRuntimeClass:
+		return true
+	}
+	return false
+}
+
 // podRequestsNvidiaGpu reports whether any container (regular or init) asks
 // for an nvidia.com/* extended resource. Extended resources must appear in
 // Limits (kubernetes copies the value into Requests), but a hand-written pod
@@ -766,6 +868,15 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	pod.Spec.InitContainers = injectInitContainers(pod.Spec.InitContainers,
 		certContainer(&effective, cfg), certWaitContainer(&effective, cfg))
 
+	if effective.Secrets != nil && cfg.SecretAgentImage != "" {
+		injectSecrets(pod, effective, cfg)
+	}
+
+	if len(effective.LUKS) > 0 && cfg.LUKSOpenImage != "" {
+		ensureLUKSVolumes(pod, effective.LUKS)
+		injectLUKS(pod, effective, cfg)
+	}
+
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
@@ -805,6 +916,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		"--renew-interval=" + inj.Cert.RenewInterval.String(),
 		"--reload-nginx=" + strconv.FormatBool(inj.Reload.Nginx),
 		"--continue-on-initial-error",
+	}
+	// Secrets injection needs the mesh CA on disk so the injected agent can
+	// trust the broker's CDS-issued serving cert.
+	if inj.Secrets != nil {
+		args = append(args, "--ca-out="+certPath(inj.Cert.Dir, "ca.crt"))
 	}
 	for _, path := range inj.Reload.WatchPaths {
 		args = append(args, "--reload-watch="+path)
@@ -1122,48 +1238,175 @@ func injectInitContainers(existing []corev1.Container, injected ...corev1.Contai
 	return out
 }
 
-// rejectReservedCertContainer denies an opted-in pod that parks a container
-// under the reserved c8s-cert name outside the init-container slot the webhook
-// rebuilds. Such a container would survive injection and collide with the
-// injected init sidecar (names are unique across all three lists), so it can
-// only be an attempt to shed or impersonate it; init-container collisions are
-// handled by injectInitContainers instead.
-func rejectReservedCertContainer(pod *corev1.Pod) error {
+// reservedInjectedContainerNames are every container name the webhook can
+// inject. Brokers exclude these names from the workload digest
+// (workloadclaims.ReservedInjectedNames), so a pod-declared container under
+// one would be hidden from attestation; the webhook refuses them all.
+func reservedInjectedContainerNames() []string {
+	return []string{
+		reservedCertContainerName,
+		reservedCertWaitContainerName,
+		secretsConfigContainerName,
+		secretsAgentInitContainerName,
+		secretsAgentContainerName,
+		luksOpenContainerName,
+	}
+}
+
+// injectedThisAdmission is the set of container names this admission will
+// (re)build, mirroring mutatePod's injection gates. Init containers under
+// these names are dropped and reinjected (injectInitContainers,
+// insertAfterContainer), so a webhook reinvocation converges.
+func injectedThisAdmission(eff injection, cfg Config, getCertNeeded bool) map[string]struct{} {
+	rebuilt := map[string]struct{}{}
+	if !getCertNeeded {
+		return rebuilt
+	}
+	rebuilt[reservedCertContainerName] = struct{}{}
+	rebuilt[reservedCertWaitContainerName] = struct{}{}
+	if eff.Secrets != nil && cfg.SecretAgentImage != "" {
+		rebuilt[secretsConfigContainerName] = struct{}{}
+		rebuilt[secretsAgentInitContainerName] = struct{}{}
+		if eff.Secrets.Renew {
+			rebuilt[secretsAgentContainerName] = struct{}{}
+		}
+	}
+	if len(eff.LUKS) > 0 && cfg.LUKSOpenImage != "" {
+		rebuilt[luksOpenContainerName] = struct{}{}
+	}
+	return rebuilt
+}
+
+// rejectReservedContainers denies an opted-in pod that declares its own
+// container under any reserved injected name. Regular and ephemeral containers
+// may never carry one (the webhook only injects init containers). An init
+// container may carry one only when this admission rebuilds that exact
+// container — the injectors drop-and-rebuild collisions, so a reinvocation
+// converges — otherwise a digest-excluded name would hide a workload image
+// from attestation.
+func rejectReservedContainers(pod *corev1.Pod, rebuilt map[string]struct{}) error {
+	reserved := make(map[string]struct{}, len(reservedInjectedContainerNames()))
+	for _, n := range reservedInjectedContainerNames() {
+		reserved[n] = struct{}{}
+	}
+	check := func(kind, name string) error {
+		if _, ok := reserved[name]; ok {
+			return fmt.Errorf("%w: %s name %q is reserved for c8s-injected containers",
+				errInvalidInjectionAnnotation, kind, name)
+		}
+		return nil
+	}
 	for _, c := range pod.Spec.Containers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: container name %q is reserved for the injected c8s cert containers",
-				errInvalidInjectionAnnotation, c.Name)
+		if err := check("container", c.Name); err != nil {
+			return err
 		}
 	}
 	for _, c := range pod.Spec.EphemeralContainers {
-		if isReservedCertName(c.Name) {
-			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s cert containers",
-				errInvalidInjectionAnnotation, c.Name)
+		if err := check("ephemeral container", c.Name); err != nil {
+			return err
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if _, ok := rebuilt[c.Name]; ok {
+			continue
+		}
+		if err := check("init container", c.Name); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func isReservedCertName(name string) bool {
-	return name == reservedCertContainerName || name == reservedCertWaitContainerName
+// reservedVolume pairs a reserved injected volume name with the predicate its
+// pre-declared shape must satisfy. ensureVolume keeps a same-named pod volume
+// rather than overwriting it, so anything but the exact injected shape could
+// redirect injected data — cert private keys, secrets, decrypted mounts — to
+// persistent, host-visible storage outside the TEE memory boundary.
+type reservedVolume struct {
+	name string
+	ok   func(v corev1.Volume) bool
+	want string
 }
 
-// rejectReservedCertVolume denies a pod that pre-declares the reserved cert
-// volume as anything other than the expected memory-backed emptyDir (see
-// certsVolume). ensureVolume keeps an existing same-named volume instead of
-// overwriting it, so without this guard an author could point the cert volume
-// at a hostPath, PVC, or disk-backed emptyDir and have the injected sidecar
-// write private keys to persistent, host-visible storage outside the TEE
-// memory boundary. Omitting the volume is fine — the webhook injects it.
-func rejectReservedCertVolume(pod *corev1.Pod, volName string) error {
-	for i := range pod.Spec.Volumes {
-		v := &pod.Spec.Volumes[i]
-		if v.Name != volName {
-			continue
+func memoryEmptyDirOK(v corev1.Volume) bool {
+	return v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory
+}
+
+func plainEmptyDirOK(v corev1.Volume) bool {
+	return v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumDefault
+}
+
+// reservedVolumesFor lists the reserved volumes of every injection this
+// admission will perform, mirroring mutatePod's injection gates.
+func reservedVolumesFor(eff injection, cfg Config, getCertNeeded bool) []reservedVolume {
+	if !getCertNeeded {
+		return nil
+	}
+	const memoryEmptyDir = "a memory-backed emptyDir (medium: Memory)"
+	reserved := []reservedVolume{
+		{name: eff.Cert.Volume, ok: memoryEmptyDirOK, want: memoryEmptyDir},
+	}
+	if dir := cfg.WorkloadClaimsHostDir; dir != "" {
+		reserved = append(reserved, reservedVolume{
+			name: workloadClaimsVolumeName,
+			ok: func(v corev1.Volume) bool {
+				return v.HostPath != nil && v.HostPath.Path == dir &&
+					v.HostPath.Type != nil && *v.HostPath.Type == corev1.HostPathDirectory
+			},
+			want: fmt.Sprintf("a hostPath directory at %s", dir),
+		})
+	}
+	if eff.Secrets != nil && cfg.SecretAgentImage != "" {
+		reserved = append(reserved,
+			reservedVolume{name: secretsConfigVolume, ok: memoryEmptyDirOK, want: memoryEmptyDir},
+			reservedVolume{name: secretsDataVolume, ok: memoryEmptyDirOK, want: memoryEmptyDir},
+		)
+	}
+	if len(eff.LUKS) > 0 && cfg.LUKSOpenImage != "" {
+		reserved = append(reserved, reservedVolume{name: luksDataVolume, ok: plainEmptyDirOK, want: "a plain emptyDir"})
+		if hasLocalLUKSVolume(eff.LUKS) {
+			reserved = append(reserved, reservedVolume{
+				name: hostDevVolume,
+				ok: func(v corev1.Volume) bool {
+					return v.HostPath != nil && v.HostPath.Path == "/dev" &&
+						(v.HostPath.Type == nil || *v.HostPath.Type == corev1.HostPathUnset)
+				},
+				want: "a hostPath at /dev",
+			})
 		}
-		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory {
-			return fmt.Errorf("%w: volume %q is reserved for the injected in-memory cert store; it must be a memory-backed emptyDir (medium: Memory) or omitted",
-				errInvalidInjectionAnnotation, volName)
+		for _, lv := range eff.LUKS {
+			if lv.PVC == "" {
+				continue
+			}
+			claim := lv.PVC
+			reserved = append(reserved, reservedVolume{
+				name: lv.pvcVolumeName(),
+				ok: func(v corev1.Volume) bool {
+					return v.PersistentVolumeClaim != nil &&
+						v.PersistentVolumeClaim.ClaimName == claim &&
+						!v.PersistentVolumeClaim.ReadOnly
+				},
+				want: fmt.Sprintf("a persistentVolumeClaim for %s", claim),
+			})
+		}
+	}
+	return reserved
+}
+
+// rejectReservedVolumes denies a pod that pre-declares a reserved injected
+// volume in any shape other than the one the webhook injects. Omitting the
+// volume is fine — the webhook injects it; the exact injected shape passes so
+// a webhook reinvocation converges.
+func rejectReservedVolumes(pod *corev1.Pod, reserved []reservedVolume) error {
+	for _, v := range pod.Spec.Volumes {
+		for _, r := range reserved {
+			if v.Name != r.name {
+				continue
+			}
+			if !r.ok(v) {
+				return fmt.Errorf("%w: volume %q is reserved for c8s injection and must be %s, or omitted",
+					errInvalidInjectionAnnotation, v.Name, r.want)
+			}
 		}
 	}
 	return nil
@@ -1172,7 +1415,7 @@ func rejectReservedCertVolume(pod *corev1.Pod, volName string) error {
 func mountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 	add := func(cs []corev1.Container) []corev1.Container {
 		for i := range cs {
-			if containerHasMount(cs[i], mount.Name) {
+			if containerHasMount(cs[i], mount.Name, mount.MountPath) {
 				continue
 			}
 			cs[i].VolumeMounts = append(cs[i].VolumeMounts, mount)
@@ -1183,9 +1426,12 @@ func mountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 	pod.Spec.InitContainers = add(pod.Spec.InitContainers)
 }
 
-func containerHasMount(c corev1.Container, name string) bool {
+// containerHasMount matches on (volume, mountPath): one volume may be mounted
+// at several paths (per-LUKS-volume subPath mounts), while a reinvocation must
+// not duplicate a mount at the same path.
+func containerHasMount(c corev1.Container, name, mountPath string) bool {
 	for _, m := range c.VolumeMounts {
-		if m.Name == name {
+		if m.Name == name && m.MountPath == mountPath {
 			return true
 		}
 	}
