@@ -4,7 +4,8 @@
 # containers, which share the operator image) on distroless. It is injected only
 # into pods requesting confidential.ai/luks-<name> volumes — see
 # internal/webhook/luks.go.
-FROM debian:bookworm-slim
+# Bump: docker buildx imagetools inspect debian:bookworm-slim → paste the new index digest.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 # cryptsetup: LUKS format/open. util-linux: mount(8), blkid, losetup.
 # e2fsprogs / xfsprogs: mkfs.ext4 / mkfs.xfs for the format-if-empty path.
