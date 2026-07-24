@@ -300,3 +300,38 @@ func TestVerifyAdoptedMapperFailsClosed(t *testing.T) {
 		t.Fatal("unstat-able backing device must fail adoption")
 	}
 }
+
+func TestMountArgsHardened(t *testing.T) {
+	got := mountArgs("ext4", "/dev/mapper/c8s-x-data", "/c8s-luks/data")
+	want := []string{"-t", "ext4", "-o", "nosuid,nodev", "/dev/mapper/c8s-x-data", "/c8s-luks/data"}
+	if len(got) != len(want) {
+		t.Fatalf("mountArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mountArgs = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOpenOneZeroizesPassphrase(t *testing.T) {
+	r := &seamRecorder{isLUKS: true}
+	installSeams(t, r)
+	var ref []byte
+	recStub := runCryptsetup
+	runCryptsetup = func(pass []byte, args ...string) error {
+		ref = pass
+		return recStub(pass, args...)
+	}
+	if err := openOne(testConfig(t), testPodUID, testVolume("open")); err != nil {
+		t.Fatal(err)
+	}
+	if len(ref) == 0 {
+		t.Fatal("runCryptsetup never saw the passphrase")
+	}
+	for i, b := range ref {
+		if b != 0 {
+			t.Fatalf("passphrase byte %d not zeroized after openOne", i)
+		}
+	}
+}

@@ -11,6 +11,7 @@
 package luksopen
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -122,13 +123,20 @@ func ParseVolumeSpecs(specs []string) ([]Volume, error) {
 
 func openOne(cfg Config, podUID string, v Volume) error {
 	passphrasePath := filepath.Join(cfg.SecretsDir, v.SecretName)
-	passphrase, err := os.ReadFile(passphrasePath)
+	raw, err := os.ReadFile(passphrasePath)
 	if err != nil {
 		return fmt.Errorf("read passphrase %s: %w", passphrasePath, err)
 	}
+	// Best-effort zeroization on every exit path (Go's GC may have copied it).
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
 	// cryptsetup accepts a trailing newline but reads the whole file as the
 	// passphrase — templated files often end with a newline, so strip it.
-	passphrase = trimTrailingNewline(passphrase)
+	// trimTrailingNewline reslices raw, so zeroing raw covers passphrase.
+	passphrase := trimTrailingNewline(raw)
 	if len(passphrase) == 0 {
 		return fmt.Errorf("passphrase file %s is empty", passphrasePath)
 	}
@@ -270,7 +278,7 @@ var (
 
 func execCryptsetup(passphrase []byte, args ...string) error {
 	cmd := exec.Command("cryptsetup", args...)
-	cmd.Stdin = bytesReader(passphrase)
+	cmd.Stdin = bytes.NewReader(passphrase)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cryptsetup %s: %w: %s", strings.Join(args, " "), err, string(out))
@@ -356,11 +364,18 @@ func execMkfs(fstype, dev string) error {
 	return nil
 }
 
+// mountArgs builds the mount argv: nosuid,nodev because the decrypted fs
+// holds tenant data, never setuid binaries or device nodes.
+func mountArgs(fstype, src, dst string) []string {
+	return []string{"-t", fstype, "-o", "nosuid,nodev", src, dst}
+}
+
 func execMount(fstype, src, dst string) error {
-	cmd := exec.Command("mount", "-t", fstype, src, dst)
+	args := mountArgs(fstype, src, dst)
+	cmd := exec.Command("mount", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mount -t %s %s %s: %w: %s", fstype, src, dst, err, string(out))
+		return fmt.Errorf("mount %s: %w: %s", strings.Join(args, " "), err, string(out))
 	}
 	return nil
 }
@@ -398,6 +413,3 @@ func trimTrailingNewline(b []byte) []byte {
 	}
 	return b
 }
-
-// small helper so we don't pull bytes/reader tricks inline
-func bytesReader(b []byte) *strings.Reader { return strings.NewReader(string(b)) }
