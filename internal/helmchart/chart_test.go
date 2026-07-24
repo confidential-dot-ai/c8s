@@ -3988,6 +3988,42 @@ func TestChartCDSMeasurementsPlumbFlatAllowlist(t *testing.T) {
 	assertContainerHasArg(t, "cds", args, "--measurements="+measurement)
 }
 
+// TestChartCDSAllowUnpinnedMeasurementsRender pins the fail-closed render
+// contract: --allow-unpinned-measurements is emitted only when measurements
+// are empty AND the operator opted in. With measurements pinned the dev flag
+// is never rendered, even if the value is set.
+func TestChartCDSAllowUnpinnedMeasurementsRender(t *testing.T) {
+	// Opt-in with empty measurements: flag rendered.
+	out, err := helmTemplate(t, "--set", "cds.allowUnpinnedMeasurements=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--allow-unpinned-measurements")
+
+	// Default: no flag (CDS then refuses to start unpinned).
+	out, err = helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args = renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerNoArgPrefix(t, "cds", args, "--allow-unpinned-measurements")
+
+	// Opt-in value set but measurements pinned: flag must not render (the
+	// binary would accept it, but rendering both is contradictory config).
+	const measurement = "0011223344556677889900112233445566778899001122334455667788990011223344556677889900112233445566ff"
+	out, err = helmTemplate(t,
+		"--set", "cds.allowUnpinnedMeasurements=true",
+		"--set", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args = renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+	assertContainerHasArg(t, "cds", args, "--measurements="+measurement)
+	assertContainerNoArgPrefix(t, "cds", args, "--allow-unpinned-measurements")
+}
+
 // TestChartCDSHandoffEnabledWiresMeasurements confirms handoff plumbs the flat
 // allowlist into --handoff-measurements (cds is its own EAR issuer, so there is
 // no external URL to wire).
