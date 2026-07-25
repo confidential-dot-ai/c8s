@@ -127,6 +127,15 @@ jobs:
           NRITAG=$(resolve_tag nri-image-policy)
           CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
           NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
+          # The operator image is ALSO the injected get-cert/c8s-cert sidecar image
+          # (operator.yaml passes --get-cert-image={{ c8s.image }}). c8s.imageAllowlist
+          # only derives a component into always_allow when it has a digest, so an
+          # un-pinned operator leaves that sidecar out of the floor AND out of the CDS
+          # seed. Under policy.mode=audit it is then denied-but-admitted, and the
+          # workload-claims broker records only on the allow path, so the sidecar is
+          # never tracked and get-cert dies with "caller cgroup names no tracked
+          # container". Pin it like cds and nri already are.
+          OPDIG=$(resolve_digest c8s-operator "$OPTAG")
           # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
           # c8s-ancestry walk can never find its tags (learned the hard way:
           # InvalidImageName, run 29473241754). :main is the canonical pointer the
@@ -149,6 +158,7 @@ jobs:
           VALS=$(cat <<EOF | base64 -w0
           image:
             tag: "$OPTAG"
+            digest: "$OPDIG"
           cds:
             image:
               tag: "$CDSTAG"
@@ -163,7 +173,20 @@ jobs:
           attestationApi:
             image:
               tag: "$AATAG"
+            # UN-PIN: keep cvmMode=node (what we actually ship on metal) and make
+            # $(HOST_IP) routing resolve. Our image predates the baked host
+            # attestation-api, but when nriImagePolicy is on the chart already
+            # publishes the AA as a NodePort for exactly this reason ("NodePort used
+            # by host-process components such as nri-image-policy"). Aligning the AA
+            # port with that NodePort makes $(HOST_IP):<port> hit the node's own AA
+            # pod (both traffic policies are Local, so it never leaves the node).
+            # Verified by helm template at HEAD: all 4 consumers (cds, operator, both
+            # tls-lb sidecars) render http://$(HOST_IP):30840, and the Service exposes
+            # port 30840 -> targetPort http -> containerPort 30840.
             cvmMode: node
+            port: 30840
+            service:
+              nodePort: 30840
             teeDevices:
               sevGuest: true
               tdxGuest: false
@@ -176,6 +199,18 @@ jobs:
             image:
               tag: "$NRITAG"
               digest: "$NRIDIG"
+            bootstrapAllowlist:
+              # THE FIX. deriveComponents is off by default and `c8s install
+              # --resolve-digests` is what normally turns it on; this lane writes raw
+              # values into a HelmChart CR, so it never did. Without it only cds and
+              # tls-lb nginx get self-entries, so the OPERATOR image is absent from
+              # always_allow and from the CDS seed. That image is also the injected
+              # c8s-cert sidecar, so under policy.mode=audit it is denied-but-admitted,
+              # and the workload-claims broker records only on the ALLOW path. The
+              # sidecar therefore runs untracked and its own get-cert call fails with
+              # "caller cgroup names no tracked container", after which get-cert waits
+              # out the 6h renewal interval and the workload never becomes ready.
+              deriveComponents: true
             policy:
               mode: audit          # bring-up: log would-be denials, admit all (chart-blessed).
                                    # enforce needs an operator-keyed allowlist first — roadmap.
@@ -241,6 +276,23 @@ jobs:
             \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
           fi
           if [ "\$CDSOK" = "1" ]; then
+            # Gate on the POLICY plane, not just CDS. The injected c8s-cert sidecar
+            # can only be recorded by the workload-claims broker if the NRI plugin is
+            # ready when its container is created; otherwise get-cert cannot resolve
+            # its own caller ("caller cgroup names no tracked container"), gives up
+            # after ~16s and waits out the 6h renewal interval. CDS and the plugin
+            # become ready independently, so applying on CDS alone is a coin flip.
+            # The installer pod is NOT a usable signal (its 120s health gate can
+            # expire while the plugin is still doing its initial CDS pull), so poll
+            # the plugin's own health socket.
+            NRIOK=0
+            for i in \$(seq 1 60); do
+              HC=\$(curl -s -o /dev/null -w '%{http_code}' --unix-socket /var/run/nri-image-policy/health.sock --max-time 3 http://localhost/healthz 2>/dev/null)
+              echo "@@NRIH \$i: \${HC:-none}@@"
+              [ "\$HC" = "200" ] && { NRIOK=1; say NRI_PLUGIN_READY; break; }
+              sleep 5
+            done
+            [ "\$NRIOK" = "1" ] || say WARN_NRI_NOT_READY
             printf %s '$CW' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
             for i in \$(seq 1 60); do
               DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
@@ -262,8 +314,8 @@ jobs:
           echo "b64=$(base64 -w0 payload.sh)" >> "$GITHUB_OUTPUT"
 
   # ── WHERE: one call per platform cell; the primitive boots/attests/tears down.
-  #    bare metal (power-cord customers: CW/Nebius/Humain) | cloud (rent-infra:
-  #    Baseten/Modal/RunPod). Adding a cell = adding a row.
+  #    bare metal (customers who run their own hardware) | cloud (customers who
+  #    rent infrastructure). Adding a cell = adding a row.
   e2e:
     needs: payload
     strategy:
