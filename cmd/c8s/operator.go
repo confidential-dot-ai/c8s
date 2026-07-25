@@ -10,6 +10,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/controller"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 var operatorCmd = &cobra.Command{
@@ -30,6 +31,13 @@ by this command.`,
 		default:
 			return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
 				webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, operatorHardwarePlatform)
+		}
+		// Fail at start, not at first workload boot: a malformed pin would
+		// otherwise surface only in sidecar logs at injection time.
+		if cdsMeasurements != "" {
+			if _, err := ratls.ParseHexMeasurements(cdsMeasurements); err != nil {
+				return fmt.Errorf("--cds-measurements: %w", err)
+			}
 		}
 		return controller.Run(cmd.Context(), controller.Options{
 			MetricsAddr:             metricsAddr,

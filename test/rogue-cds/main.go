@@ -70,7 +70,7 @@ func main() {
 	// Identical provisioning path to the real CDS (internal/cmds/cds/run.go).
 	attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), *attestationAPIURL)
 	tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
-		Platform:   *platform,
+		Platform:   ratls.NormalizePlatform(*platform),
 		AttestFunc: attestFunc,
 		CertTTL:    time.Hour,
 		Logger:     slog.Default(),

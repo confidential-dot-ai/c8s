@@ -1185,6 +1185,28 @@ func TestChartOperatorCDSMeasurementsFlagsThrough(t *testing.T) {
 	assertContainerNoArgPrefix(t, "operator", renderedOperatorArgs(t, out), "--cds-measurements")
 }
 
+func TestChartTlsLbGetCertCDSMeasurementsFlagsThrough(t *testing.T) {
+	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
+
+	// Pinned: the shared getCertContainers helper (used for the tls-lb
+	// sidecar) carries the pin.
+	out, err := helmTemplate(t,
+		"--set", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerHasArg(t, "tls-lb c8s-cert", tlsLBGetCertContainer(t, out, "c8s-cert").Args, "--cds-measurements="+measurement)
+
+	// Default (unpinned): no flag, matching get-cert's accept-any-attested-CDS
+	// fallback with a startup warning.
+	out, err = helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerNoArgPrefix(t, "tls-lb c8s-cert", tlsLBGetCertContainer(t, out, "c8s-cert").Args, "--cds-measurements")
+}
+
 func TestChartRatlsMeshCDSMeasurementsFlagsThrough(t *testing.T) {
 	const measurement = "abc1230000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff"
 	out, err := helmTemplate(t,
