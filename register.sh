@@ -69,11 +69,33 @@ WORK="$(mktemp -d)"
 
 k(){ kubectl "${KCTX_ARG[@]}" "$@"; }
 h(){ helm "${CTX_ARG[@]}" "$@"; }
-ensure_ns(){ k create ns "$1" --dry-run=client -o yaml | k apply -f - >/dev/null; }
+# PSA: a CIS-hardened RKE2 cluster sets a cluster-wide default of
+# enforce=restricted (see the rke2 role's psa-config.yaml). The ARC controller
+# and the runner pods both violate `restricted` (allowPrivilegeEscalation,
+# capabilities, runAsNonRoot, seccompProfile), so without this label the
+# ReplicaSet is refused at admission, the deployment sits at 0/1, and
+# `helm install --wait` fails with a bare "context deadline exceeded".
+ensure_ns(){
+  k create ns "$1" --dry-run=client -o yaml | k apply -f - >/dev/null
+  k label ns "$1" \
+    pod-security.kubernetes.io/enforce=privileged \
+    pod-security.kubernetes.io/warn=privileged \
+    pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null
+}
 
 ensure_controller(){
-  if k -n "$SYS_NS" get deploy arc-gha-rs-controller >/dev/null 2>&1; then
+  # Treat a deployment that exists but has no ready replica as ABSENT: a prior
+  # run that failed admission leaves the object behind, and skipping on mere
+  # existence makes every retry a silent no-op.
+  if [ "$(k -n "$SYS_NS" get deploy arc-gha-rs-controller \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" -ge 1 ] 2>/dev/null; then
     echo "controller: present"; return
+  fi
+  if k -n "$SYS_NS" get deploy arc-gha-rs-controller >/dev/null 2>&1; then
+    echo "controller: present but not ready — repairing"
+    ensure_ns "$SYS_NS"
+    k -n "$SYS_NS" rollout restart deploy/arc-gha-rs-controller >/dev/null 2>&1 || true
+    k -n "$SYS_NS" rollout status deploy/arc-gha-rs-controller --timeout=180s && return
   fi
   echo "controller: installing ($MODE)"
   ensure_ns "$SYS_NS"
