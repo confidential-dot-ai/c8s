@@ -109,6 +109,9 @@ jobs:
           NRITAG=$(resolve_tag nri-image-policy)
           CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
           NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
+          # The operator image is ALSO the injected get-cert/c8s-cert sidecar image,
+          # and deriveComponents below only derives components that carry a digest.
+          OPDIG=$(resolve_digest c8s-operator "$OPTAG")
           # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
           # c8s-ancestry walk can never find its tags (learned the hard way:
           # InvalidImageName, run 29473241754). :main is the canonical pointer the
@@ -131,6 +134,7 @@ jobs:
           VALS=$(cat <<EOF | base64 -w0
           image:
             tag: "$OPTAG"
+            digest: "$OPDIG"
           cds:
             image:
               tag: "$CDSTAG"
@@ -146,6 +150,15 @@ jobs:
             image:
               tag: "$AATAG"
             cvmMode: node
+            # cvmMode=node points every consumer at $(HOST_IP):<port>, but the staged
+            # rke2 image bakes no host attestation-api and the chart's AA DaemonSet is
+            # pod-netns, so nothing listens on the node's :8400. When nriImagePolicy is
+            # on, the chart already publishes the AA as a NodePort for host-process
+            # components; aligning the port makes $(HOST_IP) reach the node's own AA
+            # pod (both traffic policies are Local, so it never leaves the node).
+            port: 30840
+            service:
+              nodePort: 30840
             teeDevices:
               sevGuest: true
               tdxGuest: false
@@ -158,6 +171,15 @@ jobs:
             image:
               tag: "$NRITAG"
               digest: "$NRIDIG"
+            bootstrapAllowlist:
+              # c8s.imageAllowlist self-seeds only cds and tls-lb nginx; every other
+              # component (including the operator, i.e. the injected c8s-cert sidecar)
+              # is derived only under this flag, which defaults to false. `c8s install
+              # --resolve-digests` turns it on; this lane writes raw values and bypasses
+              # the CLI. Without it c8s-cert is denied-but-admitted under audit and the
+              # workload-claims broker never records it, so get-cert cannot resolve its
+              # own caller and waits out the 6h renewal interval.
+              deriveComponents: true
             policy:
               mode: audit          # bring-up: log would-be denials, admit all (chart-blessed).
                                    # enforce needs an operator-keyed allowlist first — roadmap.
@@ -223,6 +245,19 @@ jobs:
             \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
           fi
           if [ "\$CDSOK" = "1" ]; then
+            # Gate on the POLICY plane, not just CDS. c8s-cert is only recorded by the
+            # broker if the NRI plugin is ready when its container is created, and CDS
+            # and the plugin become ready independently, so applying on CDS alone is a
+            # coin flip. The installer pod is not a usable signal: its 120s health gate
+            # can expire while the plugin is still completing its initial CDS pull.
+            NRIOK=0
+            for i in \$(seq 1 60); do
+              HC=\$(curl -s -o /dev/null -w '%{http_code}' --unix-socket /var/run/nri-image-policy/health.sock --max-time 3 http://localhost/healthz 2>/dev/null)
+              echo "@@NRIH \$i: \${HC:-none}@@"
+              [ "\$HC" = "200" ] && { NRIOK=1; say NRI_PLUGIN_READY; break; }
+              sleep 5
+            done
+            [ "\$NRIOK" = "1" ] || say WARN_NRI_NOT_READY
             printf %s '$CW' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
             for i in \$(seq 1 60); do
               DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
