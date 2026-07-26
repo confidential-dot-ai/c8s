@@ -149,6 +149,28 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
+Render the directives that hand a response to the client as the upstream
+produces it. nginx's defaults are store-and-forward: `proxy_buffering on`
+accumulates the body until a proxy buffer fills, which turns an SSE token
+stream into bursts, and the HTTP/1.0 upstream hop cannot carry a chunked
+response at all. Setting HTTP/1.1 requires clearing `Connection`, which nginx
+otherwise sends upstream as `close`.
+
+An upstream keeps per-response control: `X-Accel-Buffering: yes` re-enables
+buffering for that response, sized by the server-level proxy_buffers.
+
+Takes no input; caller nindents it into a `location {}` block. These cannot be
+hoisted to server level: a location that sets any proxy_set_header of its own
+discards the inherited set, and every proxied location here sets
+Host/X-Forwarded-*.
+*/}}
+{{- define "tls-lb.proxyStreamingDirectives" -}}
+proxy_buffering off;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+{{- end -}}
+
+{{/*
 Validate the global CORS configuration. Skips when disabled.
 */}}
 {{- define "tls-lb.validateCORS" -}}

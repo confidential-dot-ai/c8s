@@ -136,6 +136,7 @@ data:
                 {{- if eq $backendProtocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" $backendProtocol "tls" $backendTLS "serverName" $backendServerName "trustedCAPath" $backendTrustedCAPath "tlsMountPath" $.Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}
+                {{- include "tls-lb.proxyStreamingDirectives" $ | nindent 16 }}
                 proxy_pass {{ $backendProtocol }}://route_{{ $i }};
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
@@ -182,7 +183,9 @@ data:
             # c8s-verify/v1 attestation + over-encryption sidecar (loopback).
             # nginx serves the static cert(s) via discovery above; the dynamic
             # per-session attestation challenge and PQ handshake are proxied to
-            # the in-pod `cds-attest` sidecar.
+            # the in-pod `cds-attest` sidecar. Deliberately not streamed: the
+            # tunnel seals one complete response envelope per request, so there
+            # is nothing to hand over incrementally.
             location /.well-known/c8s/ {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
@@ -203,6 +206,7 @@ data:
                 {{- if eq .Values.tlsLb.upstream.protocol "https" }}
                 {{- include "tls-lb.proxySSLDirectives" (dict "protocol" .Values.tlsLb.upstream.protocol "tls" .Values.tlsLb.upstream.tls "serverName" $upstreamServerName "trustedCAPath" $upstreamTrustedCAPath "tlsMountPath" .Values.tlsLb.tlsMountPath) | nindent 16 }}
                 {{- end }}
+                {{- include "tls-lb.proxyStreamingDirectives" $ | nindent 16 }}
                 set $backend_addr {{ $upstreamAddress }};
                 proxy_pass {{ .Values.tlsLb.upstream.protocol }}://$backend_addr;
                 proxy_set_header Host $host;

@@ -595,6 +595,45 @@ nothing (tls-lb has no backend) rather than a plaintext leak; the runtime
 boundary that a peer is a genuine cw pod is the mesh's always-on cw inbound
 guard, not this render guard.
 
+### Response streaming
+
+Every proxied location (the catch-all upstream and each `tlsLb.routes[]` entry)
+hands the response to the client as the backend produces it:
+
+```nginx
+proxy_buffering off;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+```
+
+This is unconditional; there is no value to turn it off. nginx's defaults are
+store-and-forward, which is wrong for the workload tls-lb exists to front: an
+SSE token stream is held until a proxy buffer fills, so clients get bursts
+instead of generation-rate delivery, and the default HTTP/1.0 upstream hop
+cannot carry a chunked response at all. `proxy_http_version 1.1` requires the
+empty `Connection` header, or nginx sends `close` upstream on every request.
+
+Two consequences worth knowing:
+
+- Unbuffered proxying stops nginx from shielding the backend from slow clients.
+  A client that reads slowly holds the upstream connection (and, for an
+  inference engine, its generation slot) for as long as it takes. An upstream
+  that would rather be buffered can set `X-Accel-Buffering: yes` on that
+  response; the server-level `proxy_buffers` still applies when it does.
+- The client sees the *proxy's* framing, not the upstream's. Anything that
+  hashes or signs response wire bytes has to account for re-chunking across the
+  hop.
+
+The over-encryption tunnel (`/.well-known/c8s/`, when `tlsLb.attest.enabled`)
+is deliberately left on nginx's defaults: `cds-attest` seals one complete
+response envelope per request, so a response through the post-quantum channel
+cannot stream regardless of proxy settings. Streaming clients ride the
+validated TLS path instead.
+
+WebSocket upgrades are not proxied. They do not work on nginx's defaults
+either (upgrade proxying needs HTTP/1.1 plus `Upgrade`/`Connection` forwarding),
+so nothing regressed; wiring them up is a separate change.
+
 ## Certificate file permissions
 
 `get-cert` writes the private key with the mode passed by `--key-mode`. The

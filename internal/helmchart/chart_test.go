@@ -2154,6 +2154,48 @@ func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T)
 	assertNoTLSLBMeshCAVolume(t, out)
 }
 
+// TestTLSLBProxiedLocationsStreamUnbuffered pins the SSE delivery fix. On
+// nginx's defaults the front door is store-and-forward: proxy_buffering
+// accumulates the body until a proxy buffer fills, so an inference token
+// stream reaches the client in bursts rather than at generation rate, and the
+// default HTTP/1.0 upstream hop cannot carry a chunked response at all. Every
+// proxied application location, the catch-all upstream and each configured
+// route alike, must hand bytes over as they arrive.
+func TestTLSLBProxiedLocationsStreamUnbuffered(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/allowlist",
+		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+
+	for _, loc := range []struct {
+		name string
+		path string
+	}{
+		{"catch-all upstream", "/"},
+		{"route", "/allowlist"},
+	} {
+		t.Run(loc.name, func(t *testing.T) {
+			block := cfg.location(t, "prefix", loc.path)
+			block.assertDirective(t, "proxy_buffering", "off")
+			block.assertDirective(t, "proxy_http_version", "1.1")
+			// Clearing Connection is what makes the 1.1 hop legal: nginx
+			// otherwise sends `close` upstream on every request.
+			block.assertDirective(t, "proxy_set_header", "Connection", `""`)
+		})
+	}
+
+	// The over-encryption sidecar seals one complete response envelope per
+	// request, so it has nothing to deliver incrementally. Leaving that
+	// location on nginx's defaults is deliberate, not an oversight.
+	cfg.location(t, "prefix", "/.well-known/c8s/").assertNoDirective(t, "proxy_buffering")
+}
+
 func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 	t.Helper()
 	cm := renderedConfigMap(t, manifest, "c8s-tls-lb-nginx")
@@ -4452,6 +4494,9 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
 	//             proxy_ssl_trusted_certificate /tls/ca.pem;
+	//             proxy_buffering off;
+	//             proxy_http_version 1.1;
+	//             proxy_set_header Connection "";
 	//             proxy_pass https://route_0;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;
@@ -4466,6 +4511,9 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
 	//             proxy_ssl_trusted_certificate /tls/ca.pem;
+	//             proxy_buffering off;
+	//             proxy_http_version 1.1;
+	//             proxy_set_header Connection "";
 	//             proxy_pass https://route_1;
 	//             proxy_set_header Host $host;
 	//             proxy_set_header X-Real-IP $remote_addr;
@@ -4481,6 +4529,9 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
 	//             proxy_ssl_trusted_certificate /tls/cert.pem;
+	//             proxy_buffering off;
+	//             proxy_http_version 1.1;
+	//             proxy_set_header Connection "";
 	//             set $backend_addr vllm:8000;
 	//             proxy_pass https://$backend_addr;
 	//             proxy_set_header Host $host;
