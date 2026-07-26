@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      ci:
+        description: "Build the rke2-ci variant (NRI admission floor stripped, C8S_NO_GPU: for CI runner clusters, e.g. the GPU-less OVH TDX host). Mutually exclusive with dev."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +38,8 @@ env:
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main.
+  # TODO(rke2-ci): bump to the confos merge that adds mkosi.profiles/rke2-ci
+  # before dispatching ci=true (the profile must exist at this ref).
   CONFOS_REF: "f7cbadcf179f580d465fa28753a9821655dd60f3" # confos main (#68)
 
 jobs:
@@ -58,6 +65,9 @@ jobs:
           path: c8s
 
       - name: Checkout attestation-rs (for the gpu-attest binary)
+        # rke2-ci composes the stock CPU attest profile (C8S_NO_GPU=1) and
+        # never stages the locally built gpu-attest binary.
+        if: github.event.inputs.ci != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: confidential-dot-ai/attestation-rs
@@ -76,9 +86,17 @@ jobs:
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
         run: |
           echo "IMAGE=${REGISTRY}/confidential-dot-ai/c8s-base" >> "$GITHUB_ENV"
+          if [ "${{ github.event.inputs.dev }}" = "true" ] && [ "${{ github.event.inputs.ci }}" = "true" ]; then
+            echo "::error::dev and ci are mutually exclusive; dispatch one variant at a time."
+            exit 1
+          fi
           if [ "${{ github.event.inputs.dev }}" = "true" ]; then
             echo "VARIANT=rke2-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
+          elif [ "${{ github.event.inputs.ci }}" = "true" ]; then
+            echo "VARIANT=rke2-ci" >> "$GITHUB_ENV"
+            echo "C8S_CI=1" >> "$GITHUB_ENV"
+            echo "C8S_NO_GPU=1" >> "$GITHUB_ENV"
           else
             echo "VARIANT=rke2" >> "$GITHUB_ENV"
             echo "C8S_DEV=0" >> "$GITHUB_ENV"
