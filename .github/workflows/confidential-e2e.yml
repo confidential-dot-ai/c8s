@@ -20,6 +20,15 @@ on:
 # Least privilege: the wrapper only reads the repo to dispatch the reusable lane.
 permissions:
   contents: read
+  # actions: read is LOAD-BEARING, not boilerplate. cvm-e2e.yml's reap step calls
+  #   gh api repos/<owner>/actions/runs/$rid -q .status
+  # to tell a genuinely orphaned CVM from one a live run still owns. GitHub sets
+  # every unlisted scope to `none` when a permissions block is present, so with
+  # `contents: read` alone that call 403s, `2>/dev/null` swallows it, $st is
+  # empty, and every decision falls through to the age-only branch:
+  #   elif [ -z "$st" ] && [ "$age" -gt 10800 ]
+  # which means a leaked CVM squats a finite bare-metal host for up to 3 hours.
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha }}
