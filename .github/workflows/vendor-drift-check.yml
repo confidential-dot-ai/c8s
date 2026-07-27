@@ -1,0 +1,93 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# VENDOR DRIFT CHECK
+# ═══════════════════════════════════════════════════════════════════════════
+# c8s is PUBLIC and confidential-ci is PRIVATE, so a public repo cannot `uses:`
+# a private repo's reusable workflow and c8s carries vendored copies instead.
+# Vendoring without a check is how you get silent divergence: c8s's cvm-e2e.yml
+# drifted 121 lines behind its original and lost an entire platform arm, and
+# nothing detected it because neither copy referenced the other.
+#
+# This compares the sha256 of each vendored file against its source of truth.
+# It is deliberately advisory for files KNOWN to have already diverged, and
+# blocking for files that are supposed to be byte-identical, so it can be
+# adopted today without first reconciling historical drift.
+name: vendor-drift-check
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cvm-e2e.yml'
+      - '.github/workflows/e2e-c8s.yml'
+      - '.github/workflows/tdx-metal-e2e.yml'
+      - '.github/workflows/vendor-drift-check.yml'
+  schedule:
+    # Catches drift introduced from the UPSTREAM side, which no c8s PR would.
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: compare each vendored workflow against its source of truth
+        env:
+          # Read-only PAT with access to the private upstream. Without it the
+          # check reports SKIPPED rather than passing, so a missing secret can
+          # never look like a clean result.
+          UPSTREAM_TOKEN: ${{ secrets.CONFIDENTIAL_CI_READ_TOKEN }}
+        run: |
+          set -uo pipefail
+          UP=confidential-dot-ai/confidential-ci
+
+          if [ -z "${UPSTREAM_TOKEN:-}" ]; then
+            echo "::warning title=vendor drift unchecked::CONFIDENTIAL_CI_READ_TOKEN is not set, so the vendored copies were NOT compared. This check is reporting SKIPPED, not PASSED."
+            exit 0
+          fi
+
+          # BLOCKING: these must be byte-identical. tdx-metal-e2e.yml carries
+          # both triggers in both repos precisely so no per-repo edit is ever
+          # needed and this comparison can be exact.
+          STRICT="tdx-metal-e2e.yml"
+          # ADVISORY: known-diverged today. Reconciling them is separate work;
+          # reporting the delta stops it growing silently in the meantime.
+          LOOSE="cvm-e2e.yml e2e-c8s.yml"
+
+          fail=0
+          for f in $STRICT $LOOSE; do
+            local_path=".github/workflows/$f"
+            [ -f "$local_path" ] || { echo "::warning::$f absent locally, skipping"; continue; }
+
+            up=$(curl -fsSL \
+                  -H "Authorization: Bearer $UPSTREAM_TOKEN" \
+                  -H "Accept: application/vnd.github.raw" \
+                  "https://api.github.com/repos/$UP/contents/.github/workflows/$f?ref=main" 2>/dev/null)
+            if [ -z "$up" ]; then
+              echo "::warning::could not fetch $f from $UP, skipping (token scope or file missing)"
+              continue
+            fi
+
+            a=$(printf '%s' "$up" | sha256sum | cut -d' ' -f1)
+            b=$(sha256sum < "$local_path" | cut -d' ' -f1)
+            la=$(printf '%s' "$up" | wc -l); lb=$(wc -l < "$local_path")
+
+            if [ "$a" = "$b" ]; then
+              echo "OK        $f  ($lb lines, sha ${a:0:12})"
+              continue
+            fi
+
+            case " $STRICT " in
+              *" $f "*)
+                echo "::error title=vendor drift::$f differs from $UP. upstream=$la lines local=$lb lines. These two are required to be byte-identical: edit the source of truth, then copy the WHOLE file across."
+                fail=1 ;;
+              *)
+                echo "::warning title=known divergence::$f differs from $UP. upstream=$la lines local=$lb lines. Advisory only, these were already out of sync before this check existed."
+                ;;
+            esac
+          done
+
+          exit "$fail"
