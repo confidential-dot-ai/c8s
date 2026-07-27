@@ -60,22 +60,28 @@ jobs:
           }
           echo "TEE confirmed: ${{ matrix.tee_dev }}"
 
-      - name: guest filesystem headroom
-        # The disk is what killed the SNP guest, so report it and warn EARLY.
-        # This runs in the runner pod, so what it sees is the pod's writable
-        # layer on the guest, not necessarily the guest root that filled. It is
-        # a leading indicator, not a complete one; the authoritative check would
-        # need node-level rights the runner deliberately lacks.
+      - name: runner storage headroom
+        # MEASURED, 2026-07-27: this reads the RUNNER POD's writable layer,
+        # which is 32G on both lanes. It is NOT the guest root.
+        #   SNP guest root  2.0G, and it hit 100% and killed the lane
+        #   SNP pod layer   32G at 33% AT THE SAME TIME, ie. it looked fine
+        # So this check would NOT have caught the outage that motivated this
+        # workflow. It catches a runner that fills its own scratch, which is a
+        # real but different failure. The guard against a wedged guest is the
+        # liveness of this job, not this number.
+        # Seeing the guest root from here needs a read-only hostPath mount of /
+        # added to the runner pod spec in both provisioners. Worth doing; it is
+        # a change to the runner spec rather than to this file.
         run: |
           set -uo pipefail
           df -h / /tmp 2>/dev/null || true
           USE=$(df --output=pcent / | tail -1 | tr -dc '0-9')
-          echo "writable layer at ${USE}%"
+          echo "runner pod writable layer at ${USE}% (NOT the guest root)"
           if [ "${USE:-0}" -ge 90 ]; then
-            echo "::error::guest writable layer at ${USE}%, this lane is close to the failure that took SNP down"
+            echo "::error::runner pod scratch at ${USE}%: builds will start failing on this runner"
             exit 1
           elif [ "${USE:-0}" -ge 75 ]; then
-            echo "::warning::guest writable layer at ${USE}%, worth looking at before it wedges"
+            echo "::warning::runner pod scratch at ${USE}%"
           fi
 
   verdict:
