@@ -327,6 +327,23 @@ jobs:
     # No `needs: payload`. The TDX lane is self-contained and does not consume
     # payload_b64, and it boots on a different host from the SNP lane, so the
     # two run in parallel rather than one waiting on the other.
+    #
+    # DELIBERATELY PASSES NO c8s_ref, AND THAT MATTERS. Read before "fixing" it.
+    # The TDX node image bakes its NRI admission floor from the c8s ref it was
+    # BUILT from (currently 64b6d7a, published in the tdx-rke2-image-refs
+    # ConfigMap). That floor is fail-closed, so installing any OTHER c8s ref
+    # means that ref's own components are not in the floor and get denied. The
+    # lane warns about exactly this: "the floor is fail-closed, so an unpaired
+    # ref is the likeliest cause of a red run". Passing the merge head here
+    # would turn TDX red on every single merge.
+    #
+    # SO BE CLEAR ABOUT WHAT THIS JOB PROVES. It boots a real TD, attests it,
+    # installs the PAIRED c8s, asserts the components converge, and asserts the
+    # baked floor denies a non-allowlisted image. That is a full health check of
+    # the confidential stack, the host, the node image and the runner. It does
+    # NOT test the code in the merge that triggered it. The SNP lane does that.
+    #
+    # TO GET REAL MERGE-CODE COVERAGE ON TDX, a TDX node image has to be built
+    # per c8s merge so its floor pairs with the merge head. That is the actual
+    # blocker, and it lives in the image pipeline, not here.
     uses: ./.github/workflows/tdx-metal-e2e.yml
-    with:
-      c8s_ref: ${{ inputs.c8s_ref }}
