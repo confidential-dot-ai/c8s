@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      - name: tools (kubectl + go, for the c8s CLI at the paired ref)
+      - name: tools (kubectl, go, crane, helm)
         run: |
           set -euo pipefail
           mkdir -p "$PWD/bin"
@@ -77,6 +77,16 @@ jobs:
           fi
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          # crane: `c8s install --resolve-digests=true` below shells out to it.
+          # Pinned rather than fetched through the GitHub releases API, which
+          # rate-limits by IP on a shared self-hosted host.
+          command -v crane >/dev/null || go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          # helm: c8s install shells out to it too. The ephemeral ARC pod has
+          # neither binary, unlike the host, so install rather than assume.
+          if ! command -v helm >/dev/null; then
+            curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz \
+              | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+          fi
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
       # Fail SAFE: only reap on a positive "completed", or on age. An unknown
@@ -321,8 +331,11 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG=/tmp/guest.kubeconfig
+          # awk, not a regex backreference: `$2 !~ /^([0-9]+)\/\1$/` looks right
+          # and is not (awk has no backreferences), so it silently only ever
+          # matches 1/1 and calls every sidecar-bearing pod not-ready.
           for i in $(seq 1 40); do
-            NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '$2!~/^([0-9]+)\/\1$/ || $3!="Running"' | wc -l)
+            NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
             TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
             [ "$TOTAL" -gt 0 ] && [ "$NOTREADY" -eq 0 ] && { echo "all $TOTAL components Running"; break; }
             sleep 15
