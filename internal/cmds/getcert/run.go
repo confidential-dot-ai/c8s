@@ -65,6 +65,7 @@ type config struct {
 	DiscoveryPublicTLSMode string
 	WorkloadClaimsBroker   bool
 	WorkloadClaimsTimeout  time.Duration
+	WorkloadClaimsRebind   time.Duration
 	WorkloadInitContainers []string
 }
 
@@ -125,6 +126,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
 	flags.BoolVar(&cfg.WorkloadClaimsBroker, "workload-claims-broker", false, "Bind a workload-digest claim by fetching this pod's admitted containers from the local broker at get-cert's compiled Unix socket path (docs/ratls.md) — nri-image-policy on node-CVM, policy-monitor in the kata guest. The path is baked in, not supplied, so the control plane cannot redirect the fetch; fail-closed if the broker is unreachable")
 	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the workload-claims broker fetch")
+	flags.DurationVar(&cfg.WorkloadClaimsRebind, "workload-claims-rebind-interval", 5*time.Second, "In renewal mode, while the workload claim is still pending (the pod's app containers are not yet admitted, so the first cert is claim-free), re-poll the broker at this cadence and rebind as soon as the admitted set appears, instead of waiting a full --renew-interval (docs/getcert-workload-binding.md, Corner 4). 0 disables fast-rebind. Inert without --workload-claims-broker")
 	flags.StringArrayVar(&cfg.WorkloadInitContainers, "workload-init-container", nil, "Name of a pod-spec init container (repeatable); the broker's containers are split into the init vs main image sets by these names for the workload digest (docs/ratls.md)")
 
 	_ = cmd.MarkFlagRequired("cds-url")
@@ -201,18 +203,27 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	if err := obtainCertWithRetry(ctx, cfg, client); err != nil {
+	initialState, err := obtainCertWithRetry(ctx, cfg, client)
+	if err != nil {
 		if cfg.RenewInterval <= 0 || !cfg.ContinueOnInitialError {
 			return err
 		}
 		slog.Error("initial certificate request failed, will retry next interval", "error", err)
+		initialState = claimsNotApplicable
 	} else if cfg.RenewInterval <= 0 {
 		return nil
 	}
 
-	// Daemon mode: renew certificate periodically with graceful shutdown.
-	slog.Info("entering renewal loop", "interval", cfg.RenewInterval)
-	ticker := time.NewTicker(cfg.RenewInterval)
+	// Daemon mode: renew the certificate periodically with graceful shutdown.
+	// Fast-rebind: the pod's first cert is issued before its app containers are
+	// admitted, so it is claim-free (docs/getcert-workload-binding.md, Corner 4).
+	// While the claim is pending, poll at WorkloadClaimsRebind and rebind as soon
+	// as the admitted set appears, then settle back to RenewInterval.
+	fastRebind := cfg.WorkloadClaimsBroker && cfg.WorkloadClaimsRebind > 0
+	fast := shouldFastRebind(fastRebind, initialState)
+	interval := renewCadence(fast, cfg)
+	slog.Info("entering renewal loop", "interval", interval, "fast_rebind", fast)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var watchC <-chan time.Time
@@ -236,14 +247,21 @@ func run(cfg config) error {
 			slog.Info("shutting down cert renewer")
 			return nil
 		case <-ticker.C:
-			if err := obtainCert(ctx, cfg, client); err != nil {
+			state, issued, err := renewOnce(ctx, cfg, client, fast)
+			if err != nil {
 				slog.Error("certificate renewal failed, will retry next interval", "error", err)
 				continue
 			}
-			if cfg.ReloadNginx {
+			if issued && cfg.ReloadNginx {
 				if err := reloadNginx(); err != nil {
 					slog.Warn("certificate renewed but nginx reload failed", "error", err)
 				}
+			}
+			if wantFast := shouldFastRebind(fastRebind, state); wantFast != fast {
+				fast = wantFast
+				next := renewCadence(fast, cfg)
+				ticker.Reset(next)
+				slog.Info("certificate rebind cadence changed", "fast_rebind", fast, "interval", next)
 			}
 		case <-watchC:
 			changed, nextState, err := reloadWatchChanged(watchState, cfg.ReloadWatchPaths)
@@ -270,13 +288,13 @@ func run(cfg config) error {
 // container into kubelet's minutes-long CrashLoopBackOff. It still fails closed:
 // once the deadline passes the last error is returned and the pod does not
 // start without a real mesh cert.
-func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client) error {
+func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client) (claimState, error) {
 	if cfg.InitialRetryTimeout <= 0 {
 		return obtainCert(ctx, cfg, client)
 	}
 	bo := backoff.NewConstantBackOff(cfg.InitialRetryInterval)
-	_, err := backoff.Retry(ctx, func() (struct{}, error) {
-		return struct{}{}, obtainCert(ctx, cfg, client)
+	return backoff.Retry(ctx, func() (claimState, error) {
+		return obtainCert(ctx, cfg, client)
 	},
 		backoff.WithBackOff(bo),
 		backoff.WithMaxElapsedTime(cfg.InitialRetryTimeout),
@@ -284,16 +302,72 @@ func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Cl
 			slog.Warn("certificate request failed, retrying", "retry_in", d, "error", err)
 		}),
 	)
-	return err
 }
 
-func obtainCert(ctx context.Context, cfg config, client attestclient.Client) error {
-	privateKey, keyPEM, err := loadOrGenerateKey(cfg)
+// obtainCert fetches the pod's workload claim (if the broker is enabled) and
+// issues one certificate, returning the resulting claim state so the renewal
+// loop can decide whether to keep polling fast for a not-yet-bound claim.
+func obtainCert(ctx context.Context, cfg config, client attestclient.Client) (claimState, error) {
+	wc, state, err := workloadClaims(ctx, cfg)
 	if err != nil {
-		return err
+		return claimsNotApplicable, err
 	}
+	if err := issueWithClaims(ctx, cfg, client, wc); err != nil {
+		return claimsNotApplicable, err
+	}
+	return state, nil
+}
 
-	wc, err := workloadClaims(ctx, cfg)
+// renewOnce is one renewal-loop tick: it re-fetches the workload claim and
+// issues, except that in fast-rebind mode a still-pending claim is a no-op — the
+// existing claim-free cert stands, so we do not re-issue (and SIGHUP nginx) every
+// few seconds while the app starts. It reports the claim state and whether a
+// certificate was written.
+func renewOnce(ctx context.Context, cfg config, client attestclient.Client, fast bool) (claimState, bool, error) {
+	wc, state, err := workloadClaims(ctx, cfg)
+	if err != nil {
+		return claimsNotApplicable, false, err
+	}
+	if !shouldIssue(fast, state) {
+		return state, false, nil
+	}
+	if err := issueWithClaims(ctx, cfg, client, wc); err != nil {
+		return state, false, err
+	}
+	return state, true, nil
+}
+
+// shouldIssue reports whether a renewal tick should (re)issue a certificate. In
+// fast-rebind mode a still-pending claim is skipped so the existing claim-free
+// cert is not reissued (and nginx not SIGHUP'd) every few seconds while the app
+// starts; every other case — a normal renewal, or a now-bindable claim — issues.
+func shouldIssue(fast bool, state claimState) bool {
+	return !fast || state != claimsPending
+}
+
+// shouldFastRebind reports whether the renewal loop should poll at the
+// fast-rebind cadence: only when fast-rebind is enabled and the last issuance's
+// workload claim is still pending (the app containers are not yet admitted).
+// Once the claim binds, or the pod does not use the broker, it returns false and
+// the loop settles back to the normal renew interval.
+func shouldFastRebind(fastRebind bool, state claimState) bool {
+	return fastRebind && state == claimsPending
+}
+
+// renewCadence is the ticker interval for the current mode: the fast-rebind
+// cadence while a claim is pending, otherwise the normal renew interval.
+func renewCadence(fast bool, cfg config) time.Duration {
+	if fast {
+		return cfg.WorkloadClaimsRebind
+	}
+	return cfg.RenewInterval
+}
+
+// issueWithClaims generates the leaf key, builds the CSR embedding the RA-TLS
+// attestation extension over wc's claims, drives the CDS attestation flow, and
+// writes the outputs.
+func issueWithClaims(ctx context.Context, cfg config, client attestclient.Client, wc workloadClaimsResult) error {
+	privateKey, keyPEM, err := loadOrGenerateKey(cfg)
 	if err != nil {
 		return err
 	}
@@ -323,6 +397,16 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 	return writeOutputs(cfg, keyPEM, result)
 }
 
+// claimState is the outcome of a workload-claims fetch: whether the pod uses the
+// broker and, if so, whether a claim was bindable this issuance.
+type claimState int
+
+const (
+	claimsNotApplicable claimState = iota // --workload-claims-broker not set
+	claimsPending                         // broker set, but no app containers admitted yet
+	claimsBound                           // broker set, a workload claim was bound
+)
+
 // workloadClaimsResult carries the claims DER to bind plus the role-partitioned
 // digest lists to forward to CDS. All nil ⇒ the plain, claims-free flow.
 type workloadClaimsResult struct {
@@ -337,21 +421,21 @@ type workloadClaimsResult struct {
 // --workload-claims-broker it returns an empty (claims-free) result; with it a
 // broker error is fail-closed — issuance aborts rather than silently dropping
 // the workload binding.
-func workloadClaims(ctx context.Context, cfg config) (workloadClaimsResult, error) {
+func workloadClaims(ctx context.Context, cfg config) (workloadClaimsResult, claimState, error) {
 	if !cfg.WorkloadClaimsBroker {
-		return workloadClaimsResult{}, nil
+		return workloadClaimsResult{}, claimsNotApplicable, nil
 	}
 	containers, err := workloadclaims.Fetch(ctx, workloadclaims.BrokerEndpoint(), cfg.WorkloadClaimsTimeout)
 	if err != nil {
-		return workloadClaimsResult{}, fmt.Errorf("fetch workload claims: %w", err)
+		return workloadClaimsResult{}, claimsNotApplicable, fmt.Errorf("fetch workload claims: %w", err)
 	}
 	if len(containers) == 0 {
 		// Expected at first issuance: the c8s-cert native sidecar runs before
 		// the app containers, so the broker has admitted none yet. Issue
-		// without a claim now; a renewal (re-attestation) binds them once the
-		// app is up (docs/ratls.md).
-		slog.Info("workload-claims broker reports no app containers admitted yet; issuing without a workload claim (renewal will bind it)")
-		return workloadClaimsResult{}, nil
+		// without a claim now; fast-rebind binds them once the app is up
+		// (docs/getcert-workload-binding.md, Corner 4).
+		slog.Info("workload-claims broker reports no app containers admitted yet; issuing without a workload claim (fast-rebind will bind it)")
+		return workloadClaimsResult{}, claimsPending, nil
 	}
 
 	initNames := make(map[string]struct{}, len(cfg.WorkloadInitContainers))
@@ -362,13 +446,13 @@ func workloadClaims(ctx context.Context, cfg config) (workloadClaimsResult, erro
 
 	claims, err := workloadclaims.BuildConfigClaims(initDigests, mainDigests)
 	if err != nil {
-		return workloadClaimsResult{}, fmt.Errorf("build workload claims: %w", err)
+		return workloadClaimsResult{}, claimsNotApplicable, fmt.Errorf("build workload claims: %w", err)
 	}
 	ext, err := claims.MarshalExtension()
 	if err != nil {
-		return workloadClaimsResult{}, err
+		return workloadClaimsResult{}, claimsNotApplicable, err
 	}
-	return workloadClaimsResult{claimsDER: ext.Value, initDigests: initDigests, mainDigests: mainDigests}, nil
+	return workloadClaimsResult{claimsDER: ext.Value, initDigests: initDigests, mainDigests: mainDigests}, claimsBound, nil
 }
 
 // reloadNginx sends SIGHUP to the nginx master process to reload certs.

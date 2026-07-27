@@ -296,10 +296,22 @@ plugin has not seen them — and the broker returns an **empty** set.
 
 get-cert handles that distinctly from an error: an empty broker result means
 "app containers not up yet," so it issues **without** a workload claim this
-round and binds the digests at the next renewal (re-attestation), once the app
-is running (`internal/cmds/getcert/run.go` `workloadClaims`). A *broker error*
+round and rebinds the digests once the app is running
+(`internal/cmds/getcert/run.go` `workloadClaims`). A *broker error*
 (unreachable, malformed) is fail-closed — issuance aborts. This is the
-"as of issuance, corrected at next renewal" semantics.
+"as of issuance, corrected shortly after" semantics.
+
+**Fast-rebind bounds the correction to seconds, not a renewal interval.** While
+the claim is pending, the renewal loop polls the broker at
+`--workload-claims-rebind-interval` (default 5s, on whenever
+`--workload-claims-broker` is set) and reissues the moment the admitted set
+appears, instead of waiting a full `--renew-interval` (hours). So a fresh pod's
+cert carries its workload claim within seconds of its app containers starting —
+which is what makes claim-consuming components (a secret broker; `c8s verify
+--workload-image`) usable at pod startup rather than only after the first
+hours-scale renewal. Set the interval to `0` to fall back to renewal-only
+binding. It is inert without the broker, so non-broker get-cert users (tls-lb,
+nginx sidecars) are unaffected.
 
 **Enforcement is on the verifier, not on issuance.** A relying party pinning
 `c8s verify --workload-image` fails closed against a pod that carries no or a
@@ -313,11 +325,14 @@ start from cert existence (letting them start and relying on the mesh being
 fail-closed for un-carted traffic) — a separate architecture change.
 
 **Staggered starts** can also bind a *partial* set: regular containers start
-~together, but a renewal fetch landing mid-startup could commit `{A}` and the
-next renewal rebind `{A,B,C}`. The workload digest is only *stable* once every
-container is steady-state, so a strict verifier could momentarily fail against
-a mid-startup leaf. Hardening this would mean waiting for an expected container
-count before binding — a deliberate follow-up, not baked in.
+~together, but a fetch landing mid-startup could commit `{A}` and a later fetch
+rebind `{A,B,C}`. The workload digest is only *stable* once every container is
+steady-state, so a strict verifier could momentarily fail against a mid-startup
+leaf. Fast-rebind keeps this window to seconds (the partial leaf is replaced on
+the next poll), and a claim-consuming enforcer that keys on a full workload
+entry simply fails closed against the partial set until it settles — but the
+binding is not itself gated on a *stable* set. Waiting for an expected container
+count before binding is the hardening — a deliberate follow-up, not baked in.
 
 **Init-container eviction churns the init set.** An init container runs to
 completion and exits; once the kubelet garbage-collects the exited container,

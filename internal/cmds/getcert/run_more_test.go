@@ -461,12 +461,15 @@ func TestBrokerEndpointIsCompiledUnixPath(t *testing.T) {
 // Without --workload-claims-broker, workloadClaims is a no-op: it returns the
 // empty (claims-free) result without contacting any broker.
 func TestWorkloadClaimsWithoutFlagIsClaimFree(t *testing.T) {
-	res, err := workloadClaims(context.Background(), config{WorkloadClaimsBroker: false})
+	res, state, err := workloadClaims(context.Background(), config{WorkloadClaimsBroker: false})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil {
 		t.Fatalf("no --workload-claims-broker but a claim was produced: %+v", res)
+	}
+	if state != claimsNotApplicable {
+		t.Fatalf("no --workload-claims-broker: got state %v, want claimsNotApplicable", state)
 	}
 }
 
@@ -602,7 +605,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 		OutPath:           filepath.Join(dir, "cert.pem"),
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
 	got, err := os.ReadFile(cfg.OutPath)
@@ -626,7 +629,7 @@ func TestObtainCertCDSError(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com"}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCert succeeded, want error when CDS fails")
 	}
 }
@@ -669,7 +672,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 		InitialRetryInterval: time.Millisecond,
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if calls < 2 {
@@ -691,7 +694,7 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com", InitialRetryTimeout: 0}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCertWithRetry succeeded, want error")
 	}
 	if calls != 1 {
@@ -714,7 +717,7 @@ func TestRunOnceWritesCert(t *testing.T) {
 	// run() builds an https-only RA-TLS client via newCDSClient; drive the
 	// run-once path (obtainCertWithRetry then return) against the plaintext
 	// fake CDS with an injected client instead.
-	if err := obtainCertWithRetry(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if _, err := os.Stat(cfg.OutPath); err != nil {
