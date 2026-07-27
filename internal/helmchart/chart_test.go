@@ -1700,6 +1700,11 @@ func TestChartTLSLBServiceType(t *testing.T) {
 		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
 		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		// Without the built-in allowlist route there is no source-IP-keyed
+		// limiter, so the default policy must not regress reachability
+		// through nodes that do not run the tls-lb pod.
+		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
@@ -1715,6 +1720,17 @@ func TestChartTLSLBServiceType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tlsLb.service.type=LoadBalancer",
+		"--set-string", "tlsLb.service.externalTrafficPolicy=bogus",
+	)
+	if err == nil {
+		t.Fatalf("expected render to fail on invalid externalTrafficPolicy; got success\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
 }
 
 // With no adopted workload the upstream address is empty; the sidecar must
@@ -2050,11 +2066,22 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		t.Fatal("nginx config missing http block")
 	}
 	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=1r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=8r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=20r/s")
 	rateMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_rate_key")
 	rateMap.assertDirective(t, "default", "$binary_remote_addr")
 	rateMap.assertDirective(t, "GET", `""`)
 	rateMap.assertDirective(t, "HEAD", `""`)
 	rateMap.assertDirective(t, "OPTIONS", `""`)
+	totalMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_total_key")
+	totalMap.assertDirective(t, "default", `"all"`)
+	totalMap.assertDirective(t, "GET", `""`)
+	totalMap.assertDirective(t, "HEAD", `""`)
+	totalMap.assertDirective(t, "OPTIONS", `""`)
+	readMap := cfg.mapBlock(t, "$request_method", "$allowlist_read_rate_key")
+	readMap.assertDirective(t, "default", `""`)
+	readMap.assertDirective(t, "GET", "$binary_remote_addr")
+	readMap.assertDirective(t, "HEAD", "$binary_remote_addr")
 
 	for _, route := range []struct {
 		match string
@@ -2068,6 +2095,8 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		location.assertDirective(t, "proxy_set_header", "Host", "$host")
 		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
 		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=5", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=15", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=40", "nodelay")
 		location.assertDirective(t, "limit_req_status", "429")
 		location.assertNoDirective(t, "proxy_ssl_verify")
 	}
@@ -2090,10 +2119,14 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	}
 }
 
-func TestTLSLBAllowlistWriteRateLimitIsConfigurable(t *testing.T) {
+func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
 		"--set", "allowlist.rateLimit.requestsPerSecond=2",
 		"--set", "allowlist.rateLimit.burst=7",
+		"--set", "allowlist.rateLimit.totalRequestsPerSecond=9",
+		"--set", "allowlist.rateLimit.totalBurst=19",
+		"--set", "allowlist.readRateLimit.requestsPerSecond=50",
+		"--set", "allowlist.readRateLimit.burst=100",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -2103,11 +2136,16 @@ func TestTLSLBAllowlistWriteRateLimitIsConfigurable(t *testing.T) {
 		t.Fatal("nginx config missing http block")
 	}
 	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=2r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=9r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=50r/s")
 	for _, key := range []nginxLocationKey{
 		{match: "exact", path: "/allowlist"},
 		{match: "prefix", path: "/allowlist/"},
 	} {
-		cfg.location(t, key.match, key.path).assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=7", "nodelay")
+		location := cfg.location(t, key.match, key.path)
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=7", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=19", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=100", "nodelay")
 	}
 }
 
@@ -2503,11 +2541,11 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
 		},
 		{
-			name: "allowlist-write-rate-consumes-cds-capacity",
+			name: "allowlist-write-rate-exceeds-total",
 			args: []string{
-				"--set", "allowlist.rateLimit.requestsPerSecond=10",
+				"--set", "allowlist.rateLimit.requestsPerSecond=9",
 			},
-			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be less than cds.rateLimit (10), got: 10",
+			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
 		},
 		{
 			name: "allowlist-write-burst-not-positive",
@@ -2517,11 +2555,39 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 			want: "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: 0",
 		},
 		{
-			name: "allowlist-write-burst-consumes-cds-capacity",
+			name: "allowlist-write-burst-exceeds-total",
 			args: []string{
-				"--set", "allowlist.rateLimit.burst=20",
+				"--set", "allowlist.rateLimit.burst=16",
 			},
-			want: "tlsLb.allowlist.rateLimit.burst must be less than cds.rateBurst (20), got: 20",
+			want: "tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
+		},
+		{
+			name: "allowlist-write-total-rate-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalRequestsPerSecond=10",
+			},
+			want: "tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
+		},
+		{
+			name: "allowlist-write-total-burst-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalBurst=20",
+			},
+			want: "tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
+		},
+		{
+			name: "allowlist-read-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-read-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.burst must be a positive integer, got: 0",
 		},
 		{
 			name: "route-verifyDepth-injection",

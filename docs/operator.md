@@ -537,13 +537,25 @@ mode. An empty pin still verifies that the peer is a TEE but accepts any launch
 measurement, which is unsafe outside development.
 
 Before nginx collapses requests onto the loopback proxy connection, it
-rate-limits mutation methods by public client address. The default is one
-request per second with a burst of five; reads and CORS preflights are exempt.
-Configure this under `tlsLb.allowlist.rateLimit`. The chart requires both
-values to remain below CDS's aggregate rate and burst, so one unauthenticated
-public caller cannot consume the shared CDS bucket and starve signed writes.
-LoadBalancer and NodePort Services use `externalTrafficPolicy: Local` so nginx
-receives the public source address used for that key.
+rate-limits the route while it still has the public client address. Mutation
+methods are limited per client (`tlsLb.allowlist.rateLimit.requestsPerSecond`/
+`burst`, default 1 r/s, burst 5) and in aggregate across all clients
+(`totalRequestsPerSecond`/`totalBurst`, default 8 r/s, burst 15). The
+aggregate bound matters because CDS rate-limits per source IP and sees every
+front-door request as the one tls-lb pod IP: without it, many distinct public
+clients each inside their per-client budget could drain the single CDS bucket
+that signed operator writes share. The chart requires the per-client values
+not to exceed the totals and the totals to stay below `cds.rateLimit`/
+`rateBurst`. Reads (GET/HEAD) are limited per client under
+`tlsLb.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
+read pressure on CDS — which also serves attestation issuance and node
+allowlist fetches — stays bounded; CORS preflights are exempt. If a flood
+saturates the front-door buckets, signed writes still work over a direct CDS
+URL or port-forward, which CDS accounts under the caller's own source IP.
+LoadBalancer and NodePort Services default to `externalTrafficPolicy: Local`
+while this route renders so nginx receives the public source address the
+per-client keys need; `tlsLb.service.externalTrafficPolicy` overrides (Local
+delivers traffic only through nodes that run the tls-lb pod).
 
 The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still

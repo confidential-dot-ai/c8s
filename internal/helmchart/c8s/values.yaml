@@ -1047,13 +1047,27 @@ tlsLb:
     # -- Loopback port for the RA-TLS-verifying allowlist proxy. This is not a
     # pod or Service port and is reachable only inside the tls-lb pod.
     proxyPort: 8801
-    # -- Per-public-client write limiting applied by nginx before requests are
-    # collapsed onto the loopback proxy connection. GET, HEAD, and OPTIONS are
-    # exempt. Keep both values below CDS's aggregate rate/burst so one
-    # unauthenticated caller cannot consume the entire CDS write bucket.
+    # -- Write limiting applied by nginx before requests are collapsed onto
+    # the loopback proxy connection. Mutations are limited per public client
+    # AND in aggregate across all clients: CDS rate-limits per source IP and
+    # sees the whole front door as the single tls-lb pod IP, so only the
+    # aggregate bound keeps a distributed caller set from consuming the CDS
+    # bucket that signed operator writes share. The chart requires
+    # requestsPerSecond/burst <= totalRequestsPerSecond/totalBurst and the
+    # totals below cds.rateLimit/rateBurst. GET, HEAD, and OPTIONS are exempt
+    # here (see readRateLimit).
     rateLimit:
       requestsPerSecond: 1
       burst: 5
+      totalRequestsPerSecond: 8
+      totalBurst: 15
+    # -- Per-public-client read (GET/HEAD) limiting on the allowlist route.
+    # Generous by default: it bounds unauthenticated read pressure on CDS,
+    # which also serves attestation issuance and node allowlist fetches.
+    # OPTIONS (CORS preflight) is exempt.
+    readRateLimit:
+      requestsPerSecond: 20
+      burst: 40
     # -- Container resources for the allowlist proxy.
     resources: {}
 
@@ -1223,10 +1237,15 @@ tlsLb:
   service:
     # -- Service type. Set to LoadBalancer to expose the listener publicly
     # (e.g. on AKS/GKE), with annotations below for cloud-LB specifics.
-    # LoadBalancer and NodePort render externalTrafficPolicy: Local so nginx
-    # retains the public source IP used by the /allowlist write limiter.
     type: ClusterIP
     port: 443
+    # -- externalTrafficPolicy for LoadBalancer/NodePort Services. Empty picks
+    # Local while the built-in /allowlist route renders (its limiters key on
+    # nginx's public peer address, which Cluster would SNAT away) and Cluster
+    # otherwise. Local delivers traffic only through nodes running the tls-lb
+    # pod; set Cluster explicitly if your LB cannot health-check nodes, at the
+    # cost of per-client limiting collapsing onto node IPs.
+    externalTrafficPolicy: ""
     # -- Optional annotations on the Service. Use the provider's LB annotation to
     # pin a static IP (e.g. networking.gke.io/load-balancer-ip-addresses on GKE,
     # service.beta.kubernetes.io/azure-pip-name on AKS); the deprecated

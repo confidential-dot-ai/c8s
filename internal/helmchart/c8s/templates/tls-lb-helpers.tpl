@@ -149,6 +149,17 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
+Validate a rate-limit value as a positive integer and return it.
+Args: value, label.
+*/}}
+{{- define "tls-lb.allowlistPositiveInt" -}}
+{{- if not (regexMatch `^[1-9][0-9]*$` (toString .value)) -}}
+{{- fail (printf "%s must be a positive integer, got: %v" .label .value) -}}
+{{- end -}}
+{{- toString .value -}}
+{{- end -}}
+
+{{/*
 Return true when a legacy typed route owns /allowlist. Such a route suppresses
 both the built-in nginx locations and their loopback proxy sidecar.
 */}}
@@ -181,9 +192,12 @@ location{{ if .exact }} ={{ end }} {{ .path }} {
     {{- if default false $root.Values.tlsLb.cors.enabled }}
     {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
     {{- end }}
-    # This runs before nginx collapses callers onto the loopback proxy source.
-    # The zone key is empty for GET, HEAD, and OPTIONS, so only mutations count.
+    # These run before nginx collapses callers onto the loopback proxy source.
+    # Each zone's map key is empty for the methods it does not cover, so
+    # mutations count per client and in aggregate, reads per client only.
     limit_req zone=allowlist_write_per_client burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.rateLimit.burst }} nodelay;
+    limit_req zone=allowlist_write_total burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.rateLimit.totalBurst }} nodelay;
+    limit_req zone=allowlist_read_per_client burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.readRateLimit.burst }} nodelay;
     limit_req_status 429;
     proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;
     proxy_set_header Host $host;

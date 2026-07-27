@@ -14,6 +14,10 @@
 {{- $allowlistProxyPort := 0 -}}
 {{- $allowlistWriteRate := 0 -}}
 {{- $allowlistWriteBurst := 0 -}}
+{{- $allowlistWriteTotalRate := 0 -}}
+{{- $allowlistWriteTotalBurst := 0 -}}
+{{- $allowlistReadRate := 0 -}}
+{{- $allowlistReadBurst := 0 -}}
 {{- if $renderAllowlistRoute -}}
 {{- $allowlistProxyPort = include "c8s.int" .Values.tlsLb.allowlist.proxyPort | int -}}
 {{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
@@ -25,21 +29,28 @@
 {{- if eq $allowlistProxyPort (int .Values.tlsLb.nginx.httpsPort) -}}
 {{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
 {{- end -}}
-{{- $allowlistWriteRateText := toString .Values.tlsLb.allowlist.rateLimit.requestsPerSecond -}}
-{{- if not (regexMatch `^[1-9][0-9]*$` $allowlistWriteRateText) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: %v" .Values.tlsLb.allowlist.rateLimit.requestsPerSecond) -}}
+{{- $allowlistWriteRate = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $allowlistWriteBurst = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
+{{- $allowlistWriteTotalRate = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $allowlistWriteTotalBurst = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
+{{- $allowlistReadRate = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.requestsPerSecond "label" "tlsLb.allowlist.readRateLimit.requestsPerSecond")) -}}
+{{- $allowlistReadBurst = int (include "tls-lb.allowlistPositiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.burst "label" "tlsLb.allowlist.readRateLimit.burst")) -}}
+{{- if gt $allowlistWriteRate $allowlistWriteTotalRate -}}
+{{- fail (printf "tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (%d), got: %d" $allowlistWriteTotalRate $allowlistWriteRate) -}}
 {{- end -}}
-{{- $allowlistWriteRate = int $allowlistWriteRateText -}}
-{{- if ge (float64 $allowlistWriteRate) (float64 .Values.cds.rateLimit) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.requestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $allowlistWriteRate) -}}
+{{- if gt $allowlistWriteBurst $allowlistWriteTotalBurst -}}
+{{- fail (printf "tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (%d), got: %d" $allowlistWriteTotalBurst $allowlistWriteBurst) -}}
 {{- end -}}
-{{- $allowlistWriteBurstText := toString .Values.tlsLb.allowlist.rateLimit.burst -}}
-{{- if not (regexMatch `^[1-9][0-9]*$` $allowlistWriteBurstText) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: %v" .Values.tlsLb.allowlist.rateLimit.burst) -}}
+{{- /*
+  CDS rate-limits per source IP and sees every front-door request as the
+  tls-lb pod IP, so only the aggregate write bound keeps N distinct public
+  clients from consuming the single CDS bucket signed operator writes share.
+*/ -}}
+{{- if ge (float64 $allowlistWriteTotalRate) (float64 .Values.cds.rateLimit) -}}
+{{- fail (printf "tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $allowlistWriteTotalRate) -}}
 {{- end -}}
-{{- $allowlistWriteBurst = int $allowlistWriteBurstText -}}
-{{- if ge $allowlistWriteBurst (int .Values.cds.rateBurst) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.burst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $allowlistWriteBurst) -}}
+{{- if ge $allowlistWriteTotalBurst (int .Values.cds.rateBurst) -}}
+{{- fail (printf "tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $allowlistWriteTotalBurst) -}}
 {{- end -}}
 {{- end -}}
 {{- /*
@@ -93,16 +104,32 @@ data:
 {{- end }}
 {{- if $renderAllowlistRoute }}
 
-        # Rate-limit mutations while nginx still has the public client IP.
-        # Empty map keys are not accounted by limit_req, so reads and CORS
-        # preflights remain unthrottled.
+        # Rate-limit /allowlist while nginx still has the public client IP;
+        # empty map keys are not accounted by limit_req. Mutations count per
+        # client and against a constant-key aggregate zone — CDS limits per
+        # source IP and sees the whole front door as one IP, so the aggregate
+        # is what protects the CDS bucket from distributed clients. Reads
+        # count per client only; OPTIONS (CORS preflight) is exempt.
         map $request_method $allowlist_write_rate_key {
             default $binary_remote_addr;
             GET "";
             HEAD "";
             OPTIONS "";
         }
+        map $request_method $allowlist_write_total_key {
+            default "all";
+            GET "";
+            HEAD "";
+            OPTIONS "";
+        }
+        map $request_method $allowlist_read_rate_key {
+            default "";
+            GET $binary_remote_addr;
+            HEAD $binary_remote_addr;
+        }
         limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate={{ $allowlistWriteRate }}r/s;
+        limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate={{ $allowlistWriteTotalRate }}r/s;
+        limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate={{ $allowlistReadRate }}r/s;
 {{- end }}
 
         # The catch-all upstream is dialed via a variable (see location /), so
