@@ -20,6 +20,31 @@
 # DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
 name: azure-tdx-e2e
 on:
+  # workflow_call so this lane can be a ROW of the c8s platform matrix via
+  # c8s-platform-e2e.yml, mirroring the workflow_dispatch inputs below so both
+  # entry points stay usable and the lane body needs no per-caller edits.
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: 'c8s ref to test'
+        required: false
+        type: string
+        default: 'main'
+      region:
+        description: 'Azure region, empty picks the lane default'
+        required: false
+        type: string
+        default: ''
+      vm_size:
+        description: 'Azure VM size'
+        required: false
+        type: string
+        default: 'Standard_DC4es_v6'
+      rke2_version:
+        description: 'rke2 version, empty picks the lane default'
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       c8s_ref:

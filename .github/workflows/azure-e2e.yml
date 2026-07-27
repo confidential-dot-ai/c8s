@@ -20,6 +20,26 @@
 # consumer-verification chain (needs pinned launch digests).
 name: azure-e2e
 on:
+  # workflow_call so this lane can be a ROW of the c8s platform matrix via
+  # c8s-platform-e2e.yml, mirroring the workflow_dispatch inputs below so both
+  # entry points stay usable and the lane body needs no per-caller edits.
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: 'c8s ref to test'
+        required: false
+        type: string
+        default: 'main'
+      vm_size:
+        description: 'Azure VM size'
+        required: false
+        type: string
+        default: 'Standard_DC4as_v5'
+      region:
+        description: 'Azure region, empty picks the lane default'
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       c8s_ref:

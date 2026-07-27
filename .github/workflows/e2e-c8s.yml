@@ -67,271 +67,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── WHAT: build the c8s payload (the only c8s-specific work) ──────────────
-  payload:
-    runs-on: ubuntu-latest
-    outputs:
-      b64: ${{ steps.build.outputs.b64 }}
-      short: ${{ steps.build.outputs.short }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: confidential-dot-ai/c8s
-          ref: ${{ inputs.c8s_ref || 'main' }}   # push/schedule have no inputs
-          path: c8s
-          fetch-depth: 50                        # the image-tag resolver walks ancestors
+  # ── ONE JOB PER PLATFORM, AND NOTHING ELSE IN THIS FILE ──────────────────
+  # Every job has the same shape: no `needs`, no payload plumbing, just a lane.
+  # Each lane workflow is self-contained and independently dispatchable, so this
+  # file is only the answer to "which platforms does c8s run on".
+  #
+  # Adding a platform is one job block here plus its lane workflow.
+  #
+  # NOT a `matrix:`. A reusable-workflow `uses:` takes no expressions, so a
+  # matrix would need a dispatcher whose jobs are `if:`-gated per row, and since
+  # every row instantiates the whole dispatcher that costs rows x jobs entries
+  # in the run tree: 16 at four platforms, 12 of them phantom, growing
+  # quadratically. Four jobs give four real entries.
 
-      - id: build
-        run: |
-          set -euo pipefail
-          SHORT=$(cd c8s && git rev-parse --short=7 HEAD)
-          FULL=$(cd c8s && git rev-parse HEAD)
-          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-
-          # IMAGE TAGS: docker.yml is path-gated too — a commit that touches no
-          # source paths triggers NO Docker run, so retag-unchanged never fires
-          # and :<short-sha> tags don't exist for it (found live: main 70aea72 had
-          # NO cds/c8s-operator tags -> ImagePullBackOff). The image a commit X
-          # would actually deploy is "the newest built tag at or before X" — so
-          # resolve each component by walking X's ancestry until a tag exists.
-          # Under the post-merge trigger (workflow_run off Docker) this resolves
-          # to $SHORT on the first probe. Anonymous pulls — the packages are public.
-          resolve_tag(){
-            local comp=$1 tok code
-            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
-            for sha in $(git -C c8s log --format=%h --abbrev=7 -50); do
-              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
-                -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-                "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${sha}")
-              [ "$code" = "200" ] && { echo "$sha"; return; }
-            done
-            echo "::warning::no sha tag found for ${comp} in the last 50 commits — falling back to :main (racy)" >&2
-            echo main
-          }
-          # PLATFORM digest (linux/amd64), not the index digest: the NRI allowlist
-          # floor matches what the runtime resolves — an index digest would reject
-          # the very image it pins (docs/attestation/allowlist multi-arch pitfall).
-          resolve_digest(){
-            local comp=$1 tag=$2 tok m d
-            tok=$(curl -fsSL "https://ghcr.io/token?scope=repository:confidential-dot-ai/${comp}:pull" | jq -r .token)
-            m=$(curl -fsSL -H "Authorization: Bearer $tok"               -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'               "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}")
-            d=$(printf '%s' "$m" | jq -r '.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest' | head -1)
-            if [ -z "$d" ]; then
-              d=$(curl -fsSI -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/confidential-dot-ai/${comp}/manifests/${tag}" | awk '{ gsub("\r","") } tolower($1)=="docker-content-digest:"{ print $2 }')
-            fi
-            [ -n "$d" ] || { echo "::error::no digest for ${comp}:${tag}"; exit 1; }
-            echo "$d"
-          }
-          OPTAG=$(resolve_tag c8s-operator)      # global image.tag: operator + tls-lb init
-          CDSTAG=$(resolve_tag cds)
-          NRITAG=$(resolve_tag nri-image-policy)
-          CDSDIG=$(resolve_digest cds "$CDSTAG")            # nriImagePolicy floor pins CDS by digest
-          NRIDIG=$(resolve_digest nri-image-policy "$NRITAG")  # installer self-allow needs its own
-          # The operator image is ALSO the injected get-cert/c8s-cert sidecar image
-          # (operator.yaml passes --get-cert-image={{ c8s.image }}). c8s.imageAllowlist
-          # only derives a component into always_allow when it has a digest, so an
-          # un-pinned operator leaves that sidecar out of the floor AND out of the CDS
-          # seed. Under policy.mode=audit it is then denied-but-admitted, and the
-          # workload-claims broker records only on the allow path, so the sidecar is
-          # never tracked and get-cert dies with "caller cgroup names no tracked
-          # container". Pin it like cds and nri already are.
-          OPDIG=$(resolve_digest c8s-operator "$OPTAG")
-          # attestation-api is versioned by the attestation-rs repo, NOT c8s — a
-          # c8s-ancestry walk can never find its tags (learned the hard way:
-          # InvalidImageName, run 29473241754). :main is the canonical pointer the
-          # c8s-integration fleet uses; accepted race until c8s pins a digest.
-          # aa_ref lets a caller PIN it (tag or sha-<short>) — floating :main drifts
-          # (e.g. attestation-rs enforce-VMPL0/reject-debug-policy landed on :main and
-          # broke this dev-sandbox CVM while the boot image was unchanged).
-          AATAG="${{ inputs.aa_ref || 'main' }}"
-          echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
-
-          # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
-          #  - cds.node.selector/tolerations null : the --single-node effect. The chart
-          #    default pins role=cds, so CDS sits Pending forever on a single node.
-          #  - measurements: RUNTIME_MEASUREMENT  : placeholder. The payload substitutes
-          #    the node's OWN runtime launch digest ($MEAS from the primitive). The image
-          #    manifest's snp_launch_digest is NOT that value (CDS -> measurement_denied).
-          #  - ratlsMesh disabled                 : the L4 mesh proxy needs kernel netfilter
-          #    modules the monolithic guest kernel lacks (base-images ask). nri-image-policy
-          #    is a containerd NRI hook — no netfilter — so it runs (audit mode for now).
-          VALS=$(cat <<EOF | base64 -w0
-          image:
-            tag: "$OPTAG"
-            digest: "$OPDIG"
-          cds:
-            image:
-              tag: "$CDSTAG"
-              digest: "$CDSDIG"
-            node:
-              selector: null      # null DELETES the key from the merged values (chart
-              tolerations: null   # default incl.) -> renders NO selector. {} counts as
-                                  # "empty" to the template's `default` -> role=cds
-                                  # resurfaces -> CDS Pending (run 29536583462).
-            ratlsPlatform: sev-snp
-            measurements: ["RUNTIME_MEASUREMENT"]
-          attestationApi:
-            image:
-              tag: "$AATAG"
-            # UN-PIN: keep cvmMode=node (what we actually ship on metal) and make
-            # $(HOST_IP) routing resolve. Our image predates the baked host
-            # attestation-api, but when nriImagePolicy is on the chart already
-            # publishes the AA as a NodePort for exactly this reason ("NodePort used
-            # by host-process components such as nri-image-policy"). Aligning the AA
-            # port with that NodePort makes $(HOST_IP):<port> hit the node's own AA
-            # pod (both traffic policies are Local, so it never leaves the node).
-            # Verified by helm template at HEAD: all 4 consumers (cds, operator, both
-            # tls-lb sidecars) render http://$(HOST_IP):30840, and the Service exposes
-            # port 30840 -> targetPort http -> containerPort 30840.
-            cvmMode: node
-            port: 30840
-            service:
-              nodePort: 30840
-            teeDevices:
-              sevGuest: true
-              tdxGuest: false
-              tpm: false
-          ratlsMesh:
-            enabled: false
-          nriImagePolicy:
-            enabled: true          # NRI hook needs no netfilter (that was ratls-mesh's constraint)
-            distro: rke2
-            image:
-              tag: "$NRITAG"
-              digest: "$NRIDIG"
-            bootstrapAllowlist:
-              # THE FIX. deriveComponents is off by default and `c8s install
-              # --resolve-digests` is what normally turns it on; this lane writes raw
-              # values into a HelmChart CR, so it never did. Without it only cds and
-              # tls-lb nginx get self-entries, so the OPERATOR image is absent from
-              # always_allow and from the CDS seed. That image is also the injected
-              # c8s-cert sidecar, so under policy.mode=audit it is denied-but-admitted,
-              # and the workload-claims broker records only on the ALLOW path. The
-              # sidecar therefore runs untracked and its own get-cert call fails with
-              # "caller cgroup names no tracked container", after which get-cert waits
-              # out the 6h renewal interval and the workload never becomes ready.
-              deriveComponents: true
-            policy:
-              mode: audit          # bring-up: log would-be denials, admit all (chart-blessed).
-                                   # enforce needs an operator-keyed allowlist first — roadmap.
-          tlsLb:
-            hostPort:
-              enabled: false
-          EOF
-          )
-          CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
-
-          # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
-          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' > /tmp/gate-vals.yaml
-          helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
-          echo "render gate: chart+values validate clean"
-
-          # ── THE PAYLOAD: runs in-guest as root. Given $K, $MEAS; emits PAYLOAD_OK.
-          cat > payload.sh <<PAYLOAD
-          dl(){ curl -fsSL --retry 3 "\$1" -o "\$2" 2>/dev/null || wget -qO "\$2" "\$1" 2>/dev/null || python3 -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "\$1" "\$2"; }
-          dl "https://codeload.github.com/confidential-dot-ai/c8s/tar.gz/$FULL" /tmp/src.tgz || { say FAIL_CHART_FETCH; exit 0; }
-          tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_CHART_EXTRACT; exit 0; }
-          CD=\$(echo /tmp/c8s-*/internal/helmchart)
-          tar -czf /tmp/chart.tgz -C "\$CD" c8s || { say FAIL_CHART_PACK; exit 0; }
-          CC=\$(base64 -w0 /tmp/chart.tgz)
-          say CHART_FROM_SOURCE
-          \$K create ns c8s-system >/dev/null 2>&1
-          \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
-          if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
-          { printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: c8s\n  namespace: kube-system\nspec:\n  chartContent: %s\n  targetNamespace: c8s-system\n  createNamespace: false\n  valuesContent: |\n' "\$CC"
-            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed 's/^/    /'
-          } | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
-          say \$MMARK
-          HOK=0
-          for i in \$(seq 1 45); do
-            s=\$(\$K -n kube-system get job helm-install-c8s -o jsonpath='{.status.succeeded}' 2>/dev/null)
-            echo "@@HJOB \$i succ=\${s:-0}@@"
-            \$K -n kube-system logs job/helm-install-c8s --tail=2 2>/dev/null | sed 's/^/@@HLOG /;s/\$/@@/'
-            [ "\$s" = "1" ] && { HOK=1; say HELM_DONE; break; }
-            sleep 12
-          done
-          if [ "\$HOK" != "1" ]; then
-            \$K -n kube-system get helmchart c8s -o jsonpath='{.status}' 2>&1 | head -c 600 | sed 's/^/@@HCSTATUS /;s/\$/@@/'
-            \$K -n kube-system logs job/helm-install-c8s --tail=40 2>&1 | sed 's/^/@@HLOG /;s/\$/@@/'
-            say FAIL_HELM
-            exit 0
-          fi
-          CDSOK=0
-          for i in \$(seq 1 45); do
-            PODS=\$(\$K -n c8s-system get pods --no-headers 2>&1)
-            printf '%s\n' "\$PODS" | sed 's/^/@@POD /;s/\$/@@/'
-            CDS=\$(printf '%s\n' "\$PODS" | grep '^c8s-cds-' | head -1)
-            echo "@@CDSR \$i: \${CDS:-nopod}@@"
-            printf '%s' "\$CDS" | grep -qE ' 1/1 +Running' && { CDSOK=1; say CDS_READY; break; }
-            printf '%s\n' "\$PODS" | grep -q 'ImagePullBackOff' && IPB=\$((\${IPB:-0}+1)) || IPB=0
-            [ "\$IPB" -ge 5 ] && { \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'pull' | tail -6 | sed 's/^/@@EV /;s/\$/@@/'; say FAIL_IMAGEPULL; exit 0; }
-            sleep 12
-          done
-          # consumption proof: a cw workload must RUN with the CDS-issued cert injected.
-          # Under MEAS_ENFORCED that cert is only issued if the node attests the pinned
-          # measurement — so this IS the enforcement test, not a separate assertion.
-          WOK=0; COK=0
-          if [ "\$CDSOK" != "1" ]; then
-            \$K -n c8s-system logs deploy/c8s-cds --tail=15 2>&1 | sed 's/^/@@CDSLOG /;s/\$/@@/'
-            \$K -n c8s-system logs ds/c8s-attestation-api --tail=8 2>&1 | sed 's/^/@@AALOG /;s/\$/@@/'
-          fi
-          if [ "\$CDSOK" = "1" ]; then
-            # Gate on the POLICY plane, not just CDS. The injected c8s-cert sidecar
-            # can only be recorded by the workload-claims broker if the NRI plugin is
-            # ready when its container is created; otherwise get-cert cannot resolve
-            # its own caller ("caller cgroup names no tracked container"), gives up
-            # after ~16s and waits out the 6h renewal interval. CDS and the plugin
-            # become ready independently, so applying on CDS alone is a coin flip.
-            # The installer pod is NOT a usable signal (its 120s health gate can
-            # expire while the plugin is still doing its initial CDS pull), so poll
-            # the plugin's own health socket.
-            NRIOK=0
-            for i in \$(seq 1 60); do
-              HC=\$(curl -s -o /dev/null -w '%{http_code}' --unix-socket /var/run/nri-image-policy/health.sock --max-time 3 http://localhost/healthz 2>/dev/null)
-              echo "@@NRIH \$i: \${HC:-none}@@"
-              [ "\$HC" = "200" ] && { NRIOK=1; say NRI_PLUGIN_READY; break; }
-              sleep 5
-            done
-            [ "\$NRIOK" = "1" ] || say WARN_NRI_NOT_READY
-            printf %s '$CW' | base64 -d | \$K apply -f - 2>&1 | sed 's/^/@@CWAPPLY /;s/\$/@@/'
-            for i in \$(seq 1 60); do
-              DP=\$(\$K -n default get deploy demo-nginx --no-headers 2>&1)
-              echo "@@CWDEP \$i: \$DP@@"
-              printf '%s' "\$DP" | grep -qE ' 1/1 ' && { WOK=1; say WORKLOAD_OK; break; }
-              sleep 10
-            done
-            IC=\$(\$K -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}' 2>/dev/null)
-            echo "@@CWCONTAINERS \${IC:-none}@@"
-            printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
-            [ "\$WOK" = "1" ] && [ "\$COK" = "1" ] && say PAYLOAD_OK
-            if [ "\$WOK" != "1" ]; then
-              \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
-              \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
-            fi
-          fi
-          \$K -n c8s-system get events --sort-by=.lastTimestamp 2>&1 | tail -10 | sed 's/^/@@EV /;s/\$/@@/'
-          PAYLOAD
-          echo "b64=$(base64 -w0 payload.sh)" >> "$GITHUB_OUTPUT"
-
-  # ── WHERE: one call per platform cell; the primitive boots/attests/tears down.
-  #    bare metal (customers who run their own hardware) | cloud (customers who
-  #    rent infrastructure). Adding a cell = adding a row.
-  e2e:
-    needs: payload
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: snp-metal
-            runner: cvm-launcher
-          # TDX metal is deliberately NOT a cell here. This matrix delivers its
-          # payload over the guest serial console, and the TDX node image is
-          # console-dead by design. TDX metal has its own console-free lane,
-          # tdx-metal-e2e.yml, which drives the guest over RA-TLS instead.
-          # - { platform: gke-snp,   runner: ubuntu-latest }        # needs the c8s-fleet provisioner seam
-    uses: ./.github/workflows/cvm-e2e.yml
+  snp-metal:
+    permissions:
+      contents: read
+      # The CVM reaper asks GitHub whether the owning run finished.
+      actions: read
+    uses: ./.github/workflows/snp-metal-e2e.yml
     with:
-      platform: ${{ matrix.platform }}
-      runner: ${{ matrix.runner }}
-      flavor: rke2-node
-      payload_b64: ${{ needs.payload.outputs.b64 }}
+      c8s_ref: ${{ inputs.c8s_ref || '' }}
+      aa_ref: ${{ inputs.aa_ref || '' }}
+
+  tdx-metal:
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/tdx-metal-e2e.yml
+    with:
+      # DELIBERATELY EMPTY. The TDX node image bakes a fail-closed NRI floor
+      # from the c8s ref it was BUILT from, so installing any other ref gets
+      # that ref's own components denied. Empty means "use the paired ref".
+      # CONSEQUENCE: this lane proves the stack, the host, the image and the
+      # runner. It does NOT test the code in the merge that triggered it; that
+      # is snp-metal's job. Real merge-code coverage on TDX needs a node image
+      # built per merge, which is an image-pipeline problem, not a CI one.
+      c8s_ref: ''
+
+  azure-snp:
+    permissions:
+      contents: read
+      # OIDC to Azure. The metal jobs deliberately do NOT hold this, so a job on
+      # our own bare-metal runners cannot mint an Azure credential.
+      id-token: write
+    uses: ./.github/workflows/azure-e2e.yml
+    with:
+      # push and schedule carry no inputs.
+      c8s_ref: ${{ inputs.c8s_ref || 'main' }}
+
+  azure-tdx:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/azure-tdx-e2e.yml
+    with:
+      c8s_ref: ${{ inputs.c8s_ref || 'main' }}
