@@ -318,12 +318,12 @@ func TestAttestBadRequestURL(t *testing.T) {
 }
 
 func TestReportDataForCSRBadPEM(t *testing.T) {
-	if _, err := reportDataForCSR("garbage", nil); err == nil {
+	if _, err := reportDataForCSR("garbage", nil, nil); err == nil {
 		t.Fatal("expected error for non-PEM input")
 	}
 	// Wrong PEM type.
 	wrongType := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	if _, err := reportDataForCSR(wrongType, nil); err == nil {
+	if _, err := reportDataForCSR(wrongType, nil, nil); err == nil {
 		t.Fatal("expected error for wrong PEM type")
 	}
 }
@@ -344,6 +344,7 @@ func testPubKeyDER(t *testing.T) []byte {
 func TestAttestKeySuccess(t *testing.T) {
 	const challenge = "dGVzdC1jaGFsbGVuZ2U="
 	const ear = "header.payload.sig"
+	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	pubDER := testPubKeyDER(t)
 
 	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +361,9 @@ func TestAttestKeySuccess(t *testing.T) {
 		if body.PublicKey != base64.StdEncoding.EncodeToString(pubDER) {
 			t.Fatal("public key not round-tripped")
 		}
+		if body.OperatorKeysHash != operatorKeysHash {
+			t.Fatalf("operator_keys_hash = %q, want %q", body.OperatorKeysHash, operatorKeysHash)
+		}
 		if body.Evidence.Platform != "snp" {
 			t.Fatalf("platform = %q, want snp", body.Evidence.Platform)
 		}
@@ -368,7 +372,7 @@ func TestAttestKeySuccess(t *testing.T) {
 	}))
 
 	c := NewClient(cdsURL)
-	got, err := c.AttestKey(context.Background(), apiURL, pubDER)
+	got, err := c.AttestKeyWithOperatorKeysHash(context.Background(), apiURL, pubDER, operatorKeysHash)
 	if err != nil {
 		t.Fatalf("AttestKey: %v", err)
 	}

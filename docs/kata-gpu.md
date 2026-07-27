@@ -2,14 +2,14 @@
 
 Runs a Kubernetes pod as a confidential VM (SEV-SNP or Intel TDX, per the
 install's `--hardware-platform`) with an NVIDIA GPU passed through over VFIO.
-**The GPU stack ships with every `c8s install --kata`** — there is no separate
+**The GPU stack ships with every `c8s install --cvm-mode=pod`** — there is no separate
 flag or mode. Every kata cluster can run both CPU and GPU confidential pods.
 **NVIDIA only. Pod-as-CVM only** (node-as-CVM GPU is a separate story — see
 "Out of scope" below).
 
-## What ships with `--kata` (the GPU stack)
+## What ships with `--cvm-mode=pod` (the GPU stack)
 
-`c8s install --kata` renders, alongside the CPU kata stack — for the declared
+`c8s install --cvm-mode=pod` renders, alongside the CPU kata stack — for the declared
 platform (SNP shown; a `--hardware-platform=tdx` install gets the `-tdx`
 equivalents instead):
 
@@ -160,8 +160,8 @@ Two deliberate deltas from the non-GPU guest:
   `CONFIG_MODULES=n`. The GPU kernel is measured and version-pinned like
   everything else; building the modules against a confos GPU kernel flavor
   (module signing + `CONFIG_MODULE_SIG_FORCE`) is the remaining hardening
-  step, tracked in [`docs/GAPS.md`](GAPS.md). Until then, boot-time module
-  loading is closed after driver load (`kernel.modules_disabled=1`, set by
+  step. Until then, boot-time module loading is closed after driver load
+  (`kernel.modules_disabled=1`, set by
   `nvidia-gpu-ready.service`).
 - **GPU bring-up is systemd units, not NVRC.** Upstream's GPU image boots
   NVIDIA's NVRC as PID 1; the c8s guest boots systemd (the in-guest stack
@@ -173,7 +173,7 @@ Two deliberate deltas from the non-GPU guest:
 
 ### `--debug` and the GPU guest
 
-`c8s install --kata --debug` switches every guest image to its debug variant:
+`c8s install --cvm-mode=pod --debug` switches every guest image to its debug variant:
 the non-GPU puller pulls `<tag>-debug` and the GPU puller pulls
 `<tag>-nvidia-debug`, both published in lockstep by CI (`kata-guest-base.yml`).
 The GPU pair is a real locked/debug split, identical in mechanism to the
@@ -209,8 +209,7 @@ self-hosted runner serializes jobs anyway.
   `maxvcpus = 1` means CPU hotplug cannot raise it at runtime. TDX installs
   are unaffected (no pin — the verified TDX measurement is vCPU-invariant).
   This is a **policy pin, not a hard limit** — see "Raising the vCPU pin"
-  below — accepted as the default for now and tracked in
-  [`docs/GAPS.md`](GAPS.md).
+  below — accepted as the default for now.
 - **No memory limits on GPU pods** (memcg + cold-plug VFIO interaction — see
   "Using it"). CPU limits are fine.
 - **One GPU model per pod, advertised per-model.** The sandbox device plugin
@@ -252,8 +251,7 @@ To raise it:
    values, not as tampering — rotate the references, don't widen them.
 
 Removing the pin entirely (or a hot-plug scheme that keeps the boot-time
-VMSA count fixed while adding vCPUs later) stays tracked in
-[`docs/GAPS.md`](GAPS.md).
+VMSA count fixed while adding vCPUs later) remains future work.
 
 ## Out of scope (assumed already provisioned on the host)
 
@@ -307,8 +305,8 @@ reach.
   `nvidia-gpu-ready.service` rather than compiled out) and the driver
   modules/userland are grafted from kata's digest-pinned GPU rootfs. Building
   the modules signed against a confos GPU kernel flavor is the remaining
-  hardening step — [`docs/GAPS.md`](GAPS.md). Everything grafted is inside
-  the measured verity root, so it is attested — just not c8s-compiled.
+  hardening step. Everything grafted is inside the measured verity root, so it
+  is attested — just not c8s-compiled.
 - **GPU attestation is not wired.** The NVIDIA GPU's own attestation (SPDM /
   `nvidia-smi conf-compute`) is out of scope for this iteration — CC mode is
   assumed correct on the host. A malicious host could present a non-CC GPU
@@ -348,7 +346,7 @@ with `/opt/kata` and the containerd drop-in. The GPU dir is read from the
 
 ```yaml
 kata:
-  gpu:                          # no `enabled` — the GPU stack ships with --kata
+  gpu:                          # no `enabled` — the GPU stack ships with --cvm-mode=pod
     guestImage:
       hostPath: /var/lib/c8s/kata-images-nvidia   # swept on uninstall
       pcieRootPort: 8           # VFIO cold-plug ports (stock ships 0)
@@ -362,8 +360,8 @@ kata:
 ```
 
 The `<tag>-nvidia` guest image reuses `kata.guestImage.{repository,insecure,
-registryAuth,pullerAuthSecret}` — same registry and credentials as the non-GPU
+pullerAuthSecret}` — same registry and credentials as the non-GPU
 image, with a `-nvidia` tag suffix. `kata.guestImage.debug` drives both
-pullers: `--kata --debug` switches the non-GPU image to `<tag>-debug` and the
+pullers: `--cvm-mode=pod --debug` switches the non-GPU image to `<tag>-debug` and the
 GPU image to `<tag>-nvidia-debug` in the same install (see "`--debug` and the
 GPU guest" above).

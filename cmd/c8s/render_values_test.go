@@ -42,6 +42,38 @@ func TestValueArgsToTreeNestsDottedKeys(t *testing.T) {
 	}
 }
 
+func TestValueArgsToTreeBuildsListFromIndexedKeys(t *testing.T) {
+	got, err := valueArgsToTree([]string{
+		"--set-string", "cds.measurements[0]=aa",
+		"--set-string", "cds.measurements[1]=bb",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]any{
+		"cds": map[string]any{"measurements": []any{"aa", "bb"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v (indexed keys must nest as a list, not a scalar key)", got, want)
+	}
+}
+
+// A '[' that is not a clean trailing key[n] is outside the grammar and must
+// error at runtime, not silently become a literal map key — so a mis-emitting
+// builder fails loudly rather than writing a bogus key.
+func TestValueArgsToTreeRejectsMalformedIndex(t *testing.T) {
+	for _, kv := range []string{
+		"a.b[0].c=x",  // index mid-path
+		"a.b[=x",      // unterminated
+		"a.b[x]=x",    // non-numeric
+		"a.b[0][1]=x", // nested index
+	} {
+		if _, err := valueArgsToTree([]string{"--set-string", kv}); err == nil {
+			t.Errorf("valueArgsToTree(%q) = nil error, want a grammar error", kv)
+		}
+	}
+}
+
 func TestValueArgsToTreeCoercesSetTypes(t *testing.T) {
 	// --set typing mirrors helm strvals: null/bool/int are coerced, the rest
 	// stay strings. --set-string never coerces.
@@ -149,12 +181,23 @@ func TestValueArgsToTreeRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+// setCvmModeForTest pins the required --cvm-mode global for a buildValueArgs
+// test and restores the prior value, so a mode leaked from another test cannot
+// change the emitted args.
+func setCvmModeForTest(t *testing.T, mode string) {
+	t.Helper()
+	prev := installCvmMode
+	installCvmMode = mode
+	t.Cleanup(func() { installCvmMode = prev })
+}
+
 // buildValueArgs must assume nothing the operator did not pass — like install,
 // an unset --distro (distro == "") emits no distro keys, leaving the chart
 // default to stand; a set --distro plumbs both component distro keys.
 func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "baremetal", "") // registered, not Changed
+	cmd.Flags().String(flagCvmMode, "node", "")
+	setCvmModeForTest(t, "node")
 
 	// Isolate the distro logic from the crane digest path (which needs the
 	// binary on PATH); this test is about what the builder assumes, not digests.
@@ -162,7 +205,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 	installResolveDigests = false
 	defer func() { installResolveDigests = prev }()
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +216,7 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 		t.Fatalf("unset distro should emit no distro keys, got %v", args)
 	}
 
-	args, err = buildValueArgs(context.Background(), cmd, nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err = buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,12 +230,13 @@ func TestBuildValueArgsOmitsDistroWhenUnset(t *testing.T) {
 // coerce never int-coerces it (0640 -> 640 would pin the wrong image).
 func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "baremetal", "")
+	cmd.Flags().String(flagCvmMode, "node", "")
+	setCvmModeForTest(t, "node")
 	prev := installResolveDigests
 	installResolveDigests = false // tag is the sole image ref only when digests are off
 	defer func() { installResolveDigests = prev }()
 
-	args, err := buildValueArgs(context.Background(), cmd,
+	args, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
 		"0640", "", appendResolvedDigestArgs)
 	if err != nil {
@@ -215,12 +259,13 @@ func TestBuildValueArgsKeepsNumericImageTagAString(t *testing.T) {
 // PATH.
 func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "baremetal", "")
+	cmd.Flags().String(flagCvmMode, "node", "")
+	setCvmModeForTest(t, "node")
 
 	prevFlag := installResolveDigests
 	defer func() { installResolveDigests = prevFlag }()
 	installResolveDigests = true
-	stubResolver := func(_ context.Context, args []string, _ string, comps []c8sComponent) ([]string, error) {
+	stubResolver := func(_ context.Context, _ string, args []string, _ string, comps []c8sComponent) ([]string, error) {
 		for _, c := range comps {
 			args = append(args, "--set-string", c.valuePrefix+".repository="+c.repository,
 				"--set-string", c.valuePrefix+".digest=sha256:abc")
@@ -228,7 +273,7 @@ func TestBuildValueArgsOmitsTagWhenDigestsResolved(t *testing.T) {
 		return append(args, "--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true"), nil
 	}
 
-	got, err := buildValueArgs(context.Background(), cmd,
+	got, err := buildValueArgs(context.Background(), cmd, "",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
 		"main", "", stubResolver)
 	if err != nil {
@@ -286,11 +331,11 @@ func TestWriteComputedValuesProducesReadableFile(t *testing.T) {
 
 // coerceSafeValueArg is the value-arg grammar valueArgsToTree / coerce actually
 // handle: a single `dotted.path=value` token whose path segments are
-// [A-Za-z0-9.] only — no list indexing (`foo[0]`), no escaped dots (`a\.b`), no
-// comma-joined multi-values (`a=1,b=2`). valueArgsToTree's doc explicitly opts
-// out of helm's full --set grammar on the promise that buildValueArgs never
-// emits those shapes.
-var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+=[^,]*$`)
+// [A-Za-z0-9.], optionally with a single trailing list index (`foo.bar[0]`).
+// Still excluded: escaped dots (`a\.b`), comma-joined multi-values (`a=1,b=2`),
+// nested indices. valueArgsToTree's doc opts out of the rest of helm's --set
+// grammar on the promise that buildValueArgs never emits those shapes.
+var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+(\[[0-9]+\])?=[^,]*$`)
 
 // TestBuildValueArgsStaysWithinParserGrammar is the lockstep guard between the
 // emitter (buildValueArgs / buildDigestArgs) and the parser (valueArgsToTree /
@@ -302,7 +347,7 @@ var coerceSafeValueArg = regexp.MustCompile(`^[A-Za-z0-9.]+=[^,]*$`)
 // shared path hides the divergence) with every existing test still green.
 func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "baremetal", "")
+	cmd.Flags().String(flagCvmMode, "node", "")
 	cmd.Flags().Int64("webhook-cert-fs-group", 0, "")
 	cmd.Flags().String("webhook-cert-key-mode", "", "")
 	cmd.Flags().Duration("webhook-get-cert-renew-interval", 0, "")
@@ -320,34 +365,39 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 
 	prev := struct {
-		crds, singleNode, kata, resolveDigests bool
-		secret, cvm, upstream, operatorKeys    string
-		workloadRefs                           []string
-	}{installCRDs, installSingleNode, installKata, installResolveDigests, installImagePullSecret, installCvmMode, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs)}
+		crds, singleNode, debug, resolveDigests bool
+		secret, cvm, upstream, operatorKeys     string
+		workloadRefs, measurements              []string
+	}{installCRDs, installSingleNode, installKataDebug, installResolveDigests, installImagePullSecret, installCvmMode, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements)}
 	defer func() {
-		installCRDs, installSingleNode, installKata, installResolveDigests = prev.crds, prev.singleNode, prev.kata, prev.resolveDigests
+		installCRDs, installSingleNode, installKataDebug, installResolveDigests = prev.crds, prev.singleNode, prev.debug, prev.resolveDigests
 		installImagePullSecret, installCvmMode = prev.secret, prev.cvm
 		installUpstream = prev.upstream
 		installOperatorKeys = prev.operatorKeys
 		installWorkloadRefs = prev.workloadRefs
+		installMeasurements = prev.measurements
 	}()
 	// Drive every value-producing toggle. --install-crds=false exercises the
 	// non-default CRD path; --resolve-digests=false keeps crane off PATH (the
 	// digest-arg shape is covered separately via buildDigestArgs below).
-	installCRDs, installSingleNode, installKata, installResolveDigests = false, true, true, false
-	installImagePullSecret, installCvmMode = "regcred", "aks"
+	// --cvm-mode=pod --debug exercises the kata stack args. --measurements
+	// (node mode — it is rejected in pod mode) exercises the one indexed key[i]=
+	// form the builder emits; asserted in a second pass below.
+	installCRDs, installSingleNode, installKataDebug, installResolveDigests = false, true, true, false
+	installImagePullSecret, installCvmMode = "regcred", "pod"
 	installWorkloadRefs = []string{"infer=workloads/deployment/vllm:8000"}
 	installUpstream = "infer"
 	installOperatorKeys = writeTestOperatorKeys(t)
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "rke2", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "rke2", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}
 	// Add the digest helper's repository/digest tokens (stubbed resolver, no crane).
 	args, err = buildDigestArgs(args, "main",
 		[]c8sComponent{{valuePrefix: "cds.image", repository: "ghcr.io/x/cds"}},
-		func(string) (string, error) { return "sha256:abc", nil })
+		func(string) (string, error) { return "sha256:abc", nil },
+		func(string) (bool, error) { return true, nil })
 	if err != nil {
 		t.Fatalf("buildDigestArgs: %v", err)
 	}
@@ -378,6 +428,24 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	if keys == installOperatorKeys || !strings.Contains(keys, "BEGIN PUBLIC KEY") {
 		t.Fatalf("cds.operatorKeys = %q, want the PEM content of %s", keys, installOperatorKeys)
 	}
+
+	// Second pass: node mode with --measurements exercises the indexed key[i]=
+	// form (rejected in pod mode above). Its args must also stay within the
+	// grammar and round-trip to a list.
+	installCvmMode = "node"
+	installMeasurements = []string{strings.Repeat("ab", 48)}
+	mArgs, err := appendCvmModeInstallArgs(nil, installCvmMode, installHardwarePlatform)
+	if err != nil {
+		t.Fatalf("appendCvmModeInstallArgs (node + measurements): %v", err)
+	}
+	for i := 0; i < len(mArgs); i += 2 {
+		if kv := mArgs[i+1]; !coerceSafeValueArg.MatchString(kv) {
+			t.Errorf("measurement arg %q is outside the grammar", kv)
+		}
+	}
+	if _, err := valueArgsToTree(mArgs); err != nil {
+		t.Fatalf("measurement args failed to parse: %v", err)
+	}
 }
 
 // --upstream derives tlsLb.upstream.address from an adopted --workload-ref (a
@@ -385,7 +453,8 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 // duplicate ref dedups to one adoption, so --upstream still resolves it.
 func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	cmd := &cobra.Command{}
-	cmd.Flags().String(flagCvmMode, "baremetal", "")
+	cmd.Flags().String(flagCvmMode, "node", "")
+	setCvmModeForTest(t, "node")
 
 	prev := struct {
 		resolveDigests bool
@@ -401,7 +470,7 @@ func TestBuildValueArgsDerivesUpstreamFromRef(t *testing.T) {
 	installWorkloadRefs = []string{"infer=vllm/deployment/x:8000", "infer=vllm/deployment/x:8000"}
 	installUpstream = "infer"
 
-	args, err := buildValueArgs(context.Background(), cmd, nil, "main", "", appendResolvedDigestArgs)
+	args, err := buildValueArgs(context.Background(), cmd, "", nil, "main", "", appendResolvedDigestArgs)
 	if err != nil {
 		t.Fatalf("buildValueArgs: %v", err)
 	}

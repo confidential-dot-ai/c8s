@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
 // startKeysTLSServer serves /operator-keys over TLS and returns the base URL
@@ -52,7 +55,7 @@ func TestFetchOperatorKeyFingerprints(t *testing.T) {
 		w.Write(pubPEM)
 	})
 
-	fps, note, err := fetchOperatorKeyFingerprints(context.Background(), base, "", certSHA, 5*time.Second)
+	fps, digest, note, err := fetchOperatorKeyFingerprints(context.Background(), base, "", certSHA, 5*time.Second)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -61,6 +64,17 @@ func TestFetchOperatorKeyFingerprints(t *testing.T) {
 	}
 	if len(fps) != 1 || fps[0] != wantFP {
 		t.Fatalf("fingerprints = %v, want [%s]", fps, wantFP)
+	}
+	keys, err := operatorauth.ParsePublicKeysPEM(pubPEM)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want, err := operatorauth.KeySetDigest(keys)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if !bytes.Equal(digest, want) {
+		t.Fatalf("served-set digest = %x, want %x", digest, want)
 	}
 }
 
@@ -74,7 +88,7 @@ func TestFetchOperatorKeysRejectsCertMismatch(t *testing.T) {
 	})
 
 	wrong := strings.Repeat("ab", 32) // a sha256 that is not the serving cert's
-	_, _, err := fetchOperatorKeyFingerprints(context.Background(), base, "", wrong, 5*time.Second)
+	_, _, _, err := fetchOperatorKeyFingerprints(context.Background(), base, "", wrong, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected a cert mismatch to fail the fetch")
 	}
@@ -85,11 +99,15 @@ func TestFetchOperatorKeys404MeansDisabled(t *testing.T) {
 		http.Error(w, "no operator keys configured", http.StatusNotFound)
 	})
 
-	fps, note, err := fetchOperatorKeyFingerprints(context.Background(), base, "", certSHA, 5*time.Second)
+	fps, digest, note, err := fetchOperatorKeyFingerprints(context.Background(), base, "", certSHA, 5*time.Second)
 	if err != nil {
 		t.Fatalf("404 should not be an error, got %v", err)
 	}
-	if len(fps) != 0 || note == "" {
-		t.Fatalf("expected no fingerprints and an explanatory note, got fps=%v note=%q", fps, note)
+	emptyDigest, err := operatorauth.KeySetDigest(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fps) != 0 || !bytes.Equal(digest, emptyDigest) || note == "" {
+		t.Fatalf("expected no fingerprints, the empty-set digest, and an explanatory note, got fps=%v digest=%x note=%q", fps, digest, note)
 	}
 }

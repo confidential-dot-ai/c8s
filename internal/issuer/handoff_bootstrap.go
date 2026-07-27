@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jws"
-	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -24,24 +24,54 @@ import (
 // HandoffEARSource produces CDS's own EAR token that handoff responses sign
 // over. Implementations must be safe for concurrent reads.
 type HandoffEARSource interface {
+	// Current returns the compact-serialized EAR. Callers retransmit it
+	// verbatim — the JWS signature covers these exact bytes, so it must not be
+	// decoded and re-encoded on the way out.
 	Current() (string, error)
+	// ExpiresAt returns the stored token's exp claim. Implementations derive it
+	// when the token is stored so that refresh scheduling and the expiry gauge
+	// do not each re-parse the same unchanging token on every read.
+	ExpiresAt() (time.Time, error)
+}
+
+// handoffEAR pairs the wire-format token with the expiry read out of it at
+// store time. Kept together in one atomic.Value so a reader can never observe
+// a token with another token's expiry.
+type handoffEAR struct {
+	raw string
+	exp time.Time
 }
 
 // AtomicHandoffEAR is a HandoffEARSource backed by an atomic.Value so the
 // refresher goroutine can swap the token without locking the request path.
 type AtomicHandoffEAR struct {
-	v atomic.Value // string
+	v atomic.Value // handoffEAR
 }
 
 func (a *AtomicHandoffEAR) Current() (string, error) {
-	if v, _ := a.v.Load().(string); v != "" {
-		return v, nil
+	if v, _ := a.v.Load().(handoffEAR); v.raw != "" {
+		return v.raw, nil
 	}
 	return "", fmt.Errorf("handoff EAR not yet bootstrapped")
 }
 
-func (a *AtomicHandoffEAR) Set(token string) {
-	a.v.Store(token)
+func (a *AtomicHandoffEAR) ExpiresAt() (time.Time, error) {
+	if v, _ := a.v.Load().(handoffEAR); v.raw != "" {
+		return v.exp, nil
+	}
+	return time.Time{}, fmt.Errorf("handoff EAR not yet bootstrapped")
+}
+
+// Set stores the token, reading its expiry once here rather than on every
+// read. A token whose exp cannot be read is rejected instead of stored, so
+// Current never hands out material the refresh loop cannot schedule against.
+func (a *AtomicHandoffEAR) Set(token string) error {
+	exp, err := unverifiedEARExpiry(token)
+	if err != nil {
+		return fmt.Errorf("store handoff EAR: %w", err)
+	}
+	a.v.Store(handoffEAR{raw: token, exp: exp})
+	return nil
 }
 
 var _ HandoffEARSource = (*AtomicHandoffEAR)(nil)
@@ -61,7 +91,7 @@ type HandoffBootstrap interface {
 // self-provision its handoff signer EAR in process — CDS is its own EAR issuer,
 // so there is no external service to dial for it.
 type LocalEARMinter interface {
-	IssueWithLaunchDigestAndPubKey(submodsEvidence json.RawMessage, launchDigest string, teePubKey *ecdsa.PublicKey) (string, error)
+	IssueAttestedKey(submodsEvidence json.RawMessage, launchDigest string, teePubKey *ecdsa.PublicKey, operatorKeysHash string) (string, error)
 }
 
 // AttestationApi is the attestation-api client the bootstrap drives:
@@ -79,6 +109,8 @@ type localHandoffBootstrap struct {
 
 	attestation AttestationApi
 	minter      LocalEARMinter
+
+	operatorKeysHash string
 }
 
 var _ HandoffBootstrap = (*localHandoffBootstrap)(nil)
@@ -88,19 +120,23 @@ var _ HandoffBootstrap = (*localHandoffBootstrap)(nil)
 // the EAR with the supplied minter (CDS's own EAR issuer) in process — there is
 // no RA-TLS hop and no remote measurement to pin, because the evidence is
 // verified and the EAR signed inside the CDS trust boundary.
-func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter) (HandoffBootstrap, error) {
+func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter, operatorKeysHash string) (HandoffBootstrap, error) {
 	if attestation == nil || minter == nil {
 		return nil, fmt.Errorf("local handoff bootstrap requires an attestation-api and EAR minter")
+	}
+	if err := operatorauth.ValidateKeySetHash(operatorKeysHash); err != nil {
+		return nil, fmt.Errorf("local handoff bootstrap requires an operator-key policy: %w", err)
 	}
 	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate handoff signer key: %w", err)
 	}
 	return &localHandoffBootstrap{
-		signer:      signer,
-		earSource:   &AtomicHandoffEAR{},
-		attestation: attestation,
-		minter:      minter,
+		signer:           signer,
+		earSource:        &AtomicHandoffEAR{},
+		attestation:      attestation,
+		minter:           minter,
+		operatorKeysHash: operatorKeysHash,
 	}, nil
 }
 
@@ -128,16 +164,22 @@ func (h *localHandoffBootstrap) RunRefresh(ctx context.Context, logger *slog.Log
 			} else {
 				logger.Warn("handoff refresh: local attest-key failed; keeping previous EAR", "error", err)
 			}
+		} else if err := h.earSource.Set(token); err != nil {
+			logger.Warn("handoff refresh: minted EAR is unreadable; keeping previous EAR", "error", err)
 		} else {
-			h.earSource.Set(token)
 			logger.Info("handoff EAR refreshed (local)")
 		}
 
-		current, _ := h.earSource.Current()
+		// No readable token yet: retry on the short floor rather than sleeping
+		// on an expiry we don't have.
+		delay := minHandoffRefresh
+		if exp, err := h.earSource.ExpiresAt(); err == nil {
+			delay = nextRefreshAfter(exp)
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(nextRefreshAfter(current)):
+		case <-time.After(delay):
 		}
 	}
 }
@@ -166,7 +208,7 @@ func (h *localHandoffBootstrap) attestKey(ctx context.Context, pubDER []byte) (s
 	if _, err := rand.Read(challenge); err != nil {
 		return "", fmt.Errorf("generate challenge: %w", err)
 	}
-	reportData, err := ratls.ReportDataForKey(ecPub, challenge)
+	reportData, err := ratls.ReportDataForKeyWithContext(ecPub, challenge, []byte(h.operatorKeysHash))
 	if err != nil {
 		return "", err
 	}
@@ -196,55 +238,50 @@ func (h *localHandoffBootstrap) attestKey(ctx context.Context, pubDER []byte) (s
 	if err != nil {
 		return "", fmt.Errorf("marshal evidence for EAR: %w", err)
 	}
-	return h.minter.IssueWithLaunchDigestAndPubKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, ecPub)
+	return h.minter.IssueAttestedKey(json.RawMessage(evidenceJSON), verifyResp.Result.Claims.LaunchDigest, ecPub, h.operatorKeysHash)
 }
 
-// HandoffEARExpiry returns the EAR token's exp claim. The token is decoded
-// without signature verification — this is for operator-facing observability
-// of the locally provisioned EAR. Handoff peers re-validate signature, issuer,
-// and expiry via ValidateEARToken before trusting any material.
-func HandoffEARExpiry(token string) (time.Time, error) {
-	msg, err := jws.Parse([]byte(token))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse JWT: %w", err)
-	}
-	claims, err := jwt.Parse(msg.Payload(), jwt.WithVerify(false), jwt.WithValidate(false))
-	if err != nil {
+// unverifiedEARExpiry returns the EAR token's exp claim WITHOUT verifying the
+// signature. It is deliberately unexported and deliberately named: the only
+// safe input is a token this process minted itself, where the expiry drives
+// local refresh scheduling and an operator-facing gauge. Never call it on a
+// token received from a peer — those go through ValidateEARToken, which checks
+// signature, issuer, and validity window before any claim is trusted.
+func unverifiedEARExpiry(token string) (time.Time, error) {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
 		return time.Time{}, fmt.Errorf("parse JWT claims: %w", err)
 	}
-	exp := claims.Expiration()
-	if exp.IsZero() || exp.Unix() == 0 {
+	exp, err := claims.GetExpirationTime()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read JWT exp claim: %w", err)
+	}
+	if exp == nil || exp.IsZero() || exp.Unix() == 0 {
 		return time.Time{}, fmt.Errorf("JWT missing exp claim")
 	}
-	return exp, nil
+	return exp.Time, nil
 }
 
-// nextRefreshAfter returns the duration until the next refresh attempt for
-// the supplied token. Half the remaining validity, clamped to a sane band so
-// we don't re-attest on every tick when the token is brand new and don't
-// sleep forever on a malformed token.
-func nextRefreshAfter(token string) time.Duration {
-	const (
-		minRefresh = 30 * time.Second
-		maxRefresh = 1 * time.Hour
-	)
-	if token == "" {
-		return minRefresh
-	}
-	exp, err := HandoffEARExpiry(token)
-	if err != nil {
-		return minRefresh
-	}
+const (
+	minHandoffRefresh = 30 * time.Second
+	maxHandoffRefresh = 1 * time.Hour
+)
+
+// nextRefreshAfter returns the duration until the next refresh attempt for a
+// token expiring at exp. Half the remaining validity, clamped to a sane band
+// so we don't re-attest on every tick when the token is brand new and don't
+// sleep past the expiry of a long-lived one.
+func nextRefreshAfter(exp time.Time) time.Duration {
 	remaining := time.Until(exp)
 	if remaining <= 0 {
-		return minRefresh
+		return minHandoffRefresh
 	}
 	d := remaining / 2
-	if d < minRefresh {
-		return minRefresh
+	if d < minHandoffRefresh {
+		return minHandoffRefresh
 	}
-	if d > maxRefresh {
-		return maxRefresh
+	if d > maxHandoffRefresh {
+		return maxHandoffRefresh
 	}
 	return d
 }

@@ -18,16 +18,25 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/issuerapi"
+	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/crypto/cryptobyte"
 )
+
+// maxHandoffErrorBytes caps how much of an untrusted peer's non-2xx /handoff
+// response body is read into HandoffStatusError. A few KB is plenty for an
+// error message.
+const maxHandoffErrorBytes = 8 << 10
 
 const (
 	handoffProtocolLabel            = "c8s-cds-handoff-v1"
@@ -83,7 +92,10 @@ type HandoffDeps struct {
 	KeyProvider         KeyProvider
 	ExpectedIssuer      string
 	AllowedMeasurements map[string]bool
-	Bundle              *BundleManager // optional; nil falls back to caCert-only bundle PEM
+	// OperatorKeysHash is the local CDS operator-key policy commitment. A
+	// requester EAR must carry the exact same REPORTDATA-bound value.
+	OperatorKeysHash string
+	Bundle           *BundleManager // optional; nil falls back to caCert-only bundle PEM
 
 	// Signer (bootstrapped via HandoffBootstrap) signs the response transcript.
 	Signer *ecdsa.PrivateKey
@@ -105,6 +117,11 @@ type CASnapshot struct {
 	Cert       *x509.Certificate
 	Key        *ecdsa.PrivateKey
 	ParentCert *x509.Certificate // nil for a self-signed root CA
+	// AllowlistVersion, Allowlist (floor) and Workloads are copied into the
+	// encrypted payload so a rolling adoption preserves runtime operator state.
+	AllowlistVersion string
+	Allowlist        map[types.Digest]string
+	Workloads        map[string]allowlist.Workload
 }
 
 func (s CASnapshot) hasCAKeyPair() bool {
@@ -141,6 +158,9 @@ func NewHandoffHandler(deps HandoffDeps) (*HandoffHandler, error) {
 	if len(deps.AllowedMeasurements) == 0 {
 		return nil, fmt.Errorf("handoff requires a non-empty measurement allowlist")
 	}
+	if err := operatorauth.ValidateKeySetHash(deps.OperatorKeysHash); err != nil {
+		return nil, fmt.Errorf("handoff requires an operator-key policy: %w", err)
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -152,18 +172,24 @@ func NewHandoffHandler(deps HandoffDeps) (*HandoffHandler, error) {
 func (hh *HandoffHandler) IssuerEARSource() HandoffEARSource { return hh.earSource }
 
 type handoffPayload struct {
-	CAKey             string `json:"ca_key"`
-	CACertificate     string `json:"ca_certificate"`
-	CABundle          string `json:"ca_bundle"`
-	ParentCertificate string `json:"parent_certificate,omitempty"`
+	CAKey             string                        `json:"ca_key"`
+	CACertificate     string                        `json:"ca_certificate"`
+	CABundle          string                        `json:"ca_bundle"`
+	ParentCertificate string                        `json:"parent_certificate,omitempty"`
+	AllowlistVersion  string                        `json:"allowlist_version"`
+	Allowlist         map[types.Digest]string       `json:"allowlist"`
+	Workloads         map[string]allowlist.Workload `json:"workloads,omitempty"`
 }
 
 // HandoffMaterial is the unwrapped result of a successful handoff.
 type HandoffMaterial struct {
-	CAKey      *ecdsa.PrivateKey
-	CACert     *x509.Certificate
-	ParentCert *x509.Certificate
-	Bundle     []*x509.Certificate
+	CAKey            *ecdsa.PrivateKey
+	CACert           *x509.Certificate
+	ParentCert       *x509.Certificate
+	Bundle           []*x509.Certificate
+	AllowlistVersion string
+	Allowlist        map[types.Digest]string
+	Workloads        map[string]allowlist.Workload
 }
 
 // HandoffClientDeps carries the EAR verification context the requester needs to
@@ -172,6 +198,20 @@ type HandoffClientDeps struct {
 	KeyProvider         KeyProvider
 	ExpectedIssuer      string
 	AllowedMeasurements map[string]bool
+	// OperatorKeysHash is the local operator-key policy commitment expected
+	// in the issuer's REPORTDATA-bound handoff EAR.
+	OperatorKeysHash string
+}
+
+// HandoffStatusError is a non-2xx handoff response, typed so callers can
+// distinguish disabled (404) from not-yet-bootstrapped (503).
+type HandoffStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *HandoffStatusError) Error() string {
+	return fmt.Sprintf("handoff peer returned %d: %s", e.Status, e.Body)
 }
 
 // HandleHandoff validates a replica EAR and returns the CA material encrypted
@@ -214,6 +254,11 @@ func (hh *HandoffHandler) HandleHandoff(w http.ResponseWriter, r *http.Request) 
 		RecordTokenValidationFailure(err)
 		RecordMeasurementDenied("handoff")
 		http.Error(w, "forbidden: requester measurement not allowed", http.StatusForbidden)
+		return
+	}
+	if err := checkOperatorPolicy(claims, hh.deps.OperatorKeysHash, "requester"); err != nil {
+		RecordTokenValidationFailure(err)
+		http.Error(w, "forbidden: requester operator-key policy does not match", http.StatusForbidden)
 		return
 	}
 	requestMessage, err := handoffRequestMessage(req.EAR, req.PublicKey)
@@ -272,9 +317,15 @@ func (hh *HandoffHandler) wrap(req HandoffRequest, snap CASnapshot, issuerEAR st
 	}
 
 	payload := handoffPayload{
-		CAKey:         string(keyPEM),
-		CACertificate: string(certutil.EncodeCertPEM(snap.Cert.Raw)),
-		CABundle:      string(bundlePEM),
+		CAKey:            string(keyPEM),
+		CACertificate:    string(certutil.EncodeCertPEM(snap.Cert.Raw)),
+		CABundle:         string(bundlePEM),
+		AllowlistVersion: snap.AllowlistVersion,
+		Allowlist:        snap.Allowlist,
+		Workloads:        snap.Workloads,
+	}
+	if err := validateAllowlistSnapshot(payload.AllowlistVersion, payload.Allowlist); err != nil {
+		return HandoffResponse{}, err
 	}
 	if snap.ParentCert != nil {
 		payload.ParentCertificate = string(certutil.EncodeCertPEM(snap.ParentCert.Raw))
@@ -331,15 +382,9 @@ func (hh *HandoffHandler) wrap(req HandoffRequest, snap CASnapshot, issuerEAR st
 // alerts fail closed instead of preserving a stale positive value.
 func RunHandoffEARExpiryUpdater(ctx context.Context, src HandoffEARSource, interval time.Duration, logger *slog.Logger) {
 	update := func() {
-		ear, err := src.Current()
+		exp, err := src.ExpiresAt()
 		if err != nil {
-			logger.Warn("handoff EAR refresh failed for metrics", "error", err)
-			handoffEARExpirySeconds.Set(-1)
-			return
-		}
-		exp, err := HandoffEARExpiry(ear)
-		if err != nil {
-			logger.Warn("handoff EAR parse failed for metrics", "error", err)
+			logger.Warn("handoff EAR expiry unavailable for metrics", "error", err)
 			handoffEARExpirySeconds.Set(-1)
 			return
 		}
@@ -359,16 +404,22 @@ func RunHandoffEARExpiryUpdater(ctx context.Context, src HandoffEARSource, inter
 }
 
 // RequestHandoff drives the client side of the handoff protocol against
-// peerURL and returns verified, decrypted CA material.
-func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, signer *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
+// peerURL and returns verified, decrypted CA material. requesterSigningKey is
+// the ECDSA key bound into requesterEAR and signs the request transcript. A
+// distinct, one-request X25519 key below encrypts the response; the CA private
+// key appears only inside the decrypted HandoffMaterial.
+func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, requesterEAR string, requesterSigningKey *ecdsa.PrivateKey, client *http.Client) (*HandoffMaterial, error) {
 	if strings.TrimSpace(requesterEAR) == "" {
 		return nil, fmt.Errorf("handoff requester EAR is required")
 	}
-	if signer == nil {
+	if requesterSigningKey == nil {
 		return nil, fmt.Errorf("handoff requester signing key is required")
 	}
 	if len(deps.AllowedMeasurements) == 0 {
 		return nil, fmt.Errorf("handoff requires a non-empty measurement allowlist")
+	}
+	if err := operatorauth.ValidateKeySetHash(deps.OperatorKeysHash); err != nil {
+		return nil, fmt.Errorf("handoff requires an operator-key policy: %w", err)
 	}
 	if client == nil {
 		client = http.DefaultClient
@@ -383,7 +434,7 @@ func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, reques
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signHandoffMessage(signer, requestMessage)
+	signature, err := signHandoffMessage(requesterSigningKey, requestMessage)
 	if err != nil {
 		return nil, err
 	}
@@ -404,8 +455,10 @@ func RequestHandoff(ctx context.Context, deps HandoffClientDeps, peerURL, reques
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("handoff peer returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Untrusted peer error body: cap it so a hostile or misconfigured
+		// peer cannot balloon memory (or the retry log) with a huge response.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHandoffErrorBytes))
+		return nil, &HandoffStatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 
 	var hr HandoffResponse
@@ -431,6 +484,10 @@ func UnwrapHandoffResponse(resp HandoffResponse, deps HandoffClientDeps, request
 		RecordTokenValidationFailure(err)
 		RecordMeasurementDenied("handoff")
 		return nil, fmt.Errorf("validate handoff issuer measurement: %w", err)
+	}
+	if err := checkOperatorPolicy(claims, deps.OperatorKeysHash, "issuer"); err != nil {
+		RecordTokenValidationFailure(err)
+		return nil, fmt.Errorf("validate handoff issuer operator-key policy: %w", err)
 	}
 	responseMessage, err := handoffResponseMessage(requesterEAR, resp.IssuerEAR, requesterPub, resp.PublicKey)
 	if err != nil {
@@ -487,7 +544,10 @@ func ParseHandoffPayload(plain []byte) (*HandoffMaterial, error) {
 		return nil, fmt.Errorf("parse handoff payload: %w", err)
 	}
 	if payload.CAKey == "" || payload.CACertificate == "" || payload.CABundle == "" {
-		return nil, fmt.Errorf("handoff payload missing ca_key, ca_certificate, or ca_bundle")
+		return nil, fmt.Errorf("handoff payload missing CA fields")
+	}
+	if err := validateAllowlistSnapshot(payload.AllowlistVersion, payload.Allowlist); err != nil {
+		return nil, err
 	}
 
 	caKey, err := certutil.ParseECPrivateKey([]byte(payload.CAKey))
@@ -515,11 +575,25 @@ func ParseHandoffPayload(plain []byte) (*HandoffMaterial, error) {
 	}
 
 	return &HandoffMaterial{
-		CAKey:      caKey,
-		CACert:     caCert,
-		ParentCert: parentCert,
-		Bundle:     certs,
+		CAKey:            caKey,
+		CACert:           caCert,
+		ParentCert:       parentCert,
+		Bundle:           certs,
+		AllowlistVersion: payload.AllowlistVersion,
+		Allowlist:        payload.Allowlist,
+		Workloads:        payload.Workloads,
 	}, nil
+}
+
+func validateAllowlistSnapshot(version string, digests map[types.Digest]string) error {
+	parsedVersion, err := strconv.ParseUint(version, 10, 64)
+	if err != nil || parsedVersion == 0 {
+		return fmt.Errorf("invalid handoff allowlist version %q", version)
+	}
+	if digests == nil {
+		return fmt.Errorf("handoff allowlist digests are required")
+	}
+	return nil
 }
 
 // ValidateCAKeyPair confirms a parsed CA certificate is currently usable for
@@ -559,6 +633,28 @@ func checkRequiredMeasurement(claims *EARClaims, allowed map[string]bool, endpoi
 		}
 	}
 	return CheckMeasurement(claims, allowed, endpoint)
+}
+
+func checkOperatorPolicy(claims *EARClaims, expected, label string) error {
+	if claims == nil || claims.OperatorKeysHash == "" {
+		return &TokenValidationError{
+			Reason: ReasonOperatorPolicy,
+			Err:    fmt.Errorf("%s EAR is missing %s claim", label, earclaims.OperatorKeysHash),
+		}
+	}
+	if err := operatorauth.ValidateKeySetHash(claims.OperatorKeysHash); err != nil {
+		return &TokenValidationError{
+			Reason: ReasonOperatorPolicy,
+			Err:    fmt.Errorf("%s EAR has invalid %s claim: %w", label, earclaims.OperatorKeysHash, err),
+		}
+	}
+	if claims.OperatorKeysHash != expected {
+		return &TokenValidationError{
+			Reason: ReasonOperatorPolicy,
+			Err:    fmt.Errorf("%s EAR operator-key policy %s does not match expected %s", label, claims.OperatorKeysHash, expected),
+		}
+	}
+	return nil
 }
 
 func signHandoffMessage(key *ecdsa.PrivateKey, message []byte) (string, error) {

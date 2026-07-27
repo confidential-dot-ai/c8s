@@ -6,11 +6,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// maxErrorBodyBytes caps how much of a non-2xx response body is read into
+// APIError/UnexpectedError.
+const maxErrorBodyBytes = 8 << 10
 
 // Client is an HTTP client for the external attestation-api.
 type Client struct {
@@ -19,11 +28,64 @@ type Client struct {
 }
 
 // NewClient creates a new attestation-api client.
+//
+// A "unix:///path/to/attest.sock" baseURL routes every request over that local
+// Unix-domain socket instead of a routable HTTP address. Because the verifier
+// trusts whatever the attestation-api returns (the /verify verdict is not
+// signed), a routable URL lets a hostile control plane redirect it under the
+// documented threat model (C-05); a private in-TCB socket removes that spoofable
+// hop. The socket's owner and mode are checked on every dial (see
+// validateVerifierSocket) so a swapped or world-writable socket fails closed.
 func NewClient(baseURL string) Client {
+	if socket, ok := strings.CutPrefix(baseURL, "unix://"); ok {
+		return Client{
+			baseURL:    "http://unix",
+			httpClient: &http.Client{Transport: unixSocketTransport(socket)},
+		}
+	}
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: http.DefaultClient,
 	}
+}
+
+// unixSocketTransport dials socketPath for every request, validating its
+// ownership and mode first so the verifier never talks to a socket an untrusted
+// actor could have replaced or made world-writable.
+func unixSocketTransport(socketPath string) *http.Transport {
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if err := validateVerifierSocket(socketPath); err != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}
+}
+
+// validateVerifierSocket asserts socketPath is a real Unix socket (not a
+// symlink), owned by root or the calling process, and not world-writable.
+func validateVerifierSocket(socketPath string) error {
+	if !filepath.IsAbs(socketPath) {
+		return fmt.Errorf("attestationclient: verifier socket %q must be an absolute path", socketPath)
+	}
+	fi, err := os.Lstat(socketPath)
+	if err != nil {
+		return fmt.Errorf("attestationclient: stat verifier socket %q: %w", socketPath, err)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("attestationclient: %q is not a socket (mode %s)", socketPath, fi.Mode())
+	}
+	if fi.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("attestationclient: verifier socket %q is world-writable (mode %#o)", socketPath, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if st.Uid != 0 && int(st.Uid) != os.Getuid() {
+			return fmt.Errorf("attestationclient: verifier socket %q is owned by uid %d (want root or the verifier's own uid)", socketPath, st.Uid)
+		}
+	}
+	return nil
 }
 
 // NewClientWithHTTP creates a new client with a custom HTTP client.
@@ -94,7 +156,9 @@ func (c Client) doAndDecode(req *http.Request, out any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		// Cap the error body: it can come from an unhealthy or untrusted
+		// endpoint and flows into error strings and logs.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		var errResp types.ErrorResponse
 		if json.Unmarshal(body, &errResp) == nil {
 			return &APIError{Status: resp.StatusCode, Response: errResp}

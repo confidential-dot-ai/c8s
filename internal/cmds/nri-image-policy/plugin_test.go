@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
-	"github.com/confidential-dot-ai/c8s/internal/cache"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/containerd/nri/pkg/api"
 )
@@ -30,7 +29,7 @@ func TestCheckImage_MissingAnnotation_DenyEnabled(t *testing.T) {
 		},
 	})
 
-	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "")
+	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "", nil)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny, got %d", verdict)
 	}
@@ -46,7 +45,7 @@ func TestCheckImage_MissingAnnotation_DenyDisabled(t *testing.T) {
 		},
 	})
 
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "")
+	verdict, _ := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr", "", nil)
 	if verdict != verdictSkip {
 		t.Fatalf("expected verdictSkip, got %d", verdict)
 	}
@@ -60,7 +59,7 @@ func TestCheckImage_MissingAnnotation_ExemptNamespace(t *testing.T) {
 		},
 	})
 
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-system", "pod", "ctr", "")
+	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-system", "pod", "ctr", "", nil)
 	if verdict != verdictSkip {
 		t.Fatalf("expected verdictSkip for exempt namespace, got %d", verdict)
 	}
@@ -74,7 +73,7 @@ func TestCheckImage_NonExemptSystemNamespace(t *testing.T) {
 		},
 	})
 
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-node-lease", "pod", "ctr", "")
+	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-node-lease", "pod", "ctr", "", nil)
 	if verdict != verdictDeny {
 		t.Fatalf("expected verdictDeny for non-exempt namespace, got %d", verdict)
 	}
@@ -205,7 +204,7 @@ func TestSynchronize_NotReady_EnforceExistingDisabled_NoDeferral(t *testing.T) {
 	}
 }
 
-func TestRunDeferredSweep_NothingDeferred(t *testing.T) {
+func TestRunDeferredCheck_NothingDeferred(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{
 			Mode:            "fail-closed",
@@ -215,11 +214,10 @@ func TestRunDeferredSweep_NothingDeferred(t *testing.T) {
 	p.SetReady()
 
 	// Should be a no-op without panic
-	p.RunDeferredSweep(context.Background())
+	p.RunDeferredCheck(context.Background())
 }
 
 func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
-	policyCache := cache.NewPolicyCache()
 	p := &plugin{
 		cfg: &config{
 			Allowlist: allowlistConfig{Pull: pullConfig{URL: "http://wl.local:8080", Timeout: 30}},
@@ -232,7 +230,7 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 		resolver: &ctrdresolver.Resolver{},
 		audit:    audit.NewLogger(),
 		logger:   slog.Default(),
-		cache:    policyCache,
+		policy:   newPolicyStore(floorAllowlist(map[string]string{})),
 	}
 	p.SetReady()
 

@@ -18,6 +18,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
+// maxErrorBodyBytes caps how much of an untrusted peer's non-2xx response
+// body is read into StatusError.
+const maxErrorBodyBytes = 8 << 10
+
 // Client is a high-level client for the CDS attestation flow.
 // It handles the full challenge-attest-certify flow in a single call.
 type Client struct {
@@ -106,6 +110,16 @@ func (c Client) ObtainCertificateWithEvidence(attestationApiURL, csrPEM string) 
 // caller-controlled cancellation across authenticate, local attest, and CDS
 // attest requests.
 func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationApiURL, csrPEM string) (CertificateResult, error) {
+	return c.ObtainCertificateWithClaimsContext(ctx, attestationApiURL, csrPEM, nil, nil, nil)
+}
+
+// ObtainCertificateWithClaimsContext is ObtainCertificateWithEvidenceContext
+// that additionally binds an RA-TLS config-claims extension into the evidence
+// REPORTDATA and forwards it (plus the role-partitioned container-digest lists
+// it commits to) to CDS for verification and leaf embedding
+// (docs/ratls.md). claimsDER nil ⇒ the plain, claims-free flow
+// (byte-identical to before).
+func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestationApiURL, csrPEM string, claimsDER []byte, initDigests, mainDigests []string) (CertificateResult, error) {
 	ctx = contextOrBackground(ctx)
 
 	// Step 1: get challenge from CDS
@@ -114,13 +128,14 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
 	}
 
-	// Step 2: generate TEE evidence bound to the CSR public key and challenge.
+	// Step 2: generate TEE evidence bound to the CSR public key, the config
+	// claims (if any), and the challenge.
 	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
 	if err != nil {
 		return CertificateResult{}, fmt.Errorf("invalid base64 in challenge: %w", err)
 	}
 
-	reportData, err := reportDataForCSR(csrPEM, challengeBytes)
+	reportData, err := reportDataForCSR(csrPEM, claimsDER, challengeBytes)
 	if err != nil {
 		return CertificateResult{}, err
 	}
@@ -140,7 +155,12 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 			Platform: asResp.Platform,
 			Evidence: asResp.Evidence,
 		},
-		CSR: csrPEM,
+		CSR:                  csrPEM,
+		InitContainerDigests: initDigests,
+		ContainerDigests:     mainDigests,
+	}
+	if len(claimsDER) > 0 {
+		attestReq.WorkloadClaims = base64.StdEncoding.EncodeToString(claimsDER)
 	}
 	certPEM, err := c.AttestContext(ctx, attestReq)
 	if err != nil {
@@ -166,6 +186,12 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 // bootstrap) that need a CDS-issued EAR bound to a key they hold in
 // memory, without going through the cert-issuance flow.
 func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyDER []byte) (string, error) {
+	return c.AttestKeyWithOperatorKeysHash(ctx, attestationApiURL, pubKeyDER, "")
+}
+
+// AttestKeyWithOperatorKeysHash is AttestKey with an additional CDS
+// operator-key policy commitment bound into REPORTDATA and the resulting EAR.
+func (c Client) AttestKeyWithOperatorKeysHash(ctx context.Context, attestationApiURL string, pubKeyDER []byte, operatorKeysHash string) (string, error) {
 	ctx = contextOrBackground(ctx)
 
 	challengeResp, err := c.AuthenticateContext(ctx)
@@ -181,7 +207,7 @@ func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyD
 	if err != nil {
 		return "", fmt.Errorf("parse public key: %w", err)
 	}
-	reportData, err := ratls.ReportDataForKey(pubAny, challengeBytes)
+	reportData, err := ratls.ReportDataForKeyWithContext(pubAny, challengeBytes, []byte(operatorKeysHash))
 	if err != nil {
 		return "", err
 	}
@@ -192,9 +218,10 @@ func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyD
 	}
 
 	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge: challengeResp.Challenge,
-		Evidence:  types.AttestationEvidence(asResp),
-		PublicKey: base64.StdEncoding.EncodeToString(pubKeyDER),
+		Challenge:        challengeResp.Challenge,
+		Evidence:         types.AttestationEvidence(asResp),
+		PublicKey:        base64.StdEncoding.EncodeToString(pubKeyDER),
+		OperatorKeysHash: operatorKeysHash,
 	})
 	if err != nil {
 		return "", err
@@ -214,7 +241,7 @@ func (c Client) AttestKey(ctx context.Context, attestationApiURL string, pubKeyD
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(httpResp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
 		return "", &StatusError{Status: httpResp.StatusCode, Body: string(respBody)}
 	}
 
@@ -249,7 +276,7 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return types.ChallengeResponse{}, &StatusError{Status: resp.StatusCode, Body: string(body)}
 	}
 
@@ -261,9 +288,12 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge string         `json:"challenge"`
-	Evidence  attestEvidence `json:"evidence"`
-	CSR       string         `json:"csr"`
+	Challenge            string         `json:"challenge"`
+	Evidence             attestEvidence `json:"evidence"`
+	CSR                  string         `json:"csr"`
+	WorkloadClaims       string         `json:"workload_claims,omitempty"`
+	InitContainerDigests []string       `json:"init_container_digests,omitempty"`
+	ContainerDigests     []string       `json:"container_digests,omitempty"`
 }
 
 type attestEvidence struct {
@@ -299,7 +329,7 @@ func (c Client) AttestContext(ctx context.Context, req attestRequest) (string, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return "", &StatusError{Status: resp.StatusCode, Body: string(body)}
 	}
 
@@ -341,7 +371,7 @@ func contextOrBackground(ctx context.Context) context.Context {
 	return ctx
 }
 
-func reportDataForCSR(csrPEM string, challenge []byte) ([]byte, error) {
+func reportDataForCSR(csrPEM string, claimsDER, challenge []byte) ([]byte, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, fmt.Errorf("CSR must be a PEM-encoded certificate request")
@@ -353,7 +383,9 @@ func reportDataForCSR(csrPEM string, challenge []byte) ([]byte, error) {
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("CSR signature invalid: %w", err)
 	}
-	reportData, err := ratls.ReportDataForKey(csr.PublicKey, challenge)
+	// claimsDER nil ⇒ SHA-384(pubkey || challenge), identical to the
+	// pre-claims binding CDS recomputes for a claims-free request.
+	reportData, err := ratls.ReportDataForKeyAndClaims(csr.PublicKey, claimsDER, challenge)
 	if err != nil {
 		return nil, err
 	}

@@ -3,10 +3,9 @@
 > **Release:** v0.1.0 · **Milestone:** operator-consolidation · **Last updated:** 2026-07-10 (v0.1.0).
 > **Living document** — update it whenever a gate, default, or gap changes; a
 > stale threat model is worse than none. Companion docs, treated as the same
-> source of truth: `docs/GAPS.md` (the deferred-work register, issue-linked),
-> `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper §3 (adversary /
-> asset model this section is lifted from), and the c8s-docs `architecture/
-> threat-model.mdx` (public framing).
+> source of truth: `docs/pitfalls.md` (code-level gotchas), the c8s whitepaper
+> §3 (adversary / asset model this section is lifted from), and the c8s-docs
+> `architecture/threat-model.mdx` (public framing).
 >
 > **How this is organised** — following the seven questions every threat model
 > should answer: what we protect (§1 Assets), who from (§2 Adversaries), how the
@@ -127,8 +126,7 @@ these away.
 Status vocabulary: **Prevented** (attacker cannot, by construction) · **Mitigated**
 (reduced, residual noted) · **Addressable** (a real threat *now*, with a committed
 or designed fix — "threat today, not tomorrow") · **Open** (real now, no committed
-fix) · **Accepted** (deliberate non-goal, §7). Deferred items link `docs/GAPS.md`
-rather than restating it.
+fix) · **Accepted** (deliberate non-goal, §7).
 
 ### Prevented / Mitigated
 
@@ -147,23 +145,24 @@ rather than restating it.
 
 | Threat | Adversary | Planned fix | Reference |
 |---|---|---|---|
-| CDS's host-supplied startup inputs are not in its attestation — a control-plane swap-restart pins attacker-chosen values on any of them: (a) the **operator-keys** ConfigMap (`cds.operatorKeys`); (b) the **allowlist-seed** ConfigMap (`--allowlist-seed`; `internal/cmds/cds/seed.go` additively inserts every digest into the store before the server serves, no operator write-token, no signature); (c) the **CDS pod arguments** themselves (which select the seed path, the op-keys file, `--measurements`, and every other flag). Revocation of op-keys is coarse (no CRL/OCSP). | control plane / host | Commit the operator-key list, the allowlist seed, and the load-bearing CDS startup arguments to attested init data (HOST_DATA/initdata) **in one commit** — closing only one input leaves the swap-restart attack alive on the others. Move op-keys to a CA + short-lived operator certs (`x5c`), CA-based revocation. Interim: `c8s cds verify` surfaces pinned-key fingerprints over the attested serving cert. | pitfalls "Operator key-pinning"; GAPS §Trust model; decision 2026-07-01; #305; `internal/cmds/cds/seed.go` |
-| Bootstrap allowlist is baked from whatever the floating `:main` tag resolved to at guest-build time; an unpinned `:main`-everywhere deploy can bake a seed that rejects the deployed CDS. | CI / whoever moves `:main` | Atomic floating-tag promotion (roll `:main`/`:latest` only after Docker **and** kata-guest-base succeed for one commit); `oras pull @digest` for `kata.guestImage`. Runtime mitigation: policy-monitor grow-only CDS refresh. | pitfalls "bootstrap allowlist … floating :main"; #306 |
+| A control-plane **config swap-restart** on CDS is detected only by pin-holding verifiers, never prevented at boot. The operator-key list and allowlist seed are attested: CDS binds their canonical digests into its serving-cert evidence (config-claims, `docs/ratls.md`), verifiers pin them (`c8s cds verify --operator-keys/--allowlist-seed`, `ratls.VerifyPolicy`), and `/handoff` releases the mesh CA only on a byte-equal operator-key-set hash (the seed digest is not checked at handoff, so a seed-only swap is caught by pinned verifies, not by handoff). Residual: the **CDS pod arguments** stay host-supplied — dropping `--operator-keys` downgrades to the attested empty key set — and enforcers/in-cluster clients pin nothing (their config is host-supplied too), so between a swap-restart and the next pinned verify the cluster serves and enforces the attacker's allowlist. Revocation of op-keys is coarse (no CRL/OCSP). | control plane / host | Run pinned verifies continuously (CI gate on `c8s verify` exit codes), not only at bootstrap; expose public ingress only behind a passing verify. Move op-keys to a CA + short-lived operator certs (`x5c`), CA-based revocation. Detection by pinning verifiers — not boot-time prevention — is the accepted posture. | `docs/ratls.md` (Config-claims); pitfalls "Operator key-pinning"; decision 2026-07-01 |
+| The **workload-image pin** (`c8s verify --workload-image`) distinguishes honest workloads only. A CDS-issued leaf commits the pod's container-image digest (config-claims), but CDS binds the claim to nothing the pod actually runs: it checks only that the forwarded list hashes to the evidence-bound digest and that every image is allowlisted. Any admitted workload can run the attest flow itself (the attestation-api binds caller-chosen REPORTDATA) and assert **any allowlisted image set** — a victim workload's included — satisfying a pin against that victim. It can never assert a *non-allowlisted* image, and image integrity is untouched (everything running is still independently allowlisted). So the pin detects an honest workload drifting or a config swap, not a lying workload asserting another's identity. | admitted (allowlisted) workload | Per-workload measurement enforced at `/attest` (bind the claim to the pod's admitted/measured images). Interim: treat the pin as honest-workload detection, not identity. | `docs/getcert-workload-binding.md` (Corner 5/6); `docs/ratls.md` (Config-claims) |
+| Bootstrap allowlist is baked from whatever the floating `:main` tag resolved to at guest-build time; an unpinned `:main`-everywhere deploy can bake a seed that rejects the deployed CDS. | CI / whoever moves `:main` | Atomic floating-tag promotion (roll `:main`/`:latest` only after Docker **and** kata-guest-base succeed for one commit); `oras pull @digest` for `kata.guestImage`. Runtime mitigation: policy-monitor grow-only CDS refresh. | pitfalls "bootstrap allowlist … floating :main" |
 | In-guest CDS allowlist refresh is **disabled on every default kata install**: policy-monitor fail-closed refuses to run without `C8S_CDS_MEASUREMENTS`, and no shipping path can deliver the pin — baking it is self-referential (CDS runs from the same guest image the pin would be baked into, so the value would change the launch measurement it pins) and per-pod cloud-init is host-controlled (a host-chosen pin defeats the point). Guests therefore enforce the baked seed alone; operator `c8s allowlist add` reaches host-side enforcement and CDS but **not running guests**. Also: the SNP launch digest covers the VMSA set, so even a correct pin is per-VM-shape (vCPU count). Stricter than ratls-mesh (which warns and proceeds on an empty pin) by intent — for the refresh, "any attested TEE" is not enough because the host can boot its own CVM from the same guest image and pass "attested" while serving an attacker-chosen allowlist, and grow-only merging is no defence when additions are the attack. | host / operator drift | Operator-signed allowlist entries verified in-guest against a baked operator public key (candidate design). Interim: the deliberate fail-closed posture — guests enforce the measured seed and nothing else. | kata-image-policy.md; GAPS §Trust model |
-| GPU guest boots **kata's** GPU kernel with NVIDIA modules grafted from kata's rootfs — kernel/driver provenance is the kata release, not the c8s build. | supply chain | A confos GPU kernel flavor (`CONFIG_MODULES=y` + `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build key) compiling/signing the NVIDIA modules. Interim: module loading locked after bring-up (`kernel.modules_disabled=1`). | pitfalls; GAPS §Confidential GPU; #292 |
-| GPU CC mode is assumed correct on the host; no positive GPU attestation (SPDM / `nvidia-smi conf-compute`) reaches the relying party. | host | Wire SPDM / conf-compute attestation. Interim: locked guest fails closed on a non-CC GPU before the agent starts. | GAPS §Confidential GPU; #55 |
-| Mesh peer verification checks the CA chain but does not pin the peer's measurement; leaf certs embed no verified measurement. On **TDX**, `Measurements` and `MinTCBVersion` set by the operator are **silently dropped**: the attestation-api's TDX verifier surfaces no launch measurement and takes no minimum-TCB parameter, so `verifyTDXEvidence` sends neither (`pkg/attestationclient/verify.go`). | pod-network / co-tenant | Pin peer measurement; wire the TDX measurement/TCB path. | GAPS §Mesh; `pkg/attestationclient/verify.go` (`EvidencePolicy`); #47 (peer pin), #303 (TDX) |
-| In-guest mesh exempts **all** UID-0 egress (so attestation-service can reach AMD KDS) — a workload running as root egresses in plaintext, bypassing the mesh. | root workload | Scope the exemption to attestation-service, not all of UID 0. Workloads MUST run non-root meanwhile. | GAPS §Mesh; #308 |
+| GPU guest boots **kata's** GPU kernel with NVIDIA modules grafted from kata's rootfs — kernel/driver provenance is the kata release, not the c8s build. | supply chain | A confos GPU kernel flavor (`CONFIG_MODULES=y` + `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build key) compiling/signing the NVIDIA modules. Interim: module loading locked after bring-up (`kernel.modules_disabled=1`). | pitfalls; GAPS §Confidential GPU |
+| GPU CC mode is assumed correct on the host; no positive GPU attestation (SPDM / `nvidia-smi conf-compute`) reaches the relying party. | host | Wire SPDM / conf-compute attestation. Interim: locked guest fails closed on a non-CC GPU before the agent starts. | GAPS §Confidential GPU |
+| Mesh mTLS after bootstrap checks the CA chain, but leaf certs embed no verified measurement, so peer workloads are not measurement-pinned. Separately, RA-TLS bootstrap verification on **TDX** applies `Measurements` to the verifier's normalized MRTD (`claims.launch_digest`), but it does not pin RTMR[0..3], and `MinTCBVersion` is still dropped because the c8s TDX request has no minimum-TCB policy field. An MRTD match therefore says nothing about the per-workload RTMR[3]. | pod-network / co-tenant | Embed and pin peer measurements; wire the TDX RTMR/TCB policy path. | GAPS §Mesh and §Trust model; `pkg/attestationclient/verify.go` (`EvidencePolicy`) |
+| In-guest mesh exempts **all** UID-0 egress (so attestation-service can reach AMD KDS) — a workload running as root egresses in plaintext, bypassing the mesh. | root workload | Scope the exemption to attestation-service, not all of UID 0. Workloads MUST run non-root meanwhile. | GAPS §Mesh |
 | Kata guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the front-door pods (tls-lb nginx, CDS RA-TLS) reach external certless clients — every kata guest therefore accepts inbound TCP:8443 **without mesh mTLS**, and any workload listening on 8443 in a kata pod is reachable without a mesh client cert. (Parser rejects mesh listener ports and non-tcp entries, and logs an audit line when active.) | pod-network / co-tenant | Per-workload rather than per-image passthrough (front doors in dedicated guests; workload guests rebuild with the variable emptied). | pitfalls "kata guests: inbound TCP port 8443 bypasses the mesh"; GAPS §Mesh and certificates |
-| Post-start kill window: policy-monitor SIGKILLs a non-allowlisted container's init *after* kata-agent forks it (single-digit-ms, no network / no user-`execve`). Field regression 2026-07 (fixed): kata-agent's `create_sandbox` does `remove_dir_all` + `create_dir_all` on `/run/kata-containers`, silently detaching the boot-time inotify watch — the monitor logged "active, seed loaded" and made **zero decisions** on any subsequently created sandbox. Now watches in generations (Remove/Rename of the watch dir + periodic inode revalidation → re-Add + re-seed), so the single-digit-ms bound holds again. Any future in-guest watcher of a kata-agent-owned path must handle the same replacement (watch **liveness**, not just existence). **Second 2026-07 miss (fixed):** the kill path's cgroup lookup matched only the bare `<cid>` basename, but a systemd-PID-1 guest names the container cgroup `cri-containerd-<cid>.scope` under `kubepods*.slice`, so `findInitPID` never found it and the SIGKILL silently missed — policy-monitor *denied* the container but it ran **unenforced** (unbounded, not a bounded window). Fixed by `cgroupDirMatchesCID` (`internal/cmds/policymonitor/kill.go`); the bound holds only with **both** fixes. | host presenting a bad image | BPF-LSM `security_bprm_check_security` hook (designed, not committed). | kata-image-policy.md G4; pitfalls "kata-agent replaces /run/kata-containers", "policy-monitor cgroup lookup"; #309 |
+| Post-start kill window: policy-monitor SIGKILLs a non-allowlisted container's init *after* kata-agent forks it (single-digit-ms, no network / no user-`execve`). Field regression 2026-07 (fixed): kata-agent's `create_sandbox` does `remove_dir_all` + `create_dir_all` on `/run/kata-containers`, silently detaching the boot-time inotify watch — the monitor logged "active, seed loaded" and made **zero decisions** on any subsequently created sandbox. Now watches in generations (Remove/Rename of the watch dir + periodic inode revalidation → re-Add + re-seed), so the single-digit-ms bound holds again. Any future in-guest watcher of a kata-agent-owned path must handle the same replacement (watch **liveness**, not just existence). **Second 2026-07 miss (fixed):** the kill path's cgroup lookup matched only the bare `<cid>` basename, but a systemd-PID-1 guest names the container cgroup `cri-containerd-<cid>.scope` under `kubepods*.slice`, so `findInitPID` never found it and the SIGKILL silently missed — policy-monitor *denied* the container but it ran **unenforced** (unbounded, not a bounded window). Fixed by `cgroupDirMatchesCID` (`internal/cmds/policymonitor/kill.go`); the bound holds only with **both** fixes. | host presenting a bad image | BPF-LSM `security_bprm_check_security` hook (designed, not committed). | kata-image-policy.md G4; pitfalls "kata-agent replaces /run/kata-containers", "policy-monitor cgroup lookup" |
 | TDX per-workload measurement is present but **not consumed by any relying party**: the baked `rtmr3-measurer` daemon extends TDX RTMR[3] with each distinct deployed workload's image digest (`SHA-384("sha256:"+hex)`, dedup keyed on the digest so restarts/replicas do not double-extend the append-only register), but `/attest` does not yet expose a workload-scoped event log, no client-side DCAP verifier gates on RTMR[3], and the RA-TLS app channel is not bound to it. Today RTMR[3] holds a value nothing enforces; policy-monitor's baked-allowlist enforcement remains the only per-workload gate. SNP has no equivalent runtime-extend register — the measurer is TDX-only. Multi-workload pods extend in first-seen scan order (unstable across runs), so a verifier must account for ordering or the deployment stays one workload image per sandbox. | — (capability gap) | Trim the `/attest` event log to workload extends, wire client-side DCAP verification of the trimmed log, bind the RA-TLS app channel to the attested VM's RTMR[3]. | `internal/cmds/rtmr3measurer`; kata-guest-base `rtmr3-measurer.service` |
 | Opt-in scratch disk for large-image kata workloads (dm-crypt AES-XTS-plain64, ephemeral per-boot key, backing `/run/kata-containers/image` when attached via `kata-qemu-scratch-wrapper.sh`) has **no integrity layer**. The host holds no key and the key is fresh per boot, so chosen-plaintext forgery and cross-boot replay are prevented; the image is digest-verified in-guest at unpack and that digest is what lands in RTMR[3]. What remains: (a) the host can corrupt scratch blocks (DoS), and (b) unlike the dm-verity root, image bytes are **not** re-verified at read — attestation covers *which image was deployed*, not *that every byte later served off scratch still matches it*. Small-image tmpfs path unaffected. | host | Authenticated dm-crypt (dm-integrity under dm-crypt) so host tamper of scratch blocks fails cryptographically at read. Do not claim continuous workload integrity in customer-facing statements meanwhile. | kata-guest-base `extra/usr/local/lib/c8s/scratch-setup.sh` |
-| No operator↔chart capability handshake — a version-skewed operator silently mis-injects webhook-dependent features. | operator/chart skew | Operator reports its webhook feature set; render fails if the chart needs more. Interim: install preflights that the operator image *exists*. | GAPS §Operations; #310 |
-| **CRL revocation is fail-open by default** (`attestation-service require_crl=false`); the in-process Go SNP path does no revocation check at all. A network adversary who blackholes the AMD CRL gets a revoked VCEK accepted. | network adversary | Ship `require_crl=true` by default / enforce revocation on the in-process path. | attestation-service `config.rs`; attestation-go; #301 |
-| **Browser WASM verifier enforces fewer checks than the Go/Rust server verifiers** — `verify_snp` omits VMPL==0, debug-policy rejection, min-TCB, VEK validity, and CRL. A browser client would accept a DEBUG-enabled or non-VMPL-0 guest (host can read enclave memory) if its measurement is allow-listed. | LB operator / host | Bring the WASM `snp` path to parity with `verify_evidence`. | c8s-verify-js; attestation-wasm; #302 |
-| **SMT- and migration-enabled guests are accepted** (`GuestPolicy{SMT:true, MigrateMA:true}`). SMT exposes cross-thread side channels; MigrateMA accepts live-migratable encrypted VMs. | host | Pin the guest policy (reject SMT / MigrateMA) or record an explicit accept. | attestation-go `validateOptions`; attestation-rs `snp/verify.rs`; #301 |
-| Image policy gates the image *digest* only, not args/env/mounts/capabilities/pod-spec. | whoever controls the pod spec | Extend the NRI plugin to pod-spec fields. | GAPS §Image and pod spec; #49 |
-| No image signing / SLSA / provenance anywhere; trust is digest-pinning only. A compromised Actions run or ghcr.io push could inject a component that attestation accepts once its digest is promoted/baked. | CI / registry | cosign/notation signing + SBOM (named as future work in deployment-scripts T21). | §6 supply-chain assumptions; #307 |
+| No operator↔chart capability handshake — a version-skewed operator silently mis-injects webhook-dependent features. | operator/chart skew | Operator reports its webhook feature set; render fails if the chart needs more. Interim: install preflights that the operator image *exists*. | GAPS §Operations |
+| **CRL revocation is fail-open by default** (`attestation-service require_crl=false`); the in-process Go SNP path does no revocation check at all. A network adversary who blackholes the AMD CRL gets a revoked VCEK accepted. | network adversary | Ship `require_crl=true` by default / enforce revocation on the in-process path. | attestation-service `config.rs`; attestation-go |
+| **Browser WASM verifier enforces fewer checks than the Go/Rust server verifiers** — `verify_snp` omits VMPL==0, debug-policy rejection, min-TCB, VEK validity, and CRL. A browser client would accept a DEBUG-enabled or non-VMPL-0 guest (host can read enclave memory) if its measurement is allow-listed. | LB operator / host | Bring the WASM `snp` path to parity with `verify_evidence`. | c8s-verify-js; attestation-wasm |
+| **SMT- and migration-enabled guests are accepted** (`GuestPolicy{SMT:true, MigrateMA:true}`). SMT exposes cross-thread side channels; MigrateMA accepts live-migratable encrypted VMs. | host | Pin the guest policy (reject SMT / MigrateMA) or record an explicit accept. | attestation-go `validateOptions`; attestation-rs `snp/verify.rs` |
+| Image policy gates the image *digest* only, not args/env/mounts/capabilities/pod-spec. | whoever controls the pod spec | Extend the NRI plugin to pod-spec fields. | GAPS §Image and pod spec |
+| No image signing / SLSA / provenance anywhere; trust is digest-pinning only. A compromised Actions run or ghcr.io push could inject a component that attestation accepts once its digest is promoted/baked. | CI / registry | cosign/notation signing + SBOM (named as future work in deployment-scripts T21). | §6 supply-chain assumptions |
 
 ### Open — threat now, no committed fix (posture decisions)
 
@@ -172,7 +171,7 @@ rather than restating it.
 | **An operator forgets to pin measurements.** `cds.measurements` and `ratlsMesh.measurements` ship empty, and the RA-TLS handshake then accepts *any* peer that produces a syntactically valid TEE attestation. An attacker who serves their own TEE attestation on the pod network can stand in for CDS at the bootstrap moment. | pod-network | **By design the operator must choose their measurements** — empty is not a bug, it is "pin nothing yet." **Mitigation**: both CDS and ratls-mesh log loud warnings when their allowlists are empty (including ratls-mesh host and in-guest modes), and ratls-mesh publishes `ratls_mesh_measurement_pinning=0` for alerting. **Real residual**: the shipped fleet overlays (`c8s-fleet` `hr.yaml`) leave these unset, so a GitOps "production" deploy runs accept-any unless the operator pins — an operational default, not a code gap. |
 | The c8s-fleet GitOps repo is a co-equal trust anchor outside the TEE: a merge to `main` rewrites measurement pins, the NRI allowlist, operator keys, and image digests for every cluster. | fleet committer / compromised GitHub App | Access control reduces to git branch protection + the Flux GitHub App. Not currently modeled; the allowlist and promotion pipelines (CI + bot PATs + tag→digest resolution) are additional attack surface. |
 | The default injected `kata-qemu` class (for un-annotated pods) provides VM isolation but **not** confidentiality — the host can read the pod's memory. Base install mode gives no per-pod confidentiality at all. | host | "Pod-as-CVM" is opt-in via `confidential.ai/cw` or a GPU request. Document so the "injection candidate" gate is not read as "everything is confidential." |
-| Namespace exemptions (release ns, `kube-system`, `kube-public`, `kube-node-lease`) bypass injection and kata enforcement; `kube-system` also skips image policy. Host-namespace pods are exempt with no PSA floor, so any user with create-pod RBAC opts out via `hostNetwork:true`. | tenant with pod-create RBAC | RuntimeClass enforcement is a guardrail, not a boundary; the actual boundary is per-pod attestation. A cluster-wide PodSecurityAdmission floor is required to close the host-namespace bypass (#311). |
+| Namespace exemptions (release ns, `kube-system`, `kube-public`, `kube-node-lease`) bypass injection and kata enforcement; `kube-system` also skips image policy. Host-namespace pods are exempt with no PSA floor, so any user with create-pod RBAC opts out via `hostNetwork:true`. | tenant with pod-create RBAC | RuntimeClass enforcement is a guardrail, not a boundary; the actual boundary is per-pod attestation. A cluster-wide PodSecurityAdmission floor is required to close the host-namespace bypass. |
 | `CopyFileRequest` is allowed by the guest OPA policy — the untrusted host can write files into a running guest (not path-scoped). | host | Deliberate deviation (`default-policy.rego`), but an in-guest attack surface worth stating. |
 | A running external service mesh (Istio/Linkerd) alongside c8s injects **un-attested** proxies into the confidential path and breaks the model. | operator misconfig | Do not run a second mesh (c8s-docs limitations). |
 
@@ -186,10 +185,7 @@ downgrade (`requireFreshness=false`, for recorded-evidence demos; the policy
 always requires a non-empty measurement allowlist and a mesh-CA pin, §10). Each
 is warned but not gated out of release builds; the freshness downgrade returns
 `ok:true` with `warnings[]`, so **the embedding app must inspect `warnings[]`**
-or the guarantee is void. Stock kata-guest-base builds now bake an empty `ghcr-auth.json`
-(`{"auths":{}}`) — the c8s images are public, so anonymous guest-pull is the
-default; a private-mirror build (pre-staged file) still bakes credentials into
-the dm-verity root, so rotating them moves the launch measurement.
+or the guarantee is void.
 
 ---
 
@@ -255,13 +251,12 @@ If any of these is false, the corresponding guarantee does not hold.
 
 ## 7. Non-goals
 
-### Deferred this milestone (tracked, expected to close — see `docs/GAPS.md`)
+### Deferred this milestone (expected to close)
 
 - Pod-spec integrity beyond image digest; per-workload peer allowlists and measurement
   pinning in the mesh; attestation-gated application secret release (the whitepaper's
   Secrets Manager Proxy / wrapped-vs-direct key brokering); active/active CDS HA;
-  multi-tenant isolation and federated multi-cluster control planes. Each has a
-  tracking issue in GAPS.md — this list is intentionally a pointer, not a copy.
+  multi-tenant isolation and federated multi-cluster control planes.
 
 ### Accepted / permanent non-goals (whitepaper §3.4, §9)
 
@@ -299,8 +294,10 @@ binary:
   Attested CA handoff is in-process: CDS self-provisions its handoff signer EAR
   (signer key generated at startup, minted by its own EAR issuer — no external
   service to dial). It is opt-in via `cds.handoff.enabled=true`, which
-  authorises peers whose launch digest is in `cds.measurements`; the chart
-  fails to render if measurements is empty while handoff is enabled.
+  authorises peers whose launch digest is in `cds.measurements` and whose
+  REPORTDATA-bound operator-key-set hash exactly matches the serving CDS. The
+  chart fails to render if measurements or operator keys are empty while
+  handoff is enabled.
 - `GET /ca` serves the public CA bundle without EAR authorization
   so ratls-mesh can poll trust anchors after its initial trust seed is
   established from the authenticated certificate issuance response.
@@ -318,22 +315,30 @@ binary:
   its TTL. Anyone holding a pinned operator key can rewrite the image-integrity
   control. Keys are long-lived and CDS consults no CRL/OCSP, so revoking an
   operator means removing its public key from `cds.operatorKeys` and
-  re-installing; protect operator keys accordingly. The pinned-key list is
-  host-supplied config, read only at CDS start and not yet in CDS's attestation —
-  an interim tradeoff, see `docs/pitfalls.md` (§5 Addressable).
-  With `cds.operatorKeys` unset, writes are rejected and only reads are served.
-  See `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`.
+  re-installing; protect operator keys accordingly. The loaded key set and the
+  applied allowlist seed are attested: their canonical digests ride the
+  config-claims extension bound into CDS's serving-cert evidence
+  (`docs/ratls.md`), and verifiers pin them (`c8s cds verify
+  --operator-keys/--allowlist-seed`, pinned from the operator's own install
+  inputs). The `/handoff` path additionally commits the operator-key-set hash
+  into requester and issuer REPORTDATA and requires an exact match, so a replica
+  cannot inherit the mesh CA under a substituted operator policy. The remaining
+  CDS startup flags are still un-attested — an interim tradeoff, see
+  `docs/pitfalls.md` (§5 Addressable). The protection is detection by
+  pin-holding verifiers, not boot-time enforcement. With `cds.operatorKeys`
+  unset, writes are rejected and only reads are served (the empty set is itself
+  attested).
 
 ### Endpoint surface (beyond the gates in §4)
 
 - **`/attest`** enforces the `cds.measurements` launch-digest allowlist before
   issuing a leaf. **`/attest-key`** issues a TEE-bound EAR (no cert) for a
   caller-generated key — used by in-cluster components (CDS's handoff signer).
-  Its handler verifies the TEE attestation evidence (the `protected` wrapper
-  adds only rate limiting and a body cap) but **does not** consult
-  `cds.measurements`. This asymmetry is intentional for in-cluster self-attestation;
-  it means measurement pinning does not constrain this route. (Flagged for review —
-  confirm whether `/attest-key` should also honor `cds.measurements`.)
+  For handoff, REPORTDATA binds the generated key, challenge, and canonical
+  operator-key-set hash; the handler rejects a hash that differs from its own
+  policy. It verifies the TEE evidence but does not itself consult
+  `cds.measurements`; `/handoff` verifies the resulting EAR's launch digest
+  before releasing state.
 - Unauthenticated reads: `GET /ca`, `GET /operator-keys`, `/.well-known/jwks.json`,
   `GET /allowlist`, `/healthz`, `/readyz`, `/metrics`. `/authenticate` is
   unauthenticated and mints an in-memory challenge (single-instance; lost on restart).
@@ -386,7 +391,8 @@ In that model:
 
 - the mesh CA private key is not stored in Kubernetes Secrets;
 - new replicas receive CA signing material only after both sides validate EAR
-  measurements allowed for handoff. The signature chain is
+  measurements allowed for handoff and exact REPORTDATA-bound operator-key
+  policy equality. The signature chain is
   transitive: each EAR carries a `tee_public_key` (ECDSA), and that key
   signs a transcript including the ephemeral X25519 KEM public key. The
   X25519 key is therefore bound to the EAR via the ECDSA proof-of-possession,
@@ -398,6 +404,9 @@ In that model:
 - allowlists and policy are signed by an operator-held key. (The whitepaper's
   fuller design has CDS signing a Kettle-attested image manifest; Kettle is not
   shipped — today the operator key signs JWT write-tokens, not the manifest.)
+- planned replica adoption transfers the current allowlist version and digests
+  inside the recipient-encrypted handoff payload. A write racing after the
+  snapshot can still be missed by the joining singleton.
 - secret release is gated by workload attestation (designed; see GAPS §Trust model);
 - recovery from total CDS outage means re-bootstrap and re-issue certificates.
 
@@ -414,19 +423,28 @@ must re-run initial CDS provisioning to converge.
 The handoff endpoint (`/handoff`) closes this when the chart enables
 `cds.handoff.enabled=true`: CDS generates an ECDSA handoff signer key in
 process at startup and self-provisions its EAR via its own EAR issuer (no
-external service to dial). No operator key file or Kubernetes Secret is
-involved (the alternative — mounting a Secret-backed PEM — would put
-CA-adjacent material into etcd, which the design forbids). Active/active
-deployments can then handoff the active CA key to a joining replica without
+external service to dial). The existing public operator-key ConfigMap is
+hashed into both replicas' REPORTDATA; no private operator key or CA-adjacent
+Kubernetes Secret is introduced. The singleton Deployment can then hand off
+the active CA key and allowlist snapshot to its surge replacement without
 re-issuing workload certs.
 
 Until the operator turns handoff on, run CDS with `replicas: 1`
 and `strategy: Recreate` (the chart defaults), guard it with a PDB, and
 treat any restart as a planned re-bootstrap event. To turn handoff on,
-set `cds.handoff.enabled=true` and pin `cds.measurements` to CDS's launch
-digest — the same flat allowlist authorises `/handoff` (setting
-handoff.enabled without measurements fails chart render). Then scale up
-freely.
+set `cds.handoff.enabled=true`, pin `cds.measurements` to CDS's launch digest,
+and configure `cds.operatorKeys`; missing either policy fails chart render.
+Then enable `cds.handoff.peerUrl=self` for active/standby RollingUpdate
+continuity. Replicas remain fixed at one until the per-pod EAR/JWKS problem is
+solved.
+
+The operator-key commitment prevents an untrusted host from substituting a
+different allowlist-write policy between the serving and joining replicas. It
+does **not** prove possession of an operator private key: the public bundle is
+readable and a malicious control plane can copy it into another same-measured
+CDS. Fully authorizing a unique joining instance needs an interactive
+operator-signed approval bound to its ephemeral key, or attestation-gated
+secret release; neither exists today.
 
 ## 10. Browser / out-of-cluster verification (c8s-verify)
 

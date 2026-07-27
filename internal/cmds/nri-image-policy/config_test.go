@@ -238,6 +238,24 @@ func TestValidate_LabelRulesOnly(t *testing.T) {
 	}
 }
 
+func TestValidate_WorkloadClaimsRequireAllowlist(t *testing.T) {
+	cfg := config{
+		Policy:         policyConfig{Mode: "fail-closed", LabelRules: []labelRule{validLabelRule()}},
+		WorkloadClaims: workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error: label-rules-only config never records for the broker")
+	}
+}
+
+func TestValidate_WorkloadClaimsWithAllowlist(t *testing.T) {
+	cfg := validConfig()
+	cfg.WorkloadClaims.SocketDir = "/var/run/nri-image-policy"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestValidate_LabelRuleMissingName(t *testing.T) {
 	cfg := validConfig()
 	cfg.Policy.LabelRules = []labelRule{

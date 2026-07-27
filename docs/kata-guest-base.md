@@ -171,19 +171,8 @@ This is the mechanism every reference to "guest-pull" in these docs
 points back to; the host-visibility limits during the transport are
 covered in [G3](kata-image-policy.md#g3--image-content-is-visible-to-the-host-during-the-guest-pull).
 
-The c8s images are public, so the in-guest pull needs no credential of its
-own. For workload images that do require auth (a private mirror of the c8s
-containers, private tenant images), the kata-agent reads credentials via
-`agent.image_registry_auth=file:///run/image-security/auth.json` on the
-guest kernel cmdline (the puller appends this from
-`kata.guestImage.registryAuth`, which defaults to that path). The file is a
-docker auth.json baked into the dm-verity rootfs at build time — empty in
-stock builds, real credentials when pre-staged for a private mirror — and
-copied onto the tmpfs path at boot. Staged credentials become part of the
-measured root; the tradeoff and the secret-free `kbs://` alternative are
-documented in [`kata-guest-base/README.md`](../kata-guest-base/README.md)
-("Guest-pull registry auth") and [`pitfalls.md`](pitfalls.md)
-("ghcr-auth.json").
+The c8s images are public, so the in-guest pull is anonymous and needs no
+credential of its own.
 
 ## In-guest image-policy enforcement
 
@@ -252,8 +241,7 @@ RAM — the host never sees plaintext and never holds a key. The volume
 is reformatted every boot (pure scratch). No scratch disk → no-op, the
 tmpfs default stands.
 
-Integrity status and the qemu wrapper's shim nature are tracked in
-[`GAPS.md`](GAPS.md) ("Confidential kata guest (TDX)").
+Integrity status and the qemu wrapper's shim nature remain known gaps.
 
 ## Reproducible root_hash
 
@@ -309,7 +297,7 @@ in-guest binaries. On a release tag (`v*`) the same image also gets the
 release version; `latest` moves only on `main`.
 
 Operators select the artifact tag by setting `kata.guestImage.tag` in a values
-file (`c8s install --kata -f values.yaml`). The
+file (`c8s install --cvm-mode=pod -f values.yaml`). The
 `c8s-kata-image-puller` DaemonSet picks that up and pulls accordingly —
 see "How it's consumed in-cluster" in
 [`kata-guest-base/README.md`](../kata-guest-base/README.md).
@@ -324,7 +312,7 @@ supply it to `cds.measurements`, `ratlsMesh.measurements`, or client-side
 
 Every tag has a `-debug` sibling published from the same build whose guest
 policy allows the host log/exec stream RPCs (`kubectl logs`/`exec` work;
-container I/O becomes host-readable). `c8s install --kata --debug` selects
+container I/O becomes host-readable). `c8s install --cvm-mode=pod --debug` selects
 it via `kata.guestImage.debug=true`; its launch measurement differs from
 the locked image, so locked-reference attestation rejects it. See "Debug
 variant" in [`kata-guest-base/README.md`](../kata-guest-base/README.md).
@@ -378,5 +366,5 @@ launch-digest mismatch at attestation time and clients refuse the pod.
 
 - [`kata-guest-base/README.md`](../kata-guest-base/README.md) — the recipe: boot model, what's baked in, build, consume, measure.
 - [`kata-image-policy.md`](kata-image-policy.md) — in-guest per-image enforcement (`policy-monitor`).
-- [`kata.md`](kata.md) — installing and enforcing the kata runtime (`c8s install --kata`).
+- [`kata.md`](kata.md) — installing and enforcing the kata runtime (`c8s install --cvm-mode=pod`).
 - [`install-flows.md`](install-flows.md) — how the two install modes assemble the platform.

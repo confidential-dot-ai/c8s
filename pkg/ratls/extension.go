@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -45,6 +46,8 @@ const (
 //
 //	1.3.6.1.4.1.59888.1   - Confidential TEE attestation arc
 //	1.3.6.1.4.1.59888.1.1 - RA-TLS attestation extension
+//	1.3.6.1.4.1.59888.1.2 - attestation-evidence audit digest (certutil)
+//	1.3.6.1.4.1.59888.1.3 - RA-TLS config-claims extension (claims.go)
 var (
 	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
 	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 1}
@@ -190,6 +193,23 @@ func (a *Attestation) EmbeddedEvidence() (types.AttestationEvidence, bool) {
 	return *a.embedded, true
 }
 
+// snpReportDataOffset is the byte offset of the 64-byte REPORTDATA field in an
+// AMD SEV-SNP ATTESTATION_REPORT.
+const snpReportDataOffset = 0x50
+
+// ReportData returns the 64-byte REPORTDATA the attestation report commits, and
+// true, for shapes c8s parses in-process (a raw SEV-SNP report). It returns
+// (nil, false) for JSON-envelope evidence (az-snp, TDX), which c8s deliberately
+// does not parse in-process (see verifyReport) — for those the REPORTDATA
+// binding is proven by the attestation-api. Lets a caller fail fast when a
+// report does not bind an expected REPORTDATA, without an attestation-api call.
+func (a *Attestation) ReportData() ([]byte, bool) {
+	if a.embedded != nil || a.TEEType != TEETypeSEVSNP || len(a.Report) < snpReportDataOffset+64 {
+		return nil, false
+	}
+	return a.Report[snpReportDataOffset : snpReportDataOffset+64], true
+}
+
 // parseEmbeddedEvidence returns the parsed attestation-api envelope when
 // raw is a JSON-encoded types.AttestationEvidence, or nil when raw is a raw
 // hardware report. Callers use the non-nil return as a signal to take the
@@ -217,19 +237,82 @@ func parseEmbeddedEvidence(raw []byte) (*types.AttestationEvidence, error) {
 // replay of attestation reports from previous sessions.
 func ReportDataForKey(pub crypto.PublicKey, nonce []byte) ([64]byte, error) {
 	var reportData [64]byte
+	keyBytes, err := marshalPublicKey(pub)
+	if err != nil {
+		return reportData, fmt.Errorf("ratls: marshal public key: %w", err)
+	}
+	h := sha512.New384()
+	h.Write(keyBytes)
+	if len(nonce) > 0 {
+		h.Write(nonce)
+	}
+	copy(reportData[:], h.Sum(nil))
+	return reportData, nil
+}
 
+// ReportDataForKeyAndClaims computes the REPORTDATA value binding a public key
+// plus a config-claims extension to a TEE attestation report (docs/ratls.md).
+//
+// With empty claims it is exactly [ReportDataForKey] — a claims-free cert stays
+// byte-identical to a plain RA-TLS cert. With claims it is a domain-separated,
+// length-framed transcript:
+//
+//	SHA-384(claimsDomainSep || framed(pubkey) || framed(claims) || framed(nonce))
+//	  where framed(x) = uint64-BE(len(x)) || x
+//
+// The length framing (same construction as [ReportDataForKeyWithContext]) makes
+// the preimage unambiguous: no two distinct (key, claims, nonce) triples can
+// share a preimage, regardless of field lengths, so binding safety does not rest
+// on any field being fixed-length or on the nonce's provenance. claims is the
+// raw DER extension value exactly as carried on the certificate.
+func ReportDataForKeyAndClaims(pub crypto.PublicKey, claims, nonce []byte) ([64]byte, error) {
+	if len(claims) == 0 {
+		return ReportDataForKey(pub, nonce)
+	}
+
+	var reportData [64]byte
 	keyBytes, err := marshalPublicKey(pub)
 	if err != nil {
 		return reportData, fmt.Errorf("ratls: marshal public key: %w", err)
 	}
 
 	h := sha512.New384()
-	h.Write(keyBytes)
-	if len(nonce) > 0 {
-		h.Write(nonce)
+	h.Write(claimsDomainSep)
+	for _, field := range [][]byte{keyBytes, claims, nonce} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		h.Write(size[:])
+		h.Write(field)
 	}
-	hash := h.Sum(nil)
-	copy(reportData[:], hash)
+	copy(reportData[:], h.Sum(nil))
+	return reportData, nil
+}
+
+// ReportDataForKeyWithContext binds an additional protocol context to a key
+// and nonce. A non-empty context uses a domain-separated, length-framed
+// transcript so fields cannot be re-split into an equivalent byte stream. An
+// empty context deliberately preserves ReportDataForKey's established wire
+// format.
+func ReportDataForKeyWithContext(pub crypto.PublicKey, nonce, context []byte) ([64]byte, error) {
+	if len(context) == 0 {
+		return ReportDataForKey(pub, nonce)
+	}
+
+	var reportData [64]byte
+	keyBytes, err := marshalPublicKey(pub)
+	if err != nil {
+		return reportData, fmt.Errorf("ratls: marshal public key: %w", err)
+	}
+
+	h := sha512.New384()
+	h.Write([]byte("c8s-report-data-context-v1\x00"))
+	for _, field := range [][]byte{keyBytes, nonce, context} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		h.Write(size[:])
+		h.Write(field)
+	}
+	copy(reportData[:], h.Sum(nil))
 	return reportData, nil
 }
 

@@ -16,14 +16,14 @@
 // connection fails closed with a re-run hint. Per-connection re-verification
 // is the eventual replacement for this single-connection model.
 //
-// `c8s verify` consumes the same contract with an in-process verifier
-// (internal/cmds/verify/discovery.go).
+// Evidence verification runs in-process (internal/localverify).
 package lbdiscovery
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -39,7 +39,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -53,28 +53,30 @@ const maxDocumentBytes = 1 << 20
 // ErrNoDiscovery reports that the target serves no discovery document
 // (unreachable, or a non-200 on the discovery path). Callers use it to fall
 // back to direct RA-TLS serving-cert verification
-// (ratls.NewVerifyingHTTPClient). A document that is present but malformed or
-// failing verification is NOT this error — those fail closed.
+// (localverify.NewRATLSHTTPClient). A document that is present but malformed
+// or failing verification is NOT this error — those fail closed.
 var ErrNoDiscovery = errors.New("lbdiscovery: target serves no discovery document")
 
 // NewVerifiedHTTPClient returns an http.Client for a tls-lb front door: it
 // dials base once, fetches the discovery document over that connection,
-// verifies the embedded attestation evidence via the attestation-api (launch
-// measurement checked against measurements — empty accepts any, UNSAFE), and
-// requires the attested serving certificate to be the leaf the connection's
-// handshake presented. The returned client is bound to that single verified
-// connection (requests are serialized over it) and only for base's host; it
-// never redials, so a lost connection fails closed — see the package comment
-// for why (per-replica serving certs).
+// verifies the embedded attestation evidence (launch measurement checked
+// against measurements — empty accepts any, UNSAFE), and requires the
+// attested serving certificate to be the leaf the connection's handshake
+// presented. The returned client is bound to that single verified connection
+// (requests are serialized over it) and only for base's host; it never
+// redials, so a lost connection fails closed — see the package comment for
+// why (per-replica serving certs).
+//
+// verify is localverify.Verify in production, a stub in tests.
 //
 // Returns [ErrNoDiscovery] when base serves no discovery document, so callers
 // can fall back to direct RA-TLS verification for a non-fronted endpoint.
 //
 // The issuance challenge is fixed, not a per-request nonce, so freshness is
 // not proven — the same trade-off as `c8s verify` discovery mode.
-func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]byte, attestationApiURL string) (*http.Client, error) {
-	if attestationApiURL == "" {
-		return nil, fmt.Errorf("lbdiscovery: attestation-api URL is required")
+func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]byte, verify localverify.VerifyFunc) (*http.Client, error) {
+	if verify == nil {
+		return nil, fmt.Errorf("lbdiscovery: evidence verifier is required")
 	}
 	u, err := url.Parse(base)
 	if err != nil {
@@ -100,7 +102,7 @@ func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]by
 	if err != nil {
 		return nil, err
 	}
-	cert, err := verifyDocument(ctx, data, attestationclient.NewClient(attestationApiURL), measurements)
+	cert, err := verifyDocument(ctx, data, verify, measurements)
 	if err != nil {
 		return nil, fmt.Errorf("lbdiscovery: discovery document verification failed: %w", err)
 	}
@@ -172,10 +174,11 @@ func fetchDocument(ctx context.Context, client *http.Client, base *url.URL) ([]b
 }
 
 // verifyDocument parses a discovery document, verifies its attestation
-// evidence via the attestation-api, and returns the attested serving
-// certificate. REPORTDATA = SHA-384(cert pubkey ‖ challenge), matching
-// get-cert's issuance binding (reportDataForCSR → ratls.ReportDataForKey).
-func verifyDocument(ctx context.Context, data []byte, api attestationclient.Client, measurements [][]byte) (*x509.Certificate, error) {
+// evidence, and returns the attested serving certificate. REPORTDATA =
+// SHA-384(cert pubkey ‖ challenge), matching get-cert's issuance binding
+// (reportDataForCSR → ratls.ReportDataForKey), passed as the unpadded 48-byte
+// anchor.
+func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyFunc, measurements [][]byte) (*x509.Certificate, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
@@ -215,12 +218,12 @@ func verifyDocument(ctx context.Context, data []byte, api attestationclient.Clie
 
 	// Empty platform defaults to bare-metal snp (pre-platform-field carriers);
 	// a genuinely unknown platform fails closed in the verifier.
-	envelope := types.AttestationEvidence{Platform: d.Attestation.Platform, Evidence: d.Attestation.Evidence}
-	if envelope.Platform == "" {
-		envelope.Platform = string(types.PlatformSnp)
+	platform := d.Attestation.Platform
+	if platform == "" {
+		platform = string(types.PlatformSnp)
 	}
-	if _, err := api.VerifyEvidence(ctx, envelope, attestationclient.EvidencePolicy{
-		ExpectedReportData: erd,
+	if _, err := verify(ctx, platform, d.Attestation.Evidence, localverify.Params{
+		ExpectedReportData: erd[:sha512.Size384],
 		Measurements:       measurements,
 	}); err != nil {
 		return nil, err

@@ -282,5 +282,4 @@ and Helm rendering for `hostNetwork`, `iptables-sync`, and hostPort behavior.
 ## Security
 
 - [Threat Model](../../docs/THREAT_MODEL.md) — adversary model, trust graph, enforcement gates, and residual risks
-- [Gaps](../../docs/GAPS.md) — known mesh/certificate limitations (peer measurement pinning, TDX policy path)
 - [Pitfalls](../../docs/pitfalls.md) — operational sharp edges, including the mesh inbound-passthrough trade-off

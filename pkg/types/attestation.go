@@ -19,6 +19,20 @@ type AttestRequestBody struct {
 	Challenge string              `json:"challenge"`
 	Evidence  AttestationEvidence `json:"evidence"`
 	CSR       string              `json:"csr"`
+
+	// WorkloadClaims is the standard-base64 DER of the RA-TLS config-claims
+	// extension (ratls.ConfigClaims) the requester bound into its evidence
+	// REPORTDATA, when it attests a workload digest (docs/ratls.md).
+	// Empty when the requester binds no claims. CDS folds these exact bytes
+	// into the expected REPORTDATA, so a tampered value fails verification.
+	WorkloadClaims string `json:"workload_claims,omitempty"`
+	// InitContainerDigests and ContainerDigests are the plain image-digest
+	// lists of the pod's non-injected init and main containers. CDS checks
+	// they hash (role-partitioned) to the workload digest in WorkloadClaims —
+	// so neither list nor the init/main split can be swapped — and that each
+	// digest is allowlisted, then issues.
+	InitContainerDigests []string `json:"init_container_digests,omitempty"`
+	ContainerDigests     []string `json:"container_digests,omitempty"`
 }
 
 // AttestKeyRequestBody is the request body for POST /attest-key. Used by
@@ -33,6 +47,11 @@ type AttestKeyRequestBody struct {
 	// SHA-384(this key) — the server verifies this binding before issuing
 	// the EAR.
 	PublicKey string `json:"public_key"`
+	// OperatorKeysHash is the canonical hash of the CDS operator public-key
+	// set. When present, it is included in REPORTDATA alongside PublicKey and
+	// Challenge and copied into the issued EAR, so handoff peers can require
+	// the same allowlist-write policy on both replicas.
+	OperatorKeysHash string `json:"operator_keys_hash,omitempty"`
 }
 
 // AttestKeyResponseBody is the response body for POST /attest-key.

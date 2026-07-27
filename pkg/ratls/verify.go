@@ -20,8 +20,8 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// Enforced on the SNP path only; dropped for TDX (see
-	// attestationclient.EvidencePolicy).
+	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
+	// covered by this policy, including the per-workload RTMR[3].
 	Measurements [][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
@@ -43,6 +43,20 @@ type VerifyPolicy struct {
 	// check is performed (TLS 1.3 already provides replay protection).
 	Nonce []byte
 
+	// Config-claims pins (docs/ratls.md). When set, the
+	// certificate must carry a config-claims extension whose corresponding
+	// digest byte-equals the pinned value:
+	//   OperatorKeysDigest — operatorauth.KeySetDigest of the expected set
+	//   SeedDigest         — allowlist.CanonicalDigest of the expected seed
+	//   WorkloadDigest     — canonical workload image-digest hash (docs/ratls.md)
+	// ratls.UnsetDigest() pins "not applicable". Empty = claims are folded
+	// into the REPORTDATA check when present but that field is not enforced.
+	// Only [VerifyCert] can enforce these (claims ride the certificate);
+	// [VerifyAttestation] fails closed when any is set.
+	OperatorKeysDigest []byte
+	SeedDigest         []byte
+	WorkloadDigest     []byte
+
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
 	// binding, debug policy, and minimum TCB. Required: there is no
@@ -58,6 +72,22 @@ type VerifyPolicy struct {
 	// AttestationVerifyTimeout bounds online attestation-api verification.
 	// If unset, a conservative default is used.
 	AttestationVerifyTimeout time.Duration
+
+	// RequireCAEvidence selects the production trust mode for the dual CA /
+	// RA-TLS peer verifier (dualVerifyPeerCallback). When false (default), a
+	// peer whose leaf chains to a configured CA is accepted on the CA chain
+	// alone (config-claims pins are still enforced) — the legacy/dev mode that
+	// eases rolling upgrades and CA rotation. When true, a valid CA chain is no
+	// longer sufficient: the leaf must ALSO carry re-verifiable RA-TLS evidence
+	// (issuer.SignCSR copies the requester's nonce-free .1.1 extension onto the
+	// leaf), which is re-verified per connection so a CA compromise or wrong
+	// issuance policy is caught at the peer rather than trusted from the chain.
+	// The embedded evidence is nonce-free by construction (bound to the leaf
+	// key and claims, no per-connection nonce); connection liveness comes from
+	// the TLS 1.3 proof-of-possession of the leaf key. Set by the production
+	// profile; a self-signed RA-TLS peer is unaffected (it always verifies its
+	// evidence via the fallback path).
+	RequireCAEvidence bool
 }
 
 // VerifyResult contains the verified attestation claims extracted from the cert.
@@ -66,11 +96,10 @@ type VerifyResult struct {
 	TEEType TEEType
 	// ReportData is the 64-byte expected REPORTDATA that the attestation-api
 	// confirmed the report is bound to (the api returns only a match verdict,
-	// not the report bytes, so this echoes the verified expectation). Only set
-	// on the SNP path; left zero for TDX.
+	// not the report bytes, so this echoes the verified expectation).
 	ReportData [64]byte
 	// Measurement is the 48-byte launch measurement reported by the
-	// attestation-api. Only set on the SNP path; left zero for TDX.
+	// attestation-api: LAUNCH_DIGEST for SNP or MRTD for TDX.
 	Measurement [48]byte
 	// PlatformInfo contains platform-specific metadata from the
 	// attestation-api response. Only set on the SNP path.
@@ -93,6 +122,10 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 	if policy.AttestationApiURL == "" {
 		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
+	if len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0 {
+		// Claims ride the certificate, which this path never sees.
+		return nil, fmt.Errorf("%w: config-claims pins require VerifyCert", ErrPolicyViolation)
+	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
 	if err != nil {
@@ -103,12 +136,19 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 }
 
 // VerifyCert verifies an RA-TLS certificate: it extracts the TEE attestation
-// extension and hands it to [VerifyAttestation] with the cert's public key.
+// extension and verifies it against the cert's public key. A config-claims
+// extension, when carried, is folded into the expected REPORTDATA (the
+// evidence binds it) and checked against the policy's config-claims pins
+// (docs/ratls.md).
 //
 // Trust comes from the hardware attestation chain (AMD ARK → ASK → VCEK, or
 // Intel equivalent for TDX) as verified by the same-TCB attestation-api, not
 // from any certificate authority signature.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
+	if policy == nil {
+		policy = &VerifyPolicy{}
+	}
+
 	att, err := ExtractAttestation(cert)
 	if err != nil {
 		return nil, err
@@ -119,7 +159,61 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 		return nil, fmt.Errorf("ratls: extract public key: %w", err)
 	}
 
-	return VerifyAttestation(pub, att, policy, nonce)
+	if policy.AttestationApiURL == "" {
+		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
+	}
+
+	claimsBytes, claimsPresent := configClaimsExtension(cert)
+	if claimsPresent && len(claimsBytes) == 0 {
+		// An empty value would fall through to the claims-free binding while
+		// still looking claims-bearing to anyone gating on extension presence.
+		return nil, fmt.Errorf("%w: config-claims extension present but empty", ErrInvalidReport)
+	}
+	if err := checkClaimsPins(claimsBytes, policy); err != nil {
+		return nil, err
+	}
+
+	expectedReportData, err := ReportDataForKeyAndClaims(pub, claimsBytes, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
+	}
+
+	return verifyReport(att, policy, expectedReportData)
+}
+
+// checkClaimsPins enforces the policy's config-claims pins against the raw
+// claims extension bytes. INVARIANT: a pin can only reject; acceptance still
+// requires the evidence to bind claimsBytes (the REPORTDATA check downstream).
+func checkClaimsPins(claimsBytes []byte, policy *VerifyPolicy) error {
+	pins := []struct {
+		name     string
+		expected []byte
+		attested func(*ConfigClaims) []byte
+	}{
+		{"operator-keys", policy.OperatorKeysDigest, func(c *ConfigClaims) []byte { return c.OperatorKeysDigest }},
+		{"allowlist-seed", policy.SeedDigest, func(c *ConfigClaims) []byte { return c.SeedDigest }},
+		{"workload", policy.WorkloadDigest, func(c *ConfigClaims) []byte { return c.WorkloadDigest }},
+	}
+	anyPinned := false
+	for _, p := range pins {
+		anyPinned = anyPinned || len(p.expected) > 0
+	}
+	if !anyPinned {
+		return nil
+	}
+	if len(claimsBytes) == 0 {
+		return fmt.Errorf("%w: config-claims pin set but certificate carries no config-claims extension", ErrPolicyViolation)
+	}
+	claims, err := UnmarshalConfigClaims(claimsBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
+	}
+	for _, p := range pins {
+		if len(p.expected) > 0 && !bytes.Equal(p.attested(claims), p.expected) {
+			return fmt.Errorf("%w: attested %s digest %x does not match pinned %x", ErrPolicyViolation, p.name, p.attested(claims), p.expected)
+		}
+	}
+	return nil
 }
 
 // ExtractAttestation finds and parses the RA-TLS extension from a certificate.
@@ -162,7 +256,9 @@ func verifyReport(att *Attestation, policy *VerifyPolicy, expectedReportData [64
 		if evidence == nil {
 			return nil, fmt.Errorf("%w: TDX RA-TLS extension missing evidence envelope", ErrInvalidReport)
 		}
-		if evidence.Platform != string(types.PlatformTdx) {
+		switch evidence.Platform {
+		case string(types.PlatformTdx), string(types.PlatformAzTdx):
+		default:
 			return nil, fmt.Errorf("%w: online verification not implemented for platform %q", ErrUnsupportedTEE, evidence.Platform)
 		}
 	default:
@@ -213,11 +309,12 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		return nil, mapVerifyError(evidence.Platform, err)
 	}
 
-	if evidence.Platform == string(types.PlatformTdx) {
-		return &VerifyResult{TEEType: TEETypeTDX}, nil
+	teeType := TEETypeSEVSNP
+	if evidence.Platform == string(types.PlatformTdx) || evidence.Platform == string(types.PlatformAzTdx) {
+		teeType = TEETypeTDX
 	}
-	result := &VerifyResult{TEEType: TEETypeSEVSNP}
-	if len(resp.Result.Claims.PlatformData) > 0 && !bytes.Equal(resp.Result.Claims.PlatformData, []byte("null")) {
+	result := &VerifyResult{TEEType: teeType}
+	if teeType == TEETypeSEVSNP && len(resp.Result.Claims.PlatformData) > 0 && !bytes.Equal(resp.Result.Claims.PlatformData, []byte("null")) {
 		result.PlatformInfo = resp.Result.Claims.PlatformData
 	}
 	copy(result.ReportData[:], expectedReportData[:])

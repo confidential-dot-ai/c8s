@@ -248,8 +248,9 @@ the host-side enforcer but not running guests. Baking the pin is
 structurally impossible (under kata, CDS runs from this same guest
 image, so the pin's value would change the launch measurement it pins),
 and per-pod cloud-init injection is host-controlled, so a host-supplied
-pin could point at the host's own fake CDS. See GAPS.md ("in-guest CDS
-allowlist refresh") for the status and the candidate fix.
+pin could point at the host's own fake CDS. The candidate fix is
+operator-signed allowlist entries, verified in-guest against a baked
+operator public key.
 
 ## Scenarios
 
@@ -594,12 +595,6 @@ What the host still sees is the *transport*: it brokers the guest's
 outbound network, so for an anonymous pull from a public registry it
 observes which image reference and layers are fetched (a metadata
 leak, not a content-confidentiality break — the bytes are public).
-Registry credentials for private pulls are currently baked into the
-dm-verity root (`ghcr-auth.json`, covered by the launch measurement —
-see `kata-guest-base/README.md`), so they are not host-readable at
-runtime but rotate only with an image rebuild. KBS delivery to the
-in-guest CDH after attestation (`kbs://` via
-`kata.guestImage.registryAuth`) is the secret-free alternative.
 
 policy-monitor still enforces on CreateContainer (it reads the
 digest from the bundle's `config.json`). Moving the decision earlier

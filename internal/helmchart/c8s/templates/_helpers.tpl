@@ -282,22 +282,63 @@ a floating tag would be root on every GPU node — so the digest is what's used.
 
 {{- /*
 c8s.attestationApiURL — the attestation-api endpoint injected into the operator
-and CDS. Under kata.enabled the host attestation-api DaemonSet is typically not
-rendered; the kata-guest-base image bakes an in-guest attestation-service on
-loopback, and the components that consume this URL (the operator's get-cert
-sidecars and CDS) run INSIDE the CVM, so they must dial 127.0.0.1, not the
-(absent) host Service.
+and CDS. Three shapes:
+
+  - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
+    on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
+    INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
+  - cvmMode=node: the node image bakes a HOST attestation-api on the node's
+    loopback :8400 (no in-cluster Service). Pod-netns consumers cannot reach host
+    loopback, so they dial the node's own IP via the $(HOST_IP) downward-API env
+    var (c8s.attestationApiHostIPEnv), which the kubelet expands per-node before
+    the process sees the arg. The operator forwards this string verbatim to the
+    tenant get-cert sidecars it injects, so it must stay unexpanded there (the
+    operator container deliberately omits HOST_IP); each tenant pod expands it
+    against its own node.
+  - otherwise: the in-cluster host Service DNS.
 */ -}}
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
+{{- else if eq (.Values.attestationApi.cvmMode | default "baremetal") "node" -}}
+http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- else -}}
 http://{{ include "c8s.attestationApiName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationApi.port }}
 {{- end -}}
 {{- end -}}
 
+{{- /*
+c8s.attestationApiHostIPEnv — the HOST_IP downward-API env var that expands the
+$(HOST_IP) placeholder in c8s.attestationApiURL. Rendered only under
+cvmMode=node, where pod-netns consumers reach the node-baked host attestation-api
+via the node's own IP. Empty in every other mode.
+*/ -}}
+{{- define "c8s.attestationApiHostIPEnv" -}}
+{{- if eq (.Values.attestationApi.cvmMode | default "baremetal") "node" -}}
+- name: HOST_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.hostIP
+{{- end -}}
+{{- end -}}
+
 {{- define "c8s.cdsURL" -}}
 https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
+{{- end -}}
+
+{{- /*
+c8s.cdsHandoffPeerURL — the effective --handoff-peer-url for CA adoption on
+startup. Empty means cold start (self-generate). The sentinel "self" expands to
+the CDS Service URL, so an operator enabling adoption for a self-rolling
+Deployment flips one value instead of hand-typing the in-cluster address; any
+other value is used verbatim (adopt from a distinct peer).
+*/ -}}
+{{- define "c8s.cdsHandoffPeerURL" -}}
+{{- if eq .Values.cds.handoff.peerUrl "self" -}}
+{{ include "c8s.cdsURL" . }}
+{{- else -}}
+{{ .Values.cds.handoff.peerUrl }}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -362,6 +403,12 @@ Caller passes a dict:
     {{- range .extraArgs }}
     - {{ . }}
     {{- end }}
+  {{- with (include "c8s.attestationApiHostIPEnv" $root) }}
+  # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node IP so
+  # this pod-netns sidecar reaches the node-baked host attestation-api.
+  env:
+    {{- . | nindent 4 }}
+  {{- end }}
   volumeMounts:
     - name: {{ .volume }}
       mountPath: {{ .mountPath }}
@@ -564,25 +611,34 @@ cache_max_entries = 1024
 {{- end -}}
 
 {{/*
-  c8s.allowlistSeedJSON renders c8s.imageAllowlist as the JSON shape CDS's
-  --allowlist-seed expects ({"version","digests"}). CDS seeds its served
-  /allowlist from it so the first worker pull returns a real list rather than
-  an empty set.
+  c8s.allowlistSeedJSON renders the allowlist document CDS's --allowlist-seed
+  expects: the c8s.imageAllowlist floor under "digests", plus any
+  bootstrapAllowlist.workloads under "workloads" ({} by default). CDS seeds its
+  served /allowlist from it so the first worker pull returns a real list rather
+  than an empty set. The document validates against pkg/allowlist.ParseJSON.
 */}}
 {{- define "c8s.allowlistSeedJSON" -}}
-{{ dict "version" "1" "digests" (include "c8s.imageAllowlist" . | fromJson) | toJson }}
+{{ dict "schema" "c8s.allowlist/v1" "digests" (include "c8s.imageAllowlist" . | fromJson) "workloads" (.Values.nriImagePolicy.bootstrapAllowlist.workloads | default dict) | toJson }}
 {{- end -}}
 
 {{/*
   c8s.serveAllowlistSeed is true when CDS should render the --allowlist-seed
-  ConfigMap/flag/mount. Two admission shapes consume CDS's served allowlist and
-  so need the seed: the host NRI plugin (nriImagePolicy.enabled), and the
-  in-guest policy-monitor baked into the kata-guest-base image (kata.enabled),
-  where the host plugin is off. Gating on nriImagePolicy.enabled alone dropped
-  the seed under kata, so adopted --workload-ref digests never reached CDS.
+  ConfigMap/flag/mount. Three admission shapes consume CDS's served allowlist
+  and so need the seed:
+    - the chart's host NRI plugin (nriImagePolicy.enabled),
+    - the in-guest policy-monitor baked into the kata-guest-base image
+      (kata.enabled, i.e. --cvm-mode=pod), where the host plugin is off, and
+    - the BAKED host NRI plugin on a node-as-CVM (--cvm-mode=node), where the
+      chart's nriImagePolicy is disabled because the node image bakes the
+      plugin — but that plugin still pulls the live allowlist from CDS, so the
+      seed must be served or CDS starts empty and every un-baked component
+      (operator, ratls-mesh, tls-lb's nginx, adopted workloads) is denied
+      until an operator hand-runs `c8s allowlist add`.
+  Gating on nriImagePolicy.enabled alone dropped the seed under both pod and
+  node mode.
 */}}
 {{- define "c8s.serveAllowlistSeed" -}}
-{{- or .Values.nriImagePolicy.enabled .Values.kata.enabled -}}
+{{- or .Values.nriImagePolicy.enabled .Values.kata.enabled (eq .Values.attestationApi.cvmMode "node") -}}
 {{- end -}}
 
 {{/*

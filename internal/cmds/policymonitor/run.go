@@ -161,6 +161,7 @@ rather than a transient runtime problem.`,
 	fs.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch digests CDS's RA-TLS serving cert must match (default $C8S_CDS_MEASUREMENTS)")
 	fs.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "local attestation-service URL for in-guest RA-TLS evidence (default $C8S_ATTESTATION_SERVICE_URL or http://127.0.0.1:8400)")
 	fs.DurationVar(&cfg.RefreshInterval, "allowlist-refresh-interval", defaultRefreshInterval, "interval to poll CDS for allowlist updates (only when --cds-url is set)")
+	fs.StringVar(&cfg.WorkloadClaimsSocketDir, "workload-claims-socket-dir", "", "guest directory to serve this pod's admitted container digests from, over a Unix socket for in-guest get-cert (default $C8S_WORKLOAD_CLAIMS_SOCKET_DIR)")
 	return cmd
 }
 
@@ -203,6 +204,22 @@ type Config struct {
 
 	// RefreshInterval is the CDS allowlist poll cadence (hybrid only).
 	RefreshInterval time.Duration
+
+	// WorkloadClaimsSocketDir, when non-empty, is the guest directory the
+	// workload-claims broker creates its Unix socket in (as
+	// workloadclaims.SocketName; docs/ratls.md). The guest bind-mounts this
+	// directory into the pod's containers at workloadclaims.SidecarSocketDir so
+	// the in-guest get-cert dials the same compiled path it uses on node-CVM.
+	// Set from $C8S_WORKLOAD_CLAIMS_SOCKET_DIR by the kata guest image.
+	//
+	// Access control: the directory lives inside the measured guest (in the
+	// TCB), owned by root (policy-monitor); the source of truth for "what this
+	// pod runs" is policy-monitor's own admission record, not anything the
+	// caller sends. The socket is group-owned by workloadclaims.BrokerSocketGID
+	// so the non-root in-guest get-cert can connect — so the guest image must
+	// run get-cert with that supplemental group (on node-CVM the webhook injects
+	// it; wiring the kata guest to do the same is the remaining follow-up).
+	WorkloadClaimsSocketDir string
 }
 
 func (c *Config) fillDefaults() {
@@ -236,6 +253,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.RefreshInterval <= 0 {
 		c.RefreshInterval = defaultRefreshInterval
+	}
+	if c.WorkloadClaimsSocketDir == "" {
+		c.WorkloadClaimsSocketDir = os.Getenv("C8S_WORKLOAD_CLAIMS_SOCKET_DIR")
 	}
 }
 

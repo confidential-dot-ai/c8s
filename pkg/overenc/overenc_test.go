@@ -54,6 +54,24 @@ func TestHybridChannelRoundTrip(t *testing.T) {
 	}
 }
 
+// channelPair returns an agreed (server, client) channel pair for tests.
+func channelPair(t *testing.T) (server, client *Channel) {
+	t.Helper()
+	srv, err := GenerateServerKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCh, hs, err := ClientAgree(srv.Public(), testTranscriptHash(0xA5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCh, err := srv.Agree(hs, testTranscriptHash(0xA5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serverCh, clientCh
+}
+
 func TestChannelRejectsMismatchedTranscript(t *testing.T) {
 	srv, err := GenerateServerKey()
 	if err != nil {
@@ -73,6 +91,31 @@ func TestChannelRejectsMismatchedTranscript(t *testing.T) {
 	}
 	if _, err := serverCh.Open(rec, RequestAAD()); err == nil {
 		t.Fatal("mismatched identity transcript derived the same channel")
+	}
+}
+
+func TestOpenRejectsReplayedRecord(t *testing.T) {
+	serverCh, clientCh := channelPair(t)
+
+	rec, err := clientCh.Seal([]byte("transfer $100"), RequestAAD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverCh.Open(rec, RequestAAD()); err != nil {
+		t.Fatalf("first open failed: %v", err)
+	}
+	// Resubmitting the exact same authenticated record must not decrypt to a
+	// second backend action.
+	if _, err := serverCh.Open(rec, RequestAAD()); err == nil {
+		t.Fatal("replayed record accepted; want rejection")
+	}
+	// A fresh, distinct record from the same channel still opens.
+	rec2, err := clientCh.Seal([]byte("transfer $200"), RequestAAD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverCh.Open(rec2, RequestAAD()); err != nil {
+		t.Fatalf("distinct record rejected: %v", err)
 	}
 }
 

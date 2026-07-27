@@ -11,7 +11,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -22,7 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -99,38 +100,23 @@ func fakeLB(t *testing.T, servingCert tls.Certificate, doc []byte) *httptest.Ser
 	return srv
 }
 
-// verifyResponse builds a minimal approving attestation-api /verify response.
-func verifyResponse(measurement []byte) map[string]any {
-	result := map[string]any{
-		"platform":          string(types.PlatformAzSnp),
-		"signature_valid":   true,
-		"report_data_match": true,
-		"claims":            map[string]any{},
-	}
-	if measurement != nil {
-		result["claims"] = map[string]any{"launch_digest": hex.EncodeToString(measurement)}
-	}
-	return map[string]any{"result": result}
-}
-
-// mockedVerifySrv returns a fake attestation-api whose /verify always responds
-// with body.
-func mockedVerifySrv(t *testing.T, body any) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if err := json.NewEncoder(w).Encode(body); err != nil {
-			t.Fatalf("encode response: %v", err)
+// approvingVerify stubs the verifier: approve, honoring the measurement-pin
+// contract for measurement (the pin itself is unit-tested in localverify).
+func approvingVerify(measurement []byte) localverify.VerifyFunc {
+	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		if len(p.Measurements) > 0 && !ratls.MeasurementAllowed(measurement, p.Measurements) {
+			return nil, localverify.ErrMeasurementNotAllowed
 		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+		match := true
+		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
+	}
 }
 
 // TestNewVerifiedHTTPClient_EndToEnd is the regression test for the tls-lb
 // allowlist bug: a front door whose serving cert has no RA-TLS extension must
-// be verified via its discovery document (evidence sent to the attestation-api
-// bound to SHA-384(cert pubkey ‖ challenge)) and subsequent requests must
-// succeed against the pinned serving cert.
+// be verified via its discovery document (evidence bound to
+// SHA-384(cert pubkey ‖ challenge)) and subsequent requests must succeed
+// against the pinned serving cert.
 func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 	servingCert, leaf := plainServingCert(t)
 	challenge := []byte("issuance-challenge")
@@ -143,26 +129,25 @@ func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sawVerify bool
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		sawVerify = true
-		var req types.VerifyRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode verify request: %v", err)
+		if platform != string(types.PlatformAzSnp) {
+			t.Fatalf("platform = %q, want az-snp", platform)
 		}
-		// az-snp binds through a TPM quote whose nonce is the 48-byte digest.
-		if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, erd[:sha512.Size384]) {
-			t.Fatalf("expected_report_data = %x, want %x", got, erd[:sha512.Size384])
+		// az-snp binds through a TPM quote whose nonce is the unpadded 48-byte
+		// digest — the verifier must receive exactly that anchor.
+		if !bytes.Equal(p.ExpectedReportData, erd[:sha512.Size384]) {
+			t.Fatalf("expected_report_data = %x, want %x", p.ExpectedReportData, erd[:sha512.Size384])
 		}
-		json.NewEncoder(w).Encode(verifyResponse(measurement))
-	}))
-	defer api.Close()
+		return approvingVerify(measurement)(ctx, platform, evidence, p)
+	}
 
-	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, api.URL)
+	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, verify)
 	if err != nil {
 		t.Fatalf("NewVerifiedHTTPClient: %v", err)
 	}
 	if !sawVerify {
-		t.Fatal("attestation-api /verify was not called")
+		t.Fatal("evidence verifier was not called")
 	}
 
 	// Two sequential requests: both must ride the one attested connection
@@ -187,7 +172,7 @@ func TestNewVerifiedHTTPClient_NoDiscovery(t *testing.T) {
 	srv := httptest.NewTLSServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	_, err := NewVerifiedHTTPClient(context.Background(), srv.URL, nil, "http://attestation-api")
+	_, err := NewVerifiedHTTPClient(context.Background(), srv.URL, nil, approvingVerify(nil))
 	if !errors.Is(err, ErrNoDiscovery) {
 		t.Fatalf("want ErrNoDiscovery, got: %v", err)
 	}
@@ -201,25 +186,22 @@ func TestNewVerifiedHTTPClient_FailsClosed(t *testing.T) {
 	doc := discoveryDoc(t, leaf, []byte("challenge"), "", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
+	errSignature := errors.New("signature verification failed")
 	cases := []struct {
 		name    string
-		body    func() map[string]any
+		verify  localverify.VerifyFunc
 		wantErr error
 	}{
-		{"invalid signature", func() map[string]any {
-			b := verifyResponse(bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize))
-			b["result"].(map[string]any)["signature_valid"] = false
-			return b
-		}, attestationclient.ErrSignatureInvalid},
-		{"measurement not allowed", func() map[string]any {
-			return verifyResponse(bytes.Repeat([]byte{0x01}, ratls.SNPMeasurementSize))
-		}, attestationclient.ErrMeasurementNotAllowed},
+		{"verifier rejects", func(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+			return nil, errSignature
+		}, errSignature},
+		{"measurement not allowed", approvingVerify(bytes.Repeat([]byte{0x01}, ratls.SNPMeasurementSize)),
+			localverify.ErrMeasurementNotAllowed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			api := mockedVerifySrv(t, tc.body())
 			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL,
-				[][]byte{bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)}, api.URL)
+				[][]byte{bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)}, tc.verify)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("want %v, got: %v", tc.wantErr, err)
 			}
@@ -241,9 +223,7 @@ func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 	doc := discoveryDoc(t, otherLeaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
-	api := mockedVerifySrv(t, verifyResponse(nil))
-
-	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, api.URL)
+	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, approvingVerify(nil))
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("different tls-lb replica")) {
 		t.Fatalf("want a doc-cert/connection-leaf binding failure, got: %v", err)
 	}
@@ -276,9 +256,8 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 			servingCert, leaf := plainServingCert(t)
 			doc := discoveryDoc(t, leaf, []byte("challenge"), tc.mode, string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 			lb := fakeLB(t, servingCert, doc)
-			api := mockedVerifySrv(t, verifyResponse(measurement))
 
-			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, api.URL)
+			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, approvingVerify(measurement))
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("NewVerifiedHTTPClient: %v", err)
@@ -304,9 +283,8 @@ func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
-	api := mockedVerifySrv(t, verifyResponse(measurement))
 
-	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, api.URL)
+	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, approvingVerify(measurement))
 	if err != nil {
 		t.Fatalf("NewVerifiedHTTPClient: %v", err)
 	}
@@ -329,8 +307,17 @@ func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 // outright: the trust model binds attestation to a TLS handshake, which
 // plaintext has none of.
 func TestNewVerifiedHTTPClient_RequiresHTTPS(t *testing.T) {
-	_, err := NewVerifiedHTTPClient(context.Background(), "http://cds.example", nil, "http://attestation-api")
+	_, err := NewVerifiedHTTPClient(context.Background(), "http://cds.example", nil, approvingVerify(nil))
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("scheme must be https")) {
 		t.Fatalf("want an https-scheme error, got: %v", err)
+	}
+}
+
+// TestNewVerifiedHTTPClient_RequiresVerifier proves a nil verifier fails
+// closed at construction rather than skipping evidence verification.
+func TestNewVerifiedHTTPClient_RequiresVerifier(t *testing.T) {
+	_, err := NewVerifiedHTTPClient(context.Background(), "https://cds.example", nil, nil)
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("verifier is required")) {
+		t.Fatalf("want a nil-verifier error, got: %v", err)
 	}
 }

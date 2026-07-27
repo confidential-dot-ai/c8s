@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,6 +59,11 @@ type ServerConfig struct {
 	// CertTTL is the certificate lifetime. Default: 24h.
 	// The certificate is rotated automatically at 50% of TTL.
 	CertTTL time.Duration
+
+	// ConfigClaims, when non-nil, is embedded in the serving certificate and
+	// bound into its attestation evidence (docs/ratls.md). Self-signed
+	// provisioning only; ignored when CertProvider is set.
+	ConfigClaims *ConfigClaims
 
 	// ClientPolicy, when set, enables mTLS: the server requires client
 	// certificates and verifies their RA-TLS attestation against this policy.
@@ -412,9 +418,10 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 			Platform:   cfg.Platform,
 			AttestFunc: cfg.AttestFunc,
 			Opts: &CertOptions{
-				Subject:  cfg.Subject,
-				TTL:      cfg.CertTTL,
-				DNSNames: cfg.DNSNames,
+				Subject:      cfg.Subject,
+				TTL:          cfg.CertTTL,
+				DNSNames:     cfg.DNSNames,
+				ConfigClaims: cfg.ConfigClaims,
 			},
 		}
 	}
@@ -600,7 +607,37 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		})
 		if chainErr == nil {
-			return nil // CA-signed cert — valid.
+			// A valid CA chain authenticates the issuer; what else must hold
+			// depends on the trust mode (see VerifyPolicy.RequireCAEvidence).
+			if policy != nil && policy.RequireCAEvidence {
+				// Production mode: the CA chain alone is not sufficient. The leaf
+				// must carry re-verifiable RA-TLS evidence (issuer.SignCSR copies
+				// the requester's nonce-free .1.1 extension onto the leaf), which
+				// we re-verify here so a CA compromise or wrong issuance policy is
+				// caught at the peer instead of trusted from the chain. VerifyCert
+				// checks the hardware evidence, launch measurement, config-claims
+				// pins, and the key/claims binding via the attestation-api. The
+				// embedded evidence is nonce-free by construction, so verify with
+				// a nil nonce; TLS 1.3 supplies connection liveness. A leaf with
+				// no (or stale/forged) evidence fails closed.
+				if _, err := VerifyCert(cert, policy, nil); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
+				}
+				return nil
+			}
+			// Legacy/dev mode: trust the CA chain, but any configured
+			// config-claims pins (operator-keys/seed/workload) still must hold —
+			// they ride the certificate, so a CA-signed leaf with absent or
+			// mismatched claims must not be accepted when a pin is configured.
+			// Without this, configuring claim pins silently degrades to CA-only
+			// trust for every CA-signed peer (the RA-TLS path already enforces
+			// them via VerifyCert). checkClaimsPins is a no-op when no pin is set.
+			if policy != nil {
+				if err := checkClaimsPins(ExtractConfigClaimsBytes(cert), policy); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed config-claims pins: %w", err)
+				}
+			}
+			return nil // CA-signed cert with satisfied claim pins — valid.
 		}
 
 		// Fall back to RA-TLS attestation verification.
@@ -609,6 +646,22 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			return fmt.Errorf("ratls: peer verification failed (CA chain: %v; RA-TLS: %w)", chainErr, err)
 		}
 		return nil
+	}
+}
+
+// NormalizePlatform maps the platform aliases used across the stack (cloud
+// prefixes like az-/gcp-, and "snp") to the two canonical values the RA-TLS
+// package understands: "sev-snp" and "tdx". Unknown values pass through
+// lowercased/trimmed so validatePlatform can reject them with a clear error.
+// Callers normalize before NewServerTLSConfig/NewClientTLSConfig.
+func NormalizePlatform(platform string) string {
+	switch p := strings.ToLower(strings.TrimSpace(platform)); p {
+	case "snp", "sev-snp", "az-snp", "gcp-snp":
+		return "sev-snp"
+	case "tdx", "az-tdx", "gcp-tdx":
+		return "tdx"
+	default:
+		return p
 	}
 }
 

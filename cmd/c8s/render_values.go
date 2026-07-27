@@ -40,7 +40,7 @@ var renderValuesDistro string
 // values.yaml, without touching a cluster. It runs the same value computation
 // as `c8s install` — resolve each component image tag to its registry digest
 // (via crane), map --cvm-mode to the TEE devices, --single-node to the cleared
-// CDS node selector, --kata to the runtime toggles, and enable the NRI
+// CDS node selector, --cvm-mode=pod runtime toggles, and enable the NRI
 // allowlist derivation — but writes the values to stdout instead of running
 // helm upgrade --install.
 //
@@ -60,7 +60,7 @@ var renderValuesCmd = &cobra.Command{
 	Short: "Print the resolved Helm values an install would apply (no cluster needed)",
 	Long: `Computes the install-time Helm values that need a registry or the chart
 to resolve — resolved image digests, --cvm-mode TEE devices, --single-node node
-selector, --kata toggles, and the NRI allowlist derivation — and writes them to
+selector, --cvm-mode=pod toggles, and the NRI allowlist derivation — and writes them to
 stdout as a values.yaml, without contacting a cluster. Per-cluster tuning a
 consumer already owns (webhook cert settings, tls-lb, nodeSelectors, …) is not
 emitted; layer it in the consuming HelmRelease values.
@@ -80,7 +80,10 @@ the consuming -f.
 
 Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := validateKataDebugFlags(installKata, installKataDebug); err != nil {
+		if err := validateCvmMode(installCvmMode); err != nil {
+			return err
+		}
+		if err := validateDebugFlag(installCvmMode, installKataDebug); err != nil {
 			return err
 		}
 		if _, err := exec.LookPath("helm"); err != nil {
@@ -107,7 +110,7 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 		if cmd.Flags().Changed("distro") {
 			distro = renderValuesDistro
 		}
-		setArgs, err := buildValueArgs(cmd.Context(), cmd, components, resolveImageTag(), distro, appendResolvedDigestArgs)
+		setArgs, err := buildValueArgs(cmd.Context(), cmd, chartPath, components, resolveImageTag(), distro, appendResolvedDigestArgs)
 		if err != nil {
 			return err
 		}
@@ -131,7 +134,10 @@ Requires the 'helm' CLI on PATH, and 'crane' unless --resolve-digests=false.`,
 // digestResolver appends the --set flags that pin each component's resolved
 // registry digest. Both commands pass appendResolvedDigestArgs (crane-backed);
 // it is injected so the full builder is testable offline without a registry.
-type digestResolver func(ctx context.Context, setArgs []string, imageTag string, components []c8sComponent) ([]string, error)
+// chartPath lets the resolver read the chart's default values (to skip
+// components the effective config disables); setArgs carries the overrides
+// assembled so far, which drive that disable.
+type digestResolver func(ctx context.Context, chartPath string, setArgs []string, imageTag string, components []c8sComponent) ([]string, error)
 
 // buildValueArgs assembles the helm --set/--set-string value args shared by
 // install and render-values. distro is passed in (install autodetects it from
@@ -140,7 +146,7 @@ type digestResolver func(ctx context.Context, setArgs []string, imageTag string,
 // returned slice is value args only — install prepends the `upgrade --install
 // <release> <chart>` verb and appends -f / wait flags, render-values converts
 // these to a values tree.
-func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sComponent, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
+func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, components []c8sComponent, imageTag, distro string, resolveDigests digestResolver) ([]string, error) {
 	// Derive the upstream address from the same deduped adoptions install's RunE
 	// validates against, so the address the chart receives and the id the RunE
 	// checks can never diverge on duplicate refs.
@@ -172,17 +178,13 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sCom
 	if distro != "" {
 		setArgs = appendDistroInstallArgs(setArgs, distro)
 	}
-	// Either flag changing on the CLI triggers the --set flow. A user who
-	// wants to drive teeDevices purely via -f leaves both flags unset and the
-	// chart's own defaults hold.
-	if cmd.Flags().Changed(flagCvmMode) || cmd.Flags().Changed(flagHardwarePlatform) {
-		var err error
-		setArgs, err = appendCvmModeInstallArgs(setArgs, installCvmMode, installHardwarePlatform)
-		if err != nil {
-			return nil, err
-		}
+	// --cvm-mode is required and validated in RunE, so always emit the mode's
+	// teeDevices/attestation-api values (and the --hardware-platform propagation).
+	setArgs, err = appendCvmModeInstallArgs(setArgs, installCvmMode, installHardwarePlatform)
+	if err != nil {
+		return nil, err
 	}
-	setArgs = appendKataInstallArgs(setArgs, installKata, installKataDebug)
+	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug)
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
 	// --upstream derives a c8s-<id>.<ns>.svc.cluster.local address; the chart
 	// recognizes that headless-Service shape as mesh-wrapped and admits plaintext
@@ -204,7 +206,7 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, components []c8sCom
 	}
 	if installResolveDigests {
 		var err error
-		setArgs, err = resolveDigests(ctx, setArgs, imageTag, components)
+		setArgs, err = resolveDigests(ctx, chartPath, setArgs, imageTag, components)
 		if err != nil {
 			return nil, err
 		}
@@ -245,9 +247,10 @@ func appendWebhookInstallArgs(setArgs []string, cmd *cobra.Command) []string {
 // int coerced; everything else stays a string); --set-string values stay
 // strings; --set-file values name a file whose content becomes the value
 // verbatim, mirroring helm. Any other flag is an error rather than a silently
-// mis-parsed value. Dotted keys nest. This deliberately does not implement
-// helm's full --set grammar (no list indexing, no escaped dots) because the
-// builder never emits those.
+// mis-parsed value. Dotted keys nest; a trailing key[n] sets list element n
+// (see setNested) — the one indexed form the builder emits. This still does not
+// implement the rest of helm's --set grammar (escaped dots, nested indices)
+// because the builder never emits those.
 func valueArgsToTree(setArgs []string) (map[string]any, error) {
 	root := map[string]any{}
 	for i := 0; i < len(setArgs); i += 2 {
@@ -316,8 +319,24 @@ func coerce(raw string, typed bool) any {
 func setNested(m map[string]any, path []string, value any) error {
 	for i, seg := range path {
 		if i == len(path)-1 {
+			// A trailing key[n] sets element n of a list (helm --set list
+			// syntax), the one indexed form the builder emits (e.g.
+			// cds.measurements[0]=…). setListElem grows the list as needed.
+			if key, idx, ok := parseListIndex(seg); ok {
+				return setListElem(m, strings.Join(path, "."), key, idx, value)
+			}
+			// A '[' that is not a clean trailing key[n] is outside the grammar
+			// this parser handles. Fail loudly rather than key on the raw
+			// segment, so a mis-emitting builder can't silently write a bogus
+			// key (the test-only grammar guard can't catch that at runtime).
+			if strings.ContainsRune(seg, '[') {
+				return fmt.Errorf("value path %q: segment %q is not a valid key or key[n] list index", strings.Join(path, "."), seg)
+			}
 			m[seg] = value
 			return nil
+		}
+		if strings.ContainsRune(seg, '[') {
+			return fmt.Errorf("value path %q: list index is only supported on the final segment, not %q", strings.Join(path, "."), seg)
 		}
 		child, ok := m[seg].(map[string]any)
 		if !ok {
@@ -332,6 +351,38 @@ func setNested(m map[string]any, path []string, value any) error {
 	return nil
 }
 
+// parseListIndex splits a trailing "key[n]" segment into (key, n). ok is false
+// for a plain key (no brackets). Only a well-formed non-negative index matches.
+func parseListIndex(seg string) (key string, idx int, ok bool) {
+	open := strings.IndexByte(seg, '[')
+	if open <= 0 || !strings.HasSuffix(seg, "]") {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(seg[open+1 : len(seg)-1])
+	if err != nil || n < 0 {
+		return "", 0, false
+	}
+	return seg[:open], n, true
+}
+
+// setListElem sets element idx of the []any at m[key], growing it with nils to
+// length idx+1. Mirrors helm: repeated key[i] pairs build the list.
+func setListElem(m map[string]any, fullPath, key string, idx int, value any) error {
+	list, ok := m[key].([]any)
+	if !ok {
+		if existing, set := m[key]; set && existing != nil {
+			return fmt.Errorf("value path %q conflicts with an existing non-list at %q", fullPath, key)
+		}
+		list = []any{}
+	}
+	for len(list) <= idx {
+		list = append(list, nil)
+	}
+	list[idx] = value
+	m[key] = list
+	return nil
+}
+
 func init() {
 	// render-values reuses the install value flags (same vars, same semantics)
 	// so the two stay in lockstep; it adds --distro in place of install's
@@ -340,10 +391,10 @@ func init() {
 	renderValuesCmd.Flags().BoolVar(&installCRDs, "install-crds", true, "emit values for chart CRDs (false sets statusMirror.enabled=false, matching install --install-crds=false)")
 	renderValuesCmd.Flags().StringVar(&renderValuesDistro, "distro", "", "host Kubernetes distro (k8s | rke2) — install autodetects this from the cluster; render-values has no cluster, so pass it explicitly when you need it pinned. Unset leaves the chart default")
 	renderValuesCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration (cds.node.selector={}, cds.node.tolerations=[])")
-	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "baremetal", "CVM deployment shape (orthogonal to --hardware-platform): baremetal or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0)")
+	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod kata CVMs; disables host-side ratls-mesh/attestation-api/nri-image-policy) or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0)")
 	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "sev-snp", "CPU-level TEE hardware (orthogonal to --cvm-mode): sev-snp (default, /dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks")
-	renderValuesCmd.Flags().BoolVar(&installKata, "kata", false, "emit the Kata Containers runtime values (kata.enabled=true; disables host-side ratls-mesh/attestation-api/nri-image-policy)")
-	renderValuesCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (requires --kata)")
+	renderValuesCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Emits cds.measurements + ratlsMesh.measurements; empty = no pinning (UNSAFE). Not valid with --cvm-mode=pod")
+	renderValuesCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG image variant (requires --cvm-mode=pod)")
 	renderValuesCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "adopted workload as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Used here only to derive --upstream's address (render-values patches nothing)")
 	renderValuesCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives tlsLb.upstream.address c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>")
 	renderValuesCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each component image tag to its registry digest (via crane), pin it, and enable the NRI allowlist derivation")

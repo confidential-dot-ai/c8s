@@ -253,6 +253,54 @@ func TestReportDataForKeyWithNonce(t *testing.T) {
 	}
 }
 
+func TestReportDataForKeyWithContext(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := []byte("challenge")
+	contextA := []byte("operator-key-set-a")
+
+	legacy, err := ReportDataForKey(&key.PublicKey, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := ReportDataForKeyWithContext(&key.PublicKey, nonce, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty != legacy {
+		t.Fatal("empty context changed the established REPORTDATA format")
+	}
+
+	withA, err := ReportDataForKeyWithContext(&key.PublicKey, nonce, contextA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withAAgain, err := ReportDataForKeyWithContext(&key.PublicKey, nonce, contextA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withA != withAAgain {
+		t.Fatal("contextual REPORTDATA is not deterministic")
+	}
+	if withA == legacy {
+		t.Fatal("non-empty context did not change REPORTDATA")
+	}
+	withB, err := ReportDataForKeyWithContext(&key.PublicKey, nonce, []byte("operator-key-set-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withA == withB {
+		t.Fatal("different contexts produced the same REPORTDATA")
+	}
+	for i := sha512.Size384; i < len(withA); i++ {
+		if withA[i] != 0 {
+			t.Fatalf("REPORTDATA[%d] = %d, want zero padding", i, withA[i])
+		}
+	}
+}
+
 func TestGenerateKeyPair(t *testing.T) {
 	key, reportData, err := GenerateKeyPair()
 	if err != nil {
@@ -528,7 +576,11 @@ func embeddedEnvelopeCert(t *testing.T, platform types.Platform, evidence json.R
 	if err != nil {
 		t.Fatal(err)
 	}
-	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: TEETypeSEVSNP, Report: embedded}, nil)
+	teeType := TEETypeSEVSNP
+	if platform == types.PlatformTdx || platform == types.PlatformAzTdx {
+		teeType = TEETypeTDX
+	}
+	certDER, err := CreateAttestedCert(key, &Attestation{TEEType: teeType, Report: embedded}, nil)
 	if err != nil {
 		t.Fatalf("CreateAttestedCert: %v", err)
 	}
@@ -658,6 +710,63 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	}
 	if !bytes.Equal(result.Measurement[:], measurement) {
 		t.Fatalf("Measurement = %x, want %x", result.Measurement, measurement)
+	}
+}
+
+func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
+	cert, expectedReportData := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
+	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
+
+	var observed types.VerifyRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatalf("decode verify request: %v", err)
+		}
+		resp := verifyResponse(mrtd)
+		resp["result"].(map[string]any)["platform"] = string(types.PlatformTdx)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{mrtd},
+		MinTCBVersion:     1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("VerifyCert: %v", err)
+	}
+	if observed.Platform != string(types.PlatformTdx) {
+		t.Fatalf("platform = %q, want tdx", observed.Platform)
+	}
+	if observed.Params == nil || observed.Params.ExpectedReportData == nil {
+		t.Fatal("missing expected report data")
+	}
+	if got := observed.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:]) {
+		t.Fatalf("expected_report_data = %x, want %x", got, expectedReportData)
+	}
+	if observed.Params.MinTcb != nil {
+		t.Fatal("min_tcb must not be sent on the TDX path")
+	}
+	if result.TEEType != TEETypeTDX {
+		t.Fatalf("TEEType = %v, want TDX", result.TEEType)
+	}
+	if !bytes.Equal(result.ReportData[:], expectedReportData[:]) {
+		t.Fatalf("ReportData = %x, want %x", result.ReportData, expectedReportData)
+	}
+	if !bytes.Equal(result.Measurement[:], mrtd) {
+		t.Fatalf("Measurement = %x, want MRTD %x", result.Measurement, mrtd)
+	}
+
+	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
+	_, err = VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{wrongMRTD},
+	}, nil)
+	if !errors.Is(err, ErrPolicyViolation) {
+		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
 	}
 }
 
@@ -845,7 +954,10 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 	})
 
-	t.Run("az-tdx evidence is rejected by online verifier", func(t *testing.T) {
+	t.Run("az-tdx evidence with a mismatched SEV-SNP TEE type is rejected", func(t *testing.T) {
+		// az-tdx is a TDX-family platform; carrying it in a cert that declares
+		// the SEV-SNP TEE type is a family mismatch and must fail closed rather
+		// than be verified under SNP rules.
 		key, _, err := GenerateKeyPair()
 		if err != nil {
 			t.Fatal(err)
@@ -872,6 +984,53 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 			t.Fatalf("got %v, want ErrUnsupportedTEE", err)
 		}
 	})
+}
+
+// TestVerifyCertEmbeddedAzTdxEvidence covers the Azure-vTPM TDX (az-tdx) online
+// path: the vTPM HCL report wraps a TD quote, the mesh peer presents an az-tdx
+// envelope under the TDX TEE type, and the verifier binds the key through the
+// 48-byte vTPM nonce (like az-snp) while enforcing the MRTD as launch digest.
+func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
+	cert, expectedReportData := embeddedEnvelopeCert(t, types.PlatformAzTdx,
+		json.RawMessage(`{"hcl_report":"fake","td_quote":"fake","tpm_quote":{"message":"fake"}}`))
+	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
+
+	var observed types.VerifyRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
+			t.Fatalf("decode verify request: %v", err)
+		}
+		resp := verifyResponse(mrtd)
+		resp["result"].(map[string]any)["platform"] = string(types.PlatformAzTdx)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := VerifyCert(cert, &VerifyPolicy{
+		AttestationApiURL: srv.URL,
+		Measurements:      [][]byte{mrtd},
+	}, nil)
+	if err != nil {
+		t.Fatalf("VerifyCert: %v", err)
+	}
+	// az-tdx binds via the 48-byte vTPM nonce, not the full 64-byte REPORTDATA.
+	if got := observed.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
+		t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte digest %x", got, len(got), expectedReportData[:sha512.Size384])
+	}
+	if result.TEEType != TEETypeTDX {
+		t.Fatalf("TEEType = %v, want TDX", result.TEEType)
+	}
+	if !bytes.Equal(result.Measurement[:], mrtd) {
+		t.Fatalf("Measurement = %x, want MRTD %x", result.Measurement, mrtd)
+	}
+
+	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{wrongMRTD}}, nil)
+	if !errors.Is(err, ErrPolicyViolation) {
+		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
+	}
 }
 
 // TestVerifyCertBareSNPUsesAttestationApi covers the bare-metal SNP shape:

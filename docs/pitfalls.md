@@ -22,7 +22,7 @@ and let each platform verifier do its own shaping; `c8s-verify-js/PROTOCOL.md`
 
 ## The bare-report KDS fetch is attestation-go's job; c8s only bounds and classifies it
 
-`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/cmds/verify/localverify.go` (`verifyInProcess`, `runAttestationGo`)
+`internal/cmds/verify/verify.go` (`verifyEvidence`), `internal/localverify/localverify.go` (`Verify`, `dispatch`)
 
 `c8s verify` of a bare RA-TLS cert (SNP report, no inline VCEK) once hung for
 minutes on Zen4c (Siena/Bergamo) hosts, ignoring `--timeout`: verification ran
@@ -77,9 +77,9 @@ signing and again for sending, any difference (key ordering, whitespace) makes
 do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
 end-to-end test (`integration_test.go`) exists to catch a regression here.
 
-## Operator key-pinning: revocation is coarse and the pin isn't attested (interim)
+## Operator key-pinning: revocation is coarse; the attested config protects only pinning verifiers
 
-`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`
+`internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`, `docs/ratls.md`
 
 Allowlist writes are authorized by **pinned operator public keys**
 (`cds.operatorKeys`); `operatorauth.Verifier` accepts a token signed by any
@@ -90,20 +90,30 @@ it:
   (remove its public key from `cds.operatorKeys`). There is no per-key
   revocation short of that. Keys are long-lived; a leaked operator private key is
   usable until removed. Protect operator keys (vault/HSM/hardware token).
-- **The pinned-key list is host-supplied config, read only at CDS start, and not
-  part of CDS's attestation.** A control-plane that swaps the ConfigMap and
-  restarts CDS could pin its own key — the same unattested-config gap as the
-  allowlist seed. `c8s cds verify` now reports the pinned-key fingerprints (via
-  `GET /operator-keys`, fetched over a connection pinned to the attested serving
-  cert), which makes a swap *visible* to an operator who knows the expected
-  fingerprints — but a verifier still sees what CDS claims, not what was
-  measured. Committing the list via HOST_DATA/initdata remains the real fix.
+- **The attested config-claims digests only protect verifiers that pin them.**
+  CDS binds the digests of its loaded key set and applied seed into its
+  serving-cert evidence, but the CDS args are still host-supplied: a control
+  plane can restart CDS with different keys or seed. That swap fails closed
+  only for clients pinning the expected values (`c8s cds verify
+  --operator-keys/--allowlist-seed`, pinned from the operator's own install
+  inputs); a client that pins nothing accepts whatever the running CDS
+  attests to, and
+  in-cluster enforcers pin nothing. Verify continuously (CI), not just at
+  bootstrap, and gate ingress exposure on a passing verify.
+- **A rotated-out config stays claimable until cert expiry.** After changing
+  operator keys or the seed, the previous serving cert (and its claims)
+  remains replayable until its RA-TLS TTL (`cds.ratlsCertTTL`) runs out. An
+  operator-key change also fails handoff by design (the key-set hash is bound
+  into handoff REPORTDATA), so a key rotation rolls a fresh CA lineage rather
+  than inheriting the old one. A seed-only change does not gate handoff — the
+  seed digest rides the serving-cert claims, not the handoff exchange — and is
+  caught only by verifiers pinning `--allowlist-seed`.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
-PKI (see `docs/decisions/2026-07-01-operator-cert-allowlist-write.md`). **Longer
-term** we want a CA + short-lived operator certificates (chain carried in the
-JWT `x5c` header), giving delegated issuance and CA-based revocation instead of
-editing a pinned-key list, plus single-file (cert+key) operator credentials.
+PKI. **Longer term** we want a CA + short-lived operator certificates (chain
+carried in the JWT `x5c` header), giving delegated issuance and CA-based
+revocation instead of editing a pinned-key list, plus single-file (cert+key)
+operator credentials.
 
 ## Operator-key auth is app-layer on purpose (do not switch CDS to mTLS)
 
@@ -121,7 +131,7 @@ mesh client (ratls-mesh, nri-image-policy, get-cert, policy-monitor — all
 
 `internal/webhook/pod_mutator.go` + `internal/helmchart/c8s/templates/kata.yaml`
 
-A `--kata` install renders the GPU RuntimeClass, shim, puller, and device plugin
+A `--cvm-mode=pod` install renders the GPU RuntimeClass, shim, puller, and device plugin
 off `kata.enabled`, but the *injection* — the platform's confidential classes
 for `confidential.ai/cw` and `nvidia.com/*` pods — lives in the operator binary
 (`kataRuntimeClassFor`). The chart and the operator binary ship as a unit: bump
@@ -145,8 +155,7 @@ the registry (via crane, best-effort) before anything touches the cluster. Do
 **not** dodge the error by falling back to `:main` for the components — a
 mismatched operator is the silent mis-injection above. A real
 operator↔chart capability handshake (operator reports its webhook feature
-set; the render fails if the chart needs more) is future work — see
-`docs/GAPS.md`.
+set; the render fails if the chart needs more) is future work.
 
 ## A GPU request alone forces the confidential GPU class — no annotation needed
 
@@ -194,7 +203,7 @@ and cannot load the driver. Module loading is locked down after driver
 bring-up (`kernel.modules_disabled=1`), and everything grafted sits inside
 the measured verity root — but the kernel/driver provenance is the kata
 release, not the c8s build. Compiling signed modules against a confos GPU
-kernel flavor closes this — see `docs/GAPS.md`. Also remember GPU SPDM
+kernel flavor closes this. Also remember GPU SPDM
 attestation is not wired yet (`docs/kata-gpu.md` "Threat-model gaps").
 
 ## kata-qemu-snp on a non-SNP host is a QEMU crash-loop, not a clean rejection
@@ -208,7 +217,7 @@ cannot boot: QEMU SIGABRTs (`kvm run failed Input/output error`, vCPU dead at
 the reset vector; dmesg: `kvm_intel: Guest access before accepting 0x807000`)
 and kubelet retries forever — an unbounded crash-loop spamming register dumps
 every ~90 s, not an error surfaced on the pod. Since the chart pins
-`kata-qemu-snp` on CDS and tls-lb, a `--kata` install on such a
+`kata-qemu-snp` on CDS and tls-lb, a `--cvm-mode=pod` install on such a
 host crash-loops its own control plane.
 
 Two guards exist; keep both intact:
@@ -217,7 +226,7 @@ Two guards exist; keep both intact:
    `scheduling.nodeSelector` on the `confidential.ai/sev-snp=true` label
    (`kata.snpNodeSelector`), so a confidential pod on an unlabelled node stays
    `Pending` with a clear scheduling message;
-2. `c8s install --kata` labels every kata-targeted node from the declared
+2. `c8s install --cvm-mode=pod` labels every kata-targeted node from the declared
    `--hardware-platform` (`cmd/c8s/tee_label.go` — declarative, no hardware
    probe; it refuses to run while any node still carries the other
    platform's label, printing the clear command) and fails fast when no
@@ -247,25 +256,23 @@ re-applies the patch whenever it drifts; readiness tracks "patch present". Do no
 "simplify" it back to a one-shot initContainer + `pause` — that reintroduces the
 clobber. Verified: clobbering the config self-heals in ~24s.
 
-## Private workload images need registry creds in TWO places under guest-pull
+## Guest-pull fetches workload image layers anonymously
 
 `internal/helmchart/c8s/templates/kata.yaml` (`EXPERIMENTAL_SETUP_SNAPSHOTTER`),
 `internal/helmchart/c8s/files/scripts/pull-and-configure.sh`
 
 The confidential shims route through the nydus-snapshotter that kata-deploy
 installs (`nydus-for-kata-tee`, guest-pull mode), so the host never pulls the
-workload's **layers** — but containerd's CRI still **resolves** the image on
-the host (manifest + config fetch) before the guest pulls the data. For a
-private image (a tenant workload, or a private mirror of the c8s components)
-that resolution is anonymous and 401s (`failed to resolve ...: unauthorized`)
-unless `serviceAccount.imagePullSecrets` supplies creds. So a guest-pull
-workload needs creds in **two** places: the host (an image-pull Secret, for
-resolution) **and** the guest (`agent.image_registry_auth`, set by the puller
-— see pull-and-configure.sh). When the c8s components themselves come from a
-private mirror the host side is one flag: create the Secret once and pass
-`c8s install --image-pull-secret <name>` (or set `imagePullSecret` via
-values) to wire it into every component's `imagePullSecrets` at install time
-— see docs/QUICKSTART.md "Private registry credentials".
+workload's **layers** — the kata-agent fetches them *inside* the guest, and
+that pull is **anonymous** (there is no in-guest registry-auth path). A
+workload image must therefore be pullable without credentials: public, or on a
+registry the guest reaches anonymously. A private image — a tenant workload, or
+a private mirror of the c8s components — 401s the in-guest layer fetch; the
+stock c8s component images are public, so the default install is unaffected.
+Note containerd's CRI still **resolves** the manifest on the host first, so an
+image whose registry gates even manifest resolution also needs
+`serviceAccount.imagePullSecrets` — but that host-side Secret does not
+authenticate the guest's layer pull.
 
 ## cds cannot reach Ready as runc on a host that is not an SNP guest
 
@@ -273,7 +280,7 @@ values) to wire it into every component's `imagePullSecrets` at install time
 
 cds's RA-TLS serving cert needs SNP evidence from `/dev/sev-guest`, which only
 exists **inside** an SNP guest (the host has `/dev/sev`, not `/dev/sev-guest`).
-The non-kata probes are httpGet/HTTPS. So running cds as host runc (no `--kata`)
+The non-kata probes are httpGet/HTTPS. So running cds as host runc (no `--cvm-mode=pod`)
 on bare metal has no clean Ready path — it is intended to run as `kata-qemu-snp`
 (gated on `kata.enabled`). For a non-confidential dev box, disable cds's RA-TLS
 (`cds.ratlsPlatform=""`, plaintext) and expect the HTTPS probe to fail.
@@ -366,7 +373,7 @@ Error response from registry: failed to resolve <tag>: GET …/manifests/<tag>: 
 exactly where `oras` looks (the container runs as root under
 `privileged: true`, so `$HOME=/root`). That Secret defaults to the
 install-time `imagePullSecret`, so a plain
-`c8s install --kata --image-pull-secret ghcr-secret` covers the oras pull
+`c8s install --cvm-mode=pod --image-pull-secret ghcr-secret` covers the oras pull
 along with every kubelet pull. Set `kata.guestImage.pullerAuthSecret` only
 when the artifact needs a different credential than the c8s images:
 
@@ -383,41 +390,7 @@ helm upgrade c8s … --set kata.guestImage.pullerAuthSecret=ghcr-puller-creds
 **This is operator-side, not TCB-relevant.** The credential never enters the
 guest and is not part of the SNP launch measurement. Rotation is a Secret
 update + puller DaemonSet restart — no re-attestation, no kata-guest-base
-rebuild, no re-pinned digest. Contrast `kata.guestImage.registryAuth` and the
-baked `ghcr-auth.json` (see next section), both of which **do** move the
-measurement.
-
-## `ghcr-auth.json`: staging in-guest pull credentials bakes them into the measured rootfs
-
-`kata-guest-base/extra/etc/c8s/ghcr-auth.json` is the docker auth.json baked
-into the dm-verity guest rootfs that kata's `experimental_force_guest_pull`
-hands to CDH/image-rs for in-guest workload pulls. It is **generated at build
-time** by `kata-guest-base/scripts/fetch.sh`: stock builds bake an empty
-`{"auths":{}}` — the c8s images are public, so anonymous guest-pull works —
-and a pre-staged file (credentials for a **private mirror**) is baked as-is.
-At boot, tmpfiles (`extra/etc/tmpfiles.d/c8s.conf`) copies it to
-`/run/image-security/auth.json`, the `file://` path named by
-`agent.image_registry_auth` on the guest kernel cmdline (the puller appends
-that from `kata.guestImage.registryAuth`, which **defaults** to
-`file:///run/image-security/auth.json` — see
-`internal/helmchart/c8s/values.yaml`).
-
-It is gitignored (`kata-guest-base/.gitignore`): it is build output, and a
-pre-staged file holds a credential — **never commit it.** If you do stage
-real credentials, keep in mind:
-
-1. **The credential is inside the SNP launch measurement.** The file's bytes
-   are part of the dm-verity root, exactly like `bootstrap-allowlist.json`. So
-   **rotating the credential changes the measurement** and requires an image
-   rebuild + re-pinned digest. Use a read-only, pull-scoped token — anyone who
-   can dump the (attested) image contents can read it.
-2. **The secret-free alternative:** leave the baked auths empty and set
-   `kata.guestImage.registryAuth` to a `kbs://` URI so CDH fetches the
-   auth.json from the Key Broker Service *after* the guest attests — no
-   credential in the image at all.
-3. **A hand-placed `ghcr-auth.json` is preserved.** `fetch.sh` never
-   overwrites a non-empty file, so a pre-staged credential survives re-runs —
-   check what is staged before a build you intend to publish.
+rebuild, no re-pinned digest.
 
 ## Bump `KATA_SRC_COMMIT` in lockstep with `KATA_VERSION`
 
@@ -507,12 +480,12 @@ mesh-trust-assuming endpoints on 8443 in kata pods; rebuild the guest image
 with the variable emptied for a fully-meshed posture (front doors then need
 `kubectl port-forward` + a mesh client cert, i.e. are effectively internal).
 
-## First `--kata` install can exceed helm's `--wait` window
+## First `--cvm-mode=pod` install can exceed helm's `--wait` window
 
 `cmd/c8s/install.go` (`buildInstallHelmArgs`)
 
 On a node without a prior kata install, kata-deploy downloads the multi-GB kata
-payload inside the helm `--wait` window. `c8s install --kata` therefore waits
+payload inside the helm `--wait` window. `c8s install --cvm-mode=pod` therefore waits
 10 minutes (vs 5 for non-kata installs), which covers typical first installs —
 but a slow registry path can still blow it: the release lands as `failed` while
 the cluster converges fine underneath, and a second `c8s install` run (helm
@@ -525,7 +498,7 @@ check the pods first.
 
 The kata sweep removes `confidential.ai/sev-snp` / `confidential.ai/tdx`
 along with the kata artifacts. A subsequent
-`c8s install --kata -f <values>` can fail fast at the TDX/SNP node check (the
+`c8s install --cvm-mode=pod -f <values>` can fail fast at the TDX/SNP node check (the
 auto-label path doesn't cover every `-f` shape). Relabel by hand and rerun.
 
 ## `cds.node.selector: null` in a values file does not survive helm's multi-file merge
@@ -583,7 +556,7 @@ runs. Neither kata-runtime nor kata-agent has a name-resolution fallback (the
 runtime spec carries only a numeric uid). Fix: set a numeric
 `securityContext.runAsUser` in the pod spec (which skips the lookup), or bake
 a numeric `USER <uid>` into the image. Prefer non-root regardless — the
-in-guest mesh exempts UID-0 egress (GAPS.md "Mesh and certificates").
+in-guest mesh exempts UID-0 egress.
 
 ## kubelet's `runtime-request-timeout` (default 2m) caps kata pod creation
 
@@ -659,3 +632,27 @@ failed to carry the stock params forward would drop load-bearing boot args
 (`cgroup_no_v1=all`, `nvrc.smi.srs=1`). Net advice: rely on the annotation for
 ad-hoc params, keep the puller's preservation, and don't trust manual config
 edits to land until this is root-caused on a live sandbox.
+
+## Workload-claims broker socket: group must be reachable by the non-root sidecar
+
+`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `BrokerSocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
+
+The broker runs as root (nri-image-policy is a containerd-launched NRI plugin),
+so its Unix socket is created `root:root`. get-cert connects as the non-root
+sidecar (UID/GID 65532) over a **read-only** mount. A `root:root 0660` socket is
+unreachable by that caller — `connect()` needs write permission on the socket
+node — and get-cert is **fail-closed** on a broker error, so the pod hangs
+forever on its initial cert (`c8s-cert-wait` never passes). It is a silent,
+node-wide brick of every `cw` pod, not a graceful degradation.
+
+The socket must therefore be group-owned by a GID the sidecar carries: `ListenUnix`
+chgrps it to `BrokerSocketGID` and the webhook injects that same GID as a pod
+`SupplementalGroups` entry. **The two must stay equal** — they share the one
+constant, so change it in one place only. Do not "fix" a connect failure by
+relaxing fail-closed (broker error ⇒ issue claim-free): that hands an attacker
+who blocks the broker exactly the claim-free cert fail-closed exists to deny.
+Connecting to a socket is exempt from the read-only-mount write block (sockets
+are not regular files), so the RO mount still prevents a socket-file swap
+without blocking the connect. The same-process broker unit tests cannot catch
+this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
+`TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.

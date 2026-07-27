@@ -8,14 +8,12 @@ a manual per-node procedure.
 This document covers what the feature installs, the design decisions behind
 it, the threat model, and the constraints to read before shipping it.
 
-It implements [confidential-dot-ai/c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97)
-(privileged Kata installation) and
-[confidential-dot-ai/c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) (RuntimeClass
-injection and enforcement).
+It implements privileged Kata installation and RuntimeClass
+injection and enforcement.
 
 ## What it installs
 
-`c8s install --kata` makes the embedded Helm chart render, in addition to the
+`c8s install --cvm-mode=pod` makes the embedded Helm chart render, in addition to the
 normal c8s components:
 
 - **The upstream `kata-deploy` DaemonSet** (`quay.io/kata-containers/kata-deploy`,
@@ -43,7 +41,7 @@ normal c8s components:
   classes would be unschedulable decoys the enforcement allowlist should not
   accept.
 
-`c8s install --kata` is **enforcing** — installing the Kata stack and
+`c8s install --cvm-mode=pod` is **enforcing** — installing the Kata stack and
 enforcing it are one shape, not two (see [Enforcement](#enforcement)).
 
 | RuntimeClass | Hypervisor | Confidential? | Renders under |
@@ -64,11 +62,11 @@ enforcing it are one shape, not two (see [Enforcement](#enforcement)).
 # (see below). tls-lb runs as a kata CVM; --upstream (with the port on its
 # --workload-ref) points tls-lb at an adopted workload's mesh-wrapped headless
 # Service (see operator.md, "tls-lb upstream").
-c8s install --kata --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --cvm-mode=pod --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 
 # Dev only: use the -debug guest image so `kubectl logs` and `kubectl exec`
 # work against kata pods (host log/exec RPCs allowed in the guest policy).
-c8s install --kata --debug --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --cvm-mode=pod --debug --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
 
 Confidential pods only schedule to nodes carrying their platform label —
@@ -156,7 +154,7 @@ installed by c8s and one provisioned by Ansible or booted from the
 
 ## Enforcement
 
-`--kata` is enforcing — there is no kata-without-enforcement shape: a
+`--cvm-mode=pod` is enforcing — there is no kata-without-enforcement shape: a
 workload that can dodge the CVM boundary makes the kata stack decorative.
 Enforcement is two cooperating pieces, installed together with the stack.
 
@@ -181,7 +179,7 @@ Enforcement is two cooperating pieces, installed together with the stack.
    workload pod requesting a `runtimeClassName` outside the installed set:
    `kata-qemu` / `kata-clh` plus the platform's confidential (CPU, GPU) pair.
 
-[c8s#77](https://github.com/confidential-dot-ai/c8s/issues/77) asked for a
+An earlier design asked for a
 `ValidatingAdmissionWebhook`. A **`ValidatingAdmissionPolicy`** (built-in CEL,
 no webhook server, no TLS) is the lighter equivalent, and it is what
 `bare-metal-infra-management` already uses for its `kata-cc-mode` policy.
@@ -200,7 +198,7 @@ kata-guest-base image:
 | `attestation-api` DaemonSet | in-guest attestation-api on loopback `:8400` (`c8s.attestationApiURL`) |
 | `nri-image-policy` (host NRI plugin) | in-guest policy-monitor, fed from CDS's served `/allowlist` |
 
-`c8s install --kata` sets `ratlsMesh.enabled=false`,
+`c8s install --cvm-mode=pod` sets `ratlsMesh.enabled=false`,
 `attestationApi.enabled=false`, and `nriImagePolicy.enabled=false` for you;
 the chart fails the render (`kind=enforce_host_components`) if any of them is
 left enabled alongside `kata.enabled`, since the host versions would be dead
@@ -292,7 +290,7 @@ kubectl get pod kata-smoketest -o jsonpath='{.spec.runtimeClassName}{"\n"}'
 ```
 
 If the field is empty, the operator is running without its `--kata-enforce`
-flag — i.e. the release was installed without `--kata` (verify with
+flag — i.e. the release was installed without `--cvm-mode=pod` (verify with
 `kubectl get deploy c8s-operator -n c8s-system -o yaml | grep kata-enforce`).
 The mutating webhook is wired in either way; injection is gated on the flag,
 which the chart sets whenever `kata.enabled` is.
@@ -347,7 +345,7 @@ nsenters PID 1 to restart the runtime. That is inherent to installing a
 runtime onto a host — there is no less-privileged way to do it.
 
 For **pod-as-kata-cvm this does not weaken the threat model**, and that is the
-core reasoning of [c8s#97](https://github.com/confidential-dot-ai/c8s/issues/97):
+core reasoning behind privileged Kata:
 
 - The host (L0) is already outside the trust boundary. With `kata-qemu-snp`
   the trust boundary is the SEV-SNP guest, not the node.
@@ -396,7 +394,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   (`kata.snpNodeSelector`), the TDX classes on `confidential.ai/tdx=true`
   (`kata.tdxNodeSelector`), so confidential pods — including the chart's own
   CDS and tls-lb — only land on nodes declared capable.
-  `c8s install --kata` labels every kata-targeted node automatically from
+  `c8s install --cvm-mode=pod` labels every kata-targeted node automatically from
   `--hardware-platform` (see [Installing](#installing) — declarative, no
   hardware probe; refuses when the other platform's label lingers) and fails
   fast when none qualifies; with `-f` or a GitOps install the labels are
@@ -485,9 +483,9 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   # → true
   ```
 
-  Then `c8s install --hardware-platform=tdx --kata …` proceeds cleanly.
+  Then `c8s install --hardware-platform=tdx --cvm-mode=pod …` proceeds cleanly.
 
-- **One-shot `--kata` has a brief bootstrap window.** `c8s install --kata`
+- **One-shot `--cvm-mode=pod` has a brief bootstrap window.** `c8s install --cvm-mode=pod`
   brings up the webhook and the policy in the same release as kata-deploy,
   but kata-deploy takes 1–2 minutes per node to install the runtime. Pods
   created in that window are mutated to a Kata RuntimeClass and stay
@@ -511,7 +509,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   only on its own namespace (`c8s-system`); it does **not** label tenant
   namespaces. If your cluster has no PSA floor (or sets `privileged` as the
   default), any namespace user with create-pod RBAC can opt out of kata
-  enforcement by setting `hostNetwork: true`. Treat `--kata` as a
+  enforcement by setting `hostNetwork: true`. Treat `--cvm-mode=pod` as a
   cluster-operator gate that must be paired with PSA `restricted` or
   `baseline` on workload namespaces — without it, the host-namespace
   exemption is a tenant-accessible bypass, not just an operator carve-out.
@@ -534,14 +532,14 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   selector, so it lands on every Linux node — including control-plane nodes
   and nodes you have tainted to keep workloads off (quarantined,
   GPU-reserved, etc.). This is the deliberate "one-shot install" posture: a
-  bare `c8s install --kata` produces a cluster where every node can run kata
+  bare `c8s install --cvm-mode=pod` produces a cluster where every node can run kata
   pods. If you need to exclude nodes, override `kata.tolerations` /
   `kata.nodeSelector` in your values file. Because kata-deploy runs
   privileged with the host root mounted, narrow this if your trust model
   treats some nodes as out-of-scope for c8s.
 
-- **Confidential GPU ships with every `--kata` install.** There is no separate
-  flag: `c8s install --kata` always renders the platform's confidential-GPU
+- **Confidential GPU ships with every `--cvm-mode=pod` install.** There is no separate
+  flag: `c8s install --cvm-mode=pod` always renders the platform's confidential-GPU
   RuntimeClass (`kata-qemu-snp-nvidia` / `kata-qemu-tdx-nvidia`, handler
   `kata-qemu-nvidia-gpu-*`), the webhook injection for pods requesting
   `nvidia.com/*`, the `<tag>-nvidia` guest image puller, and the NVIDIA
@@ -559,7 +557,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   can read the pod's memory. Only the platform's confidential classes (pods
   annotated `confidential.ai/cw`, or requesting a GPU) are confidential VMs.
   "Pod-as-kata-cvm by default" is a posture the operator opts into with
-  `confidential.ai/cw`, not something a bare `c8s install --kata` gives every
+  `confidential.ai/cw`, not something a bare `c8s install --cvm-mode=pod` gives every
   pod.
 
 ## Uninstalling
@@ -606,7 +604,7 @@ the preStop-hook cleanup, but none of the sweep guarantees above.
 - A confos GPU kernel flavor for the `<tag>-nvidia` guest: compile and sign
   the NVIDIA open GPU kernel modules against a c8s-built kernel, replacing
   the modules/kernel grafted from kata's GPU rootfs — see
-  [`docs/kata-gpu.md`](kata-gpu.md) "Threat-model gaps" and `docs/GAPS.md`.
+  [`docs/kata-gpu.md`](kata-gpu.md) "Threat-model gaps".
 - A persistent TEE-capability reconciler. The install labels kata nodes once,
   at install time, from the declared `--hardware-platform`; a long-lived
   controller that labels nodes added after install (and verifies the declared
