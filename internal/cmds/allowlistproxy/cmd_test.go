@@ -2,8 +2,11 @@ package allowlistproxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -232,6 +235,84 @@ func TestNewHandlerServesHealthWithoutDialingCDS(t *testing.T) {
 	}
 }
 
+func TestRunContextServesAndShutsDown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listenCalled := make(chan struct {
+		network string
+		address string
+	}, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runContext(ctx, validConfig(), func(network, address string) (net.Listener, error) {
+			listenCalled <- struct {
+				network string
+				address string
+			}{network: network, address: address}
+			return listener, nil
+		})
+	}()
+
+	gotListen := <-listenCalled
+	if gotListen.network != "tcp" || gotListen.address != "127.0.0.1:8801" {
+		t.Fatalf("listen = %q %q, want tcp 127.0.0.1:8801", gotListen.network, gotListen.address)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + listener.Addr().String() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("health body = %q, want empty", body)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runContext: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runContext did not stop after context cancellation")
+	}
+}
+
+func TestRunContextReportsListenFailure(t *testing.T) {
+	bindErr := errors.New("bind failed")
+	err := runContext(context.Background(), validConfig(), func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != "127.0.0.1:8801" {
+			t.Fatalf("listen = %q %q, want tcp 127.0.0.1:8801", network, address)
+		}
+		return nil, bindErr
+	})
+	want := "listen 127.0.0.1:8801: bind failed"
+	if err == nil || err.Error() != want || !errors.Is(err, bindErr) {
+		t.Fatalf("error = %v, want wrapped %q", err, want)
+	}
+}
+
+func TestNewHandlerRejectsNonPositiveRequestTimeout(t *testing.T) {
+	_, err := newHandler(config{}, nil)
+	want := "--request-timeout must be positive"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
 func TestCommandRejectsPublicListenerBeforeStarting(t *testing.T) {
 	cmd := NewCmd()
 	cmd.SetOut(io.Discard)
@@ -253,5 +334,16 @@ func TestRunRejectsInvalidHeaderTimeoutBeforeBuildingHandler(t *testing.T) {
 	want := "--read-header-timeout must be positive"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func validConfig() config {
+	return config{
+		host:              "127.0.0.1",
+		port:              8801,
+		cdsURL:            "https://c8s-cds.c8s-system.svc:8443",
+		attestationAPIURL: "http://attestation-api.c8s-system.svc:8400",
+		requestTimeout:    time.Second,
+		readHeaderTimeout: time.Second,
 	}
 }

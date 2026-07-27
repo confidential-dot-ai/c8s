@@ -64,6 +64,14 @@ func NewCmd() *cobra.Command {
 }
 
 func run(cfg config) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx, cfg, net.Listen)
+}
+
+type listenFunc func(network, address string) (net.Listener, error)
+
+func runContext(ctx context.Context, cfg config, listen listenFunc) error {
 	addr, err := listenAddress(cfg.host, cfg.port)
 	if err != nil {
 		return err
@@ -81,12 +89,15 @@ func run(cfg config) error {
 		Handler:           handler,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	listener, err := listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	defer listener.Close()
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
 	slog.Info("tls-lb allowlist proxy listening", "addr", addr, "cds_url", cfg.cdsURL)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
