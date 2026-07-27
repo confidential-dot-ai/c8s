@@ -2,6 +2,7 @@ package allowlist
 
 import (
 	"errors"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -103,6 +104,9 @@ func TestReplaceEmptyClears(t *testing.T) {
 	}
 }
 
+// A fresh store must start at version "1": CDS clients cache on the derived
+// ETag (W/"1"), so the initial value is part of the API contract, not an
+// implementation detail.
 func TestInitialVersionIsOne(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
@@ -598,5 +602,72 @@ func TestContains(t *testing.T) {
 	}
 	if ok, err := store.Contains(absent); err != nil || ok {
 		t.Fatalf("Contains(absent) = %t, %v; want false, nil", ok, err)
+	}
+}
+
+func TestOpenStoreCreatesAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.db")
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("open new store: %v", err)
+	}
+	dA := mustParseDigest(t, digestA)
+	if err := store.Add(dA, "nginx:latest"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopening the same path must find the existing schema and data.
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	version, digests, err := reopened.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if version != "2" {
+		t.Fatalf("version: got %q, want %q", version, "2")
+	}
+	if digests[dA] != "nginx:latest" {
+		t.Fatalf("digest missing after reopen: %#v", digests)
+	}
+}
+
+// TestListAllSkipsCorruptRows pins the defensive skip: a row whose digest no
+// longer parses (only reachable by out-of-band DB tampering) is dropped from
+// ListAll instead of failing the whole listing.
+func TestListAllSkipsCorruptRows(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	dA := mustParseDigest(t, digestA)
+	if err := store.Add(dA, "good:v1"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Bypass the validating API and plant a corrupt row directly.
+	if _, err := store.db.Exec(
+		"INSERT INTO allowlist (digest, image) VALUES (?, ?)", "not-a-digest", "bad:v1",
+	); err != nil {
+		t.Fatalf("plant corrupt row: %v", err)
+	}
+
+	_, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(digests) != 1 {
+		t.Fatalf("expected corrupt row to be skipped, got %d entries: %#v", len(digests), digests)
+	}
+	if digests[dA] != "good:v1" {
+		t.Fatalf("valid row lost: %#v", digests)
 	}
 }

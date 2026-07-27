@@ -1,6 +1,7 @@
 package credrelease
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -243,5 +244,67 @@ func TestLoadClusterCAKubeadmSingleCA(t *testing.T) {
 	}
 	if string(ca.pem) != string(certPEM) {
 		t.Error("single-CA anchor mismatch")
+	}
+}
+
+// TestLoadClusterCAErrors drives every refusal branch: missing files and each
+// malformed PEM shape for the three inputs.
+func TestLoadClusterCAErrors(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath, _ := namedCA(t, dir, "client-ca")
+	serverPath, _, _ := namedCA(t, dir, "server-ca")
+
+	write := func(name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	notPEM := write("not-pem", []byte("junk"))
+	wrongTypeCert := write("wrong-type.crt", pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("x")}))
+	badDERCert := write("bad-der.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}))
+	badTypeKey := write("bad-type.key", pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: []byte("x")}))
+	missing := filepath.Join(dir, "does-not-exist")
+
+	tests := []struct {
+		name                string
+		cert, key, serverCA string
+	}{
+		{"missing client cert", missing, keyPath, serverPath},
+		{"missing client key", certPath, missing, serverPath},
+		{"missing server CA", certPath, keyPath, missing},
+		{"client cert wrong PEM type", wrongTypeCert, keyPath, serverPath},
+		{"client cert bad DER", badDERCert, keyPath, serverPath},
+		{"client key not PEM", certPath, notPEM, serverPath},
+		{"client key unsupported type", certPath, badTypeKey, serverPath},
+		{"server CA wrong PEM type", certPath, keyPath, wrongTypeCert},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := loadClusterCA(tc.cert, tc.key, tc.serverCA); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestParseCAKeyPKCS8Errors: garbage PKCS#8 DER fails to parse, and a valid
+// PKCS#8 key that cannot sign (X25519) is refused.
+func TestParseCAKeyPKCS8Errors(t *testing.T) {
+	if _, err := parseCAKey([]byte("junk"), "PRIVATE KEY"); err == nil {
+		t.Error("garbage PKCS#8 DER accepted")
+	}
+	xKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(xKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseCAKey(der, "PRIVATE KEY"); err == nil {
+		t.Error("X25519 (non-signing) PKCS#8 key accepted")
 	}
 }
