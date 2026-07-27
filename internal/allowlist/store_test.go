@@ -104,6 +104,28 @@ func TestReplaceEmptyClears(t *testing.T) {
 	}
 }
 
+// A fresh store must start at version "1": CDS clients cache on the derived
+// ETag (W/"1"), so the initial value is part of the API contract, not an
+// implementation detail.
+func TestInitialVersionIsOne(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	version, digests, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if version != "1" {
+		t.Fatalf("version: got %q, want %q", version, "1")
+	}
+	if len(digests) != 0 {
+		t.Fatalf("expected empty digests, got %d", len(digests))
+	}
+}
+
 func TestAddAndListRoundtrip(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
