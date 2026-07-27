@@ -1,14 +1,43 @@
 name: Docker
 
 on:
-  # Publish component images on pushes to main and on v* release tags. Feature
-  # branches don't publish: the kata-guest-base pipeline only builds for main /
-  # release tags (its job if: gates on head_branch == main || v*), so per-branch
-  # images had no consumer.
+  # Publish component images on EVERY push to main, and on v* release tags.
+  # Feature branches don't publish: the kata-guest-base pipeline only builds for
+  # main / release tags (its job if: gates on head_branch == main || v*), so
+  # per-branch images had no consumer.
+  #
+  # NO paths filter on the push trigger, deliberately. This workflow is the head
+  # of the whole post-merge chain: "Kata guest base" and confidential-e2e both
+  # fire off its completion via workflow_run, so a path gate here does not just
+  # skip an image build, it deletes that merge's measured guest image AND its
+  # SEV-SNP integration run. Both downstream files assert the opposite invariant
+  # in their own comments ("every merge to main builds to completion",
+  # kata-guest-base.yml; "run the c8s e2e ... for every main merge",
+  # confidential-e2e.yml) and both were silently false for 25 of the last 100
+  # merges. Verified: 0e3a876 and a7eb195 have ZERO Docker runs, their
+  # confidential-e2e workflow_run instances were skipped, and the only green
+  # runs on those shas came from a human pressing workflow_dispatch.
+  #
+  # A push that changes no buildable source is cheap AND is the correct thing to
+  # publish: paths-filter reports every component unchanged, docker-build-matrix.sh
+  # emits has_images=false with all five components in retag_matrix, `images`
+  # skips, and retag-unchanged aliases each component's current :main manifest to
+  # :<short-sha> (`oras tag` writes the registry tag index only, no layer upload).
+  # That alias IS what the commit deploys, so e2e-c8s.yml's resolve_tag() hits
+  # :<short-sha> on its first probe instead of walking ancestry. This exact shape
+  # already runs green end to end: run 30024702633 (45cd7a0) took 18s, and its
+  # cascade produced a successful kata build (30024734222) and a successful
+  # SEV-SNP e2e (30024734575).
   push:
     branches: [main]
     tags: ["v*"]
-    paths: &docker-paths
+  # PRs stay path-gated: a PR run builds and scans but publishes nothing (see the
+  # push/dispatch gates on the login and build-push steps), so a docs-only PR has
+  # nothing to gain from it. The list is inlined because the YAML anchor it used
+  # to alias (&docker-paths) lived on the push trigger above.
+  pull_request:
+    branches: [main]
+    paths:
       - "**.go"
       - "go.mod"
       - "go.sum"
@@ -19,19 +48,15 @@ on:
       - "internal/helmchart/c8s/**"
       - "Makefile"
       - ".github/workflows/docker.yml"
-  pull_request:
-    branches: [main]
-    paths: *docker-paths
-  # Manual rebuild escape hatch. The push trigger above is path-gated to source
-  # changes, so a rebuild driven by something OFF the source tree — a
-  # base-image refresh or a registry re-push — has no commit that would trip
-  # the paths filter and cannot otherwise run. workflow_dispatch publishes
-  # EVERY component image at
-  # this commit's tags (the matrix fans out to all of them — see
-  # docker-build-matrix.sh), exactly as a tag push does, so the downstream
+  # Manual rebuild escape hatch, for a rebuild with NO new commit behind it: a
+  # base-image refresh or a registry re-push. workflow_dispatch publishes EVERY
+  # component image at this commit's tags (the matrix fans out to all of them,
+  # see docker-build-matrix.sh), exactly as a tag push does, so the downstream
   # "Kata guest base" workflow can resolve every component's :<short-sha> and
   # cascade off this run (its workflow_run gate accepts a workflow_dispatch
-  # origin on main / v* — see kata-guest-base.yml).
+  # origin on main / v*, see kata-guest-base.yml). NOTE: dispatching this
+  # workflow just to give a docs-only merge its images and its TEE run is no
+  # longer necessary; the unfiltered push trigger above covers that.
   workflow_dispatch:
 
 permissions:
@@ -257,7 +282,52 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.retag_matrix) }}
+    # Job-level permissions REPLACE the workflow-level block for this job, so
+    # packages: write has to be restated here or `oras tag` loses its push scope.
+    # actions: read is new, for the in-flight query in the first step.
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     steps:
+      # `oras tag IMAGE:main IMAGE:<short-sha>` copies whatever :main points at
+      # RIGHT NOW, and this workflow has no concurrency group, so runs overlap.
+      # Burst: source merge A lands (its build takes ~3m45s), non-source merge B
+      # lands a minute later, B's retag finishes in ~20s and stamps the PRE-A
+      # manifest onto sha_b. B's e2e then boots a CVM on binaries that predate
+      # its own tree and reports GREEN. Measured on the last 100 merges: 3 such
+      # pairs (bfe81c9 -> 8e49fb4, 0.4 min; f8dc9a1 -> 637da51, 1.1 min;
+      # 56d38bd -> 567019e, 0.3 min). Run ids increase monotonically per repo,
+      # so "id < ours" means "queued earlier". Bounded wait, then warn and go.
+      #
+      # Do NOT swap this for a workflow-level `concurrency:`: GitHub cancels the
+      # PENDING run when a newer one queues into the same group, so a 3-merge
+      # burst would drop the middle merge's Docker run entirely, taking its
+      # images, its kata build and its e2e with it.
+      - name: Wait out older in-flight Docker runs on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          busy=0
+          for i in $(seq 1 60); do
+            if ! busy=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/docker.yml/runs?event=push&branch=main&per_page=50" \
+                          --jq '.workflow_runs[] | select(.status != "completed") | .id' \
+                        | awk -v me="$GITHUB_RUN_ID" 'NF && $1+0 < me+0' | wc -l | tr -d ' '); then
+              echo "::warning::could not query in-flight Docker runs; proceeding without the ordering guard"
+              busy=0
+              break
+            fi
+            if [ "$busy" = "0" ]; then
+              echo "no older in-flight Docker run on main"
+              break
+            fi
+            echo "waiting on ${busy} older Docker run(s) on main (${i}/60)"
+            sleep 15
+          done
+          if [ "$busy" != "0" ]; then
+            echo "::warning::proceeding after a 15m wait; :main may lag an older in-flight build"
+          fi
       - name: Log in to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -275,6 +345,15 @@ jobs:
         run: |
           set -euo pipefail
           SHORT_SHA="${FULL_SHA:0:7}"
+          # A component in retag_matrix that has never been built on main has no
+          # :main to copy. Warn and skip rather than fail: failing this leg fails
+          # the whole Docker run, which blocks the kata build and the TEE e2e for
+          # a commit whose other four images are fine. A genuinely missing image
+          # still surfaces loudly downstream as ImagePullBackOff.
+          if ! oras manifest fetch "${IMAGE}:main" > /dev/null 2>&1; then
+            echo "::warning::${IMAGE}:main does not exist; skipping retag for ${IMAGE}"
+            exit 0
+          fi
           echo "==> oras tag ${IMAGE}:main ${SHORT_SHA}"
           # Idempotent: re-runs of the same commit are no-ops if the
           # tag already points at the same manifest.
