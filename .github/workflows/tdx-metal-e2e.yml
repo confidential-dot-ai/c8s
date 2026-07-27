@@ -1,0 +1,456 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
+# ═══════════════════════════════════════════════════════════════════════════
+# SOURCE OF TRUTH:
+#   confidential-dot-ai/confidential-ci  .github/workflows/tdx-metal-e2e.yml
+# VENDORED COPY:
+#   confidential-dot-ai/c8s              .github/workflows/tdx-metal-e2e.yml
+#
+# WHY A COPY EXISTS AT ALL: c8s is PUBLIC and confidential-ci is PRIVATE, and a
+# public repo cannot `uses:` a private repo's reusable workflow. Vendoring is
+# the workaround, the same one cvm-e2e.yml and e2e-c8s.yml already use. It is a
+# stopgap, not a design: see confidential-ci research/ADR-matrix-architecture.
+#
+# THE DRIFT HAZARD IS REAL, NOT THEORETICAL. c8s's vendored cvm-e2e.yml silently
+# fell 121 lines behind its confidential-ci original and lost an entire platform
+# arm. Nothing detected it, because neither copy referenced the other.
+#
+# THE RULE: edit the source of truth, then copy the WHOLE file across unchanged.
+# Both copies carry both triggers (workflow_call and workflow_dispatch) precisely
+# so that no per-repo edit is ever needed and a plain checksum can prove they
+# match. If you find yourself wanting to change only one copy, that is the signal
+# to stop vendoring and solve it properly instead.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# c8s on TDX BARE METAL: the product lane
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Boots the PUBLISHED, UNMODIFIED c8s node image as an Intel TDX CVM on
+# tdx-gh-runner, installs the c8s bundle into it, and asserts the product's
+# security guarantee: the baked NRI floor DENIES a non-allowlisted image.
+#
+# Proven by hand on hardware 2026-07-26 before this lane existed: image
+# imported via CDI, CVM booted, operator-key-bound kubeconfig obtained over
+# RA-TLS, `c8s install` deployed cds/operator/ratls-mesh/tls-lb, and busybox
+# was denied with "image not in allowlist".
+#
+# WHY THIS LANE HAS NO SERIAL CONSOLE (and the SNP lane does): the c8s node
+# image is console-dead by design (hardened kernel, no CONFIG_SERIAL_8250, no
+# sshd, root locked). Its supported entrypoint is the network: attestation-api
+# on :8400, kube-apiserver on :6443, cred-release on :8443. That works here
+# only because this host's OUTER cluster was renumbered to 172.20/172.21, so a
+# guest running rke2's default 10.42/10.43 no longer collides with it. The SNP
+# lane cannot do this: its cluster is live on 10.42 and RKE2 CIDRs are fixed at
+# init. Consequence worth keeping: no secret ever transits a loggable channel
+# here, so this lane is free of the console PEM-leak gap the SNP lane carries.
+#
+# DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+name: tdx-metal-e2e
+
+on:
+  # workflow_call so the vendored copy can be invoked as a job by c8s's
+  # e2e-c8s.yml. workflow_dispatch so either copy stays runnable by hand.
+  # Both copies carry both, so the two files remain byte-identical.
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: 'c8s ref to test. Defaults to the ref paired with the node image.'
+        required: false
+        type: string
+        default: ''
+      keep_cvm:
+        description: 'leave the CVM running for debugging instead of tearing it down'
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      c8s_ref:
+        description: 'c8s git ref to install + test. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (VERSION PAIRING: the node image bakes an admission floor containing the bootstrap digests from ITS build ref, so a mismatched CLI gets its own components denied).'
+        required: false
+        default: ''
+      keep_cvm:
+        description: 'Skip teardown to debug a failure. The reaper still clears it after 3h.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time: the lane boots a CVM off a shared RWO rootdisk PVC.
+  group: tdx-metal-e2e
+  cancel-in-progress: false
+
+env:
+  NS: confai-images
+  REFS_CM: tdx-rke2-image-refs
+  VM: c8s-tdx-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  e2e:
+    # Named to match the SNP primitive's leaf, `cvm (<platform>/<flavor>)`,
+    # so both lanes read the same way in the run tree.
+    name: cvm (tdx-metal/rke2-node)
+    # The HOST-side launcher runner on tdx-gh-runner. Its bm-e2e SA is scoped to
+    # confai-images (baremetal/kubevirt-rbac.yaml); kubectl uses the in-cluster
+    # token, so there is no kubeconfig to manage for the OUTER cluster.
+    runs-on: cvm-launcher-tdx
+    # CDI import is pre-staged, so: boot ~1m + guest first boot ~3m + c8s CLI
+    # build ~3m + install/converge ~3m + asserts. Headroom for a cold go cache.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: tools (kubectl, go, crane, helm)
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/bin"
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          chmod +x bin/kubectl
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+          if ! command -v go >/dev/null; then
+            GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//')"
+            [ -n "$GOVER" ] || GOVER=1.26.3
+            curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xz
+          fi
+          # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
+          # inside THIS one. `go install crane` below needs it here and now.
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          # crane: `c8s install --resolve-digests=true` below shells out to it.
+          # Pinned rather than fetched through the GitHub releases API, which
+          # rate-limits by IP on a shared self-hosted host.
+          command -v crane >/dev/null || go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          # helm: c8s install shells out to it too. The ephemeral ARC pod has
+          # neither binary, unlike the host, so install rather than assume.
+          if ! command -v helm >/dev/null; then
+            curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz \
+              | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+          fi
+
+      # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
+      # Fail SAFE: only reap on a positive "completed", or on age. An unknown
+      # status (403/404/no token) KEEPS the CVM rather than killing a live run.
+      - name: reap leaked CVMs from finished runs
+        run: |
+          set +e +o pipefail
+          NOW=$(date -u +%s)
+          for vm in $(kubectl -n "$NS" get vm -l ci.confidential.ai/managed=true -o name 2>/dev/null); do
+            rid=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/run-id}' 2>/dev/null)
+            standing=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.labels.ci\.confidential\.ai/standing}' 2>/dev/null)
+            [ "$standing" = "true" ] && { echo "keeping $vm (standing runner)"; continue; }
+            [ -z "$rid" ] && continue
+            [ "$rid" = "${{ github.run_id }}" ] && continue
+            ct=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+            age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
+            # Ask GitHub whether the owning run is actually finished, rather than
+            # waiting out the 3h age fallback while a CVM squats a finite host.
+            # ANY org repo can invoke this lane, so the owning repo is read from
+            # the annotation (a label value cannot hold the '/' in owner/repo).
+            # Ported from cvm-e2e.yml, which has had this since the SNP lane
+            # started leaking CVMs on cancelled runs.
+            # NOTE: this needs `actions: read`. Without it the call 403s, $st is
+            # empty, and we degrade to exactly the age-only behaviour this
+            # replaces, which is safe but slow.
+            orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
+            st=$(gh api "repos/${orepo:-${{ github.repository }}}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ]; then
+              echo "reaping $vm (run ${orepo:-${{ github.repository }}}#$rid completed)"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            elif [ -z "$st" ] && [ "$age" -gt 10800 ]; then
+              echo "reaping $vm (status unknown, age ${age}s > 3h -> orphaned)"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
+            fi
+          done
+          exit 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: resolve image refs + the paired c8s ref
+        run: |
+          set -euo pipefail
+          for k in image rootPvc mrtd c8sRef; do
+            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
+            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref"; exit 1; }
+            echo "$k=$v" >> "$GITHUB_ENV"
+          done
+          # An explicit input overrides the pin, but say so loudly: the floor is
+          # fail-closed, so an unpaired ref is the likeliest cause of a red run.
+          if [ -n '${{ inputs.c8s_ref }}' ]; then
+            echo "::warning title=version pairing::testing c8s_ref='${{ inputs.c8s_ref }}' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}')': components may be denied by the baked floor"
+            echo "c8sRef=${{ inputs.c8s_ref }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: preflight, TDX device capacity
+        # KubeVirt's socket device-plugin probes the QGS socket ONLY at
+        # virt-handler startup and never re-checks. After a host reboot or a
+        # qgsd/bridge restart it advertises 0 forever and every TDX VM fails to
+        # schedule with a misleading "Insufficient devices". Seen in the wild
+        # 2026-07-26 on a 26h-old virt-handler while QGS was perfectly healthy.
+        # Cheap to detect here; the remedy needs cluster-scoped rights the
+        # bm-e2e SA deliberately lacks, so this reports rather than fixes.
+        run: |
+          set -uo pipefail
+          if kubectl auth can-i get nodes >/dev/null 2>&1; then
+            N=$(kubectl get node -l kubevirt.io/tdx=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/tdx}' 2>/dev/null)
+            echo "devices.kubevirt.io/tdx = ${N:-unknown}"
+            if [ "${N:-0}" = "0" ]; then
+              echo "::error title=TDX devices exhausted::virt-handler is advertising 0 TDX devices. Fix on the host: kubectl -n kubevirt rollout restart daemonset/virt-handler"
+              exit 1
+            fi
+          else
+            echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
+          fi
+
+      - name: per-run operator key + opkeydata secret
+        # The initrd mounts the ISO labelled "opkeydata", SHA-384s the file
+        # named `pubkey`, and extends that into RTMR[3]. cred-release then
+        # refuses to serve if the on-disk key does not match RTMR[3], so the
+        # kubeconfig we fetch is cryptographically bound to THIS keypair.
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
+          openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+          kubectl -n "$NS" create secret generic "$VM-opkey" \
+            --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl apply -f -
+          echo "operator key bound (sha384 $(sha384sum < /tmp/op.pub | cut -c1-16)...)"
+
+      - name: boot the TDX CVM
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: $VM-scratch
+            namespace: $NS
+            labels: {ci.confidential.ai/managed: "true"}
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources: {requests: {storage: 80Gi}}
+            storageClassName: local-path
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata: {name: $VM-cloudinit, namespace: $NS}
+          type: Opaque
+          stringData:
+            userdata: |
+              #cloud-config
+              hostname: ${VM}
+          ---
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: $VM
+            namespace: $NS
+            labels:
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/run-id: "${{ github.run_id }}"
+            annotations:
+              ci.confidential.ai/repo: "${{ github.repository }}"
+              ci.confidential.ai/run-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          spec:
+            runStrategy: Always
+            template:
+              metadata:
+                labels: {kubevirt.io/domain: $VM}
+              spec:
+                nodeSelector:
+                  kubevirt.io/tdx: "true"
+                domain:
+                  cpu:
+                    # host-passthrough is MANDATORY: QEMU rejects a named model
+                    # for TDX ("Named cpu model is not supported for TDX yet!").
+                    model: host-passthrough
+                    cores: 4
+                  devices:
+                    autoattachVSOCK: true
+                    disks:
+                      - name: rootdisk
+                        # dm-verity rootfs: never written. readonly takes a
+                        # SHARED qemu lock so concurrent CVMs coexist; a
+                        # writable open takes an EXCLUSIVE one and starves every
+                        # other guest on the same PVC (cost the SNP lane a day).
+                        # NB: readonly is a field of `disk`, not a sibling of it;
+                        # KubeVirt's strict decoder rejects the sibling form.
+                        disk: {bus: virtio, readonly: true}
+                      - name: scratch
+                        disk: {bus: virtio}
+                        # HARD requirement: the initrd keys the encrypted
+                        # overlay off this exact serial. Without it the guest
+                        # falls back to a 2G tmpfs and rke2 wedges when full.
+                        serial: confai-scratch
+                      - name: opkey
+                        disk: {bus: virtio}
+                      - name: cloudinit
+                        disk: {bus: virtio}
+                    interfaces: [{name: default, masquerade: {}}]
+                    rng: {}
+                  firmware: {bootloader: {efi: {secureBoot: false}}}
+                  # Empty object: TDX takes no per-VM policy. Cluster config
+                  # lives in the KubeVirt CR (confidentialCompute.tdx.attestation).
+                  launchSecurity: {tdx: {}}
+                  memory: {guest: 16Gi}
+                  resources: {requests: {memory: 16Gi}}
+                networks: [{name: default, pod: {}}]
+                volumes:
+                  - name: rootdisk
+                    persistentVolumeClaim: {claimName: $rootPvc}
+                  - name: scratch
+                    persistentVolumeClaim: {claimName: $VM-scratch}
+                  - name: opkey
+                    secret: {secretName: $VM-opkey, volumeLabel: opkeydata}
+                  - name: cloudinit
+                    cloudInitNoCloud: {secretRef: {name: $VM-cloudinit}}
+          EOF
+          for i in $(seq 1 60); do
+            PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$PHASE" = Running ] && break
+            sleep 5
+          done
+          if [ "${PHASE:-}" != Running ]; then
+            kubectl -n "$NS" describe vmi "$VM" | tail -25
+            echo "::error::VMI not Running (phase=${PHASE:-none}). 'Insufficient devices.kubevirt.io/tdx' means virt-handler latched 0: rollout restart daemonset/virt-handler -n kubevirt"
+            exit 1
+          fi
+          IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}')
+          [ -n "$IP" ] || { echo "::error::no guest IP"; exit 1; }
+          echo "GUEST_IP=$IP" >> "$GITHUB_ENV"
+          echo "VMI Running at $IP"
+
+      - name: assert genuine TDX launch
+        run: |
+          set -euo pipefail
+          POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name | head -1)
+          kubectl -n "$NS" exec "$POD" -c compute -- \
+            bash -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline | grep -c "tdx-guest"' | tee /tmp/tdx.cnt
+          [ "$(cat /tmp/tdx.cnt)" -ge 1 ] || { echo "::error::qemu has no tdx-guest object: not a genuine trust domain"; exit 1; }
+          echo "OK: qemu launched with -object tdx-guest"
+
+      - name: wait for guest services (attestation-api, apiserver, cred-release)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            H=$(curl -s --connect-timeout 2 --max-time 4 "http://$GUEST_IP:8400/health" 2>/dev/null || true)
+            [ -n "$H" ] && { echo "attestation-api: $H"; break; }
+            sleep 10
+          done
+          echo "$H" | grep -q '"platform":"tdx"' || { echo "::error::attestation-api did not report platform=tdx"; exit 1; }
+          for i in $(seq 1 60); do
+            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:6443/livez" 2>/dev/null || true)
+            case "$C" in 200|401|403) echo "kube-apiserver: HTTP $C"; break;; esac
+            sleep 5
+          done
+          for i in $(seq 1 60); do
+            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
+            [ -n "$C" ] && [ "$C" != 000 ] && { echo "cred-release: HTTP $C"; break; }
+            sleep 5
+          done
+
+      - name: build the c8s CLI at the paired ref
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/c8s-src
+          git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
+          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
+          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
+          ( cd /tmp/c8s-src && go install ./cmd/c8s )
+          # An unstamped build reports "dev", which is exactly why --image-tag
+          # is passed explicitly at install rather than trusting build metadata.
+          c8s --version || true
+
+      - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
+        run: |
+          set -euo pipefail
+          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --out /tmp/guest.kubeconfig --timeout 180s
+          [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
+          WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+          [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
+          echo "OK: attested kubeconfig, identity=$WHO"
+          KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes
+
+      - name: install the c8s bundle under test
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          c8s install --cvm-mode node --single-node --hardware-platform tdx \
+            --image-tag "$c8sRef" \
+            --operator-keys /tmp/op.pub \
+            --measurements "$mrtd" \
+            --resolve-digests=true
+          kubectl -n c8s-system get pods -o wide
+
+      - name: assert components converged
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          # awk, not a regex backreference: `$2 !~ /^([0-9]+)\/\1$/` looks right
+          # and is not (awk has no backreferences), so it silently only ever
+          # matches 1/1 and calls every sidecar-bearing pod not-ready.
+          for i in $(seq 1 40); do
+            NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
+            TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
+            [ "$TOTAL" -gt 0 ] && [ "$NOTREADY" -eq 0 ] && { echo "all $TOTAL components Running"; break; }
+            sleep 15
+          done
+          kubectl -n c8s-system get pods --no-headers
+          [ "${NOTREADY:-1}" -eq 0 ] || { echo "::error::components did not converge"; kubectl -n c8s-system describe pods | tail -40; exit 1; }
+
+      - name: NEGATIVE, the baked floor must deny a non-allowlisted image
+        # The product's core guarantee, asserted rather than worked around.
+        # Uses the `default` namespace deliberately: the node image bakes a
+        # restricted PSA default and exempts `default` for smoke pods, so a
+        # denial here is unambiguously the IMAGE floor, not PodSecurity.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          kubectl -n default delete pod denied --ignore-not-found >/dev/null 2>&1 || true
+          kubectl -n default run denied --image=busybox:1.36 --restart=Never --command -- sleep 300
+          for i in $(seq 1 24); do
+            R=$(kubectl -n default get pod denied -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)
+            [ -n "$R" ] && [ "$R" != ContainerCreating ] && break
+            sleep 5
+          done
+          MSG=$(kubectl -n default get pod denied -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' 2>/dev/null || true)
+          echo "reason=$R"
+          echo "message=$MSG"
+          echo "$MSG" | grep -q 'image not in allowlist' || {
+            echo "::error title=SECURITY REGRESSION::the baked NRI floor did NOT deny a non-allowlisted image (reason=$R). The product's fail-closed admission guarantee is not holding on this image."
+            kubectl -n default describe pod denied | tail -20
+            exit 1
+          }
+          echo "OK: floor denied busybox:1.36 at container creation"
+          kubectl -n default delete pod denied --wait=false >/dev/null 2>&1 || true
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### c8s on TDX metal"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`${image:-?}\` |"
+            echo "| rootPvc | \`${rootPvc:-?}\` |"
+            echo "| c8s ref | \`${c8sRef:-?}\` |"
+            echo "| MRTD | \`${mrtd:0:32}...\` |"
+            echo "| guest | \`${GUEST_IP:-?}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: teardown
+        if: always() && inputs.keep_cvm != true
+        run: |
+          set +e
+          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=120s
+          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found
+          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false
+          exit 0
