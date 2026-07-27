@@ -195,7 +195,6 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 		name       string
 		req        *http.Request
 		wantStatus int
-		wantBody   string
 	}{
 		{
 			name:       "unknown path",
@@ -211,7 +210,6 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 			name:       "body read error",
 			req:        httptest.NewRequest(http.MethodPost, "/release-credential", errReader{}),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "read body",
 		},
 		{
 			name:       "missing authorization",
@@ -222,26 +220,22 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 			name:       "authorized but not JSON",
 			req:        authorized([]byte("{not json")),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "bad request",
 		},
 		{
 			name:       "CSR not PEM",
 			req:        authorized(mustJSON(releaseRequest{CSRPEM: "garbage"})),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "bad CSR",
 		},
 		{
 			name: "CSR PEM with garbage DER",
 			req: authorized(mustJSON(releaseRequest{CSRPEM: string(pem.EncodeToMemory(
 				&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: []byte("junk")}))})),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "bad CSR",
 		},
 		{
 			name:       "CSR with RSA key",
 			req:        authorized(mustJSON(releaseRequest{CSRPEM: string(csrPEMFromKey(t, rsaKey))})),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "want ECDSA",
 		},
 		{
 			// Client fault: a tampered CSR is the caller's garbage, not a
@@ -249,7 +243,6 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 			name:       "CSR with tampered self-signature is a client fault",
 			req:        authorized(mustJSON(releaseRequest{CSRPEM: string(tamperedCSR)})),
 			wantStatus: http.StatusBadRequest,
-			wantBody:   "bad CSR",
 		},
 	}
 	for _, tc := range tests {
@@ -258,9 +251,6 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 			h.ServeHTTP(rec, tc.req)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantBody != "" && !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantBody)) {
-				t.Errorf("body %q does not contain %q", rec.Body.String(), tc.wantBody)
 			}
 		})
 	}

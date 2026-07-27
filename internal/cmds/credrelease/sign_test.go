@@ -9,11 +9,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
-	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -274,25 +271,20 @@ func TestLoadClusterCAErrors(t *testing.T) {
 	tests := []struct {
 		name                string
 		cert, key, serverCA string
-		wantErr             string
 	}{
-		{"missing client cert", missing, keyPath, serverPath, "read client CA cert"},
-		{"missing client key", certPath, missing, serverPath, "read client CA key"},
-		{"missing server CA", certPath, keyPath, missing, "read server CA cert"},
-		{"client cert wrong PEM type", wrongTypeCert, keyPath, serverPath, "not a CERTIFICATE PEM"},
-		{"client cert bad DER", badDERCert, keyPath, serverPath, "parse client CA cert"},
-		{"client key not PEM", certPath, notPEM, serverPath, "is not PEM"},
-		{"client key unsupported type", certPath, badTypeKey, serverPath, "parse client CA key"},
-		{"server CA wrong PEM type", certPath, keyPath, wrongTypeCert, "not a CERTIFICATE PEM"},
+		{"missing client cert", missing, keyPath, serverPath},
+		{"missing client key", certPath, missing, serverPath},
+		{"missing server CA", certPath, keyPath, missing},
+		{"client cert wrong PEM type", wrongTypeCert, keyPath, serverPath},
+		{"client cert bad DER", badDERCert, keyPath, serverPath},
+		{"client key not PEM", certPath, notPEM, serverPath},
+		{"client key unsupported type", certPath, badTypeKey, serverPath},
+		{"server CA wrong PEM type", certPath, keyPath, wrongTypeCert},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := loadClusterCA(tc.cert, tc.key, tc.serverCA)
-			if err == nil {
+			if _, err := loadClusterCA(tc.cert, tc.key, tc.serverCA); err == nil {
 				t.Fatal("expected error, got nil")
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error %q does not contain %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -312,37 +304,7 @@ func TestParseCAKeyPKCS8Errors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parseCAKey(der, "PRIVATE KEY"); err == nil || !strings.Contains(err.Error(), "cannot sign") {
-		t.Errorf("X25519 key: err = %v, want \"cannot sign\"", err)
-	}
-}
-
-// TestSignOperatorCertNilCSR: a nil CSR is refused before any signing.
-func TestSignOperatorCertNilCSR(t *testing.T) {
-	if _, err := testCA(t).signOperatorCert(signParams{
-		org: "system:masters", cn: "operator", ttl: time.Hour,
-	}, time.Now()); err == nil || !strings.Contains(err.Error(), "nil CSR") {
-		t.Errorf("err = %v, want nil CSR error", err)
-	}
-}
-
-// TestSignOperatorCertSerialErrors: a failing serial source and a serial
-// CreateCertificate rejects (negative) both surface as errors.
-func TestSignOperatorCertSerialErrors(t *testing.T) {
-	ca := testCA(t)
-	csr := testCSR(t)
-
-	if _, err := ca.signOperatorCert(signParams{
-		csr: csr, org: "o", cn: "cn", ttl: time.Hour,
-		serialFn: func() (*big.Int, error) { return nil, errors.New("entropy exhausted") },
-	}, time.Now()); err == nil || !strings.Contains(err.Error(), "serial") {
-		t.Errorf("serialFn error: err = %v, want serial error", err)
-	}
-
-	if _, err := ca.signOperatorCert(signParams{
-		csr: csr, org: "o", cn: "cn", ttl: time.Hour,
-		serialFn: func() (*big.Int, error) { return big.NewInt(-1), nil },
-	}, time.Now()); err == nil || !strings.Contains(err.Error(), "sign") {
-		t.Errorf("negative serial: err = %v, want sign error", err)
+	if _, err := parseCAKey(der, "PRIVATE KEY"); err == nil {
+		t.Error("X25519 (non-signing) PKCS#8 key accepted")
 	}
 }

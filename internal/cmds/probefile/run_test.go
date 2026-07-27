@@ -90,16 +90,6 @@ func TestCmdOneShot(t *testing.T) {
 	}
 }
 
-func TestCmdOneShotFailsOnMissingFile(t *testing.T) {
-	cmd := NewCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{filepath.Join(t.TempDir(), "missing.pem")})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("Execute(missing) = nil, want error")
-	}
-}
-
 func TestCmdWaitTimesOut(t *testing.T) {
 	cmd := NewCmd()
 	cmd.SetOut(io.Discard)

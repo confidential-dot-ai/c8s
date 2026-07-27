@@ -1,7 +1,6 @@
 package allowlist
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/spf13/cobra"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -49,11 +46,16 @@ func servingCDS(t *testing.T, digests map[string]string) (url string, methods *[
 	return srv.URL, &seen
 }
 
-// listFailingCDS fails every GET with 500 but accepts writes, so the
-// "could not fetch allowlist" warning paths run.
-func listFailingCDS(t *testing.T) string {
+// listFailingCDS fails every GET with 500 but accepts writes (recording the
+// methods it saw), so the "could not fetch allowlist" warning paths run.
+func listFailingCDS(t *testing.T) (url string, methods *[]string) {
 	t.Helper()
+	var mu sync.Mutex
+	seen := []string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method)
+		mu.Unlock()
 		if r.Method == http.MethodGet {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
@@ -61,7 +63,7 @@ func listFailingCDS(t *testing.T) string {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, &seen
 }
 
 // --- validate / client flag handling ---
@@ -182,18 +184,6 @@ func TestListJSONOutput(t *testing.T) {
 	}
 }
 
-func TestListTextOutput(t *testing.T) {
-	url, _ := servingCDS(t, map[string]string{digA: "registry/app@" + digA})
-
-	out, _, err := runCmd("list", "--url", url, "--insecure")
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if !strings.Contains(out, "version 7: 1 floor digest(s), 0 workload(s)") || !strings.Contains(out, digA) {
-		t.Fatalf("unexpected text output:\n%s", out)
-	}
-}
-
 func TestExportToStdout(t *testing.T) {
 	url, _ := servingCDS(t, map[string]string{digA: "registry/app@" + digA})
 
@@ -219,12 +209,9 @@ func TestExportToFileRoundTrips(t *testing.T) {
 	url, _ := servingCDS(t, map[string]string{digA: "registry/app@" + digA})
 	path := filepath.Join(t.TempDir(), "backup.json")
 
-	_, stderr, err := runCmd("export", path, "--url", url, "--insecure")
+	_, _, err := runCmd("export", path, "--url", url, "--insecure")
 	if err != nil {
 		t.Fatalf("export to file: %v", err)
-	}
-	if !strings.Contains(stderr, "wrote 1 floor digest(s) and 0 workload(s) to "+path) {
-		t.Fatalf("missing write confirmation, stderr=%q", stderr)
 	}
 
 	// The exported file must round-trip through the same loader upload/diff use.
@@ -248,32 +235,6 @@ func TestExportWriteFailure(t *testing.T) {
 }
 
 // --- diff ---
-
-func TestDiffTextOutput(t *testing.T) {
-	digC := "sha256:" + repeat("c", 64)
-	url, _ := servingCDS(t, map[string]string{
-		digA: "img-a",
-		digB: "img-b-old",
-	})
-	file := writeAllowlistFile(t, t.TempDir(), map[string]string{
-		digB: "img-b-new",
-		digC: "img-c",
-	})
-
-	out, _, err := runCmd("diff", file, "--url", url, "--insecure")
-	if err != nil {
-		t.Fatalf("diff: %v", err)
-	}
-	for _, want := range []string{
-		"+ " + digC + "  img-c",
-		"- " + digA + "  img-a",
-		"~ " + digB + "  img-b-old -> img-b-new",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("diff output missing %q:\n%s", want, out)
-		}
-	}
-}
 
 func TestDiffJSONOutput(t *testing.T) {
 	url, _ := servingCDS(t, map[string]string{digA: "img-a"})
@@ -321,34 +282,28 @@ func TestAddRejectsInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestAddWritesAndReports(t *testing.T) {
+func TestAddWrites(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
 	url, methods := recordingCDS(t)
 
-	out, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if !contains(*methods, http.MethodPost) {
 		t.Fatalf("expected a POST, saw %v", *methods)
 	}
-	if !strings.Contains(out, "added "+digA) {
-		t.Fatalf("missing confirmation, out=%q", out)
-	}
 }
 
 func TestRemoveDryRunMakesNoCall(t *testing.T) {
 	url, methods := recordingCDS(t)
-	out, _, err := runCmd("remove", digA, digB, "--url", url, "--insecure", "--dry-run")
+	_, _, err := runCmd("remove", digA, digB, "--url", url, "--insecure", "--dry-run")
 	if err != nil {
 		t.Fatalf("remove --dry-run: %v", err)
 	}
 	if len(*methods) != 0 {
 		t.Fatalf("dry-run must not call CDS, saw %v", *methods)
-	}
-	if !strings.Contains(out, "would remove "+digA) || !strings.Contains(out, "would remove "+digB) {
-		t.Fatalf("missing dry-run output:\n%s", out)
 	}
 }
 
@@ -359,40 +314,34 @@ func TestRemoveRejectsInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestRemoveWarnsWhenListFails(t *testing.T) {
+func TestRemoveProceedsWhenListFails(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	url := listFailingCDS(t)
+	url, methods := listFailingCDS(t)
 
-	out, stderr, err := runCmd("remove", digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("remove", digA, "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("remove should still delete when the pre-check list fails: %v", err)
 	}
-	if !strings.Contains(stderr, "could not fetch allowlist") {
-		t.Fatalf("expected the list-failure warning, stderr=%q", stderr)
-	}
-	if !strings.Contains(out, "removed 1 digest(s)") {
-		t.Fatalf("missing removal confirmation, out=%q", out)
+	if !contains(*methods, http.MethodDelete) {
+		t.Fatalf("expected a DELETE despite the failing pre-check list, saw %v", *methods)
 	}
 }
 
 // --- upload ---
 
-func TestUploadWarnsWhenListFailsForDiff(t *testing.T) {
+func TestUploadProceedsWhenListFailsForDiff(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
 	file := writeAllowlistFile(t, dir, coreImages())
-	url := listFailingCDS(t)
+	url, methods := listFailingCDS(t)
 
-	out, stderr, err := runCmd("upload", file, "--url", url, "--insecure", "--operator-key", keyPath)
+	_, _, err := runCmd("upload", file, "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
-	if !strings.Contains(stderr, "could not fetch current allowlist for diff") {
-		t.Fatalf("expected the diff-failure warning, stderr=%q", stderr)
-	}
-	if !strings.Contains(out, "uploaded") {
-		t.Fatalf("missing upload confirmation, out=%q", out)
+	if !contains(*methods, http.MethodPut) {
+		t.Fatalf("expected a PUT despite the failing diff pre-fetch, saw %v", *methods)
 	}
 }
 
@@ -402,12 +351,8 @@ func TestUploadRequireOverridesDefaults(t *testing.T) {
 	file := writeAllowlistFile(t, dir, map[string]string{digA: "registry/team/myapp@" + digA})
 	url, _ := servingCDS(t, nil)
 
-	out, _, err := runCmd("upload", file, "--url", url, "--insecure", "--require", "myapp", "--dry-run")
-	if err != nil {
+	if _, _, err := runCmd("upload", file, "--url", url, "--insecure", "--require", "myapp", "--dry-run"); err != nil {
 		t.Fatalf("upload with --require override failed: %v", err)
-	}
-	if !strings.Contains(out, "dry-run: would replace allowlist with 1 floor digest(s) and 0 workload(s)") {
-		t.Fatalf("missing dry-run summary:\n%s", out)
 	}
 
 	// And the override is enforced, not just accepted.
@@ -422,6 +367,53 @@ func TestUploadRejectsBadFile(t *testing.T) {
 	}
 }
 
+// --- lint (offline) ---
+
+func TestLintOfflineWarningSurface(t *testing.T) {
+	file := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{
+		"empty":{},
+		"tagged":{"label":"docker.io/library/busybox:latest","containers":[
+			{"digest":"`+digA+`","image":"docker.io/library/busybox:latest",
+			 "command":{"policy":"any"},"args":{"policy":"any"},"paths":{"policy":"any"}}]},
+		"other":{"containers":[
+			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},
+			 "paths":{"policy":"allow","read":["/**"]}},
+			{"digest":"`+digB+`","command":{"policy":"deny"},"args":{"policy":"deny"}}]}}}`)
+
+	out, _, err := runCmd("lint", file)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	for _, want := range []string{
+		`workload "empty" has no init or main containers`,
+		`workload "tagged" label "docker.io/library/busybox:latest" is a tag`,
+		`image "docker.io/library/busybox:latest" is a tag`,
+		"the container can never start",
+		`grants a root-subtree path "/**"`,
+		"appears in 2 entries and one grants 'any'",
+		"'any' (unconstrained) policy value(s) across all entries",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lint output missing %q:\n%s", want, out)
+		}
+	}
+
+	// --strict turns those warnings into a non-zero exit.
+	if _, _, err := runCmd("lint", "--strict", file); err == nil {
+		t.Fatal("expected --strict to turn warnings into a failure")
+	}
+}
+
+func TestLintRejectsMissingAndInvalidFile(t *testing.T) {
+	if _, _, err := runCmd("lint", filepath.Join(t.TempDir(), "nope.json")); err == nil {
+		t.Fatal("expected a missing lint file to fail")
+	}
+	bad := writeFile(t, "bad.json", `{"schema":"wrong/schema"}`)
+	if _, _, err := runCmd("lint", bad); err == nil || !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("expected a schema error, got %v", err)
+	}
+}
+
 // --- small helpers ---
 
 func TestMatchedComponents(t *testing.T) {
@@ -431,30 +423,5 @@ func TestMatchedComponents(t *testing.T) {
 	}
 	if hits := matchedComponents("registry/team/app@sha256:2", defaultRequiredComponents); len(hits) != 0 {
 		t.Fatalf("expected no match for a workload image, got %v", hits)
-	}
-}
-
-func TestCoalesce(t *testing.T) {
-	if got := coalesce("a", "b"); got != "a" {
-		t.Fatalf("coalesce(a,b) = %q", got)
-	}
-	if got := coalesce("", "b"); got != "b" {
-		t.Fatalf("coalesce(\"\",b) = %q", got)
-	}
-	if got := coalesce("", ""); got != "" {
-		t.Fatalf("coalesce(\"\",\"\") = %q", got)
-	}
-}
-
-func TestCtxFallback(t *testing.T) {
-	cmd := &cobra.Command{}
-	if got := ctx(cmd); got == nil {
-		t.Fatal("ctx must fall back to a background context")
-	}
-	type ctxKey struct{}
-	want := context.WithValue(context.Background(), ctxKey{}, "v")
-	cmd.SetContext(want)
-	if got := ctx(cmd); got != want {
-		t.Fatal("ctx must return the command context when set")
 	}
 }

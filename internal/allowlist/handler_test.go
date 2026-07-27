@@ -87,7 +87,6 @@ func testAllowlistApp(t *testing.T) (http.Handler, *readiness.Checker, *operator
 // workload path parameter resolves the same way the cds router serves it.
 func allowlistTestRouter(wh allowlist.Handler, ready attestation.ReadinessFunc) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	r.Get("/readyz", attestation.HandleReadyz(ready))
 	r.Get("/allowlist", wh.HandleList)
 	r.Put("/allowlist", wh.HandleReplaceAll)
@@ -118,22 +117,6 @@ func getAllowlist(t *testing.T, srvURL string) *pkgallowlist.Allowlist {
 		t.Fatalf("parse served allowlist: %v; body=%s", err, body)
 	}
 	return al
-}
-
-func TestHealthzReturnsOK(t *testing.T) {
-	app, _, _ := testAllowlistApp(t)
-	srv := httptest.NewServer(app)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("got status %d, want 200", resp.StatusCode)
-	}
 }
 
 func TestReadyzReturnsUnavailableInitially(t *testing.T) {

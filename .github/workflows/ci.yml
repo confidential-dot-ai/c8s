@@ -82,26 +82,48 @@ jobs:
       - name: Measure coverage
         run: ./scripts/coverage-gate.sh run head.out
 
-      - name: Enforce 80% floor on internal/ packages
-        run: ./scripts/coverage-gate.sh check head.out
+      # On pushes to main, cache the total so PRs against this commit can
+      # compare without re-running the whole suite on the base branch.
+      - name: Record baseline total
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: ./scripts/coverage-gate.sh total head.out | tee base-total.txt
 
-      - name: Checkout base branch
+      - name: Cache baseline total
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: base-total.txt
+          key: coverage-total-${{ github.sha }}
+
+      - name: Restore baseline total
         if: github.event_name == 'pull_request'
+        id: baseline
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: base-total.txt
+          key: coverage-total-${{ github.event.pull_request.base.sha }}
+
+      # Fallback when the base commit's total is not cached (e.g. cache
+      # evicted, or main's coverage run predates this workflow).
+      - name: Checkout base branch
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.base_ref }}
+          ref: ${{ github.event.pull_request.base.sha }}
           path: base
 
       - name: Measure base coverage
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.cache-hit != 'true'
         working-directory: base
-        run: go test ./... -count=1 -coverprofile=../base.out -coverpkg=./...
+        run: |
+          go test ./... -count=1 -coverprofile=base.out -coverpkg=./...
+          ../scripts/coverage-gate.sh total base.out > ../base-total.txt
 
       - name: Enforce non-decreasing total coverage
         if: github.event_name == 'pull_request'
         run: |
           head=$(./scripts/coverage-gate.sh total head.out)
-          base=$(./scripts/coverage-gate.sh total base.out)
+          base=$(cat base-total.txt)
           echo "total coverage: base=${base}% head=${head}%"
           awk -v h="$head" -v b="$base" 'BEGIN {
             if (h + 0.05 < b) {

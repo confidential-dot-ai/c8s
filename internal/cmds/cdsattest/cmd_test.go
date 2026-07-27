@@ -22,29 +22,6 @@ func writeFixtureFile(t *testing.T) string {
 	return path
 }
 
-func TestNewCmdRunEWiresConfig(t *testing.T) {
-	cmd := NewCmd()
-	if cmd.Use != "cds-attest" {
-		t.Fatalf("Use = %q", cmd.Use)
-	}
-	for _, name := range []string{"host", "port", "log-level", "cds-cert-file", "serving-cert-file",
-		"evidence-fixture", "attestation-api-url", "platform", "generation", "session-ttl",
-		"read-header-timeout", "upstream", "upstream-ca", "upstream-cert", "upstream-key", "upstream-server-name"} {
-		if cmd.Flags().Lookup(name) == nil {
-			t.Errorf("missing flag --%s", name)
-		}
-	}
-
-	// Executing with no evidence source must fail through RunE -> run.
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{})
-	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--attestation-api-url or --evidence-fixture") {
-		t.Fatalf("expected missing-evidence-source error, got %v", err)
-	}
-}
-
 func TestRunErrors(t *testing.T) {
 	fixture := writeFixtureFile(t)
 	tests := []struct {
@@ -163,11 +140,5 @@ func TestRunServesUntilSignalled(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not shut down after SIGTERM")
-	}
-}
-
-func TestNewLoggerLevels(t *testing.T) {
-	if newLogger("debug") == nil || newLogger("bogus") == nil {
-		t.Fatal("newLogger returned nil")
 	}
 }

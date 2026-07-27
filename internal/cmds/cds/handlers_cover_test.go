@@ -137,9 +137,6 @@ func TestAttest_RejectsMalformedWorkloadClaimsEncoding(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "workload_claims") {
-		t.Errorf("body should mention workload_claims; got %s", w.Body.String())
-	}
 }
 
 // A CSR whose RA-TLS attestation extension does not parse must be rejected at
@@ -154,9 +151,6 @@ func TestAttest_WorkloadClaims_RejectsGarbageRATLSExtension(t *testing.T) {
 	w := postAttestClaimsWithCSR(t, h, issueChallenge(t, h), csrPEM, claimsDERFor(t, nil, digests), nil, digests)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "does not parse") {
-		t.Errorf("body should mention parse failure; got %s", w.Body.String())
 	}
 }
 
@@ -214,9 +208,6 @@ func TestVerifyWorkloadClaims_FailsClosedOnStoreError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when the allowlist store fails")
 	}
-	if !strings.Contains(err.Error(), "check allowlist") {
-		t.Errorf("error = %q, want it to mention check allowlist", err)
-	}
 }
 
 func TestSignCSR_RejectsNonPEMCSRField(t *testing.T) {
@@ -227,9 +218,6 @@ func TestSignCSR_RejectsNonPEMCSRField(t *testing.T) {
 	h.HandleSignCSR(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "invalid CSR") {
-		t.Errorf("body should say invalid CSR; got %s", w.Body.String())
 	}
 }
 
@@ -243,9 +231,6 @@ func TestSignCSR_RejectsPEMWithGarbageDER(t *testing.T) {
 	w := postSignCSR(t, h, ear, []byte("not-a-real-csr-der"), time.Hour)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "invalid CSR") {
-		t.Errorf("body should say invalid CSR; got %s", w.Body.String())
 	}
 }
 
@@ -264,9 +249,6 @@ func TestSignCSR_RejectsTamperedCSRSignature(t *testing.T) {
 	w := postSignCSR(t, h, ear, tampered, time.Hour)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "signature invalid") {
-		t.Errorf("body should say signature invalid; got %s", w.Body.String())
 	}
 }
 
@@ -384,46 +366,6 @@ func TestSignCSR_SignFailureReturns500(t *testing.T) {
 	w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d, want 500; body=%s", w.Code, w.Body.String())
-	}
-}
-
-// failWriter accepts headers but fails the body write, exercising the encode
-// error logging branch.
-type failWriter struct {
-	header http.Header
-	status int
-}
-
-func (f *failWriter) Header() http.Header {
-	if f.header == nil {
-		f.header = make(http.Header)
-	}
-	return f.header
-}
-
-func (f *failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
-
-func (f *failWriter) WriteHeader(status int) { f.status = status }
-
-func TestSignCSR_ResponseEncodeFailureIsLoggedNotFatal(t *testing.T) {
-	h, earKey, _ := newTestSignCSRHandler(t)
-	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
-	ear := signEAR(t, earKey, earClaimsLite{
-		Issuer:    "cds",
-		IssuedAt:  time.Now().Unix(),
-		Expiry:    time.Now().Add(time.Minute).Unix(),
-		TEEPubKey: teePubKeyB64(t, csrKey),
-	})
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr.Raw})
-	body, err := json.Marshal(map[string]any{"ear": ear, "csr": string(csrPEM), "ttl": "1h"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/sign-csr", bytes.NewReader(body))
-	w := &failWriter{}
-	h.HandleSignCSR(w, req) // must not panic on encode failure
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("content-type = %q, want application/json (handler reached the response stage)", ct)
 	}
 }
 

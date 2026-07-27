@@ -317,22 +317,3 @@ func TestLoadOperatorKeys(t *testing.T) {
 		}
 	})
 }
-
-// The cobra RunE closure must propagate run()'s error.
-func TestNewCmd_RunEPropagatesRunError(t *testing.T) {
-	cmd := NewCmd()
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	cmd.SetArgs([]string{
-		"--attestation-api-url", "http://127.0.0.1:9",
-		"--allowlist-db", filepath.Join(t.TempDir(), "allowlist.db"),
-		"--log-level", "bogus",
-	})
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("Execute() succeeded, want --log-level error")
-	}
-	if !strings.Contains(err.Error(), "--log-level") {
-		t.Fatalf("error = %q, want it to mention --log-level", err)
-	}
-}

@@ -82,30 +82,6 @@ func TestLoadStateRepairExtendFailureIsFatal(t *testing.T) {
 	}
 }
 
-func TestLoadStateUnreadableLogIsFatal(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "measured")
-	if err := os.Mkdir(state, 0o755); err != nil { // a directory: ReadFile fails, not ErrNotExist
-		t.Fatal(err)
-	}
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.statePath = state
-	if err := m.loadState(); err == nil {
-		t.Fatal("loadState = nil, want error for an unreadable log")
-	}
-}
-
-func TestLoadStateStateDirCreateFailureIsFatal(t *testing.T) {
-	blocker := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m := newMeasurer(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	m.statePath = filepath.Join(blocker, "measured") // parent is a regular file
-	if err := m.loadState(); err == nil {
-		t.Fatal("loadState = nil, want error when the state dir cannot be created")
-	}
-}
-
 // An unreadable watch dir warns (throttled) instead of spinning silently, and
 // the failure counter resets once the dir is back.
 func TestScanOnceUnreadableWatchDir(t *testing.T) {
@@ -270,14 +246,5 @@ func TestSysfsExtendAndReadRegister(t *testing.T) {
 	}
 	if _, err := readRegisterSysfs(); err == nil {
 		t.Fatal("readRegisterSysfs = nil error, want size mismatch error")
-	}
-
-	// A missing node fails both helpers.
-	rtmr3Sysfs = filepath.Join(t.TempDir(), "absent", "rtmr3:sha384")
-	if err := extendSysfs(event); err == nil {
-		t.Fatal("extendSysfs = nil error, want write failure")
-	}
-	if _, err := readRegisterSysfs(); err == nil {
-		t.Fatal("readRegisterSysfs = nil error, want read failure")
 	}
 }

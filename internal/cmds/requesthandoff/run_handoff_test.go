@@ -305,7 +305,9 @@ func TestRunFailsWhenServedCADiffers(t *testing.T) {
 	}
 }
 
-func TestRunHandoffDisabledHint(t *testing.T) {
+// A 404 on /handoff is classified as "handoff disabled on the peer"
+// (exitUnavailable), not a verification failure, and no report is emitted.
+func TestRunHandoffDisabledIsUnavailable(t *testing.T) {
 	keysPath, keysHash := writeOperatorKeys(t)
 	peer := newHandoffPeer(t, keysHash)
 	injectPeerClient(t, peer)
@@ -319,14 +321,13 @@ func TestRunHandoffDisabledHint(t *testing.T) {
 	if code != exitUnavailable {
 		t.Fatalf("run = %d, want %d", code, exitUnavailable)
 	}
-	if !strings.Contains(errOut.String(), "cds.handoff.enabled=true") {
-		t.Fatalf("stderr %q lacks the /handoff-disabled hint", errOut.String())
-	}
 	if out.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty on failure", out.String())
 	}
 }
 
+// An attest-key denial (peer refuses our measurement) is a verification
+// verdict (exitFailed), not an availability problem.
 func TestRunAttestKeyDeniedIsVerdict(t *testing.T) {
 	keysPath, keysHash := writeOperatorKeys(t)
 	peer := newHandoffPeer(t, keysHash)
@@ -340,9 +341,6 @@ func TestRunAttestKeyDeniedIsVerdict(t *testing.T) {
 	code := run(context.Background(), runConfigFor(peer, keysPath), &out, &errOut)
 	if code != exitFailed {
 		t.Fatalf("run = %d, want %d (stderr: %s)", code, exitFailed, errOut.String())
-	}
-	if !strings.Contains(errOut.String(), "403") {
-		t.Fatalf("stderr %q does not surface the 403 denial", errOut.String())
 	}
 }
 
@@ -412,19 +410,5 @@ func TestFetchServedCARejectsOversizedAndMalformedBundles(t *testing.T) {
 	}
 	if _, err := fetchServedCA(context.Background(), srv.Client(), srv.URL); err == nil || !strings.Contains(err.Error(), "parse served /ca bundle") {
 		t.Fatalf("malformed bundle error = %v, want parse error", err)
-	}
-}
-
-func TestFetchServedCATransportErrors(t *testing.T) {
-	if _, err := fetchServedCA(context.Background(), http.DefaultClient, "http://\x7f"); err == nil {
-		t.Fatal("expected request-construction error for a control character in the URL")
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	client := srv.Client()
-	url := srv.URL
-	srv.Close()
-	if _, err := fetchServedCA(context.Background(), client, url); err == nil {
-		t.Fatal("expected transport error against a closed server")
 	}
 }

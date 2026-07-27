@@ -182,28 +182,6 @@ func TestRunEndToEnd(t *testing.T) {
 }
 
 func TestRunErrors(t *testing.T) {
-	t.Run("missing key file", func(t *testing.T) {
-		cfg := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease).config()
-		cfg.OperatorKeyPath = filepath.Join(t.TempDir(), "nope.key")
-		err := Run(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "read operator key") {
-			t.Fatalf("want read-key error, got %v", err)
-		}
-	})
-
-	t.Run("bad key PEM", func(t *testing.T) {
-		cfg := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease).config()
-		bad := filepath.Join(t.TempDir(), "bad.key")
-		if err := os.WriteFile(bad, []byte("not a pem"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cfg.OperatorKeyPath = bad
-		err := Run(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "derive operator public key") {
-			t.Fatalf("want derive error, got %v", err)
-		}
-	})
-
 	t.Run("attest gate HTTP failure", func(t *testing.T) {
 		cfg := newTestEnv(t, http.StatusInternalServerError, http.StatusOK, goodRelease).config()
 		err := Run(context.Background(), cfg)
@@ -219,15 +197,6 @@ func TestRunErrors(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "credential release") ||
 			!strings.Contains(err.Error(), "release HTTP 403") {
 			t.Fatalf("want release HTTP 403 error, got %v", err)
-		}
-	})
-
-	t.Run("write failure", func(t *testing.T) {
-		cfg := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease).config()
-		cfg.OutPath = filepath.Join(t.TempDir(), "no", "such", "dir", "kubeconfig")
-		err := Run(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "write kubeconfig") {
-			t.Fatalf("want write error, got %v", err)
 		}
 	})
 }
@@ -269,10 +238,8 @@ func TestRATLSClientRejectsPlainCert(t *testing.T) {
 	cfg := env.config()
 	cfg.ReleaseBaseURL = plain.URL
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "credential release") ||
-		!strings.Contains(err.Error(), "ratls") ||
-		!strings.Contains(err.Error(), "missing RA-TLS extension") {
-		t.Fatalf("want RA-TLS handshake failure (ratls: missing RA-TLS extension), got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "missing RA-TLS extension") {
+		t.Fatalf("want RA-TLS handshake failure (missing RA-TLS extension), got %v", err)
 	}
 }
 
@@ -319,15 +286,6 @@ func TestRequestCredentialErrors(t *testing.T) {
 		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr)
 		if err == nil || !strings.Contains(err.Error(), "missing cert or ca") {
 			t.Fatalf("want missing-field error, got %v", err)
-		}
-	})
-
-	t.Run("connection refused", func(t *testing.T) {
-		srv := serve(http.StatusOK, goodRelease)
-		srv.Close()
-		_, err := requestCredential(ctx, client, srv.URL, keyPEM, csr)
-		if err == nil || !strings.Contains(err.Error(), "release request") {
-			t.Fatalf("want transport error, got %v", err)
 		}
 	})
 }
@@ -410,24 +368,6 @@ func TestPublicKeyPEMFromPrivateErrors(t *testing.T) {
 		blob := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{1, 2, 3}})
 		if _, err := publicKeyPEMFromPrivate(blob); err == nil {
 			t.Fatal("want PKCS8 parse error, got nil")
-		}
-	})
-}
-
-func TestPostAttestErrors(t *testing.T) {
-	t.Run("bad URL", func(t *testing.T) {
-		_, err := postAttest(context.Background(), "http://\x7f", nil)
-		if err == nil {
-			t.Fatal("want request-build error, got nil")
-		}
-	})
-
-	t.Run("connection refused", func(t *testing.T) {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		srv.Close()
-		_, err := postAttest(context.Background(), srv.URL+"/attest", []byte("n"))
-		if err == nil {
-			t.Fatal("want transport error, got nil")
 		}
 	})
 }

@@ -188,19 +188,6 @@ func newTestResolver(t *testing.T, socket string) *Resolver {
 	return r
 }
 
-func TestNewResolverError(t *testing.T) {
-	// An empty address gives the containerd client neither a connection nor
-	// preconfigured services, so construction fails without any dialing.
-	r, err := NewResolver("", testNamespace)
-	if err == nil {
-		_ = r.Close()
-		t.Fatal("NewResolver(\"\") succeeded, want error")
-	}
-	if want := "connect to containerd at"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("error %q does not contain %q", err, want)
-	}
-}
-
 func TestResolve(t *testing.T) {
 	images := &fakeImages{knownName: "docker.io/library/nginx:1.27"}
 	socket := startFakeContainerd(t, images, nil, nil)

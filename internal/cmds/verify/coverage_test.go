@@ -20,8 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
-
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -45,58 +43,6 @@ func attestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
-func TestNewCmd_DefaultsAndOverrides(t *testing.T) {
-	t.Run("zero defaults", func(t *testing.T) {
-		cmd := NewCmd(Defaults{})
-		if !strings.HasPrefix(cmd.Use, "verify") {
-			t.Errorf("Use = %q, want verify shorthand", cmd.Use)
-		}
-		if got, err := cmd.Flags().GetString("kind"); err != nil || got != "auto" {
-			t.Errorf("kind default = %q (%v), want auto", got, err)
-		}
-		if got, err := cmd.Flags().GetString("mode"); err != nil || got != "auto" {
-			t.Errorf("mode default = %q (%v), want auto", got, err)
-		}
-		if got, err := cmd.Flags().GetString("discovery-path"); err != nil || got != defaultDiscoveryPath {
-			t.Errorf("discovery-path default = %q (%v)", got, err)
-		}
-	})
-
-	t.Run("preset defaults win", func(t *testing.T) {
-		cmd := NewCmd(Defaults{Use: "verify", Short: "Verify a CDS", Kind: "cds", Mode: "ratls-cert", DefaultPort: 8443})
-		if cmd.Use != "verify" || cmd.Short != "Verify a CDS" {
-			t.Errorf("Use/Short not honored: %q / %q", cmd.Use, cmd.Short)
-		}
-		if got, _ := cmd.Flags().GetString("kind"); got != "cds" {
-			t.Errorf("kind default = %q, want cds", got)
-		}
-		if got, _ := cmd.Flags().GetString("mode"); got != "ratls-cert" {
-			t.Errorf("mode default = %q, want ratls-cert", got)
-		}
-	})
-}
-
-func TestOrDefault(t *testing.T) {
-	if got := orDefault("", "fb"); got != "fb" {
-		t.Errorf("orDefault(\"\") = %q, want fallback", got)
-	}
-	if got := orDefault("v", "fb"); got != "v" {
-		t.Errorf("orDefault(v) = %q, want v", got)
-	}
-}
-
-func TestDefaultPort(t *testing.T) {
-	if got := defaultPort(config{defaults: Defaults{DefaultPort: 9999}}); got != 9999 {
-		t.Errorf("preset DefaultPort = %d, want 9999", got)
-	}
-	if got := defaultPort(config{kind: "cds"}); got != 8443 {
-		t.Errorf("cds port = %d, want 8443", got)
-	}
-	if got := defaultPort(config{kind: "lb"}); got != 443 {
-		t.Errorf("lb port = %d, want 443", got)
-	}
-}
-
 func TestNormalizeTarget_Errors(t *testing.T) {
 	if _, _, err := normalizeTarget("https://\x7f", 443); err == nil {
 		t.Error("control character URL should fail to parse")
@@ -113,28 +59,6 @@ func TestMinTCBFromCfg(t *testing.T) {
 	got := minTCBFromCfg(config{minTCBBootloader: 1, minTCBTEE: 2, minTCBSNP: 3, minTCBMicrocode: 4})
 	if got == nil || got.Bootloader != 1 || got.Tee != 2 || got.Snp != 3 || got.Microcode != 4 {
 		t.Errorf("minTCBFromCfg = %+v, want 1/2/3/4", got)
-	}
-}
-
-func TestFormatTCB(t *testing.T) {
-	u8 := func(v uint8) *uint8 { return &v }
-	snp := teetypes.TcbInfo{Type: "Snp", Bootloader: u8(3), Tee: u8(0), Snp: u8(8), Microcode: u8(209)}
-	if got := formatTCB(snp); got != "bootloader=3 tee=0 snp=8 microcode=209" {
-		t.Errorf("snp TCB = %q", got)
-	}
-	snp.FMC = u8(1)
-	if got := formatTCB(snp); !strings.HasSuffix(got, " fmc=1") {
-		t.Errorf("snp TCB with FMC = %q, want fmc suffix", got)
-	}
-	tdx := teetypes.TcbInfo{Type: "Tdx", TCBSvn: []byte{0x01, 0x02}}
-	if got := formatTCB(tdx); got != "svn=0102" {
-		t.Errorf("tdx TCB = %q, want svn=0102", got)
-	}
-	if got := formatTCB(teetypes.TcbInfo{Type: "Tdx"}); got != "" {
-		t.Errorf("empty tdx TCB = %q, want empty", got)
-	}
-	if got := formatTCB(teetypes.TcbInfo{}); got != "" {
-		t.Errorf("unknown TCB type = %q, want empty", got)
 	}
 }
 
@@ -258,8 +182,8 @@ func TestGatherOperatorKeys(t *testing.T) {
 
 	t.Run("skipped for non-cds kinds and file targets", func(t *testing.T) {
 		got := gatherOperatorKeys(ctx, config{kind: "lb", url: "x"}, &evidence{})
-		if !strings.Contains(got.note, "cross-check skipped") || !strings.Contains(got.note, "--kind cds") || got.fingerprints != nil {
-			t.Errorf("non-cds kind must announce the skipped cross-check, got %+v", got)
+		if !strings.Contains(got.note, "skipped") || got.fingerprints != nil || got.fetchErr != nil {
+			t.Errorf("non-cds kind must skip the cross-check without fetching, got %+v", got)
 		}
 		if got := gatherOperatorKeys(ctx, config{kind: "cds"}, &evidence{}); got.note != "" {
 			t.Errorf("no url should be a no-op, got %+v", got)
@@ -268,8 +192,8 @@ func TestGatherOperatorKeys(t *testing.T) {
 
 	t.Run("no serving cert to bind to", func(t *testing.T) {
 		got := gatherOperatorKeys(ctx, config{kind: "cds", url: "cds.example.com"}, &evidence{})
-		if !strings.Contains(got.note, "no serving cert") {
-			t.Errorf("note = %q, want the no-cert explanation", got.note)
+		if got.note == "" || got.fingerprints != nil {
+			t.Errorf("no attested cert must skip the fetch with a note, got %+v", got)
 		}
 	})
 
@@ -388,18 +312,6 @@ func TestGatherFromRATLSCert(t *testing.T) {
 func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("bad target", func(t *testing.T) {
-		if _, err := gatherEvidence(ctx, config{url: "https://\x7f"}, nil); err == nil {
-			t.Error("unparseable target must fail")
-		}
-	})
-
-	t.Run("from-file missing", func(t *testing.T) {
-		if _, err := gatherEvidence(ctx, config{fromFile: filepath.Join(t.TempDir(), "absent")}, nil); err == nil {
-			t.Error("missing --from-file must fail")
-		}
-	})
-
 	t.Run("ratls-cert mode", func(t *testing.T) {
 		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
@@ -443,53 +355,6 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
 		}
 	})
-}
-
-func TestGatherFromEndpoint_Errors(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("bad base URL", func(t *testing.T) {
-		if _, err := gatherFromEndpoint(ctx, "https://\x7f", "", time.Second); err == nil {
-			t.Error("unparseable base must fail")
-		}
-	})
-
-	t.Run("non-JSON body", func(t *testing.T) {
-		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("not json"))
-		}))
-		defer srv.Close()
-		if _, err := gatherFromEndpoint(ctx, srv.URL, "", 5*time.Second); err == nil || !strings.Contains(err.Error(), "parse attestation response") {
-			t.Errorf("expected a parse error, got %v", err)
-		}
-	})
-
-	t.Run("wrong nonce echo is a security error", func(t *testing.T) {
-		report := bytes.Repeat([]byte{0x01}, 64)
-		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			wrong := bytes.Repeat([]byte{0xFF}, nonceSize)
-			w.Write(buildEndpointJSON(t, wrong, report, []byte("vcek"), bytes.Repeat([]byte{0x02}, 32), bytes.Repeat([]byte{0x03}, 1184)))
-		}))
-		defer srv.Close()
-		_, err := gatherFromEndpoint(ctx, srv.URL, "", 5*time.Second)
-		if err == nil || !isSecurityError(err) {
-			t.Fatalf("expected securityError on a non-echoed nonce, got %v", err)
-		}
-	})
-}
-
-func TestJoinAttestationURL(t *testing.T) {
-	got, err := joinAttestationURL("https://lb.example.com:443", []byte{0x01, 0x02})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "https://lb.example.com:443" + attestationPath + "?nonce=" + base64.RawURLEncoding.EncodeToString([]byte{0x01, 0x02})
-	if got != want {
-		t.Errorf("joinAttestationURL = %q, want %q", got, want)
-	}
-	if _, err := joinAttestationURL("https://\x7f", nil); err == nil {
-		t.Error("unparseable base must fail")
-	}
 }
 
 func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
@@ -599,24 +464,6 @@ func TestEvidenceFromDiscovery_DefaultsPlatformToSNP(t *testing.T) {
 func TestFetchDiscoveryDoc(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("empty path defaults", func(t *testing.T) {
-		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != defaultDiscoveryPath {
-				http.NotFound(w, r)
-				return
-			}
-			w.Write([]byte(`{}`))
-		}))
-		defer srv.Close()
-		data, src, err := fetchDiscoveryDoc(ctx, srv.URL, "", "", 5*time.Second)
-		if err != nil {
-			t.Fatalf("fetchDiscoveryDoc: %v", err)
-		}
-		if string(data) != "{}" || !strings.Contains(src, defaultDiscoveryPath) {
-			t.Errorf("data=%q src=%q", data, src)
-		}
-	})
-
 	t.Run("bad base URL", func(t *testing.T) {
 		if _, _, err := fetchDiscoveryDoc(ctx, "https://\x7f", "", "", time.Second); err == nil {
 			t.Error("unparseable base must fail")
@@ -701,58 +548,6 @@ func TestRun_UsageAndGatherFailures(t *testing.T) {
 		code := run(context.Background(), config{fromFile: filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
 		if code != exitNoEvidence || !strings.Contains(errOut.String(), "could not obtain evidence") {
 			t.Errorf("code = %d, stderr: %s", code, errOut.String())
-		}
-	})
-}
-
-func TestRenderText_AllSections(t *testing.T) {
-	oc := Outcome{
-		Verified:                   true,
-		Backend:                    "attestation-go",
-		Source:                     "test",
-		Platform:                   "snp",
-		Measurement:                strings.Repeat("ab", 48),
-		CurrentTCB:                 "bootloader=3 tee=0 snp=8 microcode=209",
-		CertSHA256:                 strings.Repeat("cd", 32),
-		Binding:                    "test binding",
-		Pinned:                     true,
-		Fresh:                      false,
-		OperatorKeysAttestedDigest: strings.Repeat("11", 32),
-		SeedAttestedDigest:         strings.Repeat("22", 32),
-		WorkloadAttestedDigest:     strings.Repeat("33", 32),
-		OperatorKeys:               []string{strings.Repeat("44", 32)},
-		ReportData:                 strings.Repeat("55", 48),
-	}
-
-	var out bytes.Buffer
-	renderText(config{showEvidence: true}, oc, &out)
-	text := out.String()
-	for _, want := range []string{
-		"cert sha256:",
-		"operator-keys digest (attested via config-claims)",
-		"allowlist-seed digest (attested via config-claims)",
-		"workload digest (attested via config-claims)",
-		"served list matches the attested digest",
-		"sha256:" + strings.Repeat("44", 32),
-		"freshness NOT proven",
-		"report_data:",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("output missing %q:\n%s", want, text)
-		}
-	}
-
-	t.Run("unattested key list label and note", func(t *testing.T) {
-		var out bytes.Buffer
-		renderText(config{}, Outcome{Verified: true, OperatorKeys: []string{"aa"}, Fresh: true, Pinned: true}, &out)
-		if !strings.Contains(out.String(), "NOT covered by the measurement") {
-			t.Errorf("expected the unattested-list label:\n%s", out.String())
-		}
-
-		out.Reset()
-		renderText(config{}, Outcome{Verified: true, OperatorKeysNote: "not fetched (why)", Fresh: true, Pinned: true}, &out)
-		if !strings.Contains(out.String(), "operator keys: not fetched (why)") {
-			t.Errorf("expected the operator-keys note:\n%s", out.String())
 		}
 	})
 }

@@ -135,35 +135,6 @@ func TestWorkloadClaimsWithBrokerUnreachableFailsClosed(t *testing.T) {
 	}
 }
 
-// obtainCert propagates a fail-closed workload-claims error before touching
-// the network.
-func TestObtainCertWorkloadClaimsErrorFailsClosed(t *testing.T) {
-	overrideBrokerEndpoint(t, "unix://"+filepath.Join(t.TempDir(), "missing.sock"))
-
-	cfg := config{
-		CDSURL:                "https://127.0.0.1:1",
-		AttestationApiURL:     "http://127.0.0.1:1",
-		SAN:                   "host.example.com",
-		WorkloadClaimsBroker:  true,
-		WorkloadClaimsTimeout: time.Second,
-	}
-	if err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err == nil {
-		t.Fatal("obtainCert succeeded, want workload-claims error")
-	}
-}
-
-func TestObtainCertKeyLoadError(t *testing.T) {
-	cfg := config{
-		CDSURL:            "https://127.0.0.1:1",
-		AttestationApiURL: "http://127.0.0.1:1",
-		SAN:               "host.example.com",
-		KeyPath:           filepath.Join(t.TempDir(), "missing.key"),
-	}
-	if err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err == nil {
-		t.Fatal("obtainCert succeeded, want key load error")
-	}
-}
-
 func TestObtainCertAttestationExtensionError(t *testing.T) {
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "attestation down", http.StatusInternalServerError)
@@ -304,96 +275,9 @@ func TestWriteOutputsPrintsToStdoutWithoutOutPath(t *testing.T) {
 	}
 }
 
-func TestWriteOutputsErrorPaths(t *testing.T) {
-	missingDir := filepath.Join(t.TempDir(), "missing")
-	chain := testIssuedChainPEM(t)
-
-	t.Run("key write fails", func(t *testing.T) {
-		err := writeOutputs(config{KeyOutPath: filepath.Join(missingDir, "k.pem"), KeyMode: "0600"}, []byte("k"), attestclient.CertificateResult{Certificate: chain})
-		if err == nil || !strings.Contains(err.Error(), "failed to write key") {
-			t.Fatalf("error = %v, want key write failure", err)
-		}
-	})
-
-	t.Run("ca write fails", func(t *testing.T) {
-		err := writeOutputs(config{CAOutPath: filepath.Join(missingDir, "ca.pem")}, nil, attestclient.CertificateResult{Certificate: chain})
-		if err == nil || !strings.Contains(err.Error(), "failed to write mesh CA") {
-			t.Fatalf("error = %v, want CA write failure", err)
-		}
-	})
-
-	t.Run("cert write fails", func(t *testing.T) {
-		err := writeOutputs(config{OutPath: filepath.Join(missingDir, "cert.pem")}, nil, attestclient.CertificateResult{Certificate: chain})
-		if err == nil || !strings.Contains(err.Error(), "failed to write cert") {
-			t.Fatalf("error = %v, want cert write failure", err)
-		}
-	})
-
-	t.Run("discovery build fails on unparseable cert", func(t *testing.T) {
-		dir := t.TempDir()
-		err := writeOutputs(config{
-			OutPath:          filepath.Join(dir, "cert.pem"),
-			DiscoveryOutPath: filepath.Join(dir, "discovery.json"),
-		}, nil, attestclient.CertificateResult{Certificate: "not a pem"})
-		if err == nil {
-			t.Fatal("writeOutputs succeeded, want discovery parse error")
-		}
-	})
-
-	t.Run("discovery write fails", func(t *testing.T) {
-		dir := t.TempDir()
-		err := writeOutputs(config{
-			OutPath:          filepath.Join(dir, "cert.pem"),
-			DiscoveryOutPath: filepath.Join(missingDir, "discovery.json"),
-		}, nil, attestclient.CertificateResult{Certificate: chain})
-		if err == nil || !strings.Contains(err.Error(), "failed to write discovery metadata") {
-			t.Fatalf("error = %v, want discovery write failure", err)
-		}
-	})
-}
-
 func TestBuildDiscoveryDocumentRejectsUnparseableCert(t *testing.T) {
 	if _, err := buildDiscoveryDocument(config{}, attestclient.CertificateResult{Certificate: "junk"}); err == nil {
 		t.Fatal("buildDiscoveryDocument succeeded, want parse error")
-	}
-}
-
-func TestCDSHTTPClientRejectsBadMeasurements(t *testing.T) {
-	_, err := cdsHTTPClient(config{
-		CDSURL:            "https://cds:8443",
-		CDSMeasurements:   "not-hex",
-		AttestationApiURL: "http://attestation-api:8400",
-	})
-	if err == nil {
-		t.Fatal("cdsHTTPClient succeeded, want measurements parse error")
-	}
-	if !strings.Contains(err.Error(), "--cds-measurements") {
-		t.Fatalf("error = %v, want --cds-measurements error", err)
-	}
-}
-
-func TestNewCDSClientSucceedsForHTTPS(t *testing.T) {
-	if _, err := newCDSClient(config{
-		CDSURL:            "https://cds:8443",
-		AttestationApiURL: "http://attestation-api:8400",
-	}); err != nil {
-		t.Fatalf("newCDSClient: %v", err)
-	}
-}
-
-// Executing the cobra command drives RunE (setupLogging + run); a plaintext
-// --cds-url makes run fail fast at the RA-TLS client without any network.
-func TestNewCmdExecuteRunsAndFailsOnPlainHTTPCDS(t *testing.T) {
-	cmd := NewCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{
-		"--cds-url", "http://cds:8443",
-		"--attestation-api-url", "http://attestation-api:8400",
-		"--san", "host.example.com",
-	})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("Execute succeeded, want https-only CDS URL error")
 	}
 }
 

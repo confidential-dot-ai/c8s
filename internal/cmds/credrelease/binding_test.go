@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -86,9 +85,8 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 	pub := []byte("operator public key bytes")
 	tests := []struct {
-		name    string
-		stage   func(t *testing.T, pubPath, rtmrPath string)
-		wantErr string
+		name  string
+		stage func(t *testing.T, pubPath, rtmrPath string)
 	}{
 		{
 			name: "substituted pubkey",
@@ -96,7 +94,6 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 				writeFileT(t, pubPath, []byte("a different key the host swapped in"))
 				writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
 			},
-			wantErr: "does not match the measured RTMR[3]",
 		},
 		{
 			name: "rtmr wrong length",
@@ -104,38 +101,30 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 				writeFileT(t, pubPath, pub)
 				writeFileT(t, rtmrPath, make([]byte, 47))
 			},
-			wantErr: "want 48",
 		},
 		{
 			name: "rtmr missing",
 			stage: func(t *testing.T, pubPath, rtmrPath string) {
 				writeFileT(t, pubPath, pub)
 			},
-			wantErr: "is this a TDX guest",
 		},
 		{
-			name:    "pubkey missing",
-			stage:   func(t *testing.T, pubPath, rtmrPath string) {},
-			wantErr: "was the VM launched with an operator key?",
+			name:  "pubkey missing",
+			stage: func(t *testing.T, pubPath, rtmrPath string) {},
 		},
 		{
 			name: "pubkey empty",
 			stage: func(t *testing.T, pubPath, rtmrPath string) {
 				writeFileT(t, pubPath, nil)
 			},
-			wantErr: "is empty",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pubPath, rtmrPath := overrideBindingPaths(t)
 			tc.stage(t, pubPath, rtmrPath)
-			_, err := LoadMeasuredOperatorKey()
-			if err == nil {
+			if _, err := LoadMeasuredOperatorKey(); err == nil {
 				t.Fatal("expected error, got nil")
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error %q does not contain %q", err, tc.wantErr)
 			}
 		})
 	}

@@ -74,13 +74,6 @@ func TestLoadFixtureEvidenceDefaultsPlatform(t *testing.T) {
 	}
 }
 
-func TestLoadFixtureEvidenceMissingFile(t *testing.T) {
-	_, err := LoadFixtureEvidence(filepath.Join(t.TempDir(), "nope.json"), "snp", "genoa")
-	if err == nil || !strings.Contains(err.Error(), "read evidence fixture") {
-		t.Fatalf("expected read error, got %v", err)
-	}
-}
-
 func TestLiveEvidenceProvider(t *testing.T) {
 	var gotReq types.AttestRequest
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

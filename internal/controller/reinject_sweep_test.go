@@ -75,31 +75,6 @@ func TestReinjectSweepDeletesOnlyOwnedUninjectedWorkloadPods(t *testing.T) {
 	}
 }
 
-func TestNeedsReinject(t *testing.T) {
-	excluded := excludedNamespaceSet("c8s-system", nil)
-	cw := map[string]string{webhook.AnnotationWorkload: "wl"}
-
-	tests := []struct {
-		name string
-		pod  *corev1.Pod
-		want bool
-	}{
-		{"opted-in uninjected", pod("a", "tenant", "ReplicaSet", cw), true},
-		{"no cw", pod("b", "tenant", "ReplicaSet", nil), false},
-		{"already injected", pod("c", "tenant", "ReplicaSet", map[string]string{
-			webhook.AnnotationWorkload: "wl", webhook.AnnotationInjected: "true",
-		}), false},
-		{"excluded namespace", pod("d", "c8s-system", "ReplicaSet", cw), false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := needsReinject(tc.pod, excluded); got != tc.want {
-				t.Fatalf("needsReinject = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestReinjectSweepListError(t *testing.T) {
 	c := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
 		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {

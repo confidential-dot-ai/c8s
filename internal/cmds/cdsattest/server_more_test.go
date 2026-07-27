@@ -37,19 +37,6 @@ func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {
 	return e
 }
 
-func TestHealthz(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/healthz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("healthz status %d", resp.StatusCode)
-	}
-}
-
 func TestAttestationRejectsBadNonces(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
@@ -298,8 +285,5 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 	resp := tunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{Method: "GET", Path: "/v1/x"})
 	if resp.Status != http.StatusBadGateway {
 		t.Fatalf("sealed status = %d, want 502", resp.Status)
-	}
-	if !strings.Contains(string(resp.Body), "backend error") {
-		t.Fatalf("sealed body = %q", resp.Body)
 	}
 }

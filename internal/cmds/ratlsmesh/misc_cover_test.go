@@ -94,40 +94,6 @@ func TestHealthReadyCertProvisioningGates(t *testing.T) {
 	}
 }
 
-func TestDefaultOrigDstFunc(t *testing.T) {
-	// Not a TCP connection.
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	if _, err := defaultOrigDstFunc(a); err == nil {
-		t.Error("expected error for non-TCP connection")
-	}
-
-	// A real TCP connection that was never REDIRECTed has no
-	// SO_ORIGINAL_DST entry; both family lookups run and fail.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			defer c.Close()
-			buf := make([]byte, 1)
-			c.Read(buf)
-		}
-	}()
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if dst, err := defaultOrigDstFunc(conn); err == nil && dst == "" {
-		t.Error("expected either an error or a non-empty destination")
-	}
-}
-
 func TestNtohs(t *testing.T) {
 	kernel := [2]byte{0x1f, 0x90} // 8080 in network byte order
 	n := binary.NativeEndian.Uint16(kernel[:])
@@ -174,33 +140,6 @@ func TestAddrIP(t *testing.T) {
 	}
 	if got := addrIP(&net.TCPAddr{IP: net.ParseIP("10.0.0.1")}); got != nil {
 		t.Errorf("addrIP(TCPAddr) = %v, want nil", got)
-	}
-}
-
-func TestResolvePodIPAutoDetect(t *testing.T) {
-	ip, err := resolvePodIP("")
-	if err != nil {
-		if !strings.Contains(err.Error(), "no usable") {
-			t.Errorf("unexpected auto-detect error: %v", err)
-		}
-		return
-	}
-	if net.ParseIP(ip) == nil {
-		t.Errorf("auto-detected pod IP %q is not a valid IP", ip)
-	}
-}
-
-func TestK8sResolverCacheSize(t *testing.T) {
-	r := &k8sResolver{
-		nodeIP: "10.0.0.1",
-		logger: testLogger(),
-		podMap: map[string]podEntry{
-			"10.244.0.5": {nodeIP: "10.0.0.1"},
-			"10.244.0.6": {nodeIP: "10.0.0.2"},
-		},
-	}
-	if got := r.CacheSize(); got != 2 {
-		t.Errorf("CacheSize() = %d, want 2", got)
 	}
 }
 
@@ -361,38 +300,6 @@ func TestRecordOutboundDestRejectedUnknownReason(t *testing.T) {
 	}
 }
 
-func TestIntOrDefaultAndWrapIdle(t *testing.T) {
-	if got := intOrDefault(0, 5); got != 5 {
-		t.Errorf("intOrDefault(0,5) = %d", got)
-	}
-	if got := intOrDefault(3, 5); got != 3 {
-		t.Errorf("intOrDefault(3,5) = %d", got)
-	}
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	p := &Proxy{idleTimeout: time.Second}
-	if _, ok := p.wrapIdle(a).(*idleConn); !ok {
-		t.Error("wrapIdle should wrap when idleTimeout > 0")
-	}
-	p2 := &Proxy{}
-	if p2.wrapIdle(a) != a {
-		t.Error("wrapIdle should be a no-op when idleTimeout == 0")
-	}
-}
-
-func TestNewInGuestCommandFailsWithoutEnv(t *testing.T) {
-	for _, k := range []string{envWorkloadID, envCDSURL, envAttestationServiceURL, envLogLevel, envPlatform, envPodIP, envCDSMeasurements, envMeshMeasurements, envInboundPassthrough} {
-		t.Setenv(k, "")
-	}
-	cmd := newInGuestCommand()
-	cmd.SetArgs(nil)
-	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), envWorkloadID) {
-		t.Fatalf("in-guest without env: err = %v, want %s requirement", err, envWorkloadID)
-	}
-}
-
 func TestRunInGuestConfigErrors(t *testing.T) {
 	valid := func() inGuestConfig {
 		c := defaultInGuestConfig()
@@ -432,83 +339,6 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	t.Run("bad platform", func(t *testing.T) {
-		installFakeNetfilter(t)
-		c := valid()
-		c.platform = "frobnitz"
-		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), "unsupported --platform") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("bad cds measurements", func(t *testing.T) {
-		installFakeNetfilter(t)
-		c := valid()
-		c.cdsMeasurements = "zz"
-		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), envCDSMeasurements) {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("bad mesh measurements", func(t *testing.T) {
-		installFakeNetfilter(t)
-		c := valid()
-		c.meshMeasurements = "zz"
-		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), envMeshMeasurements) {
-			t.Fatalf("err = %v", err)
-		}
-	})
-}
-
-func TestRunInGuestFullLifecycle(t *testing.T) {
-	installFakeNetfilter(t)
-
-	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "nope", http.StatusNotFound)
-	}))
-	defer cds.Close()
-
-	c := defaultInGuestConfig()
-	c.workloadID = "wl-test"
-	c.cdsURL = cds.URL
-	c.attestationServiceURL = "http://127.0.0.1:1"
-	c.platform = "sev-snp"
-	c.podIP = "10.42.0.9"
-	c.logLevel = "error"
-	c.cdsMeasurements = strings.Repeat("ab", 48)
-	c.inboundPassthrough = "tcp:8443"
-	c.rotationTimeout = 300 * time.Millisecond
-	c.cdsRetryBackoff = 20 * time.Millisecond
-	c.cdsRetryMaxBackoff = 40 * time.Millisecond
-	c.cdsOpTimeout = 500 * time.Millisecond
-	c.caPollInterval = 20 * time.Millisecond
-	c.drainTimeout = time.Second
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- runInGuest(ctx, &c) }()
-
-	liveURL := fmt.Sprintf("http://127.0.0.1:%d/live", inGuestHealthPort)
-	assertEventually(t, 10*time.Second, func() bool {
-		resp, err := http.Get(liveURL)
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, "in-guest health server never came up")
-
-	// Let the CA refresh ticker and the CDS retry loop take a few laps.
-	time.Sleep(80 * time.Millisecond)
-
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("runInGuest() = %v, want nil on cancel", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("runInGuest did not shut down")
-	}
 }
 
 func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {

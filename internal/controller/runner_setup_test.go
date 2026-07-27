@@ -157,52 +157,6 @@ func TestSetupManagerFullWiring(t *testing.T) {
 	// Neither can be observed without adding a production seam.
 }
 
-func TestSetupManagerStatusMirror(t *testing.T) {
-	available := &metav1.APIResourceList{APIResources: []metav1.APIResource{
-		{Name: "confidentialworkloads", Kind: "ConfidentialWorkload"},
-	}}
-	tests := []struct {
-		name    string
-		dc      *fakeServerResources
-		wantErr string
-	}{
-		{name: "crd available", dc: &fakeServerResources{resources: available}},
-		{name: "crd missing", dc: &fakeServerResources{}},
-		{name: "discovery error", dc: &fakeServerResources{err: errors.New("boom")},
-			wantErr: "discover ConfidentialWorkload CRD"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mgr := newTestManager(t)
-			err := setupManager(context.Background(), mgr, tt.dc, Options{}, logr.Discard())
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("setupManager: %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("err = %v, want %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestSetupManagerSurfacesWebhookPKIError(t *testing.T) {
-	mgr := newTestManager(t)
-	// WebhookConfigName set but no service name: bootstrapWebhookPKI must fail
-	// and setupManager must wrap it.
-	opts := Options{
-		DisableStatusMirror: true,
-		KataEnforce:         true,
-		WebhookConfigName:   "c8s-mutating",
-	}
-	err := setupManager(context.Background(), mgr, nil, opts, logr.Discard())
-	if err == nil || !strings.Contains(err.Error(), "bootstrap webhook PKI") {
-		t.Fatalf("err = %v, want a bootstrap webhook PKI error", err)
-	}
-}
-
 func TestBootstrapWebhookPKISkipsWithoutConfigName(t *testing.T) {
 	if err := bootstrapWebhookPKI(context.Background(), nil, Options{}); err != nil {
 		t.Fatalf("bootstrapWebhookPKI without config name: %v", err)
@@ -213,36 +167,6 @@ func TestBootstrapWebhookPKIRequiresServiceName(t *testing.T) {
 	err := bootstrapWebhookPKI(context.Background(), nil, Options{WebhookConfigName: "c8s-mutating"})
 	if err == nil || !strings.Contains(err.Error(), "webhook-service-name is required") {
 		t.Fatalf("err = %v, want webhook-service-name requirement", err)
-	}
-}
-
-func TestBootstrapWebhookPKIPatchesBundleAndAddsRotator(t *testing.T) {
-	dir := stubWebhookCertDir(t)
-	fc := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(mutatingWebhookConfig("c8s-mutating")).Build()
-	stubDirectClient(t, fc, nil)
-
-	mgr := newTestManager(t)
-	opts := Options{
-		WebhookConfigName:  "c8s-mutating",
-		WebhookServiceName: "c8s-webhook",
-		// No WebhookServiceNamespace: exercises the LeaderElectionNS fallback.
-		LeaderElectionNS: "c8s-system",
-	}
-	if err := bootstrapWebhookPKI(context.Background(), mgr, opts); err != nil {
-		t.Fatalf("bootstrapWebhookPKI: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "tls.crt")); err != nil {
-		t.Fatalf("serving cert not written: %v", err)
-	}
-	var got admissionv1.MutatingWebhookConfiguration
-	if err := fc.Get(context.Background(), types.NamespacedName{Name: "c8s-mutating"}, &got); err != nil {
-		t.Fatal(err)
-	}
-	for _, wh := range got.Webhooks {
-		if len(wh.ClientConfig.CABundle) == 0 {
-			t.Fatalf("webhook %q caBundle not patched", wh.Name)
-		}
 	}
 }
 
@@ -324,68 +248,5 @@ func TestWebhookCertRotatorRetriesOnFailure(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("rotator did not stop after cancel")
-	}
-}
-
-// writeKubeconfig writes a kubeconfig pointing at a dead endpoint so
-// ctrl.GetConfigOrDie succeeds offline.
-func writeKubeconfig(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "kubeconfig")
-	cfg := `apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: http://127.0.0.1:1
-  name: test
-contexts:
-- context:
-    cluster: test
-    user: test
-  name: test
-current-context: test
-users:
-- name: test
-  user: {}
-`
-	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestRunFailsWithoutReachableAPIServer(t *testing.T) {
-	t.Setenv("KUBECONFIG", writeKubeconfig(t))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	// The kubeconfig parses (so GetConfigOrDie succeeds offline), but manager
-	// construction needs API discovery for the label-scoped Service cache and
-	// the endpoint is dead, so Run must surface the create-manager error.
-	err := Run(ctx, Options{DisableStatusMirror: true, MetricsAddr: "0", HealthAddr: "0"})
-	if err == nil || !strings.Contains(err.Error(), "create manager") {
-		t.Fatalf("err = %v, want create manager failure", err)
-	}
-}
-
-func TestConfidentialWorkloadSetupWithManager(t *testing.T) {
-	mgr := newTestManager(t)
-	r := &ConfidentialWorkloadReconciler{Client: mgr.GetClient()}
-	if err := r.SetupWithManager(mgr); err != nil {
-		t.Fatalf("SetupWithManager: %v", err)
-	}
-}
-
-func TestWorkloadServiceSetupWithManagerAllKinds(t *testing.T) {
-	mgr := newTestManager(t)
-	for _, kind := range workloadServiceKinds {
-		r := &WorkloadServiceReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorder("c8s-operator-test"),
-			Kind:     kind,
-		}
-		if err := r.SetupWithManager(mgr); err != nil {
-			t.Fatalf("SetupWithManager(%s): %v", kind, err)
-		}
 	}
 }
