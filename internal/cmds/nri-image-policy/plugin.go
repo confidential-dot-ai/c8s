@@ -16,7 +16,9 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
+	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -215,15 +217,73 @@ func (p *plugin) recordForBroker(ctx context.Context, ctr *api.Container, imageR
 	if p.broker == nil {
 		return
 	}
-	digest := extractDigest(imageRef)
-	if digest == "" && imageRef != "" {
-		if resolved, err := p.resolver.Resolve(ctx, imageRef); err == nil {
-			digest = extractDigest(resolved)
-		} else {
-			p.logger.Error("workload-claims: cannot resolve admitted image digest; container will be absent from the workload claim", "image", imageRef, "error", err)
-		}
+	digest, err := p.resolveDigest(ctx, imageRef)
+	if err != nil {
+		p.logger.Error("workload-claims: cannot resolve admitted image digest; container will be absent from the workload claim", "image", imageRef, "error", err)
 	}
 	p.broker.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)
+}
+
+// resolveDigest returns the canonical digest an image reference runs as: the
+// digest already pinned in the reference, else the one containerd's image store
+// resolves the tag to. Empty imageRef yields an empty digest and no error —
+// admission handles the missing-annotation case separately.
+func (p *plugin) resolveDigest(ctx context.Context, imageRef string) (string, error) {
+	if digest := extractDigest(imageRef); digest != "" || imageRef == "" {
+		return digest, nil
+	}
+	// Resolve returns a bare sha256:<hex>, so it is the digest — running it back
+	// through extractDigest (which needs an @) would always yield "".
+	return p.resolver.Resolve(ctx, imageRef)
+}
+
+// secretSubject builds the release subject for an admitted container: the
+// digest it was admitted as and the effective argv it was admitted with. Both
+// come from the admission record — the CRI image annotation and the OCI
+// process.args NRI carries — never from anything the container later sends.
+// Returns false when the digest cannot be resolved, so a caller fails closed
+// rather than authorizing an unidentified container.
+func (p *plugin) secretSubject(ctx context.Context, ctr *api.Container, imageRef string) (secrets.Subject, bool) {
+	raw, err := p.resolveDigest(ctx, imageRef)
+	if err != nil || raw == "" {
+		return secrets.Subject{}, false
+	}
+	digest, err := types.ParseDigest(raw)
+	if err != nil {
+		return secrets.Subject{}, false
+	}
+	return secrets.Subject{Digest: digest, Argv: ctr.GetArgs()}, true
+}
+
+// recordGrants resolves what an admitted container is entitled to and audits it.
+// Nothing is released yet — this is the binding the release path will consume,
+// made observable on its own so an operator can see entitlements before any
+// secret moves. Only the count is logged; the paths themselves stay out of a
+// log that leaves the container.
+func (p *plugin) recordGrants(ctx context.Context, pod *api.PodSandbox, ctr *api.Container, imageRef string) {
+	snap := p.policy.current()
+	if snap == nil || snap.index == nil {
+		return
+	}
+	subject, ok := p.secretSubject(ctx, ctr, imageRef)
+	if !ok {
+		return
+	}
+	grants := snap.index.PathGrants(subject.Digest.String(), subject.Argv)
+	if grants.Policy != allowlist.PolicyAllow {
+		return
+	}
+	p.logger.Info("container holds secret path grants",
+		"namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName(),
+		"digest", subject.Digest.String(), "read", len(grants.Read), "write", len(grants.Write))
+	p.audit.Log(audit.Event{
+		Action:    "grant",
+		Reason:    "paths",
+		Namespace: pod.GetNamespace(),
+		Pod:       pod.GetName(),
+		Container: ctr.GetName(),
+		Image:     imageRef,
+	})
 }
 
 // evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.
@@ -565,8 +625,10 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			}
 			return nil, nil, fmt.Errorf("%s", reason)
 		}
-		// Admitted: record for the workload-claims broker.
+		// Admitted: record for the workload-claims broker, and resolve what this
+		// container is entitled to read and write.
 		p.recordForBroker(ctx, ctr, imageRef)
+		p.recordGrants(ctx, pod, ctr, imageRef)
 	}
 
 	return nil, nil, nil
