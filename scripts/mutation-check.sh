@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/mutation-check.sh run <base-ref> [out]   mutate code changed vs base-ref,
 #                                                    write <out>.json and <out>.log
+#   scripts/mutation-check.sh full [out]             mutate every covered mutant (slow)
 #   scripts/mutation-check.sh summary [out]          print markdown summary from <out>.json
 #   scripts/mutation-check.sh ci <base-ref>          run + summary >> GITHUB_STEP_SUMMARY,
 #                                                    always exit 0 (advisory)
@@ -15,13 +16,15 @@ set -euo pipefail
 
 cmd="${1:-}"
 
-run_mutation() { # $1=base-ref $2=out-prefix
+run_mutation() { # $1=base-ref ("" mutates everything) $2=out-prefix
   local base="$1" out="$2"
-  go tool gremlins unleash \
-    --diff "$base" \
-    --output "${out}.json" \
-    --output-statuses lc \
-    2>&1 | tee "${out}.log"
+  if [[ -n "$base" ]]; then
+    go tool gremlins unleash --diff "$base" \
+      --output "${out}.json" --output-statuses lc 2>&1 | tee "${out}.log"
+  else
+    go tool gremlins unleash \
+      --output "${out}.json" --output-statuses lc 2>&1 | tee "${out}.log"
+  fi
 }
 
 summary() { # $1=out-prefix
@@ -60,6 +63,9 @@ case "$cmd" in
 run)
   run_mutation "${2:?base ref required}" "${3:-mutation}"
   ;;
+full)
+  run_mutation "" "${2:-mutation}"
+  ;;
 summary)
   summary "${2:-mutation}"
   ;;
@@ -70,7 +76,7 @@ ci)
   summary mutation >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
   ;;
 *)
-  echo "usage: $0 {run <base-ref> [out]|summary [out]|ci <base-ref>}" >&2
+  echo "usage: $0 {run <base-ref> [out]|full [out]|summary [out]|ci <base-ref>}" >&2
   exit 2
   ;;
 esac
