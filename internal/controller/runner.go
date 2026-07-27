@@ -106,6 +106,13 @@ var newDirectClient = func(mgr manager.Manager) (client.Client, error) {
 // controller-runtime's default in production, overridable in tests.
 var webhookCertDir = webhook.DefaultCertDir
 
+// Production wiring hoisted to vars so Run's error paths are testable.
+var (
+	getKubeConfig      = ctrl.GetConfigOrDie
+	newManager         = ctrl.NewManager
+	newDiscoveryClient = discovery.NewDiscoveryClientForConfig
+)
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha2.AddToScheme(scheme))
@@ -116,8 +123,8 @@ func Run(ctx context.Context, opts Options) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 	logger := ctrl.Log.WithName("c8s-operator")
 
-	config := ctrl.GetConfigOrDie()
-	mgr, err := ctrl.NewManager(config, managerOptions(opts))
+	config := getKubeConfig()
+	mgr, err := newManager(config, managerOptions(opts))
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
@@ -126,7 +133,7 @@ func Run(ctx context.Context, opts Options) error {
 	// status-mirror controller is enabled.
 	var dc serverResourcesForGroupVersion
 	if !opts.DisableStatusMirror {
-		d, err := discovery.NewDiscoveryClientForConfig(config)
+		d, err := newDiscoveryClient(config)
 		if err != nil {
 			return fmt.Errorf("create discovery client: %w", err)
 		}

@@ -42,11 +42,14 @@ func Run(args []string) error {
 	return cmd.ExecuteContext(ctx)
 }
 
+// inClusterConfig is a var so tests can exercise newKubeClientset off-cluster.
+var inClusterConfig = rest.InClusterConfig
+
 // newKubeClientset builds the Kubernetes client used by the proxy and the
 // iptables-sync sidecar. Package var so tests can substitute a fake clientset;
 // production always uses the in-cluster config.
 var newKubeClientset = func() (kubernetes.Interface, error) {
-	restCfg, err := rest.InClusterConfig()
+	restCfg, err := inClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s in-cluster config: %w", err)
 	}
