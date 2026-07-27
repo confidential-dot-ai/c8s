@@ -1,6 +1,13 @@
 package allowlist
 
-import "github.com/confidential-dot-ai/c8s/pkg/types"
+import (
+	"fmt"
+	"path"
+	"sort"
+	"strings"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
+)
 
 // Index answers admission queries for enforcers in O(1). Build it once from a
 // normalized Allowlist.
@@ -63,6 +70,101 @@ func (i *Index) AdmitsContainer(digest string, argv []string) bool {
 		}
 	}
 	return false
+}
+
+// PathGrants returns the filesystem grants held by a container running this
+// digest with this effective argv: the union over the entries whose command and
+// args policies that argv satisfied. Grants are attributed only to a policy the
+// argv actually matched, so a digest that also appears under a permissive entry
+// cannot borrow a strict entry's grants. A floor digest holds none — the floor
+// admits by digest alone, so no argv was checked and no entry can be attributed.
+func (i *Index) PathGrants(digest string, argv []string) PathPolicy {
+	d, err := types.ParseDigest(digest)
+	if err != nil || i.floor[d.String()] {
+		return PathPolicy{Policy: PolicyDeny}
+	}
+	granted := PathPolicy{Policy: PolicyDeny}
+	for _, c := range i.byDigest[d.String()] {
+		if c.Paths.Policy != PolicyAllow {
+			continue
+		}
+		rest, ok := c.Command.matchCommand(argv)
+		if !ok || !c.Args.matchArgs(rest) {
+			continue
+		}
+		granted.Policy = PolicyAllow
+		granted.Read = append(granted.Read, c.Paths.Read...)
+		granted.Write = append(granted.Write, c.Paths.Write...)
+	}
+	granted.Read = sortDedupe(granted.Read)
+	granted.Write = sortDedupe(granted.Write)
+	return granted
+}
+
+// AdmitsRead reports whether a container running digest with argv may read path.
+func (i *Index) AdmitsRead(digest string, argv []string, p string) bool {
+	return pathCovered(i.PathGrants(digest, argv).Read, p)
+}
+
+// AdmitsWrite reports whether a container running digest with argv may write
+// path. A write grant implies create and update; there is no delete.
+func (i *Index) AdmitsWrite(digest string, argv []string, p string) bool {
+	return pathCovered(i.PathGrants(digest, argv).Write, p)
+}
+
+// CleanPath canonicalizes a caller-supplied path. A request names one path,
+// never a pattern, so a wildcard is rejected rather than matched literally.
+func CleanPath(p string) (string, error) {
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("path %q must be absolute", p)
+	}
+	if strings.Contains(p, "*") {
+		return "", fmt.Errorf("path %q must not contain a wildcard", p)
+	}
+	if path.Clean(p) != p {
+		return "", fmt.Errorf("path %q is not clean (no . or ..)", p)
+	}
+	return p, nil
+}
+
+// pathCovered reports whether p is covered by any glob. p is canonicalized
+// first, so an unclean or wildcard-bearing request matches nothing.
+func pathCovered(globs []string, p string) bool {
+	clean, err := CleanPath(p)
+	if err != nil {
+		return false
+	}
+	for _, g := range globs {
+		if matchGlob(g, clean) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlob matches one normalized grant against a clean absolute path: an
+// exact path matches itself, and a trailing /** matches strictly below its base
+// on a segment boundary — so /a/b/** covers /a/b/c but neither /a/bc nor /a/b.
+func matchGlob(glob, p string) bool {
+	base, subtree := strings.CutSuffix(glob, "/**")
+	if !subtree {
+		return glob == p
+	}
+	return strings.HasPrefix(p, base+"/")
+}
+
+func sortDedupe(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Strings(in)
+	out := in[:1]
+	for _, s := range in[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // matchCommand matches a command policy against the front of argv. exact pins a

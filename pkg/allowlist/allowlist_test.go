@@ -131,3 +131,32 @@ func mustParse(t *testing.T, s string) *Allowlist {
 	}
 	return al
 }
+
+// A floor digest is admitted by digest alone, so a paths grant on it would be
+// held whatever the container ran. Reject the document rather than store it.
+func TestParseJSON_RejectsFloorDigestWithGrant(t *testing.T) {
+	body := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"base"},
+		"workloads":{"w":{"containers":[{"digest":"` + digestA + `",
+		 "command":{"policy":"any"},"args":{"policy":"any"},
+		 "paths":{"policy":"allow","read":["/s/**"]}}]}}}`
+	if _, err := ParseJSON([]byte(body)); err == nil {
+		t.Fatal("expected a floor-digest-with-grant rejection")
+	}
+
+	// The same digest in the floor without a grant stays legal (the argv policy
+	// is simply unenforced, which lint warns about).
+	ok := `{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"base"},
+		"workloads":{"w":{"containers":[{"digest":"` + digestA + `",
+		 "command":{"policy":"any"},"args":{"policy":"any"}}]}}}`
+	if _, err := ParseJSON([]byte(ok)); err != nil {
+		t.Fatalf("floor digest without a grant should parse: %v", err)
+	}
+}
+
+func TestParseJSON_RejectsRootSubtreeGrant(t *testing.T) {
+	body := `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` +
+		digestA + `","paths":{"policy":"allow","read":["/**"]}}]}}}`
+	if _, err := ParseJSON([]byte(body)); err == nil {
+		t.Fatal("expected a whole-keyspace grant rejection")
+	}
+}
