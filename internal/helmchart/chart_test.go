@@ -1219,7 +1219,7 @@ func TestChartAttestationApiNodePortEnabledWithNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q by default, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
@@ -1238,7 +1238,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
@@ -1695,11 +1695,11 @@ func TestChartTLSLBServiceType(t *testing.T) {
 		name       string
 		args       []string
 		wantType   corev1.ServiceType
-		wantPolicy corev1.ServiceExternalTrafficPolicyType
+		wantPolicy corev1.ServiceExternalTrafficPolicy
 	}{
 		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
-		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal},
-		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal},
+		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
