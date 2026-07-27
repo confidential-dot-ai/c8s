@@ -110,7 +110,7 @@ surface; a workload can be injected without a CR.
 | Image digest is allowed | nri-image-policy (host, base mode); **in-guest `policy-monitor` SIGKILL under kata** (the load-bearing enforcer on a locked confidential guest — the host-side plugin is untrusted there) | CDS-served allowlist + baked seed |
 | Mesh peer cert chains to the mesh CA | ratls-mesh | mesh CA bundle (chain only; peer measurement **not** pinned — §5) |
 | Workload is injection candidate | admission webhook | pod annotation `confidential.ai/cw` |
-| LB attestation + session key are TEE-bound | `c8s cds-attest` sidecar | SNP report; the `report_data` transcript commits the session keys, nonce, mesh leaf and issuing CA, with per-session proof of possession of the leaf key (§10). Alternative `SHA-384(serving_leaf_spki \|\| nonce)` (`pq=false`, no PQ tunnel) |
+| LB attestation + session key are TEE-bound | `c8s cds-attest` sidecar | TEE report (SEV-SNP or TDX); the `report_data` transcript commits the session keys, nonce, mesh leaf and issuing CA, with per-session proof of possession of the leaf key (§10). Alternative `SHA-384(serving_leaf_spki \|\| nonce)` (`pq=false`, no PQ tunnel) |
 | Inbound traffic to `confidential.ai/cw` pods is mesh-delivered only (**conditional defense-in-depth, not an invariant**) | ratls-mesh (always-on cw inbound guard) | `RATLS-MESH-CW` chain jumped from `FORWARD` position 1 drops all-protocol traffic to cw pod IPs; catches Service-VIP DNAT and excluded-ns sources on the paths where they cross FORWARD. **Preconditions**: kube-proxy in iptables mode (VIP DNAT'd *before* FORWARD), FORWARD hook traversed, `bridge-nf-call-iptables=1`. **Known bypasses**: kube-proxy IPVS/nftables (VIP rewrite in LOCAL_IN/LOCAL_OUT skips FORWARD); CNIs whose datapath skips FORWARD; same-node host-root delivery via `OUTPUT` — the last is inside our host-adversarial scope (§2). Verified paths: iptables-mode kube-proxy with Azure CNI and kubenet. See `cmd/ratls-mesh/README.md` §"Confidential-workload inbound guard". |
 | Injection integrity survives webhook downtime | `failurePolicy: Fail` + `cw` label-integrity VAP (label ⇒ `c8s-cert` sidecar) | API-server-enforced; a pod cannot be admitted unmutated as plain runc, and a `confidential.ai/cw` pod cannot keep the label while shedding the injected sidecar — the webhook rebuilds the sidecar by reconstruction so a pre-declared `c8s-cert` cannot shadow it, and the VAP denies the label without it |
 
@@ -455,7 +455,8 @@ post-quantum over-encrypted channel to its enclave.
 The wire contract is `c8s-verify-js/PROTOCOL.md`.
 
 - `GET /.well-known/c8s/attestation?nonce=`
-  — raw SEV-SNP evidence whose domain-separated `report_data` transcript commits
+  — raw TEE evidence (SEV-SNP or TDX, bare or Azure vTPM-wrapped) whose
+  domain-separated `report_data` transcript commits
   the X25519 and ML-KEM-768 session keys, 32-byte client nonce, exact mesh leaf,
   and issuing mesh CA. The leaf also signs the transcript, proving possession
   of the corresponding private key. The client verifies the hardware signature,

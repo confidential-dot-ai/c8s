@@ -12,8 +12,8 @@ import (
 
 // EvidenceProvider yields TEE attestation evidence whose report_data equals the
 // identity transcript hash (or the serving-leaf SPKI binding for pq=false). The
-// returned evidence is the attestation-rs SnpEvidence JSON the browser verifier
-// consumes verbatim.
+// returned evidence is the platform's attestation-rs evidence JSON (SnpEvidence,
+// AzSnpEvidence, TdxEvidence, …) the browser verifier consumes verbatim.
 type EvidenceProvider interface {
 	Evidence(ctx context.Context, reportData []byte) (evidence json.RawMessage, platform, generation string, err error)
 }
@@ -24,9 +24,13 @@ var _ EvidenceProvider = LiveEvidenceProvider{}
 // bound to reportData. This is the production path; it requires a reachable
 // attestation-api and runs inside the LB's CVM.
 type LiveEvidenceProvider struct {
-	Client     attestationclient.Client
-	Platform   types.Platform // e.g. types.PlatformSnp
-	Generation string         // AMD processor generation for the browser verifier
+	Client   attestationclient.Client
+	Platform types.Platform // e.g. types.PlatformSnp
+	// Generation is the AMD processor generation the browser's bare-SNP
+	// verifier needs. It is meaningful only for PlatformSnp; the other
+	// platforms auto-detect (az-snp) or have no generation concept (TDX),
+	// and the bundle field is left empty for them.
+	Generation string
 }
 
 // Evidence implements EvidenceProvider against the attestation-api.
@@ -42,7 +46,11 @@ func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (
 	if platform == "" {
 		platform = string(p.Platform)
 	}
-	return resp.Evidence, platform, p.Generation, nil
+	generation := p.Generation
+	if platform != string(types.PlatformSnp) {
+		generation = ""
+	}
+	return resp.Evidence, platform, generation, nil
 }
 
 // FixtureEvidenceProvider serves a recorded evidence file. DEV/DEMO ONLY: the
@@ -76,6 +84,9 @@ func LoadFixtureEvidence(path, platform, generation string) (FixtureEvidenceProv
 	}
 	if platform == "" {
 		platform = "snp"
+	}
+	if platform != string(types.PlatformSnp) {
+		generation = ""
 	}
 	return FixtureEvidenceProvider{Raw: evidence, Platform: platform, Generation: generation}, nil
 }

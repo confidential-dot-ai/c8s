@@ -6,8 +6,9 @@ import "encoding/json"
 // protocol served by the Load Balancer. These mirror c8s-verify-js/PROTOCOL.md
 // and are consumed by the JavaScript client (c8s-verify-js) and any other
 // out-of-cluster verifier. All *_pubkey / handshake byte fields are base64url
-// (unpadded); the SNP evidence sub-fields use standard base64 (attestation-rs
-// SnpEvidence shape).
+// (unpadded); the evidence sub-fields follow the platform's attestation-rs
+// evidence shape (SnpEvidence uses standard base64; see PROTOCOL.md for the
+// per-platform encodings).
 
 // SessionPublicKey is the LB's per-session hybrid (X25519 + ML-KEM-768) public
 // key, committed by the report_data transcript.
@@ -46,10 +47,10 @@ type MeshIdentityProof struct {
 // response carries no discriminator.
 type AttestationBundle struct {
 	Version    string          `json:"version"`      // ProtocolVersion
-	Platform   string          `json:"platform"`     // "snp" today
-	Generation string          `json:"generation"`   // AMD gen: milan|genoa|turin
+	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
+	Generation string          `json:"generation"`   // AMD gen for "snp": milan|genoa|turin; empty otherwise
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
-	Evidence   json.RawMessage `json:"evidence"`     // attestation-rs SnpEvidence
+	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
 	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data; empty for tls-cert
 	// SessionPubKey is the per-session over-encryption key, present only for the
 	// over-encryption response; omitted (nil) for tls-cert.
