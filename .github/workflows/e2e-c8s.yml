@@ -324,7 +324,10 @@ jobs:
         include:
           - platform: snp-metal
             runner: cvm-launcher
-          # - { platform: tdx-metal, runner: cvm-launcher-tdx }  # needs a TDX rke2-node image
+          # TDX metal is deliberately NOT a cell here. This matrix delivers its
+          # payload over the guest serial console, and the TDX node image is
+          # console-dead by design. TDX metal has its own console-free lane,
+          # tdx-metal-e2e.yml, which drives the guest over RA-TLS instead.
           # - { platform: gke-snp,   runner: ubuntu-latest }        # needs the c8s-fleet provisioner seam
     uses: ./.github/workflows/cvm-e2e.yml
     with:
