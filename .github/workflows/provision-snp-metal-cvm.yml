@@ -62,6 +62,27 @@ jobs:
           # CRD) — no helm binary needed, the same path c8s installs through. $K is
           # cvm-e2e's in-guest kubectl; say() is defined by the driver preamble.
           cat > p.sh <<PAYLOAD
+          # ── AUDIT RETENTION CAP, first thing in the payload ──────────────
+          # rke2's `profile: cis` sets audit-log-maxbackup=10 x maxsize=100:
+          # a 1.0GB audit budget on a 2.0G RAM-backed root overlay that also
+          # carries etcd. On 2026-07-24 that filled, etcd hit ENOSPC and
+          # rke2-server crash-looped 16,265 times, taking snp-metal-cvm down
+          # for three days before anyone noticed. Measured burn was ~530MB/day,
+          # so a fresh guest re-wedges about three days after every provision.
+          # The guest root is ephemeral (RAM overlay), so an in-guest fix does
+          # not survive a re-provision and this has to run every time.
+          # Deliberately BEST EFFORT: hardening that can fail the provision it
+          # hardens is worse than the problem, so nothing here is fatal.
+          sed -i 's/audit-log-maxbackup=10/audit-log-maxbackup=2/; s/audit-log-maxsize=100/audit-log-maxsize=50/' /etc/rancher/rke2/config.yaml 2>/dev/null || true
+          rm -f /var/log/kube-audit/audit-2*.log 2>/dev/null || true
+          # The cap only binds once kube-apiserver re-reads its flags. A fresh
+          # guest has nothing running on it yet, so restarting here is cheap.
+          systemctl restart rke2-server 2>/dev/null || true
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+            \$K get --raw /readyz >/dev/null 2>&1 && break
+            sleep 10
+          done
+          \$K get --raw /readyz >/dev/null 2>&1 && say AUDIT_CAPPED || say WARN_AUDIT_CAP
           # ARC pods need PodSecurity=privileged (same as c8s-system; without it the
           # replicaset can't create a pod: deploy 0/1, rs 1/0 — spike run 2).
           \$K create ns arc-systems >/dev/null 2>&1; \$K create ns arc-runners >/dev/null 2>&1
