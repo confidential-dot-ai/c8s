@@ -1,118 +1,749 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# PROVISION the standing tdx-metal-cvm ARC runner — the TDX twin of snp-metal-cvm.
+# PROVISION the standing tdx-metal-cvm ARC runner: the TDX twin of snp-metal-cvm
 # ═══════════════════════════════════════════════════════════════════════════
-# STAGED (2026-07-21) — CANNOT RUN YET. Identical mechanism to snp-metal-cvm (ARC
-# console-installed into a standing rke2-node CVM; GitHub is the control plane
-# after bootstrap), on a TDX guest instead of SNP. Blocked on TWO things, neither
-# of which this file needs to exist:
-#   1. the TDX rke2-node image (joaosa building it) → its refs land in a
-#      `tdx-rke2-image-refs` ConfigMap that cvm-e2e's tdx-metal case reads.
-#   2. a TDX CI runner host + a `cvm-launcher-tdx` host-side runner to DRIVE the
-#      boot. tdx-dev-host-1 is a DEV host, not a runner host — the TDX CI host is
-#      a separate decision (dedicated tdx-gh-runner vs sharing). Until it exists,
-#      `runner: cvm-launcher-tdx` below resolves to nothing and dispatch queues.
-# The TDX boot itself is SIMPLER than SNP (no IGVM): cvm-e2e's tdx-metal case uses
-# launchSecurity.tdx + TDVF, node label kubevirt.io/tdx.
 #
-# SECRET REQUIRED: ARC_APP_PRIVATE_KEY = the PEM for GitHub App 4309649 (SAME app
-# as snp-metal-cvm/azure-cvm — no new access).
+# One mechanism on N substrates: ARC on a confidential node, so the runner pod
+# lands INSIDE the TEE. azure-cvm runs it on an AKS confidential pool.
+# snp-metal-cvm runs it on the rke2 inside a KubeVirt SNP guest. This runs it on
+# the PUBLISHED, UNMODIFIED c8s node image booted as an Intel TDX trust domain on
+# tdx-gh-runner, with the c8s bundle installed into the guest first.
 #
-# ⚠️ KNOWN GAP (console transport): the App PEM travels the serial console
-# UNSCRUBBED (base64-chunk-split → not scrubbable). Same gap as snp-metal-cvm; the
-# fix is the in-guest HTTP agent (primitive v2). Accepted dev-sandbox posture.
+# WHAT CHANGED vs the file this replaces (which never ran):
+# the old body delegated to cvm-e2e and typed a base64 ARC payload down the
+# SERIAL CONSOLE, because the SNP lane has no host-reachable guest apiserver
+# (host Cilium and in-guest rke2 both sit on 10.42/16). Neither half of that
+# holds here. The c8s node image is console-dead by design (hardened kernel, no
+# CONFIG_SERIAL_8250, no sshd, root locked), and this host's OUTER cluster was
+# renumbered to 172.20/172.21, so a guest on rke2's default 10.42/10.43 no longer
+# collides. The image's supported entrypoint is the network:
+#   :8400 attestation-api   :6443 kube-apiserver   :8443 cred-release
+# and `c8s get-kubeconfig` hands back an operator-key-bound kubeconfig over
+# RA-TLS. Proven by hand on hardware before this lane existed.
+#
+# CONSEQUENCE WORTH KEEPING: the KNOWN GAP this file used to carry is GONE.
+# The GitHub App PEM no longer transits the serial console as unscrubbable
+# base64 chunks. It goes into the guest apiserver over an attested TLS channel
+# and lands only in an in-guest Secret. No secret touches a loggable channel in
+# this lane, so it does not wait on the in-guest HTTP agent (primitive v2).
+#
+# WHAT "PROVISION" MEANS HERE, three layers in order:
+#   1. boot the standing TDX CVM from the pinned node image (KubeVirt);
+#   2. install the c8s bundle into its rke2, with the two ARC image digests
+#      SEEDED INTO THE ADMISSION FLOOR at install time;
+#   3. install ARC and register the tdx-metal-cvm scale set, scaled to zero.
+# After step 3 GitHub is the control plane: the in-guest listener polls out over
+# egress and the host never touches the guest apiserver again.
+#
+# RE-DISPATCH IS DESTRUCTIVE, BY NECESSITY. The VM is deleted and rebuilt, not
+# reconciled: kubectl apply cannot change a running VMI's spec, so an in-place
+# apply silently keeps the old guest and the provision looks green while
+# changing nothing. Any job in flight on this runner dies with the guest. This
+# is also the recovery path after a VM restart: runStrategy Always brings the
+# VMI back, but the guest rootfs is a verity image with an ephemeral encrypted
+# overlay, so the ARC install does not survive. Re-dispatch to restore it.
+#
+# THE OPERATOR KEY IS PER-PROVISION AND DISCARDED. cred-release only serves a
+# kubeconfig to the keypair whose public half was measured into RTMR[3] at boot,
+# and the private half dies with this runner's workspace. Nobody, including this
+# repo, can re-enter the guest apiserver afterwards without re-provisioning.
+# That is the posture we want for a standing runner: bootstrap, then hands off.
+#
+# SECRET REQUIRED: ARC_APP_PRIVATE_KEY = the PEM for GitHub App 4309649
+# (confidential-ci-runners; the SAME app as snp-metal-cvm / azure-cvm, so NO new
+# org access).
+#
+# No third-party actions run on this host: every step is curl, kubectl, go,
+# crane, helm and the c8s CLI.
 name: provision-tdx-metal-cvm
+
 on:
   workflow_dispatch:
     inputs:
+      runner_version:
+        description: 'actions-runner image version for the scale set. GitHub retires runner versions server-side: 2.331.0 now answers "Runner version is deprecated and cannot receive messages" and never picks up a job, while the listener still looks healthy. The pin and the allowlist entry are bumped TOGETHER here (the digest is resolved from this input), so they cannot drift apart.'
+        required: false
+        default: '2.336.0'
       max_runners:
-        description: 'max concurrent runner pods in the guest (scale-to-zero at idle)'
+        description: 'max concurrent runner pods in the guest (scale-to-zero at idle). Memory is the ceiling, not the scale set: the guest is 16Gi with a tmpfs-backed rootfs, so every job build tree lives in guest RAM. Raising this needs guest RAM, and guest RAM cannot be nudged (see the dead-zone note on GUEST_MEM below).'
         required: false
         default: '2'
+      c8s_ref:
+        description: 'c8s git ref to build the CLI from and install. Empty = the c8sRef pinned in the tdx-rke2-image-refs CM (VERSION PAIRING: the node image bakes an admission floor containing the bootstrap digests from ITS build ref, so a mismatched CLI gets its own components denied).'
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
+concurrency:
+  # Never two provisions of the same standing VM at once: the second would
+  # delete the VM the first is still installing into.
+  group: provision-tdx-metal-cvm
+  cancel-in-progress: false
+
+env:
+  NS: confai-images
+  REFS_CM: tdx-rke2-image-refs
+  # Stable name, not run-scoped: this VM outlives the run that made it.
+  VM: tdx-metal-cvm
+  # Not a tuning choice: anything in 17..63GiB silently boot-loops this image on
+  # TDX (GPU MMIO window), so 16Gi and 64Gi are the only legal values.
+  # 64Gi because consumer suites BUILD inside the TD. At 16Gi about 10Gi is held
+  # by the rke2 tmpfs, leaving ~2Gi, and kettle's cli_attest_ripgrep (a
+  # `cargo build --locked --release` of ripgrep, run concurrently at
+  # --test-threads 2) failed there every time while passing standalone.
+  # Host is 125Gi total / ~97Gi available, so this still leaves room for the
+  # ephemeral tdx-metal-e2e CVM alongside.
+  GUEST_MEM: 64Gi
+  GUEST_CORES: '4'
+  SCRATCH_SIZE: 80Gi
+  # ARC chart version AND controller image tag. They match by construction
+  # (the chart's image.tag defaults to its appVersion), but note the two OCI
+  # paths are NOT the same repository:
+  #   chart: ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+  #   image: ghcr.io/actions/gha-runner-scale-set-controller
+  # Allowlisting the chart path instead of the image path is a silent, very
+  # confusing ImagePullBackOff-free denial, so both are spelled out here.
+  ARC_VERSION: '0.14.2'
+  ARC_CHART: oci://ghcr.io/actions/actions-runner-controller-charts
+  CTRL_REPO: ghcr.io/actions/gha-runner-scale-set-controller
+  RUNNER_REPO: ghcr.io/actions/actions-runner
+  APP_ID: '4309649'
+  APP_INSTALLATION_ID: '146850802'
+  ORG_URL: https://github.com/confidential-dot-ai
+
 jobs:
-  payload:
-    runs-on: ubuntu-latest
-    outputs:
-      b64: ${{ steps.p.outputs.b64 }}
+  provision:
+    name: standing tdx-metal-cvm runner
+    # The HOST-side launcher runner on tdx-gh-runner. Its bm-e2e SA is scoped to
+    # confai-images (baremetal/kubevirt-rbac.yaml); kubectl uses the in-cluster
+    # token, so there is no kubeconfig to manage for the OUTER cluster.
+    runs-on: cvm-launcher-tdx
+    # boot ~1m + guest first boot ~3m + CLI build ~3m + c8s converge ~3m + ARC
+    # controller and listener ~5m, with headroom for a cold go module cache.
+    timeout-minutes: 60
+    env:
+      # Dispatch inputs go through env, not through ${{ }} interpolated into
+      # shell text: the values end up inside heredocs that become in-guest
+      # manifests, and an env var cannot be closed off and re-opened.
+      RUNNER_VERSION: ${{ inputs.runner_version }}
+      MAX_RUNNERS: ${{ inputs.max_runners }}
+      C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+
     steps:
-      - id: p
-        env:
-          APP_ID: '4309649'
-          APP_INSTALLATION_ID: '146850802'
-          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
-          MAXR: ${{ inputs.max_runners }}
+      - name: tools (kubectl, go, crane, helm)
         run: |
           set -euo pipefail
-          [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set — add it before first provision"; exit 1; }
-          PEM_B64=$(printf '%s' "$ARC_APP_PRIVATE_KEY" | base64 -w0)
-          CHART=oci://ghcr.io/actions/actions-runner-controller-charts
-          # payload runs as root IN the guest. rke2 ships helm-controller (HelmChart
-          # CRD) — no helm binary needed, the same path c8s installs through. $K is
-          # cvm-e2e's in-guest kubectl; say() is defined by the driver preamble.
-          cat > p.sh <<PAYLOAD
-          # ARC pods need PodSecurity=privileged (same as c8s-system; without it the
-          # replicaset can't create a pod: deploy 0/1, rs 1/0 — spike run 2).
-          \$K create ns arc-systems >/dev/null 2>&1; \$K create ns arc-runners >/dev/null 2>&1
-          for ns in arc-systems arc-runners; do \$K label ns \$ns pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1; done
-          say NS_PRIVILEGED
-          # App creds secret ARC consumes (App auth: id / installation / private key)
-          printf '%s' '$PEM_B64' | base64 -d > /tmp/arc.pem
-          \$K -n arc-runners create secret generic arc-app \
-            --from-literal=github_app_id='$APP_ID' \
-            --from-literal=github_app_installation_id='$APP_INSTALLATION_ID' \
-            --from-file=github_app_private_key=/tmp/arc.pem >/dev/null 2>&1 && say SECRET_OK || say FAIL_SECRET
-          rm -f /tmp/arc.pem
-          # 1) ARC controller
-          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: arc\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set-controller\n  version: "0.14.2"\n  targetNamespace: arc-systems\n  createNamespace: true\n' | \$K apply -f - 2>&1 | sed 's/^/@@CTL /;s/\$/@@/'
-          CTLOK=0
-          for i in \$(seq 1 45); do
-            dep=\$(\$K -n arc-systems get deploy -o jsonpath='{range .items[*]}{.metadata.name}={.status.availableReplicas}/{.status.replicas} {end}' 2>/dev/null)
-            echo "@@CTLW \$i deploy=\${dep:-none}@@"
-            printf '%s' "\$dep" | grep -qE '=1/1' && { CTLOK=1; say CTL_UP; break; }
-            sleep 12
-          done
-          if [ "\$CTLOK" != "1" ]; then
-            \$K -n kube-system logs job/helm-install-arc --tail=25 2>&1 | sed 's/^/@@HJLOG /;s/\$/@@/'
-            \$K -n arc-systems get events --field-selector reason=FailedCreate --sort-by=.lastTimestamp 2>&1 | tail -4 | sed 's/^/@@RSEV /;s/\$/@@/'
-            say FAIL_CONTROLLER; exit 0
+          mkdir -p "$PWD/bin"
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          chmod +x bin/kubectl
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+          if ! command -v go >/dev/null; then
+            GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//')"
+            [ -n "$GOVER" ] || GOVER=1.26.3
+            curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xz
           fi
-          # 2) the STANDING scale set: tdx-metal-cvm, scale-to-zero (minRunners:0).
-          # runner overlay = privileged + /dev/tdx-guest (reads the TDX report = in
-          # the TEE) + root (RUNNER_ALLOW_RUNASROOT/runAsUser:0) so jobs can apt-install
-          # libtss2 etc. — the snp-metal-cvm overlay pattern, on TDX.
-          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: tdx-metal-cvm\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: tdx-metal-cvm\n    minRunners: 0\n    maxRunners: $MAXR\n    template:\n      spec:\n        containers:\n          - name: runner\n            image: ghcr.io/actions/actions-runner:latest\n            command: ["/home/runner/run.sh"]\n            env:\n              - name: RUNNER_ALLOW_RUNASROOT\n                value: "1"\n            securityContext:\n              privileged: true\n              runAsUser: 0\n            volumeMounts:\n              - name: tdx\n                mountPath: /dev/tdx-guest\n        volumes:\n          - name: tdx\n            hostPath:\n              path: /dev/tdx-guest\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
-          # 3) GATE: the listener authenticates to github + polls => "Getting next
-          # message" — the scale set is live and registered (scaled to zero; a runner
-          # pod only materialises when a job is dispatched to runs-on: tdx-metal-cvm).
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          # crane: `c8s install --resolve-digests` shells out to it, and this
+          # lane needs it for the ARC digests too. Installed from source at a
+          # pin rather than the GitHub releases API, which rate-limits by IP on
+          # a shared self-hosted host.
+          command -v crane >/dev/null || go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          # helm: c8s install shells out to it. Normally already on the host;
+          # the fallback pins v3 deliberately (the CLI drives helm 3 semantics).
+          if ! command -v helm >/dev/null; then
+            curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz \
+              | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+          fi
+
+      - name: resolve image refs + the paired c8s ref
+        run: |
+          set -euo pipefail
+          # `|| true` so a missing CM reports the line below instead of dying
+          # inside a command substitution with no message at all.
+          for k in image rootPvc mrtd c8sRef; do
+            v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null || true)
+            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref"; exit 1; }
+            echo "$k=$v" >> "$GITHUB_ENV"
+          done
+          # Informational only (the CDI import that produced rootPvc).
+          echo "cdiTag=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.cdiTag}' 2>/dev/null || true)" >> "$GITHUB_ENV"
+          # An explicit input overrides the pin, but say so loudly: the floor is
+          # fail-closed, so an unpaired ref is the likeliest cause of a red run.
+          if [ -n "${C8S_REF_INPUT:-}" ]; then
+            echo "::warning title=version pairing::installing c8s_ref='$C8S_REF_INPUT' against an image built from '$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.c8sRef}' || true)': components may be denied by the baked floor"
+            echo "c8sRef=$C8S_REF_INPUT" >> "$GITHUB_ENV"
+          fi
+
+      # ── everything below this line up to "delete the previous standing CVM"
+      # is FAIL-FAST-BEFORE-DESTROY. A bad c8s ref, an unreachable registry or a
+      # host with no TDX slot must be found while the CURRENT standing runner is
+      # still alive and serving jobs, not after we have deleted it.
+      - name: build the c8s CLI at the paired ref
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/c8s-src
+          git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
+          git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently install main"; exit 1; }
+          echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
+          ( cd /tmp/c8s-src && go install ./cmd/c8s )
+          # An unstamped build reports version "dev", which is exactly why
+          # --image-tag is passed explicitly at install rather than trusting
+          # build metadata.
+          c8s --version || true
+
+      - name: resolve the ARC image digests (the two images that must clear the floor)
+        # ARC contributes exactly TWO images to the guest:
+        #   1. the controller, which the listener pod REUSES (one digest covers
+        #      both: the controller passes its own image to the listener);
+        #   2. the ephemeral runner.
+        # Both land in namespaces the baked NRI floor polices, so both must be
+        # in the allowlist BY DIGEST before they are ever scheduled. The
+        # index (manifest-list) digest is what containerd records for a
+        # multi-arch tag; the linux/amd64 child digest is added as well, for the
+        # same reason the azure lane does it (a resolver that records the child
+        # instead would otherwise be denied with no useful message).
+        run: |
+          set -euo pipefail
+          CTRL_IMG="$CTRL_REPO:$ARC_VERSION"
+          RUNNER_IMG="$RUNNER_REPO:$RUNNER_VERSION"
+          : > /tmp/arc-digests.txt
+          for ref in "$CTRL_IMG" "$RUNNER_IMG"; do
+            repo="${ref%:*}"
+            idx=$(crane digest "$ref") || { echo "::error::crane digest $ref failed: the tag does not exist or ghcr is unreachable"; exit 1; }
+            echo "$idx $repo" >> /tmp/arc-digests.txt
+            amd=$(crane digest --platform linux/amd64 "$ref" 2>/dev/null || true)
+            [ -n "$amd" ] && echo "$amd $repo" >> /tmp/arc-digests.txt
+            echo "$ref -> $idx"
+            case "$ref" in
+              "$CTRL_IMG")   echo "CTRL_DIGEST=$idx"   >> "$GITHUB_ENV" ;;
+              "$RUNNER_IMG") echo "RUNNER_DIGEST=$idx" >> "$GITHUB_ENV" ;;
+            esac
+          done
+          sort -u -o /tmp/arc-digests.txt /tmp/arc-digests.txt
+          # The floor is a values file, NOT a runtime `c8s allowlist add`.
+          # Runtime adds live in CDS memory and cds.persistence is off by
+          # default, so the first CDS restart drops them and every runner pod
+          # starts failing admission on a cluster nobody touched. Seeding at
+          # install writes them into the CDS ConfigMap the chart renders, which
+          # is as durable as the install itself.
+          {
+            echo "nriImagePolicy:"
+            echo "  bootstrapAllowlist:"
+            echo "    digests:"
+            while read -r d repo; do
+              printf '      "%s": "%s@%s"\n' "$d" "$repo" "$d"
+            done < /tmp/arc-digests.txt
+          } > /tmp/arc-floor.yaml
+          cat /tmp/arc-floor.yaml
+
+      - name: preflight, TDX device capacity
+        # KubeVirt's socket device-plugin probes the QGS socket ONLY at
+        # virt-handler startup and never re-checks. After a host reboot or a
+        # qgsd/bridge restart it advertises 0 forever and every TDX VM fails to
+        # schedule with a misleading "Insufficient devices", while QGS is
+        # perfectly healthy. Cheap to detect here; the remedy needs
+        # cluster-scoped rights the bm-e2e SA deliberately lacks, so this
+        # reports rather than fixes.
+        run: |
+          set -uo pipefail
+          if kubectl auth can-i get nodes >/dev/null 2>&1; then
+            N=$(kubectl get node -l kubevirt.io/tdx=true -o jsonpath='{.items[0].status.allocatable.devices\.kubevirt\.io/tdx}' 2>/dev/null)
+            echo "devices.kubevirt.io/tdx = ${N:-unknown}"
+            if [ "${N:-0}" = "0" ]; then
+              echo "::error title=TDX devices exhausted::virt-handler is advertising 0 TDX devices. Fix on the host: kubectl -n kubevirt rollout restart daemonset/virt-handler"
+              exit 1
+            fi
+          else
+            echo "no node read permission (expected: bm-e2e is namespace-scoped); relying on the scheduling gate below"
+          fi
+
+      - name: check ARC_APP_PRIVATE_KEY is present before destroying anything
+        env:
+          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set. Add it before provisioning: without it the guest boots, c8s installs, and ARC then sits unregistered forever"; exit 1; }
+          echo "App PEM present. App $APP_ID, installation $APP_INSTALLATION_ID, org $ORG_URL"
+
+      # ── DESTRUCTIVE FROM HERE ────────────────────────────────────────────
+      - name: delete the previous standing CVM
+        # `kubectl apply` on a VirtualMachine whose VMI is Running does NOT
+        # re-launch the guest: KubeVirt updates the template and leaves the live
+        # VMI alone, so a re-provision would "succeed" against the OLD guest,
+        # old node image and old ARC install. Delete first, unconditionally.
+        # The scratch PVC goes too: it is RWO, so the new VMI cannot bind it
+        # until the old virt-launcher is gone, and a fresh one removes any
+        # question about an initrd re-keying somebody else's encrypted overlay.
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" delete vm "$VM" --ignore-not-found --wait=true --timeout=180s
+          for i in $(seq 1 60); do
+            kubectl -n "$NS" get vmi "$VM" >/dev/null 2>&1 || break
+            [ "$i" = 60 ] && { echo "::error::VMI $VM still present after VM delete"; exit 1; }
+            sleep 5
+          done
+          kubectl -n "$NS" delete secret "$VM-opkey" "$VM-cloudinit" --ignore-not-found
+          kubectl -n "$NS" delete pvc "$VM-scratch" --ignore-not-found --wait=false
+          # pvc-protection holds the PVC in Terminating until the last consumer
+          # pod is gone. Recreating the same name against a Terminating PVC is
+          # the classic "provision hangs at Pending" failure, so wait it out.
+          for i in $(seq 1 60); do
+            kubectl -n "$NS" get pvc "$VM-scratch" >/dev/null 2>&1 || break
+            [ "$i" = 60 ] && { echo "::error::PVC $VM-scratch stuck Terminating; a consumer pod is still holding it"; kubectl -n "$NS" describe pvc "$VM-scratch" | tail -20; exit 1; }
+            sleep 5
+          done
+          echo "previous standing CVM cleared"
+
+      - name: per-provision operator key + opkeydata secret
+        # The initrd mounts the volume labelled "opkeydata", SHA-384s the file
+        # named `pubkey`, and extends that into RTMR[3]. cred-release then
+        # refuses to serve unless the on-disk key matches RTMR[3], so the
+        # kubeconfig fetched below is cryptographically bound to THIS keypair
+        # and to THIS boot. The Secret must therefore carry exactly one key,
+        # named pubkey.
+        run: |
+          set -euo pipefail
+          umask 077
+          rm -f /tmp/op.key /tmp/op.pub
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/op.key
+          openssl ec -in /tmp/op.key -pubout -out /tmp/op.pub 2>/dev/null
+          kubectl -n "$NS" create secret generic "$VM-opkey" \
+            --from-file=pubkey=/tmp/op.pub --dry-run=client -o yaml | kubectl -n "$NS" apply -f -
+          echo "operator key bound (sha384 $(sha384sum < /tmp/op.pub | cut -c1-16)...)"
+
+      - name: boot the standing TDX CVM
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: $VM-scratch
+            namespace: $NS
+            labels:
+              ci.confidential.ai/managed: "true"
+              ci.confidential.ai/standing: "true"
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources: {requests: {storage: $SCRATCH_SIZE}}
+            storageClassName: local-path
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata: {name: $VM-cloudinit, namespace: $NS}
+          type: Opaque
+          stringData:
+            userdata: |
+              #cloud-config
+              hostname: ${VM}
+          ---
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: $VM
+            namespace: $NS
+            labels:
+              ci.confidential.ai/managed: "true"
+              # THE REAPER CONTRACT. tdx-metal-e2e reaps every managed VM from a
+              # finished run; it checks this label FIRST and skips. Drop it and
+              # the next e2e run kills the standing runner mid-job.
+              ci.confidential.ai/standing: "true"
+              ci.confidential.ai/run-id: "${{ github.run_id }}"
+            annotations:
+              ci.confidential.ai/repo: "${{ github.repository }}"
+              ci.confidential.ai/run-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              ci.confidential.ai/c8s-ref: "$c8sRef"
+              ci.confidential.ai/runner-version: "$RUNNER_VERSION"
+          spec:
+            runStrategy: Always
+            template:
+              metadata:
+                labels: {kubevirt.io/domain: $VM}
+              spec:
+                nodeSelector:
+                  kubevirt.io/tdx: "true"
+                domain:
+                  cpu:
+                    # host-passthrough is MANDATORY: QEMU rejects a named model
+                    # for TDX ("Named cpu model is not supported for TDX yet!").
+                    model: host-passthrough
+                    # $GUEST_CORES vCPUs are SHARED by up to max_runners jobs.
+                    # More concurrency here buys more jobs at once, never faster
+                    # jobs.
+                    cores: $GUEST_CORES
+                  devices:
+                    autoattachVSOCK: true
+                    disks:
+                      - name: rootdisk
+                        # dm-verity rootfs: never written. readonly takes a
+                        # SHARED qemu lock, which is what lets this standing CVM
+                        # and a concurrent tdx-metal-e2e CVM share the one
+                        # rootdisk PVC; a writable open takes an EXCLUSIVE lock
+                        # and starves every other guest.
+                        # NB: readonly is a field of `disk`, not a sibling of it;
+                        # KubeVirt's strict decoder rejects the sibling form.
+                        disk: {bus: virtio, readonly: true}
+                      - name: scratch
+                        disk: {bus: virtio}
+                        # HARD requirement: the initrd keys the encrypted
+                        # overlay off this exact serial. Without it the guest
+                        # falls back to a 2G tmpfs and rke2 wedges when full,
+                        # which on a build runner happens within one job.
+                        serial: confai-scratch
+                      - name: opkey
+                        disk: {bus: virtio}
+                      - name: cloudinit
+                        disk: {bus: virtio}
+                    interfaces: [{name: default, masquerade: {}}]
+                    rng: {}
+                  firmware: {bootloader: {efi: {secureBoot: false}}}
+                  # Empty object: TDX takes no per-VM policy. Cluster config
+                  # lives in the KubeVirt CR (confidentialCompute.tdx.attestation).
+                  launchSecurity: {tdx: {}}
+                  memory: {guest: $GUEST_MEM}
+                  resources: {requests: {memory: $GUEST_MEM}}
+                networks: [{name: default, pod: {}}]
+                volumes:
+                  - name: rootdisk
+                    persistentVolumeClaim: {claimName: $rootPvc}
+                  - name: scratch
+                    persistentVolumeClaim: {claimName: $VM-scratch}
+                  - name: opkey
+                    secret: {secretName: $VM-opkey, volumeLabel: opkeydata}
+                  - name: cloudinit
+                    cloudInitNoCloud: {secretRef: {name: $VM-cloudinit}}
+          EOF
+          for i in $(seq 1 60); do
+            PHASE=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$PHASE" = Running ] && break
+            sleep 5
+          done
+          if [ "${PHASE:-}" != Running ]; then
+            kubectl -n "$NS" describe vmi "$VM" | tail -25
+            echo "::error::VMI not Running (phase=${PHASE:-none}). 'Insufficient devices.kubevirt.io/tdx' means virt-handler latched 0: rollout restart daemonset/virt-handler -n kubevirt"
+            exit 1
+          fi
+          IP=$(kubectl -n "$NS" get vmi "$VM" -o jsonpath='{.status.interfaces[0].ipAddress}')
+          [ -n "$IP" ] || { echo "::error::no guest IP"; exit 1; }
+          echo "GUEST_IP=$IP" >> "$GITHUB_ENV"
+          echo "VMI Running at $IP"
+
+      - name: assert genuine TDX launch
+        # Cheap, and the only thing standing between "a standing confidential
+        # runner" and "a standing VM we describe as confidential".
+        run: |
+          set -euo pipefail
+          POD=$(kubectl -n "$NS" get pods -l kubevirt.io/domain="$VM" -o name | head -1 || true)
+          [ -n "$POD" ] || { echo "::error::no virt-launcher pod for $VM"; exit 1; }
+          # grep -c exits 1 on zero matches, so absorb the status and assert on
+          # the count: a silent step failure here would read as a tooling
+          # problem rather than as "this guest is not a trust domain".
+          CNT=$(kubectl -n "$NS" exec "$POD" -c compute -- \
+            bash -c 'tr "\0" "\n" < /proc/$(pgrep -f qemu-system | head -1)/cmdline | grep -c "tdx-guest"' 2>/dev/null || echo 0)
+          echo "qemu tdx-guest args: $CNT"
+          [ "${CNT:-0}" -ge 1 ] || { echo "::error::qemu has no tdx-guest object: not a genuine trust domain"; exit 1; }
+          echo "OK: qemu launched with -object tdx-guest"
+
+      - name: wait for guest services (attestation-api, apiserver, cred-release)
+        # The console-free entrypoint. A fresh scratch PVC has to be formatted
+        # and keyed on this first boot, so be patient with :8400.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            H=$(curl -s --connect-timeout 2 --max-time 4 "http://$GUEST_IP:8400/health" 2>/dev/null || true)
+            [ -n "$H" ] && { echo "attestation-api: $H"; break; }
+            sleep 10
+          done
+          echo "$H" | grep -q '"platform":"tdx"' || { echo "::error::attestation-api did not report platform=tdx"; exit 1; }
+          for i in $(seq 1 60); do
+            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:6443/livez" 2>/dev/null || true)
+            case "$C" in 200|401|403) echo "kube-apiserver: HTTP $C"; break;; esac
+            sleep 5
+          done
+          for i in $(seq 1 60); do
+            C=$(curl -sk --max-time 4 -o /dev/null -w '%{http_code}' "https://$GUEST_IP:8443/" 2>/dev/null || true)
+            [ -n "$C" ] && [ "$C" != 000 ] && { echo "cred-release: HTTP $C"; break; }
+            sleep 5
+          done
+
+      - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
+        run: |
+          set -euo pipefail
+          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --out /tmp/guest.kubeconfig --timeout 180s
+          [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
+          WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+          [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
+          echo "OK: attested kubeconfig, identity=$WHO"
+          KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes
+
+      - name: install the c8s bundle, with the ARC digests seeded into the floor
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          # helm --wait carries a baked 5-minute ceiling that a 4-vCPU
+          # single-node guest can legitimately exceed while pods are still
+          # CONVERGING. The install is idempotent and has already applied
+          # everything by then, so a non-zero exit is downgraded here and the
+          # explicit readiness gate in the next step is authoritative.
+          c8s install --cvm-mode node --single-node --hardware-platform tdx \
+            --image-tag "$c8sRef" \
+            --operator-keys /tmp/op.pub \
+            --measurements "$mrtd" \
+            --resolve-digests=true \
+            -f /tmp/arc-floor.yaml \
+            || echo "::warning::c8s install returned non-zero (usually helm --wait timing out on a converging guest); gating on explicit readiness instead"
+          kubectl -n c8s-system get pods -o wide
+
+      - name: assert components converged
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          # awk, not a regex backreference: `$2 !~ /^([0-9]+)\/\1$/` looks right
+          # and is not (awk has no backreferences), so it silently only ever
+          # matches 1/1 and calls every sidecar-bearing pod not-ready.
+          for i in $(seq 1 40); do
+            NOTREADY=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") n++} END {print n+0}')
+            TOTAL=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | wc -l)
+            [ "$TOTAL" -gt 0 ] && [ "$NOTREADY" -eq 0 ] && { echo "all $TOTAL components Running"; break; }
+            echo "[$i] $NOTREADY/$TOTAL not ready"
+            sleep 15
+          done
+          kubectl -n c8s-system get pods --no-headers
+          [ "${NOTREADY:-1}" -eq 0 ] || { echo "::error::components did not converge"; kubectl -n c8s-system describe pods | tail -40; exit 1; }
+
+      - name: assert the ARC digests actually landed in the served allowlist
+        # Fail here, in two seconds, rather than in five minutes as an opaque
+        # "runner pod never started". If the -f values file was dropped or
+        # overridden, the digests are simply absent from the CDS seed and every
+        # ARC pod is denied at container creation.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          # The chart renders the seed into <cds>-allowlist-seed. Read it by KEY
+          # rather than by name (the name is release-derived), and fall back to
+          # the raw ConfigMap dump if the jsonpath comes back empty.
+          SEED=$(kubectl -n c8s-system get cm -o jsonpath='{range .items[*]}{.data.allowlist-seed\.json}{end}' 2>/dev/null || true)
+          [ -n "$SEED" ] || SEED=$(kubectl -n c8s-system get cm -o json)
+          MISSING=0
+          while read -r d repo; do
+            echo "$SEED" | grep -q "$d" || { echo "::error::$repo digest $d is NOT in the CDS allowlist seed"; MISSING=1; }
+          done < /tmp/arc-digests.txt
+          [ "$MISSING" -eq 0 ] || { echo "::error::the ARC images would be denied by the baked NRI floor; not proceeding to install ARC"; exit 1; }
+          echo "OK: every ARC digest is in the durable floor (survives a CDS restart)"
+
+      - name: ARC namespaces (privileged PSA) + the GitHub App secret
+        env:
+          ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          # The node image bakes a RESTRICTED PodSecurity default. Without these
+          # labels the ARC replicaset cannot create a pod at all and the only
+          # symptom is deploy 0/1 with rs 1/0, no pod, no event worth reading.
+          for ns in arc-systems arc-runners; do
+            kubectl create ns "$ns" >/dev/null 2>&1 || true
+            kubectl label ns "$ns" \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null
+          done
+          echo "arc-systems and arc-runners labelled privileged"
+          # The App PEM travels this RA-TLS session into an in-guest Secret. It
+          # is never echoed, never rendered into helm values, and never written
+          # to a step log. umask 0077 covers the brief on-disk hop.
+          umask 077
+          printf '%s\n' "$ARC_APP_PRIVATE_KEY" > /tmp/arc.pem
+          kubectl -n arc-runners delete secret arc-app --ignore-not-found >/dev/null
+          kubectl -n arc-runners create secret generic arc-app \
+            --from-literal=github_app_id="$APP_ID" \
+            --from-literal=github_app_installation_id="$APP_INSTALLATION_ID" \
+            --from-file=github_app_private_key=/tmp/arc.pem >/dev/null
+          shred -u /tmp/arc.pem 2>/dev/null || rm -f /tmp/arc.pem
+          # describe prints key names and byte counts, never values.
+          kubectl -n arc-runners describe secret arc-app | tail -6
+
+      - name: install the ARC controller
+        # rke2 ships helm-controller, so a HelmChart CR is the install path (no
+        # helm binary in the guest). It MUST live in kube-system: that is where
+        # helm-controller watches, and where the klipper-helm job image is both
+        # PSA-exempt and NRI-exempt. The chart is pulled from the
+        # actions-runner-controller-charts OCI path; the image it then runs is
+        # the DIFFERENT gha-runner-scale-set-controller path, pinned here to the
+        # exact tag whose digest was seeded into the floor above.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          kubectl apply -f - <<EOF
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: arc
+            namespace: kube-system
+          spec:
+            chart: $ARC_CHART/gha-runner-scale-set-controller
+            version: "$ARC_VERSION"
+            targetNamespace: arc-systems
+            createNamespace: true
+            valuesContent: |
+              image:
+                repository: $CTRL_REPO
+                tag: "$ARC_VERSION"
+          EOF
+          D=""
+          for i in $(seq 1 60); do
+            # `|| true` is load-bearing under pipefail: head closing the pipe
+            # early makes kubectl exit 141 and would kill the step.
+            D=$(kubectl -n arc-systems get deploy -o name 2>/dev/null | head -1 || true)
+            [ -n "$D" ] && break
+            sleep 10
+          done
+          if [ -z "$D" ]; then
+            echo "::error::ARC controller deployment never appeared"
+            kubectl -n kube-system logs job/helm-install-arc --tail=40 2>&1 || true
+            exit 1
+          fi
+          kubectl -n arc-systems rollout status "$D" --timeout=300s || {
+            echo "::error::ARC controller did not become available"
+            kubectl -n arc-systems get pods -o wide
+            kubectl -n arc-systems describe "$D" | tail -30
+            exit 1
+          }
+
+      - name: register the tdx-metal-cvm scale set (scale-to-zero)
+        # The runner overlay is the snp-metal-cvm pattern retargeted at TDX:
+        #   /dev/tdx_guest   the TDX guest device, so a job can pull its own
+        #                    attestation report and PROVE it ran in the TEE.
+        #                    UNDERSCORE, not hyphen: the hyphenated path silently
+        #                    creates an empty dir with hostPath type unset, which
+        #                    is why type: CharDevice is pinned here.
+        #   /sys/kernel/config  configfs, the TSM report interface (configfs-tsm)
+        #                    the newer attestation clients use instead of the
+        #                    ioctl.
+        #   root + privileged  so jobs can apt-install libtss2 and friends. The
+        #                    pod is root on OUR node inside the CVM boundary:
+        #                    same trust domain, no boundary crossed.
+        # The image is pinned BY DIGEST, the same digest seeded into the floor,
+        # so the tag cannot drift between resolution and pull.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
+          kubectl apply -f - <<EOF
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: tdx-metal-cvm
+            namespace: kube-system
+          spec:
+            chart: $ARC_CHART/gha-runner-scale-set
+            version: "$ARC_VERSION"
+            targetNamespace: arc-runners
+            createNamespace: true
+            valuesContent: |
+              githubConfigUrl: $ORG_URL
+              githubConfigSecret: arc-app
+              runnerScaleSetName: tdx-metal-cvm
+              minRunners: 0
+              maxRunners: $MAX_RUNNERS
+              template:
+                spec:
+                  containers:
+                    - name: runner
+                      image: $RUNNER_REPO@$RUNNER_DIGEST
+                      command: ["/home/runner/run.sh"]
+                      env:
+                        - name: RUNNER_ALLOW_RUNASROOT
+                          value: "1"
+                      securityContext:
+                        privileged: true
+                        runAsUser: 0
+                      volumeMounts:
+                        - name: tdx
+                          mountPath: /dev/tdx_guest
+                        - name: configfs
+                          mountPath: /sys/kernel/config
+                  volumes:
+                    - name: tdx
+                      hostPath:
+                        path: /dev/tdx_guest
+                        type: CharDevice
+                    - name: configfs
+                      hostPath:
+                        path: /sys/kernel/config
+                        type: Directory
+          EOF
+          for i in $(seq 1 40); do
+            kubectl -n arc-runners get autoscalingrunnerset -o name 2>/dev/null | grep -q . && break
+            sleep 10
+          done
+          kubectl -n arc-runners get autoscalingrunnerset,pods 2>&1 | tail -10 || true
+
+      - name: gate, the listener must register with GitHub
+        # "Getting next message" is the proof that the listener authenticated as
+        # the App, resolved the org, and is long-polling for jobs. Until it says
+        # that, `runs-on: tdx-metal-cvm` queues forever with no error anywhere.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/guest.kubeconfig
           LOK=0
-          for i in \$(seq 1 40); do
-            LP=\$(\$K -n arc-systems get pods --no-headers 2>/dev/null | grep -i listener | awk '{print \$1" "\$3}')
-            echo "@@LST \$i: \${LP:-none}@@"
-            L=\$(\$K -n arc-systems get pods -o name 2>/dev/null | grep -i listener | head -1)
-            [ -n "\$L" ] && \$K -n arc-systems logs "\$L" --tail=3 2>/dev/null | grep -q 'Getting next message' && { LOK=1; say LISTENER_REGISTERED; break; }
+          L=""
+          for i in $(seq 1 40); do
+            # `|| true` twice: grep exits 1 with no match and head SIGPIPEs
+            # kubectl, either of which pipefail would turn into a dead step.
+            L=$(kubectl -n arc-systems get pods -o name 2>/dev/null | grep -i listener | head -1 || true)
+            echo "[$i] listener=${L:-none}"
+            if [ -n "$L" ] && kubectl -n arc-systems logs "$L" --tail=20 2>/dev/null | grep -q 'Getting next message'; then
+              LOK=1
+              echo "OK: listener is polling GitHub"
+              break
+            fi
             sleep 12
           done
-          [ "\$LOK" = "1" ] || { \$K -n arc-systems get pods 2>&1 | sed 's/^/@@DBG /;s/\$/@@/'; say FAIL_LISTENER; exit 0; }
-          say PAYLOAD_OK
-          PAYLOAD
-          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+          # Written here, not inside the loop: a value put in GITHUB_ENV is not
+          # visible to the step that wrote it, only to later ones.
+          echo "LISTENER_REGISTERED=$LOK" >> "$GITHUB_ENV"
+          if [ "$LOK" != "1" ]; then
+            set +e
+            kubectl -n arc-systems get pods -o wide
+            [ -n "$L" ] && kubectl -n arc-systems logs "$L" --tail=40 2>&1 | tail -40
+            kubectl -n arc-runners get pods -o wide
+            kubectl -n arc-runners get autoscalingrunnerset -o wide
+            echo "::error::listener never reached 'Getting next message'. Check that App installation ${APP_INSTALLATION_ID} still grants org_self_hosted_runners:write on $ORG_URL, and that guest egress to github.com is open"
+            exit 1
+          fi
 
-  # boot a STANDING rke2-node TDX CVM (stable name, reaper-exempt, no teardown) and
-  # console-deliver the ARC install into it. Reuses the proven cvm-e2e primitive
-  # (tdx-metal case: launchSecurity.tdx, no IGVM). runner=cvm-launcher-tdx is the
-  # host-side runner on the TDX CI host — pending (see header).
-  provision:
-    needs: payload
-    uses: ./.github/workflows/cvm-e2e.yml
-    with:
-      platform: tdx-metal
-      runner: cvm-launcher-tdx
-      flavor: rke2-node
-      keep_alive: true
-      vm_name: tdx-metal-cvm
-      payload_b64: ${{ needs.payload.outputs.b64 }}
-      timeout_minutes: 45
-    secrets: inherit
+      - name: discard the operator private key
+        # Deliberate: the key that can mint a guest-admin kubeconfig does not
+        # outlive the provision. Re-dispatch this workflow to regain access.
+        if: always()
+        run: |
+          set +e
+          shred -u /tmp/op.key 2>/dev/null || rm -f /tmp/op.key
+          rm -f /tmp/guest.kubeconfig /tmp/arc.pem
+          exit 0
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### standing runner: \`tdx-metal-cvm\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| node image | \`${image:-?}\` |"
+            echo "| rootPvc | \`${rootPvc:-?}\` |"
+            echo "| cdiTag | \`${cdiTag:-?}\` |"
+            echo "| c8s ref | \`${c8sRef:-?}\` |"
+            echo "| MRTD | \`${mrtd:0:32}...\` |"
+            echo "| guest | \`${GUEST_IP:-?}\` (${GUEST_CORES} vCPU / ${GUEST_MEM}) |"
+            echo "| ARC | chart \`${ARC_VERSION}\`, controller+listener \`${CTRL_DIGEST:-?}\` |"
+            echo "| runner image | \`${RUNNER_REPO}:${RUNNER_VERSION}\` = \`${RUNNER_DIGEST:-?}\` |"
+            echo "| scale set | minRunners 0, maxRunners ${MAX_RUNNERS} |"
+            if [ "${LISTENER_REGISTERED:-0}" = "1" ]; then echo "| listener | registered, polling |"; else echo "| listener | NOT registered |"; fi
+            echo ""
+            echo "Dispatch a job with \`runs-on: tdx-metal-cvm\` to land it in the trust domain."
+            echo "NO TEARDOWN: this CVM is standing and is labelled \`ci.confidential.ai/standing=true\`, which is what makes tdx-metal-e2e's reaper skip it."
+            echo "The per-provision operator key has been discarded; re-dispatch this workflow to regain guest-admin access, and after any VM restart to reinstall ARC (the guest rootfs does not persist it)."
+          } >> "$GITHUB_STEP_SUMMARY"

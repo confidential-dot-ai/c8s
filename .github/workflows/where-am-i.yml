@@ -1,16 +1,19 @@
 # Settles one question empirically: is the cvm-launcher ARC runner INSIDE a CVM
 # (an SNP guest) or ON the bare-metal SNP host? /dev/sev-guest exists only inside a
 # guest; /dev/sev is the host-side PSP interface used to LAUNCH guests.
+# Same question on the TDX side: /dev/tdx_guest (UNDERSCORE, never a hyphen) is
+# the in-TD attestation device and exists only inside a TD guest; a TDX-capable
+# HOST shows kvm_intel's `tdx` module parameter = Y and NO /dev/tdx_guest.
 # Also probes the Azure signals: on `azure-snp-cvm` (runner pod ON a confidential
 # AKS node) expect virt=container BUT /dev/tpmrm0 present + IMDS
-# securityProfile=ConfidentialVM — the TEE boundary is the NODE, evidenced by
+# securityProfile=ConfidentialVM. The TEE boundary is the NODE, evidenced by
 # the vTPM, not /dev/sev-guest (Azure never exposes the native device).
 name: where-am-i
 on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'runs-on label to probe (cvm-launcher | azure-snp-cvm | azure-tdx-cvm | ...)'
+        description: 'runs-on label to probe (cvm-launcher | cvm-launcher-tdx | snp-metal-cvm | tdx-metal-cvm | azure-snp-cvm | azure-tdx-cvm | ...)'
         required: false
         default: cvm-launcher
 jobs:
@@ -21,7 +24,7 @@ jobs:
       - name: am I in a TEE?
         run: |
           set +e
-          echo "=== capability check (root + tpm OPEN — needed for real payloads) ==="
+          echo "=== capability check (root + tpm OPEN, needed for real payloads) ==="
           echo "uid=$(id -u)"
           ( exec 3</dev/tpmrm0 ) 2>/dev/null && echo "tpmrm0: OPENABLE" || echo "tpmrm0: not openable"
           echo "=== azure signals (vTPM + IMDS; meaningful on azure-snp-cvm) ==="
@@ -31,13 +34,21 @@ jobs:
           systemd-detect-virt 2>/dev/null || echo "(systemd-detect-virt unavailable)"
           echo "=== /dev/sev* (sev-guest => we ARE a guest; sev => we are the HOST) ==="
           ls -la /dev/sev* 2>&1
+          echo "=== /dev/tdx_guest (UNDERSCORE; present => we ARE a TD guest) ==="
+          ls -la /dev/tdx_guest 2>&1
+          echo "=== tdx HOST signal (kvm_intel tdx=Y => TDX-capable host, not a guest) ==="
+          cat /sys/module/kvm_intel/parameters/tdx 2>/dev/null || echo "(kvm_intel tdx parameter absent)"
           echo "=== configfs-tsm (the in-guest attestation report interface) ==="
           ls -la /sys/kernel/config/tsm/report 2>&1 | head -3
           echo "=== cpuinfo sev flags ==="
           grep -o -m1 -E 'sev[_a-z]*' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          echo "=== cpuinfo tdx flags (tdx_guest => the kernel booted as a TD) ==="
+          grep -o -m1 -E 'tdx[_a-z]*' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
           echo "=== node/host identity ==="
           echo "node=$(cat /etc/hostname 2>/dev/null)  kernel=$(uname -r)"
           echo "=== VERDICT ==="
-          if [ -e /dev/sev-guest ]; then echo "INSIDE a CVM (SNP guest): /dev/sev-guest present"
+          if [ -e /dev/tdx_guest ]; then echo "INSIDE a TD guest (Intel TDX): /dev/tdx_guest present"
+          elif [ -e /dev/sev-guest ]; then echo "INSIDE a CVM (SNP guest): /dev/sev-guest present"
+          elif [ "$(cat /sys/module/kvm_intel/parameters/tdx 2>/dev/null)" = "Y" ]; then echo "ON the bare-metal TDX HOST: kvm_intel tdx=Y, /dev/tdx_guest ABSENT"
           elif [ -e /dev/sev ]; then echo "ON the bare-metal SNP HOST: /dev/sev present, /dev/sev-guest ABSENT"
-          else echo "neither device visible from this pod"; fi
+          else echo "no native TEE device visible from this pod (EXPECTED on azure-snp-cvm / azure-tdx-cvm: the TEE boundary is the NODE, evidenced by the vTPM + IMDS securityProfile above)"; fi
