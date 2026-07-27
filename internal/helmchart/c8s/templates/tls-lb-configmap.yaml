@@ -209,6 +209,28 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $scheme;
+                {{- /*
+                  Stream responses through instead of accumulating them.
+
+                  nginx defaults to proxy_buffering on and HTTP/1.0 upstream, so
+                  a Server-Sent Events body is buffered and released in clumps.
+                  For token streaming that turns a smooth generation into
+                  bursts: measured on an 8xB300 TDX node-as-CVM, TTFT p50 rose
+                  22.4ms -> 287.2ms through this proxy while inter-token latency
+                  *fell* 5.49ms -> 1.58ms. ITL improving across an extra hop is
+                  the tell -- chunks arriving together compress measured ITL
+                  while first-token latency rises.
+
+                  proxy_http_version 1.1 is required alongside it: HTTP/1.0
+                  upstream has no chunked transfer-encoding, so nginx must read
+                  to EOF to know the body length, which re-buffers regardless of
+                  proxy_buffering.
+
+                  Both are safe for non-streaming responses -- they change when
+                  bytes are forwarded, not what is sent.
+                */}}
+                proxy_buffering off;
+                proxy_http_version 1.1;
             }
             {{- end }}
 
