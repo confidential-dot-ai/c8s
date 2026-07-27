@@ -6,6 +6,24 @@
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
+{{- if not (kindIs "bool" .Values.tlsLb.allowlist.enabled) -}}
+{{- fail (printf "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.allowlist.enabled) -}}
+{{- end -}}
+{{- $explicitAllowlistRoute := eq (include "tls-lb.hasExplicitAllowlistRoute" .) "true" -}}
+{{- $renderAllowlistRoute := and .Values.tlsLb.allowlist.enabled (not $explicitAllowlistRoute) -}}
+{{- $allowlistProxyPort := 0 -}}
+{{- if $renderAllowlistRoute -}}
+{{- $allowlistProxyPort = include "c8s.int" .Values.tlsLb.allowlist.proxyPort | int -}}
+{{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if and .Values.tlsLb.attest.enabled (eq $allowlistProxyPort (int .Values.tlsLb.attest.port)) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if eq $allowlistProxyPort (int .Values.tlsLb.nginx.httpsPort) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- end -}}
 {{- /*
   No upstream is a legal state: tls-lb serves its cert and explicit routes with
   no catch-all until one is wired (an install-then-attach-inference flow). The
@@ -93,6 +111,13 @@ data:
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
+            {{- if $renderAllowlistRoute }}
+            # Built-in control-plane route. The exact + slash-prefix pair
+            # exposes only /allowlist and its API subtree, not lookalike paths.
+            {{- include "tls-lb.allowlistLocation" (dict "root" $ "exact" true "path" "/allowlist" "proxyPort" $allowlistProxyPort) | nindent 12 }}
+            {{- include "tls-lb.allowlistLocation" (dict "root" $ "exact" false "path" "/allowlist/" "proxyPort" $allowlistProxyPort) | nindent 12 }}
+
+            {{- end }}
             {{- range $i, $route := .Values.tlsLb.routes }}
             {{- $path := required (printf "tlsLb.routes[%d].path is required" $i) $route.path }}
             {{- $match := default "prefix" $route.match }}

@@ -772,7 +772,7 @@ nriImagePolicy:
   ## shape, not free: it MUST be false where another path already admits — under
   ## kata (the in-guest policy-monitor; enforce_host_components) and under
   ## cvmMode=node (the node image bakes a fail-closed plugin) — and MUST be true
-  ## otherwise (gke/aks/bare, where host NRI is the only allowlist gate;
+  ## otherwise (pod/gke/aks, where host NRI is the only allowlist gate;
   ## require_host_image_policy). `c8s install` sets it from --cvm-mode. The
   ## bootstrapAllowlist below still feeds CDS's served seed whenever a consumer
   ## exists — host NRI, kata's in-guest monitor, or the node-baked plugin (see
@@ -1030,6 +1030,25 @@ tlsLb:
       # <meshCA.mountPath>/<meshCA.key> (and provide that ConfigMap) or another
       # path for a different upstream.
       trustedCAPath: /tls/cert.pem
+
+  # -- Publish CDS's complete /allowlist API through the tls-lb front door.
+  # The built-in route uses an in-pod loopback proxy that verifies the
+  # chart-managed CDS Service's RA-TLS evidence; nginx forwards the original
+  # method, URI, body, and Authorization header unchanged. Reads remain
+  # unauthenticated at CDS.
+  # Writes still require the short-lived, body-bound operator token minted by
+  # `c8s allowlist --operator-key`; the private key never enters the cluster.
+  #
+  # An explicit tlsLb.routes entry at /allowlist or /allowlist/ takes precedence
+  # for backwards compatibility. Set enabled: false to remove the built-in
+  # public route entirely.
+  allowlist:
+    enabled: true
+    # -- Loopback port for the RA-TLS-verifying allowlist proxy. This is not a
+    # pod or Service port and is reachable only inside the tls-lb pod.
+    proxyPort: 8801
+    # -- Container resources for the allowlist proxy.
+    resources: {}
 
   # -- Additional path routes proxied before the default upstream backend.
   # Useful for preserving control-plane endpoints while the catch-all route

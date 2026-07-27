@@ -96,16 +96,19 @@ short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
-CDS has no public ingress; reach it over a port-forward or the tls-lb (see the
---url flag). To generate an operator key and pin its public half, see the c8s
-README ("Operator allowlist credentials").`,
+The default chart publishes /allowlist through tls-lb; point --url at that
+front door. A direct CDS URL (for example through a port-forward) remains
+supported. --measurements pins the trusted build of whichever endpoint --url
+names; use the tls-lb launch digest for the default public URL. To generate an
+operator key and pin its public half, see the c8s README ("Managing the image
+allowlist").`,
 		SilenceUsage: true,
 	}
 
 	pf := cmd.PersistentFlags()
-	pf.StringVar(&o.url, "url", "", "CDS base URL (required). CDS has no public ingress: reach it via 'kubectl port-forward svc/c8s-cds 8443:8443' then --url https://localhost:8443, or via the tls-lb")
-	pf.StringSliceVar(&o.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) of the attested endpoint — CDS directly, or the tls-lb's discovery evidence when fronted (repeatable/comma-separated); empty = no pinning (UNSAFE)")
-	pf.StringVar(&o.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
+	pf.StringVar(&o.url, "url", "", "tls-lb or direct CDS base URL (required); the default chart publishes /allowlist on tls-lb")
+	pf.StringSliceVar(&o.measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use tls-lb's value for the default public URL; empty trusts any attested build (UNSAFE)")
+	pf.StringVar(&o.measurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
 	pf.DurationVar(&o.timeout, "timeout", 15*time.Second, "per-request timeout")
 	pf.StringVar(&o.operatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+envOperatorKey+"); required for writes")
 	pf.StringVarP(&o.output, "output", "o", "text", "output format: text or json")
@@ -159,7 +162,7 @@ func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
 			return allowlistclient.Client{}, err
 		}
 		if len(measurements) == 0 {
-			fmt.Fprintln(os.Stderr, "warning: no --measurements set; accepting any RA-TLS-attested CDS (UNSAFE)")
+			fmt.Fprintln(os.Stderr, "warning: no --measurements set; accepting any attested endpoint build (UNSAFE)")
 		}
 		hc, err := o.httpsClient(ctx, measurements)
 		if err != nil {

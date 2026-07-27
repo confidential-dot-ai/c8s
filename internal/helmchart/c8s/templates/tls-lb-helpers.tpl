@@ -149,6 +149,48 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
+Return true when a legacy typed route owns /allowlist. Such a route suppresses
+both the built-in nginx locations and their loopback proxy sidecar.
+*/}}
+{{- define "tls-lb.hasExplicitAllowlistRoute" -}}
+{{- $found := false -}}
+{{- range $route := .Values.tlsLb.routes -}}
+{{- $path := toString (default "" $route.path) -}}
+{{- if or (eq $path "/allowlist") (eq $path "/allowlist/") -}}
+{{- $found = true -}}
+{{- end -}}
+{{- end -}}
+{{- $found -}}
+{{- end -}}
+
+{{/*
+Render one half of the built-in CDS allowlist route. The caller emits an exact
+/allowlist location and a /allowlist/ prefix location so unrelated paths such
+as /allowlisted never reach the loopback proxy. proxy_pass includes $request_uri
+explicitly: operator authorization signs the HTTP method, exact path, and body,
+so nginx must not normalize or replace the path before CDS verifies the token.
+
+The loopback proxy verifies CDS's RA-TLS evidence. Stock nginx cannot verify
+the attestation extension itself, so it must never dial CDS directly here.
+
+Args: root, exact (bool), path, proxyPort.
+*/}}
+{{- define "tls-lb.allowlistLocation" -}}
+{{- $root := .root -}}
+location{{ if .exact }} ={{ end }} {{ .path }} {
+    {{- if default false $root.Values.tlsLb.cors.enabled }}
+    {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
+    {{- end }}
+    proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+{{- end -}}
+
+{{/*
 Validate the global CORS configuration. Skips when disabled.
 */}}
 {{- define "tls-lb.validateCORS" -}}

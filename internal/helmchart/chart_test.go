@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1253,7 +1254,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 // On a cluster that is neither kata nor node-baked, host nri-image-policy is the
 // only image-admission enforcement, so disabling it must be rejected — otherwise
 // confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (aks/bare behave the same). kata and cvmMode=node
+// representative such cluster (pod/aks behave the same). kata and cvmMode=node
 // carry their own admission and are exempt (enforce_host_components requires nri
 // off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
 func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
@@ -1470,11 +1471,15 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=bogus")
-	if err == nil {
-		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+	for _, mode := range []string{"bogus", "baremetal"} {
+		t.Run(mode, func(t *testing.T) {
+			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
+			if err == nil {
+				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+			}
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+		})
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of pod, node, gke, aks (got "bogus")`)
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
@@ -1524,6 +1529,14 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	assertContainerArgs(t, attest, hostIPURL)
 	if !hasHostIPEnv(attest) {
 		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
+	}
+
+	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
+	// the RA-TLS hop to CDS.
+	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerArgs(t, allowlistProxy, hostIPURL)
+	if !hasHostIPEnv(allowlistProxy) {
+		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
 	}
 
 	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.
@@ -1763,8 +1776,8 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	if _, ok := containerVolumeMount(sidecar, "mesh-ca"); ok {
 		t.Fatalf("cds-attest should not mount mesh-ca with the default /tls/cert.pem trust; mounts=%v", sidecar.VolumeMounts)
 	}
-	if got := len(deployment.Spec.Template.Spec.Containers); got != 2 {
-		t.Fatalf("tls-lb should have nginx + cds-attest, got %d containers", got)
+	if got := len(deployment.Spec.Template.Spec.Containers); got != 3 {
+		t.Fatalf("tls-lb should have nginx + cds-attest + allowlist-proxy, got %d containers", got)
 	}
 
 	// nginx reverse-proxies the dynamic well-known prefix to the sidecar.
@@ -2019,6 +2032,99 @@ func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	}
 	if !strings.Contains(out, "X-C8s-Session") {
 		t.Fatalf("CORS Access-Control-Allow-Headers missing X-C8s-Session:\n%s", out)
+	}
+}
+
+func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+
+	for _, route := range []struct {
+		match string
+		path  string
+	}{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		location := cfg.location(t, route.match, route.path)
+		location.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
+		location.assertDirective(t, "proxy_set_header", "Host", "$host")
+		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
+		location.assertNoDirective(t, "proxy_ssl_verify")
+	}
+
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	for _, want := range []string{
+		"allowlist-proxy",
+		"--host=127.0.0.1",
+		"--port=8801",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--attestation-api-url=http://$(HOST_IP):8400",
+	} {
+		assertContainerHasArg(t, "allowlist-proxy", proxy.Args, want)
+	}
+	if len(proxy.VolumeMounts) != 0 {
+		t.Fatalf("allowlist-proxy must not receive TLS or operator private keys: mounts=%v", proxy.VolumeMounts)
+	}
+	if !hasHostIPEnv(proxy) {
+		t.Fatalf("allowlist-proxy missing HOST_IP downward-API env: env=%v", proxy.Env)
+	}
+}
+
+func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
+	measurement := strings.Repeat("ab", ratls.SNPMeasurementSize)
+	out, err := helmTemplate(t,
+		"--set-string", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--cds-measurements="+measurement)
+}
+
+func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		if _, ok := cfg.locations[key]; ok {
+			t.Fatalf("nginx config contains disabled built-in allowlist location %#v", key)
+		}
+	}
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("disabled built-in allowlist route still renders allowlist-proxy")
+	}
+}
+
+func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/allowlist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "exact", "/allowlist").assertDirective(t, "proxy_pass", "https://route_0")
+	if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/allowlist/"}]; ok {
+		t.Fatal("built-in /allowlist/ route rendered alongside explicit allowlist route")
+	}
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("explicit allowlist route still renders the built-in allowlist-proxy")
 	}
 }
 
@@ -2290,6 +2396,34 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		args []string
 		want string
 	}{
+		{
+			name: "allowlist-enabled-not-bool",
+			args: []string{
+				"--set-string", "allowlist.enabled=false",
+			},
+			want: "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: false",
+		},
+		{
+			name: "allowlist-proxy-port-out-of-range",
+			args: []string{
+				"--set", "allowlist.proxyPort=0",
+			},
+			want: "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: 0",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-attestation",
+			args: []string{
+				"--set", "allowlist.proxyPort=8800",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: 8800",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-nginx",
+			args: []string{
+				"--set", "allowlist.proxyPort=8443",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: 8443",
+		},
 		{
 			name: "route-verifyDepth-injection",
 			args: []string{
@@ -3164,6 +3298,18 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 	}, args...)...)
+}
+
+func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
+	if hasHostIPEnv(proxy) {
+		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
+	}
 }
 
 // TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the

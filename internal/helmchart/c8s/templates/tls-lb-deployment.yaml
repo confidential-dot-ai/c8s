@@ -9,6 +9,7 @@ Recreate, silently defeating the operator's opt-out. */ -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
 {{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
+{{- $renderAllowlistProxy := and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -201,6 +202,40 @@ spec:
               drop:
                 - ALL
           {{- with .Values.tlsLb.attest.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- if $renderAllowlistProxy }}
+        # nginx terminates the public, tls-lb-attested connection and forwards
+        # /allowlist over pod loopback. This sidecar establishes the second
+        # trust hop: it verifies CDS's RA-TLS evidence before proxying.
+        - name: allowlist-proxy
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          args:
+            - allowlist-proxy
+            - --host=127.0.0.1
+            - --port={{ include "c8s.int" .Values.tlsLb.allowlist.proxyPort }}
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            {{- with .Values.cds.measurements }}
+            - --cds-measurements={{ join "," . }}
+            {{- end }}
+          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
+          # cvmMode=node: the proxy verifies CDS through the node-baked
+          # attestation-api, reached from this pod via its node IP.
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.tlsLb.allowlist.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

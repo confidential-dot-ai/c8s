@@ -60,7 +60,7 @@
   image bakes a fail-closed nri-image-policy). So host nri is mandatory in
   exactly the remaining shapes — non-kata and non-node.
 */ -}}
-{{- if and (not .Values.kata.enabled) (not .Values.nriImagePolicy.enabled) (ne (.Values.attestationApi.cvmMode | default "baremetal") "node") -}}
+{{- if and (not .Values.kata.enabled) (not .Values.nriImagePolicy.enabled) (ne .Values.attestationApi.cvmMode "node") -}}
 {{- fail "VALIDATION_ERROR kind=require_host_image_policy: nriImagePolicy.enabled=false requires kata.enabled=true or attestationApi.cvmMode=node. On a non-kata, non-node cluster host nri-image-policy is the only image-admission enforcement; disabling it leaves confidential workloads with no attested allowlist gate. Under kata the in-guest policy-monitor replaces it and under cvmMode=node the node image bakes the plugin (`c8s install --cvm-mode=pod` and `--cvm-mode=node` set nriImagePolicy.enabled=false for you)." -}}
 {{- end -}}
 {{- if and .Values.nriImagePolicy.enabled (not .Values.cds.image.digest) -}}
