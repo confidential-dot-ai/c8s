@@ -60,6 +60,12 @@ func TestClassifyVerifyError(t *testing.T) {
 			wantCode:   types.ErrorCodeVerificationFailed,
 		},
 		{
+			name:       "api 500 is upstream outage",
+			err:        &attestationclient.APIError{Status: http.StatusInternalServerError},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+		{
 			name:       "api 408 is retryable unavailability",
 			err:        &attestationclient.APIError{Status: http.StatusRequestTimeout},
 			wantStatus: http.StatusBadGateway,
