@@ -146,13 +146,32 @@ jobs:
             [ "$rid" = "${{ github.run_id }}" ] && continue
             ct=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
             age=$(( NOW - $(date -u -d "$ct" +%s 2>/dev/null || echo "$NOW") ))
-            if [ "$age" -gt 10800 ]; then
-              echo "reaping $vm (age ${age}s > 3h)"
+            # Ask GitHub whether the owning run is actually finished, rather than
+            # waiting out the 3h age fallback while a CVM squats a finite host.
+            # ANY org repo can invoke this lane, so the owning repo is read from
+            # the annotation (a label value cannot hold the '/' in owner/repo).
+            # Ported from cvm-e2e.yml, which has had this since the SNP lane
+            # started leaking CVMs on cancelled runs.
+            # NOTE: this needs `actions: read`. Without it the call 403s, $st is
+            # empty, and we degrade to exactly the age-only behaviour this
+            # replaces, which is safe but slow.
+            orepo=$(kubectl -n "$NS" get "$vm" -o jsonpath='{.metadata.annotations.ci\.confidential\.ai/repo}' 2>/dev/null)
+            st=$(gh api "repos/${orepo:-${{ github.repository }}}/actions/runs/$rid" -q .status 2>/dev/null)
+            if [ "$st" = "completed" ]; then
+              echo "reaping $vm (run ${orepo:-${{ github.repository }}}#$rid completed)"
               kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
               kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            elif [ -z "$st" ] && [ "$age" -gt 10800 ]; then
+              echo "reaping $vm (status unknown, age ${age}s > 3h -> orphaned)"
+              kubectl -n "$NS" delete "$vm" --ignore-not-found --wait=false
+              kubectl -n "$NS" delete pvc "${vm#virtualmachine.kubevirt.io/}-scratch" --ignore-not-found --wait=false
+            else
+              echo "keeping $vm (run ${orepo:-${{ github.repository }}}#$rid status=${st:-unknown} age=${age}s)"
             fi
           done
           exit 0
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: resolve image refs + the paired c8s ref
         run: |
