@@ -130,6 +130,13 @@ entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
 guarantee is recovered at [cert issuance](#where-its-enforced).
 
+**`paths` does not take the union.** A grant is attributed only to the entries
+whose `command`/`args` the effective argv actually satisfied
+(`Index.PathGrants`). Admission and entitlement would otherwise come from
+different entries: a digest listed once with a strict argv and a grant, and once
+with `command: any` and none, could be run as `/bin/sh -c …` — admitted by the
+second entry, granted by the first.
+
 ## Path policy (`paths`)
 
 `paths` grants filesystem access for a coming key-management integration: a
@@ -140,17 +147,25 @@ is entitled to.
 "paths": { "policy": "allow", "read": ["/secrets/model/**"], "write": ["/secrets/session"] }
 ```
 
-- `deny` (default) grants nothing; `any` is unconstrained; `allow` lists `read`
-  and `write` globs.
-- A `write` grant implies create and update.
+- `deny` (the default) and `any` both grant nothing; only `allow` grants, and
+  only the `read`/`write` globs it lists. (`any` is the unconstrained sentinel
+  for argv; for paths it normalizes to empty lists, so it is `deny` with a
+  different name. `lint` says so.)
+- A `write` grant implies create and update. There is no delete.
 - Paths are absolute and clean (no `.`/`..`); the only wildcard is a trailing
-  `/**` (subtree). These rules exist so a grant cannot be widened by path
-  trickery once an enforcer consumes it.
+  `/**`, matching strictly below its base on a segment boundary — `/a/b/**`
+  covers `/a/b/c` but neither `/a/bc` nor `/a/b` itself. A bare `/**` is
+  rejected: it grants the whole keyspace.
+- A digest in the **floor** may not carry a grant, and the document is rejected
+  if one does. The floor admits by digest alone, so no argv is ever matched and
+  the grant would be held whatever the container ran.
 
-**No enforcer consumes `paths` yet.** It is carried, validated, canonicalized,
-and attested (it is part of the seed digest), so the schema and the operator
-tooling are ready — but it grants nothing until the secret-release component
-exists. When that component lands, a grant's subject must be bound to the
+**No enforcer consumes `paths` yet.** Resolution exists — `Index.PathGrants`
+turns an attested digest plus its effective argv into the grants it holds — but
+nothing calls it, so no secret is released. It is carried, validated,
+canonicalized, and attested (it is part of the seed digest), so the schema and
+the operator tooling are ready — but it grants nothing until the secret-release
+component exists. When that component lands, a grant's subject must be bound to the
 **attested workload digest**, never to a self-asserted image reference, or any
 allowlisted workload could claim another's grant. The field is inert-with-a-spec
 by design; it is not a live capability.
@@ -306,10 +321,12 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 `lint` catches the semantic traps before a write: an entry that admits nothing
 (both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry, a digest that is
-floor-listed while also carrying a workload policy — the floor admits it by
-digest alone, so the argv/paths policy is silently not enforced — tag-form labels
-(which can move under the operator), and a summary of how many `any` policies a
-document carries. `--online` cross-checks digests against the registry with
+floor-listed while also carrying a workload argv policy — the floor admits it by
+digest alone, so that policy is silently not enforced — a `paths: any` that reads
+like a grant but is not, tag-form labels (which can move under the operator), and
+a summary of how many `any` policies a document carries. The two path traps that
+are *errors* rather than warnings — a bare `/**`, and a floor digest carrying a
+grant — are rejected by `ParseJSON`, so they never reach `lint`. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 ## Operator credentials

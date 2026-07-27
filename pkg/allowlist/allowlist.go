@@ -184,6 +184,27 @@ func (a *Allowlist) normalize() error {
 		sortContainers(w.Containers)
 		a.Workloads[name] = w
 	}
+	return a.rejectFloorGrants()
+}
+
+// rejectFloorGrants fails a document where a floor digest also carries a path
+// grant. The floor admits by digest alone — no argv is ever matched — so the
+// grant would be held whatever the container ran. Index.PathGrants enforces the
+// same rule at query time; this makes it a write-time error too.
+func (a *Allowlist) rejectFloorGrants() error {
+	if len(a.Digests) == 0 {
+		return nil
+	}
+	for name, w := range a.Workloads {
+		for _, c := range append(append([]Container{}, w.InitContainers...), w.Containers...) {
+			if c.Paths.Policy != PolicyAllow {
+				continue
+			}
+			if _, isFloor := a.Digests[c.Digest.String()]; isFloor {
+				return fmt.Errorf("workload %q container %s is floor-listed and carries a paths grant: the floor admits it by digest alone, so the grant would be held whatever it ran", name, c.Digest)
+			}
+		}
+	}
 	return nil
 }
 
@@ -266,10 +287,10 @@ func normalizeGlobs(globs []string) ([]string, error) {
 		if !strings.HasPrefix(g, "/") {
 			return nil, fmt.Errorf("path %q must be absolute", g)
 		}
-		base := strings.TrimSuffix(g, "/**")
-		if base == "" {
-			base = "/"
+		if g == "/**" {
+			return nil, fmt.Errorf(`path "/**" grants the whole keyspace; name the subtrees instead`)
 		}
+		base := strings.TrimSuffix(g, "/**")
 		if strings.Contains(base, "*") {
 			return nil, fmt.Errorf("path %q: the only wildcard is a trailing /**", g)
 		}
