@@ -31,19 +31,8 @@
 {{- $allowlistWriteTotalBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
 {{- $allowlistReadRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.requestsPerSecond "label" "tlsLb.allowlist.readRateLimit.requestsPerSecond")) -}}
 {{- $allowlistReadBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.burst "label" "tlsLb.allowlist.readRateLimit.burst")) -}}
-{{- if gt $allowlistWriteRate $allowlistWriteTotalRate -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (%d), got: %d" $allowlistWriteTotalRate $allowlistWriteRate) -}}
-{{- end -}}
-{{- if gt $allowlistWriteBurst $allowlistWriteTotalBurst -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (%d), got: %d" $allowlistWriteTotalBurst $allowlistWriteBurst) -}}
-{{- end -}}
-{{- /* The totals guard the per-pod-IP CDS bucket; see docs/operator.md. */ -}}
-{{- if ge (float64 $allowlistWriteTotalRate) (float64 .Values.cds.rateLimit) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (%v), got: %d" .Values.cds.rateLimit $allowlistWriteTotalRate) -}}
-{{- end -}}
-{{- if ge $allowlistWriteTotalBurst (int .Values.cds.rateBurst) -}}
-{{- fail (printf "tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $allowlistWriteTotalBurst) -}}
-{{- end -}}
+{{- /* Cross-value budget invariants (per-client <= total < cds bucket) live
+   in validations.yaml, kind=tlslb_allowlist_rate_budget. */ -}}
 {{- end -}}
 {{- /*
   No upstream is a legal state: tls-lb serves its cert and explicit routes with

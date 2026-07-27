@@ -2545,7 +2545,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 			args: []string{
 				"--set", "allowlist.rateLimit.requestsPerSecond=9",
 			},
-			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
 		},
 		{
 			name: "allowlist-write-burst-not-positive",
@@ -2559,21 +2559,21 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 			args: []string{
 				"--set", "allowlist.rateLimit.burst=16",
 			},
-			want: "tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
 		},
 		{
 			name: "allowlist-write-total-rate-consumes-cds-capacity",
 			args: []string{
 				"--set", "allowlist.rateLimit.totalRequestsPerSecond=10",
 			},
-			want: "tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
 		},
 		{
 			name: "allowlist-write-total-burst-consumes-cds-capacity",
 			args: []string{
 				"--set", "allowlist.rateLimit.totalBurst=20",
 			},
-			want: "tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
 		},
 		{
 			name: "allowlist-read-rate-not-positive",
