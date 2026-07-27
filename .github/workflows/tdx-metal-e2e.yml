@@ -1,4 +1,27 @@
 # ═══════════════════════════════════════════════════════════════════════════
+# VENDORED FILE, TWO COPIES, KEEP THEM BYTE-IDENTICAL.
+# ═══════════════════════════════════════════════════════════════════════════
+# SOURCE OF TRUTH:
+#   confidential-dot-ai/confidential-ci  .github/workflows/tdx-metal-e2e.yml
+# VENDORED COPY:
+#   confidential-dot-ai/c8s              .github/workflows/tdx-metal-e2e.yml
+#
+# WHY A COPY EXISTS AT ALL: c8s is PUBLIC and confidential-ci is PRIVATE, and a
+# public repo cannot `uses:` a private repo's reusable workflow. Vendoring is
+# the workaround, the same one cvm-e2e.yml and e2e-c8s.yml already use. It is a
+# stopgap, not a design: see confidential-ci research/ADR-matrix-architecture.
+#
+# THE DRIFT HAZARD IS REAL, NOT THEORETICAL. c8s's vendored cvm-e2e.yml silently
+# fell 121 lines behind its confidential-ci original and lost an entire platform
+# arm. Nothing detected it, because neither copy referenced the other.
+#
+# THE RULE: edit the source of truth, then copy the WHOLE file across unchanged.
+# Both copies carry both triggers (workflow_call and workflow_dispatch) precisely
+# so that no per-repo edit is ever needed and a plain checksum can prove they
+# match. If you find yourself wanting to change only one copy, that is the signal
+# to stop vendoring and solve it properly instead.
+#
+# ═══════════════════════════════════════════════════════════════════════════
 # c8s on TDX BARE METAL: the product lane
 # ═══════════════════════════════════════════════════════════════════════════
 #
@@ -25,6 +48,21 @@
 name: tdx-metal-e2e
 
 on:
+  # workflow_call so the vendored copy can be invoked as a job by c8s's
+  # e2e-c8s.yml. workflow_dispatch so either copy stays runnable by hand.
+  # Both copies carry both, so the two files remain byte-identical.
+  workflow_call:
+    inputs:
+      c8s_ref:
+        description: 'c8s ref to test. Defaults to the ref paired with the node image.'
+        required: false
+        type: string
+        default: ''
+      keep_cvm:
+        description: 'leave the CVM running for debugging instead of tearing it down'
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       c8s_ref:
