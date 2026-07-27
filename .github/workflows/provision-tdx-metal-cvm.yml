@@ -64,7 +64,7 @@ on:
         required: false
         default: '2.336.0'
       max_runners:
-        description: 'max concurrent runner pods in the guest (scale-to-zero at idle). Memory is the ceiling, not the scale set: the guest is 16Gi with a tmpfs-backed rootfs, so every job build tree lives in guest RAM. Raising this needs guest RAM, and guest RAM cannot be nudged (see the dead-zone note on GUEST_MEM below).'
+        description: 'max concurrent runner pods in the guest (scale-to-zero at idle). Memory is the ceiling, not the scale set: the guest is 64Gi with a tmpfs-backed rootfs, so every job build tree lives in guest RAM. Raising this needs guest RAM, and guest RAM cannot be nudged (see the dead-zone note on GUEST_MEM below).'
         required: false
         default: '2'
       c8s_ref:
