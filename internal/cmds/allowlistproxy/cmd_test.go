@@ -210,3 +210,48 @@ func TestNewHandlerRejectsBadMeasurement(t *testing.T) {
 		t.Fatalf("error = %v, want %q", err, want)
 	}
 }
+
+func TestNewHandlerServesHealthWithoutDialingCDS(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler, err := newHandler(config{
+		cdsURL:            "https://c8s-cds.c8s-system.svc:8443",
+		attestationAPIURL: "http://attestation-api.c8s-system.svc:8400",
+		requestTimeout:    time.Second,
+	}, logger)
+	if err != nil {
+		t.Fatalf("newHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("health body = %q, want empty", rec.Body.String())
+	}
+}
+
+func TestCommandRejectsPublicListenerBeforeStarting(t *testing.T) {
+	cmd := NewCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--host=0.0.0.0",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--attestation-api-url=http://attestation-api.c8s-system.svc:8400",
+	})
+	err := cmd.Execute()
+	want := `--host must be a loopback IP, got "0.0.0.0"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestRunRejectsInvalidHeaderTimeoutBeforeBuildingHandler(t *testing.T) {
+	err := run(config{host: "127.0.0.1", port: 8801})
+	want := "--read-header-timeout must be positive"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
