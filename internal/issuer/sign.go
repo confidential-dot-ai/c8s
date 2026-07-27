@@ -26,6 +26,12 @@ type SignCSRParams struct {
 	// workload digests) the allowlist before passing them — SignCSR does not
 	// re-verify (docs/ratls.md).
 	ConfigClaimsExt []byte
+
+	// SandboxID, when set, is stamped as the pod-sandbox-ID extension
+	// (ratls.OIDSandboxID). The caller MUST have verified the inventory-signed
+	// sandbox token it came from — SignCSR does not re-verify (docs/ratls.md,
+	// "Sandbox identity").
+	SandboxID string
 }
 
 // SignCSR signs csr against this CA, returning the leaf certificate PEM and
@@ -68,6 +74,13 @@ func (c *CA) SignCSR(p SignCSRParams) (certPEM []byte, serial *big.Int, err erro
 			Id:    ratls.OIDRATLSConfigClaims,
 			Value: p.ConfigClaimsExt,
 		})
+	}
+	if p.SandboxID != "" {
+		sandboxExt, err := ratls.MarshalSandboxIDExtension(p.SandboxID)
+		if err != nil {
+			return nil, nil, err
+		}
+		template.ExtraExtensions = append(template.ExtraExtensions, sandboxExt)
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, c.Cert, p.CSR.PublicKey, c.Key)

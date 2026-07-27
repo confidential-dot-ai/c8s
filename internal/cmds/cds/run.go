@@ -235,6 +235,8 @@ func run(cfg config) error {
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
+			EARKeyProvider:    rotator,
+			EARIssuer:         cfg.expectedIssuer,
 		},
 		SignCSRHandler: SignCSRHandler{
 			CA:             mesh,

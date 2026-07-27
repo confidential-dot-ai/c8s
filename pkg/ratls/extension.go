@@ -48,6 +48,7 @@ const (
 //	1.3.6.1.4.1.59888.1.1 - RA-TLS attestation extension
 //	1.3.6.1.4.1.59888.1.2 - attestation-evidence audit digest (certutil)
 //	1.3.6.1.4.1.59888.1.3 - RA-TLS config-claims extension (claims.go)
+//	1.3.6.1.4.1.59888.1.4 - pod sandbox ID extension (sandbox.go)
 var (
 	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
 	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 1}

@@ -347,14 +347,14 @@ func TestRunDeferredCheck_EnforceExistingDisabled_NoOp(t *testing.T) {
 	p.RunDeferredCheck(context.Background())
 }
 
-// --- enforce_existing=false still rebuilds broker state across a restart ---
+// --- enforce_existing=false still rebuilds inventory state across a restart ---
 
-func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *testing.T) {
+func TestSynchronize_EnforceExistingDisabled_InventoryRecordsWithoutKilling(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.broker = newWorkloadBroker("/proc")
+	p.inventory = newAdmissionInventory("/proc")
 	p.SetReady()
 
 	pod := makePod("default", "pod1")
@@ -367,15 +367,15 @@ func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *test
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rec, ok := p.broker.containers[allowed.Id]
+	rec, ok := p.inventory.containers[allowed.Id]
 	if !ok {
-		t.Fatalf("allowlisted container not recorded for the broker: %v", p.broker.containers)
+		t.Fatalf("allowlisted container not recorded for the inventory: %v", p.inventory.containers)
 	}
 	if rec.digest != pushDigestA {
 		t.Fatalf("recorded digest = %q, want %q", rec.digest, pushDigestA)
 	}
-	if _, ok := p.broker.containers[denied.Id]; ok {
-		t.Fatal("denied container must not be recorded for the broker")
+	if _, ok := p.inventory.containers[denied.Id]; ok {
+		t.Fatal("denied container must not be recorded for the inventory")
 	}
 }
 
@@ -386,7 +386,7 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.broker = newWorkloadBroker("/proc")
+	p.inventory = newAdmissionInventory("/proc")
 
 	pod := makePod("default", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA)
@@ -394,15 +394,15 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.broker.containers) != 0 {
+	if len(p.inventory.containers) != 0 {
 		t.Fatal("nothing should be recorded before the plugin is ready")
 	}
 
 	p.SetReady()
 	p.RunDeferredCheck(context.Background())
 
-	if _, ok := p.broker.containers[ctr.Id]; !ok {
-		t.Fatalf("deferred check did not record the container: %v", p.broker.containers)
+	if _, ok := p.inventory.containers[ctr.Id]; !ok {
+		t.Fatalf("deferred check did not record the container: %v", p.inventory.containers)
 	}
 }
 

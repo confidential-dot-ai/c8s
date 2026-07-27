@@ -149,6 +149,41 @@ func TestCASignCSR_CopiesRATLSExtension(t *testing.T) {
 	t.Fatalf("RA-TLS extension not propagated to leaf")
 }
 
+func TestCASignCSR_StampsSandboxID(t *testing.T) {
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	csr, _ := mustCSR(t, "node", nil, nil, nil)
+	const sandboxID = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
+
+	certPEM, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, SandboxID: sandboxID})
+	if err != nil {
+		t.Fatalf("SignCSR: %v", err)
+	}
+	got, err := ratls.SandboxIDFromCert(mustParseCert(t, certPEM))
+	if err != nil {
+		t.Fatalf("SandboxIDFromCert: %v", err)
+	}
+	if got != sandboxID {
+		t.Fatalf("sandbox = %q, want %q", got, sandboxID)
+	}
+
+	// No SandboxID param ⇒ no extension.
+	certPEM, _, err = ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("SignCSR: %v", err)
+	}
+	if got, err := ratls.SandboxIDFromCert(mustParseCert(t, certPEM)); err != nil || got != "" {
+		t.Fatalf("sandbox without param = %q, %v; want empty", got, err)
+	}
+
+	// An invalid sandbox ID fails the signing, not silently drops.
+	if _, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, SandboxID: "not valid!"}); err == nil {
+		t.Fatal("invalid sandbox ID signed")
+	}
+}
+
 func TestCASignCSR_RejectsNilCAOrCSR(t *testing.T) {
 	ca, err := issuer.NewCA("test ca", time.Hour)
 	if err != nil {

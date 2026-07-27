@@ -86,7 +86,7 @@ type Options struct {
 	// (webhook.HardwarePlatformSNP or ...TDX; the operator command validates).
 	HardwarePlatform string
 
-	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy broker
+	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy inventory
 	// socket directory: the webhook mounts it into c8s-cert and injects the
 	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
 	WorkloadClaimsHostDir string

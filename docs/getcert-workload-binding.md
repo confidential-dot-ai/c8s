@@ -16,10 +16,10 @@ section of `docs/ratls.md`.
 
 ## The one-paragraph version
 
-`get-cert` (the injected `c8s-cert` sidecar) asks a node-local **broker** —
+`get-cert` (the injected `c8s-cert` sidecar) asks a node-local **inventory** —
 part of the image-admission component itself (`nri-image-policy` on node-CVM,
 `policy-monitor` on kata), not a standalone service — "what images does my pod
-run?" *without saying who it is*. The broker learns
+run?" *without saying who it is*. The inventory learns
 the caller's identity from the **kernel** (unix-socket peer credentials), maps
 it to a pod, and returns that pod's admitted container image digests.
 `get-cert` hashes them into one `workloadDigest`, binds it into its CSR's
@@ -43,14 +43,14 @@ version; each points at the Corner with the full argument.
 wouldn't be trustworthy even if it did. A pod is a set of containers; a single
 container sees its own rootfs, not the registry *digest* it was pulled as, and
 nothing about its siblings. The workload identity is the pod's whole image set,
-which only the component that admitted those containers — the broker — holds. A
+which only the component that admitted those containers — the inventory — holds. A
 malicious container could also just lie about its own digest, so self-report is
 a non-starter regardless. (Corner 1, Corner 6.)
 
-**How does the broker know which pod is calling — is that operator-controlled?**
+**How does the inventory know which pod is calling — is that operator-controlled?**
 No, and that is the crux. get-cert sends no identity at all. When it connects,
 the **kernel** stamps the caller's PID onto the socket (`SO_PEERCRED`); the
-broker reads that PID and resolves it PID → cgroup (`/proc`) → container → pod
+inventory reads that PID and resolves it PID → cgroup (`/proc`) → container → pod
 from its *own* admission record. Every link is kernel/runtime-derived — nothing
 the caller or the control plane supplies is used for identity. The kernel doing
 the stamping is in the TCB (the node is the CVM under node-CVM; the measured
@@ -71,7 +71,7 @@ it treats the forwarded digest list as an untrusted proposal and independently
 confirms it hashes to the evidence-bound `workloadDigest` **and** that every
 digest is allowlisted. The compiled-in socket path is a related but separate
 property — because the path is part of get-cert's own image digest, the control
-plane cannot repoint get-cert at a rogue broker. (Corner 5, Corner 6.)
+plane cannot repoint get-cert at a rogue inventory. (Corner 5, Corner 6.)
 
 **It says "claimed image" — what stops a malicious pod claiming some other
 image?** Less than the flow first suggests, and this is the feature's key
@@ -81,7 +81,7 @@ must hash to the evidence-bound digest. **Not guaranteed:** that a workload
 claims only what it *actually runs*. Any admitted workload can run the attest
 flow itself — the attestation-api binds caller-chosen `REPORT_DATA`, and CDS
 enforces only list↔claim-hash and allowlist membership; it does **not** verify
-the claim came from the honest get-cert→broker path (`SO_PEERCRED` binds
+the claim came from the honest get-cert→inventory path (`SO_PEERCRED` binds
 *get-cert's* caller, and CDS does not re-check it). So a malicious pod can assert
 **any allowlisted image set**, including a victim workload's, and satisfy
 `c8s verify --workload-image <victim>`. **The pin therefore distinguishes honest
@@ -94,7 +94,7 @@ unimplemented (GAPS §Trust model). (Corner 5, Corner 6.)
 threats:
 
 - *Impersonating another pod over the socket* — closed by `SO_PEERCRED`. The
-  socket's mode gates who can *reach* the broker, but identity comes from the
+  socket's mode gates who can *reach* the inventory, but identity comes from the
   kernel-reported PID, not anything a caller sends, so even a reachable caller
   is bound to its own pod.
 - *Replacing the socket file* — the real hijack vector. get-cert mounts the
@@ -114,7 +114,7 @@ threats:
 - **get-cert** — runs in the `c8s-cert` native sidecar the webhook injects
   into every `confidential.ai/cw` pod. Generates the leaf key, builds the CSR,
   drives the CDS attestation flow, writes the cert. (`internal/cmds/getcert`)
-- **The broker** — serves "the calling pod's admitted image digests." It lives
+- **The inventory** — serves "the calling pod's admitted image digests." It lives
   *inside the component that already makes the admit/deny decision*, so what it
   vouches for is exactly what was admitted:
   Both shapes serve it over a **unix socket** get-cert dials at one compiled
@@ -132,21 +132,21 @@ threats:
 
 ## Step by step
 
-1. **get-cert asks, anonymously.** It opens the broker at its compiled Unix
-   socket path (`--workload-claims-broker`, the same in both shapes) and sends
+1. **get-cert asks, anonymously.** It opens the inventory at its compiled Unix
+   socket path (`--workload-claims`, the same in both shapes) and sends
    a plain `GET /v1/workload-digests`. The request carries **no** PID, pod
    name, or container ID. (See "Corner 1".)
 
-2. **The broker binds the caller from the kernel.** On the unix socket it reads
+2. **The inventory binds the caller from the kernel.** On the unix socket it reads
    the peer's PID with `getsockopt(SO_PEERCRED)`
    (`pkg/workloadclaims/peercred_linux.go`), resolves that PID to a container
    via `/proc/<pid>/cgroup` (`cgroup.go`), maps container → pod from its own
    admission record, and returns the pod's **non-injected** container digests
-   (`internal/cmds/nri-image-policy/broker.go`). Nothing the caller *sent* is
+   (`internal/cmds/nri-image-policy/inventory.go`). Nothing the caller *sent* is
    used for identity.
 
 3. **get-cert folds the containers into one digest, split by role.** It splits
-   the broker's containers into the pod's init set and main set (by the
+   the inventory's containers into the pod's init set and main set (by the
    init-container names the webhook passed), and `workloadclaims.Digest`
    commits to both into a single 32-byte `workloadDigest`; `BuildConfigClaims`
    puts it in a config-claims extension (operator-keys and seed fields left at
@@ -194,12 +194,12 @@ threats:
 
 ## Corner 1 — get-cert sends no PID; the kernel reports it
 
-The most common confusion: *how does get-cert tell the broker which process to
+The most common confusion: *how does get-cert tell the inventory which process to
 look up?* It doesn't. If a caller could name a PID (or pod, or container), a
 malicious pod would name a victim's and the binding would be worthless.
 
-Instead, when the broker **accepts** the unix-socket connection, the kernel
-attaches the peer's credentials to the socket; the broker reads them with
+Instead, when the inventory **accepts** the unix-socket connection, the kernel
+attaches the peer's credentials to the socket; the inventory reads them with
 `SO_PEERCRED`. The PID comes from the kernel's own accounting of who opened the
 socket. The chain is entirely kernel/runtime-derived — `SO_PEERCRED` → cgroup →
 container → pod — and none of it is caller-supplied.
@@ -213,8 +213,8 @@ container's cgroup. This is why the plugin needs the host PID view and why
 `workload_claims.proc_root` is `/proc` (the host's), not a mounted `/host/proc`.
 
 **kata is simpler.** `policy-monitor` serves the *same* unix socket
-(`policymonitor/broker.go`), but in a kata guest there is exactly one pod, so
-there is nobody to disambiguate: the broker ignores the peer PID and returns
+(`policymonitor/inventory.go`), but in a kata guest there is exactly one pod, so
+there is nobody to disambiguate: the inventory ignores the peer PID and returns
 the guest's admitted digests. Peer-cred co-location does not matter here — the
 guest boundary *is* the isolation — but reusing the socket lets get-cert dial
 one compiled path in both shapes.
@@ -226,8 +226,8 @@ one compiled path in both shapes.
 A container's cgroup path can contain more than one 64-hex component
 (CRI-O nests the sandbox ID above the container scope; an attacker can nest a
 child cgroup). The resolver returns **all** candidates shallow→deep and the
-broker picks the shallowest that is a *tracked container*
-(`ContainerIDCandidatesForPID`, `broker.go`).
+inventory picks the shallowest that is a *tracked container*
+(`ContainerIDCandidatesForPID`, `inventory.go`).
 
 Why shallowest: a process can only move itself **deeper**, into cgroups it
 creates — its runtime-assigned container scope is always an *ancestor* of
@@ -243,9 +243,9 @@ choice — is the exploitable one.
 ## Corner 3 — the digest is two role sets (init, main), not one flat set
 
 A pod usually has several non-injected containers, including user **init
-containers**, which the broker records too (NRI's `CreateContainer` fires for
+containers**, which the inventory records too (NRI's `CreateContainer` fires for
 init and regular containers alike; only the injected `c8s-cert`/`c8s-cert-wait`
-are excluded, by name). The broker returns them with their **names**; get-cert
+are excluded, by name). The inventory returns them with their **names**; get-cert
 splits them into the pod's init set and main set (using the init-container
 names the webhook passes from the pod spec), and `workloadclaims.Digest`
 commits to both:
@@ -263,9 +263,9 @@ commits to both:
   it as init.
 - **Whole-set per role.** You cannot add, drop, or re-role an image without
   changing the digest. A verifier pins with `--workload-init-image` (init set)
-  and `--workload-image` (main set). The set is all-or-nothing: if the broker
+  and `--workload-image` (main set). The set is all-or-nothing: if the inventory
   cannot resolve an admitted container's image digest it records an empty one
-  (logged at error, see `recordForBroker`), and rather than answer with the
+  (logged at error, see `recordForInventory`), and rather than answer with the
   containers it *can* describe — a subset passed off as the whole set — it
   fails the whole fetch, which get-cert treats as fail-closed.
 - **CDS re-derives the same role-partitioned digest** from the forwarded init
@@ -292,12 +292,12 @@ The webhook injects `c8s-cert` as a **native sidecar** (an init container with
 the sidecar, then `c8s-cert-wait` blocks on the first cert file, and the pod's
 **app containers only start after all init containers pass**. So when the pod's
 cert is first minted, the app containers **have not been created** — the NRI
-plugin has not seen them — and the broker returns an **empty** set.
+plugin has not seen them — and the inventory returns an **empty** set.
 
-get-cert handles that distinctly from an error: an empty broker result means
+get-cert handles that distinctly from an error: an empty inventory result means
 "app containers not up yet," so it issues **without** a workload claim this
 round and binds the digests at the next renewal (re-attestation), once the app
-is running (`internal/cmds/getcert/run.go` `workloadClaims`). A *broker error*
+is running (`internal/cmds/getcert/run.go` `workloadClaims`). A *inventory error*
 (unreachable, malformed) is fail-closed — issuance aborts. This is the
 "as of issuance, corrected at next renewal" semantics.
 
@@ -321,14 +321,14 @@ count before binding — a deliberate follow-up, not baked in.
 
 **Init-container eviction churns the init set.** An init container runs to
 completion and exits; once the kubelet garbage-collects the exited container,
-NRI fires `RemoveContainer` and the node-CVM broker evicts it, so a renewal
+NRI fires `RemoveContainer` and the node-CVM inventory evicts it, so a renewal
 after GC rebinds with an **empty init set**. `--workload-init-image` pins are
 therefore reliable only until init-container GC — a digest *change* at renewal
 here is expected, not tampering. The same expected-container-count hardening
 would fix it; not baked in.
 
-**A plugin restart empties the broker, and the startup check is what refills
-it.** The node-CVM broker is in-memory only. `nri-image-policy` is not a pod —
+**A plugin restart empties the inventory, and the startup check is what refills
+it.** The node-CVM inventory is in-memory only. `nri-image-policy` is not a pod —
 it is a host process containerd launches from `/opt/nri/plugins`, and NRI does
 not respawn it on exit — so it restarts when containerd does: a chart upgrade
 that bumps the plugin binary or its config (the installer restarts containerd),
@@ -339,10 +339,10 @@ recovery deliberately does **not** depend on `policy.enforce_existing` —
 that knob gates only the *kill* step, because "learn what is running" and
 "kill what shouldn't be" are separate concerns.
 
-Until the check completes there is a real window: the broker socket comes up
+Until the check completes there is a real window: the inventory socket comes up
 before the initial CDS pull, so a fetch landing in between resolves no tracked
 container and get-cert **fails closed** and retries at the next renewal
-interval. That is the correct outcome — the broker genuinely does not yet know
+interval. That is the correct outcome — the inventory genuinely does not yet know
 what is running, and answering "no containers" instead would silently downgrade
 the pod to a claim-free cert. The window is bounded by the plugin's initial
 pull (backoff plus fetch timeouts, tens of seconds), against a renewal interval
@@ -353,9 +353,9 @@ plugin's `always_allow` floor, so the check always admits it; a tenant app image
 does not, and a check running after the allowlist changed can deny one. The
 sidecar is then recorded and the app container is not, so the caller resolves
 against an empty sibling set — which get-cert reads as "app containers not up
-yet" and issues claim-free. An *unresolvable* digest is caught (the broker
+yet" and issues claim-free. An *unresolvable* digest is caught (the inventory
 fails the whole fetch, Corner 3), but a *denied* container is not recorded at
-all, so the broker cannot tell it from one that has not started. With
+all, so the inventory cannot tell it from one that has not started. With
 `enforce_existing` on, the same check kills the offending container and the
 state cannot persist; with it off, tolerating that container is the operator's
 stated intent, and the pod keeps a claim-free cert until it is recreated. This
@@ -365,28 +365,28 @@ all three.
 
 ---
 
-## Corner 5 — the broker is not control-plane-redirectable, and CDS re-validates regardless
+## Corner 5 — the inventory is not control-plane-redirectable, and CDS re-validates regardless
 
 Two independent properties keep a malicious control plane from forging the claim.
 
-**get-cert's broker target is measured, not injected.** get-cert dials a
-**compiled** Unix socket path (`workloadclaims.BrokerEndpoint`, selected by
-`--workload-claims-broker`) in both shapes — the platform injects only the
+**get-cert's inventory target is measured, not injected.** get-cert dials a
+**compiled** Unix socket path (`workloadclaims.InventoryEndpoint`, selected by
+`--workload-claims`) in both shapes — the platform injects only the
 read-only socket *mount* (a webhook hostPath on node-CVM, a guest bind-mount
 under kata), never the path — so the control plane cannot point get-cert at a
-rogue broker by changing an arg. The "point get-cert at an attacker's broker"
+rogue inventory by changing an arg. The "point get-cert at an attacker's inventory"
 vector is closed.
 
 **CDS re-validates the list regardless (defense in depth).** CDS never trusts
-the broker or get-cert. It treats the forwarded digest list as an untrusted
+the inventory or get-cert. It treats the forwarded digest list as an untrusted
 proposal and independently checks (a) the list hashes to the evidence-bound
 claim, and (b) **every** digest is in the allowlist store. The allowlist — not
-the broker — is the invariant, so even a reporter that lied could not smuggle
+the inventory — is the invariant, so even a reporter that lied could not smuggle
 an unallowlisted image.
 
 This bounds the damage but does not make the pin an identity proof. No
 *compromise* is even required: any admitted workload can skip the honest
-get-cert→broker path and run the attest flow itself. The attestation-api binds
+get-cert→inventory path and run the attest flow itself. The attestation-api binds
 whatever `REPORT_DATA` the caller asks for, and CDS checks only (a) and (b)
 above — never that the claim reflects what the pod actually runs (the
 `SO_PEERCRED` binding is enforced by get-cert, and CDS does not re-verify it). So
@@ -403,7 +403,7 @@ enforced at `/attest`, is the real close, and
 unimplemented (GAPS §Trust model).
 
 The one surface still on an untrusted path is the **node-CVM** socket mount:
-the broker socket sits on a host directory the webhook hostPath-mounts, so a
+the inventory socket sits on a host directory the webhook hostPath-mounts, so a
 malicious *allowlisted* pod able to mount that directory read-write could swap
 the socket file before get-cert connects. That is a PodSecurity /
 filesystem-permission concern (the socket dir must be unwritable by untrusted
@@ -413,17 +413,17 @@ bind-mount inside the measured VM, so it is not control-plane-supplied at all.
 
 ### Why a unix socket, not an HTTP/DNS endpoint
 
-The broker is reached over a **unix socket** (a kernel filesystem path) in both
+The inventory is reached over a **unix socket** (a kernel filesystem path) in both
 shapes — never a network/hostname endpoint. That is deliberate; an HTTP
 endpoint addressed by name would forfeit three properties:
 
 - **Co-location.** `SO_PEERCRED` works only across a same-kernel socket, so the
-  broker get-cert reaches *is provably the one on its own node* — the real
+  inventory get-cert reaches *is provably the one on its own node* — the real
   admission record for this pod (Corner 1). An HTTP call to another
   genuinely-attested node or pod cannot prove co-location: it would pass a
   measurement check yet answer for the wrong pod (the "any attested TEE passes"
-  problem). This is also why authenticating the broker's RA-TLS cert would not
-  help — a cert proves *measurement*, not that you reached the local broker.
+  problem). This is also why authenticating the inventory's RA-TLS cert would not
+  help — a cert proves *measurement*, not that you reached the local inventory.
   (Under kata there is one pod per guest, so co-location is free — but reusing
   the socket keeps get-cert on one compiled path in both shapes.)
 - **DNS-immunity.** A kernel path has no name-resolution step. Cluster DNS is
@@ -431,7 +431,7 @@ endpoint addressed by name would forfeit three properties:
   *regardless of what value is baked in* — baking the name buys nothing. A unix
   socket sidesteps resolution entirely.
 - **Non-redirectability.** get-cert bakes the socket path as a compiled
-  constant (`workloadclaims.BrokerEndpoint`, in allowlisted/measured code), so
+  constant (`workloadclaims.InventoryEndpoint`, in allowlisted/measured code), so
   the control plane cannot change *where* get-cert looks — the platform supplies
   only the socket mount, not the path. A network endpoint would be only as
   fixed as the arg carrying it.
@@ -445,7 +445,7 @@ handshake; that mismatch is caught downstream by an external verifier pinning
 the operator key (`docs/ratls.md`), which refuses the pod, not by
 get-cert. The pattern: go over the network by name only when you can
 authenticate the endpoint's measurement (CDS); stay on the kernel-local socket
-when what you need is co-location, which attestation cannot prove (the broker).
+when what you need is co-location, which attestation cannot prove (the inventory).
 
 The residual left is neither DNS nor attestation: the socket file lives on a
 node path, so a malicious *allowlisted* pod that can `hostPath`-mount that
@@ -454,8 +454,8 @@ PodSecurity / filesystem-permission hardening (the socket dir must be
 unwritable by untrusted pods), not more crypto.
 
 Note this is *not* the same as the socket's own permissions. The non-root
-get-cert reaches the socket because the broker group-owns it
-(`workloadclaims.BrokerSocketGID`, mode 0660) and the webhook puts the sidecar
+get-cert reaches the socket because the inventory group-owns it
+(`workloadclaims.InventorySocketGID`, mode 0660) and the webhook puts the sidecar
 in that group — that is reachability for the *file*. The swap vector is about
 the *directory*: the installer keeps it root-owned and non-world-writable (mode
 0711, see the install script), so an untrusted pod still cannot unlink/replace
@@ -477,8 +477,8 @@ named:
   image; under pod-CVM it is baked into the measured guest. Either way its
   integrity is rooted in the same allowlist/measurement the rest of the
   platform is.
-- **The ground truth for "what runs" is the broker** — the admission record —
-  not get-cert and not CDS. get-cert is a faithful conduit; the broker is the
+- **The ground truth for "what runs" is the inventory** — the admission record —
+  not get-cert and not CDS. get-cert is a faithful conduit; the inventory is the
   component that actually made the admit decision, so its answer *is* what was
   admitted (Corner 1 binds the caller to the right pod).
 - **CDS's own backstop is the allowlist.** It treats the forwarded digest list
@@ -486,19 +486,19 @@ named:
   store, so even a compromised reporter cannot smuggle an unallowlisted image
   (Corner 5).
 - **But this chain assumes the honest get-cert.** A malicious admitted workload
-  can skip get-cert and the broker entirely and assert any *allowlisted* image
+  can skip get-cert and the inventory entirely and assert any *allowlisted* image
   set — CDS re-checks allowlist membership and the list↔claim hash, but nothing
   binds the claim to what the pod actually runs (Corner 5). So this establishes
   trust for an *honest* workload's claim; it does not make the pin an identity
   proof against a lying one. That gap is unimplemented (GAPS §Trust model).
 
-"Did get-cert reach the *real* broker" is no longer a control-plane-supplied
+"Did get-cert reach the *real* inventory" is no longer a control-plane-supplied
 link: get-cert bakes one compiled Unix socket path for both shapes (Corner 5),
 so the path is not an injected arg. What remains is the node-CVM socket-file
 swap — a PodSecurity / filesystem-permission item, not attestation (and
 under kata even that is gone, the mount being a measured guest bind-mount). So
 the guarantee rests on trusting get-cert, but that trust is
-allowlist/measurement-rooted, with the broker as the source of truth and the
+allowlist/measurement-rooted, with the inventory as the source of truth and the
 allowlist as the floor beneath it.
 
 ---
@@ -506,7 +506,7 @@ allowlist as the floor beneath it.
 ## Corner 7 — who creates the socket, and why a hostile host can't inject one
 
 A natural challenge: the socket is a filesystem object on the node — what stops
-a malicious host from planting its own and answering for the broker?
+a malicious host from planting its own and answering for the inventory?
 
 **First, who actually creates it.** Not the c8s installer. The nri-image-policy
 installer DaemonSet only lays down three things on the node: the plugin
@@ -517,12 +517,12 @@ plugin**: containerd launches it as a node process and `workloadclaims.ListenUni
 calls `net.Listen("unix", …)` — that syscall materializes the socket. It
 `os.Remove`s the path first, so any pre-existing (stale or planted) socket is
 deleted before it binds its own. Under kata the same is true of `policy-monitor`
-inside the guest. So: **the broker creates the socket, not the installer and not
+inside the guest. So: **the inventory creates the socket, not the installer and not
 the host.**
 
 **The reframe that answers the challenge.** The socket is not a root of trust —
 it is intra-TCB plumbing between two components that are *both already inside*
-the measurement boundary (the broker and get-cert). Its integrity is *inherited*
+the measurement boundary (the inventory and get-cert). Its integrity is *inherited*
 from that boundary, not established by the socket. Which "host" can subvert it
 splits cleanly:
 
@@ -554,7 +554,7 @@ splits cleanly:
 
 **And a subverted socket is bounded anyway.** Even granting the co-tenant swap,
 get-cert is measured/allowlisted (CDS verifies its evidence) and CDS re-checks
-every claimed digest against the allowlist. A rogue broker can never smuggle a
+every claimed digest against the allowlist. A rogue inventory can never smuggle a
 non-allowlisted image or escape the TCB; the worst it achieves is the
 honest-workloads-only residual (Corner 5) — claiming *other allowlisted* images.
 
@@ -566,24 +566,24 @@ never because the socket file itself is assumed authentic.
 
 ## Enablement
 
-Always on for node-CVM: the chart wires the NRI broker socket, the webhook
-mount, and the operator flag. get-cert is fail-closed on a broker error, so a
+Always on for node-CVM: the chart wires the NRI inventory socket, the webhook
+mount, and the operator flag. get-cert is fail-closed on an inventory error, so a
 broken nri-image-policy blocks workload cert issuance node-wide — by design.
 
-**Upgrade ordering.** Because get-cert fails closed on a broker error, roll
-`nri-image-policy` (which creates the socket and serves the broker) **before or
-with** the operator/webhook that injects `--workload-claims-broker`. If the
-webhook starts injecting the flag while an old plugin (no broker socket) is
+**Upgrade ordering.** Because get-cert fails closed on an inventory error, roll
+`nri-image-policy` (which creates the socket and serves the inventory) **before or
+with** the operator/webhook that injects `--workload-claims`. If the
+webhook starts injecting the flag while an old plugin (no inventory socket) is
 still running — or before the socket's host directory exists for the hostPath
 mount — every newly admitted `cw` pod fails cert issuance until the plugin is
 current. A chart upgrade that rolls both together is safe; a partial rollout is
 not.
 
 (The kata path is not yet chart-wired: the guest image must serve
-`policy-monitor`'s broker socket via `--workload-claims-socket-dir` and
+`policy-monitor`'s inventory socket via `--workload-claims-socket-dir` and
 bind-mount that directory into pod containers at
 `workloadclaims.SidecarSocketDir` before the chart injects
-`--workload-claims-broker` for kata pods — a follow-up.) CDS verifies whatever
+`--workload-claims` for kata pods — a follow-up.) CDS verifies whatever
 claims a request carries and stamps them on the leaf; relying parties enforce
 them with `c8s verify --workload-image` (Corner 4).
 
@@ -591,9 +591,9 @@ them with `c8s verify --workload-image` (Corner 4).
 
 | Concern | Where |
 |---|---|
-| Digest, broker protocol, peer-cred + cgroup binding | `pkg/workloadclaims/` |
-| node-CVM broker (shallowest-tracked resolution, eviction) | `internal/cmds/nri-image-policy/broker.go` |
-| kata guest broker (single-pod, same unix socket) | `internal/cmds/policymonitor/broker.go` |
+| Digest, inventory protocol, peer-cred + cgroup binding | `pkg/workloadclaims/` |
+| node-CVM inventory (shallowest-tracked resolution, eviction) | `internal/cmds/nri-image-policy/inventory.go` |
+| kata guest inventory (single-pod, same unix socket) | `internal/cmds/policymonitor/inventory.go` |
 | get-cert fetch → claim → CSR fold (empty-set handling) | `internal/cmds/getcert/run.go`, `pkg/attestclient/client.go` |
 | get-cert leaf-embed (nonce-free attestation over the claims) + CDS guard | `pkg/attestclient/ratls.go` (`AttestationExtensionForClaims`), `internal/cmds/cds/attest.go` (`csrCarriesRATLSExtension`) |
 | CDS verify list↔claim + allowlist gate + leaf embed | `internal/cmds/cds/attest.go`, `internal/issuer/sign.go` |

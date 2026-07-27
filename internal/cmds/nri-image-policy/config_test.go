@@ -244,7 +244,7 @@ func TestValidate_WorkloadClaimsRequireAllowlist(t *testing.T) {
 		WorkloadClaims: workloadClaimsConfig{SocketDir: "/var/run/nri-image-policy"},
 	}
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error: label-rules-only config never records for the broker")
+		t.Fatal("expected error: label-rules-only config never records for the inventory")
 	}
 }
 

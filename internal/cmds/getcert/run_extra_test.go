@@ -2,6 +2,10 @@ package getcert
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -16,16 +20,28 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-// overrideBrokerEndpoint points the compiled broker endpoint at a test socket
-// and restores the production value on cleanup.
-func overrideBrokerEndpoint(t *testing.T, endpoint string) {
+// testCSRKey returns a throwaway public key standing in for the CSR key a
+// sandbox token would be bound to.
+func testCSRKey(t *testing.T) *ecdsa.PublicKey {
 	t.Helper()
-	old := brokerEndpoint
-	brokerEndpoint = func() string { return endpoint }
-	t.Cleanup(func() { brokerEndpoint = old })
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &key.PublicKey
+}
+
+// overrideInventoryEndpoint points the compiled inventory endpoint at a test socket
+// and restores the production value on cleanup.
+func overrideInventoryEndpoint(t *testing.T, endpoint string) {
+	t.Helper()
+	old := inventoryEndpoint
+	inventoryEndpoint = func() string { return endpoint }
+	t.Cleanup(func() { inventoryEndpoint = old })
 }
 
 // overrideProcRoot substitutes a fake /proc tree and restores the real one on
@@ -37,7 +53,7 @@ func overrideProcRoot(t *testing.T, root string) {
 	t.Cleanup(func() { procRoot = old })
 }
 
-// fakeResolver answers the broker's ContainersForPeer with fixed data.
+// fakeResolver answers the inventory's ContainersForPeer with fixed data.
 type fakeResolver struct {
 	containers []workloadclaims.Container
 	err        error
@@ -47,9 +63,9 @@ func (f fakeResolver) ContainersForPeer(int) ([]workloadclaims.Container, error)
 	return f.containers, f.err
 }
 
-// startFakeBroker serves the workload-claims broker protocol on a unix socket
+// startFakeInventory serves the admission inventory protocol on a unix socket
 // and returns its unix:// endpoint.
-func startFakeBroker(t *testing.T, resolver workloadclaims.Resolver) string {
+func startFakeInventory(t *testing.T, resolver workloadclaims.Resolver) string {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "wc.sock")
 	l, err := net.Listen("unix", sock)
@@ -60,7 +76,7 @@ func startFakeBroker(t *testing.T, resolver workloadclaims.Resolver) string {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = workloadclaims.Serve(ctx, l, resolver)
+		_ = workloadclaims.Serve(ctx, l, resolver, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -69,18 +85,18 @@ func startFakeBroker(t *testing.T, resolver workloadclaims.Resolver) string {
 	return "unix://" + sock
 }
 
-func TestWorkloadClaimsWithBrokerBindsAndPartitions(t *testing.T) {
-	endpoint := startFakeBroker(t, fakeResolver{containers: []workloadclaims.Container{
+func TestWorkloadClaimsWithInventoryBindsAndPartitions(t *testing.T) {
+	endpoint := startFakeInventory(t, fakeResolver{containers: []workloadclaims.Container{
 		{Name: "setup", Digest: "sha256:" + strings.Repeat("a", 64)},
 		{Name: "app", Digest: "sha256:" + strings.Repeat("b", 64)},
 	}})
-	overrideBrokerEndpoint(t, endpoint)
+	overrideInventoryEndpoint(t, endpoint)
 
 	res, err := workloadClaims(context.Background(), config{
-		WorkloadClaimsBroker:   true,
+		WorkloadClaims:         true,
 		WorkloadClaimsTimeout:  2 * time.Second,
 		WorkloadInitContainers: []string{"setup"},
-	})
+	}, testCSRKey(t), []byte("test-nonce"))
 	if err != nil {
 		t.Fatalf("workloadClaims: %v", err)
 	}
@@ -100,16 +116,16 @@ func TestWorkloadClaimsWithBrokerBindsAndPartitions(t *testing.T) {
 	}
 }
 
-// First issuance: the broker has admitted no app containers yet, so get-cert
+// First issuance: the inventory has admitted no app containers yet, so get-cert
 // issues without a claim instead of failing.
-func TestWorkloadClaimsWithBrokerNoContainersIsClaimFree(t *testing.T) {
-	endpoint := startFakeBroker(t, fakeResolver{})
-	overrideBrokerEndpoint(t, endpoint)
+func TestWorkloadClaimsWithInventoryNoContainersIsClaimFree(t *testing.T) {
+	endpoint := startFakeInventory(t, fakeResolver{})
+	overrideInventoryEndpoint(t, endpoint)
 
 	res, err := workloadClaims(context.Background(), config{
-		WorkloadClaimsBroker:  true,
+		WorkloadClaims:        true,
 		WorkloadClaimsTimeout: 2 * time.Second,
-	})
+	}, testCSRKey(t), []byte("test-nonce"))
 	if err != nil {
 		t.Fatalf("workloadClaims: %v", err)
 	}
@@ -118,35 +134,43 @@ func TestWorkloadClaimsWithBrokerNoContainersIsClaimFree(t *testing.T) {
 	}
 }
 
-// A broker error is fail-closed: issuance aborts rather than silently dropping
+// An inventory error is fail-closed: issuance aborts rather than silently dropping
 // the workload binding.
-func TestWorkloadClaimsWithBrokerUnreachableFailsClosed(t *testing.T) {
-	overrideBrokerEndpoint(t, "unix://"+filepath.Join(t.TempDir(), "missing.sock"))
+func TestWorkloadClaimsWithInventoryUnreachableFailsClosed(t *testing.T) {
+	overrideInventoryEndpoint(t, "unix://"+filepath.Join(t.TempDir(), "missing.sock"))
 
 	_, err := workloadClaims(context.Background(), config{
-		WorkloadClaimsBroker:  true,
+		WorkloadClaims:        true,
 		WorkloadClaimsTimeout: time.Second,
-	})
+	}, testCSRKey(t), []byte("test-nonce"))
 	if err == nil {
-		t.Fatal("workloadClaims succeeded, want fail-closed error for unreachable broker")
+		t.Fatal("workloadClaims succeeded, want fail-closed error for unreachable inventory")
 	}
-	if !strings.Contains(err.Error(), "fetch workload claims") {
-		t.Fatalf("error = %v, want fetch workload claims", err)
+	// The sandbox-token fetch runs first and hits the dead socket.
+	if !strings.Contains(err.Error(), "fetch sandbox token") {
+		t.Fatalf("error = %v, want fetch sandbox token", err)
 	}
 }
 
 func TestObtainCertAttestationExtensionError(t *testing.T) {
+	// CDS answers /authenticate (obtainCert fetches the challenge first), so the
+	// flow reaches the attestation-api, which is down — the error under test.
+	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChallengeResponse{Challenge: "dGVzdC1jaGFsbGVuZ2U="})
+	}))
+	t.Cleanup(cds.Close)
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "attestation down", http.StatusInternalServerError)
 	}))
 	t.Cleanup(att.Close)
 
 	cfg := config{
-		CDSURL:            "https://127.0.0.1:1",
+		CDSURL:            cds.URL,
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}
-	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL))
+	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cds.URL))
 	if err == nil {
 		t.Fatal("obtainCert succeeded, want attestation extension error")
 	}

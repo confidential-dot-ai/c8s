@@ -96,14 +96,14 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		revalidateInterval: 10 * time.Second,
 	}
 
-	// Workload-claims broker (docs/ratls.md): serve the guest
+	// Admission inventory (docs/ratls.md): serve the guest
 	// pod's admitted digests to the in-guest get-cert over a Unix socket the
 	// guest bind-mounts into the pod.
 	if cfg.WorkloadClaimsSocketDir != "" {
-		m.broker = newWorkloadBroker()
+		m.inventory = newAdmissionInventory()
 		socketPath := filepath.Join(cfg.WorkloadClaimsSocketDir, workloadclaims.SocketName)
-		if err := startWorkloadClaimsBroker(ctx, logger, m.broker, socketPath); err != nil {
-			return fmt.Errorf("start workload-claims broker: %w", err)
+		if err := startAdmissionInventory(ctx, logger, m.inventory, socketPath, sandboxTokenSigner(cfg, logger)); err != nil {
+			return fmt.Errorf("start admission inventory: %w", err)
 		}
 	}
 
@@ -131,7 +131,7 @@ type monitor struct {
 	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
 	overlay            *policyOverlay // latest CDS pull's workload argv policy
 	killer             containerKiller
-	broker             *workloadBroker // serves the workload-claims flow (docs/ratls.md)
+	inventory          *admissionInventory // workload-claims flow (docs/ratls.md); nil ⇔ disabled (no workload-claims socket dir)
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
 	revalidateInterval time.Duration
@@ -420,6 +420,12 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	// mislabelled workload can't slip through (kata would run the measured
 	// pause for it, not the host's image). Checked before extractDigest
 	// because the pause carries no image-name annotation.
+	// Every container (the pause included) names its pod sandbox in the CRI
+	// annotations; capture it for the inventory's sandbox-identity surface.
+	if m.inventory != nil {
+		m.inventory.recordSandboxID(sandboxIDFromAnnotations(spec.Annotations))
+	}
+
 	if isSandbox(spec.Annotations) {
 		m.logger.Info("allow sandbox (pause) container — measured via rootfs, not allowlisted", "cid", cid)
 		return
@@ -447,8 +453,8 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	}
 	if m.admits(digest, argv) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
-		if m.broker != nil {
-			m.broker.record(cid, containerName(spec.Annotations), digest)
+		if m.inventory != nil {
+			m.inventory.record(cid, containerName(spec.Annotations), digest)
 		}
 		return
 	}
