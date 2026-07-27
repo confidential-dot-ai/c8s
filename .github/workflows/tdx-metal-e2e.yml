@@ -90,7 +90,9 @@ env:
 
 jobs:
   e2e:
-    name: c8s on TDX metal
+    # Named to match the SNP primitive's leaf, `cvm (<platform>/<flavor>)`,
+    # so both lanes read the same way in the run tree.
+    name: cvm (tdx-metal/rke2-node)
     # The HOST-side launcher runner on tdx-gh-runner. Its bm-e2e SA is scoped to
     # confai-images (baremetal/kubevirt-rbac.yaml); kubectl uses the in-cluster
     # token, so there is no kubeconfig to manage for the OUTER cluster.

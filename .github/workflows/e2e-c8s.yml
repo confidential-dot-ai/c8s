@@ -324,6 +324,9 @@ jobs:
   # removed from cvm-e2e.yml.
   # Same trigger as `e2e` above, so one merge exercises both lanes.
   tdx:
+    # Mirrors the SNP path's matrix-derived label, `e2e (snp-metal, cvm-launcher)`,
+    # so the two lanes line up in the run tree instead of reading as unrelated.
+    name: tdx (tdx-metal, cvm-launcher-tdx)
     # No `needs: payload`. The TDX lane is self-contained and does not consume
     # payload_b64, and it boots on a different host from the SNP lane, so the
     # two run in parallel rather than one waiting on the other.
