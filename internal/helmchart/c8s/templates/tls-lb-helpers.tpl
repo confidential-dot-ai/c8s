@@ -181,6 +181,10 @@ location{{ if .exact }} ={{ end }} {{ .path }} {
     {{- if default false $root.Values.tlsLb.cors.enabled }}
     {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
     {{- end }}
+    # This runs before nginx collapses callers onto the loopback proxy source.
+    # The zone key is empty for GET, HEAD, and OPTIONS, so only mutations count.
+    limit_req zone=allowlist_write_per_client burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.rateLimit.burst }} nodelay;
+    limit_req_status 429;
     proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;
     proxy_set_header Host $host;
     proxy_set_header Authorization $http_authorization;

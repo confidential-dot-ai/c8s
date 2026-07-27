@@ -348,8 +348,9 @@ CDS serves the image-digest allowlist that `nri-image-policy` (host) and
 `policy-monitor` (in-guest) enforce on every node. The `c8s allowlist`
 command reads and mutates it. By default, tls-lb publishes the complete
 `/allowlist` API and verifies CDS's attestation before forwarding requests.
-Point the CLI at the same tls-lb URL used for application traffic; no
-port-forward is required.
+When tls-lb uses the chart default CDS-issued public certificate
+(`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at
+the same tls-lb URL used for application traffic; no port-forward is required.
 
 ```sh
 TLS_LB=https://<tls-lb-host>
@@ -374,6 +375,18 @@ to. For the default public route, use the tls-lb launch digest; the CLI reads
 tls-lb's discovery document and verifies its attestation automatically. An
 empty set accepts any attested endpoint and is unsafe outside development.
 Direct CDS URLs remain supported, in which case pin the CDS launch digest.
+
+Do not point this CLI at tls-lb when `tlsLb.publicTLS.secretName` is set. That
+front door uses WebPKI (`public_tls.mode=webpki`), and its public certificate is
+not yet cryptographically bound to the discovery attestation, so the CLI
+deliberately refuses it. Use a direct CDS RA-TLS URL and the CDS launch digest;
+if CDS is not otherwise routable, use a local port-forward:
+
+```sh
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+c8s allowlist export --url https://localhost:8443 \
+  --measurements <cds-launch-digest>
+```
 
 Writes are authorized by an operator EC keypair whose **public** half CDS
 pins at install time. Generate one and pin it:

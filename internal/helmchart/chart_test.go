@@ -1692,21 +1692,26 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 // Public exposure is an explicit type=LoadBalancer, not inferred.
 func TestChartTLSLBServiceType(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want corev1.ServiceType
+		name       string
+		args       []string
+		wantType   corev1.ServiceType
+		wantPolicy corev1.ServiceExternalTrafficPolicyType
 	}{
-		{"default is ClusterIP", nil, corev1.ServiceTypeClusterIP},
-		{"explicit LoadBalancer", []string{"--set", "tlsLb.service.type=LoadBalancer"}, corev1.ServiceTypeLoadBalancer},
-		{"explicit NodePort", []string{"--set", "tlsLb.service.type=NodePort"}, corev1.ServiceTypeNodePort},
+		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
+		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal},
+		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyTypeLocal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			if got := renderedService(t, out, "c8s-tls-lb").Spec.Type; got != tc.want {
-				t.Fatalf("service type = %q, want %q", got, tc.want)
+			svc := renderedService(t, out, "c8s-tls-lb")
+			if svc.Spec.Type != tc.wantType {
+				t.Fatalf("service type = %q, want %q", svc.Spec.Type, tc.wantType)
+			}
+			if svc.Spec.ExternalTrafficPolicy != tc.wantPolicy {
+				t.Fatalf("externalTrafficPolicy = %q, want %q", svc.Spec.ExternalTrafficPolicy, tc.wantPolicy)
 			}
 		})
 	}
@@ -2041,6 +2046,15 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=1r/s")
+	rateMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_rate_key")
+	rateMap.assertDirective(t, "default", "$binary_remote_addr")
+	rateMap.assertDirective(t, "GET", `""`)
+	rateMap.assertDirective(t, "HEAD", `""`)
+	rateMap.assertDirective(t, "OPTIONS", `""`)
 
 	for _, route := range []struct {
 		match string
@@ -2053,6 +2067,8 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		location.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
 		location.assertDirective(t, "proxy_set_header", "Host", "$host")
 		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=5", "nodelay")
+		location.assertDirective(t, "limit_req_status", "429")
 		location.assertNoDirective(t, "proxy_ssl_verify")
 	}
 
@@ -2071,6 +2087,27 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	}
 	if !hasHostIPEnv(proxy) {
 		t.Fatalf("allowlist-proxy missing HOST_IP downward-API env: env=%v", proxy.Env)
+	}
+}
+
+func TestTLSLBAllowlistWriteRateLimitIsConfigurable(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "allowlist.rateLimit.requestsPerSecond=2",
+		"--set", "allowlist.rateLimit.burst=7",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=2r/s")
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		cfg.location(t, key.match, key.path).assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=7", "nodelay")
 	}
 }
 
@@ -2100,6 +2137,10 @@ func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
 			t.Fatalf("nginx config contains disabled built-in allowlist location %#v", key)
 		}
 	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("disabled built-in allowlist route still renders its rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
 		t.Fatal("disabled built-in allowlist route still renders allowlist-proxy")
@@ -2122,6 +2163,10 @@ func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
 	if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/allowlist/"}]; ok {
 		t.Fatal("built-in /allowlist/ route rendered alongside explicit allowlist route")
 	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("explicit allowlist route still renders the built-in rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
 		t.Fatal("explicit allowlist route still renders the built-in allowlist-proxy")
@@ -2272,7 +2317,14 @@ func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 
 type nginxConfig struct {
 	upstreams map[string]*nginxBlock
+	maps      map[nginxMapKey]*nginxBlock
 	locations map[nginxLocationKey]*nginxBlock
+	http      *nginxBlock
+}
+
+type nginxMapKey struct {
+	source string
+	target string
 }
 
 type nginxLocationKey struct {
@@ -2293,10 +2345,11 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 	t.Helper()
 	cfg := nginxConfig{
 		upstreams: make(map[string]*nginxBlock),
+		maps:      make(map[nginxMapKey]*nginxBlock),
 		locations: make(map[nginxLocationKey]*nginxBlock),
 	}
 
-	var current *nginxBlock
+	var stack []*nginxBlock
 	for _, line := range strings.Split(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -2304,37 +2357,45 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 		}
 		if strings.HasSuffix(trimmed, "{") {
 			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+			block := &nginxBlock{directives: make(map[string][][]string)}
+			if len(fields) == 1 && fields[0] == "http" {
+				cfg.http = block
+			}
 			if len(fields) == 2 && fields[0] == "upstream" {
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.upstreams[fields[1]] = block
-				current = block
-				continue
+			}
+			if len(fields) == 3 && fields[0] == "map" {
+				cfg.maps[nginxMapKey{source: fields[1], target: fields[2]}] = block
 			}
 			if len(fields) >= 2 && fields[0] == "location" {
 				key := nginxLocationKey{match: "prefix", path: fields[1]}
 				if len(fields) == 3 && fields[1] == "=" {
 					key = nginxLocationKey{match: "exact", path: fields[2]}
 				}
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.locations[key] = block
-				current = block
-				continue
 			}
-			current = nil
+			stack = append(stack, block)
 			continue
 		}
 		if trimmed == "}" {
-			current = nil
+			if len(stack) == 0 {
+				t.Fatalf("nginx config has unmatched closing brace")
+			}
+			stack = stack[:len(stack)-1]
 			continue
 		}
-		if current == nil || !strings.HasSuffix(trimmed, ";") {
+		if len(stack) == 0 || !strings.HasSuffix(trimmed, ";") {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
 		if len(fields) == 0 {
 			continue
 		}
+		current := stack[len(stack)-1]
 		current.directives[fields[0]] = append(current.directives[fields[0]], fields[1:])
+	}
+	if len(stack) != 0 {
+		t.Fatalf("nginx config has %d unclosed block(s)", len(stack))
 	}
 	return cfg
 }
@@ -2356,6 +2417,16 @@ func (cfg nginxConfig) location(t *testing.T, match, path string) *nginxBlock {
 		t.Fatalf("nginx config missing location %#v; got %v", key, cfg.locations)
 	}
 	return location
+}
+
+func (cfg nginxConfig) mapBlock(t *testing.T, source, target string) *nginxBlock {
+	t.Helper()
+	key := nginxMapKey{source: source, target: target}
+	block, ok := cfg.maps[key]
+	if !ok {
+		t.Fatalf("nginx config missing map %#v; got %v", key, cfg.maps)
+	}
+	return block
 }
 
 func (block *nginxBlock) assertServer(t *testing.T, server string) {
@@ -2423,6 +2494,34 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 				"--set", "allowlist.proxyPort=8443",
 			},
 			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: 8443",
+		},
+		{
+			name: "allowlist-write-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-rate-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=10",
+			},
+			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be less than cds.rateLimit (10), got: 10",
+		},
+		{
+			name: "allowlist-write-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-burst-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=20",
+			},
+			want: "tlsLb.allowlist.rateLimit.burst must be less than cds.rateBurst (20), got: 20",
 		},
 		{
 			name: "route-verifyDepth-injection",

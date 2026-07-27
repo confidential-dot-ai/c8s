@@ -1047,6 +1047,13 @@ tlsLb:
     # -- Loopback port for the RA-TLS-verifying allowlist proxy. This is not a
     # pod or Service port and is reachable only inside the tls-lb pod.
     proxyPort: 8801
+    # -- Per-public-client write limiting applied by nginx before requests are
+    # collapsed onto the loopback proxy connection. GET, HEAD, and OPTIONS are
+    # exempt. Keep both values below CDS's aggregate rate/burst so one
+    # unauthenticated caller cannot consume the entire CDS write bucket.
+    rateLimit:
+      requestsPerSecond: 1
+      burst: 5
     # -- Container resources for the allowlist proxy.
     resources: {}
 
@@ -1216,6 +1223,8 @@ tlsLb:
   service:
     # -- Service type. Set to LoadBalancer to expose the listener publicly
     # (e.g. on AKS/GKE), with annotations below for cloud-LB specifics.
+    # LoadBalancer and NodePort render externalTrafficPolicy: Local so nginx
+    # retains the public source IP used by the /allowlist write limiter.
     type: ClusterIP
     port: 443
     # -- Optional annotations on the Service. Use the provider's LB annotation to

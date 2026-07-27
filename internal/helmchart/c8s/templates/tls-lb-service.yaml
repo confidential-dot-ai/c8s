@@ -12,6 +12,11 @@ metadata:
   {{- end }}
 spec:
   type: {{ $svc.type }}
+  {{- if or (eq $svc.type "LoadBalancer") (eq $svc.type "NodePort") }}
+  # The built-in /allowlist write limiter keys on nginx's public peer address.
+  # Local preserves that source instead of SNATing every caller to a node IP.
+  externalTrafficPolicy: Local
+  {{- end }}
   ports:
     - port: {{ $svc.port }}
       targetPort: https
