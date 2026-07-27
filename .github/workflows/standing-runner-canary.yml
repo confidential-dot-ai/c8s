@@ -1,0 +1,99 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# CANARY for the STANDING in-guest runners (snp-metal-cvm, tdx-metal-cvm).
+# ═══════════════════════════════════════════════════════════════════════════
+# WHY THIS EXISTS: on 2026-07-24 the SNP standing guest wedged (its 2.0G root
+# overlay filled with kube-audit, etcd hit ENOSPC, rke2-server crash-looped
+# 16k times) and NOBODY NOTICED FOR THREE DAYS. Nothing watches these runners.
+# Consumer lanes only touch them when someone merges, and a dead in-guest
+# listener does not fail a job, it silently never picks one up, so the run
+# just sits queued until GitHub cancels it 24h later.
+#
+# WHAT IT CATCHES: any cause of a dead standing runner, not just the disk one.
+# A wedged guest, a host reboot (runStrategy Always brings the VMI back but the
+# ephemeral overlay loses the ARC install, so the label stays registered and
+# never serves), a retired runner image, an expired credential.
+#
+# HONEST LIMITATION: a job targeting a dead runner QUEUES rather than failing,
+# and GitHub's timeout-minutes governs execution, not queue time. So a dead
+# runner does not go red instantly; the `verdict` job goes red once the queued
+# job is cancelled (24h). That is far better than three days of silence but it
+# is not a minutes-level alarm. Tightening it further needs an external prober.
+name: standing-runner-canary
+
+on:
+  schedule:
+    # Every 6 hours, offset off the hour so it does not pile onto other lanes.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never queue canaries behind each other: a stuck one must not mask the next.
+concurrency:
+  group: standing-runner-canary
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false          # one dead lane must not hide the other
+      matrix:
+        include:
+          - runner: snp-metal-cvm
+            tee_dev: /dev/sev-guest
+          - runner: tdx-metal-cvm
+            # UNDERSCORE. The hyphen spelling is qemu's -object tdx-guest,
+            # which is a host-side string and not a device node.
+            tee_dev: /dev/tdx_guest
+    name: probe (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: the runner is alive and inside its TEE
+        run: |
+          set -euo pipefail
+          echo "runner=$(hostname) label=${{ matrix.runner }}"
+          [ -e "${{ matrix.tee_dev }}" ] || {
+            echo "::error::${{ matrix.tee_dev }} absent: this runner is not the expected TEE"
+            exit 1
+          }
+          echo "TEE confirmed: ${{ matrix.tee_dev }}"
+
+      - name: guest filesystem headroom
+        # The disk is what killed the SNP guest, so report it and warn EARLY.
+        # This runs in the runner pod, so what it sees is the pod's writable
+        # layer on the guest, not necessarily the guest root that filled. It is
+        # a leading indicator, not a complete one; the authoritative check would
+        # need node-level rights the runner deliberately lacks.
+        run: |
+          set -uo pipefail
+          df -h / /tmp 2>/dev/null || true
+          USE=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+          echo "writable layer at ${USE}%"
+          if [ "${USE:-0}" -ge 90 ]; then
+            echo "::error::guest writable layer at ${USE}%, this lane is close to the failure that took SNP down"
+            exit 1
+          elif [ "${USE:-0}" -ge 75 ]; then
+            echo "::warning::guest writable layer at ${USE}%, worth looking at before it wedges"
+          fi
+
+  verdict:
+    # Turns a silent non-result into a red run. Without this a cancelled or
+    # skipped probe leaves the workflow looking merely "not green" rather than
+    # failed, which is exactly the kind of thing nobody notices.
+    needs: [probe]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every standing runner must have reported
+        run: |
+          set -euo pipefail
+          echo "probe result: ${{ needs.probe.result }}"
+          [ "${{ needs.probe.result }}" = "success" ] || {
+            echo "::error::a standing runner did not report. Check whether its guest is wedged:"
+            echo "  SNP: ssh the SNP host, sudo virtctl console snp-metal-cvm -n confai-images"
+            echo "  TDX: the guest is console-dead by design; re-run provision-tdx-metal-cvm.yml"
+            exit 1
+          }
+          echo "all standing runners alive"
