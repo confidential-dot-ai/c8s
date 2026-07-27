@@ -1,4 +1,21 @@
 # ═══════════════════════════════════════════════════════════════════════════
+# VENDORED FILE. SOURCE OF TRUTH LIVES IN confidential-ci.
+# ═══════════════════════════════════════════════════════════════════════════
+# UPSTREAM: confidential-dot-ai/confidential-ci  .github/workflows/cvm-e2e.yml
+# THIS FILE: confidential-dot-ai/c8s             .github/workflows/cvm-e2e.yml
+#
+# WHY A COPY: c8s is PUBLIC and confidential-ci is PRIVATE, and a public repo
+# cannot `uses:` a private repo's reusable workflow. Vendoring is the stopgap.
+#
+# THESE TWO COPIES HAVE ALREADY DIVERGED, and it went unnoticed: upstream grew
+# a tdx-metal arm this copy never had, then had it removed again. Neither file
+# referenced the other, so nothing could detect it. Reconciling them is separate
+# work; this banner exists so the next person knows to look.
+#
+# WHEN CHANGING THIS FILE: change the upstream copy too, or say in the PR why the
+# two must differ. A silent one-sided edit is how the drift above happened.
+#
+# ═══════════════════════════════════════════════════════════════════════════
 # THE PRIMITIVE — "run CI inside a CVM", reusable across the whole stack.
 # ═══════════════════════════════════════════════════════════════════════════
 #

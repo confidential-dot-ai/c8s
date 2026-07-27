@@ -1,4 +1,20 @@
 # ═══════════════════════════════════════════════════════════════════════════
+# VENDORED FILE. SOURCE OF TRUTH LIVES IN confidential-ci.
+# ═══════════════════════════════════════════════════════════════════════════
+# UPSTREAM: confidential-dot-ai/confidential-ci  .github/workflows/e2e-c8s.yml
+# THIS FILE: confidential-dot-ai/c8s             .github/workflows/e2e-c8s.yml
+#
+# WHY A COPY: c8s is PUBLIC and confidential-ci is PRIVATE, and a public repo
+# cannot `uses:` a private repo's reusable workflow. Vendoring is the stopgap.
+#
+# This copy and its upstream have diverged over time. Treat upstream as the
+# reference when they disagree, and reconcile deliberately rather than by
+# copying whichever was edited most recently.
+#
+# WHEN CHANGING THIS FILE: change the upstream copy too, or say in the PR why the
+# two must differ. A silent one-sided edit is how the drift above happened.
+#
+# ═══════════════════════════════════════════════════════════════════════════
 # CONSUMER: c8s — the flagship payload ("install c8s + prove a cw workload runs")
 # ═══════════════════════════════════════════════════════════════════════════
 #
@@ -297,3 +313,20 @@ jobs:
       runner: ${{ matrix.runner }}
       flavor: rke2-node
       payload_b64: ${{ needs.payload.outputs.b64 }}
+
+
+  # TDX metal, a SIBLING JOB rather than another row of the matrix above.
+  # A reusable-workflow `uses:` must be a static literal, so it cannot be driven
+  # by ${{ matrix }} (confidential-ci research/ADR-matrix-architecture-2026-07-20).
+  # It would want to be a separate job regardless: the two lanes use different
+  # transports, console for SNP and RA-TLS for TDX, and folding them into one
+  # reusable workflow is exactly the two-drivers-in-one-file shape that was just
+  # removed from cvm-e2e.yml.
+  # Same trigger as `e2e` above, so one merge exercises both lanes.
+  tdx:
+    # No `needs: payload`. The TDX lane is self-contained and does not consume
+    # payload_b64, and it boots on a different host from the SNP lane, so the
+    # two run in parallel rather than one waiting on the other.
+    uses: ./.github/workflows/tdx-metal-e2e.yml
+    with:
+      c8s_ref: ${{ inputs.c8s_ref }}
