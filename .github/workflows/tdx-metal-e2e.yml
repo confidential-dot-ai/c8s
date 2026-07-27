@@ -75,6 +75,9 @@ jobs:
             [ -n "$GOVER" ] || GOVER=1.26.3
             curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xz
           fi
+          # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
+          # inside THIS one. `go install crane` below needs it here and now.
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           # crane: `c8s install --resolve-digests=true` below shells out to it.
