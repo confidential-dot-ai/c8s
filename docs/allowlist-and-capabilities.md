@@ -132,8 +132,8 @@ guarantee is recovered at [cert issuance](#where-its-enforced).
 
 ## Path policy (`paths`)
 
-`paths` grants filesystem access for a coming key-management integration: a
-workload attests, and a secret broker releases material into paths the workload
+`paths` grants filesystem access for key-management integration: a workload
+attests, and the CDS secrets broker releases material into paths the workload
 is entitled to.
 
 ```json
@@ -147,13 +147,20 @@ is entitled to.
   `/**` (subtree). These rules exist so a grant cannot be widened by path
   trickery once an enforcer consumes it.
 
-**No enforcer consumes `paths` yet.** It is carried, validated, canonicalized,
-and attested (it is part of the seed digest), so the schema and the operator
-tooling are ready — but it grants nothing until the secret-release component
-exists. When that component lands, a grant's subject must be bound to the
-**attested workload digest**, never to a self-asserted image reference, or any
-allowlisted workload could claim another's grant. The field is inert-with-a-spec
-by design; it is not a live capability.
+**Consumed by the CDS secrets broker** (`docs/secrets-broker.md`) for read
+grants: `/secrets/fetch` resolves the requester's claimed container set to
+exactly one workload entry and releases only paths that entry grants to each
+claimed digest, entry-scoped (never the per-digest union). A grant binds to
+the attested workload digest, never to a self-asserted image reference. Workload
+runtime *writes* are not yet delivered (no in-pod write path ships); the grant
+model already carries them.
+
+Grant-writing rules lint enforces as warnings (treat the first two as errors):
+a paths-bearing container should pin argv `exact`+`exact` (any invocation of
+permissive bytes can read the granted secrets); grant paths should live under
+`/secrets/` (the staging root); identical-set entries carrying grants fail
+closed at the broker (ambiguous entry resolution); a same-entry duplicate that
+widens a digest's paths to `any` silently grants every requested path.
 
 ## Where it's enforced
 
@@ -317,5 +324,7 @@ document carries. `--online` cross-checks digests against the registry with
 Generating an operator key and pinning its public half is unchanged; see the
 README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
 the pinned set's digest is attested, so a verifier detects a changed write policy.
-The path grants (`paths`) will, when their enforcer lands, be managed with the
-same `workload edit`/`apply` flow and bound to the attested workload digest.
+Path grants (`paths`) are managed with the same `workload edit`/`apply` flow and
+are released to attested workload digests by the secrets broker
+([`secrets-broker.md`](secrets-broker.md)); deposits use the same operator
+credential via `c8s secrets`.

@@ -19,6 +19,7 @@ type dependencies struct {
 	AttestKeyHandler attestation.Handler
 	SignCSRHandler   SignCSRHandler
 	AllowlistHandler allowlist.Handler
+	SecretsHandler   SecretsHandler
 	HandoffHandler   *issuer.HandoffHandler // nil disables /handoff (no --handoff-measurements)
 	ReadyFn          attestation.ReadinessFunc
 	EarIssuer        ear.Issuer
@@ -66,6 +67,16 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodDelete, "/allowlist/digests", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteDigests)))
 	r.Method(http.MethodPut, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandlePutWorkload)))
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
+
+	// The secrets broker. /secrets/fetch is attestation-gated like /attest;
+	// the operator deposit routes take the allowlist write middleware;
+	// /secrets/broker-identity is an unauthenticated read like /ca — integrity
+	// comes from the chain to the mesh CA.
+	r.Method(http.MethodPost, "/secrets/fetch", deps.protected(http.HandlerFunc(deps.SecretsHandler.HandleFetch)))
+	r.Get("/secrets/broker-identity", deps.SecretsHandler.HandleBrokerIdentity)
+	r.Method(http.MethodPut, "/secrets/entries/{entry}/paths/*", deps.allowlistWrite(http.HandlerFunc(deps.SecretsHandler.HandleOperatorPut)))
+	r.Method(http.MethodGet, "/secrets/entries/{entry}/paths/*", deps.allowlistWrite(http.HandlerFunc(deps.SecretsHandler.HandleOperatorGet)))
+	r.Method(http.MethodDelete, "/secrets/entries/{entry}/paths/*", deps.allowlistWrite(http.HandlerFunc(deps.SecretsHandler.HandleOperatorDelete)))
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
 	r.Get("/operator-keys", handleOperatorKeys(deps.OperatorKeysPEM))

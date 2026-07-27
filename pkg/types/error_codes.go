@@ -18,4 +18,8 @@ const (
 	ErrorCodeInternal                  = "internal"
 	ErrorCodeAttestationUnavailable    = "attestation_unavailable"
 	ErrorCodeBindingUnavailable        = "binding_unavailable"
+	ErrorCodeMeasurementNotConfigured  = "measurement_not_configured"
+	ErrorCodeGrantDenied               = "grant_denied"
+	ErrorCodeEntryAmbiguous            = "entry_ambiguous"
+	ErrorCodeSecretNotFound            = "secret_not_found"
 )

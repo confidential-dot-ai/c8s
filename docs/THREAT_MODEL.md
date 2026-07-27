@@ -39,6 +39,12 @@ Infrastructure assets whose integrity the above depend on:
    values** — what the platform will admit and attest.
 7. **Operator keys** and **per-session channel keys** (RA-TLS leaves, the
    browser over-encryption keys).
+8. **Brokered application secrets** — tenant DEKs, credentials, and signing
+   keys held by the CDS secrets broker in attested CVM memory and released
+   only to attested workloads under per-(entry, digest, path) grants
+   (`docs/secrets-broker.md`). At rest they exist only in CDS process memory;
+   in transit only wrapped inside an attested channel; at rest in pods only
+   in tmpfs (in-TEE RAM).
 
 ---
 
@@ -53,7 +59,7 @@ TEE is the trust boundary.** "It works on a normal cluster" is not the bar.
 | Physical host operator (in its *physical* role) | Trusted | Not to mount memory-bus probing / DIMM substitution / JTAG. The same company is distrusted in its hypervisor role. |
 | Code measured into the TEE (guest stack, CDS) | Trusted | Correct iff its launch measurement is pinned by the relying party. |
 | Hypervisor / host OS / BIOS / drivers / kubelet / containerd | **Untrusted** | Full control of the node: can read/modify anything outside a CVM, schedule pods, set pod annotations, inject kernel cmdline (§5), serve its own TEE attestation on the pod network. |
-| Kubernetes control plane / etcd | **Untrusted** | Sees only ciphertext and public material for the **TEE-held privates** — CDS mesh CA / EAR issuer / handoff signer, RA-TLS leaf keys, browser over-encryption session keys — which never enter etcd. Ordinary Kubernetes Secrets **are visible in plaintext** to whoever reads etcd: image-pull dockerconfigjson (`imagePullSecrets`, `kata.guestImage.pullerAuthSecret`), the webhook TLS `caBundle`, and any tenant workload Secrets. Attestation-gated application-secret release is deferred (§7). CRDs are not security inputs. |
+| Kubernetes control plane / etcd | **Untrusted** | Sees only ciphertext and public material for the **TEE-held privates** — CDS mesh CA / EAR issuer / handoff signer, RA-TLS leaf keys, browser over-encryption session keys, and brokered application secrets — which never enter etcd. Ordinary Kubernetes Secrets **are visible in plaintext** to whoever reads etcd: image-pull dockerconfigjson (`imagePullSecrets`, `kata.guestImage.pullerAuthSecret`), the webhook TLS `caBundle`, and any tenant workload Secrets. The secrets broker's store is CDS-memory only for the same reason (`docs/secrets-broker.md`). CRDs are not security inputs. |
 | Pod-network attacker (compromised CNI, malicious sidecar, DNS hijack) | **Untrusted** | Can stand up its own genuine TEE attestation and try to impersonate CDS / a mesh peer at bootstrap. |
 | Co-tenant workload | **Untrusted** | Multi-tenant isolation is not yet solved (§7). Node-as-CVM pods are only kernel-isolated. |
 | Supply chain — CI (GitHub Actions), ghcr.io, npm/CDN, the fleet GitOps repo | **Partially trusted, unenumerated risk** | Produces the measurements, allowlists, and digests that make attestation meaningful — all from *outside* the TEE. See §5 (Open) and §6. |
@@ -108,6 +114,7 @@ surface; a workload can be injected without a CR.
 | TEE evidence is valid | attestation-api and CDS | hardware evidence verification (verdict unsigned — see §6) |
 | A CSR can be signed | CDS | EAR JWT, plus `cds.measurements` when configured |
 | Image digest is allowed | nri-image-policy (host, base mode); **in-guest `policy-monitor` SIGKILL under kata** (the load-bearing enforcer on a locked confidential guest — the host-side plugin is untrusted there) | CDS-served allowlist + baked seed |
+| Application-secret release | CDS secrets broker (`/secrets/fetch`) | TEE evidence + launch-measurement pin (**fail-closed when empty**, unlike `/attest`) + claimed-set → workload-entry resolution (ambiguous ⇒ 403) + per-(digest, path) PathPolicy grants; response wrapped to the requester's evidence-bound key and signed by the mesh-CA-anchored broker identity (docs/secrets-broker.md) |
 | Mesh peer cert chains to the mesh CA | ratls-mesh | mesh CA bundle (chain only; peer measurement **not** pinned — §5) |
 | Workload is injection candidate | admission webhook | pod annotation `confidential.ai/cw` |
 | LB attestation + session key are TEE-bound | `c8s cds-attest` sidecar | SNP report `report_data = SHA-384(x25519 \|\| mlkem768 \|\| nonce)` (default PQ; does not yet bind the mesh identity, §5 Addressable) or `SHA-384(serving_leaf_spki \|\| nonce)` (`pq=false`, no PQ tunnel) |
@@ -146,6 +153,7 @@ fix) · **Accepted** (deliberate non-goal, §7).
 |---|---|---|---|
 | A control-plane **config swap-restart** on CDS is detected only by pin-holding verifiers, never prevented at boot. The operator-key list and allowlist seed are attested: CDS binds their canonical digests into its serving-cert evidence (config-claims, `docs/ratls.md`), verifiers pin them (`c8s cds verify --operator-keys/--allowlist-seed`, `ratls.VerifyPolicy`), and `/handoff` releases the mesh CA only on a byte-equal operator-key-set hash (the seed digest is not checked at handoff, so a seed-only swap is caught by pinned verifies, not by handoff). Residual: the **CDS pod arguments** stay host-supplied — dropping `--operator-keys` downgrades to the attested empty key set — and enforcers/in-cluster clients pin nothing (their config is host-supplied too), so between a swap-restart and the next pinned verify the cluster serves and enforces the attacker's allowlist. Revocation of op-keys is coarse (no CRL/OCSP). | control plane / host | Run pinned verifies continuously (CI gate on `c8s verify` exit codes), not only at bootstrap; expose public ingress only behind a passing verify. Move op-keys to a CA + short-lived operator certs (`x5c`), CA-based revocation. Detection by pinning verifiers — not boot-time prevention — is the accepted posture. | `docs/ratls.md` (Config-claims); pitfalls "Operator key-pinning"; decision 2026-07-01 |
 | The **workload-image pin** (`c8s verify --workload-image`) distinguishes honest workloads only. A CDS-issued leaf commits the pod's container-image digest (config-claims), but CDS binds the claim to nothing the pod actually runs: it checks only that the forwarded list hashes to the evidence-bound digest and that every image is allowlisted. Any admitted workload can run the attest flow itself (the attestation-api binds caller-chosen REPORTDATA) and assert **any allowlisted image set** — a victim workload's included — satisfying a pin against that victim. It can never assert a *non-allowlisted* image, and image integrity is untouched (everything running is still independently allowlisted). So the pin detects an honest workload drifting or a config swap, not a lying workload asserting another's identity. | admitted (allowlisted) workload | Per-workload measurement enforced at `/attest` (bind the claim to the pod's admitted/measured images). Interim: treat the pin as honest-workload detection, not identity. | `docs/getcert-workload-binding.md` (Corner 5/6); `docs/ratls.md` (Config-claims) |
+| **Secrets fetch forgery (same class as the row above, escalated impact).** The `/secrets/fetch` gate has the same structural gap: any admitted workload — including a floor or `argv:any` image the control plane schedules with no tenant cooperation — can claim another entry's digest set and **receive that entry's secrets** (confidentiality), and once workload writes ship, **overwrite them** (integrity). The broker hardens the channel (response wrap to the evidence-bound key, mesh-CA-anchored broker identity, fail-closed measurement pin), which closes fake/relay brokers — but the requester *is* the unwrap target, so direct claim forgery stands. Impact escalates from "satisfies a verifier pin" to "exfiltrates secret material". | admitted (allowlisted) workload / control plane | Measured-digest consumption at CDS (TDX RTMR3 event-log verification) and/or SPIFFE-style agent identity; SNP has no runtime-extend register, so the SNP close is the identity work. Interim: keep floor/permissive-argv images minimal (any is a fetch proxy), and treat the lint "grants require exact argv" warning as an error. | `docs/secrets-broker.md` §security posture; `docs/getcert-workload-binding.md` (Corner 5) |
 | Bootstrap allowlist is baked from whatever the floating `:main` tag resolved to at guest-build time; an unpinned `:main`-everywhere deploy can bake a seed that rejects the deployed CDS. | CI / whoever moves `:main` | Atomic floating-tag promotion (roll `:main`/`:latest` only after Docker **and** kata-guest-base succeed for one commit); `oras pull @digest` for `kata.guestImage`. Runtime mitigation: policy-monitor grow-only CDS refresh. | pitfalls "bootstrap allowlist … floating :main" |
 | In-guest CDS allowlist refresh is **disabled on every default kata install**: policy-monitor fail-closed refuses to run without `C8S_CDS_MEASUREMENTS`, and no shipping path can deliver the pin — baking it is self-referential (CDS runs from the same guest image the pin would be baked into, so the value would change the launch measurement it pins) and per-pod cloud-init is host-controlled (a host-chosen pin defeats the point). Guests therefore enforce the baked seed alone; operator `c8s allowlist add` reaches host-side enforcement and CDS but **not running guests**. Also: the SNP launch digest covers the VMSA set, so even a correct pin is per-VM-shape (vCPU count). Stricter than ratls-mesh (which warns and proceeds on an empty pin) by intent — for the refresh, "any attested TEE" is not enough because the host can boot its own CVM from the same guest image and pass "attested" while serving an attacker-chosen allowlist, and grow-only merging is no defence when additions are the attack. | host / operator drift | Operator-signed allowlist entries verified in-guest against a baked operator public key (candidate design). Interim: the deliberate fail-closed posture — guests enforce the measured seed and nothing else. | kata-image-policy.md; GAPS §Trust model |
 | GPU guest boots **kata's** GPU kernel with NVIDIA modules grafted from kata's rootfs — kernel/driver provenance is the kata release, not the c8s build. | supply chain | A confos GPU kernel flavor (`CONFIG_MODULES=y` + `CONFIG_MODULE_SIG_FORCE=y`, ephemeral build key) compiling/signing the NVIDIA modules. Interim: module loading locked after bring-up (`kernel.modules_disabled=1`). | pitfalls; GAPS §Confidential GPU |
@@ -254,9 +262,10 @@ If any of these is false, the corresponding guarantee does not hold.
 ### Deferred this milestone (expected to close)
 
 - Pod-spec integrity beyond image digest; per-workload peer allowlists and measurement
-  pinning in the mesh; attestation-gated application secret release (the whitepaper's
-  Secrets Manager Proxy / wrapped-vs-direct key brokering); active/active CDS HA;
-  multi-tenant isolation and federated multi-cluster control planes.
+  pinning in the mesh; attestation-gated application secret release **for workload
+  runtime writes and external-KMS backends** (read-path release shipped — see
+  `docs/secrets-broker.md`; the claim-forgery residual is §5 Addressable);
+  active/active CDS HA; multi-tenant isolation and federated multi-cluster control planes.
 
 ### Accepted / permanent non-goals (whitepaper §3.4, §9)
 
@@ -407,7 +416,8 @@ In that model:
 - planned replica adoption transfers the current allowlist version and digests
   inside the recipient-encrypted handoff payload. A write racing after the
   snapshot can still be missed by the joining singleton.
-- secret release is gated by workload attestation (designed; see GAPS §Trust model);
+- secret release is gated by workload attestation (read path shipped —
+  `docs/secrets-broker.md`; runtime writes and wrapped/external-KMS modes remain designed);
 - recovery from total CDS outage means re-bootstrap and re-issue certificates.
 
 ### CDS is a stateful singleton until handoff is enabled

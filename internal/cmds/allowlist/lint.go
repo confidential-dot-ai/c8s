@@ -162,10 +162,88 @@ func lintOffline(al *pkgallowlist.Allowlist) []string {
 		}
 	}
 
+	warnings = append(warnings, lintSecretsGrants(al)...)
+
 	if anyCount > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d 'any' (unconstrained) policy value(s) across all entries", anyCount))
 	}
 	return warnings
+}
+
+// lintSecretsGrants reports secrets-broker grant traps (docs/secrets-broker.md):
+// grants behind permissive argv, grants outside the /secrets/ staging root,
+// identical-set entries the broker must fail closed on, and within-entry
+// duplicates that widen a digest's paths to 'any'.
+func lintSecretsGrants(al *pkgallowlist.Allowlist) []string {
+	var warnings []string
+
+	setKeys := map[string][]string{} // canonical container-set key -> entry names
+	grantsByEntry := map[string]bool{}
+	for _, name := range sortedWorkloadNames(al.Workloads) {
+		w := al.Workloads[name]
+		entryHasGrants := false
+		seenPerDigest := map[string][]pkgallowlist.Container{}
+		for _, c := range allContainers(w) {
+			d := c.Digest.String()
+			seenPerDigest[d] = append(seenPerDigest[d], c)
+			if c.Paths.Policy == pkgallowlist.PolicyDeny {
+				continue
+			}
+			entryHasGrants = true
+			if c.Command.Policy != pkgallowlist.PolicyExact || c.Args.Policy != pkgallowlist.PolicyExact {
+				warnings = append(warnings, fmt.Sprintf("workload %q container %s carries path grants but its argv policy is not exact+exact — any invocation of these bytes can read the granted secrets", name, d))
+			}
+			for _, g := range append(append([]string{}, c.Paths.Read...), c.Paths.Write...) {
+				if g != "/secrets/**" && !strings.HasPrefix(g, "/secrets/") {
+					warnings = append(warnings, fmt.Sprintf("workload %q container %s grants path %q outside /secrets/ — the broker stages secrets only under /secrets/", name, d, g))
+				}
+			}
+		}
+		for d, cs := range seenPerDigest {
+			if len(cs) > 1 {
+				for _, c := range cs {
+					if c.Paths.Policy == pkgallowlist.PolicyAny {
+						warnings = append(warnings, fmt.Sprintf("workload %q duplicates digest %s and one occurrence widens paths to 'any'; the effective grant for that digest is any requested path (union within the entry)", name, d))
+						break
+					}
+				}
+			}
+		}
+		grantsByEntry[name] = entryHasGrants
+		setKeys[containerSetKey(al, w)] = append(setKeys[containerSetKey(al, w)], name)
+	}
+
+	for _, names := range setKeys {
+		if len(names) < 2 {
+			continue
+		}
+		anyGrants := false
+		for _, n := range names {
+			anyGrants = anyGrants || grantsByEntry[n]
+		}
+		if anyGrants {
+			warnings = append(warnings, fmt.Sprintf("entries [%s] share an identical container set while at least one carries path grants; the secrets broker fails closed on ambiguous entry resolution (403) for every pod of that set — differentiate the sets", strings.Join(names, ", ")))
+		}
+	}
+	return warnings
+}
+
+// containerSetKey renders an entry's non-floor init/main digest sets as one
+// comparable string. Entries with equal keys have identical claimed sets.
+func containerSetKey(al *pkgallowlist.Allowlist, w pkgallowlist.Workload) string {
+	set := func(cs []pkgallowlist.Container) []string {
+		var out []string
+		for _, c := range cs {
+			d := c.Digest.String()
+			if _, isFloor := al.Digests[d]; isFloor {
+				continue
+			}
+			out = append(out, d)
+		}
+		sort.Strings(out)
+		return out
+	}
+	return strings.Join(set(w.InitContainers), ",") + "|" + strings.Join(set(w.Containers), ",")
 }
 
 // lintOnline checks each workload container digest is resolvable in its

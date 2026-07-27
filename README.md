@@ -486,6 +486,9 @@ The direction of travel, beyond closing the gaps above:
 
 - **Key management system.** Attestation-gated secret release, so application
   secrets are brokered to workloads only after their measurement verifies.
+  The CDS broker, store interface, and operator CLI ship in
+  [`docs/secrets-broker.md`](docs/secrets-broker.md); workload-side injection
+  and external KMS adapters are the next milestones.
 
 - **IGVM support for Kata.** Move the per-pod runtime's measured boot to
   IGVM, unifying pod-as-CVM and node-as-CVM on one measured-boot format.

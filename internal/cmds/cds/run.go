@@ -21,6 +21,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
+	"github.com/confidential-dot-ai/c8s/internal/secretstore"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -123,6 +124,15 @@ func run(cfg config) error {
 		"not_after", mesh.Cert.NotAfter.Format(time.RFC3339),
 	)
 	caChainPEM := certutil.EncodeCertPEM(mesh.Cert.Raw)
+
+	// The secrets broker identity rides the mesh CA: it is the one key a
+	// same-measurement fake CDS cannot hold, so clients that verify it defuse
+	// fake and relay brokers (docs/secrets-broker.md).
+	brokerId, err := newBrokerIdentity(mesh, caChainPEM)
+	if err != nil {
+		return fmt.Errorf("issue secrets broker identity: %w", err)
+	}
+	secretStore := secretstore.NewMemStore()
 
 	measurements := parseMeasurementAllowlist(cfg.measurements)
 	if len(measurements) == 0 {
@@ -251,6 +261,16 @@ func run(cfg config) error {
 			Store:             &allowlistStore,
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
+		},
+		SecretsHandler: SecretsHandler{
+			Challenges:        &challengeStore,
+			AttestationClient: asClient,
+			RequestTimeout:    cfg.requestTimeout,
+			Measurements:      measurements,
+			AllowlistStore:    &allowlistStore,
+			Store:             secretStore,
+			Identity:          brokerId,
+			WriteAuthorizer:   writeAuthorizer,
 		},
 		AttestKeyHandler: attestKeyHandler,
 		HandoffHandler:   handoffHandler,
