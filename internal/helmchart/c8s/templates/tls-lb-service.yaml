@@ -13,15 +13,13 @@ metadata:
 spec:
   type: {{ $svc.type }}
   {{- if or (eq $svc.type "LoadBalancer") (eq $svc.type "NodePort") }}
-  {{- $renderAllowlistRoute := and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") }}
+  {{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" }}
   {{- $policy := default (ternary "Local" "Cluster" $renderAllowlistRoute) $svc.externalTrafficPolicy }}
   {{- if not (or (eq $policy "Local") (eq $policy "Cluster")) }}
   {{- fail (printf "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: %s" $policy) }}
   {{- end }}
-  # Defaults to Local while the built-in /allowlist route renders: its
-  # per-client limiters key on nginx's public peer address, which Cluster
-  # would SNAT to a node IP. Local delivers only through nodes running the
-  # tls-lb pod; tlsLb.service.externalTrafficPolicy overrides.
+  # Local (the default while the built-in /allowlist route renders) preserves
+  # the public source IP its per-client limiters key on; see values.yaml.
   externalTrafficPolicy: {{ $policy }}
   {{- end }}
   ports:

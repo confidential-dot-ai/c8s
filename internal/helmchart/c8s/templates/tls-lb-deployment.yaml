@@ -9,7 +9,7 @@ Recreate, silently defeating the operator's opt-out. */ -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
 {{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
-{{- $renderAllowlistProxy := and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") -}}
+{{- $renderAllowlistProxy := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

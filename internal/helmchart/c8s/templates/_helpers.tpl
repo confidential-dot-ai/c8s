@@ -32,6 +32,14 @@
 {{- int64 . -}}
 {{- end -}}
 
+{{/* Positive integer or fail with the value's label. Args: value, label. */}}
+{{- define "c8s.positiveInt" -}}
+{{- if not (regexMatch `^[1-9][0-9]*$` (toString .value)) -}}
+{{- fail (printf "%s must be a positive integer, got: %v" .label .value) -}}
+{{- end -}}
+{{- toString .value -}}
+{{- end -}}
+
 {{/*
   Image refs prefer digest when set — floating tags silently drift the
   binary running inside the TEE and invalidate the measurement allowlist.

@@ -149,14 +149,16 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
-Validate a rate-limit value as a positive integer and return it.
-Args: value, label.
+Return true when the built-in /allowlist route renders: allowlist.enabled is a
+real bool set to true and no legacy typed route owns /allowlist. The nginx
+locations, the loopback proxy sidecar, and the Service traffic policy must all
+flip on this one predicate.
 */}}
-{{- define "tls-lb.allowlistPositiveInt" -}}
-{{- if not (regexMatch `^[1-9][0-9]*$` (toString .value)) -}}
-{{- fail (printf "%s must be a positive integer, got: %v" .label .value) -}}
+{{- define "tls-lb.renderAllowlistRoute" -}}
+{{- if not (kindIs "bool" .Values.tlsLb.allowlist.enabled) -}}
+{{- fail (printf "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.allowlist.enabled) -}}
 {{- end -}}
-{{- toString .value -}}
+{{- and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") -}}
 {{- end -}}
 
 {{/*
@@ -184,7 +186,8 @@ so nginx must not normalize or replace the path before CDS verifies the token.
 The loopback proxy verifies CDS's RA-TLS evidence. Stock nginx cannot verify
 the attestation extension itself, so it must never dial CDS directly here.
 
-Args: root, exact (bool), path, proxyPort.
+Args: root, exact (bool), path, proxyPort, writeBurst, writeTotalBurst,
+readBurst — the numeric args arrive pre-validated by the configmap prologue.
 */}}
 {{- define "tls-lb.allowlistLocation" -}}
 {{- $root := .root -}}
@@ -195,9 +198,9 @@ location{{ if .exact }} ={{ end }} {{ .path }} {
     # These run before nginx collapses callers onto the loopback proxy source.
     # Each zone's map key is empty for the methods it does not cover, so
     # mutations count per client and in aggregate, reads per client only.
-    limit_req zone=allowlist_write_per_client burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.rateLimit.burst }} nodelay;
-    limit_req zone=allowlist_write_total burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.rateLimit.totalBurst }} nodelay;
-    limit_req zone=allowlist_read_per_client burst={{ include "c8s.int" $root.Values.tlsLb.allowlist.readRateLimit.burst }} nodelay;
+    limit_req zone=allowlist_write_per_client burst={{ .writeBurst }} nodelay;
+    limit_req zone=allowlist_write_total burst={{ .writeTotalBurst }} nodelay;
+    limit_req zone=allowlist_read_per_client burst={{ .readBurst }} nodelay;
     limit_req_status 429;
     proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;
     proxy_set_header Host $host;

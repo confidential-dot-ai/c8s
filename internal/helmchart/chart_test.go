@@ -2073,11 +2073,11 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	rateMap.assertDirective(t, "GET", `""`)
 	rateMap.assertDirective(t, "HEAD", `""`)
 	rateMap.assertDirective(t, "OPTIONS", `""`)
-	totalMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_total_key")
+	// The total key chains off the write key: exempt methods stay exempt, any
+	// counted method collapses onto the single "all" bucket.
+	totalMap := cfg.mapBlock(t, "$allowlist_write_rate_key", "$allowlist_write_total_key")
+	totalMap.assertDirective(t, `""`, `""`)
 	totalMap.assertDirective(t, "default", `"all"`)
-	totalMap.assertDirective(t, "GET", `""`)
-	totalMap.assertDirective(t, "HEAD", `""`)
-	totalMap.assertDirective(t, "OPTIONS", `""`)
 	readMap := cfg.mapBlock(t, "$request_method", "$allowlist_read_rate_key")
 	readMap.assertDirective(t, "default", `""`)
 	readMap.assertDirective(t, "GET", "$binary_remote_addr")
