@@ -54,8 +54,6 @@ on:
         description: force a region (skips quota-based selection)
         required: false
         default: ''
-  schedule:
-    - cron: '47 9 * * *'      # nightly drift, offset from the metal lane
 
 permissions:
   id-token: write

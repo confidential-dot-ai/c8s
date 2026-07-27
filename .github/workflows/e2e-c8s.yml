@@ -106,6 +106,20 @@ jobs:
       c8s_ref: ''
 
   azure-snp:
+    # ── COST GATE ─────────────────────────────────────────────────────────
+    # The metal lanes run on our own hardware and are effectively free. Each
+    # azure row bills a real cloud resource per run: an ephemeral AKS cluster
+    # here, a DC4es_v6 in azure-tdx. So they run on the nightly and on demand,
+    # not on every push.
+    #
+    # WHAT EACH TRIGGER IS FOR: a push here only ever edits CI workflows (the
+    # push trigger is path-gated to three workflow paths), so the question it
+    # answers is "did I break a lane", which the metal pair answers cheaply.
+    # The nightly answers "did the world change underneath us", which is where
+    # the azure lanes earn their cost, and is also the failure class our real
+    # outages came from: a filling disk, a deprecated runner image, drifted
+    # collateral. None of those are caused by a commit.
+    if: github.event_name != 'push'
     permissions:
       contents: read
       # OIDC to Azure. The metal jobs deliberately do NOT hold this, so a job on
@@ -117,6 +131,8 @@ jobs:
       c8s_ref: ${{ inputs.c8s_ref || 'main' }}
 
   azure-tdx:
+    # Same cost gate as azure-snp above.
+    if: github.event_name != 'push'
     permissions:
       contents: read
       id-token: write
