@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -419,6 +420,66 @@ func TestWorkloadServiceAlreadyExistsRequeues(t *testing.T) {
 	}
 	if res.RequeueAfter != collisionRequeue {
 		t.Fatalf("requeue = %v, want %v", res.RequeueAfter, collisionRequeue)
+	}
+}
+
+// The unnameable-id log is the only operator-visible signal that a workload
+// opted in but cannot get a headless Service; it must fire exactly for a
+// non-empty id that yields no Service name.
+func TestWorkloadServiceLogsUnnameableCwID(t *testing.T) {
+	tests := []struct {
+		name     string
+		cwID     string
+		wantSkip bool
+	}{
+		{"unnameable id is reported", "api.v1", true},
+		{"empty id is silent", "", false},
+		{"nameable id is silent", "api", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dep := cwDeployment("tenant", "api", tc.cwID)
+			r := reconcilerFor(v1alpha2.WorkloadKindDeployment, nil, dep)
+			rec := newLogRecorder()
+			ctx := log.IntoContext(context.Background(), rec.logger())
+			if _, err := r.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+			}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			_, got := rec.find("cw id does not yield a valid Service name; skipping headless Service")
+			if got != tc.wantSkip {
+				t.Fatalf("skip log present = %v, want %v", got, tc.wantSkip)
+			}
+		})
+	}
+}
+
+// The reconcile log fires only when the Service actually changed.
+func TestWorkloadServiceLogsReconcileOnlyOnChange(t *testing.T) {
+	dep := cwDeployment("tenant", "api", "api")
+	r := reconcilerFor(v1alpha2.WorkloadKindDeployment, nil, dep)
+
+	first := newLogRecorder()
+	ctx := log.IntoContext(context.Background(), first.logger())
+	if _, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, ok := first.find("headless Service reconciled"); !ok {
+		t.Fatal("expected a reconcile log entry on create")
+	}
+
+	second := newLogRecorder()
+	ctx = log.IntoContext(context.Background(), second.logger())
+	if _, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "api"},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, ok := second.find("headless Service reconciled"); ok {
+		t.Fatal("no-op reconcile must not log a Service change")
 	}
 }
 

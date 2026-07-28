@@ -3,6 +3,7 @@ package overenc
 import (
 	"bytes"
 	"crypto/rand"
+	"strings"
 	"testing"
 )
 
@@ -127,5 +128,29 @@ func TestAgreeRejectsWrongSizes(t *testing.T) {
 	}
 	if _, _, err := ClientAgree(PublicKey{X25519: make([]byte, 32), MLKEM768: make([]byte, 10)}, nil); err == nil {
 		t.Fatal("expected error for short ML-KEM key")
+	}
+}
+
+// The anti-replay set is bounded: once maxTrackedNonces records have been
+// opened, further records are refused so a hostile client cannot grow the set
+// without re-establishing the session.
+func TestOpenFailsClosedAtRecordLimit(t *testing.T) {
+	server, client := channelPair(t)
+	aad := RequestAAD()
+	for i := 0; i < maxTrackedNonces; i++ {
+		rec, err := client.Seal([]byte("m"), aad)
+		if err != nil {
+			t.Fatalf("seal %d: %v", i, err)
+		}
+		if _, err := server.Open(rec, aad); err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+	}
+	rec, err := client.Seal([]byte("m"), aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Open(rec, aad); err == nil || !strings.Contains(err.Error(), "record limit") {
+		t.Fatalf("Open after %d records = %v, want the fail-closed limit error", maxTrackedNonces, err)
 	}
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sort"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
@@ -113,6 +115,45 @@ func TestReinjectSweepDeleteErrorSurfaces(t *testing.T) {
 		}).Build()
 	if err := reinjectSweep(context.Background(), c, nil); err == nil {
 		t.Fatal("reinjectSweep = nil, want delete error")
+	}
+}
+
+// The completion log is the sweep's audit record: its counters must reflect
+// what actually happened.
+func TestReinjectSweepReportsCounts(t *testing.T) {
+	cw := map[string]string{webhook.AnnotationWorkload: "wl"}
+	c := fake.NewClientBuilder().WithObjects(
+		pod("owned-1", "tenant", "ReplicaSet", cw),
+		pod("owned-2", "tenant", "StatefulSet", cw),
+		pod("bare", "tenant", "", cw),
+	).Build()
+
+	rec := newLogRecorder()
+	ctx := log.IntoContext(context.Background(), rec.logger())
+	if err := reinjectSweep(ctx, c, nil); err != nil {
+		t.Fatalf("reinjectSweep: %v", err)
+	}
+
+	e, ok := rec.find("reinject sweep complete")
+	if !ok {
+		t.Fatal("completion log entry missing")
+	}
+	if deleted, ok := e.kv["deleted"].(int); !ok || deleted != 2 {
+		t.Fatalf("deleted = %v, want 2", e.kv["deleted"])
+	}
+	if skipped, ok := e.kv["skipped_bare"].(int); !ok || skipped != 1 {
+		t.Fatalf("skipped_bare = %v, want 1", e.kv["skipped_bare"])
+	}
+}
+
+func TestExcludedNamespaceSetManyExtras(t *testing.T) {
+	got := excludedNamespaceSet("rel", []string{"a", "b", "c", "d", "e", " f ", ""})
+	want := map[string]struct{}{
+		"rel": {}, "kube-system": {}, "kube-public": {}, "kube-node-lease": {},
+		"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {},
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("excludedNamespaceSet = %v, want %v", got, want)
 	}
 }
 
