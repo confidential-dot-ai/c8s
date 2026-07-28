@@ -850,6 +850,15 @@ nriImagePolicy:
     cacheDir: /var/lib/nri-image-policy
     runtimeDir: /var/run/nri-image-policy
 
+  ## Node port serving the CDS-facing sandbox-digests endpoint over
+  ## mutually-attested RA-TLS: CDS asks it what a pod sandbox is running before
+  ## issuing that pod a mesh certificate (docs/ratls.md, "Sandbox identity").
+  ## Must be reachable from CDS. The advertised host is inferred from the route
+  ## to CDS; set advertiseHost only when that inference is wrong (NAT).
+  sandboxDigests:
+    port: 9443
+    advertiseHost: ""
+
   # Containerd configuration the installer targets. The config directory,
   # socket, and restart command default from distro; set the fields below only
   # for a distro the built-in values do not cover.

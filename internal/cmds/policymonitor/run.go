@@ -220,6 +220,17 @@ type Config struct {
 	// run get-cert with that supplemental group (on node-CVM the webhook injects
 	// it; wiring the kata guest to do the same is the remaining follow-up).
 	WorkloadClaimsSocketDir string
+
+	// SandboxDigestsPort is the TCP port inside the guest serving the
+	// CDS-facing sandbox-digests endpoint (mutually-attested RA-TLS).
+	// Defaults to defaultSandboxDigestsPort.
+	SandboxDigestsPort int
+
+	// SandboxDigestsAdvertiseHost is the host CDS dials to reach that port —
+	// the guest's pod IP. Empty infers it from the route to CDS (see
+	// workloadclaims.ResolveAdvertiseAddr). Set from
+	// $C8S_SANDBOX_DIGESTS_ADVERTISE_HOST.
+	SandboxDigestsAdvertiseHost string
 }
 
 func (c *Config) fillDefaults() {
@@ -257,6 +268,12 @@ func (c *Config) fillDefaults() {
 	if c.WorkloadClaimsSocketDir == "" {
 		c.WorkloadClaimsSocketDir = os.Getenv("C8S_WORKLOAD_CLAIMS_SOCKET_DIR")
 	}
+	if c.SandboxDigestsAdvertiseHost == "" {
+		c.SandboxDigestsAdvertiseHost = os.Getenv("C8S_SANDBOX_DIGESTS_ADVERTISE_HOST")
+	}
+	if c.SandboxDigestsPort <= 0 {
+		c.SandboxDigestsPort = defaultSandboxDigestsPort
+	}
 }
 
 // Defaults — exported as constants so the systemd unit (which calls
@@ -285,4 +302,9 @@ const (
 	// defaultRefreshInterval is the CDS allowlist poll cadence — matches
 	// the host nri-image-policy worker's default pull interval.
 	defaultRefreshInterval = 30 * time.Second
+
+	// defaultSandboxDigestsPort is the in-guest port CDS dials for a
+	// sandbox's image digests — the same port nri-image-policy uses on
+	// node-CVM, so one CDS client works against both shapes.
+	defaultSandboxDigestsPort = 9443
 )

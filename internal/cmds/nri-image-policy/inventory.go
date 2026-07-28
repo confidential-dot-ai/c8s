@@ -8,14 +8,13 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-// admissionInventory answers "which admitted, non-injected container image digests
-// belong to the pod of the calling process" for the node-CVM workload-claims
-// flow (docs/ratls.md), plus the sandbox-identity queries of
-// workloadclaims.SandboxResolver. It is fed from the same CreateContainer /
-// Synchronize events that drive enforcement — and pod-sandbox events for the
-// sandbox set — so what it vouches for is exactly what was admitted. Caller
-// identity comes from the kernel (SO_PEERCRED → cgroup → container), never
-// from the request.
+// admissionInventory implements workloadclaims.SandboxResolver for node-CVM:
+// which sandbox a calling process belongs to, and which image digests a named
+// sandbox is running (docs/ratls.md, "Sandbox identity"). It is fed from the
+// same CreateContainer / Synchronize events that drive enforcement — and
+// pod-sandbox events for the sandbox set — so what it vouches for is exactly
+// what was admitted. Caller identity comes from the kernel (SO_PEERCRED →
+// cgroup → container), never from the request.
 type admissionInventory struct {
 	mu         sync.RWMutex
 	containers map[string]ctrRec   // containerID -> record
@@ -37,10 +36,9 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 	}
 }
 
-// record notes an admitted container. Injected containers (the get-cert
-// sidecar and its wait gate) are recorded too but excluded at query time by
-// name (workloadclaims.IsInjectedContainer) — the sidecar attests the app's
-// images, not its own.
+// record notes an admitted container, injected sidecars included: /digests is
+// an inventory of what runs in the sandbox, and the injected images are
+// allowlist floor entries, so CDS drops them from workload matching itself.
 func (b *admissionInventory) record(containerID, sandboxID, name, digest string) {
 	if containerID == "" || sandboxID == "" {
 		return
@@ -123,40 +121,8 @@ func (b *admissionInventory) callerForPeer(peer workloadclaims.Peer) (ctrRec, er
 	return ctrRec{}, fmt.Errorf("caller cgroup names no tracked container")
 }
 
-// ContainersForPeer resolves the calling process to its pod and returns that
-// pod's admitted, non-injected containers (name + digest).
-func (b *admissionInventory) ContainersForPeer(peer workloadclaims.Peer) ([]workloadclaims.Container, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	caller, err := b.callerForPeer(peer)
-	if err != nil {
-		return nil, err
-	}
-
-	var out []workloadclaims.Container
-	for _, rec := range b.containers {
-		if rec.sandboxID != caller.sandboxID {
-			continue
-		}
-		// Injected containers are never part of the claim, so an unresolved
-		// digest on one does not make the answer incomplete.
-		if workloadclaims.IsInjectedContainer(rec.name) {
-			continue
-		}
-		// Serving the rest would commit a subset of the pod's images as if it
-		// were the whole set; refuse the answer instead (docs/getcert-workload-
-		// binding.md, Corner 3).
-		if rec.digest == "" {
-			return nil, fmt.Errorf("container %q has no resolved image digest", rec.name)
-		}
-		out = append(out, workloadclaims.Container{Name: rec.name, Digest: rec.digest})
-	}
-	return out, nil
-}
-
 // SandboxForPeer resolves the calling process to the pod sandbox it runs in,
-// bound by kernel credentials like ContainersForPeer.
+// bound by kernel credentials.
 func (b *admissionInventory) SandboxForPeer(peer workloadclaims.Peer) (string, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

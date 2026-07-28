@@ -60,11 +60,6 @@ type ServerConfig struct {
 	// The certificate is rotated automatically at 50% of TTL.
 	CertTTL time.Duration
 
-	// ConfigClaims, when non-nil, is embedded in the serving certificate and
-	// bound into its attestation evidence (docs/ratls.md). Self-signed
-	// provisioning only; ignored when CertProvider is set.
-	ConfigClaims *ConfigClaims
-
 	// ClientPolicy, when set, enables mTLS: the server requires client
 	// certificates and verifies their RA-TLS attestation against this policy.
 	// When nil, the server does not request client certificates.
@@ -418,10 +413,9 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 			Platform:   cfg.Platform,
 			AttestFunc: cfg.AttestFunc,
 			Opts: &CertOptions{
-				Subject:      cfg.Subject,
-				TTL:          cfg.CertTTL,
-				DNSNames:     cfg.DNSNames,
-				ConfigClaims: cfg.ConfigClaims,
+				Subject:  cfg.Subject,
+				TTL:      cfg.CertTTL,
+				DNSNames: cfg.DNSNames,
 			},
 		}
 	}
@@ -607,6 +601,14 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		})
 		if chainErr == nil {
+			// The chain is verified here and only here, so this is the one place
+			// a sandbox-ID pin can be enforced: CDS's signature over the leaf is
+			// what authenticates the ID. No-op when no pin is set.
+			if policy != nil {
+				if err := checkSandboxPin(cert, policy); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed the sandbox-ID pin: %w", err)
+				}
+			}
 			// A valid CA chain authenticates the issuer; what else must hold
 			// depends on the trust mode (see VerifyPolicy.RequireCAEvidence).
 			if policy != nil && policy.RequireCAEvidence {
@@ -615,32 +617,24 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				// the requester's nonce-free .1.1 extension onto the leaf), which
 				// we re-verify here so a CA compromise or wrong issuance policy is
 				// caught at the peer instead of trusted from the chain. VerifyCert
-				// checks the hardware evidence, launch measurement, config-claims
-				// pins, and the key/claims binding via the attestation-api. The
-				// embedded evidence is nonce-free by construction, so verify with
-				// a nil nonce; TLS 1.3 supplies connection liveness. A leaf with
-				// no (or stale/forged) evidence fails closed.
-				if _, err := VerifyCert(cert, policy, nil); err != nil {
+				// checks the hardware evidence, launch measurement, and the key
+				// binding via the attestation-api. The embedded evidence is
+				// nonce-free by construction, so verify with a nil nonce; TLS 1.3
+				// supplies connection liveness. A leaf with no (or stale/forged)
+				// evidence fails closed. The sandbox pin is already enforced above
+				// and is not evidence-bound, so clear it for this call.
+				evidencePolicy := *policy
+				evidencePolicy.SandboxID = ""
+				if _, err := VerifyCert(cert, &evidencePolicy, nil); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
 				}
-				return nil
 			}
-			// Legacy/dev mode: trust the CA chain, but any configured
-			// config-claims pins (operator-keys/seed/workload) still must hold —
-			// they ride the certificate, so a CA-signed leaf with absent or
-			// mismatched claims must not be accepted when a pin is configured.
-			// Without this, configuring claim pins silently degrades to CA-only
-			// trust for every CA-signed peer (the RA-TLS path already enforces
-			// them via VerifyCert). checkClaimsPins is a no-op when no pin is set.
-			if policy != nil {
-				if err := checkClaimsPins(ExtractConfigClaimsBytes(cert), policy); err != nil {
-					return fmt.Errorf("ratls: CA-signed peer failed config-claims pins: %w", err)
-				}
-			}
-			return nil // CA-signed cert with satisfied claim pins — valid.
+			return nil
 		}
 
-		// Fall back to RA-TLS attestation verification.
+		// Fall back to RA-TLS attestation verification. A sandbox-ID pin cannot
+		// be satisfied here — a self-signed leaf's extension is chosen by
+		// whoever minted it — and VerifyCert fails closed on one.
 		_, err = VerifyCert(cert, policy, nonce)
 		if err != nil {
 			return fmt.Errorf("ratls: peer verification failed (CA chain: %v; RA-TLS: %w)", chainErr, err)

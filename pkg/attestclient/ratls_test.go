@@ -66,18 +66,8 @@ func attestSpy(t *testing.T, gotReportData *[]byte) *httptest.Server {
 	return srv
 }
 
-func TestAttestationExtensionForClaims_BindsFoldedClaims(t *testing.T) {
+func TestAttestationExtension_BindsKeyAnchor(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claims := &ratls.ConfigClaims{
-		OperatorKeysDigest: ratls.UnsetDigest(),
-		SeedDigest:         ratls.UnsetDigest(),
-		WorkloadDigest:     make([]byte, ratls.ClaimsDigestSize),
-	}
-	claims.WorkloadDigest[0] = 0xAB
-	claimsExt, err := claims.MarshalExtension()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,22 +75,22 @@ func TestAttestationExtensionForClaims_BindsFoldedClaims(t *testing.T) {
 	var sentReportData []byte
 	srv := attestSpy(t, &sentReportData)
 
-	ext, err := NewClient("").AttestationExtensionForClaims(context.Background(), srv.URL, &key.PublicKey, claimsExt.Value)
+	ext, err := NewClient("").AttestationExtension(context.Background(), srv.URL, &key.PublicKey)
 	if err != nil {
-		t.Fatalf("AttestationExtensionForClaims: %v", err)
+		t.Fatalf("AttestationExtension: %v", err)
 	}
 	if !ext.Id.Equal(ratls.OIDRATLSAttestation) {
 		t.Fatalf("extension OID = %v, want %v", ext.Id, ratls.OIDRATLSAttestation)
 	}
 
-	// The evidence must be bound to the nonce-free anchor over the same claims
-	// the leaf will carry — that equality is what makes the leaf verifiable.
-	want, err := ratls.ReportDataForKeyAndClaims(&key.PublicKey, claimsExt.Value, nil)
+	// The evidence must be bound to the nonce-free key anchor — that equality
+	// is what makes the leaf re-verifiable at a relying party.
+	want, err := ratls.ReportDataForKey(&key.PublicKey, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(sentReportData) != string(want[:sha512.Size384]) {
-		t.Fatalf("bound report data = %x, want folded anchor %x", sentReportData, want[:sha512.Size384])
+		t.Fatalf("bound report data = %x, want key anchor %x", sentReportData, want[:sha512.Size384])
 	}
 
 	att, err := ratls.UnmarshalExtension(ext.Value)
@@ -109,25 +99,5 @@ func TestAttestationExtensionForClaims_BindsFoldedClaims(t *testing.T) {
 	}
 	if att.TEEType != ratls.TEETypeSEVSNP {
 		t.Fatalf("TEEType = %d, want SEV-SNP", att.TEEType)
-	}
-}
-
-func TestAttestationExtensionForClaims_NilClaimsBindsKeyOnly(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sentReportData []byte
-	srv := attestSpy(t, &sentReportData)
-
-	if _, err := NewClient("").AttestationExtensionForClaims(context.Background(), srv.URL, &key.PublicKey, nil); err != nil {
-		t.Fatalf("AttestationExtensionForClaims: %v", err)
-	}
-	want, err := ratls.ReportDataForKey(&key.PublicKey, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(sentReportData) != string(want[:sha512.Size384]) {
-		t.Fatalf("nil claims: bound report data = %x, want plain key anchor %x", sentReportData, want[:sha512.Size384])
 	}
 }

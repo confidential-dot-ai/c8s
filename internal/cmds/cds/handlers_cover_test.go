@@ -26,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func TestClassifyVerifyError(t *testing.T) {
@@ -123,43 +124,6 @@ func TestAttest_RejectsNonECDSACSR(t *testing.T) {
 	}
 }
 
-func TestAttest_RejectsMalformedWorkloadClaimsEncoding(t *testing.T) {
-	mock := newMockAttestationApi(t, "x")
-	h := newTestAttestHandler(t, mock.URL, nil)
-	csrPEM, _ := generateCSR(t)
-
-	body, err := json.Marshal(types.AttestRequestBody{
-		Challenge:      issueChallenge(t, h),
-		Evidence:       types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
-		CSR:            csrPEM,
-		WorkloadClaims: "!!!not-base64!!!",
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h.HandleAttest(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-}
-
-// A CSR whose RA-TLS attestation extension does not parse must be rejected at
-// issuance when workload claims are presented.
-func TestAttest_WorkloadClaims_RejectsGarbageRATLSExtension(t *testing.T) {
-	mock := newMockAttestationApi(t, "x")
-	h := newTestAttestHandler(t, mock.URL, nil)
-	h.AllowlistStore = floorStore(wlDigestA)
-
-	csrPEM, _ := generateCSRWithRATLSExtension(t, []byte("garbage-extension"))
-	digests := []string{wlDigestA}
-	w := postAttestClaimsWithCSR(t, h, issueChallenge(t, h), csrPEM, claimsDERFor(t, nil, digests), nil, digests)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-}
-
 func generateCSRWithRATLSExtension(t *testing.T, extValue []byte) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -207,10 +171,15 @@ func (errStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 	return nil, "", errors.New("store unavailable")
 }
 
-func TestVerifyWorkloadClaims_FailsClosedOnStoreError(t *testing.T) {
-	h := AttestHandler{AllowlistStore: errStore{}}
-	digests := []string{wlDigestA}
-	err := h.verifyWorkloadClaims(claimsDERFor(t, nil, digests), nil, digests)
+func TestVerifySandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
+	h := AttestHandler{
+		AllowlistStore: errStore{},
+		SandboxDigests: fakeDigests{testSandboxID: {wlDigestA}},
+	}
+	err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
+		SandboxID:     testSandboxID,
+		InventoryAddr: testInventoryAddr,
+	})
 	if err == nil {
 		t.Fatal("expected error when the allowlist store fails")
 	}
@@ -384,7 +353,7 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	_ = store.Close()
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
-	if _, err := seedStore(&store, path); err == nil {
+	if err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
 	}
 }

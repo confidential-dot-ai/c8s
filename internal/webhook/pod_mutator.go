@@ -218,10 +218,6 @@ type injection struct {
 	Discovery discoverySpec
 	Security  getCertSecuritySpec
 	Verbose   bool
-	// InitContainerNames are the pod's own init-container names (before c8s
-	// injection). get-cert uses them to split the inventory's containers into the
-	// init vs main image sets for the workload digest (docs/ratls.md).
-	InitContainerNames []string
 }
 
 type certSpec struct {
@@ -735,11 +731,6 @@ func kataIncompatible(pod *corev1.Pod) bool {
 func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	cfg = cfg.withDefaults()
 	effective := inj.withDefaults(cfg)
-	// Capture the pod's own init-container names before c8s prepends its own,
-	// so get-cert can classify the inventory's containers by role.
-	for _, c := range pod.Spec.InitContainers {
-		effective.InitContainerNames = append(effective.InitContainerNames, c.Name)
-	}
 	if *cfg.CertFSGroup >= 0 {
 		ensureFSGroup(pod, *cfg.CertFSGroup)
 	}
@@ -810,14 +801,10 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// node-CVM: get-cert fetches from the nri-image-policy inventory over its
-	// compiled socket path (mounted below). The pod's init-container names
-	// travel so get-cert can split the digest by role.
+	// node-CVM: get-cert redeems a sandbox token from the nri-image-policy
+	// inventory over its compiled socket path (mounted below).
 	if cfg.WorkloadClaimsHostDir != "" {
 		args = append(args, "--workload-claims")
-		for _, name := range inj.InitContainerNames {
-			args = append(args, "--workload-init-container="+name)
-		}
 	}
 	if inj.Verbose {
 		args = append(args, "--verbose")

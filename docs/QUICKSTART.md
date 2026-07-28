@@ -13,8 +13,8 @@ This is the supported install path for the consolidated c8s chart.
 - Nodes with the TEE device shape expected by `attestationApi.teeDevices`.
 - Node kernels new enough for `SO_PEERPIDFD` (Linux ≥ 6.5), which the
   admission inventory (nri-image-policy) requires to pin a caller's peer
-  credentials against PID reuse; a node without it fails workload-claims and
-  sandbox-token fetches closed. TEE-capable kernels already exceed this — AMD
+  credentials against PID reuse; a node without it fails sandbox-token fetches
+  closed. TEE-capable kernels already exceed this — AMD
   SEV-SNP hosts need ≥ 6.11 and Intel TDX ≥ 6.16 — so this is satisfied on any
   supported node.
 

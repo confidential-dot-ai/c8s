@@ -81,27 +81,27 @@ func TestParseJSON_PathValidation(t *testing.T) {
 	}
 }
 
-func TestCanonicalDigest_OrderIndependent(t *testing.T) {
+func TestCanonical_OrderIndependent(t *testing.T) {
 	a := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
 		{"digest":"`+digestB+`","args":{"policy":"any"}},
 		{"digest":"`+digestA+`","args":{"policy":"any"}}]}}}`)
 	b := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
 		{"digest":"`+digestA+`","args":{"policy":"any"}},
 		{"digest":"`+digestB+`","args":{"policy":"any"}}]}}}`)
-	da, _ := a.CanonicalDigest()
-	db, _ := b.CanonicalDigest()
+	da, _ := a.Canonical()
+	db, _ := b.Canonical()
 	if !bytes.Equal(da, db) {
-		t.Fatal("canonical digest depends on container order")
+		t.Fatal("canonical form depends on container order")
 	}
 }
 
-func TestCanonicalDigest_FormattingIndependent(t *testing.T) {
+func TestCanonical_FormattingIndependent(t *testing.T) {
 	compact := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"x"}}`)
 	spaced := mustParse(t, "{\n  \"schema\": \"c8s.allowlist/v1\",\n  \"digests\": {\""+digestA+"\": \"x\"}\n}")
-	dc, _ := compact.CanonicalDigest()
-	ds, _ := spaced.CanonicalDigest()
+	dc, _ := compact.Canonical()
+	ds, _ := spaced.Canonical()
 	if !bytes.Equal(dc, ds) {
-		t.Fatal("canonical digest depends on source formatting")
+		t.Fatal("canonical form depends on source formatting")
 	}
 }
 

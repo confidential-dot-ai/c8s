@@ -6,12 +6,14 @@ package nriimagepolicy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -162,6 +165,11 @@ func Run(args []string) error {
 		socketPath := filepath.Join(cfg.WorkloadClaims.SocketDir, workloadclaims.SocketName)
 		if err := startAdmissionInventory(ctx, logger, plugin.inventory, socketPath, signer); err != nil {
 			return fmt.Errorf("start admission inventory: %w", err)
+		}
+		if signer != nil {
+			if err := startSandboxDigests(ctx, logger, cfg, plugin.inventory); err != nil {
+				return fmt.Errorf("start sandbox-digests endpoint: %w", err)
+			}
 		}
 	}
 
@@ -480,6 +488,10 @@ func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.Sandb
 		logger.Warn("admission inventory has no CDS pull config; sandbox tokens disabled")
 		return nil, nil
 	}
+	addr, err := digestsAdvertiseAddr(cfg)
+	if err != nil {
+		return nil, err
+	}
 	httpClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox-token CDS client: %w", err)
@@ -488,15 +500,74 @@ func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.Sandb
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
 	signer, err := workloadclaims.NewSandboxTokenSigner(func(ctx context.Context, pubDER []byte) (string, error) {
 		return cdsClient.AttestKey(ctx, attestationApiURL, pubDER)
-	})
+	}, addr)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox-token signer: %w", err)
 	}
+	logger.Info("sandbox tokens enabled", "digests_addr", addr)
 	return signer, nil
 }
 
-// startAdmissionInventory serves the node-CVM admission inventory on a
-// Unix socket (docs/ratls.md).
+// digestsAdvertiseAddr is the host:port every sandbox token names for CDS's
+// digests callback.
+func digestsAdvertiseAddr(cfg *config) (string, error) {
+	cdsHost := cfg.Allowlist.Pull.URL
+	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
+		cdsHost = u.Host
+	}
+	return workloadclaims.ResolveAdvertiseAddr(cfg.WorkloadClaims.AdvertiseHost, digestsPort(cfg), cdsHost)
+}
+
+func digestsPort(cfg *config) int {
+	if cfg.WorkloadClaims.DigestsPort != 0 {
+		return cfg.WorkloadClaims.DigestsPort
+	}
+	return defaultDigestsPort
+}
+
+// startSandboxDigests serves the CDS-facing digests endpoint over
+// mutually-attested RA-TLS: the node proves it is a TEE, and only a CDS on an
+// allowed measurement is answered (docs/ratls.md, "Sandbox identity").
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory) error {
+	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
+	if err != nil {
+		return fmt.Errorf("parse CDS measurements: %w", err)
+	}
+	if len(measurements) == 0 {
+		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
+	}
+	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
+	tlsCfg, certMgr, err := workloadclaims.DigestsServerTLSConfig(
+		string(types.PlatformSnp),
+		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
+		attestationApiURL,
+		measurements,
+		0,
+	)
+	if err != nil {
+		return err
+	}
+	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	err = certMgr.WarmUp(warmupCtx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("warm up sandbox-digests cert: %w", err)
+	}
+	addr := net.JoinHostPort("", strconv.Itoa(digestsPort(cfg)))
+	l, err := tls.Listen("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	go func() {
+		logger.Info("starting sandbox-digests endpoint", "addr", addr)
+		if err := workloadclaims.ServeDigests(ctx, l, inventory); err != nil {
+			logger.Error("sandbox-digests endpoint error", "error", err)
+		}
+	}()
+	return nil
+}
+
+// startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).
 func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, socketPath string, signer *workloadclaims.SandboxTokenSigner) error {
 	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.InventorySocketGID)
 	if err != nil {
@@ -504,7 +575,7 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 	}
 	go func() {
 		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
-		if err := workloadclaims.Serve(ctx, l, inventory, signer); err != nil {
+		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
 	}()

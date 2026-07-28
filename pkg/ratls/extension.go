@@ -47,8 +47,9 @@ const (
 //	1.3.6.1.4.1.59888.1   - Confidential TEE attestation arc
 //	1.3.6.1.4.1.59888.1.1 - RA-TLS attestation extension
 //	1.3.6.1.4.1.59888.1.2 - attestation-evidence audit digest (certutil)
-//	1.3.6.1.4.1.59888.1.3 - RA-TLS config-claims extension (claims.go)
 //	1.3.6.1.4.1.59888.1.4 - pod sandbox ID extension (sandbox.go)
+//
+// .1.3 was the RA-TLS config-claims extension; it is retired, not reusable.
 var (
 	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
 	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 1}
@@ -246,44 +247,6 @@ func ReportDataForKey(pub crypto.PublicKey, nonce []byte) ([64]byte, error) {
 	h.Write(keyBytes)
 	if len(nonce) > 0 {
 		h.Write(nonce)
-	}
-	copy(reportData[:], h.Sum(nil))
-	return reportData, nil
-}
-
-// ReportDataForKeyAndClaims computes the REPORTDATA value binding a public key
-// plus a config-claims extension to a TEE attestation report (docs/ratls.md).
-//
-// With empty claims it is exactly [ReportDataForKey] — a claims-free cert stays
-// byte-identical to a plain RA-TLS cert. With claims it is a domain-separated,
-// length-framed transcript:
-//
-//	SHA-384(claimsDomainSep || framed(pubkey) || framed(claims) || framed(nonce))
-//	  where framed(x) = uint64-BE(len(x)) || x
-//
-// The length framing (same construction as [ReportDataForKeyWithContext]) makes
-// the preimage unambiguous: no two distinct (key, claims, nonce) triples can
-// share a preimage, regardless of field lengths, so binding safety does not rest
-// on any field being fixed-length or on the nonce's provenance. claims is the
-// raw DER extension value exactly as carried on the certificate.
-func ReportDataForKeyAndClaims(pub crypto.PublicKey, claims, nonce []byte) ([64]byte, error) {
-	if len(claims) == 0 {
-		return ReportDataForKey(pub, nonce)
-	}
-
-	var reportData [64]byte
-	keyBytes, err := marshalPublicKey(pub)
-	if err != nil {
-		return reportData, fmt.Errorf("ratls: marshal public key: %w", err)
-	}
-
-	h := sha512.New384()
-	h.Write(claimsDomainSep)
-	for _, field := range [][]byte{keyBytes, claims, nonce} {
-		var size [8]byte
-		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
-		h.Write(size[:])
-		h.Write(field)
 	}
 	copy(reportData[:], h.Sum(nil))
 	return reportData, nil

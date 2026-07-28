@@ -20,27 +20,14 @@ type AttestRequestBody struct {
 	Evidence  AttestationEvidence `json:"evidence"`
 	CSR       string              `json:"csr"`
 
-	// WorkloadClaims is the standard-base64 DER of the RA-TLS config-claims
-	// extension (ratls.ConfigClaims) the requester bound into its evidence
-	// REPORTDATA, when it attests a workload digest (docs/ratls.md).
-	// Empty when the requester binds no claims. CDS folds these exact bytes
-	// into the expected REPORTDATA, so a tampered value fails verification.
-	WorkloadClaims string `json:"workload_claims,omitempty"`
-	// InitContainerDigests and ContainerDigests are the plain image-digest
-	// lists of the pod's non-injected init and main containers. CDS checks
-	// they hash (role-partitioned) to the workload digest in WorkloadClaims —
-	// so neither list nor the init/main split can be swapped — and that each
-	// digest is allowlisted, then issues.
-	InitContainerDigests []string `json:"init_container_digests,omitempty"`
-	ContainerDigests     []string `json:"container_digests,omitempty"`
-
 	// SandboxToken is the inventory-signed sandbox identity of the requesting
-	// pod (workloadclaims.SignedSandboxToken as JSON): its CRI sandbox ID
-	// bound to the requester's CSR key within a bounded window, signed by a
-	// inventory key CDS attested via /attest-key. CDS verifies the token and
-	// stamps the sandbox ID into the leaf (ratls.OIDSandboxID) —
-	// docs/ratls.md, "Sandbox identity". Kept opaque here (types must not
-	// import workloadclaims).
+	// pod (workloadclaims.SignedSandboxToken as JSON): its CRI sandbox ID and
+	// the inventory's callback address, bound to the requester's CSR key and
+	// this request's challenge, signed by an inventory key CDS attested via
+	// /attest-key. CDS verifies the token, asks that inventory which images
+	// the sandbox is running, and stamps the sandbox ID into the leaf
+	// (ratls.OIDSandboxID) — docs/ratls.md, "Sandbox identity". Kept opaque
+	// here (types must not import workloadclaims).
 	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
 }
 

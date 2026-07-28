@@ -20,10 +20,6 @@ type CertOptions struct {
 	TTL time.Duration
 	// DNSNames for the certificate's SAN extension.
 	DNSNames []string
-	// ConfigClaims, when non-nil, is embedded as the config-claims extension.
-	// The attestation evidence must bind it (ReportDataForKeyAndClaims over
-	// the marshaled extension value) or verification fails.
-	ConfigClaims *ConfigClaims
 }
 
 func (o *CertOptions) ttl() time.Duration {
@@ -78,13 +74,6 @@ func CreateAttestedCert(key *ecdsa.PrivateKey, att *Attestation, opts *CertOptio
 		return nil, err
 	}
 	extensions := []pkix.Extension{ext}
-	if opts.ConfigClaims != nil {
-		claimsExt, err := opts.ConfigClaims.MarshalExtension()
-		if err != nil {
-			return nil, err
-		}
-		extensions = append(extensions, claimsExt)
-	}
 
 	serialNumber, err := certutil.GenerateSerial()
 	if err != nil {

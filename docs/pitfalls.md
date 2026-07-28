@@ -77,7 +77,7 @@ signing and again for sending, any difference (key ordering, whitespace) makes
 do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
 end-to-end test (`integration_test.go`) exists to catch a regression here.
 
-## Operator key-pinning: revocation is coarse; the attested config protects only pinning verifiers
+## Operator key-pinning: revocation is coarse; the served key set protects only verifiers that check it
 
 `internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`, `docs/ratls.md`
 
@@ -90,24 +90,21 @@ it:
   (remove its public key from `cds.operatorKeys`). There is no per-key
   revocation short of that. Keys are long-lived; a leaked operator private key is
   usable until removed. Protect operator keys (vault/HSM/hardware token).
-- **The attested config-claims digests only protect verifiers that pin them.**
-  CDS binds the digests of its loaded key set and applied seed into its
-  serving-cert evidence, but the CDS args are still host-supplied: a control
-  plane can restart CDS with different keys or seed. That swap fails closed
-  only for clients pinning the expected values (`c8s cds verify
-  --operator-keys/--allowlist-seed`, pinned from the operator's own install
-  inputs); a client that pins nothing accepts whatever the running CDS
-  attests to, and
-  in-cluster enforcers pin nothing. Verify continuously (CI), not just at
+- **The served key set only protects verifiers that check it.** CDS's serving
+  certificate commits its key and measurement — not its operator keys, not its
+  allowlist seed — and the CDS args are still host-supplied: a control plane can
+  restart CDS with different keys or seed. That swap is caught only by clients
+  running `c8s cds verify --operator-keys` (which fetches `/operator-keys` over
+  the attested serving cert and compares it against the operator's own bundle);
+  a client that checks nothing accepts whatever the running CDS serves, and
+  in-cluster enforcers check nothing. Verify continuously (CI), not just at
   bootstrap, and gate ingress exposure on a passing verify.
-- **A rotated-out config stays claimable until cert expiry.** After changing
-  operator keys or the seed, the previous serving cert (and its claims)
-  remains replayable until its RA-TLS TTL (`cds.ratlsCertTTL`) runs out. An
-  operator-key change also fails handoff by design (the key-set hash is bound
-  into handoff REPORTDATA), so a key rotation rolls a fresh CA lineage rather
-  than inheriting the old one. A seed-only change does not gate handoff — the
-  seed digest rides the serving-cert claims, not the handoff exchange — and is
-  caught only by verifiers pinning `--allowlist-seed`.
+- **An operator-key rotation rolls the CA lineage; a seed change is invisible
+  to attestation.** The key-set hash is bound into `/handoff` REPORTDATA, so
+  changing operator keys fails handoff by design and a replacement replica mints
+  a fresh CA rather than inheriting the old one. A seed-only change gates
+  nothing — the seed is not committed anywhere in the certificate or the handoff
+  exchange — and is visible only by reading the allowlist CDS serves.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
 PKI. **Longer term** we want a CA + short-lived operator certificates (chain
@@ -649,8 +646,9 @@ The socket must therefore be group-owned by a GID the sidecar carries: `ListenUn
 chgrps it to `InventorySocketGID` and the webhook injects that same GID as a pod
 `SupplementalGroups` entry. **The two must stay equal** — they share the one
 constant, so change it in one place only. Do not "fix" a connect failure by
-relaxing fail-closed (inventory error ⇒ issue claim-free): that hands an attacker
-who blocks the inventory exactly the claim-free cert fail-closed exists to deny.
+relaxing fail-closed (inventory error ⇒ issue without a sandbox ID): that hands
+an attacker who blocks the inventory exactly the identity-free cert fail-closed
+exists to deny.
 Connecting to a socket is exempt from the read-only-mount write block (sockets
 are not regular files), so the RO mount still prevents a socket-file swap
 without blocking the connect. The same-process inventory unit tests cannot catch

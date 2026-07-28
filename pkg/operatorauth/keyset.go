@@ -22,10 +22,10 @@ const keySetDomain = "c8s-operator-key-set-v1\x00"
 // deduplicated SHA-256 fingerprints of each key's PKIX/SPKI DER. Independent of
 // PEM formatting, key order, and duplicates, so any faithful copy of the bundle
 // digests identically. The empty set is a defined, attestable value ("no keys
-// pinned / writes disabled"), distinct from the unset config-claims sentinel.
+// pinned / writes disabled").
 //
 // KeySetHash is the lowercase-hex form of this digest — the same commitment.
-// CDS binds this into its attestation config-claims
+// CDS commits this in the /handoff and /attest-key REPORTDATA
 // (ratls.ConfigClaims.OperatorKeysDigest) and verifiers pin against it.
 func KeySetDigest(keys []*ecdsa.PublicKey) ([]byte, error) {
 	fps := make([][]byte, 0, len(keys))

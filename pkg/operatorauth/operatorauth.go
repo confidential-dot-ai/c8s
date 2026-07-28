@@ -73,7 +73,7 @@ var validMethods = []string{
 // operator public-key set — the string commitment CDS binds into a
 // handoff/attest-key EAR's REPORTDATA (operator_keys_hash claim) to prove both
 // replicas started with the same allowlist-write policy. Empty sets are
-// rejected here (config-claims uses KeySetDigest directly, where the empty set
+// rejected here (KeySetDigest is used directly where the empty set
 // is a defined value).
 func KeySetHash(keys []*ecdsa.PublicKey) (string, error) {
 	if len(keys) == 0 {

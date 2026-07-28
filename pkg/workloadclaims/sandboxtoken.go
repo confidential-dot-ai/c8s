@@ -32,24 +32,30 @@ const maxNonceLen = 128
 
 // sandboxTokenDomainSep tags the token signature preimage so an inventory-key
 // signature over a token can never be confused with any other statement by
-// the same key.
+// the same key. Its "v1" names the statement type, not the token structure —
+// sandboxTokenVersion versions that, inside the signed bytes.
 var sandboxTokenDomainSep = []byte("c8s/sandbox-token/v1\x00")
 
-const sandboxTokenVersion = 1
+// sandboxTokenVersion is 2: v1 carried no inventory address, so CDS had no
+// attested way to reach the inventory back for the sandbox's digests. CDS and
+// both inventories ship from the same chart, so there is no v1 read path.
+const sandboxTokenVersion = 2
 
 // sandboxTokenASN1 is the DER structure the inventory signs.
 //
 //	SandboxToken ::= SEQUENCE {
-//	    version    INTEGER,
-//	    sandboxId  IA5String,
-//	    keyDigest  OCTET STRING (32),  -- SHA-256(requester PKIX pubkey DER)
-//	    nonce      OCTET STRING        -- the CDS challenge for this issuance
+//	    version        INTEGER,
+//	    sandboxId      IA5String,
+//	    keyDigest      OCTET STRING (32),  -- SHA-256(requester PKIX pubkey DER)
+//	    nonce          OCTET STRING,       -- the CDS challenge for this issuance
+//	    inventoryAddr  IA5String           -- host:port of the digests endpoint
 //	}
 type sandboxTokenASN1 struct {
-	Version   int
-	SandboxID string `asn1:"ia5"`
-	KeyDigest []byte
-	Nonce     []byte
+	Version       int
+	SandboxID     string `asn1:"ia5"`
+	KeyDigest     []byte
+	Nonce         []byte
+	InventoryAddr string `asn1:"ia5"`
 }
 
 // SignedSandboxToken is the inventory's SandboxPath answer.
@@ -83,45 +89,60 @@ func RequesterKeyDigest(pub crypto.PublicKey) ([]byte, error) {
 	return sum[:], nil
 }
 
+// VerifiedSandbox is what a valid token establishes: which sandbox the
+// requester is in, and where to ask that sandbox's inventory what it is
+// running.
+type VerifiedSandbox struct {
+	SandboxID string
+	// InventoryAddr is the host:port of the signing inventory's digests
+	// endpoint. It is inside the signature, so a hostile host cannot point CDS
+	// at an endpoint of its choosing — and CDS re-verifies the RA-TLS identity
+	// of whatever answers there anyway.
+	InventoryAddr string
+}
+
 // Verify checks the envelope against the inventory key (which the caller must
 // have resolved from the EAR and trusts), the requester key, and the CDS
-// challenge for this request, returning the token's sandbox ID. It fails closed
-// on a bad signature, a malformed or wrong-version token, a nonce that is not
-// this request's challenge, or a requester-key mismatch. nonce is the
-// single-use challenge CDS is consuming for the issuance, so a token cannot be
-// replayed against a later request or pre-signed against a future one.
-func (s *SignedSandboxToken) Verify(inventoryPub *ecdsa.PublicKey, requesterPub crypto.PublicKey, nonce []byte) (string, error) {
+// challenge for this request. It fails closed on a bad signature, a malformed
+// or wrong-version token, a nonce that is not this request's challenge, or a
+// requester-key mismatch. nonce is the single-use challenge CDS is consuming
+// for the issuance, so a token cannot be replayed against a later request or
+// pre-signed against a future one.
+func (s *SignedSandboxToken) Verify(inventoryPub *ecdsa.PublicKey, requesterPub crypto.PublicKey, nonce []byte) (VerifiedSandbox, error) {
 	if inventoryPub == nil {
-		return "", fmt.Errorf("workloadclaims: no inventory key to verify the sandbox token against")
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: no inventory key to verify the sandbox token against")
 	}
 	if len(nonce) == 0 {
-		return "", fmt.Errorf("workloadclaims: no challenge to verify the sandbox token freshness against")
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: no challenge to verify the sandbox token freshness against")
 	}
 	if !ecdsa.VerifyASN1(inventoryPub, sandboxTokenSigningHash(s.Token), s.Signature) {
-		return "", fmt.Errorf("workloadclaims: sandbox token signature invalid")
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: sandbox token signature invalid")
 	}
 	var tok sandboxTokenASN1
 	rest, err := asn1.Unmarshal(s.Token, &tok)
 	if err != nil {
-		return "", fmt.Errorf("workloadclaims: unmarshal sandbox token: %w", err)
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: unmarshal sandbox token: %w", err)
 	}
 	if len(rest) > 0 {
-		return "", fmt.Errorf("workloadclaims: %d trailing bytes after sandbox token", len(rest))
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: %d trailing bytes after sandbox token", len(rest))
 	}
 	if tok.Version != sandboxTokenVersion {
-		return "", fmt.Errorf("workloadclaims: unsupported sandbox token version %d", tok.Version)
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: unsupported sandbox token version %d", tok.Version)
 	}
 	if !bytes.Equal(tok.Nonce, nonce) {
-		return "", fmt.Errorf("workloadclaims: sandbox token nonce does not match this request's challenge")
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: sandbox token nonce does not match this request's challenge")
 	}
 	want, err := RequesterKeyDigest(requesterPub)
 	if err != nil {
-		return "", err
+		return VerifiedSandbox{}, err
 	}
 	if !bytes.Equal(tok.KeyDigest, want) {
-		return "", fmt.Errorf("workloadclaims: sandbox token is bound to a different requester key")
+		return VerifiedSandbox{}, fmt.Errorf("workloadclaims: sandbox token is bound to a different requester key")
 	}
-	return tok.SandboxID, nil
+	if err := ValidateInventoryAddr(tok.InventoryAddr); err != nil {
+		return VerifiedSandbox{}, err
+	}
+	return VerifiedSandbox{SandboxID: tok.SandboxID, InventoryAddr: tok.InventoryAddr}, nil
 }
 
 // EARSource obtains a CDS-issued EAR for the inventory's signing public key
@@ -139,15 +160,21 @@ type SandboxTokenSigner struct {
 	key    *ecdsa.PrivateKey
 	pubDER []byte
 	source EARSource
+	addr   string
 
 	mu     sync.Mutex
 	ear    string
 	earExp time.Time
 }
 
-// NewSandboxTokenSigner generates the signing key. No EAR is fetched yet —
-// the first Sign obtains it, so inventory startup does not block on CDS.
-func NewSandboxTokenSigner(source EARSource) (*SandboxTokenSigner, error) {
+// NewSandboxTokenSigner generates the signing key. addr is the host:port of
+// this inventory's digests endpoint, signed into every token so CDS can reach
+// it back. No EAR is fetched yet — the first Sign obtains it, so inventory
+// startup does not block on CDS.
+func NewSandboxTokenSigner(source EARSource, addr string) (*SandboxTokenSigner, error) {
+	if err := ValidateInventoryAddr(addr); err != nil {
+		return nil, err
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("workloadclaims: generate sandbox signing key: %w", err)
@@ -156,7 +183,7 @@ func NewSandboxTokenSigner(source EARSource) (*SandboxTokenSigner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workloadclaims: marshal sandbox signing key: %w", err)
 	}
-	return &SandboxTokenSigner{key: key, pubDER: pubDER, source: source}, nil
+	return &SandboxTokenSigner{key: key, pubDER: pubDER, source: source, addr: addr}, nil
 }
 
 // PublicKey is the signing key CDS sees in the inventory EAR.
@@ -173,10 +200,11 @@ func (s *SandboxTokenSigner) Sign(ctx context.Context, sandboxID string, request
 		return nil, err
 	}
 	der, err := asn1.Marshal(sandboxTokenASN1{
-		Version:   sandboxTokenVersion,
-		SandboxID: sandboxID,
-		KeyDigest: requesterKeyDigest,
-		Nonce:     nonce,
+		Version:       sandboxTokenVersion,
+		SandboxID:     sandboxID,
+		KeyDigest:     requesterKeyDigest,
+		Nonce:         nonce,
+		InventoryAddr: s.addr,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("workloadclaims: marshal sandbox token: %w", err)

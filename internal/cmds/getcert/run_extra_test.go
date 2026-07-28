@@ -53,19 +53,23 @@ func overrideProcRoot(t *testing.T, root string) {
 	t.Cleanup(func() { procRoot = old })
 }
 
-// fakeResolver answers the inventory's ContainersForPeer with fixed data.
+// fakeResolver answers the inventory's sandbox routes with fixed data.
 type fakeResolver struct {
-	containers []workloadclaims.Container
-	err        error
+	sandboxID string
+	err       error
 }
 
-func (f fakeResolver) ContainersForPeer(workloadclaims.Peer) ([]workloadclaims.Container, error) {
-	return f.containers, f.err
+func (f fakeResolver) SandboxForPeer(workloadclaims.Peer) (string, error) {
+	return f.sandboxID, f.err
 }
 
-// startFakeInventory serves the admission inventory protocol on a unix socket
-// and returns its unix:// endpoint.
-func startFakeInventory(t *testing.T, resolver workloadclaims.Resolver) string {
+func (f fakeResolver) DigestsForSandbox(string) ([]string, bool, error) {
+	return nil, false, nil
+}
+
+// startFakeInventory serves the inventory token socket and returns its unix://
+// endpoint.
+func startFakeInventory(t *testing.T, resolver workloadclaims.SandboxResolver, signer *workloadclaims.SandboxTokenSigner) string {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "wc.sock")
 	l, err := net.Listen("unix", sock)
@@ -76,7 +80,7 @@ func startFakeInventory(t *testing.T, resolver workloadclaims.Resolver) string {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = workloadclaims.Serve(ctx, l, resolver, nil)
+		_ = workloadclaims.ServeTokens(ctx, l, resolver, signer)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -85,52 +89,54 @@ func startFakeInventory(t *testing.T, resolver workloadclaims.Resolver) string {
 	return "unix://" + sock
 }
 
-func TestWorkloadClaimsWithInventoryBindsAndPartitions(t *testing.T) {
-	endpoint := startFakeInventory(t, fakeResolver{containers: []workloadclaims.Container{
-		{Name: "setup", Digest: "sha256:" + strings.Repeat("a", 64)},
-		{Name: "app", Digest: "sha256:" + strings.Repeat("b", 64)},
-	}})
-	overrideInventoryEndpoint(t, endpoint)
-
-	res, err := workloadClaims(context.Background(), config{
-		WorkloadClaims:         true,
-		WorkloadClaimsTimeout:  2 * time.Second,
-		WorkloadInitContainers: []string{"setup"},
-	}, testCSRKey(t), []byte("test-nonce"))
+func testTokenSigner(t *testing.T) *workloadclaims.SandboxTokenSigner {
+	t.Helper()
+	signer, err := workloadclaims.NewSandboxTokenSigner(func(context.Context, []byte) (string, error) {
+		return "test-ear", nil
+	}, "10.0.0.7:9443")
 	if err != nil {
-		t.Fatalf("workloadClaims: %v", err)
+		t.Fatal(err)
 	}
-	if len(res.claimsDER) == 0 {
-		t.Fatal("claimsDER empty, want a bound config-claims extension")
-	}
-	if len(res.initDigests) != 1 || res.initDigests[0] != "sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("initDigests = %v, want the setup container digest", res.initDigests)
-	}
-	if len(res.mainDigests) != 1 || res.mainDigests[0] != "sha256:"+strings.Repeat("b", 64) {
-		t.Fatalf("mainDigests = %v, want the app container digest", res.mainDigests)
-	}
-
-	// The bound claim must verify against the same digest partition.
-	if _, err := workloadclaims.VerifyWorkloadDigest(res.claimsDER, res.initDigests, res.mainDigests); err != nil {
-		t.Fatalf("VerifyWorkloadDigest: %v", err)
-	}
+	return signer
 }
 
-// First issuance: the inventory has admitted no app containers yet, so get-cert
-// issues without a claim instead of failing.
-func TestWorkloadClaimsWithInventoryNoContainersIsClaimFree(t *testing.T) {
-	endpoint := startFakeInventory(t, fakeResolver{})
+// get-cert forwards the inventory-signed token verbatim and reports no images
+// of its own — CDS resolves those from the inventory.
+func TestFetchSandboxTokenForwardsSignedToken(t *testing.T) {
+	endpoint := startFakeInventory(t, fakeResolver{sandboxID: "sandbox-1"}, testTokenSigner(t))
 	overrideInventoryEndpoint(t, endpoint)
 
-	res, err := workloadClaims(context.Background(), config{
+	raw, err := fetchSandboxToken(context.Background(), config{
 		WorkloadClaims:        true,
 		WorkloadClaimsTimeout: 2 * time.Second,
 	}, testCSRKey(t), []byte("test-nonce"))
 	if err != nil {
-		t.Fatalf("workloadClaims: %v", err)
+		t.Fatalf("fetchSandboxToken: %v", err)
 	}
-	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil {
-		t.Fatalf("expected claims-free result, got %+v", res)
+	var token workloadclaims.SignedSandboxToken
+	if err := json.Unmarshal(raw, &token); err != nil {
+		t.Fatalf("token is not a SignedSandboxToken: %v", err)
+	}
+	if len(token.Token) == 0 || len(token.Signature) == 0 || token.EAR != "test-ear" {
+		t.Fatalf("incomplete token forwarded: %+v", token)
+	}
+}
+
+// An inventory without the token route is not a failure: get-cert issues
+// without a sandbox ID.
+func TestFetchSandboxTokenRouteAbsentIsTokenFree(t *testing.T) {
+	endpoint := startFakeInventory(t, fakeResolver{sandboxID: "sandbox-1"}, nil)
+	overrideInventoryEndpoint(t, endpoint)
+
+	raw, err := fetchSandboxToken(context.Background(), config{
+		WorkloadClaims:        true,
+		WorkloadClaimsTimeout: 2 * time.Second,
+	}, testCSRKey(t), []byte("test-nonce"))
+	if err != nil {
+		t.Fatalf("fetchSandboxToken: %v", err)
+	}
+	if raw != nil {
+		t.Fatalf("expected no token, got %s", raw)
 	}
 }
 
@@ -139,12 +145,12 @@ func TestWorkloadClaimsWithInventoryNoContainersIsClaimFree(t *testing.T) {
 func TestWorkloadClaimsWithInventoryUnreachableFailsClosed(t *testing.T) {
 	overrideInventoryEndpoint(t, "unix://"+filepath.Join(t.TempDir(), "missing.sock"))
 
-	_, err := workloadClaims(context.Background(), config{
+	_, err := fetchSandboxToken(context.Background(), config{
 		WorkloadClaims:        true,
 		WorkloadClaimsTimeout: time.Second,
 	}, testCSRKey(t), []byte("test-nonce"))
 	if err == nil {
-		t.Fatal("workloadClaims succeeded, want fail-closed error for unreachable inventory")
+		t.Fatal("fetchSandboxToken succeeded, want fail-closed error for unreachable inventory")
 	}
 	// The sandbox-token fetch runs first and hits the dead socket.
 	if !strings.Contains(err.Error(), "fetch sandbox token") {

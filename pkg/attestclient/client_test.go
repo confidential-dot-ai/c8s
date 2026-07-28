@@ -57,7 +57,7 @@ func TestObtainCertificateWithEvidenceReturnsAttestationMaterial(t *testing.T) {
 
 	csrPEM := testCSRPEM(t)
 	challengeBytes := []byte("test-challenge")
-	expectedReportData, err := reportDataForCSR(csrPEM, nil, challengeBytes)
+	expectedReportData, err := reportDataForCSR(csrPEM, challengeBytes)
 	if err != nil {
 		t.Fatalf("reportDataForCSR: %v", err)
 	}

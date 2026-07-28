@@ -100,7 +100,7 @@ type plugin struct {
 	logger   *slog.Logger
 	ready    atomic.Bool
 
-	// inventory serves the workload-claims flow (docs/ratls.md). nil ⇔ the flow
+	// inventory serves the sandbox-identity flow (docs/ratls.md). nil ⇔ the flow
 	// is disabled (no workload_claims.socket_dir) — configuration, not a
 	// fault: Configure then leaves the inventory-feeding events unsubscribed,
 	// and the nil-guarded hooks/seeding no-op rather than fail a container
@@ -246,7 +246,7 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 		if resolved, err := p.resolver.Resolve(ctx, imageRef); err == nil {
 			digest = extractDigest(resolved)
 		} else {
-			p.logger.Error("workload-claims: cannot resolve admitted image digest; container will be absent from the workload claim", "image", imageRef, "error", err)
+			p.logger.Error("cannot resolve admitted image digest; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
 		}
 	}
 	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)

@@ -1,29 +1,13 @@
 package webhook
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-// The inventory excludes the webhook-injected sidecars from the workload digest
-// by name (workloadclaims.ReservedInjectedNames). Those names are defined
-// independently from the webhook's own reserved-name constants, and nothing
-// couples them: a rename here that misses the other side would silently let an
-// injected image pollute a pod's workload claim. Guard the coupling.
-func TestReservedInjectedNamesMatchWebhookConstants(t *testing.T) {
-	want := map[string]bool{reservedCertContainerName: true, reservedCertWaitContainerName: true}
-	if len(workloadclaims.ReservedInjectedNames) != len(want) {
-		t.Fatalf("ReservedInjectedNames = %v, want the webhook's injected containers %v", workloadclaims.ReservedInjectedNames, want)
-	}
-	for _, name := range workloadclaims.ReservedInjectedNames {
-		if !want[name] {
-			t.Fatalf("ReservedInjectedNames has %q, not a webhook-injected container name", name)
-		}
-	}
-}
 
 func newInjectablePod() *corev1.Pod {
 	return &corev1.Pod{
@@ -74,9 +58,10 @@ func TestWorkloadClaims_NodeCVMMountsInventorySocket(t *testing.T) {
 }
 
 // The webhook passes the pod's own init-container names so get-cert can split
-// the inventory's containers by role — and only the user's init containers, not
-// the c8s-injected ones (which the inventory excludes anyway).
-func TestWorkloadClaims_PassesInitContainerNames(t *testing.T) {
+// / get-cert no longer classifies containers by role — CDS resolves a sandbox's
+// images from the inventory — so the webhook must not pass per-init-container
+// names it would reject as an unknown flag.
+func TestWorkloadClaims_PassesNoInitContainerNames(t *testing.T) {
 	pod := newInjectablePod()
 	pod.Spec.InitContainers = []corev1.Container{{Name: "setup"}, {Name: "migrate"}}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
@@ -90,14 +75,10 @@ func TestWorkloadClaims_PassesInitContainerNames(t *testing.T) {
 	if cert.Name != "c8s-cert" {
 		t.Fatalf("c8s-cert not first: %q", cert.Name)
 	}
-	for _, want := range []string{"--workload-init-container=setup", "--workload-init-container=migrate"} {
-		if !hasArg(cert.Args, want) {
-			t.Fatalf("c8s-cert missing %s: %v", want, cert.Args)
+	for _, arg := range cert.Args {
+		if strings.HasPrefix(arg, "--workload-init-container") {
+			t.Fatalf("webhook still passes a flag get-cert does not define: %v", cert.Args)
 		}
-	}
-	// Its own injected init containers must NOT be listed.
-	if hasArg(cert.Args, "--workload-init-container=c8s-cert") || hasArg(cert.Args, "--workload-init-container=c8s-cert-wait") {
-		t.Fatalf("injected init containers leaked into the init-name list: %v", cert.Args)
 	}
 }
 

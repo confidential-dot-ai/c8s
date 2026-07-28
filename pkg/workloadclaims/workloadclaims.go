@@ -1,63 +1,41 @@
-// Package workloadclaims implements the workload-digest layer of the RA-TLS
-// config-claims (docs/ratls.md): the canonical hash over a pod's
-// admitted container image digests, and the node-local admission-inventory API
-// get-cert uses to learn its own pod's digests from the component that
-// admitted them (nri-image-policy on node-CVM, policy-monitor in a kata
-// guest). The inventory binds the answer to the calling pod via kernel peer
-// credentials, never via anything the caller sends.
+// Package workloadclaims implements the admission-inventory API: the component
+// that admitted a pod's containers (nri-image-policy on node-CVM,
+// policy-monitor in a kata guest) is the arbiter of both what runs in a pod
+// sandbox and which sandbox a process belongs to.
+//
+// It serves two disjoint surfaces (docs/ratls.md, "Sandbox identity"):
+//
+//   - a node-local Unix socket, where get-cert redeems its kernel peer
+//     credentials for a signed sandbox token naming its own sandbox — nothing
+//     the caller sends names the pod;
+//   - a network endpoint over mutually-attested RA-TLS, where CDS asks which
+//     image digests a named sandbox is currently running.
+//
+// Keeping them apart bounds each: the socket cannot enumerate other sandboxes,
+// and the network endpoint cannot mint identity.
 package workloadclaims
 
 import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// ReservedInjectedNames are the container names the c8s webhook injects into a
-// workload pod (the get-cert sidecar and its wait gate). Both inventories
-// exclude them from the workload digest: injected infrastructure is vouched by the node
-// measurement or the measured guest image, and self-assertion by the asserter
-// adds nothing (docs/ratls.md). The webhook rejects user pods that
-// define a container with one of these names, so exclusion-by-name cannot be
-// abused to hide a workload image.
-var ReservedInjectedNames = []string{"c8s-cert", "c8s-cert-wait"}
-
-// IsInjectedContainer reports whether name is a c8s-injected container to
-// exclude from the workload digest.
-func IsInjectedContainer(name string) bool {
-	for _, n := range ReservedInjectedNames {
-		if name == n {
-			return true
-		}
-	}
-	return false
-}
-
-// DigestsPath is the inventory's workload-digests route.
-const DigestsPath = "/v1/workload-digests"
-
-// SandboxPath and SandboxDigestsPrefix are the sandbox-identity routes served
-// when the inventory implements SandboxResolver: POST SandboxPath issues a
-// signed sandbox token for the calling process (caller bound by kernel peer
-// credentials, like DigestsPath; see sandboxtoken.go), and GET
-// SandboxDigestsPrefix+<sandboxID> lists the tracked container image digests
-// of that sandbox.
+// SandboxPath is the token route on the local Unix socket; SandboxDigestsPrefix
+// is the digests route on the CDS-facing network endpoint. POST SandboxPath
+// issues a signed sandbox token for the calling process (caller bound by kernel
+// peer credentials; see sandboxtoken.go). GET SandboxDigestsPrefix+<sandboxID>
+// lists the tracked container image digests of that sandbox.
 const (
 	SandboxPath          = "/sandbox"
 	SandboxDigestsPrefix = "/digests/"
@@ -127,20 +105,6 @@ func ListenUnix(socketPath string, gid int) (net.Listener, error) {
 // containers, each digest 71 bytes.
 const maxResponseBytes = 1 << 20
 
-// Container is one admitted, non-injected container of the calling pod: its
-// name (so get-cert can split it into the init/main role its pod spec
-// declares) and its resolved image digest.
-type Container struct {
-	Name   string `json:"name"`
-	Digest string `json:"digest"`
-}
-
-// Response is the inventory's answer: the admitted, non-injected containers of
-// the calling pod.
-type Response struct {
-	Containers []Container `json:"containers"`
-}
-
 // SandboxTokenRequest is the SandboxPath request body: the requester's PKIX
 // public-key DER, which the inventory binds into the signed token so only the
 // holder of that key can redeem it at CDS.
@@ -160,125 +124,17 @@ type SandboxDigestsResponse struct {
 	Digests []string `json:"digests"`
 }
 
-// roleInit / roleMain label the two container-role partitions in the workload
-// digest preimage (docs/ratls.md). A digest cannot contain these
-// bytes (it is sha256:<hex>), so the labels unambiguously separate the sets.
-const (
-	roleInit = "init\n"
-	roleMain = "main\n"
-)
-
-// Digest returns the canonical workload digest (docs/ratls.md):
-// SHA-256 over the init image set then the main image set, each sorted,
-// deduplicated, canonicalized and role-labeled. Order-independent WITHIN a
-// role (restart churn does not move it) but role-distinguishing ACROSS roles,
-// so {init:A, main:B} and {init:B, main:A} differ. Both sets empty is an
-// error: a pod runs at least one non-injected container, so an empty claim
-// can only be a bug and must fail closed rather than attest an empty workload.
-func Digest(initImages, mainImages []string) ([]byte, error) {
-	if len(initImages) == 0 && len(mainImages) == 0 {
-		return nil, fmt.Errorf("workloadclaims: no container digests to hash")
-	}
-	h := sha256.New()
-	for _, part := range []struct {
-		role   string
-		images []string
-	}{{roleInit, initImages}, {roleMain, mainImages}} {
-		h.Write([]byte(part.role))
-		if err := writeImageSet(h, part.images); err != nil {
-			return nil, err
-		}
-	}
-	return h.Sum(nil), nil
-}
-
-// writeImageSet writes the sorted, deduplicated, canonical sha256:<hex>
-// strings of images into h, each terminated by '\n'.
-func writeImageSet(h hash.Hash, images []string) error {
-	canonical := make([]string, 0, len(images))
-	for _, d := range images {
-		parsed, err := types.ParseDigest(d)
-		if err != nil {
-			return fmt.Errorf("workloadclaims: %w", err)
-		}
-		canonical = append(canonical, parsed.String())
-	}
-	sort.Strings(canonical)
-	prev := ""
-	for _, d := range canonical {
-		if d == prev {
-			continue
-		}
-		h.Write([]byte(d))
-		h.Write([]byte{'\n'})
-		prev = d
-	}
-	return nil
-}
-
-// BuildConfigClaims builds the RA-TLS config-claims for a workload from its
-// admitted init and main container image digests (docs/ratls.md):
-// operator-keys and seed are the unset sentinel (a workload does not attest
-// allowlist governance), the workload field is Digest(init, main).
-func BuildConfigClaims(initImages, mainImages []string) (*ratls.ConfigClaims, error) {
-	wd, err := Digest(initImages, mainImages)
-	if err != nil {
-		return nil, err
-	}
-	return &ratls.ConfigClaims{
-		OperatorKeysDigest: ratls.UnsetDigest(),
-		SeedDigest:         ratls.UnsetDigest(),
-		WorkloadDigest:     wd,
-	}, nil
-}
-
-// VerifyWorkloadDigest reparses claimsDER and confirms its workload digest
-// equals the role-partitioned digest of the given init/main image lists. It
-// is the CDS-side check that the (untrusted) lists a requester sent are
-// exactly what its evidence-bound claims committed to — so CDS can safely
-// check them against the allowlist. It does NOT check allowlist membership
-// (the caller holds the store). Returns the parsed claims on success.
-func VerifyWorkloadDigest(claimsDER []byte, initImages, mainImages []string) (*ratls.ConfigClaims, error) {
-	claims, err := ratls.UnmarshalConfigClaims(claimsDER)
-	if err != nil {
-		return nil, err
-	}
-	if !claims.HasWorkload() {
-		return nil, fmt.Errorf("workloadclaims: claims carry no workload digest")
-	}
-	// A workload attests only its own images, never allowlist governance
-	// (docs/ratls.md). Reject non-sentinel operator/seed fields so
-	// a CDS-issued leaf can never carry forged governance claims.
-	if claims.HasSeed() || !bytes.Equal(claims.OperatorKeysDigest, ratls.UnsetDigest()) {
-		return nil, fmt.Errorf("workloadclaims: workload claims must not carry operator-keys or seed digests")
-	}
-	want, err := Digest(initImages, mainImages)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(claims.WorkloadDigest, want) {
-		return nil, fmt.Errorf("workloadclaims: container digests do not match the attested workload digest")
-	}
-	return claims, nil
-}
-
-// Resolver answers "which admitted, non-injected containers belong to the pod
-// of the calling process". peer carries the kernel-pinned caller identity
-// (SO_PEERCRED PID plus an SO_PEERPIDFD liveness pin) — the caller never names
-// its own pod. The node-CVM resolver binds peer.PID() to a pod and rechecks
-// peer.IsAlive() after its /proc read to reject PID reuse; the kata resolver
-// ignores it, since the guest holds exactly one pod and no disambiguation is
-// needed.
-type Resolver interface {
-	ContainersForPeer(peer Peer) ([]Container, error)
-}
-
-// SandboxResolver is the sandbox-identity surface an inventory additionally
-// implements — nri-image-policy on node-CVM (runtime sandbox state from NRI
-// pod events) and policy-monitor in the kata guest (the guest's single pod).
-// Serve registers SandboxDigestsPrefix when the resolver implements it, and
-// SandboxPath when a token signer is also available; get-cert treats a
-// missing SandboxPath as "no sandbox ID" (ErrSandboxUnsupported).
+// SandboxResolver is the surface an inventory implements — nri-image-policy on
+// node-CVM (runtime sandbox state from NRI pod events) and policy-monitor in
+// the kata guest (the guest's single pod). ServeTokens uses SandboxForPeer;
+// ServeDigests uses DigestsForSandbox. get-cert treats a missing SandboxPath
+// as "no sandbox ID" (ErrSandboxUnsupported).
+//
+// peer carries the kernel-pinned caller identity (SO_PEERCRED PID plus an
+// SO_PEERPIDFD liveness pin) — the caller never names its own pod. The
+// node-CVM resolver binds peer.PID() to a pod and rechecks peer.IsAlive()
+// after its /proc read to reject PID reuse; the kata resolver ignores it,
+// since the guest holds exactly one pod and no disambiguation is needed.
 type SandboxResolver interface {
 	// SandboxForPeer returns the pod sandbox ID of the calling process,
 	// bound by kernel peer credentials exactly like ContainersForPeer.
@@ -304,82 +160,85 @@ func peerFromRequest(r *http.Request) Peer {
 // PKIX public key.
 const maxSandboxRequestBytes = 64 << 10
 
-// Serve runs the inventory on l (a unix listener in both deployment shapes) until
-// ctx is done. Errors from the resolver are returned to the caller as 500s —
-// get-cert fails closed on them. The digests route is registered when
-// resolver implements SandboxResolver; the token route additionally needs a
-// non-nil signer (no signer ⇒ no CDS to attest the signing key against, and
-// an unverifiable token is worse than none).
-func Serve(ctx context.Context, l net.Listener, resolver Resolver, signer *SandboxTokenSigner) error {
+// ServeTokens runs the token socket on l (a unix listener in both deployment
+// shapes) until ctx is done. It serves POST SandboxPath only: the caller is
+// bound by kernel peer credentials, so this listener must stay local. Errors
+// from the resolver are returned as 500s — get-cert fails closed on them.
+//
+// A nil signer serves nothing (404 on the route): no signer means no CDS to
+// attest the signing key against, and an unverifiable token is worse than none.
+func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signer *SandboxTokenSigner) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+DigestsPath, func(w http.ResponseWriter, r *http.Request) {
-		peer := peerFromRequest(r)
-		defer peer.Close()
-		containers, err := resolver.ContainersForPeer(peer)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("resolve caller pod: %v", err), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Response{Containers: containers})
-	})
-
-	if sandboxes, ok := resolver.(SandboxResolver); ok {
-		if signer != nil {
-			mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
-				var req SandboxTokenRequest
-				if err := json.NewDecoder(io.LimitReader(r.Body, maxSandboxRequestBytes)).Decode(&req); err != nil {
-					http.Error(w, fmt.Sprintf("decode sandbox token request: %v", err), http.StatusBadRequest)
-					return
-				}
-				pub, err := x509.ParsePKIXPublicKey(req.PublicKey)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("parse requester key: %v", err), http.StatusBadRequest)
-					return
-				}
-				keyDigest, err := RequesterKeyDigest(pub)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				if len(req.Nonce) == 0 {
-					http.Error(w, "missing challenge nonce", http.StatusBadRequest)
-					return
-				}
-				peer := peerFromRequest(r)
-				defer peer.Close()
-				id, err := sandboxes.SandboxForPeer(peer)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
-					return
-				}
-				token, err := signer.Sign(r.Context(), id, keyDigest, req.Nonce)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("sign sandbox token: %v", err), http.StatusInternalServerError)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(token)
-			})
-		}
-		mux.HandleFunc("GET "+SandboxDigestsPrefix+"{sandboxID}", func(w http.ResponseWriter, r *http.Request) {
-			digests, known, err := sandboxes.DigestsForSandbox(r.PathValue("sandboxID"))
+	if signer != nil {
+		mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
+			var req SandboxTokenRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, maxSandboxRequestBytes)).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("decode sandbox token request: %v", err), http.StatusBadRequest)
+				return
+			}
+			pub, err := x509.ParsePKIXPublicKey(req.PublicKey)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("resolve sandbox digests: %v", err), http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("parse requester key: %v", err), http.StatusBadRequest)
 				return
 			}
-			if !known {
-				http.Error(w, "unknown sandbox", http.StatusNotFound)
+			keyDigest, err := RequesterKeyDigest(pub)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if digests == nil {
-				digests = []string{}
+			if len(req.Nonce) == 0 {
+				http.Error(w, "missing challenge nonce", http.StatusBadRequest)
+				return
+			}
+			peer := peerFromRequest(r)
+			defer peer.Close()
+			id, err := resolver.SandboxForPeer(peer)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
+				return
+			}
+			token, err := signer.Sign(r.Context(), id, keyDigest, req.Nonce)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("sign sandbox token: %v", err), http.StatusInternalServerError)
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(SandboxDigestsResponse{Digests: digests})
+			_ = json.NewEncoder(w).Encode(token)
 		})
 	}
+	return serveUntil(ctx, l, mux)
+}
 
+// ServeDigests runs the CDS-facing digests endpoint on l until ctx is done. It
+// serves GET SandboxDigestsPrefix+<sandboxID> only, and answers for ANY
+// sandbox — so l MUST be a mutually-attested RA-TLS listener that admits only
+// CDS (BuildDigestsTLSConfig). Over a plain listener this would disclose the
+// node's running images to anyone who can reach the port.
+func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+SandboxDigestsPrefix+"{sandboxID}", func(w http.ResponseWriter, r *http.Request) {
+		digests, known, err := resolver.DigestsForSandbox(r.PathValue("sandboxID"))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("resolve sandbox digests: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if !known {
+			http.Error(w, "unknown sandbox", http.StatusNotFound)
+			return
+		}
+		if digests == nil {
+			digests = []string{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SandboxDigestsResponse{Digests: digests})
+	})
+	return serveUntil(ctx, l, mux)
+}
+
+// serveUntil runs mux on l until ctx is done. The accepted net.Conn is carried
+// through the request context so handlers can read kernel peer credentials
+// from it (ServeTokens).
+func serveUntil(ctx context.Context, l net.Listener, mux *http.ServeMux) error {
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -435,24 +294,6 @@ func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Re
 	return resp, nil
 }
 
-// Fetch queries the inventory at endpoint and returns the caller pod's containers.
-func Fetch(ctx context.Context, endpoint string, timeout time.Duration) ([]Container, error) {
-	resp, err := inventoryDo(ctx, endpoint, http.MethodGet, DigestsPath, nil, timeout)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("workloadclaims: inventory returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var out Response
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
-	}
-	return out.Containers, nil
-}
-
 // ErrSandboxUnsupported reports that the inventory serves no SandboxPath route —
 // an inventory without sandbox state or without a CDS-attested signing key.
 // Callers proceed without a sandbox ID.
@@ -492,20 +333,4 @@ func FetchSandboxToken(ctx context.Context, endpoint string, timeout time.Durati
 		return nil, fmt.Errorf("workloadclaims: inventory returned an incomplete sandbox token")
 	}
 	return &out, nil
-}
-
-// Partition splits a pod's containers into (init images, main images) by name,
-// using initNames as the set of container names the pod spec declares as init
-// containers. A container not in initNames is treated as main. The webhook
-// supplies initNames (it knows the pod spec); get-cert does the split so both
-// inventory shapes stay role-agnostic.
-func Partition(containers []Container, initNames map[string]struct{}) (initImages, mainImages []string) {
-	for _, c := range containers {
-		if _, isInit := initNames[c.Name]; isInit {
-			initImages = append(initImages, c.Digest)
-		} else {
-			mainImages = append(mainImages, c.Digest)
-		}
-	}
-	return initImages, mainImages
 }

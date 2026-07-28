@@ -177,7 +177,7 @@ func TestRun_ErrorPaths(t *testing.T) {
 		{
 			name:    "unsupported ratls platform",
 			mutate:  func(_ *testing.T, cfg *config) { cfg.ratlsPlatform = "bogus-platform" },
-			wantSub: "ratls server config",
+			wantSub: "unsupported TEE platform",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

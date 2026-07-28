@@ -181,6 +181,8 @@ workload_claims:
   # The plugin is launched by containerd on the host, so its /proc is the
   # host's — a caller PID from SO_PEERCRED resolves directly.
   proc_root: "/proc"
+  digests_port: {{ int $root.Values.nriImagePolicy.sandboxDigests.port }}
+  advertise_host: {{ $root.Values.nriImagePolicy.sandboxDigests.advertiseHost | quote }}
 allowlist:
   pull:
     url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}

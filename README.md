@@ -413,28 +413,24 @@ Set `tlsLb.allowlist.enabled=false` to remove the built-in public route. A
 direct CDS connection, including a local port-forward for debugging, can
 still be passed explicitly with `--url`.
 
-CDS attests its allowlist governance: the digests of its loaded operator-key
-set and of the allowlist seed it applied are bound into its serving-cert
-attestation (the config-claims extension — see
-[docs/ratls.md](docs/ratls.md)). Verify the root of trust —
-measurement, operator keys, seed — before exposing public ingress, pinning
-from your own install inputs (the operator public-key bundle and the seed
-JSON; verify computes the digests):
+Verify CDS's root of trust — its launch measurement and the operator key set it
+serves — before exposing public ingress, using your own install inputs (the
+operator public-key bundle). The key list is fetched over the attested serving
+certificate, so it cannot be substituted in transit
+([docs/ratls.md](docs/ratls.md)):
 
 ```sh
 c8s cds verify https://<cds>:8443 \
   --measurements <launch-digest> \
-  --operator-keys operator.pub \
-  --allowlist-seed seed.json        # or --allowlist-seed-digest <hex>
+  --operator-keys operator.pub
 ```
 
-A swapped key set or tampered seed fails this closed. The pins protect the
-verifier that holds them, so run the verify continuously (CI), not only at
-bootstrap.
+A swapped key set fails this closed. The check protects the verifier that runs
+it, so run it continuously (CI), not only at bootstrap.
 
 Two caveats worth knowing before production: revocation is currently coarse
-(remove the key from `cds.operatorKeys` and re-install), and the attested
-config protects only verifiers that pin it. See
+(remove the key from `cds.operatorKeys` and re-install), and this check protects
+only verifiers that run it. See
 [docs/pitfalls.md](docs/pitfalls.md). For
 GitOps consumers, `c8s render-values --operator-keys operator.pub` embeds the
 PEM content (the chart value takes content, never a file path); the chart

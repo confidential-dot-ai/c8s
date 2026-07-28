@@ -23,6 +23,25 @@ import (
 
 const testSandboxID = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
 
+// testInventoryAddr is the callback address the signer stamps into tokens. The
+// tests answer it with fakeDigests rather than dialing.
+const testInventoryAddr = "10.0.0.7:9443"
+
+// fakeDigests answers the inventory callback from a sandbox -> digests map. A
+// missing sandbox is workloadclaims.ErrSandboxUnknown, like a 404 on the wire.
+type fakeDigests map[string][]string
+
+func (f fakeDigests) Fetch(_ context.Context, addr, sandboxID string) ([]string, error) {
+	if addr != testInventoryAddr {
+		return nil, fmt.Errorf("unexpected inventory address %q", addr)
+	}
+	d, ok := f[sandboxID]
+	if !ok {
+		return nil, workloadclaims.ErrSandboxUnknown
+	}
+	return d, nil
+}
+
 // newSandboxTestEnv wires an AttestHandler that can validate inventory EARs, and
 // an inventory signer whose EARs that handler accepts: the signer's EAR source
 // mints /attest-key-shaped EARs from the same issuer the handler's
@@ -31,6 +50,10 @@ const testSandboxID = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1
 func newSandboxTestEnv(t *testing.T, mockURL, launchDigest string) (AttestHandler, *workloadclaims.SandboxTokenSigner) {
 	t.Helper()
 	h := newTestAttestHandler(t, mockURL, nil)
+	// A token now triggers the digests callback, so every sandbox test needs an
+	// inventory to answer and an allowlist admitting what it reports.
+	h.AllowlistStore = floorStore(wlDigestA)
+	h.SandboxDigests = fakeDigests{testSandboxID: {wlDigestA}}
 
 	keyPEM, err := earsigner.Generate()
 	if err != nil {
@@ -57,7 +80,7 @@ func newSandboxTestEnv(t *testing.T, mockURL, launchDigest string) (AttestHandle
 			return "", fmt.Errorf("inventory key is not ECDSA")
 		}
 		return earIss.IssueAttestedKey(json.RawMessage(`{"test":true}`), launchDigest, pub, "")
-	})
+	}, testInventoryAddr)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -102,8 +102,16 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	if cfg.WorkloadClaimsSocketDir != "" {
 		m.inventory = newAdmissionInventory()
 		socketPath := filepath.Join(cfg.WorkloadClaimsSocketDir, workloadclaims.SocketName)
-		if err := startAdmissionInventory(ctx, logger, m.inventory, socketPath, sandboxTokenSigner(cfg, logger)); err != nil {
+		signer := sandboxTokenSigner(cfg, logger)
+		if err := startAdmissionInventory(ctx, logger, m.inventory, socketPath, signer); err != nil {
 			return fmt.Errorf("start admission inventory: %w", err)
+		}
+		// Only useful alongside tokens: the address CDS dials is signed into
+		// them, so without a signer nothing can direct CDS here.
+		if signer != nil {
+			if err := startSandboxDigests(ctx, logger, cfg, m.inventory); err != nil {
+				return fmt.Errorf("start sandbox-digests endpoint: %w", err)
+			}
 		}
 	}
 
@@ -131,7 +139,7 @@ type monitor struct {
 	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
 	overlay            *policyOverlay // latest CDS pull's workload argv policy
 	killer             containerKiller
-	inventory          *admissionInventory // workload-claims flow (docs/ratls.md); nil ⇔ disabled (no workload-claims socket dir)
+	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); nil ⇔ disabled (no workload-claims socket dir)
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
 	revalidateInterval time.Duration
@@ -454,7 +462,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	if m.admits(digest, argv) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
 		if m.inventory != nil {
-			m.inventory.record(cid, containerName(spec.Annotations), digest)
+			m.inventory.record(cid, digest)
 		}
 		return
 	}

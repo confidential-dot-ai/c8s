@@ -43,6 +43,13 @@ type workloadClaimsConfig struct {
 	// ProcRoot is the /proc mount used to resolve a caller PID to its
 	// container cgroup. Defaults to "/proc".
 	ProcRoot string `yaml:"proc_root"`
+	// DigestsPort is the TCP port of the CDS-facing sandbox-digests endpoint
+	// (mutually-attested RA-TLS). Defaults to defaultDigestsPort.
+	DigestsPort int `yaml:"digests_port"`
+	// AdvertiseHost is the host CDS dials to reach DigestsPort; the chart sets
+	// it from the downward API (status.hostIP). Empty infers it from the route
+	// to CDS — see workloadclaims.ResolveAdvertiseAddr.
+	AdvertiseHost string `yaml:"advertise_host"`
 }
 
 // allowlistConfig groups the digest-source mechanisms.
@@ -116,6 +123,9 @@ type loggingConfig struct {
 
 const defaultPullInterval = 30 * time.Second
 const defaultPullTimeout = 30 * time.Second
+
+// defaultDigestsPort is the node port CDS dials for a sandbox's image digests.
+const defaultDigestsPort = 9443
 
 // loadConfig loads configuration from a YAML file.
 func loadConfig(path string) (*config, error) {
