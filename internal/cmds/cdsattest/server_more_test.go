@@ -38,7 +38,7 @@ func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {
 }
 
 func TestAttestationRejectsBadNonces(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	tests := []struct {
@@ -67,7 +67,14 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 
 func TestAttestationEvidenceUnavailable(t *testing.T) {
 	certPath, _ := writeTestLeaf(t)
-	srv := NewServer(Config{Evidence: failingProvider{}, ServingCertFile: certPath})
+	identity := writeTestMeshIdentity(t)
+	srv := NewServer(Config{
+		Evidence:             failingProvider{},
+		ServingCertFile:      certPath,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -132,7 +139,7 @@ func TestServingLeafSPKIErrors(t *testing.T) {
 }
 
 func TestHandshakeRejectsInvalidJSON(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader("{nope"))
 	if err != nil {
@@ -147,7 +154,7 @@ func TestHandshakeRejectsInvalidJSON(t *testing.T) {
 }
 
 func TestHandshakeRejectsBadFieldEncoding(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	nonce := make([]byte, 32)
@@ -172,7 +179,7 @@ func TestHandshakeRejectsBadFieldEncoding(t *testing.T) {
 }
 
 func TestHandshakeRejectsBadKeyMaterial(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	nonce := make([]byte, 32)
@@ -198,7 +205,7 @@ func TestHandshakeRejectsBadKeyMaterial(t *testing.T) {
 }
 
 func TestTunnelRejectsMalformedRecords(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	post := func(t *testing.T, sessionID string, body []byte) *http.Response {
@@ -271,9 +278,13 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
-		Evidence: FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
-		Backend:  hb,
+		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
+		Backend:              hb,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
