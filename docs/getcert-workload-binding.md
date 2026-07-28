@@ -204,6 +204,21 @@ attaches the peer's credentials to the socket; the inventory reads them with
 socket. The chain is entirely kernel/runtime-derived — `SO_PEERCRED` → cgroup →
 container → pod — and none of it is caller-supplied.
 
+**Pinning the PID against reuse.** `SO_PEERCRED` returns a bare PID, and the
+`/proc/<pid>/cgroup` read happens a few instructions later — a window in which
+the peer could exit and the kernel recycle its PID to an unrelated process,
+which the inventory would then resolve as the caller. The inventory closes this
+by also reading `SO_PEERPIDFD` (Linux 6.5+), a pidfd that pins that *exact*
+process instance, and rechecking `peer.IsAlive()` **after** the cgroup read: if
+the pinned process exited during resolution — or the pidfd could not be obtained
+at all — the answer is refused (`peercred_linux.go`, `Peer.IsAlive`;
+`inventory.go`, `callerForPeer`). A supported CC node always has the pidfd:
+`SO_PEERPIDFD` landed in Linux 6.5, and SNP hosts require ≥ 6.11, TDX ≥ 6.16, so
+its absence is treated as an error and **fails closed**, not tolerated as a
+best-effort fallback. This is orthogonal to Corner 2: the pidfd fixes *PID
+identity over time*, the shallowest-tracked rule fixes *cgroup-nesting
+spoofing*; both are needed.
+
 **PID-namespace subtlety.** get-cert runs in a container where its own PID
 might be 1. `SO_PEERCRED` reports the PID *as seen by the reader* — the
 nri-image-policy plugin, which runs on the **host** (launched by containerd,

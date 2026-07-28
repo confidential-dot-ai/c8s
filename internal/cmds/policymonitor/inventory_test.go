@@ -5,6 +5,8 @@ package policymonitor
 import (
 	"slices"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -22,7 +24,7 @@ func TestKataInventoryClaimExcludesInjectedInventoryIncludes(t *testing.T) {
 	b.record("cid-app", "app", pmDigestApp)
 	b.record("cid-cert", "c8s-cert", pmDigestSidecar)
 
-	containers, err := b.ContainersForPeer(0)
+	containers, err := b.ContainersForPeer(workloadclaims.PeerForPID(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +49,7 @@ func TestKataInventoryClaimExcludesInjectedInventoryIncludes(t *testing.T) {
 func TestKataInventorySandboxIdentity(t *testing.T) {
 	b := newAdmissionInventory()
 
-	if _, err := b.SandboxForPeer(0); err == nil {
+	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(0)); err == nil {
 		t.Fatal("sandbox resolved before any container was observed")
 	}
 	if _, known, _ := b.DigestsForSandbox(pmSandboxID); known {
@@ -56,7 +58,7 @@ func TestKataInventorySandboxIdentity(t *testing.T) {
 
 	b.recordSandboxID(pmSandboxID)
 	b.recordSandboxID("some-other-id") // can't happen in a one-pod guest; first wins
-	got, err := b.SandboxForPeer(0)
+	got, err := b.SandboxForPeer(workloadclaims.PeerForPID(0))
 	if err != nil || got != pmSandboxID {
 		t.Fatalf("sandbox = %q, %v; want %q", got, err, pmSandboxID)
 	}

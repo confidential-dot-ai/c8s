@@ -107,8 +107,8 @@ type pidRecordingResolver struct {
 	err        error
 }
 
-func (r *pidRecordingResolver) ContainersForPeer(peerPID int) ([]Container, error) {
-	r.pid = peerPID
+func (r *pidRecordingResolver) ContainersForPeer(peer Peer) ([]Container, error) {
+	r.pid = peer.PID()
 	return r.containers, r.err
 }
 
@@ -179,8 +179,8 @@ type sandboxAwareResolver struct {
 	digests    map[string][]string // sandboxID -> digests
 }
 
-func (r *sandboxAwareResolver) SandboxForPeer(peerPID int) (string, error) {
-	r.pid = peerPID
+func (r *sandboxAwareResolver) SandboxForPeer(peer Peer) (string, error) {
+	r.pid = peer.PID()
 	return r.sandboxID, r.sandboxErr
 }
 

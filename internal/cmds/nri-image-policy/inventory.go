@@ -89,15 +89,27 @@ func (b *admissionInventory) removeSandbox(sandboxID string) {
 }
 
 // callerForPeer resolves the calling process to its tracked container record.
-// peerPID 0 is rejected: on node-CVM the inventory MUST bind the caller via
-// kernel credentials. Callers must hold at least b.mu.RLock.
-func (b *admissionInventory) callerForPeer(peerPID int) (ctrRec, error) {
-	if peerPID <= 0 {
+// A zero PID is rejected: on node-CVM the inventory MUST bind the caller via
+// kernel credentials. peer.IsAlive() is rechecked after the /proc read so a PID
+// recycled between SO_PEERCRED and that read (the peer exited mid-resolution)
+// is rejected rather than resolved to whatever now holds the number
+// (docs/getcert-workload-binding.md, Corner 1). Callers must hold at least
+// b.mu.RLock.
+func (b *admissionInventory) callerForPeer(peer workloadclaims.Peer) (ctrRec, error) {
+	pid := peer.PID()
+	if pid <= 0 {
 		return ctrRec{}, fmt.Errorf("no peer credentials on the inventory connection")
 	}
-	candidates, err := workloadclaims.ContainerIDCandidatesForPID(b.procRoot, peerPID)
+	candidates, err := workloadclaims.ContainerIDCandidatesForPID(b.procRoot, pid)
 	if err != nil {
 		return ctrRec{}, err
+	}
+	// The cgroup was read by PID; confirm the pinned peer is still the process
+	// that was there, so a reused PID cannot bind the caller to a victim's
+	// container. Fails closed if liveness can't be confirmed — the peer exited,
+	// or no pidfd was available (anomalous on a supported CC kernel).
+	if !peer.IsAlive() {
+		return ctrRec{}, fmt.Errorf("cannot confirm the caller is still the pinned peer process (exited during resolution, or pidfd unavailable)")
 	}
 	// Resolve the shallowest candidate that is a tracked container: the
 	// caller's own runtime-assigned scope is always an ancestor of any cgroup
@@ -113,11 +125,11 @@ func (b *admissionInventory) callerForPeer(peerPID int) (ctrRec, error) {
 
 // ContainersForPeer resolves the calling process to its pod and returns that
 // pod's admitted, non-injected containers (name + digest).
-func (b *admissionInventory) ContainersForPeer(peerPID int) ([]workloadclaims.Container, error) {
+func (b *admissionInventory) ContainersForPeer(peer workloadclaims.Peer) ([]workloadclaims.Container, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	caller, err := b.callerForPeer(peerPID)
+	caller, err := b.callerForPeer(peer)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +157,11 @@ func (b *admissionInventory) ContainersForPeer(peerPID int) ([]workloadclaims.Co
 
 // SandboxForPeer resolves the calling process to the pod sandbox it runs in,
 // bound by kernel credentials like ContainersForPeer.
-func (b *admissionInventory) SandboxForPeer(peerPID int) (string, error) {
+func (b *admissionInventory) SandboxForPeer(peer workloadclaims.Peer) (string, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	caller, err := b.callerForPeer(peerPID)
+	caller, err := b.callerForPeer(peer)
 	if err != nil {
 		return "", err
 	}
