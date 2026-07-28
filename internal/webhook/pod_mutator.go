@@ -146,7 +146,7 @@ type Config struct {
 	// injected as get-cert's --cds-measurements. Without it every workload's
 	// cert bootstrap accepts ANY RA-TLS-attested peer as CDS, and the CA
 	// bundle in the forged issuance response becomes the victim's mesh root
-	// of trust (docs/security/RT-001-cds-bootstrap-identity.md). Empty logs a
+	// of trust. Empty logs a
 	// loud warning at registration and leaves the sidecars unpinned — safe
 	// only on a fully trusted pod network.
 	CDSMeasurements string
@@ -202,7 +202,7 @@ type Config struct {
 func Register(mgr ctrl.Manager, cfg Config) error {
 	cfg = cfg.withDefaults()
 	if cfg.GetCertImage != "" && cfg.CDSMeasurements == "" {
-		ctrl.Log.WithName("c8s-webhook").Info("WARNING: CDSMeasurements is empty — injected get-cert sidecars will accept ANY RA-TLS-attested peer as CDS; a pod-network attacker serving genuine TEE evidence can replace the mesh root of trust (docs/security/RT-001-cds-bootstrap-identity.md)")
+		ctrl.Log.WithName("c8s-webhook").Info("WARNING: CDSMeasurements is empty — injected get-cert sidecars will accept ANY RA-TLS-attested peer as CDS; a pod-network attacker serving genuine TEE evidence can replace the mesh root of trust")
 	}
 	mgr.GetWebhookServer().Register("/mutate-pods", &admission.Webhook{
 		Handler: &podMutator{
