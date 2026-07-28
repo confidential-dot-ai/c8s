@@ -18,7 +18,7 @@ var containerIDPattern = regexp.MustCompile(`([0-9a-f]{64})`)
 // SO_PEERCRED names the PID, the cgroup names the container, and the runtime's
 // own state names the pod — nothing the caller sends is trusted.
 //
-// The caller (the broker) MUST resolve the SHALLOWEST candidate that is a
+// The caller (the inventory) MUST resolve the SHALLOWEST candidate that is a
 // tracked container, not the deepest. A process can only ever move itself
 // DEEPER into cgroups it creates, so its runtime-assigned container scope is
 // always an ancestor (shallower) of any child cgroup it nests — including one

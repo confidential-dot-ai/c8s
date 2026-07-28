@@ -446,27 +446,31 @@ func TestReloadWatchChangedPropagatesError(t *testing.T) {
 	}
 }
 
-// The broker endpoint get-cert dials is a compiled Unix socket path, not a
+// The inventory endpoint get-cert dials is a compiled Unix socket path, not a
 // control-plane-supplied value, so the fetch can't be redirected.
-func TestBrokerEndpointIsCompiledUnixPath(t *testing.T) {
-	got := workloadclaims.BrokerEndpoint()
+func TestInventoryEndpointIsCompiledUnixPath(t *testing.T) {
+	got := workloadclaims.InventoryEndpoint()
 	if !strings.HasPrefix(got, "unix://") {
-		t.Fatalf("broker endpoint %q is not a unix socket", got)
+		t.Fatalf("inventory endpoint %q is not a unix socket", got)
 	}
 	if !strings.HasSuffix(got, "/"+workloadclaims.SocketName) {
-		t.Fatalf("broker endpoint %q does not end in the compiled socket name %q", got, workloadclaims.SocketName)
+		t.Fatalf("inventory endpoint %q does not end in the compiled socket name %q", got, workloadclaims.SocketName)
 	}
 }
 
-// Without --workload-claims-broker, workloadClaims is a no-op: it returns the
-// empty (claims-free) result without contacting any broker.
+// Without --workload-claims, workloadClaims is a no-op: it returns the
+// empty (claims-free) result without contacting any inventory.
 func TestWorkloadClaimsWithoutFlagIsClaimFree(t *testing.T) {
-	res, err := workloadClaims(context.Background(), config{WorkloadClaimsBroker: false})
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil {
-		t.Fatalf("no --workload-claims-broker but a claim was produced: %+v", res)
+	res, err := workloadClaims(context.Background(), config{WorkloadClaims: false}, &key.PublicKey, []byte("test-nonce"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil || res.sandboxToken != nil {
+		t.Fatalf("no --workload-claims but a claim was produced: %+v", res)
 	}
 }
 

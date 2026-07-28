@@ -206,7 +206,7 @@ type Config struct {
 	RefreshInterval time.Duration
 
 	// WorkloadClaimsSocketDir, when non-empty, is the guest directory the
-	// workload-claims broker creates its Unix socket in (as
+	// admission inventory creates its Unix socket in (as
 	// workloadclaims.SocketName; docs/ratls.md). The guest bind-mounts this
 	// directory into the pod's containers at workloadclaims.SidecarSocketDir so
 	// the in-guest get-cert dials the same compiled path it uses on node-CVM.
@@ -215,7 +215,7 @@ type Config struct {
 	// Access control: the directory lives inside the measured guest (in the
 	// TCB), owned by root (policy-monitor); the source of truth for "what this
 	// pod runs" is policy-monitor's own admission record, not anything the
-	// caller sends. The socket is group-owned by workloadclaims.BrokerSocketGID
+	// caller sends. The socket is group-owned by workloadclaims.InventorySocketGID
 	// so the non-root in-guest get-cert can connect — so the guest image must
 	// run get-cert with that supplemental group (on node-CVM the webhook injects
 	// it; wiring the kata guest to do the same is the remaining follow-up).

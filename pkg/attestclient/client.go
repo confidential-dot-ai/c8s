@@ -110,7 +110,14 @@ func (c Client) ObtainCertificateWithEvidence(attestationApiURL, csrPEM string) 
 // caller-controlled cancellation across authenticate, local attest, and CDS
 // attest requests.
 func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationApiURL, csrPEM string) (CertificateResult, error) {
-	return c.ObtainCertificateWithClaimsContext(ctx, attestationApiURL, csrPEM, nil, nil, nil)
+	ctx = contextOrBackground(ctx)
+	// The claims-free flow fetches its own challenge; the claims/sandbox flow
+	// has get-cert fetch it so one nonce binds both the token and the evidence.
+	challengeResp, err := c.AuthenticateContext(ctx)
+	if err != nil {
+		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
+	}
+	return c.ObtainCertificateWithClaimsContext(ctx, attestationApiURL, csrPEM, challengeResp.Challenge, nil, nil, nil, nil)
 }
 
 // ObtainCertificateWithClaimsContext is ObtainCertificateWithEvidenceContext
@@ -118,19 +125,18 @@ func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attest
 // REPORTDATA and forwards it (plus the role-partitioned container-digest lists
 // it commits to) to CDS for verification and leaf embedding
 // (docs/ratls.md). claimsDER nil ⇒ the plain, claims-free flow
-// (byte-identical to before).
-func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestationApiURL, csrPEM string, claimsDER []byte, initDigests, mainDigests []string) (CertificateResult, error) {
+// (byte-identical to before). challenge is the base64 CDS challenge the caller
+// already fetched (POST /authenticate); the same nonce binds the evidence
+// REPORTDATA and the sandbox token, so CDS checks both against one single-use
+// value. sandboxToken, when non-empty, is the inventory-signed sandbox token
+// JSON (workloadclaims.SignedSandboxToken) forwarded opaquely for CDS to verify
+// and stamp as the leaf's pod-sandbox-ID extension (ratls.OIDSandboxID).
+func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestationApiURL, csrPEM, challenge string, claimsDER []byte, initDigests, mainDigests []string, sandboxToken json.RawMessage) (CertificateResult, error) {
 	ctx = contextOrBackground(ctx)
 
-	// Step 1: get challenge from CDS
-	challengeResp, err := c.AuthenticateContext(ctx)
-	if err != nil {
-		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
-	}
-
-	// Step 2: generate TEE evidence bound to the CSR public key, the config
-	// claims (if any), and the challenge.
-	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
+	// The caller fetched the challenge so the same nonce binds both the sandbox
+	// token and the evidence REPORTDATA below.
+	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
 	if err != nil {
 		return CertificateResult{}, fmt.Errorf("invalid base64 in challenge: %w", err)
 	}
@@ -145,12 +151,12 @@ func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestat
 		return CertificateResult{}, fmt.Errorf("attestation-api: %w", err)
 	}
 
-	// Step 3: submit evidence + CSR to CDS for verification and cert issuance.
+	// Submit evidence + CSR to CDS for verification and cert issuance.
 	// asResp.Evidence is the platform-specific evidence object as emitted by
 	// /attest; CDS's /attest expects it wrapped in an AttestationEvidence
 	// envelope keyed by Platform.
 	attestReq := attestRequest{
-		Challenge: challengeResp.Challenge,
+		Challenge: challenge,
 		Evidence: attestEvidence{
 			Platform: asResp.Platform,
 			Evidence: asResp.Evidence,
@@ -158,6 +164,7 @@ func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestat
 		CSR:                  csrPEM,
 		InitContainerDigests: initDigests,
 		ContainerDigests:     mainDigests,
+		SandboxToken:         sandboxToken,
 	}
 	if len(claimsDER) > 0 {
 		attestReq.WorkloadClaims = base64.StdEncoding.EncodeToString(claimsDER)
@@ -169,7 +176,7 @@ func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestat
 
 	return CertificateResult{
 		Certificate: certPEM,
-		Challenge:   challengeResp.Challenge,
+		Challenge:   challenge,
 		Platform:    asResp.Platform,
 		Evidence:    asResp.Evidence,
 	}, nil
@@ -288,12 +295,13 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge            string         `json:"challenge"`
-	Evidence             attestEvidence `json:"evidence"`
-	CSR                  string         `json:"csr"`
-	WorkloadClaims       string         `json:"workload_claims,omitempty"`
-	InitContainerDigests []string       `json:"init_container_digests,omitempty"`
-	ContainerDigests     []string       `json:"container_digests,omitempty"`
+	Challenge            string          `json:"challenge"`
+	Evidence             attestEvidence  `json:"evidence"`
+	CSR                  string          `json:"csr"`
+	WorkloadClaims       string          `json:"workload_claims,omitempty"`
+	InitContainerDigests []string        `json:"init_container_digests,omitempty"`
+	ContainerDigests     []string        `json:"container_digests,omitempty"`
+	SandboxToken         json.RawMessage `json:"sandbox_token,omitempty"`
 }
 
 type attestEvidence struct {

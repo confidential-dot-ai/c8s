@@ -307,7 +307,7 @@ What it does **not** guarantee:
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. Config-claims narrow this — a workload's cert commits its
   container-image digest (see Config-claims), pinnable with
-  `c8s verify --workload-image` — but that binding rests on the in-TCB broker,
+  `c8s verify --workload-image` — but that binding rests on the in-TCB inventory,
   not on a fresh hardware measurement of the running container, and CDS does not
   bind the claim to what the pod runs. So the pin distinguishes **honest
   workloads only**: any admitted workload can assert any *allowlisted* image set
@@ -368,7 +368,7 @@ verifiers**, not boot-time prevention.
   `c8s verify --workload-init-image/--workload-image`.
 
 **How the container digest is obtained and why it can be trusted is its own
-story** — get-cert fetches the pod's admitted images from a node-local broker
+story** — get-cert fetches the pod's admitted images from a node-local inventory
 that binds the caller by kernel credentials, and CDS gates issuance on every
 image being allowlisted. That flow, its corners, and its residual trust
 assumptions are in
@@ -393,6 +393,61 @@ the pod's *whole* image set ([getcert-workload-binding.md](getcert-workload-bind
 "Corner 3"), not a per-image value, so an authorizer
 compares it by recomputing `workloadclaims.Digest(init, main)` over the expected
 set — the same call `c8s verify` makes.
+
+### Sandbox identity
+
+A workload leaf can additionally name the **CRI pod sandbox** it was issued
+to:
+
+```text
+OID 1.3.6.1.4.1.59888.1.4  (pod sandbox ID extension)
+SandboxID ::= IA5String     -- e.g. containerd's 64-hex sandbox ID
+```
+
+The ID reaches the leaf as a **inventory-signed sandbox token**, not a bare
+string. get-cert fetches the CDS challenge for this issuance up front, then
+POSTs its CSR public key and that challenge to the inventory's `/sandbox` route
+over the same peer-credential socket as the workload digests; the inventory
+(nri-image-policy on node-CVM, policy-monitor in the kata guest) resolves the
+caller's kernel identity to its sandbox — nothing the caller sends names the
+pod — and signs
+
+```text
+SandboxToken ::= SEQUENCE {
+    version    INTEGER,
+    sandboxId  IA5String,
+    keyDigest  OCTET STRING (32),  -- SHA-256(requester PKIX pubkey DER)
+    nonce      OCTET STRING        -- the CDS challenge for this issuance
+}
+```
+
+with an in-process key it had CDS attest via `POST /attest-key` (the envelope
+carries the resulting EAR). get-cert forwards the envelope in the attest
+request (`sandbox_token`); CDS validates the EAR against its own JWKS and
+measurement allowlist, verifies the token signature with the EAR's attested
+key, requires the nonce to be the same single-use challenge it is consuming for
+this request, and requires the key digest to name the CSR key — whose
+possession the CSR signature and evidence binding already prove. Only then is
+the sandbox ID stamped into the signed leaf. So the ID is (a) redeemable only
+by the get-cert holding the bound key, (b) usable only for the one issuance
+whose challenge it carries — no clock, no replay window — and (c) provably
+signed by a TEE-attested inventory key, with no per-node key state in CDS since
+every envelope carries its own CDS-verifiable credential. The **same** challenge
+binds both the evidence REPORTDATA and the sandbox token, so the token rides the
+issuance's existing freshness rather than a wall-clock of its own.
+
+**Residual trust.** The EAR proves the signing key lives in a TEE on an
+allowed measurement — the same granularity as the rest of the platform: on
+node-CVM every process in the measured node shares that measurement, so
+"came from nri-image-policy" ultimately rests on the measured node image
+running only the intended inventories (the honest-node assumption of
+[getcert-workload-binding.md](getcert-workload-binding.md), Corners 6–7).
+
+The live cross-check is the inventory itself: `GET /digests/{sandboxID}` answers
+the sorted, deduplicated image digests of every container currently tracked
+in that sandbox (404 for an unknown sandbox, `{"digests": []}` for a pod with
+none yet) — fed by NRI pod/container events on node-CVM and by kata-agent
+bundle admission in the guest.
 
 **Cross-implementation note.** Any non-Go verifier (e.g. `c8s-verify-js`) must
 reproduce these byte formats exactly to pin a config-claim: the SHA-384

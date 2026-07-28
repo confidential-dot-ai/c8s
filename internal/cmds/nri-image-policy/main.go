@@ -26,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -153,10 +154,14 @@ func Run(args []string) error {
 		pluginErrCh <- plugin.Run(ctx)
 	}()
 
-	if plugin.broker != nil {
+	if plugin.inventory != nil {
+		signer, err := sandboxTokenSigner(cfg, logger)
+		if err != nil {
+			return err
+		}
 		socketPath := filepath.Join(cfg.WorkloadClaims.SocketDir, workloadclaims.SocketName)
-		if err := startWorkloadClaimsBroker(ctx, logger, plugin.broker, socketPath); err != nil {
-			return fmt.Errorf("start workload-claims broker: %w", err)
+		if err := startAdmissionInventory(ctx, logger, plugin.inventory, socketPath, signer); err != nil {
+			return fmt.Errorf("start admission inventory: %w", err)
 		}
 	}
 
@@ -466,17 +471,41 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 	return nil
 }
 
-// startWorkloadClaimsBroker serves the node-CVM workload-claims broker on a
+// sandboxTokenSigner builds the inventory's sandbox-token signer over the same
+// RA-TLS CDS client config the allowlist pull uses; its EAR comes from CDS's
+// /attest-key. Without pull config there is no CDS to attest the key against,
+// so sandbox tokens are disabled (get-cert then issues without a sandbox ID).
+func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.SandboxTokenSigner, error) {
+	if !cfg.PullEnabled() {
+		logger.Warn("admission inventory has no CDS pull config; sandbox tokens disabled")
+		return nil, nil
+	}
+	httpClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox-token CDS client: %w", err)
+	}
+	cdsClient := attestclient.NewClientWithHTTP(cfg.Allowlist.Pull.URL, httpClient)
+	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
+	signer, err := workloadclaims.NewSandboxTokenSigner(func(ctx context.Context, pubDER []byte) (string, error) {
+		return cdsClient.AttestKey(ctx, attestationApiURL, pubDER)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox-token signer: %w", err)
+	}
+	return signer, nil
+}
+
+// startAdmissionInventory serves the node-CVM admission inventory on a
 // Unix socket (docs/ratls.md).
-func startWorkloadClaimsBroker(ctx context.Context, logger *slog.Logger, broker *workloadBroker, socketPath string) error {
-	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.BrokerSocketGID)
+func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, socketPath string, signer *workloadclaims.SandboxTokenSigner) error {
+	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.InventorySocketGID)
 	if err != nil {
 		return err
 	}
 	go func() {
-		logger.Info("starting workload-claims broker", "socket", socketPath)
-		if err := workloadclaims.Serve(ctx, l, broker); err != nil {
-			logger.Error("workload-claims broker error", "error", err)
+		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
+		if err := workloadclaims.Serve(ctx, l, inventory, signer); err != nil {
+			logger.Error("admission inventory error", "error", err)
 		}
 	}()
 	return nil

@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-func digestsOf(b *workloadBroker, pid int) ([]string, error) {
-	cs, err := b.ContainersForPeer(pid)
+func digestsOf(b *admissionInventory, pid int) ([]string, error) {
+	cs, err := b.ContainersForPeer(workloadclaims.PeerForPID(pid))
 	if err != nil {
 		return nil, err
 	}
@@ -56,11 +58,11 @@ func itoa(i int) string {
 	return string(b)
 }
 
-// TestBrokerResolvesPodAndExcludesInjected: a get-cert caller in pod P gets P's
+// TestInventoryResolvesPodAndExcludesInjected: a get-cert caller in pod P gets P's
 // app-container digests, excluding the injected sidecar and any other pod.
-func TestBrokerResolvesPodAndExcludesInjected(t *testing.T) {
+func TestInventoryResolvesPodAndExcludesInjected(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 
 	const (
 		pod1 = "sandbox-1"
@@ -88,9 +90,9 @@ func TestBrokerResolvesPodAndExcludesInjected(t *testing.T) {
 	}
 }
 
-func TestBrokerRejectsUntrackedAndZeroPID(t *testing.T) {
+func TestInventoryRejectsUntrackedAndZeroPID(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 	b.record(cidApp1, "sandbox-1", "app", digestApp)
 
 	if _, err := digestsOf(b, 0); err == nil {
@@ -103,12 +105,12 @@ func TestBrokerRejectsUntrackedAndZeroPID(t *testing.T) {
 }
 
 // The nesting attack (review finding #1): a caller in pod2 creates a child
-// cgroup named with pod1's app container ID. The broker must resolve the
+// cgroup named with pod1's app container ID. The inventory must resolve the
 // shallowest tracked container (pod2's own get-cert), NOT the nested pod1 ID,
 // so it returns pod2's digests — never pod1's.
-func TestBrokerRejectsNestedVictimCgroup(t *testing.T) {
+func TestInventoryRejectsNestedVictimCgroup(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 
 	const pod1, pod2 = "sandbox-1", "sandbox-2"
 	b.record(cidApp1, pod1, "app", digestApp) // victim's app in pod1
@@ -140,9 +142,9 @@ func TestBrokerRejectsNestedVictimCgroup(t *testing.T) {
 
 // An unresolved digest must fail the whole fetch: serving the siblings that did
 // resolve would pass a subset off as the pod's whole image set.
-func TestBrokerRefusesUnresolvedDigest(t *testing.T) {
+func TestInventoryRefusesUnresolvedDigest(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 
 	const pod1 = "sandbox-1"
 	b.record(cidGetCert, pod1, "c8s-cert", digestOther)
@@ -157,9 +159,9 @@ func TestBrokerRefusesUnresolvedDigest(t *testing.T) {
 
 // The sidecar is excluded from the claim, so its own digest never gates the
 // answer — otherwise a first issuance could not proceed.
-func TestBrokerIgnoresUnresolvedInjectedDigest(t *testing.T) {
+func TestInventoryIgnoresUnresolvedInjectedDigest(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 
 	const pod1 = "sandbox-1"
 	b.record(cidGetCert, pod1, "c8s-cert", "")
@@ -175,9 +177,9 @@ func TestBrokerIgnoresUnresolvedInjectedDigest(t *testing.T) {
 	}
 }
 
-func TestBrokerEvicts(t *testing.T) {
+func TestInventoryEvicts(t *testing.T) {
 	procRoot := t.TempDir()
-	b := newWorkloadBroker(procRoot)
+	b := newAdmissionInventory(procRoot)
 	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
 	b.record(cidApp1, "sandbox-1", "app", digestApp)
 	writeCgroup(t, procRoot, 77, cidGetCert)
@@ -189,5 +191,105 @@ func TestBrokerEvicts(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("evicted digest still served: %v", got)
+	}
+}
+
+// SandboxForPeer binds the caller the same way ContainersForPeer does: kernel
+// PID → cgroup → tracked container → its sandbox. An untracked caller fails.
+func TestInventorySandboxForPeer(t *testing.T) {
+	procRoot := t.TempDir()
+	b := newAdmissionInventory(procRoot)
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
+	writeCgroup(t, procRoot, 4242, cidGetCert)
+
+	got, err := b.SandboxForPeer(workloadclaims.PeerForPID(4242))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sandbox-1" {
+		t.Fatalf("sandbox = %q, want sandbox-1", got)
+	}
+
+	writeCgroup(t, procRoot, 55, cidOther)
+	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(55)); err == nil {
+		t.Fatal("untracked caller resolved to a sandbox")
+	}
+	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(0)); err == nil {
+		t.Fatal("peer pid 0 accepted")
+	}
+}
+
+func TestInventoryDigestsForSandbox(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+
+	if _, known, err := b.DigestsForSandbox("nope"); err != nil || known {
+		t.Fatalf("unknown sandbox: known=%v err=%v, want known=false", known, err)
+	}
+
+	// A known sandbox with no containers answers an empty inventory.
+	b.recordSandbox("sandbox-empty")
+	got, known, err := b.DigestsForSandbox("sandbox-empty")
+	if err != nil || !known {
+		t.Fatalf("empty sandbox: known=%v err=%v", known, err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("digests = %v, want none", got)
+	}
+
+	// The inventory includes injected containers, deduplicates, and sorts.
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
+	b.record(cidApp1, "sandbox-1", "app", digestApp)
+	b.record(cidApp2, "sandbox-1", "worker", digestApp)
+	b.record(cidOther, "sandbox-2", "app", digestApp2)
+	got, known, err = b.DigestsForSandbox("sandbox-1")
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if want := []string{digestOther, digestApp}; !slices.Equal(got, slicesSorted(want)) {
+		t.Fatalf("digests = %v, want %v (sorted, deduped, sidecar included, no sandbox-2)", got, slicesSorted(want))
+	}
+}
+
+func slicesSorted(in []string) []string {
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return out
+}
+
+// An unresolved digest fails the whole inventory rather than serve a subset —
+// the same rule ContainersForPeer applies, with no injected exemption: the
+// inventory covers every running container.
+func TestInventoryDigestsForSandboxRefusesUnresolved(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", "")
+	b.record(cidApp1, "sandbox-1", "app", digestApp)
+
+	if _, _, err := b.DigestsForSandbox("sandbox-1"); err == nil {
+		t.Fatal("served a subset of the sandbox inventory")
+	}
+}
+
+// removeSandbox evicts the sandbox and its containers; recording a container
+// alone (no pod event) still makes its sandbox known.
+func TestInventorySandboxLifecycle(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+
+	b.record(cidApp1, "sandbox-1", "app", digestApp)
+	if _, known, _ := b.DigestsForSandbox("sandbox-1"); !known {
+		t.Fatal("recorded container did not imply its sandbox")
+	}
+
+	b.record(cidOther, "sandbox-2", "app", digestApp2)
+	b.removeSandbox("sandbox-1")
+	if _, known, _ := b.DigestsForSandbox("sandbox-1"); known {
+		t.Fatal("removed sandbox still known")
+	}
+	got, known, err := b.DigestsForSandbox("sandbox-2")
+	if err != nil || !known || !slices.Equal(got, []string{digestApp2}) {
+		t.Fatalf("sandbox-2 after removing sandbox-1: %v %v %v", got, known, err)
+	}
+	// sandbox-1's containers went with it.
+	if len(b.containers) != 1 {
+		t.Fatalf("containers = %v, want only sandbox-2's", b.containers)
 	}
 }

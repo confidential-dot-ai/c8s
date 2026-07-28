@@ -33,6 +33,15 @@ type AttestRequestBody struct {
 	// digest is allowlisted, then issues.
 	InitContainerDigests []string `json:"init_container_digests,omitempty"`
 	ContainerDigests     []string `json:"container_digests,omitempty"`
+
+	// SandboxToken is the inventory-signed sandbox identity of the requesting
+	// pod (workloadclaims.SignedSandboxToken as JSON): its CRI sandbox ID
+	// bound to the requester's CSR key within a bounded window, signed by a
+	// inventory key CDS attested via /attest-key. CDS verifies the token and
+	// stamps the sandbox ID into the leaf (ratls.OIDSandboxID) —
+	// docs/ratls.md, "Sandbox identity". Kept opaque here (types must not
+	// import workloadclaims).
+	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
 }
 
 // AttestKeyRequestBody is the request body for POST /attest-key. Used by

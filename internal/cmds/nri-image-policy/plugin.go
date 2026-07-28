@@ -100,8 +100,12 @@ type plugin struct {
 	logger   *slog.Logger
 	ready    atomic.Bool
 
-	// broker serves the workload-claims flow (docs/ratls.md).
-	broker *workloadBroker
+	// inventory serves the workload-claims flow (docs/ratls.md). nil ⇔ the flow
+	// is disabled (no workload_claims.socket_dir) — configuration, not a
+	// fault: Configure then leaves the inventory-feeding events unsubscribed,
+	// and the nil-guarded hooks/seeding no-op rather than fail a container
+	// lifecycle callback over bookkeeping.
+	inventory *admissionInventory
 
 	// Deferred check: pods/containers observed during Synchronize before
 	// the plugin is ready, replayed once the cache has a allowlist.
@@ -129,7 +133,7 @@ func newPlugin(
 		if procRoot == "" {
 			procRoot = "/proc"
 		}
-		p.broker = newWorkloadBroker(procRoot)
+		p.inventory = newAdmissionInventory(procRoot)
 	}
 
 	// Check if running as pre-installed plugin (containerd sets these env vars)
@@ -189,30 +193,52 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 
 	var mask api.EventMask
 	mask.Set(api.Event_CREATE_CONTAINER)
-	if p.broker != nil {
-		// The broker needs eviction on stop to stay correct across pod churn.
+	if p.inventory != nil {
+		// The inventory needs eviction on stop to stay correct across pod churn,
+		// and the pod-sandbox lifecycle to keep its sandbox set (the /sandbox
+		// and /digests routes) live.
 		mask.Set(api.Event_REMOVE_CONTAINER)
+		mask.Set(api.Event_RUN_POD_SANDBOX)
+		mask.Set(api.Event_REMOVE_POD_SANDBOX)
 	}
 	return mask, nil
 }
 
-// RemoveContainer evicts a stopped container from the workload-claims broker.
-// Only subscribed when the broker is enabled (see Configure).
+// RemoveContainer evicts a stopped container from the admission inventory.
+// Only subscribed when the inventory is enabled (see Configure).
 func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
-	if p.broker != nil {
-		p.broker.remove(ctr.GetId())
+	if p.inventory != nil {
+		p.inventory.remove(ctr.GetId())
 	}
 	return nil
 }
 
-// recordForBroker resolves a container's admitted image digest and records it
-// for the workload-claims broker. A resolve failure records an empty digest,
-// which makes the broker refuse the pod's whole answer rather than commit a
+// RunPodSandbox records a started pod sandbox for the inventory's sandbox set.
+// Only subscribed when the inventory is enabled (see Configure).
+func (p *plugin) RunPodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	if p.inventory != nil {
+		p.inventory.recordSandbox(pod.GetId())
+	}
+	return nil
+}
+
+// RemovePodSandbox evicts a removed pod sandbox (and its containers) from the
+// inventory. Only subscribed when the inventory is enabled (see Configure).
+func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	if p.inventory != nil {
+		p.inventory.removeSandbox(pod.GetId())
+	}
+	return nil
+}
+
+// recordForInventory resolves a container's admitted image digest and records it
+// for the admission inventory. A resolve failure records an empty digest,
+// which makes the inventory refuse the pod's whole answer rather than commit a
 // subset — fail-closed, and logged at error because it costs the pod its
 // claim. It never blocks the create path: admission already decided the
 // container.
-func (p *plugin) recordForBroker(ctx context.Context, ctr *api.Container, imageRef string) {
-	if p.broker == nil {
+func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) {
+	if p.inventory == nil {
 		return
 	}
 	digest := extractDigest(imageRef)
@@ -223,7 +249,7 @@ func (p *plugin) recordForBroker(ctx context.Context, ctr *api.Container, imageR
 			p.logger.Error("workload-claims: cannot resolve admitted image digest; container will be absent from the workload claim", "image", imageRef, "error", err)
 		}
 	}
-	p.broker.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)
+	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)
 }
 
 // evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.
@@ -381,16 +407,24 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 }
 
 // shouldCheckExisting reports whether the startup check has work — enforcement,
-// broker recovery, or both. See docs/getcert-workload-binding.md, Corner 4.
+// inventory recovery, or both. See docs/getcert-workload-binding.md, Corner 4.
 func (p *plugin) shouldCheckExisting() bool {
-	return p.cfg.Policy.EnforceExisting || p.broker != nil
+	return p.cfg.Policy.EnforceExisting || p.inventory != nil
 }
 
 // Synchronize is called when the plugin connects to containerd. It checks all
 // existing containers against the allowlist, records the admitted ones for the
-// broker, and kills violations when enforce_existing is set.
+// inventory, and kills violations when enforce_existing is set.
 func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
 	cfg := p.cfg
+
+	// Seed the inventory's sandbox set now, even when the container check is
+	// deferred: sandbox existence needs no allowlist.
+	if p.inventory != nil {
+		for _, pod := range pods {
+			p.inventory.recordSandbox(pod.GetId())
+		}
+	}
 
 	if !p.shouldCheckExisting() {
 		p.logger.Info("startup check disabled", "pods", len(pods), "containers", len(ctrs))
@@ -413,7 +447,7 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 }
 
 // checkExisting checks all existing containers against the allowlist, records
-// the admitted ones for the broker, and kills violations when enforce_existing
+// the admitted ones for the inventory, and kills violations when enforce_existing
 // is set.
 func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.PodSandbox, ctrs []*api.Container) {
 	p.logger.Info("checking existing containers",
@@ -448,7 +482,7 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 			if imgVerdict == verdictDeny {
 				denied = true
 			} else {
-				p.recordForBroker(ctx, ctr, imageRef)
+				p.recordForInventory(ctx, ctr, imageRef)
 			}
 		}
 
@@ -456,7 +490,7 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 			continue
 		}
 
-		// enforce_existing off: the check only feeds the broker.
+		// enforce_existing off: the check only feeds the inventory.
 		if cfg.Policy.Mode == ModeAudit || !cfg.Policy.EnforceExisting {
 			continue
 		}
@@ -565,8 +599,8 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 			}
 			return nil, nil, fmt.Errorf("%s", reason)
 		}
-		// Admitted: record for the workload-claims broker.
-		p.recordForBroker(ctx, ctr, imageRef)
+		// Admitted: record for the admission inventory.
+		p.recordForInventory(ctx, ctr, imageRef)
 	}
 
 	return nil, nil, nil

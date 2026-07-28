@@ -633,26 +633,26 @@ failed to carry the stock params forward would drop load-bearing boot args
 ad-hoc params, keep the puller's preservation, and don't trust manual config
 edits to land until this is root-caused on a live sandbox.
 
-## Workload-claims broker socket: group must be reachable by the non-root sidecar
+## Admission inventory socket: group must be reachable by the non-root sidecar
 
-`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `BrokerSocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
+`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `InventorySocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
 
-The broker runs as root (nri-image-policy is a containerd-launched NRI plugin),
+The inventory runs as root (nri-image-policy is a containerd-launched NRI plugin),
 so its Unix socket is created `root:root`. get-cert connects as the non-root
 sidecar (UID/GID 65532) over a **read-only** mount. A `root:root 0660` socket is
 unreachable by that caller — `connect()` needs write permission on the socket
-node — and get-cert is **fail-closed** on a broker error, so the pod hangs
+node — and get-cert is **fail-closed** on an inventory error, so the pod hangs
 forever on its initial cert (`c8s-cert-wait` never passes). It is a silent,
 node-wide brick of every `cw` pod, not a graceful degradation.
 
 The socket must therefore be group-owned by a GID the sidecar carries: `ListenUnix`
-chgrps it to `BrokerSocketGID` and the webhook injects that same GID as a pod
+chgrps it to `InventorySocketGID` and the webhook injects that same GID as a pod
 `SupplementalGroups` entry. **The two must stay equal** — they share the one
 constant, so change it in one place only. Do not "fix" a connect failure by
-relaxing fail-closed (broker error ⇒ issue claim-free): that hands an attacker
-who blocks the broker exactly the claim-free cert fail-closed exists to deny.
+relaxing fail-closed (inventory error ⇒ issue claim-free): that hands an attacker
+who blocks the inventory exactly the claim-free cert fail-closed exists to deny.
 Connecting to a socket is exempt from the read-only-mount write block (sockets
 are not regular files), so the RO mount still prevents a socket-file swap
-without blocking the connect. The same-process broker unit tests cannot catch
+without blocking the connect. The same-process inventory unit tests cannot catch
 this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
-`TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.
+`TestWorkloadClaims_InjectsInventorySupplementalGroup` guard the two halves.

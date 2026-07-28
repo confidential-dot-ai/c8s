@@ -179,6 +179,9 @@ provisioning guides is at
   TDX host for pod-as-CVM, or SEV-SNP / TDX confidential VMs as nodes for
   node-as-CVM
   (see the [CVM setup guide](https://confidential.ai/docs/c8s/tutorials/azure-e2e)).
+  Node kernels must be recent enough for the TEE (AMD SEV-SNP ≥ 6.11, Intel TDX
+  ≥ 6.16), which also satisfies the Linux ≥ 6.5 `SO_PEERPIDFD` the admission
+  inventory relies on — see [docs/QUICKSTART.md](docs/QUICKSTART.md).
 - Helm 3, `kubectl`, and `crane` on PATH.
 - Go 1.26+ to build the CLI.
 

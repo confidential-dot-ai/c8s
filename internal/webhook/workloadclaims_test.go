@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// The broker excludes the webhook-injected sidecars from the workload digest
+// The inventory excludes the webhook-injected sidecars from the workload digest
 // by name (workloadclaims.ReservedInjectedNames). Those names are defined
 // independently from the webhook's own reserved-name constants, and nothing
 // couples them: a rename here that misses the other side would silently let an
@@ -41,10 +41,10 @@ func findVolume(pod *corev1.Pod, name string) *corev1.Volume {
 	return nil
 }
 
-// node-CVM (broker + host dir): the webhook injects --workload-claims-broker
+// node-CVM (inventory + host dir): the webhook injects --workload-claims
 // plus a read-only hostPath mount of the socket directory into the c8s-cert
 // sidecar, so get-cert dials the mounted socket over its compiled path.
-func TestWorkloadClaims_NodeCVMMountsBrokerSocket(t *testing.T) {
+func TestWorkloadClaims_NodeCVMMountsInventorySocket(t *testing.T) {
 	pod := newInjectablePod()
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "img",
@@ -55,12 +55,12 @@ func TestWorkloadClaims_NodeCVMMountsBrokerSocket(t *testing.T) {
 	})
 
 	cert := pod.Spec.InitContainers[0]
-	if !hasArg(cert.Args, "--workload-claims-broker") {
-		t.Fatalf("c8s-cert missing workload-claims-broker flag: %v", cert.Args)
+	if !hasArg(cert.Args, "--workload-claims") {
+		t.Fatalf("c8s-cert missing workload-claims flag: %v", cert.Args)
 	}
 	vol := findVolume(pod, workloadClaimsVolumeName)
 	if vol == nil || vol.HostPath == nil || vol.HostPath.Path != "/var/run/nri-image-policy" {
-		t.Fatalf("broker hostPath volume missing or wrong: %#v", vol)
+		t.Fatalf("inventory hostPath volume missing or wrong: %#v", vol)
 	}
 	var mount *corev1.VolumeMount
 	for i := range cert.VolumeMounts {
@@ -69,13 +69,13 @@ func TestWorkloadClaims_NodeCVMMountsBrokerSocket(t *testing.T) {
 		}
 	}
 	if mount == nil || !mount.ReadOnly || mount.MountPath != workloadclaims.SidecarSocketDir {
-		t.Fatalf("broker socket mount missing/writable/wrong path: %#v", mount)
+		t.Fatalf("inventory socket mount missing/writable/wrong path: %#v", mount)
 	}
 }
 
 // The webhook passes the pod's own init-container names so get-cert can split
-// the broker's containers by role — and only the user's init containers, not
-// the c8s-injected ones (which the broker excludes anyway).
+// the inventory's containers by role — and only the user's init containers, not
+// the c8s-injected ones (which the inventory excludes anyway).
 func TestWorkloadClaims_PassesInitContainerNames(t *testing.T) {
 	pod := newInjectablePod()
 	pod.Spec.InitContainers = []corev1.Container{{Name: "setup"}, {Name: "migrate"}}
@@ -102,8 +102,8 @@ func TestWorkloadClaims_PassesInitContainerNames(t *testing.T) {
 }
 
 // No host dir (default, and the not-yet-wired kata path): the webhook injects
-// neither the broker flag nor a mount, so get-cert issues claim-free.
-func TestWorkloadClaims_NoHostDirNoBroker(t *testing.T) {
+// neither the inventory flag nor a mount, so get-cert issues claim-free.
+func TestWorkloadClaims_NoHostDirNoInventory(t *testing.T) {
 	pod := newInjectablePod()
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:      "img",
@@ -112,25 +112,25 @@ func TestWorkloadClaims_NoHostDirNoBroker(t *testing.T) {
 		CertDir:           "/etc/c8s/certs",
 	})
 	cert := pod.Spec.InitContainers[0]
-	if hasArg(cert.Args, "--workload-claims-broker") {
-		t.Fatalf("unexpected workload-claims-broker flag: %v", cert.Args)
+	if hasArg(cert.Args, "--workload-claims") {
+		t.Fatalf("unexpected workload-claims flag: %v", cert.Args)
 	}
 	if findVolume(pod, workloadClaimsVolumeName) != nil {
-		t.Fatal("no broker volume expected when disabled")
+		t.Fatal("no inventory volume expected when disabled")
 	}
 	if pod.Spec.SecurityContext != nil {
 		for _, g := range pod.Spec.SecurityContext.SupplementalGroups {
-			if g == workloadclaims.BrokerSocketGID {
-				t.Fatal("broker supplemental group injected without workload-claims enabled")
+			if g == workloadclaims.InventorySocketGID {
+				t.Fatal("inventory supplemental group injected without workload-claims enabled")
 			}
 		}
 	}
 }
 
-// The broker socket is group-owned (BrokerSocketGID); the non-root sidecar can
+// The inventory socket is group-owned (InventorySocketGID); the non-root sidecar can
 // only reach it if the pod carries that supplemental group. Without it, connect
 // fails closed and the pod hangs on its initial cert.
-func TestWorkloadClaims_InjectsBrokerSupplementalGroup(t *testing.T) {
+func TestWorkloadClaims_InjectsInventorySupplementalGroup(t *testing.T) {
 	pod := newInjectablePod()
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage:          "img",
@@ -144,11 +144,11 @@ func TestWorkloadClaims_InjectsBrokerSupplementalGroup(t *testing.T) {
 	}
 	found := false
 	for _, g := range pod.Spec.SecurityContext.SupplementalGroups {
-		if g == workloadclaims.BrokerSocketGID {
+		if g == workloadclaims.InventorySocketGID {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("pod missing broker supplemental group %d: %v", workloadclaims.BrokerSocketGID, pod.Spec.SecurityContext.SupplementalGroups)
+		t.Fatalf("pod missing inventory supplemental group %d: %v", workloadclaims.InventorySocketGID, pod.Spec.SecurityContext.SupplementalGroups)
 	}
 }
