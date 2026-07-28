@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func digestsOf(b *admissionInventory, pid int) ([]string, error) {
-	cs, err := b.ContainersForPeer(pid)
+	cs, err := b.ContainersForPeer(workloadclaims.PeerForPID(pid))
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +202,7 @@ func TestInventorySandboxForPeer(t *testing.T) {
 	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
 	writeCgroup(t, procRoot, 4242, cidGetCert)
 
-	got, err := b.SandboxForPeer(4242)
+	got, err := b.SandboxForPeer(workloadclaims.PeerForPID(4242))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,10 +211,10 @@ func TestInventorySandboxForPeer(t *testing.T) {
 	}
 
 	writeCgroup(t, procRoot, 55, cidOther)
-	if _, err := b.SandboxForPeer(55); err == nil {
+	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(55)); err == nil {
 		t.Fatal("untracked caller resolved to a sandbox")
 	}
-	if _, err := b.SandboxForPeer(0); err == nil {
+	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(0)); err == nil {
 		t.Fatal("peer pid 0 accepted")
 	}
 }

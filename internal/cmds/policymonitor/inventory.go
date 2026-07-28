@@ -74,7 +74,7 @@ func (b *admissionInventory) recordSandboxID(id string) {
 // ContainersForPeer returns every admitted, non-injected container in the
 // guest's single pod. The peer PID is ignored: the guest boundary is the
 // isolation, so there is nothing to bind the caller to.
-func (b *admissionInventory) ContainersForPeer(_ int) ([]workloadclaims.Container, error) {
+func (b *admissionInventory) ContainersForPeer(_ workloadclaims.Peer) ([]workloadclaims.Container, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	out := make([]workloadclaims.Container, 0, len(b.containers))
@@ -90,7 +90,7 @@ func (b *admissionInventory) ContainersForPeer(_ int) ([]workloadclaims.Containe
 // SandboxForPeer returns the guest pod's sandbox ID; the peer PID is ignored
 // (single pod). Fails until a container has been observed, so a too-early
 // token request fails closed instead of naming an empty sandbox.
-func (b *admissionInventory) SandboxForPeer(_ int) (string, error) {
+func (b *admissionInventory) SandboxForPeer(_ workloadclaims.Peer) (string, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.sandboxID == "" {

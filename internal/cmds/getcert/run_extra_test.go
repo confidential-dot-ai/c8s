@@ -59,7 +59,7 @@ type fakeResolver struct {
 	err        error
 }
 
-func (f fakeResolver) ContainersForPeer(int) ([]workloadclaims.Container, error) {
+func (f fakeResolver) ContainersForPeer(workloadclaims.Peer) ([]workloadclaims.Container, error) {
 	return f.containers, f.err
 }
 

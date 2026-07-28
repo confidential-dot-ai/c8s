@@ -263,12 +263,14 @@ func VerifyWorkloadDigest(claimsDER []byte, initImages, mainImages []string) (*r
 }
 
 // Resolver answers "which admitted, non-injected containers belong to the pod
-// of the calling process". peerPID is the kernel-reported PID of the caller
-// (SO_PEERCRED) — the caller never names its own pod. The node-CVM resolver
-// binds peerPID to a pod; the kata resolver ignores it, since the guest holds
-// exactly one pod and no disambiguation is needed.
+// of the calling process". peer carries the kernel-pinned caller identity
+// (SO_PEERCRED PID plus an SO_PEERPIDFD liveness pin) — the caller never names
+// its own pod. The node-CVM resolver binds peer.PID() to a pod and rechecks
+// peer.IsAlive() after its /proc read to reject PID reuse; the kata resolver
+// ignores it, since the guest holds exactly one pod and no disambiguation is
+// needed.
 type Resolver interface {
-	ContainersForPeer(peerPID int) ([]Container, error)
+	ContainersForPeer(peer Peer) ([]Container, error)
 }
 
 // SandboxResolver is the sandbox-identity surface an inventory additionally
@@ -280,7 +282,7 @@ type Resolver interface {
 type SandboxResolver interface {
 	// SandboxForPeer returns the pod sandbox ID of the calling process,
 	// bound by kernel peer credentials exactly like ContainersForPeer.
-	SandboxForPeer(peerPID int) (string, error)
+	SandboxForPeer(peer Peer) (string, error)
 	// DigestsForSandbox returns the deduplicated image digests of the named
 	// sandbox's tracked containers. known=false means no such sandbox (a 404
 	// on the wire); a known sandbox with no containers returns an empty slice.
@@ -290,6 +292,13 @@ type SandboxResolver interface {
 // connKey carries the accepted net.Conn through the request context so the
 // handler can read kernel peer credentials from it.
 type connKey struct{}
+
+// peerFromRequest pins the caller of an inventory request. The returned Peer's
+// pidfd must be released with Close once resolution is done.
+func peerFromRequest(r *http.Request) Peer {
+	conn, _ := r.Context().Value(connKey{}).(net.Conn)
+	return peerFrom(conn)
+}
 
 // maxSandboxRequestBytes bounds a SandboxPath request body; it carries one
 // PKIX public key.
@@ -304,8 +313,9 @@ const maxSandboxRequestBytes = 64 << 10
 func Serve(ctx context.Context, l net.Listener, resolver Resolver, signer *SandboxTokenSigner) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+DigestsPath, func(w http.ResponseWriter, r *http.Request) {
-		conn, _ := r.Context().Value(connKey{}).(net.Conn)
-		containers, err := resolver.ContainersForPeer(peerPID(conn))
+		peer := peerFromRequest(r)
+		defer peer.Close()
+		containers, err := resolver.ContainersForPeer(peer)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("resolve caller pod: %v", err), http.StatusInternalServerError)
 			return
@@ -336,8 +346,9 @@ func Serve(ctx context.Context, l net.Listener, resolver Resolver, signer *Sandb
 					http.Error(w, "missing challenge nonce", http.StatusBadRequest)
 					return
 				}
-				conn, _ := r.Context().Value(connKey{}).(net.Conn)
-				id, err := sandboxes.SandboxForPeer(peerPID(conn))
+				peer := peerFromRequest(r)
+				defer peer.Close()
+				id, err := sandboxes.SandboxForPeer(peer)
 				if err != nil {
 					http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
 					return
