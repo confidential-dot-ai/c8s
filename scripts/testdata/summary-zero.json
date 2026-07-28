@@ -1,0 +1,17 @@
+{
+  "go_module": "probe",
+  "files": [],
+  "test_efficacy": 0,
+  "mutations_coverage": 0,
+  "mutants_total": 0,
+  "mutants_killed": 0,
+  "mutants_lived": 0,
+  "mutants_not_viable": 0,
+  "mutants_not_covered": 0,
+  "elapsed_time": 0.683288292,
+  "mutator_statistics": {
+    "arithmetic_base": 1,
+    "conditionals_negation": 1,
+    "conditionals_boundary": 1
+  }
+}

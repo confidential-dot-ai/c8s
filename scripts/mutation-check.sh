@@ -6,6 +6,7 @@
 #                                                    write <out>.json and <out>.log
 #   scripts/mutation-check.sh full [out]             mutate every covered mutant (slow)
 #   scripts/mutation-check.sh summary [out]          print markdown summary from <out>.json
+#   scripts/mutation-check.sh selftest               check summary against scripts/testdata fixtures
 #   scripts/mutation-check.sh ci <base-ref>          run + summary >> GITHUB_STEP_SUMMARY,
 #                                                    always exit 0 (advisory)
 #
@@ -59,6 +60,19 @@ summary() { # $1=out-prefix
   fi
 }
 
+selftest() { # summary must handle survivors, zero mutants, and a missing report
+  local dir out
+  dir="$(dirname "$0")/testdata"
+  out="$(summary "$dir/summary-sample")"
+  echo "$out" | grep -q -- "- Test efficacy: 33.3%" || { echo "selftest: efficacy line wrong" >&2; return 1; }
+  echo "$out" | grep -q "LIVED" || { echo "selftest: survivor list missing" >&2; return 1; }
+  out="$(summary "$dir/summary-zero")"
+  echo "$out" | grep -q "No mutants generated" || { echo "selftest: zero-mutant path wrong" >&2; return 1; }
+  out="$(summary "$dir/no-such-report")"
+  echo "$out" | grep -q "No report produced" || { echo "selftest: missing-report path wrong" >&2; return 1; }
+  echo "selftest ok"
+}
+
 case "$cmd" in
 run)
   run_mutation "${2:?base ref required}" "${3:-mutation}"
@@ -69,6 +83,9 @@ full)
 summary)
   summary "${2:-mutation}"
   ;;
+selftest)
+  selftest
+  ;;
 ci)
   # Advisory end to end: report to the step summary, never fail the job.
   run_mutation "${2:?base ref required}" mutation \
@@ -76,7 +93,7 @@ ci)
   summary mutation >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
   ;;
 *)
-  echo "usage: $0 {run <base-ref> [out]|full [out]|summary [out]|ci <base-ref>}" >&2
+  echo "usage: $0 {run <base-ref> [out]|full [out]|summary [out]|selftest|ci <base-ref>}" >&2
   exit 2
   ;;
 esac

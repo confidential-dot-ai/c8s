@@ -15,6 +15,7 @@ on:
       - "internal/helmchart/c8s/**"
       - "scripts/coverage-gate.sh"
       - "scripts/mutation-check.sh"
+      - "scripts/testdata/**"
       - ".gremlins.yaml"
       - ".github/workflows/ci.yml"
   pull_request:
@@ -68,6 +69,11 @@ jobs:
 
       - name: Test
         run: make test
+
+      # The advisory mutation job only exercises the 0-mutant path on
+      # script-only diffs; this guards the summary paths it skips.
+      - name: mutation-check selftest
+        run: ./scripts/mutation-check.sh selftest
 
   coverage:
     name: Coverage gate
