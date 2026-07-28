@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -73,6 +74,24 @@ func TestEvidenceFromCertFoldsClaims(t *testing.T) {
 	}
 	if bytes.Equal(ev.erd, plain[:48]) {
 		t.Fatal("erd ignored the claims extension")
+	}
+}
+
+// A cert with no config-claims extension must not report one: no claims, no
+// claims parse error, and a binding note that does not mention the extension.
+func TestEvidenceFromCertWithoutClaims(t *testing.T) {
+	ev, err := evidenceFromCert(claimsCert(t, nil), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.configClaims != nil {
+		t.Fatalf("configClaims = %+v, want nil for a claims-free cert", ev.configClaims)
+	}
+	if ev.claimsErr != nil {
+		t.Fatalf("claimsErr = %v, want nil for a claims-free cert", ev.claimsErr)
+	}
+	if strings.Contains(ev.bindingNote, "config-claims") {
+		t.Fatalf("binding note claims a config-claims extension the cert does not carry: %q", ev.bindingNote)
 	}
 }
 
@@ -158,6 +177,8 @@ func TestExpectedSeedDigestFlags(t *testing.T) {
 	}
 	if _, err := expectedSeedDigest(config{allowlistSeedDigest: "abcd"}); err == nil {
 		t.Fatal("wrong-length hex digest accepted")
+	} else if !strings.Contains(err.Error(), "64 hex chars") {
+		t.Fatalf("wrong-length error must state the expected 64 hex chars, got: %v", err)
 	}
 	digest, err := expectedSeedDigest(config{allowlistSeedDigest: "sha256:" + hex.EncodeToString(bytes.Repeat([]byte{0xAB}, 32))})
 	if err != nil || !bytes.Equal(digest, bytes.Repeat([]byte{0xAB}, 32)) {

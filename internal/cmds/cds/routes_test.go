@@ -388,6 +388,7 @@ func TestReadinessFn(t *testing.T) {
 		{"CA already expired", healthyService, expiredCA, time.Hour, false},
 		{"nil CA", healthyService, nil, time.Hour, false},
 		{"zero window disables CA check", healthyService, expiringCA, 0, true},
+		{"zero window disables CA check even when expired", healthyService, expiredCA, 0, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

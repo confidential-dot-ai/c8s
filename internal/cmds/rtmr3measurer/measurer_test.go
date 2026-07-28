@@ -281,6 +281,7 @@ func TestNormalizeDigest(t *testing.T) {
 		{in: hexA, want: hexA},
 		{in: "SHA256:" + hexA, want: hexA},
 		{in: "  sha256:" + hexA + "  ", want: hexA},
+		{in: "@sha256:" + hexA, want: hexA},
 		{in: "ghcr.io/confidential-dot-ai/app:latest", wantErr: true},
 		{in: "sha256:tooshort", wantErr: true},
 		{in: "", wantErr: true},

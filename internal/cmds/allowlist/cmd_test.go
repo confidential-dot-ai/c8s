@@ -2,6 +2,7 @@ package allowlist
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,6 +10,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +19,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+	"github.com/spf13/cobra"
+
+	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -358,6 +366,104 @@ func repeat(s string, n int) string {
 		out = append(out, s[0])
 	}
 	return string(out)
+}
+
+// stubVerify approves everything; the paths under test never reach it.
+func stubVerify(context.Context, string, json.RawMessage, localverify.Params) (*teetypes.VerificationResult, error) {
+	return &teetypes.VerificationResult{}, nil
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what
+// was written.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = old
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// A target serving no discovery document falls back to direct RA-TLS
+// verification with a usable client, not an error and not a nil client.
+func TestHTTPSClientFallsBackWithoutDiscovery(t *testing.T) {
+	o := &options{url: "https://127.0.0.1:1", timeout: 2 * time.Second, verify: stubVerify}
+	hc, err := o.httpsClient(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("httpsClient: %v", err)
+	}
+	if hc == nil {
+		t.Fatal("fallback RA-TLS client is nil")
+	}
+}
+
+func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
+	const warning = "no --measurements set"
+	base := options{url: "https://127.0.0.1:1", timeout: 2 * time.Second, verify: stubVerify, output: "text"}
+
+	t.Run("unpinned warns", func(t *testing.T) {
+		o := base
+		out := captureStderr(t, func() {
+			if _, err := o.client(context.Background()); err != nil {
+				t.Errorf("client: %v", err)
+			}
+		})
+		if !strings.Contains(out, warning) {
+			t.Fatalf("stderr = %q, want the unpinned-measurements warning", out)
+		}
+	})
+
+	t.Run("pinned does not warn", func(t *testing.T) {
+		o := base
+		o.measurements = []string{strings.Repeat("ab", 48)}
+		out := captureStderr(t, func() {
+			if _, err := o.client(context.Background()); err != nil {
+				t.Errorf("client: %v", err)
+			}
+		})
+		if strings.Contains(out, warning) {
+			t.Fatalf("stderr = %q, warned despite pinned measurements", out)
+		}
+	})
+}
+
+// uploadImageLabels keys every gathered image under sequential synthetic keys.
+func TestUploadImageLabelsSequentialKeys(t *testing.T) {
+	al := &pkgallowlist.Allowlist{
+		Schema:  pkgallowlist.Schema,
+		Digests: map[string]string{digA: "floor-img"},
+		Workloads: map[string]pkgallowlist.Workload{"web": {
+			Label:          "label-img",
+			InitContainers: []pkgallowlist.Container{{Digest: mustDigest(t, digB), Image: "init-img"}},
+			Containers:     []pkgallowlist.Container{{Digest: mustDigest(t, digC), Image: "main-img"}},
+		}},
+	}
+	want := map[string]string{"0": "floor-img", "1": "label-img", "2": "init-img", "3": "main-img"}
+	if got := uploadImageLabels(al); !maps.Equal(got, want) {
+		t.Fatalf("uploadImageLabels = %#v, want %#v", got, want)
+	}
+}
+
+type ctxTestKey struct{}
+
+func TestCtxPrefersCommandContext(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.WithValue(context.Background(), ctxTestKey{}, "v"))
+	if got := ctx(cmd); got.Value(ctxTestKey{}) != "v" {
+		t.Fatal("ctx did not return the command's own context")
+	}
+	if got := ctx(&cobra.Command{}); got == nil {
+		t.Fatal("ctx returned nil for a command without a context")
+	}
 }
 
 // guard against accidental duplicate flag registration panics.

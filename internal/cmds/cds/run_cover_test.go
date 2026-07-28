@@ -1,13 +1,18 @@
 package cds
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +22,16 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// writeOperatorKeysPEM writes a PEM bundle with one EC public key and returns
-// its path.
-func writeOperatorKeysPEM(t *testing.T) string {
+// writeOperatorKeyPair generates an operator EC key, writes the public half as
+// a PEM bundle, and returns the private key plus the bundle path.
+func writeOperatorKeyPair(t *testing.T) (*ecdsa.PrivateKey, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -36,6 +46,14 @@ func writeOperatorKeysPEM(t *testing.T) string {
 	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
 		t.Fatalf("write operator keys: %v", err)
 	}
+	return key, path
+}
+
+// writeOperatorKeysPEM writes a PEM bundle with one EC public key and returns
+// its path.
+func writeOperatorKeysPEM(t *testing.T) string {
+	t.Helper()
+	_, path := writeOperatorKeyPair(t)
 	return path
 }
 
@@ -283,6 +301,252 @@ func TestRun_ServesAndShutsDownOnSIGTERM(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("run() did not shut down after SIGTERM")
+	}
+}
+
+// startRunServer launches run(cfg) in the background, waits for /healthz, and
+// registers a cleanup that SIGTERMs the process and requires a clean exit.
+func startRunServer(t *testing.T, cfg config) string {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(cfg) }()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.port)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("cds never became healthy")
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("run() exited early: %v", err)
+		default:
+		}
+		resp, err := http.Get(base + "/healthz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Cleanup(func() {
+		if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatalf("send SIGTERM: %v", err)
+		}
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("run() returned error on shutdown: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("run() did not shut down after SIGTERM")
+		}
+	})
+	return base
+}
+
+// TestRun_SetsJWTClockSkew: --jwt-clock-skew is seconds; run() must convert it
+// before any request can be served. The rate-limiter failure exits right after
+// the conversion, keeping the test hermetic.
+func TestRun_SetsJWTClockSkew(t *testing.T) {
+	api := newHealthyAttestationApi(t)
+	cfg := validRunConfig(t, api.URL)
+	cfg.jwtClockSkew = 7
+	cfg.rateLimiterMax = 0
+	if err := run(cfg); err == nil {
+		t.Fatal("run() with rateLimiterMax=0 should fail")
+	}
+	if issuer.JWTClockSkew != 7*time.Second {
+		t.Fatalf("issuer.JWTClockSkew = %v, want %v", issuer.JWTClockSkew, 7*time.Second)
+	}
+}
+
+// TestRun_LogsMeasurementPinning: with --measurements set, startup must log the
+// pinning-enabled line, not the UNSAFE empty-allowlist warning. The bad DNS
+// pattern exits startup right after that log line.
+func TestRun_LogsMeasurementPinning(t *testing.T) {
+	api := newHealthyAttestationApi(t)
+	cfg := validRunConfig(t, api.URL)
+	cfg.logLevel = "info"
+	cfg.measurements = []string{"deadbeef"}
+	cfg.dnsSANPatterns = []string{"("}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	runErr := run(cfg)
+	os.Stdout = orig
+	// run() left slog's default pointed at the pipe; detach it before closing.
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_ = w.Close()
+	logged, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured logs: %v", err)
+	}
+
+	if runErr == nil || !strings.Contains(runErr.Error(), "--dns-san-pattern") {
+		t.Fatalf("run() error = %v, want --dns-san-pattern failure", runErr)
+	}
+	if !strings.Contains(string(logged), "measurement pinning enabled") {
+		t.Fatalf("startup log missing pinning-enabled line:\n%s", logged)
+	}
+	if strings.Contains(string(logged), "--measurements empty") {
+		t.Fatalf("startup log warned about empty measurements despite pinning:\n%s", logged)
+	}
+}
+
+// postAttestKeyPolicyProbe sends an /attest-key request carrying a well-formed
+// but wrong operator-key hash and returns status plus error code.
+func postAttestKeyPolicyProbe(t *testing.T, base string) (int, string) {
+	t.Helper()
+	body, err := json.Marshal(types.AttestKeyRequestBody{
+		Challenge:        "!!", // fails challenge decoding when the policy gate passes
+		OperatorKeysHash: strings.Repeat("a", 64),
+	})
+	if err != nil {
+		t.Fatalf("marshal attest-key request: %v", err)
+	}
+	resp, err := http.Post(base+"/attest-key", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /attest-key: %v", err)
+	}
+	defer resp.Body.Close()
+	var errResp types.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode /attest-key error: %v", err)
+	}
+	return resp.StatusCode, errResp.Error
+}
+
+// TestRun_AttestKeyOperatorPolicyGate: /attest-key must require the caller to
+// attest the operator-key policy exactly when handoff replicas are configured.
+func TestRun_AttestKeyOperatorPolicyGate(t *testing.T) {
+	t.Run("enforced with handoff measurements", func(t *testing.T) {
+		api := newHealthyAttestationApi(t)
+		cfg := validRunConfig(t, api.URL)
+		cfg.port = freePort(t)
+		cfg.operatorKeys = writeOperatorKeysPEM(t)
+		cfg.handoffMeasurements = []string{"deadbeef"}
+		base := startRunServer(t, cfg)
+
+		status, code := postAttestKeyPolicyProbe(t, base)
+		if status != http.StatusForbidden || code != "operator_policy_mismatch" {
+			t.Fatalf("got %d %q, want 403 operator_policy_mismatch", status, code)
+		}
+	})
+
+	t.Run("not enforced without handoff measurements", func(t *testing.T) {
+		api := newHealthyAttestationApi(t)
+		cfg := validRunConfig(t, api.URL)
+		cfg.port = freePort(t)
+		cfg.operatorKeys = writeOperatorKeysPEM(t)
+		base := startRunServer(t, cfg)
+
+		status, code := postAttestKeyPolicyProbe(t, base)
+		if status != http.StatusBadRequest || code != "invalid_challenge" {
+			t.Fatalf("got %d %q, want 400 invalid_challenge", status, code)
+		}
+	})
+}
+
+// TestRun_AllowlistWriteAcceptsClockSkewedToken: the operator-token verifier
+// must apply --jwt-clock-skew as leeway, so a token stamped by a slightly-fast
+// operator clock still authorizes the write.
+func TestRun_AllowlistWriteAcceptsClockSkewedToken(t *testing.T) {
+	api := newHealthyAttestationApi(t)
+	operatorKey, keysPath := writeOperatorKeyPair(t)
+	cfg := validRunConfig(t, api.URL) // jwtClockSkew: 30
+	cfg.port = freePort(t)
+	cfg.operatorKeys = keysPath
+	base := startRunServer(t, cfg)
+
+	body := []byte(`{"schema":"c8s.allowlist/v1","digests":{"` + digestA + `":"ghcr.io/x/cds:v1"}}`)
+	sum := sha256.Sum256(body)
+	issued := time.Now().Add(10 * time.Second) // inside the 30s leeway
+	token, err := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+		"iat": issued.Unix(),
+		"exp": issued.Add(30 * time.Second).Unix(),
+		"htm": http.MethodPut,
+		"htu": "/allowlist",
+		"pbh": base64.RawURLEncoding.EncodeToString(sum[:]),
+	}).SignedString(operatorKey)
+	if err != nil {
+		t.Fatalf("sign operator token: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPut, base+"/allowlist", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT /allowlist: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT /allowlist = %d (%s), want 204", resp.StatusCode, respBody)
+	}
+}
+
+// TestRun_NoRotationWhenIntervalZero: --token-signer-rotation-interval 0 must
+// disable the rotation loop entirely; with a long overlap any rotation would
+// leave extra keys in the served JWKS.
+func TestRun_NoRotationWhenIntervalZero(t *testing.T) {
+	api := newHealthyAttestationApi(t)
+	cfg := validRunConfig(t, api.URL)
+	cfg.port = freePort(t)
+	cfg.rotationInterval = 0
+	cfg.rotationOverlap = time.Hour
+	base := startRunServer(t, cfg)
+
+	resp, err := http.Get(base + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatalf("GET jwks: %v", err)
+	}
+	defer resp.Body.Close()
+	var jwks struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		t.Fatalf("decode jwks: %v", err)
+	}
+	if len(jwks.Keys) != 1 {
+		t.Fatalf("JWKS has %d keys, want exactly 1 (rotation must be disabled)", len(jwks.Keys))
+	}
+}
+
+// TestRun_RATLSWarmupFailureFailsClosed: with RA-TLS enabled, a failed serving
+// cert warm-up must abort startup instead of serving.
+func TestRun_RATLSWarmupFailureFailsClosed(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no evidence for you", http.StatusInternalServerError)
+	}))
+	t.Cleanup(api.Close)
+	cfg := validRunConfig(t, api.URL)
+	cfg.port = freePort(t)
+	cfg.ratlsPlatform = "sev-snp"
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- run(cfg) }()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "warm up ratls serving cert") {
+			t.Fatalf("run() error = %v, want warm-up failure", err)
+		}
+	case <-time.After(20 * time.Second):
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-errCh
+		t.Fatal("run() kept serving after RA-TLS warm-up failure")
 	}
 }
 

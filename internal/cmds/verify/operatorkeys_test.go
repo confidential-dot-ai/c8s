@@ -94,6 +94,26 @@ func TestFetchOperatorKeysRejectsCertMismatch(t *testing.T) {
 	}
 }
 
+// A response of exactly maxOperatorKeysBytes is within the cap and must parse.
+func TestFetchOperatorKeysExactCapAccepted(t *testing.T) {
+	pubPEM, wantFP := operatorPubPEM(t)
+	if len(pubPEM) > maxOperatorKeysBytes {
+		t.Fatalf("fixture PEM larger than the cap (%d bytes)", len(pubPEM))
+	}
+	body := append(append([]byte{}, pubPEM...), bytes.Repeat([]byte{'\n'}, maxOperatorKeysBytes-len(pubPEM))...)
+	base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	})
+
+	fps, _, _, err := fetchOperatorKeyFingerprints(context.Background(), base, "", certSHA, 5*time.Second)
+	if err != nil {
+		t.Fatalf("an exactly-cap-sized response must be accepted: %v", err)
+	}
+	if len(fps) != 1 || fps[0] != wantFP {
+		t.Fatalf("fingerprints = %v, want [%s]", fps, wantFP)
+	}
+}
+
 func TestFetchOperatorKeys404MeansDisabled(t *testing.T) {
 	base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no operator keys configured", http.StatusNotFound)

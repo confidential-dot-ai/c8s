@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 const (
@@ -74,6 +76,116 @@ func TestDigestFailsClosed(t *testing.T) {
 	if _, err := Digest(nil, []string{digestA}); err != nil {
 		t.Fatalf("main-only rejected: %v", err)
 	}
+}
+
+func TestIsInjectedContainer(t *testing.T) {
+	for name, want := range map[string]bool{
+		"c8s-cert":      true,
+		"c8s-cert-wait": true,
+		"app":           false,
+		"":              false,
+	} {
+		if got := IsInjectedContainer(name); got != want {
+			t.Errorf("IsInjectedContainer(%q) = %t, want %t", name, got, want)
+		}
+	}
+}
+
+// The broker endpoint is a compiled constant, not control-plane input.
+func TestBrokerEndpointBakedPath(t *testing.T) {
+	if got := BrokerEndpoint(); got != "unix:///run/c8s/workload-claims/workload-claims.sock" {
+		t.Fatalf("BrokerEndpoint = %q", got)
+	}
+}
+
+func TestBuildConfigClaims(t *testing.T) {
+	claims, err := BuildConfigClaims([]string{digestA}, []string{digestB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(claims.OperatorKeysDigest, ratls.UnsetDigest()) || !bytes.Equal(claims.SeedDigest, ratls.UnsetDigest()) {
+		t.Fatal("workload claims must carry the unset sentinel for operator-keys and seed")
+	}
+	if !bytes.Equal(claims.WorkloadDigest, mustDigest(t, []string{digestA}, []string{digestB})) {
+		t.Fatal("workload digest does not match Digest(init, main)")
+	}
+	if _, err := BuildConfigClaims(nil, nil); err == nil {
+		t.Fatal("both-empty image sets accepted")
+	}
+}
+
+func TestVerifyWorkloadDigest(t *testing.T) {
+	claimsDER := func(t *testing.T, c *ratls.ConfigClaims) []byte {
+		t.Helper()
+		ext, err := c.MarshalExtension()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ext.Value
+	}
+	claims, err := BuildConfigClaims([]string{digestA}, []string{digestB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	der := claimsDER(t, claims)
+
+	t.Run("matching lists verify and round-trip the claims", func(t *testing.T) {
+		got, err := VerifyWorkloadDigest(der, []string{digestA}, []string{digestB})
+		if err != nil {
+			t.Fatalf("VerifyWorkloadDigest: %v", err)
+		}
+		if !bytes.Equal(got.WorkloadDigest, claims.WorkloadDigest) {
+			t.Fatal("returned claims do not carry the attested workload digest")
+		}
+	})
+
+	t.Run("swapped roles rejected", func(t *testing.T) {
+		if _, err := VerifyWorkloadDigest(der, []string{digestB}, []string{digestA}); err == nil {
+			t.Fatal("role-swapped lists matched the attested digest")
+		}
+	})
+
+	t.Run("different images rejected", func(t *testing.T) {
+		if _, err := VerifyWorkloadDigest(der, []string{digestA}, []string{digestA}); err == nil {
+			t.Fatal("different image set matched the attested digest")
+		}
+	})
+
+	t.Run("unparseable claims rejected", func(t *testing.T) {
+		if _, err := VerifyWorkloadDigest([]byte("not-der"), []string{digestA}, nil); err == nil {
+			t.Fatal("garbage DER accepted")
+		}
+	})
+
+	t.Run("claims without workload digest rejected", func(t *testing.T) {
+		none := &ratls.ConfigClaims{
+			OperatorKeysDigest: ratls.UnsetDigest(),
+			SeedDigest:         ratls.UnsetDigest(),
+			WorkloadDigest:     ratls.UnsetDigest(),
+		}
+		if _, err := VerifyWorkloadDigest(claimsDER(t, none), []string{digestA}, nil); err == nil {
+			t.Fatal("workload-less claims accepted")
+		}
+	})
+
+	t.Run("governance claims rejected", func(t *testing.T) {
+		governed := &ratls.ConfigClaims{
+			OperatorKeysDigest: bytes.Repeat([]byte{0xEE}, ratls.ClaimsDigestSize),
+			SeedDigest:         ratls.UnsetDigest(),
+			WorkloadDigest:     claims.WorkloadDigest,
+		}
+		if _, err := VerifyWorkloadDigest(claimsDER(t, governed), []string{digestA}, []string{digestB}); err == nil {
+			t.Fatal("operator-keys digest on a workload claim accepted")
+		}
+		seeded := &ratls.ConfigClaims{
+			OperatorKeysDigest: ratls.UnsetDigest(),
+			SeedDigest:         bytes.Repeat([]byte{0xEE}, ratls.ClaimsDigestSize),
+			WorkloadDigest:     claims.WorkloadDigest,
+		}
+		if _, err := VerifyWorkloadDigest(claimsDER(t, seeded), []string{digestA}, []string{digestB}); err == nil {
+			t.Fatal("seed digest on a workload claim accepted")
+		}
+	})
 }
 
 func TestPartition(t *testing.T) {
@@ -269,6 +381,9 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 	})
 
 	t.Run("zero pid fails closed", func(t *testing.T) {
+		// Even with a resolvable /proc/0/cgroup: pid 0 means "no peer
+		// credential" and must never bind to a container.
+		writeCgroupFile(t, procRoot, 0, "0::/kubepods/besteffort/pod0/"+id+"\n")
 		if _, err := ContainerIDCandidatesForPID(procRoot, 0); err == nil {
 			t.Fatal("pid 0 accepted")
 		}
@@ -276,12 +391,17 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 }
 
 // The broker runs as root but get-cert connects non-root, so ListenUnix must
-// group-own the socket (0660 + chgrp) for the caller to reach it — the exact
-// permission the same-process broker tests can't exercise. Chgrp to our own gid
-// (BrokerSocketGID needs root); this still proves ListenUnix applies the group.
+// group-own the socket (0660 + chgrp) for the caller to reach it, the exact
+// permission the same-process broker tests can't exercise. Root chgrps to a
+// group the socket would not otherwise get (BrokerSocketGID); non-root can only
+// chgrp to its own gid, which still proves ListenUnix applies the group.
 func TestListenUnixSetsModeAndGroup(t *testing.T) {
+	gid := os.Getgid()
+	if os.Getuid() == 0 {
+		gid = BrokerSocketGID
+	}
 	sock := filepath.Join(t.TempDir(), "b.sock")
-	l, err := ListenUnix(sock, os.Getgid())
+	l, err := ListenUnix(sock, gid)
 	if err != nil {
 		t.Fatalf("ListenUnix: %v", err)
 	}
@@ -298,8 +418,58 @@ func TestListenUnixSetsModeAndGroup(t *testing.T) {
 	if !ok {
 		t.Skip("no syscall.Stat_t on this platform")
 	}
-	if int(st.Gid) != os.Getgid() {
-		t.Fatalf("socket gid = %d, want %d (ListenUnix must chgrp so a non-root caller in that group can connect)", st.Gid, os.Getgid())
+	if int(st.Gid) != gid {
+		t.Fatalf("socket gid = %d, want %d (ListenUnix must chgrp so a non-root caller in that group can connect)", st.Gid, gid)
+	}
+	if int(st.Uid) != os.Getuid() {
+		t.Fatalf("socket uid = %d, want %d (chgrp must not change the owner)", st.Uid, os.Getuid())
+	}
+}
+
+// With gid <= 0 the socket's group must be left exactly as the filesystem
+// assigned it. A setgid parent directory makes that observable even as root:
+// the socket inherits the directory's group, and any chown would change it.
+func TestListenUnixGidZeroLeavesGroup(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root to set up a setgid directory with a foreign group")
+	}
+	dir := t.TempDir()
+	if err := os.Chown(dir, -1, BrokerSocketGID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o770|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "b.sock")
+	l, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	defer l.Close()
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no syscall.Stat_t on this platform")
+	}
+	if int(st.Gid) != BrokerSocketGID {
+		t.Fatalf("socket gid = %d, want the setgid-inherited %d (gid 0 must mean no chgrp)", st.Gid, BrokerSocketGID)
+	}
+}
+
+// A listener failing for any reason other than shutdown must surface the error.
+func TestServeSurfacesListenerError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := Serve(ctx, l, &pidRecordingResolver{}); err == nil {
+		t.Fatal("Serve on a closed listener returned nil")
 	}
 }
 

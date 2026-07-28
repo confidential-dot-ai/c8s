@@ -628,6 +628,160 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
+func TestNewCmdDefaults(t *testing.T) {
+	t.Run("generic", func(t *testing.T) {
+		cmd := NewCmd(Defaults{})
+		if cmd.Use != "verify [target]" {
+			t.Errorf("Use = %q, want the generic default", cmd.Use)
+		}
+		if cmd.Short != "Verify a c8s component's TEE attestation" {
+			t.Errorf("Short = %q, want the generic default", cmd.Short)
+		}
+		if !strings.HasPrefix(cmd.Long, cmd.Short+".") {
+			t.Errorf("Long must open with Short, got %q...", cmd.Long[:60])
+		}
+		for flag, want := range map[string]string{
+			"kind":    "auto",
+			"mode":    "auto",
+			"timeout": "15s",
+		} {
+			f := cmd.Flags().Lookup(flag)
+			if f == nil || f.DefValue != want {
+				t.Errorf("--%s default = %v, want %q", flag, f, want)
+			}
+		}
+	})
+
+	t.Run("preset", func(t *testing.T) {
+		cmd := NewCmd(Defaults{Use: "verify", Short: "Verify the CDS", Kind: "cds", Mode: "ratls-cert"})
+		if cmd.Use != "verify" || cmd.Short != "Verify the CDS" {
+			t.Errorf("Use/Short = %q/%q, presets not applied", cmd.Use, cmd.Short)
+		}
+		if got := cmd.Flags().Lookup("kind").DefValue; got != "cds" {
+			t.Errorf("--kind default = %q, want cds", got)
+		}
+		if got := cmd.Flags().Lookup("mode").DefValue; got != "ratls-cert" {
+			t.Errorf("--mode default = %q, want ratls-cert", got)
+		}
+	})
+}
+
+func TestDefaultPort(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config
+		want int
+	}{
+		{"preset wins over kind", config{defaults: Defaults{DefaultPort: 1234}, kind: "cds"}, 1234},
+		{"cds", config{kind: "cds"}, 8443},
+		{"lb", config{kind: "lb"}, 443},
+		{"auto", config{}, 443},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultPort(tc.cfg); got != tc.want {
+				t.Errorf("defaultPort = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The verifier-reported platform wins; the sent platform is only a fallback.
+func TestNewOutcomePlatform(t *testing.T) {
+	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
+	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("az-snp")}
+	if oc := newOutcome(config{}, ev, reported, nil, &ratls.VerifyPolicy{}); oc.Platform != "az-snp" {
+		t.Errorf("Platform = %q, want the verifier-reported az-snp", oc.Platform)
+	}
+	unreported := &teetypes.VerificationResult{SignatureValid: true}
+	if oc := newOutcome(config{}, ev, unreported, nil, &ratls.VerifyPolicy{}); oc.Platform != "snp" {
+		t.Errorf("Platform = %q, want the fallback snp", oc.Platform)
+	}
+}
+
+func TestFormatTCB(t *testing.T) {
+	u8 := func(v uint8) *uint8 { return &v }
+	cases := []struct {
+		name string
+		tcb  teetypes.TcbInfo
+		want string
+	}{
+		{"snp all components", teetypes.TcbInfo{Type: "Snp", Bootloader: u8(1), Tee: u8(2), Snp: u8(3), Microcode: u8(4)}, "bootloader=1 tee=2 snp=3 microcode=4"},
+		{"snp nil components render as zero", teetypes.TcbInfo{Type: "Snp"}, "bootloader=0 tee=0 snp=0 microcode=0"},
+		{"snp with fmc", teetypes.TcbInfo{Type: "Snp", Bootloader: u8(1), Tee: u8(2), Snp: u8(3), Microcode: u8(4), FMC: u8(7)}, "bootloader=1 tee=2 snp=3 microcode=4 fmc=7"},
+		{"tdx svn", teetypes.TcbInfo{Type: "Tdx", TCBSvn: []byte{0xAB, 0xCD}}, "svn=abcd"},
+		{"tdx without svn", teetypes.TcbInfo{Type: "Tdx"}, ""},
+		{"unknown type", teetypes.TcbInfo{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTCB(tc.tcb); got != tc.want {
+				t.Errorf("formatTCB = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderTextSections pins which optional sections the text verdict prints:
+// each is emitted exactly when its datum is present.
+func TestRenderTextSections(t *testing.T) {
+	renderOut := func(oc Outcome) string {
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		return out.String()
+	}
+
+	t.Run("all sections present", func(t *testing.T) {
+		got := renderOut(Outcome{
+			Verified:                   true,
+			Fresh:                      true,
+			Pinned:                     true,
+			CertSHA256:                 "cert-digest-hex",
+			OperatorKeysAttestedDigest: "opkeys-digest-hex",
+			SeedAttestedDigest:         "seed-digest-hex",
+			WorkloadAttestedDigest:     "workload-digest-hex",
+			OperatorKeys:               []string{"fp-one"},
+		})
+		for _, want := range []string{
+			"cert sha256:  cert-digest-hex",
+			"operator-keys digest (attested via config-claims): sha256:opkeys-digest-hex",
+			"allowlist-seed digest (attested via config-claims): seed-digest-hex",
+			"workload digest (attested via config-claims): sha256:workload-digest-hex",
+			"operator keys (allowlist writes; served list matches the attested digest):",
+			"    sha256:fp-one",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("absent data prints nothing", func(t *testing.T) {
+		got := renderOut(Outcome{Verified: true, Fresh: true, Pinned: true, OperatorKeysNote: "note-xyz"})
+		if !strings.Contains(got, "operator keys: note-xyz") {
+			t.Errorf("note not printed when no keys were fetched:\n%s", got)
+		}
+		for _, absent := range []string{
+			"cert sha256",
+			"operator-keys digest",
+			"allowlist-seed digest",
+			"workload digest",
+			"allowlist writes",
+		} {
+			if strings.Contains(got, absent) {
+				t.Errorf("output has %q without the datum:\n%s", absent, got)
+			}
+		}
+	})
+
+	t.Run("keys without attested digest use the unattested label", func(t *testing.T) {
+		got := renderOut(Outcome{Verified: true, Fresh: true, Pinned: true, OperatorKeys: []string{"fp-one"}})
+		if !strings.Contains(got, "CDS-reported config, NOT covered by the measurement") {
+			t.Errorf("expected the unattested key-list label:\n%s", got)
+		}
+	})
+}
+
 // TestGatherEvidence_AutoPrefersDiscovery proves auto mode (no --kind) detects
 // an LB by fetching its discovery doc first — the bare `c8s verify <lb>` path.
 func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {

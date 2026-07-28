@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -159,6 +160,51 @@ func TestSignCSR_HappyPath(t *testing.T) {
 	}
 	if err := leaf.CheckSignatureFrom(h.CA.Cert); err != nil {
 		t.Fatalf("leaf not signed by handler CA: %v", err)
+	}
+}
+
+// TestSignCSR_ZeroRequestTimeoutDisablesDeadline: RequestTimeout == 0 must mean
+// "no deadline", not an already-expired one.
+func TestSignCSR_ZeroRequestTimeoutDisablesDeadline(t *testing.T) {
+	h, earKey, _ := newTestSignCSRHandler(t)
+	h.RequestTimeout = 0
+	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
+	ear := signEAR(t, earKey, earClaimsLite{
+		Issuer:    "cds",
+		IssuedAt:  time.Now().Unix(),
+		Expiry:    time.Now().Add(5 * time.Minute).Unix(),
+		TEEPubKey: teePubKeyB64(t, csrKey),
+	})
+
+	w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestSignCSR_SuccessDoesNotLogEncodeFailure pins that the response-encode
+// error path stays silent on success.
+func TestSignCSR_SuccessDoesNotLogEncodeFailure(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h, earKey, _ := newTestSignCSRHandler(t)
+	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
+	ear := signEAR(t, earKey, earClaimsLite{
+		Issuer:    "cds",
+		IssuedAt:  time.Now().Unix(),
+		Expiry:    time.Now().Add(5 * time.Minute).Unix(),
+		TEEPubKey: teePubKeyB64(t, csrKey),
+	})
+
+	w := postSignCSR(t, h, ear, csr.Raw, time.Hour)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(logBuf.String(), "encode sign-csr response failed") {
+		t.Fatalf("success logged an encode failure: %s", logBuf.String())
 	}
 }
 

@@ -63,6 +63,7 @@ func TestNewCmdFlagDefaultsAndRequired(t *testing.T) {
 		{"initial-retry-timeout", "2m0s"},
 		{"initial-retry-interval", "2s"},
 		{"reload-nginx", "true"},
+		{"workload-claims-timeout", "5s"},
 	}
 	for _, tt := range tests {
 		flag := flags.Lookup(tt.name)
@@ -179,6 +180,7 @@ func TestValidateSAN(t *testing.T) {
 		{"https url", "https://host", true},
 		{"wildcard", "*.example.com", true},
 		{"trailing dot label", "host..com", true},
+		{"max length", strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 61), false},
 		{"too long", strings.Repeat("a", 254), true},
 		{"label too long", strings.Repeat("a", 64) + ".com", true},
 		{"underscore", "host_name.com", true},

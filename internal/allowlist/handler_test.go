@@ -547,6 +547,29 @@ func TestAllowlistAddRejectsBodyOverConfiguredCap(t *testing.T) {
 	}
 }
 
+// TestAllowlistDefaultWriteBodyCap pins the built-in cap applied when
+// MaxWriteBodyBytes is unset: a normal mutation body passes, one over 64 KiB
+// is rejected before decoding.
+func TestAllowlistDefaultWriteBodyCap(t *testing.T) {
+	h, _ := guardTestHandler(t)
+
+	small := fmt.Sprintf(`{"digest":%q,"image":"img"}`, digestA)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(small))
+	h.HandleAddDigest(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("small body got status %d, want 204 (body %q)", rec.Code, rec.Body.String())
+	}
+
+	big := strings.Repeat("x", 64*1024+1)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/allowlist/digests", strings.NewReader(big))
+	h.HandleAddDigest(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-cap body got status %d, want 413", rec.Code)
+	}
+}
+
 // TestWorkloadPutDeleteRoundtrip exercises the workload routes end to end,
 // including the {name} path parameter and the 404 on a repeated delete.
 func TestWorkloadPutDeleteRoundtrip(t *testing.T) {

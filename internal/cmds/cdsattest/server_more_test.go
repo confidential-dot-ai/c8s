@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -63,6 +64,61 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAttestationAcceptsMinimumNonce: a nonce of exactly minNonceBytes is the
+// smallest accepted freshness input.
+func TestAttestationAcceptsMinimumNonce(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?nonce=" + b64url(make([]byte, minNonceBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a %d-byte nonce", resp.StatusCode, minNonceBytes)
+	}
+}
+
+// TestCDSCertRouteAbsentWithoutCert: the optional cds-cert endpoint must not be
+// mounted when no cert was supplied.
+func TestCDSCertRouteAbsentWithoutCert(t *testing.T) {
+	srv := NewServer(Config{Evidence: failingProvider{}})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/cds-cert.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 when no cds cert is configured", resp.StatusCode)
+	}
+}
+
+// TestReportDataBindings pins the exact report_data constructions, including
+// nonces larger than the key material they are hashed with.
+func TestReportDataBindings(t *testing.T) {
+	t.Run("session key binding", func(t *testing.T) {
+		pub := overenc.PublicKey{
+			X25519:   bytes.Repeat([]byte{1}, overenc.X25519PubBytes),
+			MLKEM768: bytes.Repeat([]byte{2}, overenc.MLKEM768EKBytes),
+		}
+		nonce := bytes.Repeat([]byte{3}, 4096)
+		want := sha512.Sum384(append(append(append([]byte{}, pub.X25519...), pub.MLKEM768...), nonce...))
+		if got := reportDataFor(pub, nonce); !bytes.Equal(got, want[:]) {
+			t.Fatalf("reportDataFor = %x, want %x", got, want)
+		}
+	})
+	t.Run("tls cert binding", func(t *testing.T) {
+		spki := bytes.Repeat([]byte{4}, 16)
+		nonce := bytes.Repeat([]byte{5}, 64)
+		want := sha512.Sum384(append(append([]byte{}, spki...), nonce...))
+		if got := reportDataForCert(spki, nonce); !bytes.Equal(got, want[:]) {
+			t.Fatalf("reportDataForCert = %x, want %x", got, want)
+		}
+	})
 }
 
 func TestAttestationEvidenceUnavailable(t *testing.T) {
