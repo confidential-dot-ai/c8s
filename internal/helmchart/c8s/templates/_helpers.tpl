@@ -32,6 +32,14 @@
 {{- int64 . -}}
 {{- end -}}
 
+{{/* Positive integer or fail with the value's label. Args: value, label. */}}
+{{- define "c8s.positiveInt" -}}
+{{- if not (regexMatch `^[1-9][0-9]*$` (toString .value)) -}}
+{{- fail (printf "%s must be a positive integer, got: %v" .label .value) -}}
+{{- end -}}
+{{- toString .value -}}
+{{- end -}}
+
 {{/*
   Image refs prefer digest when set — floating tags silently drift the
   binary running inside the TEE and invalidate the measurement allowlist.
@@ -300,7 +308,7 @@ and CDS. Three shapes:
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if eq (.Values.attestationApi.cvmMode | default "baremetal") "node" -}}
+{{- else if eq .Values.attestationApi.cvmMode "node" -}}
 http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- else -}}
 http://{{ include "c8s.attestationApiName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationApi.port }}
@@ -314,7 +322,7 @@ cvmMode=node, where pod-netns consumers reach the node-baked host attestation-ap
 via the node's own IP. Empty in every other mode.
 */ -}}
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if eq (.Values.attestationApi.cvmMode | default "baremetal") "node" -}}
+{{- if and (not .Values.kata.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:

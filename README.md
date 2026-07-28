@@ -346,29 +346,47 @@ make clean
 
 CDS serves the image-digest allowlist that `nri-image-policy` (host) and
 `policy-monitor` (in-guest) enforce on every node. The `c8s allowlist`
-command reads and mutates it. CDS has no public ingress, so reach it over a
-port-forward; the CLI verifies CDS's attestation, so the localhost hop is
-fine.
+command reads and mutates it. By default, tls-lb publishes the complete
+`/allowlist` API and verifies CDS's attestation before forwarding requests.
+When tls-lb uses the chart default CDS-issued public certificate
+(`tlsLb.publicTLS.secretName` is empty, discovery mode `cds`), point the CLI at
+the same tls-lb URL used for application traffic; no port-forward is required.
 
 ```sh
-kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+TLS_LB=https://<tls-lb-host>
 
 # Reads are unauthenticated
-c8s allowlist export --url https://localhost:8443 > allowlist.json
-c8s allowlist diff allowlist.json --url https://localhost:8443
+c8s allowlist export --url "$TLS_LB" \
+  --measurements <tls-lb-launch-digest> > allowlist.json
+c8s allowlist diff allowlist.json --url "$TLS_LB" \
+  --measurements <tls-lb-launch-digest>
 
 # Writes are signed with the operator key
 c8s allowlist add sha256:<digest> registry.example.com/app@sha256:<digest> \
-  --url https://localhost:8443 --operator-key operator.key
+  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+  --operator-key operator.key
 c8s allowlist upload allowlist.json \
-  --url https://localhost:8443 --operator-key operator.key
+  --url "$TLS_LB" --measurements <tls-lb-launch-digest> \
+  --operator-key operator.key
 ```
 
-For reads, pass `--measurements` to pin CDS's launch digest; an empty set
-accepts any attested CDS (unsafe outside dev). An `https://` URL is verified
-via TEE attestation — a direct CDS endpoint through its RA-TLS serving cert,
-or a tls-lb front door through its `/v1/discovery` document (the CLI detects
-which).
+`--measurements` identifies the trusted build of the endpoint you connected
+to. For the default public route, use the tls-lb launch digest; the CLI reads
+tls-lb's discovery document and verifies its attestation automatically. An
+empty set accepts any attested endpoint and is unsafe outside development.
+Direct CDS URLs remain supported, in which case pin the CDS launch digest.
+
+Do not point this CLI at tls-lb when `tlsLb.publicTLS.secretName` is set. That
+front door uses WebPKI (`public_tls.mode=webpki`), and its public certificate is
+not yet cryptographically bound to the discovery attestation, so the CLI
+deliberately refuses it. Use a direct CDS RA-TLS URL and the CDS launch digest;
+if CDS is not otherwise routable, use a local port-forward:
+
+```sh
+kubectl port-forward -n c8s-system svc/c8s-cds 8443:8443 &
+c8s allowlist export --url https://localhost:8443 \
+  --measurements <cds-launch-digest>
+```
 
 Writes are authorized by an operator EC keypair whose **public** half CDS
 pins at install time. Generate one and pin it:
@@ -385,7 +403,12 @@ Installing without `--operator-keys` leaves allowlist writes disabled, and
 acknowledge. Supply the private key to the CLI by flag (`--operator-key`) or
 environment (`C8S_OPERATOR_KEY`). Write tokens are short-lived and bound to
 the request body, so a captured token cannot be replayed against a different
-payload.
+payload. The private key remains on the operator machine: tls-lb forwards only
+the signed request and CDS verifies it against the pinned public key.
+
+Set `tlsLb.allowlist.enabled=false` to remove the built-in public route. A
+direct CDS connection, including a local port-forward for debugging, can
+still be passed explicitly with `--url`.
 
 CDS attests its allowlist governance: the digests of its loaded operator-key
 set and of the allowlist seed it applied are bound into its serving-cert

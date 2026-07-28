@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1218,7 +1219,7 @@ func TestChartAttestationApiNodePortEnabledWithNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q by default, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
@@ -1237,7 +1238,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
@@ -1253,7 +1254,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 // On a cluster that is neither kata nor node-baked, host nri-image-policy is the
 // only image-admission enforcement, so disabling it must be rejected — otherwise
 // confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (aks/bare behave the same). kata and cvmMode=node
+// representative such cluster (pod/aks behave the same). kata and cvmMode=node
 // carry their own admission and are exempt (enforce_host_components requires nri
 // off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
 func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
@@ -1470,11 +1471,15 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=bogus")
-	if err == nil {
-		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+	for _, mode := range []string{"bogus", "baremetal"} {
+		t.Run(mode, func(t *testing.T) {
+			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
+			if err == nil {
+				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+			}
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+		})
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of pod, node, gke, aks (got "bogus")`)
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
@@ -1524,6 +1529,14 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	assertContainerArgs(t, attest, hostIPURL)
 	if !hasHostIPEnv(attest) {
 		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
+	}
+
+	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
+	// the RA-TLS hop to CDS.
+	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerArgs(t, allowlistProxy, hostIPURL)
+	if !hasHostIPEnv(allowlistProxy) {
+		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
 	}
 
 	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.
@@ -1679,24 +1692,45 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 // Public exposure is an explicit type=LoadBalancer, not inferred.
 func TestChartTLSLBServiceType(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want corev1.ServiceType
+		name       string
+		args       []string
+		wantType   corev1.ServiceType
+		wantPolicy corev1.ServiceExternalTrafficPolicy
 	}{
-		{"default is ClusterIP", nil, corev1.ServiceTypeClusterIP},
-		{"explicit LoadBalancer", []string{"--set", "tlsLb.service.type=LoadBalancer"}, corev1.ServiceTypeLoadBalancer},
-		{"explicit NodePort", []string{"--set", "tlsLb.service.type=NodePort"}, corev1.ServiceTypeNodePort},
+		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
+		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		// Without the built-in allowlist route there is no source-IP-keyed
+		// limiter, so the default policy must not regress reachability
+		// through nodes that do not run the tls-lb pod.
+		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			if got := renderedService(t, out, "c8s-tls-lb").Spec.Type; got != tc.want {
-				t.Fatalf("service type = %q, want %q", got, tc.want)
+			svc := renderedService(t, out, "c8s-tls-lb")
+			if svc.Spec.Type != tc.wantType {
+				t.Fatalf("service type = %q, want %q", svc.Spec.Type, tc.wantType)
+			}
+			if svc.Spec.ExternalTrafficPolicy != tc.wantPolicy {
+				t.Fatalf("externalTrafficPolicy = %q, want %q", svc.Spec.ExternalTrafficPolicy, tc.wantPolicy)
 			}
 		})
 	}
+}
+
+func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tlsLb.service.type=LoadBalancer",
+		"--set-string", "tlsLb.service.externalTrafficPolicy=bogus",
+	)
+	if err == nil {
+		t.Fatalf("expected render to fail on invalid externalTrafficPolicy; got success\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
 }
 
 // With no adopted workload the upstream address is empty; the sidecar must
@@ -1763,8 +1797,8 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	if _, ok := containerVolumeMount(sidecar, "mesh-ca"); ok {
 		t.Fatalf("cds-attest should not mount mesh-ca with the default /tls/cert.pem trust; mounts=%v", sidecar.VolumeMounts)
 	}
-	if got := len(deployment.Spec.Template.Spec.Containers); got != 2 {
-		t.Fatalf("tls-lb should have nginx + cds-attest, got %d containers", got)
+	if got := len(deployment.Spec.Template.Spec.Containers); got != 3 {
+		t.Fatalf("tls-lb should have nginx + cds-attest + allowlist-proxy, got %d containers", got)
 	}
 
 	// nginx reverse-proxies the dynamic well-known prefix to the sidecar.
@@ -2022,6 +2056,161 @@ func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	}
 }
 
+func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=1r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=8r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=20r/s")
+	rateMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_rate_key")
+	rateMap.assertDirective(t, "default", "$binary_remote_addr")
+	rateMap.assertDirective(t, "GET", `""`)
+	rateMap.assertDirective(t, "HEAD", `""`)
+	rateMap.assertDirective(t, "OPTIONS", `""`)
+	// The total key chains off the write key: exempt methods stay exempt, any
+	// counted method collapses onto the single "all" bucket.
+	totalMap := cfg.mapBlock(t, "$allowlist_write_rate_key", "$allowlist_write_total_key")
+	totalMap.assertDirective(t, `""`, `""`)
+	totalMap.assertDirective(t, "default", `"all"`)
+	readMap := cfg.mapBlock(t, "$request_method", "$allowlist_read_rate_key")
+	readMap.assertDirective(t, "default", `""`)
+	readMap.assertDirective(t, "GET", "$binary_remote_addr")
+	readMap.assertDirective(t, "HEAD", "$binary_remote_addr")
+
+	for _, route := range []struct {
+		match string
+		path  string
+	}{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		location := cfg.location(t, route.match, route.path)
+		location.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
+		location.assertDirective(t, "proxy_set_header", "Host", "$host")
+		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=5", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=15", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=40", "nodelay")
+		location.assertDirective(t, "limit_req_status", "429")
+		location.assertNoDirective(t, "proxy_ssl_verify")
+	}
+
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	for _, want := range []string{
+		"allowlist-proxy",
+		"--host=127.0.0.1",
+		"--port=8801",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--attestation-api-url=http://$(HOST_IP):8400",
+	} {
+		assertContainerHasArg(t, "allowlist-proxy", proxy.Args, want)
+	}
+	if len(proxy.VolumeMounts) != 0 {
+		t.Fatalf("allowlist-proxy must not receive TLS or operator private keys: mounts=%v", proxy.VolumeMounts)
+	}
+	if !hasHostIPEnv(proxy) {
+		t.Fatalf("allowlist-proxy missing HOST_IP downward-API env: env=%v", proxy.Env)
+	}
+}
+
+func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "allowlist.rateLimit.requestsPerSecond=2",
+		"--set", "allowlist.rateLimit.burst=7",
+		"--set", "allowlist.rateLimit.totalRequestsPerSecond=9",
+		"--set", "allowlist.rateLimit.totalBurst=19",
+		"--set", "allowlist.readRateLimit.requestsPerSecond=50",
+		"--set", "allowlist.readRateLimit.burst=100",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=2r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=9r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=50r/s")
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		location := cfg.location(t, key.match, key.path)
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=7", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=19", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=100", "nodelay")
+	}
+}
+
+func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
+	measurement := strings.Repeat("ab", ratls.SNPMeasurementSize)
+	out, err := helmTemplate(t,
+		"--set-string", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--cds-measurements="+measurement)
+}
+
+func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		if _, ok := cfg.locations[key]; ok {
+			t.Fatalf("nginx config contains disabled built-in allowlist location %#v", key)
+		}
+	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("disabled built-in allowlist route still renders its rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("disabled built-in allowlist route still renders allowlist-proxy")
+	}
+}
+
+func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/allowlist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "exact", "/allowlist").assertDirective(t, "proxy_pass", "https://route_0")
+	if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/allowlist/"}]; ok {
+		t.Fatal("built-in /allowlist/ route rendered alongside explicit allowlist route")
+	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("explicit allowlist route still renders the built-in rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("explicit allowlist route still renders the built-in allowlist-proxy")
+	}
+}
+
 func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	// Route backends must be secured (https + verify); the location/upstream
 	// wiring under test is protocol-independent.
@@ -2166,7 +2355,14 @@ func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 
 type nginxConfig struct {
 	upstreams map[string]*nginxBlock
+	maps      map[nginxMapKey]*nginxBlock
 	locations map[nginxLocationKey]*nginxBlock
+	http      *nginxBlock
+}
+
+type nginxMapKey struct {
+	source string
+	target string
 }
 
 type nginxLocationKey struct {
@@ -2187,10 +2383,11 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 	t.Helper()
 	cfg := nginxConfig{
 		upstreams: make(map[string]*nginxBlock),
+		maps:      make(map[nginxMapKey]*nginxBlock),
 		locations: make(map[nginxLocationKey]*nginxBlock),
 	}
 
-	var current *nginxBlock
+	var stack []*nginxBlock
 	for _, line := range strings.Split(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -2198,37 +2395,45 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 		}
 		if strings.HasSuffix(trimmed, "{") {
 			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+			block := &nginxBlock{directives: make(map[string][][]string)}
+			if len(fields) == 1 && fields[0] == "http" {
+				cfg.http = block
+			}
 			if len(fields) == 2 && fields[0] == "upstream" {
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.upstreams[fields[1]] = block
-				current = block
-				continue
+			}
+			if len(fields) == 3 && fields[0] == "map" {
+				cfg.maps[nginxMapKey{source: fields[1], target: fields[2]}] = block
 			}
 			if len(fields) >= 2 && fields[0] == "location" {
 				key := nginxLocationKey{match: "prefix", path: fields[1]}
 				if len(fields) == 3 && fields[1] == "=" {
 					key = nginxLocationKey{match: "exact", path: fields[2]}
 				}
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.locations[key] = block
-				current = block
-				continue
 			}
-			current = nil
+			stack = append(stack, block)
 			continue
 		}
 		if trimmed == "}" {
-			current = nil
+			if len(stack) == 0 {
+				t.Fatalf("nginx config has unmatched closing brace")
+			}
+			stack = stack[:len(stack)-1]
 			continue
 		}
-		if current == nil || !strings.HasSuffix(trimmed, ";") {
+		if len(stack) == 0 || !strings.HasSuffix(trimmed, ";") {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
 		if len(fields) == 0 {
 			continue
 		}
+		current := stack[len(stack)-1]
 		current.directives[fields[0]] = append(current.directives[fields[0]], fields[1:])
+	}
+	if len(stack) != 0 {
+		t.Fatalf("nginx config has %d unclosed block(s)", len(stack))
 	}
 	return cfg
 }
@@ -2250,6 +2455,16 @@ func (cfg nginxConfig) location(t *testing.T, match, path string) *nginxBlock {
 		t.Fatalf("nginx config missing location %#v; got %v", key, cfg.locations)
 	}
 	return location
+}
+
+func (cfg nginxConfig) mapBlock(t *testing.T, source, target string) *nginxBlock {
+	t.Helper()
+	key := nginxMapKey{source: source, target: target}
+	block, ok := cfg.maps[key]
+	if !ok {
+		t.Fatalf("nginx config missing map %#v; got %v", key, cfg.maps)
+	}
+	return block
 }
 
 func (block *nginxBlock) assertServer(t *testing.T, server string) {
@@ -2290,6 +2505,90 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		args []string
 		want string
 	}{
+		{
+			name: "allowlist-enabled-not-bool",
+			args: []string{
+				"--set-string", "allowlist.enabled=false",
+			},
+			want: "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: false",
+		},
+		{
+			name: "allowlist-proxy-port-out-of-range",
+			args: []string{
+				"--set", "allowlist.proxyPort=0",
+			},
+			want: "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: 0",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-attestation",
+			args: []string{
+				"--set", "allowlist.proxyPort=8800",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: 8800",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-nginx",
+			args: []string{
+				"--set", "allowlist.proxyPort=8443",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: 8443",
+		},
+		{
+			name: "allowlist-write-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-rate-exceeds-total",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=9",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
+		},
+		{
+			name: "allowlist-write-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-burst-exceeds-total",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=16",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
+		},
+		{
+			name: "allowlist-write-total-rate-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalRequestsPerSecond=10",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
+		},
+		{
+			name: "allowlist-write-total-burst-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalBurst=20",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
+		},
+		{
+			name: "allowlist-read-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-read-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.burst must be a positive integer, got: 0",
+		},
 		{
 			name: "route-verifyDepth-injection",
 			args: []string{
@@ -3164,6 +3463,18 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
 	}, args...)...)
+}
+
+func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
+	if hasHostIPEnv(proxy) {
+		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
+	}
 }
 
 // TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the
