@@ -1,0 +1,164 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ATTEST A SELF-HOSTED CONFIDENTIAL RUNNER, PER JOB, TO SOMETHING THAT IS NOT
+# THE RUNNER.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHAT THIS REPLACES. Consumer lanes gate on `[ -e /dev/sev-guest ]` before
+# trusting a result. That check is made by the guest, about the guest, and it
+# passes whenever a device node exists. A standing runner is attested once when
+# it is provisioned and every job after that inherits the same evidence, so the
+# interval between provisioning and a job is unmeasured. See issue #51.
+#
+# THE TWO PROPERTIES THAT MATTER, and neither is achievable inside the guest:
+#
+#   FRESHNESS.   The nonce is generated in a job that does not run on the
+#                runner. If the guest chose its own nonce, a genuine report
+#                captured from an earlier boot would satisfy the check forever.
+#
+#   EXTERNALITY. The report is verified in a job that does not run on the
+#                runner. A guest asserting its own verification result is the
+#                circular check this is meant to remove.
+#
+# WHAT IT PROVES. That at the moment this job ran, the runner label reached a
+# genuine TEE whose launch measurement is the one the caller pinned, on hardware
+# whose signing key chains to the vendor.
+#
+# WHAT IT DOES NOT PROVE. A launch measurement covers the boot chain. It does
+# not cover software installed after boot, which on a standing runner includes
+# the CI agent itself, and it does not cover what a previous job left behind.
+# Closing that needs a runtime measurement of post-boot state, which SEV-SNP has
+# no register for. This narrows the interval; it does not eliminate the class.
+name: attest-runner
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'runner label to attest, for example snp-metal-cvm'
+        required: true
+        type: string
+      platform:
+        description: 'attestation-cli platform: snp | tdx | az-snp | az-tdx'
+        required: true
+        type: string
+      expected_launch_digest:
+        description: 'SNP launch digest, hex, 48 bytes. Empty checks genuineness and freshness only.'
+        required: false
+        type: string
+        default: ''
+      expected_mrtd:
+        description: 'TDX MRTD, hex, 48 bytes. Empty checks genuineness and freshness only.'
+        required: false
+        type: string
+        default: ''
+      cli_ref:
+        description: 'attestation-rs ref to build the verifier from'
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  nonce:
+    # Deliberately ubuntu-latest. The value of the nonce is entirely in the fact
+    # that the runner being attested did not choose it.
+    name: pick a nonce off the runner
+    runs-on: ubuntu-latest
+    outputs:
+      nonce: ${{ steps.gen.outputs.nonce }}
+    steps:
+      - id: gen
+        run: |
+          set -euo pipefail
+          # 64 bytes, because that is the width of the guest-supplied field in
+          # both an SNP report and a TDX quote.
+          NONCE=$(head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')
+          echo "nonce=$NONCE" >> "$GITHUB_OUTPUT"
+          echo "nonce chosen off the runner: ${NONCE:0:16}..."
+
+  evidence:
+    name: produce evidence on ${{ inputs.runner }}
+    needs: nonce
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      evidence: ${{ steps.att.outputs.evidence }}
+    steps:
+      - name: build deps
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            libtss2-dev pkg-config build-essential curl ca-certificates git
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: attest over the caller's nonce
+        id: att
+        env:
+          NONCE: ${{ needs.nonce.outputs.nonce }}
+        run: |
+          set -euo pipefail
+          cargo install --quiet \
+            --git https://github.com/confidential-dot-ai/attestation-rs \
+            --rev "${{ inputs.cli_ref }}" \
+            --features attest attestation-cli 2>/dev/null \
+            || cargo install --quiet \
+                 --git https://github.com/confidential-dot-ai/attestation-rs \
+                 --branch "${{ inputs.cli_ref }}" \
+                 --features attest attestation-cli
+          attestation-cli attest \
+            --platform '${{ inputs.platform }}' \
+            --report-data-hex "$NONCE" > /tmp/evidence.json
+          # Carried as a job output rather than an artifact so the verify job
+          # cannot be handed a different file than the one this job produced.
+          echo "evidence=$(base64 -w0 < /tmp/evidence.json)" >> "$GITHUB_OUTPUT"
+          echo "evidence produced, $(wc -c < /tmp/evidence.json) bytes"
+
+  verify:
+    # Deliberately ubuntu-latest, and deliberately a separate job. A guest that
+    # verified its own report and reported the outcome would be asserting its own
+    # trustworthiness, which is the thing being removed.
+    name: verify off the runner
+    needs: [nonce, evidence]
+    runs-on: ubuntu-latest
+    steps:
+      - name: build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config build-essential
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: verify the report against the nonce and the pinned measurement
+        env:
+          NONCE: ${{ needs.nonce.outputs.nonce }}
+          EVIDENCE: ${{ needs.evidence.outputs.evidence }}
+          LAUNCH: ${{ inputs.expected_launch_digest }}
+          MRTD: ${{ inputs.expected_mrtd }}
+        run: |
+          set -euo pipefail
+          # No --features attest here on purpose. This host has no TEE and the
+          # verify path does not need one, so the verifier cannot accidentally
+          # depend on hardware it is checking claims about.
+          cargo install --quiet \
+            --git https://github.com/confidential-dot-ai/attestation-rs \
+            --branch "${{ inputs.cli_ref }}" attestation-cli
+          printf '%s' "$EVIDENCE" | base64 -d > /tmp/evidence.json
+
+          ARGS=(verify --evidence /tmp/evidence.json --expected-report-data "$NONCE")
+          if [ -n "$LAUNCH" ]; then
+            ARGS+=(--expected-launch-digest "$LAUNCH")
+          elif [ -n "$MRTD" ]; then
+            ARGS+=(--expected-mrtd "$MRTD")
+          else
+            echo "::warning title=no measurement pinned::Checked that the report is genuine and fresh, but not that it came from the image we expect. Pass expected_launch_digest or expected_mrtd to close that."
+          fi
+
+          attestation-cli "${ARGS[@]}"
+          echo "runner ${{ inputs.runner }} attested off-runner, bound to this job's nonce"
