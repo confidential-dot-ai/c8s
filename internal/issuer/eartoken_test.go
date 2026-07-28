@@ -212,3 +212,148 @@ func TestValidateEARTokenRejectsMissingMandatoryEARClaims(t *testing.T) {
 		})
 	}
 }
+
+func TestEARClaimsGetters(t *testing.T) {
+	c := issuer.EARClaims{Issuer: "cds"}
+	if sub, err := c.GetSubject(); err != nil || sub != "" {
+		t.Errorf("GetSubject() = %q, %v; want \"\", nil", sub, err)
+	}
+	aud, err := c.GetAudience()
+	if err != nil {
+		t.Fatalf("GetAudience: %v", err)
+	}
+	if len(aud) != 0 {
+		t.Errorf("GetAudience() = %v, want empty", aud)
+	}
+	iss, err := c.GetIssuer()
+	if err != nil || iss != "cds" {
+		t.Errorf("GetIssuer() = %q, %v; want cds, nil", iss, err)
+	}
+}
+
+func TestEARClaimsUnmarshalInvalidJSON(t *testing.T) {
+	var c issuer.EARClaims
+	if err := json.Unmarshal([]byte("not json"), &c); err == nil {
+		t.Fatal("expected error unmarshaling invalid JSON into EARClaims")
+	}
+}
+
+func TestValidateEARTokenRequiresProvider(t *testing.T) {
+	_, err := issuer.ValidateEARToken("x.y.z", nil, "cds")
+	var ve *issuer.TokenValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %T, want TokenValidationError", err)
+	}
+	if ve.Reason != issuer.ReasonInvalidSignature {
+		t.Errorf("reason = %q, want invalid_signature", ve.Reason)
+	}
+}
+
+func TestValidateEARTokenMalformedToken(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	_, err = issuer.ValidateEARToken("garbage", testKeyProvider{pub: &key.PublicKey}, "cds")
+	var ve *issuer.TokenValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %T, want TokenValidationError", err)
+	}
+	if ve.Reason != issuer.ReasonMalformed {
+		t.Errorf("reason = %q, want malformed", ve.Reason)
+	}
+}
+
+func TestValidateEARTokenExpired(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Unix()
+	claims := validEARClaims(past)
+	claims[earclaims.ExpiresAt] = past + 1 // already expired (beyond skew)
+	token := signEARJWT(t, key, claims)
+
+	_, err = issuer.ValidateEARToken(token, testKeyProvider{pub: &key.PublicKey}, "cds")
+	var ve *issuer.TokenValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %T, want TokenValidationError", err)
+	}
+	if ve.Reason != issuer.ReasonExpired {
+		t.Errorf("reason = %q, want expired", ve.Reason)
+	}
+}
+
+func TestValidateEARTokenWrongIssuer(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	now := time.Now().Unix()
+	claims := validEARClaims(now)
+	claims[earclaims.Issuer] = "someone-else"
+	token := signEARJWT(t, key, claims)
+
+	_, err = issuer.ValidateEARToken(token, testKeyProvider{pub: &key.PublicKey}, "cds")
+	var ve *issuer.TokenValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %T, want TokenValidationError", err)
+	}
+	if ve.Reason != issuer.ReasonInvalidIssuer {
+		t.Errorf("reason = %q, want invalid_issuer", ve.Reason)
+	}
+}
+
+func TestValidateEARTokenWrongSigningKey(t *testing.T) {
+	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
+	now := time.Now().Unix()
+	token := signEARJWT(t, signingKey, validEARClaims(now))
+
+	// Provider returns a different key, so the signature does not verify.
+	_, err = issuer.ValidateEARToken(token, testKeyProvider{pub: &otherKey.PublicKey}, "cds")
+	var ve *issuer.TokenValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %T, want TokenValidationError", err)
+	}
+	if ve.Reason != issuer.ReasonInvalidSignature {
+		t.Errorf("reason = %q, want invalid_signature", ve.Reason)
+	}
+}
+
+func TestValidateEARTokenProviderError(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	now := time.Now().Unix()
+	token := signEARJWT(t, key, validEARClaims(now))
+
+	_, err = issuer.ValidateEARToken(token, erroringKeyProvider{}, "cds")
+	if err == nil {
+		t.Fatal("expected error when provider cannot resolve key")
+	}
+}
+
+type erroringKeyProvider struct{}
+
+func (erroringKeyProvider) PublicKey(string) (*ecdsa.PublicKey, error) {
+	return nil, errors.New("no key")
+}
+
+func TestTokenValidationErrorErrorAndUnwrap(t *testing.T) {
+	inner := errors.New("inner failure")
+	e := &issuer.TokenValidationError{Reason: issuer.ReasonExpired, Err: inner}
+	if e.Error() != "inner failure" {
+		t.Errorf("Error() = %q, want inner failure", e.Error())
+	}
+	if !errors.Is(e, inner) {
+		t.Error("Unwrap should expose the wrapped error")
+	}
+}

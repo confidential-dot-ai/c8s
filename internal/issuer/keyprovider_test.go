@@ -56,6 +56,15 @@ func jwksTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func jwksServer(t *testing.T, kid string, pub *ecdsa.PublicKey) *httptest.Server {
+	t.Helper()
+	buf := jwksTestJSON(t, kid, pub)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(buf)
+	}))
+}
+
 // TestJWKSKeyProviderUsesProvidedClient pins that a caller-supplied HTTP
 // client carries every JWKS fetch: the URL host is unresolvable, so only the
 // injected transport can serve it.
@@ -154,5 +163,94 @@ func TestJWKSKeyProviderPicksUpRotatedKid(t *testing.T) {
 	}
 	if delta := testutil.ToFloat64(jwksRefreshesTotal) - before; delta < 2 {
 		t.Fatalf("jwks refreshes delta = %v, want >= 2 (initial fetch + kid-miss refresh)", delta)
+	}
+}
+
+func TestNewCertKeyProvider(t *testing.T) {
+	ca, err := NewCA("kp", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	p, err := NewCertKeyProvider(ca.Cert)
+	if err != nil {
+		t.Fatalf("NewCertKeyProvider: %v", err)
+	}
+	// kid is ignored for the cert-pinned provider.
+	got, err := p.PublicKey("anything")
+	if err != nil {
+		t.Fatalf("PublicKey: %v", err)
+	}
+	if !got.Equal(ca.Key.Public()) {
+		t.Error("returned public key does not match CA key")
+	}
+}
+
+func TestNewCertKeyProviderRejectsNonECDSA(t *testing.T) {
+	// A leaf cert built around a non-ECDSA key is overkill; instead craft a
+	// cert whose PublicKey is replaced with a non-ECDSA type.
+	ca, err := NewCA("kp", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	bad := *ca.Cert
+	bad.PublicKey = "not-a-key"
+	if _, err := NewCertKeyProvider(&bad); err == nil {
+		t.Fatal("expected error for non-ECDSA cert public key")
+	}
+}
+
+func TestJWKSKeyProviderRejectsEmptyKid(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, "kid-1", &key.PublicKey)
+	defer srv.Close()
+
+	p, err := NewJWKSKeyProvider(context.Background(), srv.URL, time.Minute, srv.Client(), jwksTestLogger())
+	if err != nil {
+		t.Fatalf("NewJWKSKeyProvider: %v", err)
+	}
+	if _, err := p.PublicKey(""); err == nil {
+		t.Fatal("expected empty kid to be rejected")
+	}
+}
+
+func TestJWKSKeyProviderKidMiss(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, "kid-1", &key.PublicKey)
+	defer srv.Close()
+
+	p, err := NewJWKSKeyProvider(context.Background(), srv.URL, time.Minute, srv.Client(), jwksTestLogger())
+	if err != nil {
+		t.Fatalf("NewJWKSKeyProvider: %v", err)
+	}
+	// First miss triggers a force-refresh which still won't find the kid.
+	if _, err := p.PublicKey("missing-kid"); err == nil {
+		t.Fatal("expected kid miss to error")
+	}
+	// Second miss within a second is refresh rate-limited.
+	if _, err := p.PublicKey("missing-kid"); err == nil {
+		t.Fatal("expected rate-limited kid miss to error")
+	}
+}
+
+func TestNewJWKSKeyProviderInitialFetchFailureDoesNotError(t *testing.T) {
+	// A server that 500s: initial fetch fails but constructor still succeeds
+	// (it logs a warning and retries lazily).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p, err := NewJWKSKeyProvider(context.Background(), srv.URL, time.Minute, srv.Client(), jwksTestLogger())
+	if err != nil {
+		t.Fatalf("NewJWKSKeyProvider should tolerate initial fetch failure: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
 	}
 }

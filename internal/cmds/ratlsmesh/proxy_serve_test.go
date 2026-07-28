@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -438,4 +439,117 @@ func TestProxyRunPerSourceRejectReleasesGlobalSlot(t *testing.T) {
 		t.Errorf("connLimitRejected = %v, want 0 (per-source rejects must return the global slot)", v)
 	}
 	release()
+}
+
+func TestTryAcquireAndReleaseSrc(t *testing.T) {
+	p := &Proxy{maxConnsPerSrc: 2}
+	c1, ok := p.tryAcquireSrc("10.0.0.1")
+	if !ok || c1 == nil {
+		t.Fatal("first acquire should succeed")
+	}
+	c2, ok := p.tryAcquireSrc("10.0.0.1")
+	if !ok || c2 != c1 {
+		t.Fatal("second acquire should succeed on the same counter")
+	}
+	if _, ok := p.tryAcquireSrc("10.0.0.1"); ok {
+		t.Fatal("third acquire should hit the limit")
+	}
+	p.releaseSrc("10.0.0.1", c1)
+	p.releaseSrc("10.0.0.1", c1)
+	if len(p.srcConns) != 0 {
+		t.Errorf("srcConns not cleaned up: %v", p.srcConns)
+	}
+	// A stale counter must not delete a newer one.
+	fresh, _ := p.tryAcquireSrc("10.0.0.1")
+	p.releaseSrc("10.0.0.1", c1) // stale: drops to -1, map entry is fresh's
+	if got := p.srcConns["10.0.0.1"]; got != fresh {
+		t.Error("stale release removed the fresh counter")
+	}
+	p.releaseSrc("10.0.0.1", fresh)
+}
+
+// TestServeConnectionLimits drives Proxy.Run so serve's semaphore and
+// per-source budget branches execute in the real accept loop.
+func TestServeConnectionLimits(t *testing.T) {
+	serverTLS, clientTLS := testTLSConfigs(t)
+	for _, tc := range []struct {
+		name    string
+		sem     int
+		perSrc  int
+		counter func(m *metrics) float64
+	}{
+		{"global limit", 1, 0, func(m *metrics) float64 { return testutil.ToFloat64(m.connLimitRejected) }},
+		{"per-source limit", 2, 1, func(m *metrics) float64 { return testutil.ToFloat64(m.connLimitPerSourceRejected) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testMetrics()
+			hold := make(chan struct{})
+			var holdOnce sync.Once
+			releaseHold := func() { holdOnce.Do(func() { close(hold) }) }
+			defer releaseHold()
+
+			outPort := freePort(t)
+			inPort := freePort(t)
+			var sem chan struct{}
+			if tc.sem > 0 {
+				sem = make(chan struct{}, tc.sem)
+			}
+			ready := make(chan struct{})
+			p := &Proxy{
+				outboundAddr: fmt.Sprintf("127.0.0.1:%d", outPort),
+				inboundAddr:  fmt.Sprintf("127.0.0.1:%d", inPort),
+				serverTLS:    serverTLS,
+				clientTLS:    clientTLS,
+				nodeIP:       "127.0.0.1",
+				inboundPort:  inPort,
+				resolver:     &staticResolver{nodeIP: "127.0.0.1"},
+				origDstFunc: func(net.Conn) (string, error) {
+					<-hold
+					return "", errors.New("held connection released")
+				},
+				logger:         testLogger(),
+				metrics:        m,
+				bufPool:        newBufPool(0),
+				connSem:        sem,
+				maxConnsPerSrc: tc.perSrc,
+				drainTimeout:   200 * time.Millisecond,
+				onReady:        func() { close(ready) },
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runDone := make(chan error, 1)
+			go func() { runDone <- p.Run(ctx) }()
+			select {
+			case <-ready:
+			case <-time.After(10 * time.Second):
+				t.Fatal("proxy never became ready")
+			}
+
+			conn1, err := net.Dial("tcp", p.outboundAddr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn1.Close()
+			// Wait until the first handler is actually holding its slot.
+			assertEventually(t, 5*time.Second, func() bool {
+				return testutil.ToFloat64(m.activeConnections.WithLabelValues("outbound")) >= 1
+			}, "first connection never reached the handler")
+
+			conn2, err := net.Dial("tcp", p.outboundAddr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn2.Close()
+			assertEventually(t, 5*time.Second, func() bool { return tc.counter(m) >= 1 }, "limit rejection never counted")
+
+			releaseHold()
+			cancel()
+			select {
+			case <-runDone:
+			case <-time.After(10 * time.Second):
+				t.Fatal("proxy Run did not stop")
+			}
+		})
+	}
 }

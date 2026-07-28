@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -474,5 +475,160 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 	if summary.Killed != 0 || summary.Failed != 1 {
 		t.Fatalf("killed=%d failed=%d, want killed=0 failed=1 for an undeliverable kill",
 			summary.Killed, summary.Failed)
+	}
+}
+
+func TestAlwaysAllowAllowlist(t *testing.T) {
+	wl := alwaysAllowAllowlist(map[string]string{pushDigestA: "image-a", pushDigestB: "image-b"})
+	if len(wl.Digests) != 2 {
+		t.Fatalf("expected 2 digests, got %d", len(wl.Digests))
+	}
+	if wl.Digests[pushDigestA] != "image-a" {
+		t.Fatalf("digest A = %q, want image-a", wl.Digests[pushDigestA])
+	}
+}
+
+func TestAlwaysAllowAllowlist_Empty(t *testing.T) {
+	wl := alwaysAllowAllowlist(nil)
+	if wl == nil || wl.Digests == nil {
+		t.Fatal("expected non-nil allowlist with non-nil Digests map")
+	}
+	if len(wl.Digests) != 0 {
+		t.Fatalf("expected empty digests, got %d", len(wl.Digests))
+	}
+}
+
+func TestEntriesOf(t *testing.T) {
+	if got := entriesOf(nil); got != 0 {
+		t.Fatalf("entriesOf(nil) = %d, want 0", got)
+	}
+	wl := &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "a", pushDigestB: "b"}}
+	if got := entriesOf(wl); got != 2 {
+		t.Fatalf("entriesOf = %d, want 2", got)
+	}
+}
+
+// --- healthListener / startHealthServer ---
+
+func TestHealthListener_TCP(t *testing.T) {
+	l, err := healthListener("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer l.Close()
+	if l.Addr().Network() != "tcp" {
+		t.Fatalf("expected tcp listener, got %q", l.Addr().Network())
+	}
+}
+
+func TestHealthListener_TCPInvalidAddr(t *testing.T) {
+	if _, err := healthListener("not-a-valid-addr"); err == nil {
+		t.Fatal("expected error for invalid TCP address")
+	}
+}
+
+func TestHealthListener_Unix(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "health.sock")
+	l, err := healthListener("unix://" + sock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer l.Close()
+	if l.Addr().Network() != "unix" {
+		t.Fatalf("expected unix listener, got %q", l.Addr().Network())
+	}
+}
+
+func TestHealthListener_UnixRemovesStaleSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "health.sock")
+	// Bind once and close to leave a stale socket file behind.
+	l1, err := healthListener("unix://" + sock)
+	if err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+	l1.Close()
+	// Re-bind must succeed (stale file removed before listen).
+	l2, err := healthListener("unix://" + sock)
+	if err != nil {
+		t.Fatalf("rebind over stale socket: %v", err)
+	}
+	l2.Close()
+}
+
+func TestStartHealthServer_HealthzReflectsReadiness(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "health.sock")
+	addr := "unix://" + sock
+
+	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := startHealthServer(ctx, healthServerConfig{
+		logger:       discardLogger(),
+		plugin:       p,
+		addr:         addr,
+		readTimeout:  time.Second,
+		writeTimeout: time.Second,
+	}); err != nil {
+		t.Fatalf("startHealthServer: %v", err)
+	}
+
+	httpClient := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+	}
+
+	// Not ready yet → 503.
+	resp, err := httpClient.Get("http://unix/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz (not ready): %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d, want 503", resp.StatusCode)
+	}
+
+	p.SetReady()
+	resp2, err := httpClient.Get("http://unix/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz (ready): %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("ready status = %d, want 200", resp2.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestStartHealthServer_InvalidAddr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := startHealthServer(ctx, healthServerConfig{
+		logger:       discardLogger(),
+		plugin:       &plugin{},
+		addr:         "not-a-valid-addr",
+		readTimeout:  time.Second,
+		writeTimeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid listen address")
+	}
+}
+
+func TestAllowlistPullHTTPClient_InvalidMeasurements(t *testing.T) {
+	_, err := allowlistPullHTTPClient(pullConfig{
+		CDSMeasurements:   []string{"not-hex"},
+		AttestationApiURL: "http://localhost:30840",
+		Timeout:           time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid CDS measurements")
 	}
 }
