@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer \
-       test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff vet fmt lint clean \
+       test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
 
 CONTROLLER_GEN         ?= controller-gen
@@ -109,6 +109,11 @@ test:
 
 test-integration:
 	./test/integration/run.sh
+
+# Advisory mutation testing of code changed vs BASE (default origin/main).
+mutation-check:
+	./scripts/mutation-check.sh run "$${BASE:-origin/main}"
+	./scripts/mutation-check.sh summary
 
 # Live-cluster check of the cw-label integrity admission policy. Needs
 # kubectl pointed at a cluster with the c8s chart installed.

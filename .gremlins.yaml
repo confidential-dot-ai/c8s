@@ -1,0 +1,8 @@
+# Static mutation-testing policy; per-run inputs (diff base, output paths) are
+# flags in scripts/mutation-check.sh.
+unleash:
+  exclude-files:
+    # helmchart tests exec a real helm binary the mutation CI job does not
+    # install; deepcopy is generated code.
+    - "internal/helmchart/.*"
+    - "api/v1alpha2/zz_generated.deepcopy.go"

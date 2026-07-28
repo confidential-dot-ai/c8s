@@ -14,6 +14,8 @@ on:
       - ".golangci.yml"
       - "internal/helmchart/c8s/**"
       - "scripts/coverage-gate.sh"
+      - "scripts/mutation-check.sh"
+      - ".gremlins.yaml"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main, "feat/**"]
@@ -131,3 +133,29 @@ jobs:
               exit 1
             }
           }'
+
+  mutation:
+    name: Mutation (advisory)
+    runs-on: ubuntu-latest
+    # Diff-based vs the PR base; no meaningful base ref on push.
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 20
+    # Advisory: never blocks the PR, even if the tool itself breaks.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # gremlins --diff needs the base ref's history.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      # The initial coverage pass runs the full suite, incl. helmchart tests.
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.14.4
+
+      - name: Mutation testing vs base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: ./scripts/mutation-check.sh ci "origin/$BASE_REF"

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# mutation-check.sh - advisory diff-based mutation testing (gremlins).
+#
+# Usage:
+#   scripts/mutation-check.sh run <base-ref> [out]   mutate code changed vs base-ref,
+#                                                    write <out>.json and <out>.log
+#   scripts/mutation-check.sh summary [out]          print markdown summary from <out>.json
+#   scripts/mutation-check.sh ci <base-ref>          run + summary >> GITHUB_STEP_SUMMARY,
+#                                                    always exit 0 (advisory)
+#
+# gremlins is pinned as a tool dependency in go.mod. Static policy (excluded
+# files) lives in .gremlins.yaml; only tests of the mutated package run per
+# mutant, but the initial coverage pass runs the full suite.
+set -euo pipefail
+
+cmd="${1:-}"
+
+run_mutation() { # $1=base-ref $2=out-prefix
+  local base="$1" out="$2"
+  go tool gremlins unleash \
+    --diff "$base" \
+    --output "${out}.json" \
+    --output-statuses lc \
+    2>&1 | tee "${out}.log"
+}
+
+summary() { # $1=out-prefix
+  local json="$1.json"
+  command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+  echo "## Mutation testing (advisory)"
+  echo
+  if [[ ! -s "$json" ]]; then
+    echo "No report produced (gremlins failed before mutation testing; see job log)."
+    return 0
+  fi
+  if [[ "$(jq '.mutants_total // 0' "$json")" -eq 0 ]]; then
+    echo "No mutants generated: the diff touched no mutable Go code."
+    return 0
+  fi
+  jq -r '"- Test efficacy: \(.test_efficacy * 10 | round / 10)% (killed / (killed + lived))",
+         "- Mutant coverage: \(.mutations_coverage * 10 | round / 10)%",
+         "- Mutants: \(.mutants_total) total, \(.mutants_killed // 0) killed, \(.mutants_lived // 0) lived, \(.mutants_not_covered // 0) not covered, \(.mutants_not_viable // 0) not viable"' "$json"
+  local survivors
+  survivors="$(jq -r '.files[]? | .file_name as $f | .mutations[]?
+    | select(.status == "LIVED" or .status == "NOT COVERED")
+    | "- `\($f):\(.line):\(.column)` \(.type) \(.status)"' "$json")"
+  if [[ -n "$survivors" ]]; then
+    echo
+    echo "### Surviving mutants"
+    echo "$survivors" | head -n 100
+    local n
+    n="$(echo "$survivors" | wc -l | tr -d ' ')"
+    if [[ "$n" -gt 100 ]]; then
+      echo "- (truncated, $n total)"
+    fi
+  fi
+}
+
+case "$cmd" in
+run)
+  run_mutation "${2:?base ref required}" "${3:-mutation}"
+  ;;
+summary)
+  summary "${2:-mutation}"
+  ;;
+ci)
+  # Advisory end to end: report to the step summary, never fail the job.
+  run_mutation "${2:?base ref required}" mutation \
+    || echo "gremlins exited non-zero (advisory, continuing)" >&2
+  summary mutation >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+  ;;
+*)
+  echo "usage: $0 {run <base-ref> [out]|summary [out]|ci <base-ref>}" >&2
+  exit 2
+  ;;
+esac
