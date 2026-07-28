@@ -992,7 +992,6 @@ func TestHostPortConflict(t *testing.T) {
 	}
 }
 
-
 // TestInstallFailsClosedWithoutPinOrOptIn pins the installer contract: with
 // neither --measurements nor --allow-unpinned-measurements, the install fails
 // (rather than rendering a CDS that refuses to start); the opt-in proceeds
