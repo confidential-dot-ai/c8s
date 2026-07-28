@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -165,4 +166,31 @@ func TestNeedsReinjectSkipsTerminatingPod(t *testing.T) {
 	if needsReinject(p, excluded) {
 		t.Fatal("terminating pod should not be swept")
 	}
+}
+
+func TestRunReinjectSweep(t *testing.T) {
+	mgr := newTestManager(t)
+	excluded := excludedNamespaceSet("c8s-system", nil)
+
+	t.Run("client build failure is wrapped", func(t *testing.T) {
+		stubDirectClient(t, nil, errors.New("boom"))
+		err := runReinjectSweep(context.Background(), mgr, excluded)
+		if err == nil || !strings.Contains(err.Error(), "build sweep client: boom") {
+			t.Fatalf("runReinjectSweep error = %v, want wrapped client-build error", err)
+		}
+	})
+
+	t.Run("sweeps through the built client", func(t *testing.T) {
+		cw := map[string]string{webhook.AnnotationWorkload: "wl"}
+		fc := fake.NewClientBuilder().WithObjects(pod("needs", "tenant", "ReplicaSet", cw)).Build()
+		stubDirectClient(t, fc, nil)
+		if err := runReinjectSweep(context.Background(), mgr, excluded); err != nil {
+			t.Fatalf("runReinjectSweep: %v", err)
+		}
+		var p corev1.Pod
+		err := fc.Get(context.Background(), client.ObjectKey{Namespace: "tenant", Name: "needs"}, &p)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("uninjected cw pod still present after sweep (get err = %v)", err)
+		}
+	})
 }
