@@ -84,6 +84,58 @@ jobs:
             echo "::warning::runner pod scratch at ${USE}%"
           fi
 
+  pickup:
+    # THE EXTERNAL PROBER the header above asks for. Liveness alone cannot alarm
+    # in minutes, because a dead runner does not fail a job, it queues it. This
+    # job runs on GitHub's own runners, watches how long each probe waits for a
+    # pod, and goes red on the WAIT rather than on the eventual result.
+    #
+    # MEASURED, 2026-07-28, over the five prior canary runs and 98 jobs across
+    # the consumer repos: tdx-metal-cvm picked up in 6-7s every time, while
+    # snp-metal-cvm took 2m, 8m, 2h02m, 2h40m and 6h04m, and every one of those
+    # runs concluded SUCCESS. That is the blindness this closes: the multi-hour
+    # stalls were already happening and the canary was green through all of them.
+    name: pickup latency
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A standing scale-to-zero set should produce a pod in well under a minute.
+      # WARN is where tdx sits with headroom; FAIL is generous enough that a cold
+      # image pull cannot trip it, so a red here means the listener is not
+      # reconciling rather than that the guest was merely busy.
+      WARN_S: '60'
+      FAIL_S: '600'
+    steps:
+      - name: every standing runner must accept a job promptly
+        run: |
+          set -euo pipefail
+          api="repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
+          deadline=$(( $(date +%s) + FAIL_S ))
+          while :; do
+            pending=$(gh api "$api" --paginate \
+              --jq '.jobs[] | select(.name|startswith("probe")) | select((.steps|length)==0 or .steps[0].started_at==null) | .name' || true)
+            [ -z "$pending" ] && break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::no runner pod after ${FAIL_S}s for:"
+              printf '  %s\n' $pending
+              echo "The label is registered but its listener is not serving. This is the"
+              echo "silent failure mode: the job stays queued, nothing goes red for 24h."
+              exit 1
+            fi
+            sleep 15
+          done
+          gh api "$api" --paginate --jq '.jobs[] | select(.name|startswith("probe")) | "\(.name)\t\(.created_at)\t\(.steps[0].started_at)"' \
+          | while IFS=$'\t' read -r name created started; do
+              w=$(( $(date -d "$started" +%s) - $(date -d "$created" +%s) ))
+              echo "$name waited ${w}s"
+              if   [ "$w" -ge "$FAIL_S" ]; then echo "::error::$name waited ${w}s for a runner"; exit 1
+              elif [ "$w" -ge "$WARN_S" ]; then echo "::warning title=slow runner pickup::$name waited ${w}s, tdx-metal-cvm baseline is under 10s"
+              fi
+            done
+
   verdict:
     # Turns a silent non-result into a red run. Without this a cancelled or
     # skipped probe leaves the workflow looking merely "not green" rather than

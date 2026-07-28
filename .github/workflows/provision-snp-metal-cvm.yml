@@ -33,6 +33,10 @@ name: provision-snp-metal-cvm
 on:
   workflow_dispatch:
     inputs:
+      runner_version:
+        description: 'actions-runner image tag for the scale set. Pinned rather than latest: the guest has no scratch disk, so the containerd store is a RAM overlay, and a :latest tag defaults imagePullPolicy to Always and re-pulls ~2GB on every scale-from-zero.'
+        required: false
+        default: '2.336.0'
       max_runners:
         description: 'max concurrent runner pods in the guest. Default 3: paired with memory_override 48Gi in the cvm-e2e call below (see metal-runner-scaling.md, option A). Ceiling is memory, not the scale set — the guest is still smp4, so 3 jobs SHARE 4 vCPUs (more jobs at once, not faster jobs). Raising this without raising the guest RAM re-introduces the OOM (runs 29854690919/29854809091).'
         required: false
@@ -53,6 +57,7 @@ jobs:
           APP_INSTALLATION_ID: '146850802'
           ARC_APP_PRIVATE_KEY: ${{ secrets.ARC_APP_PRIVATE_KEY }}
           MAXR: ${{ inputs.max_runners }}
+          RUNNER_VERSION: ${{ inputs.runner_version }}
         run: |
           set -euo pipefail
           [ -n "${ARC_APP_PRIVATE_KEY:-}" ] || { echo "::error::secret ARC_APP_PRIVATE_KEY (App 4309649 PEM) is not set — add it before first provision"; exit 1; }
@@ -113,7 +118,7 @@ jobs:
           # runner overlay = privileged + /dev/sev-guest (reads the SNP report = in
           # the TEE) + root (RUNNER_ALLOW_RUNASROOT/runAsUser:0) so jobs can apt-install
           # libtss2 etc. — the azure-cvm overlay pattern, on metal.
-          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: snp-metal-cvm\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: snp-metal-cvm\n    minRunners: 0\n    maxRunners: $MAXR\n    template:\n      spec:\n        containers:\n          - name: runner\n            image: ghcr.io/actions/actions-runner:latest\n            command: ["/home/runner/run.sh"]\n            env:\n              - name: RUNNER_ALLOW_RUNASROOT\n                value: "1"\n            securityContext:\n              privileged: true\n              runAsUser: 0\n            volumeMounts:\n              - name: sev\n                mountPath: /dev/sev-guest\n        volumes:\n          - name: sev\n            hostPath:\n              path: /dev/sev-guest\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
+          printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: snp-metal-cvm\n  namespace: kube-system\nspec:\n  chart: $CHART/gha-runner-scale-set\n  version: "0.14.2"\n  targetNamespace: arc-runners\n  createNamespace: true\n  valuesContent: |\n    githubConfigUrl: https://github.com/confidential-dot-ai\n    githubConfigSecret: arc-app\n    runnerScaleSetName: snp-metal-cvm\n    minRunners: 0\n    maxRunners: $MAXR\n    template:\n      spec:\n        containers:\n          - name: runner\n            image: ghcr.io/actions/actions-runner:$RUNNER_VERSION\n                imagePullPolicy: IfNotPresent\n            command: ["/home/runner/run.sh"]\n            env:\n              - name: RUNNER_ALLOW_RUNASROOT\n                value: "1"\n            securityContext:\n              privileged: true\n              runAsUser: 0\n            volumeMounts:\n              - name: sev\n                mountPath: /dev/sev-guest\n        volumes:\n          - name: sev\n            hostPath:\n              path: /dev/sev-guest\n' | \$K apply -f - 2>&1 | sed 's/^/@@SS /;s/\$/@@/'
           # 3) GATE: the listener authenticates to github + polls => "Getting next
           # message" — the scale set is live and registered (scaled to zero; a runner
           # pod only materialises when a job is dispatched to runs-on: snp-metal-cvm).
