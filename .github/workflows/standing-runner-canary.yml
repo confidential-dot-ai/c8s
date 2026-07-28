@@ -120,7 +120,9 @@ jobs:
             [ -z "$pending" ] && break
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "::error::no runner pod after ${FAIL_S}s for:"
-              printf '  %s\n' $pending
+              # Quoted: job names contain a space, and an unquoted expansion
+              # word-splits "probe (snp-metal-cvm)" across two lines.
+              echo "$pending" | sed 's/^/  /'
               echo "The label is registered but its listener is not serving. This is the"
               echo "silent failure mode: the job stays queued, nothing goes red for 24h."
               exit 1
