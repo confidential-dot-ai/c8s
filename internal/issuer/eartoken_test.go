@@ -1,9 +1,11 @@
 package issuer_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -143,6 +145,32 @@ func TestValidateEARTokenRejectsSignedNonEARJWT(t *testing.T) {
 	}
 	if validationErr.Reason != issuer.ReasonMalformed {
 		t.Fatalf("reason = %q, want malformed", validationErr.Reason)
+	}
+}
+
+// TestEARClaimsRawEvidencePreservation pins the audit-evidence capture: with
+// submods present RawEvidence carries them, and without submods it must keep
+// the full raw claim set rather than being cleared.
+func TestEARClaimsRawEvidencePreservation(t *testing.T) {
+	withoutSubmods := []byte(`{"iss":"cds","iat":1}`)
+	var c issuer.EARClaims
+	if err := json.Unmarshal(withoutSubmods, &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !bytes.Equal(c.RawEvidence, withoutSubmods) {
+		t.Fatalf("RawEvidence = %q, want the full raw claims %q", c.RawEvidence, withoutSubmods)
+	}
+	if len(c.Submods) != 0 {
+		t.Fatalf("Submods = %q, want empty without a submods claim", c.Submods)
+	}
+
+	withSubmods := []byte(`{"iss":"cds","submods":{"cvm":{"ear.status":2}}}`)
+	c = issuer.EARClaims{}
+	if err := json.Unmarshal(withSubmods, &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(c.Submods) == 0 || !bytes.Equal(c.Submods, c.RawEvidence) {
+		t.Fatalf("Submods = %q, RawEvidence = %q; want both set to the submods object", c.Submods, c.RawEvidence)
 	}
 }
 

@@ -148,6 +148,11 @@ func TestValidateCSR(t *testing.T) {
 			csr:    &x509.CertificateRequest{},
 			policy: issuer.CSRPolicy{},
 		},
+		{
+			name:   "no IP SAN with SourceIP set accepted",
+			csr:    &x509.CertificateRequest{},
+			policy: issuer.CSRPolicy{SourceIP: "10.0.0.1"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

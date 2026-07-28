@@ -19,8 +19,11 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -737,6 +740,253 @@ func TestValidateAllowlistSnapshot(t *testing.T) {
 	}
 	if err := validateAllowlistSnapshot("1", map[types.Digest]string{}); err != nil {
 		t.Fatalf("validateAllowlistSnapshot rejected an empty snapshot: %v", err)
+	}
+}
+
+// capturedRecord is one slog record collected by captureHandler.
+type capturedRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]slog.Value
+}
+
+// captureHandler collects records so tests can assert on structured log
+// output without string-slicing formatted lines.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedRecord
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]slog.Value)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, capturedRecord{level: r.Level, msg: r.Message, attrs: attrs})
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) find(msg string) (capturedRecord, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.msg == msg {
+			return r, true
+		}
+	}
+	return capturedRecord{}, false
+}
+
+func (h *captureHandler) anyAtLevel(level slog.Level) (capturedRecord, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.level >= level {
+			return r, true
+		}
+	}
+	return capturedRecord{}, false
+}
+
+func TestNewHandoffHandlerDefaultsNilLogger(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hh, err := NewHandoffHandler(HandoffDeps{
+		KeyProvider:         testKeyProvider{pub: &tokenKey.PublicKey},
+		AllowedMeasurements: map[string]bool{"m": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash,
+		Signer:              handoffTestKey(t),
+		EARSource:           staticHandoffEARSource{ear: "ear"},
+		Snapshot:            snapshotFromCA(ca),
+	})
+	if err != nil {
+		t.Fatalf("newHandoffHandler: %v", err)
+	}
+	if hh.deps.Logger == nil {
+		t.Fatal("nil Logger must be defaulted, not stored")
+	}
+}
+
+func TestHandoffSuccessLogsNoErrors(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	kp := testKeyProvider{pub: &tokenKey.PublicKey}
+	ca, err := NewCAWithCurve("Test Mesh CA", time.Hour, elliptic.P384())
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeHandoffKey := handoffTestKey(t)
+	requesterHandoffKey := handoffTestKey(t)
+	activeEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", activeHandoffKey)
+	requesterEAR := handoffTestEARWithKey(t, tokenKey, "allowed_measurement", requesterHandoffKey)
+
+	capture := &captureHandler{}
+	hh, err := NewHandoffHandler(HandoffDeps{
+		Logger:              slog.New(capture),
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash,
+		Signer:              activeHandoffKey,
+		EARSource:           staticHandoffEARSource{ear: activeEAR},
+		Snapshot:            snapshotFromCA(ca),
+	})
+	if err != nil {
+		t.Fatalf("newHandoffHandler: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(hh.HandleHandoff))
+	t.Cleanup(srv.Close)
+
+	clientDeps := HandoffClientDeps{
+		KeyProvider:         kp,
+		AllowedMeasurements: map[string]bool{"allowed_measurement": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash,
+	}
+	if _, err := RequestHandoff(context.Background(), clientDeps, srv.URL, requesterEAR, requesterHandoffKey, srv.Client()); err != nil {
+		t.Fatalf("requestHandoff: %v", err)
+	}
+	if r, ok := capture.anyAtLevel(slog.LevelWarn); ok {
+		t.Fatalf("successful handoff logged %q at level %v", r.msg, r.level)
+	}
+}
+
+func TestRequestHandoffNilClientUsesDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	deps := HandoffClientDeps{
+		KeyProvider:         testKeyProvider{},
+		AllowedMeasurements: map[string]bool{"m": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash,
+	}
+	_, err := RequestHandoff(context.Background(), deps, srv.URL, "requester-ear", handoffTestKey(t), nil)
+	var statusErr *HandoffStatusError
+	if !errors.As(err, &statusErr) || statusErr.Status != http.StatusTeapot {
+		t.Fatalf("RequestHandoff error = %v, want 418 *HandoffStatusError", err)
+	}
+}
+
+func TestRequestHandoffTreats3xxAsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+	}))
+	t.Cleanup(srv.Close)
+
+	deps := HandoffClientDeps{
+		KeyProvider:         testKeyProvider{},
+		AllowedMeasurements: map[string]bool{"m": true},
+		OperatorKeysHash:    handoffTestOperatorKeysHash,
+	}
+	_, err := RequestHandoff(context.Background(), deps, srv.URL, "requester-ear", handoffTestKey(t), srv.Client())
+	var statusErr *HandoffStatusError
+	if !errors.As(err, &statusErr) || statusErr.Status != http.StatusMultipleChoices {
+		t.Fatalf("RequestHandoff error = %v, want 300 *HandoffStatusError", err)
+	}
+}
+
+func TestHandoffEARExpiryUpdaterSetsPositiveExpiry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ear := handoffTestEAR(t, handoffTestKey(t), "m")
+	handoffEARExpirySeconds.Set(-1)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	RunHandoffEARExpiryUpdater(ctx, staticHandoffEARSource{ear: ear}, time.Hour, logger)
+
+	got := testutil.ToFloat64(handoffEARExpirySeconds)
+	if got < 3500 || got > 3700 {
+		t.Fatalf("handoff EAR expiry gauge = %v, want ~3600", got)
+	}
+}
+
+func TestParseHandoffPayloadParentCertificate(t *testing.T) {
+	ca, err := NewCAWithCurve("payload-ca", time.Hour, elliptic.P256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := NewCAWithCurve("payload-parent", time.Hour, elliptic.P256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := certutil.MarshalECKeyPEM(ca.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := string(certutil.EncodeCertPEM(ca.Cert.Raw))
+
+	base := handoffPayload{
+		CAKey:            string(keyPEM),
+		CACertificate:    certPEM,
+		CABundle:         certPEM,
+		AllowlistVersion: "1",
+		Allowlist:        map[types.Digest]string{},
+	}
+
+	valid := base
+	valid.ParentCertificate = string(certutil.EncodeCertPEM(parent.Cert.Raw))
+	plain, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := ParseHandoffPayload(plain)
+	if err != nil {
+		t.Fatalf("ParseHandoffPayload with valid parent: %v", err)
+	}
+	if material.ParentCert == nil || !material.ParentCert.Equal(parent.Cert) {
+		t.Fatal("parsed parent certificate does not match payload")
+	}
+
+	garbage := base
+	garbage.ParentCertificate = "not a certificate"
+	plain, err = json.Marshal(garbage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseHandoffPayload(plain); err == nil || !strings.Contains(err.Error(), "parse handoff parent certificate") {
+		t.Fatalf("ParseHandoffPayload with garbage parent: err = %v, want parse failure", err)
+	}
+}
+
+func TestValidateEARTokenAcceptsES384(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	claims := jwt.MapClaims(validTestEARClaims(map[string]any{
+		earclaims.IssuedAt:  now,
+		earclaims.ExpiresAt: now + 3600,
+	}))
+	token, err := jwt.NewWithClaims(jwt.SigningMethodES384, claims).SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateEARToken(token, testKeyProvider{pub: &key.PublicKey}, ""); err != nil {
+		t.Fatalf("ES384 EAR rejected: %v", err)
+	}
+}
+
+func TestValidateEARTokenAllowsClockSkewedExpiry(t *testing.T) {
+	tokenKey := handoffTestKey(t)
+	now := time.Now().Unix()
+	// Expired 10s ago: inside the 30s leeway, so it must still validate.
+	token := signJWT(t, tokenKey, map[string]any{
+		earclaims.IssuedAt:  now - 600,
+		earclaims.ExpiresAt: now - 10,
+	})
+	if _, err := ValidateEARToken(token, testKeyProvider{pub: &tokenKey.PublicKey}, ""); err != nil {
+		t.Fatalf("token expired within leeway rejected: %v", err)
 	}
 }
 

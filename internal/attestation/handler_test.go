@@ -204,6 +204,72 @@ func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
 	}
 }
 
+// TestAttestKeyEmbedsSubmittedEvidence: the issued EAR's ear_raw_evidence must
+// carry the evidence envelope the caller submitted, verbatim.
+func TestAttestKeyEmbedsSubmittedEvidence(t *testing.T) {
+	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, mockVerifyResponse(true, true))
+	}))
+	defer mockAS.Close()
+
+	app := httptest.NewServer(testApp(mockAS.URL))
+	defer app.Close()
+
+	challenge := authenticate(t, app.URL)
+	pubDER, err := x509.MarshalPKIXPublicKey(generateAttestKeyPubKey(t))
+	if err != nil {
+		t.Fatalf("marshal pubkey: %v", err)
+	}
+	submitted := types.AttestationEvidence{
+		Platform: "snp",
+		Evidence: json.RawMessage(`{"quote":"abc"}`),
+	}
+	body, err := json.Marshal(types.AttestKeyRequestBody{
+		Challenge: challenge,
+		Evidence:  submitted,
+		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp, err := http.Post(app.URL+"/attest-key", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST /attest-key: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
+	}
+	var out types.AttestKeyResponseBody
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	var claims struct {
+		Submods map[string]struct {
+			RawEvidence json.RawMessage `json:"ear_raw_evidence"`
+		} `json:"submods"`
+	}
+	decodeJWTPayload(t, out.EAR, &claims)
+	att, ok := claims.Submods[earclaims.SubmodAttester]
+	if !ok {
+		t.Fatalf("EAR missing %q submod", earclaims.SubmodAttester)
+	}
+	var got types.AttestationEvidence
+	if err := json.Unmarshal(att.RawEvidence, &got); err != nil {
+		t.Fatalf("unmarshal ear_raw_evidence %s: %v", att.RawEvidence, err)
+	}
+	if got.Platform != submitted.Platform {
+		t.Errorf("ear_raw_evidence platform = %q, want %q", got.Platform, submitted.Platform)
+	}
+	if string(got.Evidence) != string(submitted.Evidence) {
+		t.Errorf("ear_raw_evidence evidence = %s, want %s", got.Evidence, submitted.Evidence)
+	}
+}
+
 func TestAttestKeyRejectsMismatchedOperatorPolicy(t *testing.T) {
 	const requiredHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	app := httptest.NewServer(testAppWithOperatorPolicy("http://unused", requiredHash))

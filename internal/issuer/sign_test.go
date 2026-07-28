@@ -149,6 +149,44 @@ func TestCASignCSR_CopiesRATLSExtension(t *testing.T) {
 	t.Fatalf("RA-TLS extension not propagated to leaf")
 }
 
+func TestCASignCSR_ConfigClaimsExtension(t *testing.T) {
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	claimsValue := []byte{0x30, 0x03, 0x02, 0x01, 0x07}
+
+	findConfigClaims := func(leaf *x509.Certificate) ([]byte, bool) {
+		for _, ext := range leaf.Extensions {
+			if ext.Id.Equal(ratls.OIDRATLSConfigClaims) {
+				return ext.Value, true
+			}
+		}
+		return nil, false
+	}
+
+	csr, _ := mustCSR(t, "node", nil, nil, nil)
+	certPEM, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, ConfigClaimsExt: claimsValue})
+	if err != nil {
+		t.Fatalf("SignCSR with config claims: %v", err)
+	}
+	got, ok := findConfigClaims(mustParseCert(t, certPEM))
+	if !ok {
+		t.Fatal("config-claims extension not stamped on leaf")
+	}
+	if string(got) != string(claimsValue) {
+		t.Fatalf("config-claims value = %x, want %x", got, claimsValue)
+	}
+
+	certPEM, _, err = ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("SignCSR without config claims: %v", err)
+	}
+	if _, ok := findConfigClaims(mustParseCert(t, certPEM)); ok {
+		t.Fatal("config-claims extension stamped on leaf without claims")
+	}
+}
+
 func TestCASignCSR_RejectsNilCAOrCSR(t *testing.T) {
 	ca, err := issuer.NewCA("test ca", time.Hour)
 	if err != nil {

@@ -1,19 +1,23 @@
 package attestclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -490,5 +494,143 @@ func TestMakeSNPRATLSAttestFuncAPIError(t *testing.T) {
 	_, err := fn(context.Background(), customData)
 	if err == nil || !strings.Contains(err.Error(), "attestation-api") {
 		t.Fatalf("error = %v, want attestation-api error", err)
+	}
+}
+
+// TestRedirectStatusIsNotSuccess pins the success window at [200, 300): a 300
+// response must be treated as a failure on every endpoint.
+func TestRedirectStatusIsNotSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+		_, _ = w.Write([]byte(`{"challenge":"x","ear":"x"}`))
+	}))
+	defer srv.Close()
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+
+	assertStatus300 := func(t *testing.T, err error) {
+		t.Helper()
+		var statusErr *StatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("expected StatusError, got %T: %v", err, err)
+		}
+		if statusErr.Status != http.StatusMultipleChoices {
+			t.Fatalf("status = %d, want 300", statusErr.Status)
+		}
+	}
+	t.Run("authenticate", func(t *testing.T) {
+		_, err := c.Authenticate()
+		assertStatus300(t, err)
+	})
+	t.Run("attest", func(t *testing.T) {
+		_, err := c.Attest(attestRequest{})
+		assertStatus300(t, err)
+	})
+	t.Run("healthz", func(t *testing.T) {
+		ok, err := c.Healthz()
+		if err != nil {
+			t.Fatalf("Healthz: %v", err)
+		}
+		if ok {
+			t.Fatal("Healthz reported healthy on a 300 response")
+		}
+	})
+	t.Run("readyz", func(t *testing.T) {
+		ok, err := c.Readyz()
+		if err != nil {
+			t.Fatalf("Readyz: %v", err)
+		}
+		if ok {
+			t.Fatal("Readyz reported ready on a 300 response")
+		}
+	})
+}
+
+func TestAttestKeyRedirectStatusIsError(t *testing.T) {
+	const challenge = "dGVzdC1jaGFsbGVuZ2U="
+	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+		_, _ = w.Write([]byte(`{"ear":"x"}`))
+	}))
+
+	c := NewClient(cdsURL)
+	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected StatusError, got %T: %v", err, err)
+	}
+	if statusErr.Status != http.StatusMultipleChoices {
+		t.Fatalf("status = %d, want 300", statusErr.Status)
+	}
+}
+
+// TestObtainCertificateWithClaimsForwardsClaims: the claims DER must be bound
+// into the attestation-api report data and forwarded to CDS alongside the
+// digest lists. Expected report data is recomputed from primitives so the
+// assertion does not depend on the client's own helper.
+func TestObtainCertificateWithClaimsForwardsClaims(t *testing.T) {
+	const challenge = "dGVzdC1jaGFsbGVuZ2U="
+	const certPEM = "-----BEGIN CERTIFICATE-----\nclaims\n-----END CERTIFICATE-----\n"
+	claimsDER := []byte("claims-der")
+	initDigests := []string{"sha256:aa"}
+	mainDigests := []string{"sha256:bb"}
+	csrPEM := testCSRPEM(t)
+
+	block, _ := pem.Decode([]byte(csrPEM))
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse csr: %v", err)
+	}
+	anchor, err := ratls.ReportDataForKeyAndClaims(csr.PublicKey, claimsDER, []byte("test-challenge"))
+	if err != nil {
+		t.Fatalf("ReportDataForKeyAndClaims: %v", err)
+	}
+	wantReportData := anchor[:sha512.Size384]
+
+	var sawReportData []byte
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req types.AttestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode attest request: %v", err)
+		}
+		sawReportData = append([]byte(nil), req.ReportData.Bytes()...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"platform":"snp","evidence":{"q":1}}`))
+	}))
+	defer api.Close()
+
+	var sawAttest attestRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/authenticate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChallengeResponse{Challenge: challenge})
+	})
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&sawAttest); err != nil {
+			t.Errorf("decode cds attest request: %v", err)
+		}
+		_, _ = w.Write([]byte(certPEM))
+	})
+	cds := httptest.NewServer(mux)
+	defer cds.Close()
+
+	c := NewClientWithHTTP(cds.URL, cds.Client())
+	result, err := c.ObtainCertificateWithClaimsContext(context.Background(), api.URL, csrPEM, claimsDER, initDigests, mainDigests)
+	if err != nil {
+		t.Fatalf("ObtainCertificateWithClaimsContext: %v", err)
+	}
+	if result.Certificate != certPEM {
+		t.Fatalf("cert = %q, want %q", result.Certificate, certPEM)
+	}
+	if !bytes.Equal(sawReportData, wantReportData) {
+		t.Fatalf("report_data = %x, want claims-bound anchor %x", sawReportData, wantReportData)
+	}
+	if want := base64.StdEncoding.EncodeToString(claimsDER); sawAttest.WorkloadClaims != want {
+		t.Fatalf("workload_claims = %q, want %q", sawAttest.WorkloadClaims, want)
+	}
+	if len(sawAttest.InitContainerDigests) != 1 || sawAttest.InitContainerDigests[0] != initDigests[0] {
+		t.Fatalf("init_container_digests = %v, want %v", sawAttest.InitContainerDigests, initDigests)
+	}
+	if len(sawAttest.ContainerDigests) != 1 || sawAttest.ContainerDigests[0] != mainDigests[0] {
+		t.Fatalf("container_digests = %v, want %v", sawAttest.ContainerDigests, mainDigests)
 	}
 }

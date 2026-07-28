@@ -1,11 +1,42 @@
 package issuer
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"golang.org/x/time/rate"
 )
+
+// TestRateLimitMiddlewareKeysBySourceIP pins that limiter entries are keyed by
+// the source IP alone: a client reconnecting from a new ephemeral port must
+// not get a fresh bucket.
+func TestRateLimitMiddlewareKeysBySourceIP(t *testing.T) {
+	rl, err := NewIPRateLimiter(rate.Limit(0), 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := RateLimitMiddleware(rl, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	first := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req1.RemoteAddr = "10.5.5.5:1111"
+	h.ServeHTTP(first, req1)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first request code = %d, want 200", first.Code)
+	}
+
+	second := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.RemoteAddr = "10.5.5.5:2222"
+	h.ServeHTTP(second, req2)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("same IP from new port code = %d, want 429", second.Code)
+	}
+}
 
 func TestNewIPRateLimiterRejectsNonPositiveMaxEntries(t *testing.T) {
 	for _, maxEntries := range []int{0, -1} {
