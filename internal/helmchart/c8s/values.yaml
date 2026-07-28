@@ -218,12 +218,11 @@ cds:
   ##   2. The ratls-mesh daemonset and nri-image-policy plugin pin CDS's RA-TLS
   ##      serving cert against it when they dial CDS.
   ## Empty = CDS refuses to start unless allowUnpinnedMeasurements is set
-  ## (fail closed — see docs/security/RT-005-cds-no-instance-binding.md).
+  ## (fail closed).
   measurements: []
   ## Explicitly permit CDS to start with measurements empty (it otherwise
-  ## fails closed — see docs/security/RT-005-cds-no-instance-binding.md: an
-  ## unpinned /attest issues any workload's mesh identity to any TEE platform
-  ## that can reach the port). Development only.
+  ## fails closed: an unpinned /attest issues any workload's mesh identity
+  ## to any TEE platform that can reach the port). Development only.
   allowUnpinnedMeasurements: false
   ## PEM bundle of operator EC public keys (public material, not a secret).
   ## When set, CDS accepts POST/PUT/DELETE /allowlist from a client presenting a

@@ -415,7 +415,7 @@ func validateConfig(cfg config) error {
 		// port — no cluster membership, no k8s identity required. Fail
 		// closed at startup; --allow-unpinned-measurements restores the
 		// old warn-and-accept posture for development.
-		return fmt.Errorf("--measurements is empty: /attest would accept any TEE measurement from any platform (see docs/security/RT-005-cds-no-instance-binding.md); pass --allow-unpinned-measurements to run unpinned (development only)")
+		return fmt.Errorf("--measurements is empty: /attest would accept any TEE measurement from any platform that can reach this port; pass --allow-unpinned-measurements to run unpinned (development only)")
 	}
 	for _, timeout := range []struct {
 		name  string
