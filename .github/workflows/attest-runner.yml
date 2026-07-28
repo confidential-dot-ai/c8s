@@ -19,9 +19,17 @@
 #                runner. A guest asserting its own verification result is the
 #                circular check this is meant to remove.
 #
-# WHAT IT PROVES. That at the moment this job ran, the runner label reached a
-# genuine TEE whose launch measurement is the one the caller pinned, on hardware
-# whose signing key chains to the vendor.
+# WHAT IT PROVES. That at the moment this job ran, the runner label reached a TEE
+# that produced a report over this job's nonce, carrying the launch measurement
+# the caller pinned, with a valid signature over that report.
+#
+# WHAT IT DOES NOT PROVE, and the first run is what showed this. The report comes
+# back `"collateral_verified": false`, because attestation-cli takes no cert
+# provider and so never fetches the AMD or Intel chain. The signature is checked
+# against the certificate carried in the evidence, and nothing checks that the
+# certificate itself descends from the vendor root. Closing that needs either a
+# provider option on the CLI or the attesting side embedding a fetched VCEK, and
+# until then this gate is weaker than a full remote-attestation check.
 #
 # WHAT IT DOES NOT PROVE. A launch measurement covers the boot chain. It does
 # not cover software installed after boot, which on a standing runner includes
@@ -93,8 +101,10 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             libtss2-dev pkg-config build-essential curl ca-certificates git
 
+      # No rust-cache. There is no workspace checked out here, so its post step
+      # fails looking for a Cargo.toml, and `cargo install --git` would not use
+      # the workspace cache anyway.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: attest over the caller's nonce
         id: att
@@ -133,7 +143,6 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config build-essential
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: verify the report against the nonce and the pinned measurement
         env:
