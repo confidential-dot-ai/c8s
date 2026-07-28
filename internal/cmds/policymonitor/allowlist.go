@@ -211,10 +211,10 @@ func extractDigest(annotations map[string]string) (string, bool) {
 // policy makes it. The stock kata policy allows CopyFileRequest to any
 // guest path, so a host can overwrite the stamp post-pull (and replace
 // rootfs content outright); closing that needs path-scoped CopyFile rules
-// that exclude the bundle tree (tracked as a residual in
-// docs/security/RT-003-policy-monitor-host-annotations.md). The stamp
-// still raises the bar over annotations: forging it requires an extra,
-// timed guest-write the annotation path never needed.
+// that exclude the bundle tree — and blanket-allowing /run/kata-containers
+// does NOT close it, the stamp lives there. The stamp still raises the bar
+// over annotations: forging it requires an extra, timed guest write the
+// annotation path never needed.
 const pulledImageStampName = "c8s-pulled-image"
 
 // maxPulledImageStampSize bounds the stamp read. An image reference is a

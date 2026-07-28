@@ -2,8 +2,7 @@
 
 package policymonitor
 
-// Repro + regression tests for the host-forged annotation bypass
-// (docs/security/RT-003-policy-monitor-host-annotations.md).
+// Repro + regression tests for the host-forged annotation bypass.
 //
 // The vulnerability: policy-monitor's allowlist decision consumed
 // host-authored OCI annotations (io.kubernetes.cri.image-id et al.), which
