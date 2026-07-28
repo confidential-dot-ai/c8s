@@ -584,6 +584,70 @@ func TestReplaceAllSwapsFloorAndWorkloads(t *testing.T) {
 	}
 }
 
+// ReplaceAll must store and index every workload in the document, not just the
+// first one the map iteration happens to visit.
+func TestReplaceAllIndexesEveryWorkload(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	dA := mustParseDigest(t, digestA)
+	dB := mustParseDigest(t, digestB)
+	replacement := &pkgallowlist.Allowlist{
+		Schema: pkgallowlist.Schema,
+		Workloads: map[string]pkgallowlist.Workload{
+			"web": oneContainerWorkload(dA),
+			"db":  oneContainerWorkload(dB),
+		},
+	}
+	if err := store.ReplaceAll(replacement); err != nil {
+		t.Fatalf("replace all: %v", err)
+	}
+
+	doc, _, err := store.LoadAll()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, name := range []string{"web", "db"} {
+		if _, ok := doc.Workloads[name]; !ok {
+			t.Fatalf("workload %q missing after ReplaceAll: %#v", name, doc.Workloads)
+		}
+	}
+	// Both workloads' container digests must be admitted via the index.
+	for _, d := range []types.Digest{dA, dB} {
+		if ok, err := store.Contains(d); err != nil || !ok {
+			t.Fatalf("Contains(%s) = %t, %v; want true, nil", d, ok, err)
+		}
+	}
+}
+
+// PutWorkload must index every container digest of the entry, init and main.
+func TestPutWorkloadIndexesAllContainers(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	dInit := mustParseDigest(t, digestA)
+	dMain := mustParseDigest(t, digestB)
+	w := pkgallowlist.Workload{
+		InitContainers: []pkgallowlist.Container{{Digest: dInit}},
+		Containers:     []pkgallowlist.Container{{Digest: dMain}},
+	}
+	if err := store.PutWorkload("web", w); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	for _, d := range []types.Digest{dInit, dMain} {
+		if ok, err := store.Contains(d); err != nil || !ok {
+			t.Fatalf("Contains(%s) = %t, %v; want true, nil", d, ok, err)
+		}
+	}
+}
+
 func TestContains(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
@@ -616,6 +680,11 @@ func TestOpenStoreCreatesAndReopens(t *testing.T) {
 	if err := store.Add(dA, "nginx:latest"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
+	// The on-disk schema must include the workload tables too.
+	dB := mustParseDigest(t, digestB)
+	if err := store.PutWorkload("web", oneContainerWorkload(dB)); err != nil {
+		t.Fatalf("put workload: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -631,11 +700,14 @@ func TestOpenStoreCreatesAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if version != "2" {
-		t.Fatalf("version: got %q, want %q", version, "2")
+	if version != "3" {
+		t.Fatalf("version: got %q, want %q", version, "3")
 	}
 	if digests[dA] != "nginx:latest" {
 		t.Fatalf("digest missing after reopen: %#v", digests)
+	}
+	if ok, err := reopened.Contains(dB); err != nil || !ok {
+		t.Fatalf("Contains(workload digest) after reopen = %t, %v; want true, nil", ok, err)
 	}
 }
 

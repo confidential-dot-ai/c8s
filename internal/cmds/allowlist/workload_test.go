@@ -197,6 +197,33 @@ func TestWorkloadApplyRejectsEmptyAndBadInput(t *testing.T) {
 	}
 }
 
+// The ignored-floor note must appear exactly when the applied file carries
+// floor digests.
+func TestWorkloadApplyFloorNote(t *testing.T) {
+	url, _ := servingCDS(t, nil)
+
+	withFloor := writeFile(t, "with-floor.json", `{"schema":"c8s.allowlist/v1",
+		"digests":{"`+digD+`":"floor-img"},
+		"workloads":{"w":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
+	_, stderr, err := runCmd("workload", "apply", withFloor, "--url", url, "--insecure", "--dry-run")
+	if err != nil {
+		t.Fatalf("workload apply: %v", err)
+	}
+	if !strings.Contains(stderr, "note: 1 floor digest(s)") {
+		t.Fatalf("missing floor note:\n%s", stderr)
+	}
+
+	noFloor := writeFile(t, "no-floor.json", `{"schema":"c8s.allowlist/v1",
+		"workloads":{"w":{"containers":[`+ctrJSON(digA, "/app")+`]}}}`)
+	_, stderr, err = runCmd("workload", "apply", noFloor, "--url", url, "--insecure", "--dry-run")
+	if err != nil {
+		t.Fatalf("workload apply: %v", err)
+	}
+	if strings.Contains(stderr, "floor digest(s) in the file are ignored") {
+		t.Fatalf("unexpected floor note:\n%s", stderr)
+	}
+}
+
 func TestParseWorkloadEntriesBadEntry(t *testing.T) {
 	// Valid JSON map, but the entry body fails workload validation (no digest).
 	_, _, err := parseWorkloadEntries([]byte(`{"w1":{"containers":[{"command":{"policy":"any"},"args":{"policy":"any"}}]}}`))
@@ -241,6 +268,9 @@ func TestWorkloadEditApplies(t *testing.T) {
 	}
 	if !contains(*methods, http.MethodPut) {
 		t.Fatalf("expected a PUT, saw %v", *methods)
+	}
+	if !strings.Contains(out, "applied web") {
+		t.Fatalf("missing applied confirmation:\n%s", out)
 	}
 }
 
@@ -313,6 +343,29 @@ func TestWorkloadDeleteNotFound(t *testing.T) {
 func TestSanitizeFileName(t *testing.T) {
 	if got := sanitizeFileName("web-1_A.b/..\\x y"); got != "web-1_A_b____x_y" {
 		t.Fatalf("sanitizeFileName = %q", got)
+	}
+}
+
+// Boundary characters of every allowed range must pass through untouched, and
+// their immediate ASCII neighbours must map to underscores.
+func TestSanitizeFileNameBoundaries(t *testing.T) {
+	if got := sanitizeFileName("azAZ09-_"); got != "azAZ09-_" {
+		t.Fatalf("in-range characters mangled: %q", got)
+	}
+	if got := sanitizeFileName("`{@[/:"); got != "______" {
+		t.Fatalf("out-of-range characters kept: %q", got)
+	}
+}
+
+func TestArgvPolicyName(t *testing.T) {
+	if got := argvPolicyName(pkgallowlist.ArgvPolicy{}); got != pkgallowlist.PolicyDeny {
+		t.Fatalf("empty policy = %q, want %q", got, pkgallowlist.PolicyDeny)
+	}
+	if got := argvPolicyName(pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}); got != pkgallowlist.PolicyAny {
+		t.Fatalf("any policy = %q", got)
+	}
+	if got := argvPolicyName(pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/x"}}); got != pkgallowlist.PolicyExact {
+		t.Fatalf("exact policy = %q", got)
 	}
 }
 

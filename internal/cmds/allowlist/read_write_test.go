@@ -184,6 +184,68 @@ func TestListJSONOutput(t *testing.T) {
 	}
 }
 
+// TestListTextWorkloadTable pins the text rendering of the workload summary
+// table: init/main counts, the aggregated command/args policy sets, and the
+// path grant tallies (with the any counter only when nonzero).
+func TestListTextWorkloadTable(t *testing.T) {
+	web := pkgallowlist.Workload{Containers: []pkgallowlist.Container{
+		{
+			Digest:  mustDigest(t, digA),
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/app"}},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/a", "/b"}, Write: []string{"/w"}},
+		},
+		{
+			Digest:  mustDigest(t, digB),
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAny},
+		},
+	}}
+	plain := pkgallowlist.Workload{Containers: []pkgallowlist.Container{
+		{
+			Digest:  mustDigest(t, digC),
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/p"}},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/r"}},
+		},
+	}}
+	al := &pkgallowlist.Allowlist{
+		Schema:    pkgallowlist.Schema,
+		Digests:   map[string]string{digD: "floor-img"},
+		Workloads: map[string]pkgallowlist.Workload{"web": web, "plain": plain},
+	}
+	url, _ := servingAllowlistCDS(t, al)
+
+	out, _, err := runCmd("list", "--url", url, "--insecure")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "1 floor digest(s), 2 workload(s)") {
+		t.Fatalf("missing summary line:\n%s", out)
+	}
+
+	rows := map[string][]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			rows[f[0]] = f
+		}
+	}
+	want := map[string][]string{
+		"web":   {"web", "0", "2", "command=any,exact", "args=any,deny", "R=2", "W=1", "any=1"},
+		"plain": {"plain", "0", "1", "command=exact", "args=deny", "R=1", "W=0"},
+	}
+	for name, wantRow := range want {
+		got, ok := rows[name]
+		if !ok {
+			t.Fatalf("workload row %q missing:\n%s", name, out)
+		}
+		if strings.Join(got, " ") != strings.Join(wantRow, " ") {
+			t.Errorf("row %q = %v, want %v", name, got, wantRow)
+		}
+	}
+}
+
 func TestExportToStdout(t *testing.T) {
 	url, _ := servingCDS(t, map[string]string{digA: "registry/app@" + digA})
 
@@ -287,12 +349,15 @@ func TestAddWrites(t *testing.T) {
 	keyPath := writeOperatorKey(t, dir)
 	url, methods := recordingCDS(t)
 
-	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
+	out, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure", "--operator-key", keyPath)
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if !contains(*methods, http.MethodPost) {
 		t.Fatalf("expected a POST, saw %v", *methods)
+	}
+	if !strings.Contains(out, "added "+digA) {
+		t.Fatalf("missing confirmation line:\n%s", out)
 	}
 }
 
@@ -358,6 +423,37 @@ func TestUploadRequireOverridesDefaults(t *testing.T) {
 	// And the override is enforced, not just accepted.
 	if _, _, err := runCmd("upload", file, "--url", url, "--insecure", "--require", "otherapp", "--dry-run"); err == nil {
 		t.Fatal("expected an unmet --require component to refuse the upload")
+	}
+}
+
+func TestUploadStrictLint(t *testing.T) {
+	dir := t.TempDir()
+	clean := writeAllowlistFile(t, dir, coreImages())
+	url, methods := recordingCDS(t)
+
+	if _, _, err := runCmd("upload", clean, "--url", url, "--insecure", "--strict", "--dry-run"); err != nil {
+		t.Fatalf("--strict with a clean file must succeed, got %v", err)
+	}
+	if contains(*methods, http.MethodPut) {
+		t.Fatal("dry-run must not PUT")
+	}
+
+	warny := writeFile(t, "warny.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digA+`","command":{"policy":"any"},"args":{"policy":"any"}}]}}}`)
+	_, _, err := runCmd("upload", warny, "--url", url, "--insecure", "--strict")
+	if err == nil || !strings.Contains(err.Error(), "lint warning(s) with --strict") {
+		t.Fatalf("expected a strict lint refusal, got %v", err)
+	}
+}
+
+// Without --require the default component guard must stay armed.
+func TestUploadGuardOnByDefault(t *testing.T) {
+	file := writeAllowlistFile(t, t.TempDir(), map[string]string{digA: "registry/app/only@" + digA})
+	url, _ := recordingCDS(t)
+
+	_, _, err := runCmd("upload", file, "--url", url, "--insecure", "--dry-run")
+	if err == nil || !strings.Contains(err.Error(), "refusing to upload an allowlist missing core components") {
+		t.Fatalf("expected the component guard to refuse, got %v", err)
 	}
 }
 

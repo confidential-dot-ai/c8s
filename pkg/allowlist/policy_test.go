@@ -55,6 +55,17 @@ func TestIndex_ArgsDenyMeansNoArgs(t *testing.T) {
 	}
 }
 
+func TestIndex_CommandDenyMeansEmptyArgv(t *testing.T) {
+	idx := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestA+`","command":{"policy":"deny"},"args":{"policy":"any"}}]}}}`).BuildIndex()
+	if !idx.AdmitsContainer(digestA, nil) {
+		t.Fatal("command:deny should admit an empty argv")
+	}
+	if idx.AdmitsContainer(digestA, []string{"/bin/sh"}) {
+		t.Fatal("command:deny must reject any argv")
+	}
+}
+
 // A shared digest may run under several command/args policies; admission is the
 // union across entries.
 func TestIndex_SharedDigestUnion(t *testing.T) {

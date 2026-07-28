@@ -191,6 +191,20 @@ func TestRunProxyClientsetError(t *testing.T) {
 	}
 }
 
+// The default clientset factory must fail cleanly when not running in a
+// cluster instead of proceeding with a nil rest config.
+func TestNewKubeClientsetDefaultOutsideCluster(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	cs, err := newKubeClientset()
+	if err == nil || !strings.Contains(err.Error(), "k8s in-cluster config") {
+		t.Fatalf("newKubeClientset() error = %v, want in-cluster config error", err)
+	}
+	if cs != nil {
+		t.Fatalf("newKubeClientset() clientset = %v, want nil on error", cs)
+	}
+}
+
 // TestRunProxyFullLifecycle drives runProxy end to end with a fake
 // clientset and local fake CDS / probe / attestation endpoints, then
 // cancels the context and expects a clean shutdown.

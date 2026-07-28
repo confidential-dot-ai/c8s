@@ -8,6 +8,7 @@ import (
 
 const digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const digestB = "sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const digestC = "sha256:" + "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 func TestParseJSON_Minimal(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"}}`)
@@ -120,6 +121,128 @@ func TestRoundTripCanonical(t *testing.T) {
 	c2, _ := again.Canonical()
 	if !bytes.Equal(canon, c2) {
 		t.Fatalf("canonical form not stable across round-trip:\n%s\n%s", canon, c2)
+	}
+}
+
+// Order independence alone would pass even if both parses sorted descending;
+// pin the absolute ascending order.
+func TestSortContainers_AscendingByDigest(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestB+`","args":{"policy":"any"}},
+		{"digest":"`+digestA+`","args":{"policy":"any"}}]}}}`)
+	cs := al.Workloads["w"].Containers
+	if cs[0].Digest.String() != digestA || cs[1].Digest.String() != digestB {
+		t.Fatalf("containers not sorted ascending by digest: %s, %s", cs[0].Digest, cs[1].Digest)
+	}
+}
+
+func TestSortContainers_PolicyTieBreakAscending(t *testing.T) {
+	// Same digest, distinct args policies; "any" sorts before "exact".
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestA+`","args":{"policy":"exact","argv":["x"]}},
+		{"digest":"`+digestA+`","args":{"policy":"any"}}]}}}`)
+	cs := al.Workloads["w"].Containers
+	if cs[0].Args.Policy != PolicyAny || cs[1].Args.Policy != PolicyExact {
+		t.Fatalf("policy tie-break wrong: %q, %q", cs[0].Args.Policy, cs[1].Args.Policy)
+	}
+}
+
+func TestSortContainers_StableOnFullTie(t *testing.T) {
+	// Image is not part of the sort key; a full tie must keep input order.
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
+		{"digest":"`+digestA+`","image":"zzz","args":{"policy":"any"}},
+		{"digest":"`+digestA+`","image":"aaa","args":{"policy":"any"}}]}}}`)
+	cs := al.Workloads["w"].Containers
+	if cs[0].Image != "zzz" || cs[1].Image != "aaa" {
+		t.Fatalf("tied containers reordered: %q, %q", cs[0].Image, cs[1].Image)
+	}
+}
+
+func TestValidWorkloadName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ok   bool
+	}{
+		{"a", true},
+		{"z", true},
+		{"A", true},
+		{"Z", true},
+		{"0", true},
+		{"9", true},
+		{"a.b_c-d9", true},
+		{"x.", true},
+		{"x_", true},
+		{"x-", true},
+		{"", false},
+		// Bytes adjacent to each accepted range.
+		{"`", false},
+		{"{", false},
+		{"@", false},
+		{"[", false},
+		{"/", false},
+		{":", false},
+		// Separators are only valid after the first byte.
+		{".x", false},
+		{"_x", false},
+		{"-x", false},
+		{"a b", false},
+		{"a/b", false},
+	} {
+		if got := validWorkloadName(tc.name); got != tc.ok {
+			t.Errorf("validWorkloadName(%q) = %v, want %v", tc.name, got, tc.ok)
+		}
+	}
+}
+
+func TestParseJSON_RejectsBadWorkloadName(t *testing.T) {
+	body := `{"schema":"c8s.allowlist/v1","workloads":{"a/b":{"containers":[{"digest":"` + digestA + `"}]}}}`
+	if _, err := ParseJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "workload name") {
+		t.Fatalf("expected workload name error, got %v", err)
+	}
+}
+
+func TestParseWorkloadJSON(t *testing.T) {
+	w, err := ParseWorkloadJSON([]byte(`{"initContainers":[{"digest":"` + digestC + `"}],"containers":[
+		{"digest":"` + digestB + `"},{"digest":"` + digestA + `"}]}`))
+	if err != nil {
+		t.Fatalf("ParseWorkloadJSON: %v", err)
+	}
+	if w == nil {
+		t.Fatal("ParseWorkloadJSON returned nil workload without error")
+	}
+	if w.Containers[0].Digest.String() != digestA || w.Containers[1].Digest.String() != digestB {
+		t.Fatalf("containers not sorted: %s, %s", w.Containers[0].Digest, w.Containers[1].Digest)
+	}
+	if w.InitContainers[0].Command.Policy != PolicyDeny {
+		t.Fatalf("absent policy should default to deny, got %q", w.InitContainers[0].Command.Policy)
+	}
+}
+
+func TestParseWorkloadJSON_Rejects(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"unknown field", `{"containers":[],"surprise":1}`},
+		{"init missing digest", `{"initContainers":[{"image":"x"}]}`},
+		{"container missing digest", `{"containers":[{"image":"x"}]}`},
+	} {
+		if w, err := ParseWorkloadJSON([]byte(tc.body)); err == nil {
+			t.Errorf("%s: expected error, got workload %#v", tc.name, w)
+		}
+	}
+}
+
+func TestWorkloadDigests(t *testing.T) {
+	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{
+		"initContainers":[{"digest":"`+digestC+`"}],
+		"containers":[{"digest":"`+digestA+`"},{"digest":"`+digestB+`"}]}}}`)
+	got := al.Workloads["w"].Digests()
+	want := []string{digestC, digestA, digestB}
+	if len(got) != len(want) {
+		t.Fatalf("Digests() returned %d digests, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].String() != want[i] {
+			t.Fatalf("Digests()[%d] = %s, want %s", i, got[i], want[i])
+		}
 	}
 }
 

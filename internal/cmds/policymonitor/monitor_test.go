@@ -219,6 +219,26 @@ func TestPolicyOverlayAntiRollback(t *testing.T) {
 	}
 }
 
+// Re-applying the same version is a no-op: only a strictly higher version may
+// replace the installed policy, so a replayed pull can't swap in a different
+// document at the current epoch.
+func TestPolicyOverlayIgnoresEqualVersion(t *testing.T) {
+	wl := "sha256:" + strings.Repeat("b", 64)
+	o := &policyOverlay{}
+	if !o.apply(exactEntrypointOverlay(t, wl, []string{"/bin/app"}), 5) {
+		t.Fatal("first apply of version 5 rejected")
+	}
+	if o.apply(exactEntrypointOverlay(t, wl, []string{"/bin/other"}), 5) {
+		t.Fatal("replayed version 5 was applied")
+	}
+	if !o.index().AdmitsContainer(wl, []string{"/bin/app"}) {
+		t.Fatal("original version-5 policy dropped by equal-version replay")
+	}
+	if o.index().AdmitsContainer(wl, []string{"/bin/other"}) {
+		t.Fatal("equal-version replay policy took effect")
+	}
+}
+
 // A guest reboot / process restart is a fresh overlay (version 0), so it trusts
 // the first pull whatever its version — even one below a prior lifetime's.
 // Rollback protection is per-process-lifetime; state re-syncs from CDS.

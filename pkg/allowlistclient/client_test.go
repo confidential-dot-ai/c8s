@@ -2,6 +2,7 @@ package allowlistclient
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,56 @@ func TestPutWorkloadBindsBody(t *testing.T) {
 	}
 	if !strings.Contains(string(gotBody), testDigest) {
 		t.Fatalf("body missing digest: %s", gotBody)
+	}
+}
+
+func TestAddDigestSendsRequest(t *testing.T) {
+	var gotMethod, gotPath, gotContentType string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := NewClient(srv.URL).AddDigest(context.Background(), mustDigest(t, testDigest), "img", stubAuth{}); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/allowlist/digests" {
+		t.Fatalf("request = %s %s", gotMethod, gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", gotContentType)
+	}
+	var req types.DigestAddRequest
+	if err := json.Unmarshal(gotBody, &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if req.Digest.String() != testDigest || req.Image != "img" {
+		t.Fatalf("body = %+v", req)
+	}
+}
+
+func TestDeleteWorkloadOmitsContentType(t *testing.T) {
+	var gotContentType string
+	var seen bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = true
+		gotContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := NewClient(srv.URL).DeleteWorkload(context.Background(), "my-app", stubAuth{}); err != nil {
+		t.Fatal(err)
+	}
+	if !seen {
+		t.Fatal("request never sent")
+	}
+	if gotContentType != "" {
+		t.Fatalf("bodyless request should not set Content-Type, got %q", gotContentType)
 	}
 }
 
