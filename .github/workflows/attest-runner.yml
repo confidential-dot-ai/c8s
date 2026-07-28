@@ -23,13 +23,14 @@
 # that produced a report over this job's nonce, carrying the launch measurement
 # the caller pinned, with a valid signature over that report.
 #
-# WHAT IT DOES NOT PROVE, and the first run is what showed this. The report comes
-# back `"collateral_verified": false`, because attestation-cli takes no cert
-# provider and so never fetches the AMD or Intel chain. The signature is checked
-# against the certificate carried in the evidence, and nothing checks that the
-# certificate itself descends from the vendor root. Closing that needs either a
-# provider option on the CLI or the attesting side embedding a fetched VCEK, and
-# until then this gate is weaker than a full remote-attestation check.
+# WHAT IT DOES NOT PROVE, and what `"collateral_verified": false` on the SNP
+# lanes actually means. The flag does not mean the chain is unchecked: the CLI
+# verifies with its default providers, which embed the AMD root keys and walk
+# each report's VCEK back to them, and the TDX lanes fetch Intel's collateral
+# in full, revocation included. What `false` means is that revocation is
+# skipped on SNP: the default provider fetches no AMD CRL, so a chip key AMD
+# has revoked would still pass. Closing that needs a CRL-fetching cert
+# provider on the verify side, like the one attestation-api already carries.
 #
 # WHAT IT DOES NOT PROVE. A launch measurement covers the boot chain. It does
 # not cover software installed after boot, which on a standing runner includes
