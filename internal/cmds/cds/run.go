@@ -219,11 +219,20 @@ func run(cfg config) error {
 	// unauthenticated anchor the operator has to distribute by hand — and it
 	// regenerates on every install.
 	meshCADigest := sha256.Sum256(mesh.Cert.Raw)
+	// The allowlist CDS is serving right now, as distinct from the seed it
+	// booted with. Re-issued on every change by watchAllowlistReissue, so a
+	// client that attests this certificate learns the policy in force rather
+	// than the one loaded at startup.
+	allowlistDigest, err := liveAllowlistDigest(&allowlistStore)
+	if err != nil {
+		return fmt.Errorf("digest live allowlist: %w", err)
+	}
 	configClaims := &ratls.ConfigClaims{
 		OperatorKeysDigest: opKeysDigest,
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     ratls.UnsetDigest(),
 		MeshCADigest:       meshCADigest[:],
+		AllowlistDigest:    allowlistDigest,
 	}
 
 	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
@@ -286,6 +295,21 @@ func run(cfg config) error {
 
 	if cfg.ratlsPlatform != "" {
 		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
+		// newProvider reproduces the provider NewServerTLSConfig builds below,
+		// with only the claims replaced — used for re-issue on an allowlist
+		// change. The initial certificate deliberately still goes through the
+		// ConfigClaims path so NewServerTLSConfig keeps validating the
+		// platform at config time rather than deferring it to warm-up.
+		newProvider := func(claims *ratls.ConfigClaims) ratls.CertProvider {
+			return &ratls.SelfSignedProvider{
+				Platform:   cfg.ratlsPlatform,
+				AttestFunc: attestFunc,
+				Opts: &ratls.CertOptions{
+					TTL:          cfg.ratlsCertTTL,
+					ConfigClaims: claims,
+				},
+			}
+		}
 		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 			Platform:     cfg.ratlsPlatform,
 			AttestFunc:   attestFunc,
@@ -306,6 +330,7 @@ func run(cfg config) error {
 		}
 
 		go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
+		go watchAllowlistReissue(ctx, &allowlistStore, certMgr.SwapProvider, *configClaims, newProvider, reissuePollInterval)
 
 		slog.Info("cds listening (RA-TLS)", "addr", addr, "platform", cfg.ratlsPlatform)
 		if err := srv.ListenAndServeTLS("", ""); err != http.ErrServerClosed {

@@ -21,9 +21,10 @@ import (
 //	1.3.6.1.4.1.59888.1.3 - RA-TLS config-claims extension
 var OIDRATLSConfigClaims = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 3}
 
-// configClaimsVersion is the claims version this package EMITS. v1 is still
-// parsed for certificates issued before meshCADigest existed.
-const configClaimsVersion = 2
+// configClaimsVersion is the claims version this package EMITS. v1 and v2 are
+// still parsed for certificates issued before meshCADigest and allowlistDigest
+// existed.
+const configClaimsVersion = 3
 
 // claimsDomainSep tags the config-claims REPORTDATA transcript
 // (ReportDataForKeyAndClaims), keeping it disjoint from a plain key+nonce
@@ -81,6 +82,26 @@ type ConfigClaims struct {
 	//
 	// Present from claims v2. A v1 certificate parses with UnsetDigest here.
 	MeshCADigest []byte
+	// AllowlistDigest is the canonical digest of the allowlist CDS is serving
+	// NOW (allowlist.CanonicalDigest over the live store), or UnsetDigest on
+	// certificates that serve none. Set by CDS.
+	//
+	// SeedDigest answers "what was loaded at boot"; this answers "what is
+	// admitted now". They are kept separate rather than one replacing the
+	// other because the two are independently useful, and their divergence is
+	// itself the audit signal that someone mutated the allowlist at runtime.
+	// Pinning SeedDigest alone cannot catch an operator adding a permissive
+	// entry post-boot — observed live, where the allowlist went version 2 to 7
+	// while SeedDigest never moved.
+	//
+	// Freshness comes from re-issuance, not from a timestamp: CDS re-issues
+	// this certificate whenever the live digest changes, so the certificate
+	// fingerprint changing IS the cache-invalidation signal. A client caches
+	// the verified certificate long-lived and re-attests exactly when the
+	// allowlist moves — no staleness window to tune (docs/ratls.md).
+	//
+	// Present from claims v3. A v1/v2 certificate parses with UnsetDigest here.
+	AllowlistDigest []byte
 }
 
 // configClaimsASN1V1 is the v1 DER encoding, still parsed so certificates
@@ -100,7 +121,8 @@ type configClaimsASN1V1 struct {
 	WorkloadDigest     []byte
 }
 
-// configClaimsASN1 is the current (v2) encoding: v1 plus meshCADigest.
+// configClaimsASN1V2 is the v2 DER encoding: v1 plus meshCADigest. Still
+// parsed so certificates issued before allowlistDigest existed keep verifying.
 //
 //	C8SConfigClaims ::= SEQUENCE {
 //	    version             INTEGER,
@@ -109,12 +131,30 @@ type configClaimsASN1V1 struct {
 //	    workloadDigest      OCTET STRING,
 //	    meshCADigest        OCTET STRING
 //	}
+type configClaimsASN1V2 struct {
+	Version            int
+	OperatorKeysDigest []byte
+	SeedDigest         []byte
+	WorkloadDigest     []byte
+	MeshCADigest       []byte
+}
+
+// configClaimsASN1 is the current (v3) encoding: v2 plus allowlistDigest.
+//
+//	C8SConfigClaims ::= SEQUENCE {
+//	    version             INTEGER,
+//	    operatorKeysDigest  OCTET STRING,
+//	    seedDigest          OCTET STRING,
+//	    workloadDigest      OCTET STRING,
+//	    meshCADigest        OCTET STRING,
+//	    allowlistDigest     OCTET STRING
+//	}
 //
 // The version had to change rather than the field being appended optionally:
 // UnmarshalConfigClaims requires a byte-exact round-trip, so any additional
 // element is a different encoding by construction. That strictness is
 // deliberate — it is what makes "parses as vN" mean "is the one vN encoding" —
-// and it means a pre-v2 verifier rejects these claims outright instead of
+// and it means a pre-v3 verifier rejects these claims outright instead of
 // silently ignoring a field it cannot see. Fail closed, not fail quiet.
 type configClaimsASN1 struct {
 	Version            int
@@ -122,6 +162,7 @@ type configClaimsASN1 struct {
 	SeedDigest         []byte
 	WorkloadDigest     []byte
 	MeshCADigest       []byte
+	AllowlistDigest    []byte
 }
 
 // MarshalExtension encodes the claims as a DER-encoded X.509 extension.
@@ -137,6 +178,7 @@ func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 		{"seed", c.SeedDigest},
 		{"workload", c.WorkloadDigest},
 		{"mesh-ca", c.MeshCADigest},
+		{"allowlist", c.AllowlistDigest},
 	} {
 		if len(f.d) != ClaimsDigestSize {
 			return pkix.Extension{}, fmt.Errorf("ratls: %s claims digest must be %d bytes, got %d", f.name, ClaimsDigestSize, len(f.d))
@@ -148,6 +190,7 @@ func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 		SeedDigest:         c.SeedDigest,
 		WorkloadDigest:     c.WorkloadDigest,
 		MeshCADigest:       c.MeshCADigest,
+		AllowlistDigest:    c.AllowlistDigest,
 	})
 	if err != nil {
 		return pkix.Extension{}, fmt.Errorf("ratls: marshal config claims: %w", err)
@@ -172,8 +215,28 @@ func UnmarshalConfigClaims(der []byte) (*ConfigClaims, error) {
 	}
 
 	switch probe.Version {
-	case 2:
+	case 3:
 		var raw configClaimsASN1
+		if err := unmarshalExact(der, &raw, 3); err != nil {
+			return nil, err
+		}
+		claims := &ConfigClaims{
+			OperatorKeysDigest: raw.OperatorKeysDigest,
+			SeedDigest:         raw.SeedDigest,
+			WorkloadDigest:     raw.WorkloadDigest,
+			MeshCADigest:       raw.MeshCADigest,
+			AllowlistDigest:    raw.AllowlistDigest,
+		}
+		if err := claims.validateDigests(); err != nil {
+			return nil, err
+		}
+		return claims, nil
+
+	case 2:
+		// Pre-allowlistDigest certificates. The missing field reads as
+		// UnsetDigest, so a verifier pinning a real live-allowlist digest can
+		// never be satisfied by claims that never carried one.
+		var raw configClaimsASN1V2
 		if err := unmarshalExact(der, &raw, 2); err != nil {
 			return nil, err
 		}
@@ -182,6 +245,7 @@ func UnmarshalConfigClaims(der []byte) (*ConfigClaims, error) {
 			SeedDigest:         raw.SeedDigest,
 			WorkloadDigest:     raw.WorkloadDigest,
 			MeshCADigest:       raw.MeshCADigest,
+			AllowlistDigest:    UnsetDigest(),
 		}
 		if err := claims.validateDigests(); err != nil {
 			return nil, err
@@ -202,6 +266,7 @@ func UnmarshalConfigClaims(der []byte) (*ConfigClaims, error) {
 			SeedDigest:         raw.SeedDigest,
 			WorkloadDigest:     raw.WorkloadDigest,
 			MeshCADigest:       UnsetDigest(),
+			AllowlistDigest:    UnsetDigest(),
 		}
 		if err := claims.validateDigests(); err != nil {
 			return nil, err
@@ -209,7 +274,7 @@ func UnmarshalConfigClaims(der []byte) (*ConfigClaims, error) {
 		return claims, nil
 
 	default:
-		return nil, fmt.Errorf("ratls: unsupported config-claims version %d (supported: 1, %d)", probe.Version, configClaimsVersion)
+		return nil, fmt.Errorf("ratls: unsupported config-claims version %d (supported: 1, 2, %d)", probe.Version, configClaimsVersion)
 	}
 }
 
@@ -242,7 +307,7 @@ func unmarshalExact(der []byte, v any, version int) error {
 // validateDigests rejects a claims set carrying a wrong-size digest. Applied
 // after decoding so both versions share one rule.
 func (c *ConfigClaims) validateDigests() error {
-	for _, d := range [][]byte{c.OperatorKeysDigest, c.SeedDigest, c.WorkloadDigest, c.MeshCADigest} {
+	for _, d := range [][]byte{c.OperatorKeysDigest, c.SeedDigest, c.WorkloadDigest, c.MeshCADigest, c.AllowlistDigest} {
 		if len(d) != ClaimsDigestSize {
 			return fmt.Errorf("ratls: config-claims digest is %d bytes, want %d", len(d), ClaimsDigestSize)
 		}
@@ -259,6 +324,12 @@ func (c *ConfigClaims) HasSeed() bool {
 // v1 claims, which predate the field.
 func (c *ConfigClaims) HasMeshCA() bool {
 	return !bytes.Equal(c.MeshCADigest, unsetDigest)
+}
+
+// HasAllowlist reports whether the claims attest a live allowlist digest.
+// False on v1/v2 claims, which predate the field.
+func (c *ConfigClaims) HasAllowlist() bool {
+	return !bytes.Equal(c.AllowlistDigest, unsetDigest)
 }
 
 // HasWorkload reports whether the claims attest a workload digest.

@@ -99,6 +99,8 @@ type config struct {
 	allowlistSeedDigest string
 	meshCAFile          string
 	meshCADigestHex     string
+	allowlistFile       string
+	allowlistDigestHex  string
 	workloadImages      []string
 	workloadInitImages  []string
 	allowDebug          bool
@@ -189,6 +191,8 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
 	f.StringVar(&cfg.meshCAFile, "mesh-ca", "", "mesh CA certificate (PEM) the target must attest to issuing under; verification fails unless the attested config-claims commit SHA-256 of this CA's DER. Turns the mesh CA from an anchor you were handed into one the hardware vouches for. Mutually exclusive with --mesh-ca-digest (claims v2+)")
 	f.StringVar(&cfg.meshCADigestHex, "mesh-ca-digest", "", "expected hex SHA-256 of the issuing mesh CA's DER; alternative to --mesh-ca")
+	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the EXACT bytes of a GET /allowlist response, whose SHA-256 the target must attest as its live allowlist. Pins the admission policy actually in force, which --expected-seed cannot. NOTE: this must be the served response, not a hand-written or exported allowlist — the store normalizes on load, so a semantically identical file hashes differently and the mismatch looks like an attack. Mutually exclusive with --allowlist-digest (claims v3+)")
+	f.StringVar(&cfg.allowlistDigestHex, "allowlist-digest", "", "expected hex SHA-256 of the live allowlist's canonical bytes; alternative to --allowlist")
 	f.StringSliceVar(&cfg.workloadImages, "workload-image", nil, "expected main container image digest(s) (sha256:...; repeatable/comma-separated); with --workload-init-image, verification fails unless the target leaf's attested workload digest matches these role sets (docs/ratls.md)")
 	f.StringSliceVar(&cfg.workloadInitImages, "workload-init-image", nil, "expected init container image digest(s) (sha256:...; repeatable/comma-separated); pairs with --workload-image")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
@@ -383,6 +387,11 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		return nil, err
 	}
 
+	allowlistDigest, err := expectedAllowlistDigest(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	var workloadDigest []byte
 	if len(cfg.workloadInitImages) > 0 || len(cfg.workloadImages) > 0 {
 		if workloadDigest, err = workloadclaims.Digest(cfg.workloadInitImages, cfg.workloadImages); err != nil {
@@ -397,6 +406,7 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     workloadDigest,
 		MeshCADigest:       meshCADigest,
+		AllowlistDigest:    allowlistDigest,
 		ExpectedRTMRs:      rtmrs,
 	}, nil
 }
@@ -696,7 +706,8 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	// missing from this disjunction is worse than absent: the caller believes
 	// it is enforcing something and nothing is checked.
 	pinned := len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 ||
-		len(policy.WorkloadDigest) > 0 || len(policy.MeshCADigest) > 0
+		len(policy.WorkloadDigest) > 0 || len(policy.MeshCADigest) > 0 ||
+		len(policy.AllowlistDigest) > 0
 	if pinned && ev.configClaims == nil {
 		fail("config-claims pin set but the evidence binds no config-claims (target predates config attestation, or is not a CDS serving cert)")
 		return
@@ -713,6 +724,10 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	if len(policy.MeshCADigest) > 0 && !bytes.Equal(ev.configClaims.MeshCADigest, policy.MeshCADigest) {
 		fail("attested mesh-CA digest %x does not match the --mesh-ca pin (%x) — this component does not issue under the CA you pinned",
 			ev.configClaims.MeshCADigest, policy.MeshCADigest)
+	}
+	if len(policy.AllowlistDigest) > 0 && !bytes.Equal(ev.configClaims.AllowlistDigest, policy.AllowlistDigest) {
+		fail("attested live-allowlist digest %x does not match the --allowlist pin (%x) — the admission policy in force is not the one you pinned",
+			ev.configClaims.AllowlistDigest, policy.AllowlistDigest)
 	}
 	// The served key list must be the set the measured code attested to
 	// loading; a mismatch means MITM on the fetch or a CDS bug. A failed fetch
@@ -882,6 +897,42 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	if cfg.showEvidence {
 		fmt.Fprintf(out, "  report_data:  %s\n", oc.ReportData)
 	}
+}
+
+// expectedAllowlistDigest resolves the live-allowlist pin from --allowlist (a
+// file holding the exact GET /allowlist response bytes) or --allowlist-digest
+// (the hex value directly). Nil means no pin.
+//
+// The file is hashed verbatim, with no parsing or re-serialization, because
+// that is precisely what CDS commits: GET /allowlist returns the canonical
+// bytes whose SHA-256 is the attested claim. Re-encoding here would reintroduce
+// the normalization skew this pin exists to detect — a hand-assembled file that
+// is semantically identical hashes differently and fails, which is correct but
+// reads like an attack, hence the warning on the flag.
+func expectedAllowlistDigest(cfg config) ([]byte, error) {
+	switch {
+	case cfg.allowlistFile != "" && cfg.allowlistDigestHex != "":
+		return nil, fmt.Errorf("--allowlist and --allowlist-digest are mutually exclusive")
+
+	case cfg.allowlistDigestHex != "":
+		b, err := hex.DecodeString(strings.TrimSpace(cfg.allowlistDigestHex))
+		if err != nil {
+			return nil, fmt.Errorf("--allowlist-digest: not hex: %w", err)
+		}
+		if len(b) != sha256.Size {
+			return nil, fmt.Errorf("--allowlist-digest is %d bytes, want %d", len(b), sha256.Size)
+		}
+		return b, nil
+
+	case cfg.allowlistFile != "":
+		raw, err := os.ReadFile(cfg.allowlistFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --allowlist: %w", err)
+		}
+		sum := sha256.Sum256(raw)
+		return sum[:], nil
+	}
+	return nil, nil
 }
 
 // expectedMeshCADigest resolves the mesh-CA pin from --mesh-ca (a PEM whose DER

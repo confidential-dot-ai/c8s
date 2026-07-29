@@ -815,6 +815,7 @@ func TestDualVerifyPeerCallback_CASignedEnforcesClaimPins(t *testing.T) {
 			SeedDigest:         UnsetDigest(),
 			WorkloadDigest:     UnsetDigest(),
 			MeshCADigest:       UnsetDigest(),
+			AllowlistDigest:    UnsetDigest(),
 		}
 		ext, err := c.MarshalExtension()
 		if err != nil {
