@@ -17,7 +17,7 @@ func sandboxDigestsFor(b *admissionInventory, pid int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	digests, known, err := b.DigestsForSandbox(id)
+	digests, _, known, err := b.DigestsForSandbox(id)
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +75,11 @@ func TestInventoryResolvesPodAndIsolatesOtherPods(t *testing.T) {
 		pod2 = "sandbox-2"
 	)
 	// pod1: get-cert sidecar + two app containers.
-	b.record(cidGetCert, pod1, "c8s-cert", digestOther)
-	b.record(cidApp1, pod1, "app", digestApp)
-	b.record(cidApp2, pod1, "worker", digestApp2)
+	b.record(cidGetCert, pod1, "c8s-cert", digestOther, nil)
+	b.record(cidApp1, pod1, "app", digestApp, nil)
+	b.record(cidApp2, pod1, "worker", digestApp2, nil)
 	// pod2: a different app; must never appear in pod1's answer.
-	b.record(cidOther, pod2, "app", digestOther)
+	b.record(cidOther, pod2, "app", digestOther, nil)
 
 	// The caller is the get-cert process in pod1.
 	writeCgroup(t, procRoot, 4242, cidGetCert)
@@ -98,7 +98,7 @@ func TestInventoryResolvesPodAndIsolatesOtherPods(t *testing.T) {
 func TestInventoryRejectsUntrackedAndZeroPID(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
-	b.record(cidApp1, "sandbox-1", "app", digestApp)
+	b.record(cidApp1, "sandbox-1", "app", digestApp, nil)
 
 	if _, err := sandboxDigestsFor(b, 0); err == nil {
 		t.Fatal("peer pid 0 accepted (node-CVM must bind the caller)")
@@ -118,9 +118,9 @@ func TestInventoryRejectsNestedVictimCgroup(t *testing.T) {
 	b := newAdmissionInventory(procRoot)
 
 	const pod1, pod2 = "sandbox-1", "sandbox-2"
-	b.record(cidApp1, pod1, "app", digestApp) // victim's app in pod1
-	b.record(cidGetCert, pod2, "c8s-cert", digestOther)
-	b.record(cidApp2, pod2, "app", digestApp2) // attacker's own app in pod2
+	b.record(cidApp1, pod1, "app", digestApp, nil) // victim's app in pod1
+	b.record(cidGetCert, pod2, "c8s-cert", digestOther, nil)
+	b.record(cidApp2, pod2, "app", digestApp2, nil) // attacker's own app in pod2
 
 	// Attacker's process: its real scope is cidGetCert (pod2), with a nested
 	// child cgroup named cidApp1 (pod1's container).
@@ -152,9 +152,9 @@ func TestInventoryRefusesUnresolvedDigest(t *testing.T) {
 	b := newAdmissionInventory(procRoot)
 
 	const pod1 = "sandbox-1"
-	b.record(cidGetCert, pod1, "c8s-cert", digestOther)
-	b.record(cidApp1, pod1, "app", digestApp)
-	b.record(cidApp2, pod1, "worker", "") // resolve failed at admission
+	b.record(cidGetCert, pod1, "c8s-cert", digestOther, nil)
+	b.record(cidApp1, pod1, "app", digestApp, nil)
+	b.record(cidApp2, pod1, "worker", "", nil) // resolve failed at admission
 	writeCgroup(t, procRoot, 4242, cidGetCert)
 
 	if _, err := sandboxDigestsFor(b, 4242); err == nil {
@@ -162,11 +162,15 @@ func TestInventoryRefusesUnresolvedDigest(t *testing.T) {
 	}
 }
 
-func TestInventoryEvicts(t *testing.T) {
+// A removed container leaves caller resolution but stays in the sandbox's
+// admission record. Dropping it would let a pod hide a container by arranging
+// for it to be absent when asked — kubelet removes and recreates a container
+// across a CrashLoopBackOff, so that window is free (docs/secrets.md).
+func TestInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
-	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
-	b.record(cidApp1, "sandbox-1", "app", digestApp)
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther, nil)
+	b.record(cidApp1, "sandbox-1", "app", digestApp, nil)
 	writeCgroup(t, procRoot, 77, cidGetCert)
 
 	b.remove(cidApp1)
@@ -174,8 +178,21 @@ func TestInventoryEvicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(got, []string{digestOther}) {
-		t.Fatalf("digests = %v, want only the surviving sidecar", got)
+	if !slices.Equal(got, slicesSorted([]string{digestOther, digestApp})) {
+		t.Fatalf("digests = %v, want the removed container still recorded", got)
+	}
+
+	// It is gone for caller resolution, though: a stopped container must not
+	// bind a caller.
+	writeCgroup(t, procRoot, 78, cidApp1)
+	if _, err := sandboxDigestsFor(b, 78); err == nil {
+		t.Fatal("a removed container still resolved a caller")
+	}
+
+	// Tearing the sandbox down does clear it.
+	b.removeSandbox("sandbox-1")
+	if _, _, known, _ := b.DigestsForSandbox("sandbox-1"); known {
+		t.Fatal("removed sandbox still known")
 	}
 }
 
@@ -184,7 +201,7 @@ func TestInventoryEvicts(t *testing.T) {
 func TestInventorySandboxForPeer(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
-	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther, nil)
 	writeCgroup(t, procRoot, 4242, cidGetCert)
 
 	got, err := b.SandboxForPeer(workloadclaims.PeerForPID(4242))
@@ -207,13 +224,13 @@ func TestInventorySandboxForPeer(t *testing.T) {
 func TestInventoryDigestsForSandbox(t *testing.T) {
 	b := newAdmissionInventory(t.TempDir())
 
-	if _, known, err := b.DigestsForSandbox("nope"); err != nil || known {
+	if _, _, known, err := b.DigestsForSandbox("nope"); err != nil || known {
 		t.Fatalf("unknown sandbox: known=%v err=%v, want known=false", known, err)
 	}
 
 	// A known sandbox with no containers answers an empty inventory.
 	b.recordSandbox("sandbox-empty")
-	got, known, err := b.DigestsForSandbox("sandbox-empty")
+	got, _, known, err := b.DigestsForSandbox("sandbox-empty")
 	if err != nil || !known {
 		t.Fatalf("empty sandbox: known=%v err=%v", known, err)
 	}
@@ -222,11 +239,11 @@ func TestInventoryDigestsForSandbox(t *testing.T) {
 	}
 
 	// The inventory includes injected containers, deduplicates, and sorts.
-	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther)
-	b.record(cidApp1, "sandbox-1", "app", digestApp)
-	b.record(cidApp2, "sandbox-1", "worker", digestApp)
-	b.record(cidOther, "sandbox-2", "app", digestApp2)
-	got, known, err = b.DigestsForSandbox("sandbox-1")
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", digestOther, nil)
+	b.record(cidApp1, "sandbox-1", "app", digestApp, nil)
+	b.record(cidApp2, "sandbox-1", "worker", digestApp, nil)
+	b.record(cidOther, "sandbox-2", "app", digestApp2, nil)
+	got, _, known, err = b.DigestsForSandbox("sandbox-1")
 	if err != nil || !known {
 		t.Fatalf("known=%v err=%v", known, err)
 	}
@@ -245,10 +262,10 @@ func slicesSorted(in []string) []string {
 // the inventory covers every running container, injected ones included.
 func TestInventoryDigestsForSandboxRefusesUnresolved(t *testing.T) {
 	b := newAdmissionInventory(t.TempDir())
-	b.record(cidGetCert, "sandbox-1", "c8s-cert", "")
-	b.record(cidApp1, "sandbox-1", "app", digestApp)
+	b.record(cidGetCert, "sandbox-1", "c8s-cert", "", nil)
+	b.record(cidApp1, "sandbox-1", "app", digestApp, nil)
 
-	if _, _, err := b.DigestsForSandbox("sandbox-1"); err == nil {
+	if _, _, _, err := b.DigestsForSandbox("sandbox-1"); err == nil {
 		t.Fatal("served a subset of the sandbox inventory")
 	}
 }
@@ -258,17 +275,17 @@ func TestInventoryDigestsForSandboxRefusesUnresolved(t *testing.T) {
 func TestInventorySandboxLifecycle(t *testing.T) {
 	b := newAdmissionInventory(t.TempDir())
 
-	b.record(cidApp1, "sandbox-1", "app", digestApp)
-	if _, known, _ := b.DigestsForSandbox("sandbox-1"); !known {
+	b.record(cidApp1, "sandbox-1", "app", digestApp, nil)
+	if _, _, known, _ := b.DigestsForSandbox("sandbox-1"); !known {
 		t.Fatal("recorded container did not imply its sandbox")
 	}
 
-	b.record(cidOther, "sandbox-2", "app", digestApp2)
+	b.record(cidOther, "sandbox-2", "app", digestApp2, nil)
 	b.removeSandbox("sandbox-1")
-	if _, known, _ := b.DigestsForSandbox("sandbox-1"); known {
+	if _, _, known, _ := b.DigestsForSandbox("sandbox-1"); known {
 		t.Fatal("removed sandbox still known")
 	}
-	got, known, err := b.DigestsForSandbox("sandbox-2")
+	got, _, known, err := b.DigestsForSandbox("sandbox-2")
 	if err != nil || !known || !slices.Equal(got, []string{digestApp2}) {
 		t.Fatalf("sandbox-2 after removing sandbox-1: %v %v %v", got, known, err)
 	}

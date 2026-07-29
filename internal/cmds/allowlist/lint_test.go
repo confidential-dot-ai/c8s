@@ -8,7 +8,7 @@ import (
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
-// A digest on the floor is admitted by digest alone, so any argv/paths policy an
+// A digest on the floor is admitted by digest alone, so any argv policy an
 // operator also wrote for it in a workload is silently not enforced. lint must
 // surface that overlap — and only for the overlapping digest.
 func TestLintFloorWorkloadOverlap(t *testing.T) {
@@ -56,7 +56,7 @@ func TestLintCleanAllowlistReportsOK(t *testing.T) {
 }
 
 // The any-count warning tallies each unconstrained segment (command, args,
-// paths) per container; a fully-any container in a single entry produces no
+// per container; a fully-any container in a single entry produces no
 // other warning, so the output is pinned exactly.
 func TestLintAnyCountWarning(t *testing.T) {
 	cases := []struct {
@@ -65,13 +65,13 @@ func TestLintAnyCountWarning(t *testing.T) {
 		want string
 	}{
 		{
-			name: "fully unconstrained counts all three segments",
-			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"},"paths":{"policy":"any"}}`,
-			want: "warning: 3 'any' (unconstrained) policy value(s) across all entries\n",
+			name: "fully unconstrained counts both argv segments",
+			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"any"}}`,
+			want: "warning: 2 'any' (unconstrained) policy value(s) across all entries\n",
 		},
 		{
 			name: "single any segment counts once",
-			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"exact","argv":["/x"]},"paths":{"policy":"allow","read":["/data"]}}`,
+			ctr:  `{"digest":"` + digA + `","command":{"policy":"any"},"args":{"policy":"exact","argv":["/x"]}}`,
 			want: "warning: 1 'any' (unconstrained) policy value(s) across all entries\n",
 		},
 	}

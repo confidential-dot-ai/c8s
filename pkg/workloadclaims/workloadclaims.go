@@ -144,11 +144,36 @@ type SandboxTokenRequest struct {
 	Nonce []byte `json:"nonce"`
 }
 
-// SandboxDigestsResponse is the SandboxDigestsPrefix answer: the image digests
-// of every tracked container in the named sandbox. Digests is [] (never null)
-// for a known sandbox with no containers.
+// SandboxDigestsResponse is the SandboxDigestsPrefix answer.
+//
+// Digests is the deduplicated image-digest set, and is what cert issuance gates
+// on (membership). Containers is the per-container detail secret release needs:
+// it is NOT deduplicated, and it carries each container's effective argv, so a
+// consumer can hold a sandbox to a whole workload entry — the same (digest,
+// argv) pair admission evaluated — rather than to a digest set that says nothing
+// about what those images were told to run.
+//
+// Both describe every container ever admitted in the sandbox, not only those
+// running now: a container is removed and recreated across a CrashLoopBackOff,
+// so a live snapshot would let a pod present a set it does not really have by
+// arranging for a container to be absent at the moment it is asked (see
+// docs/secrets.md).
+//
+// Digests is [] (never null) for a known sandbox with no containers. Containers
+// is absent on an inventory that predates it, which consumers must treat as
+// "cannot answer" rather than "no containers".
 type SandboxDigestsResponse struct {
-	Digests []string `json:"digests"`
+	Digests    []string           `json:"digests"`
+	Containers []SandboxContainer `json:"containers,omitempty"`
+}
+
+// SandboxContainer is one admitted container: the bytes, and what they were
+// told to run.
+type SandboxContainer struct {
+	Digest string `json:"digest"`
+	// Argv is the effective OCI process.args — the merged image-config and
+	// pod-spec command, which is what the argv policy is written against.
+	Argv []string `json:"argv,omitempty"`
 }
 
 // SandboxResolver is the surface an inventory implements — nri-image-policy on
@@ -166,10 +191,12 @@ type SandboxResolver interface {
 	// SandboxForPeer returns the pod sandbox ID of the calling process,
 	// bound by kernel peer credentials exactly like ContainersForPeer.
 	SandboxForPeer(peer Peer) (string, error)
-	// DigestsForSandbox returns the deduplicated image digests of the named
-	// sandbox's tracked containers. known=false means no such sandbox (a 404
-	// on the wire); a known sandbox with no containers returns an empty slice.
-	DigestsForSandbox(sandboxID string) (digests []string, known bool, err error)
+	// DigestsForSandbox returns every container ever admitted in the named
+	// sandbox — deduplicated digests for issuance, and the per-container
+	// (digest, argv) detail for secret release. known=false means no such
+	// sandbox (a 404 on the wire); a known sandbox with no containers returns
+	// empty slices.
+	DigestsForSandbox(sandboxID string) (digests []string, containers []SandboxContainer, known bool, err error)
 }
 
 // connKey carries the accepted net.Conn through the request context so the
@@ -249,7 +276,7 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver,
 		_ = json.NewEncoder(w).Encode(InventoryIdentity{PublicKey: identity})
 	})
 	mux.HandleFunc("GET "+SandboxDigestsPrefix+"{sandboxID}", func(w http.ResponseWriter, r *http.Request) {
-		digests, known, err := resolver.DigestsForSandbox(r.PathValue("sandboxID"))
+		digests, containers, known, err := resolver.DigestsForSandbox(r.PathValue("sandboxID"))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("resolve sandbox digests: %v", err), http.StatusInternalServerError)
 			return
@@ -262,7 +289,7 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver,
 			digests = []string{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(SandboxDigestsResponse{Digests: digests})
+		_ = json.NewEncoder(w).Encode(SandboxDigestsResponse{Digests: digests, Containers: containers})
 	})
 	return serveUntil(ctx, l, mux)
 }

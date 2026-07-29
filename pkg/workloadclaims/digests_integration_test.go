@@ -366,8 +366,8 @@ func TestDigestsClientTransportAndProtocolFailures(t *testing.T) {
 type erroringResolver struct{}
 
 func (erroringResolver) SandboxForPeer(Peer) (string, error) { return "", errTestAttest }
-func (erroringResolver) DigestsForSandbox(string) ([]string, bool, error) {
-	return nil, false, errTestAttest
+func (erroringResolver) DigestsForSandbox(string) ([]string, []SandboxContainer, bool, error) {
+	return nil, nil, false, errTestAttest
 }
 
 // clientAgainst points a DigestsClient at an arbitrary TLS handler, so the

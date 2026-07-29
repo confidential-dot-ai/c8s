@@ -39,7 +39,7 @@ func TestParseJSON_RejectsBadFloorDigest(t *testing.T) {
 func TestParseJSON_AbsentPolicyDefaultsToDeny(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"`+digestA+`"}]}}}`)
 	c := al.Workloads["w"].Containers[0]
-	if c.Command.Policy != PolicyDeny || c.Args.Policy != PolicyDeny || c.Paths.Policy != PolicyDeny {
+	if c.Command.Policy != PolicyDeny || c.Args.Policy != PolicyDeny {
 		t.Fatalf("absent policies should default to deny, got %#v", c)
 	}
 }
@@ -67,10 +67,12 @@ func TestParseJSON_PathValidation(t *testing.T) {
 		{"dotdot", `"read":["/a/../b"]`, false},
 		{"midglob", `"read":["/a/*/b"]`, false},
 		{"subtree", `"read":["/a/**"]`, true},
-		{"literal", `"write":["/secret"]`, true},
+		{"literal", `"read":["/secret"]`, true},
+		{"write with read", `"read":["/r"],"write":["/secret"]`, true},
+		{"write without read", `"write":["/secret"]`, false},
 	} {
 		body := `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[{"digest":"` +
-			digestA + `","paths":{"policy":"allow",` + tc.body + `}}]}}}`
+			digestA + `"}],"secrets":{"policy":"allow",` + tc.body + `}}}}`
 		_, err := ParseJSON([]byte(body))
 		if tc.ok && err != nil {
 			t.Errorf("%s: unexpected error %v", tc.name, err)
@@ -109,7 +111,7 @@ func TestRoundTripCanonical(t *testing.T) {
 	al := mustParse(t, `{"schema":"c8s.allowlist/v1","digests":{"`+digestA+`":"cds"},
 		"workloads":{"w":{"label":"img","containers":[
 		{"digest":"`+digestB+`","command":{"policy":"exact","argv":["/app"]},
-		 "args":{"policy":"any"},"paths":{"policy":"allow","read":["/s/**"]}}]}}}`)
+		 "args":{"policy":"any"}}],"secrets":{"policy":"allow","read":["/s/**"]}}}}`)
 	canon, err := al.Canonical()
 	if err != nil {
 		t.Fatal(err)

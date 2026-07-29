@@ -21,10 +21,10 @@ const (
 func TestKataInventoryIncludesInjectedSidecars(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp)
-	b.record("cid-cert", pmDigestSidecar)
+	b.record("cid-app", pmDigestApp, nil)
+	b.record("cid-cert", pmDigestSidecar, nil)
 
-	digests, known, err := b.DigestsForSandbox(pmSandboxID)
+	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
 		t.Fatalf("known=%v err=%v", known, err)
 	}
@@ -44,7 +44,7 @@ func TestKataInventorySandboxIdentity(t *testing.T) {
 	if _, err := b.SandboxForPeer(workloadclaims.PeerForPID(0)); err == nil {
 		t.Fatal("sandbox resolved before any container was observed")
 	}
-	if _, known, _ := b.DigestsForSandbox(pmSandboxID); known {
+	if _, _, known, _ := b.DigestsForSandbox(pmSandboxID); known {
 		t.Fatal("sandbox known before any container was observed")
 	}
 
@@ -54,10 +54,10 @@ func TestKataInventorySandboxIdentity(t *testing.T) {
 	if err != nil || got != pmSandboxID {
 		t.Fatalf("sandbox = %q, %v; want %q", got, err, pmSandboxID)
 	}
-	if _, known, _ := b.DigestsForSandbox("some-other-id"); known {
+	if _, _, known, _ := b.DigestsForSandbox("some-other-id"); known {
 		t.Fatal("foreign sandbox ID answered")
 	}
-	if digests, known, err := b.DigestsForSandbox(pmSandboxID); err != nil || !known || len(digests) != 0 {
+	if digests, _, known, err := b.DigestsForSandbox(pmSandboxID); err != nil || !known || len(digests) != 0 {
 		t.Fatalf("own sandbox: digests=%v known=%v err=%v, want empty inventory", digests, known, err)
 	}
 }
@@ -74,22 +74,25 @@ func TestSandboxIDFromAnnotations(t *testing.T) {
 	}
 }
 
-// The guest inventory must evict a container whose bundle kata-agent tore down,
-// or /digests reports everything the guest ever ran rather than what it runs.
-func TestKataInventoryEvictsRemovedContainer(t *testing.T) {
+// A container whose bundle kata-agent tore down stays in the guest's admission
+// record: /digests reports everything the guest ever ran, so a pod cannot hide
+// a container by arranging for it to be absent when asked (docs/secrets.md).
+func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp)
-	b.record("cid-gone", pmDigestSidecar)
+	b.record("cid-app", pmDigestApp, nil)
+	b.record("cid-gone", pmDigestSidecar, nil)
 
 	b.remove("cid-gone")
 
-	digests, known, err := b.DigestsForSandbox(pmSandboxID)
+	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
 		t.Fatalf("known=%v err=%v", known, err)
 	}
-	if !slices.Equal(digests, []string{pmDigestApp}) {
-		t.Fatalf("digests = %v, want only the surviving container", digests)
+	want := []string{pmDigestApp, pmDigestSidecar}
+	slices.Sort(want)
+	if !slices.Equal(digests, want) {
+		t.Fatalf("digests = %v, want the removed container still recorded (%v)", digests, want)
 	}
 }
 

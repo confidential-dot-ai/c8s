@@ -333,24 +333,59 @@ func (c *DigestsClient) get(ctx context.Context, host, route string) (*http.Resp
 // host comes from the verified sandbox token, so it names the inventory that
 // vouched for the sandbox.
 func (c *DigestsClient) Fetch(ctx context.Context, host, sandboxID string) ([]string, error) {
-	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
-		return nil, err
-	}
-	resp, err := c.get(ctx, host, SandboxDigestsPrefix+sandboxID)
+	out, err := c.FetchSandbox(ctx, host, sandboxID)
 	if err != nil {
 		return nil, err
 	}
+	return out.Digests, nil
+}
+
+// ErrSandboxContainersUnsupported reports an inventory that answers with digests
+// but no per-container detail — one older than the field. Distinguished so a
+// caller that needs (digest, argv) fails closed on it instead of silently
+// matching on digests alone.
+var ErrSandboxContainersUnsupported = fmt.Errorf("workloadclaims: inventory does not report per-container detail")
+
+// FetchSandbox is Fetch with the per-container (digest, argv) detail secret
+// release needs. It fails closed when the inventory reports containers it could
+// not fully resolve, and when it reports none at all for a sandbox that has
+// digests.
+func (c *DigestsClient) FetchSandbox(ctx context.Context, host, sandboxID string) (SandboxDigestsResponse, error) {
+	var out SandboxDigestsResponse
+	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
+		return out, err
+	}
+	resp, err := c.get(ctx, host, SandboxDigestsPrefix+sandboxID)
+	if err != nil {
+		return out, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrSandboxUnknown
+		return out, ErrSandboxUnknown
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", host, resp.StatusCode, strings.TrimSpace(string(body)))
+		return out, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", host, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var out SandboxDigestsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
+		return out, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
 	}
-	return out.Digests, nil
+	return out, nil
+}
+
+// RequireContainers returns the per-container detail, refusing an answer that
+// cannot support a (digest, argv) decision.
+func (r SandboxDigestsResponse) RequireContainers() ([]SandboxContainer, error) {
+	if len(r.Containers) == 0 {
+		if len(r.Digests) == 0 {
+			return nil, fmt.Errorf("workloadclaims: inventory reports no containers")
+		}
+		return nil, ErrSandboxContainersUnsupported
+	}
+	for _, c := range r.Containers {
+		if c.Digest == "" {
+			return nil, fmt.Errorf("workloadclaims: inventory reported a container with no digest")
+		}
+	}
+	return r.Containers, nil
 }

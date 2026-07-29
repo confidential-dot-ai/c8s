@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -33,27 +34,35 @@ var sandboxIDAnnotations = []string{
 // the guest boundary is the isolation, so no peer-credential check is needed.
 type admissionInventory struct {
 	mu         sync.RWMutex
-	containers map[string]string // container id -> image digest
-	sandboxID  string            // the guest's single pod sandbox
+	containers map[string]string                          // live container id -> image digest
+	admitted   map[string]workloadclaims.SandboxContainer // key -> everything ever admitted
+	sandboxID  string                                     // the guest's single pod sandbox
 }
 
 func newAdmissionInventory() *admissionInventory {
-	return &admissionInventory{containers: map[string]string{}}
+	return &admissionInventory{
+		containers: map[string]string{},
+		admitted:   map[string]workloadclaims.SandboxContainer{},
+	}
 }
 
-// record notes an admitted container's digest — injected sidecars included, so
-// the sandbox inventory is what actually runs in the guest.
-func (b *admissionInventory) record(cid, digest string) {
+// record notes an admitted container — injected sidecars included, so the
+// sandbox inventory is what actually ran in the guest. argv is the effective
+// OCI process.args the allowlist was evaluated against.
+func (b *admissionInventory) record(cid, digest string, argv []string) {
 	if digest == "" {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.containers[cid] = digest
+	b.admitted[digest+"\x1f"+strings.Join(argv, "\x1f")] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
 }
 
-// remove evicts a container whose bundle kata-agent has torn down, so a stopped
-// container's image cannot linger in a later /digests answer.
+// remove evicts a container whose bundle kata-agent has torn down. The
+// admission record is deliberately kept: a container is removed and recreated
+// across a CrashLoopBackOff, and forgetting it would let a pod present a
+// container set it does not have (docs/secrets.md).
 func (b *admissionInventory) remove(cid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -87,20 +96,29 @@ func (b *admissionInventory) SandboxForPeer(_ workloadclaims.Peer) (string, erro
 }
 
 // DigestsForSandbox answers the sandbox inventory for the guest's single
-// sandbox: sorted, deduplicated digests of every recorded container, injected
-// sidecars included. Any other sandbox ID is unknown.
-func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, bool, error) {
+// sandbox: every container ever admitted there, injected sidecars included, as
+// a sorted deduplicated digest set plus per-container (digest, argv) detail.
+// Any other sandbox ID is unknown.
+func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.sandboxID == "" || sandboxID != b.sandboxID {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	digests := []string{}
-	for _, d := range b.containers {
-		digests = append(digests, d)
+	containers := make([]workloadclaims.SandboxContainer, 0, len(b.admitted))
+	for _, c := range b.admitted {
+		digests = append(digests, c.Digest)
+		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	return slices.Compact(digests), true, nil
+	slices.SortFunc(containers, func(x, y workloadclaims.SandboxContainer) int {
+		if x.Digest != y.Digest {
+			return strings.Compare(x.Digest, y.Digest)
+		}
+		return strings.Compare(strings.Join(x.Argv, "\x1f"), strings.Join(y.Argv, "\x1f"))
+	})
+	return slices.Compact(digests), containers, true, nil
 }
 
 // sandboxIDFromAnnotations extracts the pod sandbox ID from a container's OCI

@@ -388,14 +388,11 @@ func TestArgvSummary(t *testing.T) {
 	}
 }
 
-func TestPathSummary(t *testing.T) {
-	if got := pathSummary(pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAny}); got != "any" {
-		t.Fatalf("any summary = %q", got)
-	}
-	if got := pathSummary(pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/a"}, Write: []string{"/b", "/c"}}); got != "allow(r=1,w=2)" {
+func TestSecretsSummary(t *testing.T) {
+	if got := secretsSummary(&pkgallowlist.SecretsPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/a"}, Write: []string{"/b", "/c"}}); got != "allow(r=1,w=2)" {
 		t.Fatalf("allow summary = %q", got)
 	}
-	if got := pathSummary(pkgallowlist.PathPolicy{}); got != "deny" {
+	if got := secretsSummary(&pkgallowlist.SecretsPolicy{}); got != "deny" {
 		t.Fatalf("deny summary = %q", got)
 	}
 }

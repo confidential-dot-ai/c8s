@@ -3,6 +3,7 @@ package nriimagepolicy
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -17,7 +18,8 @@ import (
 // cgroup → container), never from the request.
 type admissionInventory struct {
 	mu         sync.RWMutex
-	containers map[string]ctrRec   // containerID -> record
+	containers map[string]ctrRec   // live containerID -> record (caller resolution)
+	admitted   map[string]sbxRec   // sandboxID -> everything ever admitted there
 	sandboxes  map[string]struct{} // live pod sandbox IDs
 	procRoot   string
 }
@@ -26,34 +28,70 @@ type ctrRec struct {
 	sandboxID string
 	name      string
 	digest    string // canonical sha256:<hex>; "" when unresolved
+	argv      []string
+}
+
+// sbxRec is a sandbox's admission high-water mark: every distinct (digest,
+// argv) admitted in it, keyed for dedup. It is never pruned while the sandbox
+// lives.
+//
+// containers alone cannot answer /digests. A container is removed and recreated
+// across a CrashLoopBackOff, so a live view lets a pod arrange for a container
+// to be absent at the moment it is asked and present a set it does not have —
+// the release check would then see only the containers of an entry it is not
+// (docs/secrets.md). Admission is monotone; membership here is too.
+type sbxRec struct {
+	byKey      map[string]workloadclaims.SandboxContainer
+	unresolved bool // some admitted container never resolved a digest
 }
 
 func newAdmissionInventory(procRoot string) *admissionInventory {
 	return &admissionInventory{
 		containers: map[string]ctrRec{},
+		admitted:   map[string]sbxRec{},
 		sandboxes:  map[string]struct{}{},
 		procRoot:   procRoot,
 	}
 }
 
+// admittedKey identifies a (digest, argv) pair for dedup. The unit separator
+// cannot appear in a digest and is not a shell-reachable argv byte in practice;
+// a collision would only merge two identical-looking containers anyway.
+func admittedKey(digest string, argv []string) string {
+	return digest + "\x1f" + strings.Join(argv, "\x1f")
+}
+
 // record notes an admitted container, injected sidecars included: /digests is
-// an inventory of what runs in the sandbox, and the injected images are
+// an inventory of what was admitted in the sandbox, and the injected images are
 // allowlist floor entries, so CDS drops them from workload matching itself.
-func (b *admissionInventory) record(containerID, sandboxID, name, digest string) {
+// argv is the effective OCI process.args the allowlist was evaluated against.
+func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string) {
 	if containerID == "" || sandboxID == "" {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.containers[containerID] = ctrRec{sandboxID: sandboxID, name: name, digest: digest}
+	b.containers[containerID] = ctrRec{sandboxID: sandboxID, name: name, digest: digest, argv: argv}
+
+	rec, ok := b.admitted[sandboxID]
+	if !ok {
+		rec = sbxRec{byKey: map[string]workloadclaims.SandboxContainer{}}
+	}
+	if digest == "" {
+		rec.unresolved = true
+	} else {
+		rec.byKey[admittedKey(digest, argv)] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	}
+	b.admitted[sandboxID] = rec
+
 	// A container implies its sandbox, so a record arriving before (or without)
 	// the pod event still leaves the sandbox resolvable.
 	b.sandboxes[sandboxID] = struct{}{}
 }
 
-// remove evicts a container that stopped, so its digest can't linger in a
-// later pod's answer (container IDs are unique, but eviction keeps the map
-// bounded and correct across pod churn).
+// remove evicts a stopped container from caller resolution. It deliberately
+// does NOT touch the sandbox's admission record: what ran there is what ran
+// there, and forgetting it is the TOCTOU sbxRec exists to close.
 func (b *admissionInventory) remove(containerID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -79,6 +117,7 @@ func (b *admissionInventory) removeSandbox(sandboxID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.sandboxes, sandboxID)
+	delete(b.admitted, sandboxID)
 	for id, rec := range b.containers {
 		if rec.sandboxID == sandboxID {
 			delete(b.containers, id)
@@ -134,28 +173,36 @@ func (b *admissionInventory) SandboxForPeer(peer workloadclaims.Peer) (string, e
 	return caller.sandboxID, nil
 }
 
-// DigestsForSandbox returns the sorted, deduplicated image digests of every
-// tracked container in the sandbox, injected containers included: this is an
-// inventory of what runs there, and CDS drops the injected images itself (they
-// are allowlist floor entries). An unresolved digest fails the whole answer
-// rather than commit a subset as if it were the whole inventory.
-func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, bool, error) {
+// DigestsForSandbox reports every container ever admitted in the sandbox,
+// injected containers included: CDS drops the injected ones itself. Digests is
+// the sorted, deduplicated digest set (issuance); containers carries the
+// per-container (digest, argv) detail, sorted for a stable answer.
+//
+// An unresolved digest fails the whole answer rather than commit a subset as if
+// it were the whole inventory.
+func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	if _, ok := b.sandboxes[sandboxID]; !ok {
-		return nil, false, nil
+		return nil, nil, false, nil
+	}
+	rec := b.admitted[sandboxID]
+	if rec.unresolved {
+		return nil, nil, true, fmt.Errorf("sandbox %s admitted a container with no resolved image digest", sandboxID)
 	}
 	digests := []string{}
-	for _, rec := range b.containers {
-		if rec.sandboxID != sandboxID {
-			continue
-		}
-		if rec.digest == "" {
-			return nil, true, fmt.Errorf("container %q has no resolved image digest", rec.name)
-		}
-		digests = append(digests, rec.digest)
+	containers := make([]workloadclaims.SandboxContainer, 0, len(rec.byKey))
+	for _, c := range rec.byKey {
+		digests = append(digests, c.Digest)
+		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	return slices.Compact(digests), true, nil
+	slices.SortFunc(containers, func(a, b workloadclaims.SandboxContainer) int {
+		if a.Digest != b.Digest {
+			return strings.Compare(a.Digest, b.Digest)
+		}
+		return strings.Compare(strings.Join(a.Argv, "\x1f"), strings.Join(b.Argv, "\x1f"))
+	})
+	return slices.Compact(digests), containers, true, nil
 }
