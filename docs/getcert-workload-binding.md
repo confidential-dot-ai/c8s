@@ -22,8 +22,7 @@ issuance's CDS challenge, and the address of its own digests endpoint.
 `get-cert` forwards the token to CDS and says nothing about its own images.
 CDS verifies the token, then calls that inventory back over mutually-attested
 RA-TLS and asks what the sandbox is running; it issues only if every image is
-allowlisted and the non-floor set matches one workload entry, and stamps the
-sandbox ID onto the leaf. A relying party can then pin the workload
+allowlisted, and stamps the sandbox ID onto the leaf. A relying party can then pin the workload
 (`c8s verify --sandbox-id <id> --mesh-ca ca.pem`) or read a live mesh peer's ID
 off the connection with `ratls.PeerSandboxID` (docs/ratls.md, "Reading a peer's
 sandbox ID").
@@ -157,8 +156,7 @@ threats:
    `inventoryAddr` over mutually-attested RA-TLS (`workloadclaims.DigestsClient`,
    pinning the same measurements `/attest` uses, presenting CDS's own RA-TLS
    certificate) and asks `GET /digests/{sandboxID}`. Every returned image must
-   be allowlisted, and the non-floor images must equal one workload entry's
-   non-floor set. All pass ⇒ it signs the leaf and stamps the sandbox ID into
+   be allowlisted. All pass ⇒ it signs the leaf and stamps the sandbox ID into
    its signed area (`internal/cmds/cds/attest.go` `verifySandboxToken` /
    `verifySandboxWorkload`, `internal/issuer/sign.go`).
 
@@ -253,11 +251,10 @@ skips it (it is measured via the rootfs, not allowlisted). Unknown sandbox ⇒
   `recordForInventory`), and rather than answer with the containers it *can*
   describe — a subset passed off as the whole set — it fails the whole request,
   which CDS treats as fail-closed.
-- **CDS excludes the floor, then matches exactly.** Injected c8s containers are
-  allowlist floor entries, so their measured digests drop out of the comparison
-  by digest, not by name. Whatever remains must equal one workload entry's
-  non-floor set (`enforceWorkloadCombination`), so containers from different
-  entries cannot be mixed into an unauthorized pod.
+- **CDS checks membership, not composition.** Every image the inventory reports
+  must be allowlisted (floor or any workload container). Injected c8s containers
+  are floor entries, so they pass by digest, not by name. CDS does not require
+  the set to match a whole workload entry — see Corner 4.
 
 **Matching is set-based over init and main together.** The inventory tracks
 admission, not pod-spec roles, so two workload entries differing only in which
@@ -268,7 +265,7 @@ nri-image-policy / policy-monitor, where the role distinction is not needed
 
 ---
 
-## Corner 4 — the sandbox ID binds at first issuance; the combination gate is as-of-issuance
+## Corner 4 — the sandbox ID binds at first issuance; the gate is membership only
 
 There is **one cert per pod**, not one per container. get-cert writes it to the
 shared `c8s-certs` tmpfs, which the webhook mounts read-only into every
@@ -284,25 +281,34 @@ issuance and the leaf carries the ID from the start. (This is what the
 requester-reports-its-own-images shape could not do: at first issuance it had
 nothing to report.)
 
-The **combination gate** is still evaluated against whatever is running at that
-instant. At first issuance that is the injected sidecar alone — all floor
-digests — so the non-floor set is empty and the gate passes vacuously. It bites
-from the first renewal onward, once the app containers are up.
+The **image gate is membership only**, and that is a direct consequence of the
+ordering above. Issuance lands wherever the pod happens to be, and the running
+set is a strict subset of the declared one in most of those states:
 
-Everything that used to degrade to a claim-free certificate now **fails closed**
-at issuance instead:
+- at first issuance, only the injected sidecar is up;
+- while a user init container runs, the main containers do not exist yet;
+- main containers come up over a short window, not atomically;
+- a restarting container is evicted from the inventory until it is recreated;
+- once completed init containers are garbage-collected, `RemoveContainer` fires
+  and they leave the set **permanently** — a pod with init containers never
+  again runs its whole declared set.
 
-- **Staggered starts.** Regular containers start ~together, but a renewal
-  landing mid-startup sees a partial set. If that partial set matches no
-  workload entry, CDS refuses the renewal; the pod keeps serving on its current
-  leaf and the next renewal succeeds. A strict verifier can still momentarily
-  see a leaf issued against a partial set. Waiting for an expected container
-  count before answering would fix it; not baked in.
-- **Init-container eviction.** An init container runs to completion and exits;
-  once the kubelet garbage-collects it, NRI fires `RemoveContainer` and the
-  node-CVM inventory evicts it, so the sandbox's set shrinks. A workload entry
-  listing init images must therefore still match after GC, or renewals start
-  failing. A digest-set *change* here is expected, not tampering.
+Requiring the running set to equal a workload entry would therefore deny
+certificates for ordinary lifecycle states, and in the last case would fail
+every renewal for the rest of the pod's life. Membership is subset-safe — any
+subset of an allowlisted set is still allowlisted — so it holds throughout.
+
+What this gives up: CDS no longer refuses a pod that mixes containers from two
+different workload entries, since each image is individually admitted. That
+check wants a *complete* pod and a high-stakes decision to hang off, which is
+secrets release, not cert issuance. Until it lands there, a leaf's sandbox ID
+means *this key belongs to pod X*, not *pod X runs exactly workload Y*.
+
+Two inventory behaviours that still matter here:
+
+- **An unresolved digest fails the whole answer.** The inventory refuses to
+  describe a sandbox it cannot describe completely (Corner 3), so a subset is
+  never passed off as the whole set.
 - **A plugin restart empties the inventory, and the startup check refills it.**
   The node-CVM inventory is in-memory only. `nri-image-policy` is not a pod — it
   is a host process containerd launches from `/opt/nri/plugins`, and NRI does
@@ -328,8 +334,8 @@ at issuance instead:
   state cannot persist; with it off, tolerating that container is the operator's
   stated intent.
 
-**Enforcement is on both sides now.** Issuance refuses a sandbox whose images
-are not allowlisted or match no workload entry; a relying party pinning
+**Enforcement is on both sides now.** Issuance refuses a sandbox running an
+image the allowlist does not admit; a relying party pinning
 `c8s verify --sandbox-id … --mesh-ca …` refuses a pod that carries no or a
 wrong sandbox ID.
 
@@ -440,9 +446,9 @@ named:
   There is no requester-supplied list to re-derive or cross-check, because the
   requester supplies none.
 - **CDS's own backstop is the allowlist.** Every digest the inventory reports is
-  re-checked against the allowlist store, and the non-floor set must match one
-  workload entry. So even a compromised inventory cannot smuggle an
-  unallowlisted image or an unauthorized combination past issuance.
+  re-checked against the allowlist store, so even a compromised inventory cannot
+  smuggle an unallowlisted image past issuance. It *can* report a combination no
+  workload entry authorizes, since CDS no longer matches whole sets (Corner 4).
 - **The remaining assumption is the honest inventory on an honest node.** The
   EAR proves the signing key lives in a TEE on an allowed measurement — on
   node-CVM that is the whole node, so "came from nri-image-policy" rests on the
@@ -565,5 +571,5 @@ bind-mount that directory into pod containers at
 | kata guest inventory (single-pod, same unix socket) | `internal/cmds/policymonitor/inventory.go` |
 | get-cert challenge → token fetch → `/attest` forward | `internal/cmds/getcert/run.go`, `pkg/attestclient/client.go` |
 | get-cert leaf-embed (nonce-free RA-TLS extension on the CSR) | `pkg/attestclient/ratls.go` (`AttestationExtension`) |
-| CDS token verify + inventory callback + allowlist/combination gate + leaf stamp | `internal/cmds/cds/attest.go`, `internal/issuer/sign.go` |
+| CDS token verify + inventory callback + allowlist membership gate + leaf stamp | `internal/cmds/cds/attest.go`, `internal/issuer/sign.go` |
 | verifier pin | `internal/cmds/verify/` (`--sandbox-id`, `--mesh-ca`) |

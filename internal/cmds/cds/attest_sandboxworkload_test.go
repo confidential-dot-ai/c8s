@@ -125,9 +125,10 @@ func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 	}
 }
 
-// An inventory reporting an empty sandbox is fail-closed too: a pod always runs
-// at least the sidecar that is asking, so an empty answer is a bug or a lie.
-func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
+// An inventory reporting an empty sandbox issues: membership over an empty set
+// is vacuously satisfied, and an empty answer is a lifecycle state (nothing
+// recorded yet), not evidence of anything to reject.
+func TestAttest_SandboxWorkload_EmptySandboxIssues(t *testing.T) {
 	mock := newMockAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
 	h.AllowlistStore = floorStore(wlDigestA)
@@ -136,8 +137,8 @@ func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
 	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }
 
@@ -166,27 +167,28 @@ func TestAttest_SandboxWorkload_RejectsWhenGateUnwired(t *testing.T) {
 	}
 }
 
-// The combination gate: a sandbox whose non-floor images match one workload
-// entry is admitted; a set matching no single entry is not, so containers from
-// different entries cannot be assembled into an unauthorized pod.
-func TestAttest_SandboxWorkload_CombinationGate(t *testing.T) {
+// Issuance happens at arbitrary points in the pod lifecycle, and in most of
+// them the running set is a strict subset of what the pod declares. Every one
+// of these must still get a certificate: gating on the whole declared set would
+// deny ordinary states, and permanently so once completed init containers are
+// reaped (the running set never equals init+main again).
+func TestAttest_SandboxWorkload_PartialLifecycleStatesIssue(t *testing.T) {
 	store := fakeStore{
-		floor: map[string]bool{wlDigestC: true}, // the injected sidecar
+		floor: map[string]bool{wlDigestC: true}, // the injected c8s-cert sidecar
 		workloads: map[string]pkgallowlist.Workload{
-			"api":   workloadEntry(t, []string{wlDigestA}, []string{wlDigestB}),
-			"other": workloadEntry(t, nil, []string{wlDigestC}),
+			"api": workloadEntry(t, []string{wlDigestA}, []string{wlDigestB}),
 		},
 	}
 
 	for _, tc := range []struct {
 		name    string
 		running []string
-		want    int
 	}{
-		{"entry set matches", []string{wlDigestA, wlDigestB}, http.StatusOK},
-		{"floor images drop out of matching", []string{wlDigestA, wlDigestB, wlDigestC}, http.StatusOK},
-		{"subset of an entry rejected", []string{wlDigestA}, http.StatusForbidden},
-		{"floor-only sandbox needs no entry", []string{wlDigestC}, http.StatusOK},
+		{"only the injected sidecar (first issuance)", []string{wlDigestC}},
+		{"user init container running", []string{wlDigestC, wlDigestA}},
+		{"init done, main coming up", []string{wlDigestC, wlDigestB}},
+		{"fully started", []string{wlDigestC, wlDigestA, wlDigestB}},
+		{"a container transiently evicted while restarting", []string{wlDigestA}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := newMockAttestationApi(t, "deadbeef")
@@ -197,10 +199,30 @@ func TestAttest_SandboxWorkload_CombinationGate(t *testing.T) {
 			csrPEM, _ := generateCSR(t)
 			challenge := issueChallenge(t, h)
 			w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
-			if w.Code != tc.want {
-				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.want, w.Body.String())
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// Relaxing the whole-set match must not relax membership: an image no entry
+// admits still blocks issuance, in every lifecycle state.
+func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
+	store := fakeStore{
+		floor:     map[string]bool{wlDigestC: true},
+		workloads: map[string]pkgallowlist.Workload{"api": workloadEntry(t, []string{wlDigestA}, nil)},
+	}
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = store
+	h.SandboxDigests = fakeDigests{testSandboxID: {wlDigestC, wlDigestA, wlDigestB}}
+
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
 }
 

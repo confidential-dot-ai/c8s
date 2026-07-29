@@ -173,40 +173,38 @@ Three independent points enforce, at different strengths:
 3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
-   allowlisted (floor or workload) and, when any is a workload digest, the
-   non-floor set must **match a single workload entry's set exactly** — the
-   combination gate.
+   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
+   where the running set is a strict subset of the declared one, so requiring a
+   whole entry would deny ordinary states
+   ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
 
 ### What each layer can and cannot promise
 
 Per-container digest+argv admission holds at all three points. **Combinations**
-("only this image set may run together") can only be checked where the whole set
-is visible atomically, which is issuance — and there the set is the one the
-*inventory* reports, live, not one the workload asserts. NRI and policy-monitor
-see containers one at a time and cannot detect a *missing* container, so they
-cannot enforce a combination. The honest guarantee is therefore:
-**per-container digest + argv everywhere; combination gating at identity
-issuance.** Making a combination itself attested (so it gates container start,
-not just issuance) is the RTMR3 per-workload-measurement path tracked in
-[`THREAT_MODEL.md`](THREAT_MODEL.md); it is out of scope here.
+("only this image set may run together") are **not enforced anywhere today**.
+NRI and policy-monitor see containers one at a time and cannot detect a
+*missing* container, so they cannot enforce a combination; CDS sees the whole
+reported set but only at issuance, which lands mid-lifecycle when that set is
+still a subset of the declared one, so it checks membership rather than
+composition ([getcert-workload-binding.md](getcert-workload-binding.md),
+Corner 4). The honest guarantee is therefore: **per-container digest + argv
+everywhere; no combination gating.**
 
-Matching is **set-based over the sandbox's whole image set**, init and main
-together: the inventory tracks admission, not pod-spec roles. Two workload
-entries differing only in which role holds an image are therefore
-indistinguishable at issuance; the argv policy that constrains how an image runs
-is enforced per-container at admission, where the role distinction is not
-needed.
+Combination gating wants a point where the pod is complete and the decision is
+worth blocking on — secrets release is the intended home, and is not implemented
+yet. Making a combination itself *attested* (so it gates container start) is the
+RTMR3 per-workload-measurement path tracked in
+[`THREAT_MODEL.md`](THREAT_MODEL.md); both are out of scope here.
 
 ### The injected-container carve-out
 
 c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. The combination gate must exclude them, or every
-workload's expected set would have to enumerate c8s's own sidecars. It excludes
-them by **digest**: injected component images are floor entries, and the gate
-drops floor digests from both sides of the comparison before matching. Nothing
-rests on the container *name*, which the host writes. get-cert runs with per-pod
-dynamic arguments, which is exactly why standalone/injected images are
-digest-only floor entries: their argv is not fixed and must not be argv-policed.
+(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
+by name: injected component images are allowlist floor entries, so a workload
+entry never has to enumerate c8s's own sidecars. Nothing rests on the container
+*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+which is exactly why standalone/injected images are digest-only floor entries:
+their argv is not fixed and must not be argv-policed.
 
 ## Distribution and trust
 

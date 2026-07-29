@@ -17,7 +17,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -58,8 +57,7 @@ type AttestHandler struct {
 	SANValidation bool
 
 	// AllowlistStore, when set, gates a sandbox's running images: every image
-	// the inventory reports must be allowlisted, and a set touching workload
-	// (non-floor) images must match one entry (docs/ratls.md). nil rejects any
+	// the inventory reports must be allowlisted (docs/ratls.md). nil rejects any
 	// request carrying a sandbox token, since it could not be checked.
 	AllowlistStore allowlistGate
 
@@ -83,12 +81,11 @@ type sandboxDigestSource interface {
 	Fetch(ctx context.Context, addr, sandboxID string) ([]string, error)
 }
 
-// allowlistGate answers the two attest-time questions: per-digest membership
-// (floor OR workload) and the full document for the combination check.
-// Satisfied by *internal/allowlist.Store.
+// allowlistGate answers the one attest-time question: is this digest admitted
+// at all, as a floor entry or as any workload container. Satisfied by
+// *internal/allowlist.Store.
 type allowlistGate interface {
 	Contains(digest types.Digest) (bool, error)
-	LoadAll() (*pkgallowlist.Allowlist, string, error)
 }
 
 func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
@@ -274,15 +271,26 @@ func (h AttestHandler) verifySandboxToken(raw json.RawMessage, requesterPub cryp
 }
 
 // verifySandboxWorkload asks the sandbox's own inventory which images it is
-// running and gates issuance on the allowlist: every image admitted, and — when
-// any is a workload (non-floor) image — the set matching one workload entry, so
-// containers from different entries cannot be mixed into an unauthorized pod
+// running and requires every one of them to be allowlisted before issuing
 // (docs/ratls.md, "Sandbox identity").
 //
+// Membership only. It deliberately does NOT require the running set to match a
+// whole workload entry: issuance happens at arbitrary points in the pod
+// lifecycle — while a user init container runs, between main containers coming
+// up, while one restarts, and after completed init containers are reaped — and
+// in every one of those the running set is a strict subset of what the pod
+// declares. Gating on the whole set would deny certificates for ordinary
+// lifecycle states, permanently so for pods with init containers. Membership is
+// subset-safe: any subset of an allowlisted set is still allowlisted.
+//
+// Whole-set enforcement belongs where the pod is complete and the stake is
+// high — secrets release — not at cert issuance. Until then a leaf's sandbox ID
+// says "this key belongs to pod X", not "pod X runs exactly workload Y".
+//
 // No sandbox ⇒ nothing to check: a requester that presents no token gets a leaf
-// with no sandbox ID, which no workload authorizer will accept. With a token,
-// every failure is fail-closed — an unreachable inventory means CDS cannot
-// establish what the pod runs, which is exactly when it must not issue.
+// with no sandbox ID. With a token, an unreachable inventory or a
+// non-allowlisted image is fail-closed — CDS cannot establish what the pod
+// runs, or has established that it should not run.
 func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox workloadclaims.VerifiedSandbox) error {
 	if sandbox.SandboxID == "" {
 		return nil
@@ -297,9 +305,6 @@ func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox worklo
 	if err != nil {
 		return fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryAddr, err)
 	}
-	if len(digests) == 0 {
-		return fmt.Errorf("inventory reports no containers in sandbox %s", sandbox.SandboxID)
-	}
 	for _, d := range digests {
 		digest, err := types.ParseDigest(d)
 		if err != nil {
@@ -313,75 +318,7 @@ func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox worklo
 			return fmt.Errorf("container image %s is not allowlisted", digest)
 		}
 	}
-	doc, _, err := h.AllowlistStore.LoadAll()
-	if err != nil {
-		return fmt.Errorf("load allowlist: %w", err)
-	}
-	return enforceWorkloadCombination(doc, digests)
-}
-
-// enforceWorkloadCombination requires the non-floor portion of the sandbox's
-// image set to equal one workload entry's non-floor image set.
-//
-// Floor digests are excluded from both sides: they are admitted alone and carry
-// no combination policy. Injected c8s containers (get-cert) are floor entries,
-// so their measured digest drops out here.
-//
-// The inventory reports a sandbox's images as one deduplicated set — it tracks
-// admission, not pod-spec roles — so matching is set-based over init+main
-// together. Two entries differing only in which role holds an image are
-// therefore indistinguishable here; the argv policy that actually constrains
-// how an image runs is enforced per-container at admission, where the role
-// distinction is not needed.
-func enforceWorkloadCombination(doc *pkgallowlist.Allowlist, digests []string) error {
-	floor := doc.Digests
-	running := nonFloorSet(digests, floor)
-	if len(running) == 0 {
-		return nil
-	}
-	for _, w := range doc.Workloads {
-		entry := nonFloorSet(digestStrings(w.Digests()), floor)
-		if setsEqual(running, entry) {
-			return nil
-		}
-	}
-	return fmt.Errorf("running container set matches no single workload entry")
-}
-
-// nonFloorSet is the canonical digests in ds that are not floor entries.
-func nonFloorSet(ds []string, floor map[string]string) map[string]struct{} {
-	set := make(map[string]struct{}, len(ds))
-	for _, d := range ds {
-		parsed, err := types.ParseDigest(d)
-		if err != nil {
-			continue
-		}
-		if _, isFloor := floor[parsed.String()]; isFloor {
-			continue
-		}
-		set[parsed.String()] = struct{}{}
-	}
-	return set
-}
-
-func digestStrings(ds []types.Digest) []string {
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.String()
-	}
-	return out
-}
-
-func setsEqual(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
-			return false
-		}
-	}
-	return true
+	return nil
 }
 
 func (h AttestHandler) caChainPEM() []byte {

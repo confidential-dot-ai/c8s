@@ -401,16 +401,15 @@ get-cert forwards the envelope opaquely in the `/attest` request body
    (`workloadclaims.DigestsClient`, pinning the same measurement allowlist
    `/attest` uses and presenting CDS's own RA-TLS certificate) and asks
    `GET /digests/{sandboxID}`;
-5. gates issuance on the answer: every image must be allowlisted, and the
-   non-floor images must equal one workload entry's non-floor set;
+5. gates issuance on the answer: every image the sandbox is running must be
+   allowlisted;
 6. stamps the sandbox ID into the leaf's signed area
    (`internal/issuer/sign.go`).
 
 So the ID is redeemable only by the get-cert holding the bound key, usable only
 for the one issuance whose challenge it carries — no clock, no replay window —
-and provably signed by a TEE-attested inventory. Every step is fail-closed: an
-unreachable inventory, an unknown sandbox, an empty container set, or a
-combination matching no workload entry refuses the certificate. A request
+and provably signed by a TEE-attested inventory. An unreachable inventory, an
+unknown sandbox, or a non-allowlisted image refuses the certificate. A request
 carrying no token gets a leaf with no sandbox ID.
 
 Because the digests are fetched live from the admitting component rather than
@@ -418,11 +417,20 @@ reported by the requester, the binding holds at **first** issuance: get-cert's
 own sidecar container is already tracked when it asks for the token, and step 4
 reads whatever the sandbox is running at that instant.
 
-Matching is **set-based over the sandbox's whole image set**, init and main
-together. The inventory tracks admission, not pod-spec roles, so two workload
-entries differing only in which role holds an image are indistinguishable here;
-per-container argv policy is enforced at admission by nri-image-policy /
-policy-monitor ([allowlist-and-capabilities.md](allowlist-and-capabilities.md)).
+The gate is **membership only** — it does not require the running set to match a
+whole workload entry. Issuance lands at arbitrary points in the pod lifecycle
+(a user init container running, main containers coming up one at a time, one
+restarting, completed init containers reaped), and in each the running set is a
+strict subset of what the pod declares. Requiring the whole set would deny
+ordinary lifecycle states, permanently so once init containers are reaped.
+Membership is subset-safe, so it holds in all of them.
+
+The consequence: a leaf's sandbox ID says *this key belongs to pod X*, not *pod
+X runs exactly workload Y*. Whole-set enforcement belongs where the pod is
+complete and the stake is high — secrets release — and is not implemented yet.
+Per-container digest and argv policy is still enforced continuously at
+admission by nri-image-policy / policy-monitor
+([allowlist-and-capabilities.md](allowlist-and-capabilities.md)).
 
 ### What vouches for the ID
 
