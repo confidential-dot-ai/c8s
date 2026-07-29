@@ -186,30 +186,33 @@ func TestListJSONOutput(t *testing.T) {
 
 // TestListTextWorkloadTable pins the text rendering of the workload summary
 // table: init/main counts, the aggregated command/args policy sets, and the
-// path grant tallies (with the any counter only when nonzero).
+// entry-level secret grant tallies.
 func TestListTextWorkloadTable(t *testing.T) {
-	web := pkgallowlist.Workload{Containers: []pkgallowlist.Container{
-		{
-			Digest:  mustDigest(t, digA),
-			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/app"}},
-			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/a", "/b"}, Write: []string{"/w"}},
+	web := pkgallowlist.Workload{
+		Containers: []pkgallowlist.Container{
+			{
+				Digest:  mustDigest(t, digA),
+				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/app"}},
+				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			},
+			{
+				Digest:  mustDigest(t, digB),
+				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
+			},
 		},
-		{
-			Digest:  mustDigest(t, digB),
-			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
-			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny},
-			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAny},
+		Secrets: &pkgallowlist.SecretsPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/a", "/b"}, Write: []string{"/w"}},
+	}
+	plain := pkgallowlist.Workload{
+		Containers: []pkgallowlist.Container{
+			{
+				Digest:  mustDigest(t, digC),
+				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/p"}},
+				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			},
 		},
-	}}
-	plain := pkgallowlist.Workload{Containers: []pkgallowlist.Container{
-		{
-			Digest:  mustDigest(t, digC),
-			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/p"}},
-			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/r"}},
-		},
-	}}
+		Secrets: &pkgallowlist.SecretsPolicy{Policy: pkgallowlist.PolicyAllow, Read: []string{"/r"}},
+	}
 	al := &pkgallowlist.Allowlist{
 		Schema:    pkgallowlist.Schema,
 		Digests:   map[string]string{digD: "floor-img"},
@@ -232,8 +235,8 @@ func TestListTextWorkloadTable(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"web":   {"web", "0", "2", "command=any,exact", "args=any,deny", "R=2", "W=1", "any=1"},
-		"plain": {"plain", "0", "1", "command=exact", "args=deny", "R=1", "W=0"},
+		"web":   {"web", "0", "2", "command=any,exact", "args=any,deny", "allow(r=2,w=1)"},
+		"plain": {"plain", "0", "1", "command=exact", "args=deny", "allow(r=1,w=0)"},
 	}
 	for name, wantRow := range want {
 		got, ok := rows[name]
@@ -470,10 +473,9 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		"empty":{},
 		"tagged":{"label":"docker.io/library/busybox:latest","containers":[
 			{"digest":"`+digA+`","image":"docker.io/library/busybox:latest",
-			 "command":{"policy":"any"},"args":{"policy":"any"},"paths":{"policy":"any"}}]},
-		"other":{"containers":[
-			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"},
-			 "paths":{"policy":"allow","read":["/**"]}},
+			 "command":{"policy":"any"},"args":{"policy":"any"}}]},
+		"other":{"secrets":{"policy":"allow","read":["/**"]},"containers":[
+			{"digest":"`+digA+`","command":{"policy":"exact","argv":["/app"]},"args":{"policy":"deny"}},
 			{"digest":"`+digB+`","command":{"policy":"deny"},"args":{"policy":"deny"}}]}}}`)
 
 	out, _, err := runCmd("lint", file)
@@ -485,7 +487,7 @@ func TestLintOfflineWarningSurface(t *testing.T) {
 		`workload "tagged" label "docker.io/library/busybox:latest" is a tag`,
 		`image "docker.io/library/busybox:latest" is a tag`,
 		"the container can never start",
-		`grants a root-subtree path "/**"`,
+		`grants the root secret subtree "/**"`,
 		"appears in 2 entries and one grants 'any'",
 		"'any' (unconstrained) policy value(s) across all entries",
 	} {

@@ -249,7 +249,10 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 			p.logger.Error("cannot resolve admitted image digest; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
 		}
 	}
-	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest)
+	// ctr.Args is the effective OCI process.args admission was evaluated
+	// against, so the inventory vouches for the same (digest, argv) pair the
+	// allowlist matched.
+	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs())
 }
 
 // evaluateRule checks whether a pod satisfies a compiled Kubernetes selector.

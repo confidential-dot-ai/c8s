@@ -108,21 +108,21 @@ func TestPodSandboxEventsFeedInventory(t *testing.T) {
 	if _, err := p.Synchronize(context.Background(), pods, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, known, _ := p.inventory.DigestsForSandbox("pod1-id"); !known {
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod1-id"); !known {
 		t.Fatal("Synchronize did not seed the inventory sandbox set while deferring")
 	}
 
 	if err := p.RunPodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); !known {
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); !known {
 		t.Fatal("RunPodSandbox did not record the sandbox")
 	}
 
 	if err := p.RemovePodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); known {
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); known {
 		t.Fatal("RemovePodSandbox did not evict the sandbox")
 	}
 }

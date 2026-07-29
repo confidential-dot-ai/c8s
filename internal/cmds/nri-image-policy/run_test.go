@@ -71,7 +71,7 @@ func TestPluginRun_StopsOnContextCancel(t *testing.T) {
 func TestRemoveContainer_EvictsFromInventory(t *testing.T) {
 	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
 	p.inventory = newAdmissionInventory(t.TempDir())
-	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp)
+	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil)
 
 	ctr := &api.Container{Id: cidApp1, PodSandboxId: "sandbox-1", Name: "app"}
 	if err := p.RemoveContainer(context.Background(), &api.PodSandbox{Id: "sandbox-1"}, ctr); err != nil {

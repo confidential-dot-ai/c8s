@@ -43,9 +43,13 @@ func (r *fakeResolver) SandboxForPeer(peer Peer) (string, error) {
 	return r.sandboxID, r.sandboxErr
 }
 
-func (r *fakeResolver) DigestsForSandbox(sandboxID string) ([]string, bool, error) {
+func (r *fakeResolver) DigestsForSandbox(sandboxID string) ([]string, []SandboxContainer, bool, error) {
 	d, ok := r.digests[sandboxID]
-	return d, ok, nil
+	cs := make([]SandboxContainer, 0, len(d))
+	for _, dg := range d {
+		cs = append(cs, SandboxContainer{Digest: dg})
+	}
+	return d, cs, ok, nil
 }
 
 // serveTokens runs the token socket and returns its path.

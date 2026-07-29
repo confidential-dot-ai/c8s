@@ -143,3 +143,19 @@
 {{- fail (printf "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (%v), got: %d" .Values.cds.rateBurst $writeTotalBurst) -}}
 {{- end -}}
 {{- end -}}
+{{- /*
+  Per-container `paths` was replaced by an entry-level `secrets` grant. CDS
+  parses its seed with unknown fields rejected and fails closed on a parse
+  error, so a values file carried over from a release that used `paths` would
+  not misconfigure CDS — it would stop it booting, taking the mesh CA with it.
+  Catch it at upgrade time instead. See docs/secrets.md.
+*/ -}}
+{{- range $name, $entry := .Values.nriImagePolicy.bootstrapAllowlist.workloads -}}
+{{- range $field := (list "initContainers" "containers") -}}
+{{- range $ctr := (index $entry $field) -}}
+{{- if hasKey $ctr "paths" -}}
+{{- fail (printf "VALIDATION_ERROR kind=allowlist_container_paths: nriImagePolicy.bootstrapAllowlist.workloads.%s.%s has a container with a `paths` policy, which was replaced by an entry-level `secrets` grant. CDS rejects unknown fields in its seed and would fail to start. Move the grant up to the entry as `secrets: {policy: allow, read: [...], write: [...]}` (a deny grant is just omitted). See docs/secrets.md." $name $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

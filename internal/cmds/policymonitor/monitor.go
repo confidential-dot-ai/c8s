@@ -474,7 +474,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	if m.admits(digest, argv) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
 		if m.inventory != nil {
-			m.inventory.record(cid, digest)
+			m.inventory.record(cid, digest, argv)
 		}
 		return
 	}

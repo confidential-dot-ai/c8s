@@ -134,15 +134,14 @@ func lintOffline(al *pkgallowlist.Allowlist) []string {
 			if c.Args.Policy == pkgallowlist.PolicyAny {
 				anyCount++
 			}
-			if c.Paths.Policy == pkgallowlist.PolicyAny {
-				anyCount++
-			}
 			if c.Image != "" && isTagForm(c.Image) {
 				warnings = append(warnings, fmt.Sprintf("workload %q container %s image %q is a tag, not a digest (informational, but tags are mutable — TOCTOU)", name, d, c.Image))
 			}
-			for _, g := range append(append([]string{}, c.Paths.Read...), c.Paths.Write...) {
+		}
+		if w.Secrets != nil {
+			for _, g := range append(append([]string{}, w.Secrets.Read...), w.Secrets.Write...) {
 				if g == "/**" {
-					warnings = append(warnings, fmt.Sprintf("workload %q container %s grants a root-subtree path %q (whole filesystem)", name, d, g))
+					warnings = append(warnings, fmt.Sprintf("workload %q grants the root secret subtree %q (every secret in the store)", name, g))
 				}
 			}
 		}
@@ -155,10 +154,12 @@ func lintOffline(al *pkgallowlist.Allowlist) []string {
 	}
 
 	// A floor digest is admitted by digest alone, so it short-circuits any argv
-	// or paths policy an operator also wrote for the same digest in a workload.
+	// policy an operator also wrote for the same digest in a workload — and for
+	// a secrets-bearing entry it also makes the entry unmatchable, since the
+	// digest is dropped from the candidate set.
 	for _, d := range sortedKeys(al.Digests) {
 		if names := entriesByDigest[d]; len(names) > 0 {
-			warnings = append(warnings, fmt.Sprintf("digest %s is floor-listed and also in workload entr(ies) [%s]; the floor admits it by digest alone, so those argv/paths policies are not enforced (remove it from the floor to enforce them)", d, strings.Join(sortedKeysBool(names), ", ")))
+			warnings = append(warnings, fmt.Sprintf("digest %s is floor-listed and also in workload entr(ies) [%s]; the floor admits it by digest alone, so those argv policies are not enforced (remove it from the floor to enforce them)", d, strings.Join(sortedKeysBool(names), ", ")))
 		}
 	}
 

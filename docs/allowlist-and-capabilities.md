@@ -26,7 +26,8 @@ The allowlist has two layers.
 
 - **Workloads** — `workloads`: named entries, each pinning an init/main
   container set. Every container binds a **digest** to the process policy
-  (`command`, `args`) and path policy (`paths`) permitted for those bytes. The
+  (`command`, `args`) permitted for those bytes, and the entry as a whole may
+  carry a secret-store grant (`secrets`). The
   entry name is operator-chosen; the entry `label` and per-container `image` are
   informational. Policy is always resolved by container digest.
 
@@ -53,8 +54,7 @@ semantics](#a-digest-may-run-many-ways).
           "digest": "sha256:<vllm>",
           "image":  "docker.io/vllm/vllm-openai:v0.6.3",
           "command": { "policy": "exact", "argv": ["python3"] },
-          "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] },
-          "paths":   { "policy": "deny" }
+          "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] }
         }
       ]
     }
@@ -130,30 +130,32 @@ entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
 guarantee is recovered at [cert issuance](#where-its-enforced).
 
-## Path policy (`paths`)
+## Secret grants (`secrets`)
 
-`paths` grants filesystem access for a coming key-management integration: a
-workload attests, and a secret broker releases material into paths the workload
-is entitled to.
+An entry may grant secret-store paths to the workload it names. The subject is
+the **entry**, not a container — see [`secrets.md`](secrets.md) for the model and
+for what the admission inventory contributes to a release decision.
 
 ```json
-"paths": { "policy": "allow", "read": ["/secrets/model/**"], "write": ["/secrets/session"] }
+"secrets": { "policy": "allow", "read": ["/tenant-a/**"], "write": ["/tenant-a/session"] }
 ```
 
-- `deny` (default) grants nothing; `any` is unconstrained; `allow` lists `read`
-  and `write` globs.
-- A `write` grant implies create and update.
+- `allow` or `deny` only; there is deliberately no `any`.
+- `write` requires `read`.
 - Paths are absolute and clean (no `.`/`..`); the only wildcard is a trailing
-  `/**` (subtree). These rules exist so a grant cannot be widened by path
-  trickery once an enforcer consumes it.
+  `/**` (subtree), which matches strictly beneath its base.
+- A grant that releases nothing is omitted from the canonical document, so an
+  entry without one serializes exactly as it did before the field existed.
 
-**No enforcer consumes `paths` yet.** It is carried, validated, and
-canonicalized, so the schema and the operator tooling are ready — but it grants
-nothing until the secret-release component exists. When that component lands, a
-grant's subject must be bound to the leaf's CDS-stamped **sandbox identity**
-(`docs/ratls.md`, "Sandbox identity"), never to a self-asserted image reference,
-or any allowlisted workload could claim another's grant. The field is
-inert-with-a-spec by design; it is not a live capability.
+**No enforcer consumes `secrets` yet** — the CDS secret store and its release
+endpoint are not implemented, so a grant releases nothing today. It is carried,
+validated, and canonicalized so the schema and the operator tooling are ready.
+
+This replaces the per-container `paths` field, which named filesystem locations
+and never had an enforcer. Filesystem location is not an authorization boundary
+— a workload owns its own filesystem once a value is inside it — so only the
+store path is policy. Upgrading an install that still sets `paths` is covered in
+[`secrets.md`](secrets.md#upgrading).
 
 ## Where it's enforced
 
@@ -239,7 +241,7 @@ failure modes:
 - The **workload policy overlay swaps wholesale, gated by a monotonic epoch**
   (the version counter). A consumer applies a pulled overlay only if its version
   is greater than the last applied, and ignores a regression. This matters
-  because workload policy can *tighten* (narrow `args`, revoke a `paths` grant);
+  because workload policy can *tighten* (narrow `args`, revoke a `secrets` grant);
   a plain additive merge would let a host that withholds an update keep a laxer
   policy live forever. Epoch-gated replacement makes a withheld or rolled-back
   update fail toward the last-known-good policy, not toward the laxest one. The
@@ -313,7 +315,7 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 (both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry, a digest that is
 floor-listed while also carrying a workload policy — the floor admits it by
-digest alone, so the argv/paths policy is silently not enforced — tag-form labels
+digest alone, so the argv policy is silently not enforced — tag-form labels
 (which can move under the operator), and a summary of how many `any` policies a
 document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
@@ -323,6 +325,5 @@ document carries. `--online` cross-checks digests against the registry with
 Generating an operator key and pinning its public half is unchanged; see the
 README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
 a verifier detects a changed write policy by comparing the served
-`/operator-keys` list against its own bundle. The path grants (`paths`) will,
-when their enforcer lands, be managed with the same `workload edit`/`apply` flow
-and bound to the leaf's sandbox identity.
+`/operator-keys` list against its own bundle. Secret grants (`secrets`) are
+managed with the same `workload edit`/`apply` flow.

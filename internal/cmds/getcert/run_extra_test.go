@@ -63,8 +63,8 @@ func (f fakeResolver) SandboxForPeer(workloadclaims.Peer) (string, error) {
 	return f.sandboxID, f.err
 }
 
-func (f fakeResolver) DigestsForSandbox(string) ([]string, bool, error) {
-	return nil, false, nil
+func (f fakeResolver) DigestsForSandbox(string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
+	return nil, nil, false, nil
 }
 
 // startFakeInventory serves the inventory token socket and returns its unix://
