@@ -1,0 +1,210 @@
+package secrets
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"testing"
+
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
+)
+
+// failingStore stands in for a backend that is reachable but not working, so
+// the handler's 500 paths are exercised separately from its 403/404 ones.
+type failingStore struct{ err error }
+
+func (f failingStore) Get(context.Context, string) ([]byte, error) { return nil, f.err }
+func (f failingStore) PutIfAbsent(context.Context, string, []byte) ([]byte, bool, error) {
+	return nil, false, f.err
+}
+
+// A store failure is not a policy denial: the caller is told the secret is
+// unavailable, and the reason stays in the CDS log.
+func TestStoreFailureIsFiveHundred(t *testing.T) {
+	for _, tc := range []struct{ name, method string }{
+		{"read", http.MethodGet},
+		{"create", http.MethodPost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			hn.h.Store = failingStore{err: fmt.Errorf("backend down")}
+			if w := do(hn.h, hn.request(t, tc.method, "/api/db")); w.Code != http.StatusInternalServerError {
+				t.Fatalf("%s = %d, want 500", tc.method, w.Code)
+			}
+		})
+	}
+}
+
+// Reading a granted path that holds nothing is a plain 404 — the same answer an
+// ungranted path gets, so the two are indistinguishable from outside.
+func TestReadMissingSecretIsNotFound(t *testing.T) {
+	hn := newHarness(t)
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/never-created")); w.Code != http.StatusNotFound {
+		t.Fatalf("missing secret = %d, want 404", w.Code)
+	}
+}
+
+func TestChallengeHeaderRejections(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{"missing", func(r *http.Request) { r.Header.Del("X-C8s-Challenge") }},
+		{"not base64", func(r *http.Request) { r.Header.Set("X-C8s-Challenge", "!!!not base64!!!") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			r := hn.request(t, http.MethodGet, "/api/db")
+			tc.mutate(r)
+			if w := do(hn.h, r); w.Code != http.StatusBadRequest {
+				t.Fatalf("%s challenge = %d, want 400", tc.name, w.Code)
+			}
+		})
+	}
+}
+
+func TestNoChallengeStoreRefuses(t *testing.T) {
+	hn := newHarness(t)
+	hn.h.Challenges = nil
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusBadRequest {
+		t.Fatalf("unconfigured challenge store = %d, want 400", w.Code)
+	}
+}
+
+func TestTokenHeaderRejections(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"missing", ""},
+		{"wrong scheme", "Bearer " + base64.StdEncoding.EncodeToString([]byte(`{"token":"","signature":""}`))},
+		{"not base64", authScheme + "!!!"},
+		{"not json", authScheme + base64.StdEncoding.EncodeToString([]byte("not json"))},
+		{"unknown field", authScheme + base64.StdEncoding.EncodeToString([]byte(`{"token":"AA==","signature":"AA==","extra":1}`))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			r := hn.request(t, http.MethodGet, "/api/db")
+			if tc.value == "" {
+				r.Header.Del("Authorization")
+			} else {
+				r.Header.Set("Authorization", tc.value)
+			}
+			if w := do(hn.h, r); w.Code != http.StatusForbidden {
+				t.Fatalf("%s token = %d, want 403", tc.name, w.Code)
+			}
+		})
+	}
+}
+
+// Each of these leaves the handler unable to reach or bound an inventory, so it
+// must refuse rather than dial anything.
+func TestInventoryMisconfigurationRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Handler)
+	}{
+		{"no inventory client", func(h *Handler) { h.Inventory = nil }},
+		{"no bindings", func(h *Handler) { h.Bindings = nil }},
+		{"no cidrs", func(h *Handler) { h.InventoryHosts = nil }},
+		{"bound host outside cidrs", func(h *Handler) { h.Bindings = fakeBindings{host: "203.0.113.5"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hn := newHarness(t)
+			tc.mutate(&hn.h)
+			if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+				t.Fatalf("%s = %d, want 403", tc.name, w.Code)
+			}
+		})
+	}
+}
+
+// An unreachable inventory is fail-closed: CDS cannot establish what the
+// sandbox runs, so it releases nothing.
+func TestInventoryFetchFailureRefuses(t *testing.T) {
+	hn := newHarness(t)
+	hn.inv.err = fmt.Errorf("dial timeout")
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+		t.Fatalf("unreachable inventory = %d, want 403", w.Code)
+	}
+}
+
+// A sandbox whose only containers are c8s's own has nothing to match an entry
+// against, so it is refused rather than matched vacuously.
+func TestOnlyInjectedContainersRefuses(t *testing.T) {
+	hn := newHarness(t)
+	hn.inv.containers = []workloadclaims.SandboxContainer{
+		{Digest: testInjected, Argv: []string{"get-cert", "--san=x"}},
+	}
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+		t.Fatalf("injected-only sandbox = %d, want 403", w.Code)
+	}
+}
+
+// A reported container with no digest cannot be matched, so the whole answer is
+// refused rather than partly trusted.
+func TestContainerWithoutDigestRefuses(t *testing.T) {
+	hn := newHarness(t)
+	hn.inv.containers = []workloadclaims.SandboxContainer{
+		{Digest: testAppImg, Argv: []string{"/serve"}},
+		{Digest: "", Argv: []string{"/other"}},
+	}
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+		t.Fatalf("digest-less container = %d, want 403", w.Code)
+	}
+}
+
+// A container with no argv at all cannot be an injected one, so it stays in the
+// candidate set and makes the pod foreign.
+func TestArgvLessContainerIsNotDropped(t *testing.T) {
+	hn := newHarness(t)
+	hn.inv.containers = append(hn.inv.containers,
+		workloadclaims.SandboxContainer{Digest: testInjected})
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+		t.Fatalf("argv-less injected image = %d, want 403", w.Code)
+	}
+}
+
+// An allowlist that cannot be loaded is an internal failure, not a denial.
+type failingPolicy struct{}
+
+func (failingPolicy) Allowlist() (*pkgallowlist.Allowlist, error) {
+	return nil, fmt.Errorf("allowlist unavailable")
+}
+
+func TestPolicyFailureRefuses(t *testing.T) {
+	hn := newHarness(t)
+	hn.h.Policy = failingPolicy{}
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+		t.Fatalf("unloadable allowlist = %d, want 403", w.Code)
+	}
+}
+
+// A request outside the route prefix cannot name a store path.
+func TestRequestPathOutsidePrefix(t *testing.T) {
+	hn := newHarness(t)
+	r := hn.request(t, http.MethodGet, "/api/db")
+	r.URL.Path = "/elsewhere/api/db"
+	r.URL.RawPath = ""
+	if w := do(hn.h, r); w.Code != http.StatusBadRequest {
+		t.Fatalf("path outside /secrets = %d, want 400", w.Code)
+	}
+}
+
+func TestDenialError(t *testing.T) {
+	if got := deny("sandbox %s is unbound", "abc").Error(); got != "sandbox abc is unbound" {
+		t.Fatalf("Error() = %q", got)
+	}
+}
+
+// A handler with no logger configured still serves; it falls back to the
+// default rather than panicking on a denial path.
+func TestHandlerWithoutLogger(t *testing.T) {
+	hn := newHarness(t)
+	hn.h.Logger = nil
+	if w := do(hn.h, hn.request(t, http.MethodGet, "/other/db")); w.Code != http.StatusNotFound {
+		t.Fatalf("logger-less handler = %d, want 404", w.Code)
+	}
+}
