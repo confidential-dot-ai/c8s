@@ -12,6 +12,11 @@ reason at the filesystem layer — the inventory's socket directory is root-owne
 c8s's own node-level components (the nri-image-policy installer, ratls-mesh)
 legitimately use both and run in the release namespace, which is exempt along
 with kube-system and any operator-supplied additions.
+
+One hostPath is carved out: the webhook injects a read-only mount of the
+inventory socket directory (nriImagePolicy.hostPaths.runtimeDir) into every
+CW pod's cert sidecar, so the policy admits exactly that dir, type Directory,
+with every referencing mount readOnly.
 */}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -52,8 +57,14 @@ spec:
       message: "hostIPC is denied for tenant pods."
     - expression: >-
         !has(object.spec.volumes) ||
-        object.spec.volumes.all(v, !has(v.hostPath))
-      message: "hostPath volumes are denied: a writable mount of the node filesystem could swap the admission inventory's socket (docs/getcert-workload-binding.md, Corner 7)."
+        object.spec.volumes.all(v, !has(v.hostPath) ||
+          (v.hostPath.path == {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }} &&
+           has(v.hostPath.type) && v.hostPath.type == 'Directory' &&
+           object.spec.containers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))) &&
+           (!has(object.spec.initContainers) || object.spec.initContainers.all(c, !has(c.volumeMounts) ||
+             c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))))))
+      message: "hostPath volumes are denied, except a read-only mount of the admission inventory socket directory (the webhook-injected claims volume): a writable mount of the node filesystem could swap the inventory's socket (docs/getcert-workload-binding.md, Corner 7)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

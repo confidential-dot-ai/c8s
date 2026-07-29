@@ -707,6 +707,17 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if installKataDebug {
 			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
 		}
+		// The sandbox-digests callback dials node addresses and nothing else.
+		// Resolve them here, where the cluster is reachable, so a default
+		// install does not quietly ship with sandbox identity disabled. Must
+		// run before buildValueArgs, which folds the resolved CIDRs into the
+		// computed values.
+		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
+		if err != nil {
+			return err
+		}
+		installInventoryCIDRs = resolved
+
 		// The computed values are shared with `c8s render-values` via
 		// buildValueArgs, then written to one values file rather than passed as a
 		// pile of --set flags. The contract that the CLI's flag-derived values
@@ -797,15 +808,6 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 				return err
 			}
 		}
-
-		// The sandbox-digests callback dials node addresses and nothing else.
-		// Resolve them here, where the cluster is reachable, so a default
-		// install does not quietly ship with sandbox identity disabled.
-		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
-		if err != nil {
-			return err
-		}
-		installInventoryCIDRs = resolved
 
 		// The install always ships pods that exceed the restricted pod-security
 		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
