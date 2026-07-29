@@ -22,6 +22,7 @@ import (
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -87,6 +88,8 @@ type config struct {
 	measurements        []string
 	measurementsFile    string
 	operatorKeys        string
+	expectedRTMR3Hex    string
+	operatorKeyFile     string
 	allowlistSeed       string
 	allowlistSeedDigest string
 	workloadImages      []string
@@ -170,6 +173,8 @@ unavailable (unreachable / unparseable).`,
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE)")
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the target's attested config-claims digest matches this set (kind=cds targets)")
+	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars; verification fails unless the guest's runtime measurement register matches. Mutually exclusive with --operator-key (TDX only)")
+	f.StringVar(&cfg.operatorKeyFile, "operator-key", "", "operator PUBLIC key file bound into RTMR[3] at launch; pins RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), proving the node was launched to trust only this key. Mutually exclusive with --expected-rtmr3 (TDX only)")
 	f.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "expected allowlist seed JSON file; verification fails unless the target's attested seed digest matches its canonical digest (kind=cds targets)")
 	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
 	f.StringSliceVar(&cfg.workloadImages, "workload-image", nil, "expected main container image digest(s) (sha256:...; repeatable/comma-separated); with --workload-init-image, verification fails unless the target leaf's attested workload digest matches these role sets (docs/ratls.md)")
@@ -346,6 +351,11 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		}
 	}
 
+	expectedRTMR3, err := expectedRTMR3Pin(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	seedDigest, err := expectedSeedDigest(cfg)
 	if err != nil {
 		return nil, err
@@ -364,7 +374,55 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		OperatorKeysDigest: opKeysDigest,
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     workloadDigest,
+		ExpectedRTMR3:      expectedRTMR3,
 	}, nil
+}
+
+// expectedRTMR3Pin resolves the runtime-register pin from --expected-rtmr3 (the
+// hex value directly) or --operator-key (derived from the public key that was
+// bound at launch). Nil means no pin.
+//
+// Both spellings exist because they suit different callers: an operator holds
+// the key file and should not have to precompute a digest, while a relying
+// party who was handed a published reference value has no key at all. The
+// derivation itself lives in pkg/runtimemeasure so it cannot drift from the
+// initrd that performs the extend.
+func expectedRTMR3Pin(cfg config) ([]byte, error) {
+	switch {
+	case cfg.expectedRTMR3Hex != "" && cfg.operatorKeyFile != "":
+		return nil, fmt.Errorf("--expected-rtmr3 and --operator-key are mutually exclusive")
+
+	case cfg.expectedRTMR3Hex != "":
+		b, err := hex.DecodeString(strings.TrimSpace(cfg.expectedRTMR3Hex))
+		if err != nil {
+			return nil, fmt.Errorf("--expected-rtmr3: not hex: %w", err)
+		}
+		if len(b) != runtimemeasure.Size {
+			return nil, fmt.Errorf("--expected-rtmr3 is %d bytes (%d hex chars), want %d (%d hex chars)",
+				len(b), len(cfg.expectedRTMR3Hex), runtimemeasure.Size, runtimemeasure.Size*2)
+		}
+		return b, nil
+
+	case cfg.operatorKeyFile != "":
+		// The initrd hashes the pubkey FILE verbatim, so these bytes go in
+		// unmodified — parsing and re-encoding the PEM would change the digest
+		// and silently fail every comparison.
+		pub, err := os.ReadFile(cfg.operatorKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --operator-key: %w", err)
+		}
+		if len(pub) == 0 {
+			return nil, fmt.Errorf("--operator-key: %s is empty", cfg.operatorKeyFile)
+		}
+		// Catch a private key handed over by mistake: it would derive a pin that
+		// can never match, and the failure would look like a compromised node.
+		if bytes.Contains(pub, []byte("PRIVATE KEY")) {
+			return nil, fmt.Errorf("--operator-key: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", cfg.operatorKeyFile)
+		}
+		reg := runtimemeasure.ForOperatorKey(pub)
+		return reg[:], nil
+	}
+	return nil, nil
 }
 
 // expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON
@@ -509,6 +567,13 @@ type Outcome struct {
 	Pinned      bool      `json:"measurement_pinned"`
 	Error       string    `json:"error,omitempty"`
 
+	// RTMR3Pinned is the runtime measurement register value that was enforced
+	// (hex), empty when no pin was supplied. Rendered so a reader can tell an
+	// identity-checked verdict from one that only proved genuine hardware
+	// running audited code — the measurement alone cannot distinguish this
+	// cluster from anyone else's copy of the same image.
+	RTMR3Pinned string `json:"rtmr3_pinned,omitempty"`
+
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
 	// operator public keys the target pins for allowlist writes (served list,
 	// kind=cds only). The *AttestedDigest fields carry the digests bound in
@@ -592,6 +657,9 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		Binding:    ev.bindingNote,
 		CertSHA256: ev.certSHA256,
 		Pinned:     pinned,
+	}
+	if len(policy.ExpectedRTMR3) > 0 {
+		oc.RTMR3Pinned = hex.EncodeToString(policy.ExpectedRTMR3)
 	}
 	if verr != nil {
 		oc.Error = verr.Error()
@@ -688,6 +756,9 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  cert sha256:  %s\n", oc.CertSHA256)
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
+	if oc.RTMR3Pinned != "" {
+		fmt.Fprintf(out, "  RTMR[3]:      %s (matched — node launched to trust the pinned operator key)\n", oc.RTMR3Pinned)
+	}
 	if oc.OperatorKeysAttestedDigest != "" {
 		fmt.Fprintf(out, "  operator-keys digest (attested via config-claims): sha256:%s\n", oc.OperatorKeysAttestedDigest)
 	}
