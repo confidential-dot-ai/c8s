@@ -2,9 +2,12 @@ package secrets
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -209,5 +212,63 @@ func TestHandlerWithoutLogger(t *testing.T) {
 	hn.h.Logger = nil
 	if w := do(hn.h, hn.request(t, http.MethodGet, "/other/db")); w.Code != http.StatusNotFound {
 		t.Fatalf("logger-less handler = %d, want 404", w.Code)
+	}
+}
+
+// --- rate-limit keying ---
+
+// The key is the sandbox, not the address: pods share a node's address through
+// the NodePort and the mesh proxy, so an address bucket is a shared one.
+func TestRateKeyUsesTheVerifiedSandbox(t *testing.T) {
+	leaf, _ := leafFor(t, testSandbox)
+	r := httptest.NewRequest(http.MethodGet, "/secrets/api/db", nil)
+	r.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}
+	if got := RateKey(r); got != "sandbox:"+testSandbox {
+		t.Fatalf("RateKey = %q, want the sandbox bucket", got)
+	}
+}
+
+// A certificate crypto/tls has not chained to the mesh CA carries a sandbox ID
+// its holder chose. Keying on it would let anyone able to mint a self-signed
+// leaf name a victim's bucket and exhaust it — the denial this keying exists to
+// prevent, handed to an unauthenticated caller.
+func TestRateKeyIgnoresAnUnverifiedCertificate(t *testing.T) {
+	leaf, _ := leafFor(t, testSandbox)
+	r := httptest.NewRequest(http.MethodGet, "/secrets/api/db", nil)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+	if got := RateKey(r); got != "" {
+		t.Fatalf("RateKey = %q, want the address fallback for an unverified chain", got)
+	}
+}
+
+func TestRateKeyFallsBackWithoutASandbox(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tls  *tls.ConnectionState
+	}{
+		{"no TLS", nil},
+		{"no certificate", &tls.ConnectionState{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/secrets/api/db", nil)
+			r.TLS = tc.tls
+			if got := RateKey(r); got != "" {
+				t.Fatalf("RateKey = %q, want the address fallback", got)
+			}
+		})
+	}
+
+	// A verified leaf carrying no sandbox extension is the same case.
+	bare, _ := leafFor(t, "")
+	r := httptest.NewRequest(http.MethodGet, "/secrets/api/db", nil)
+	r.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{bare},
+		VerifiedChains:   [][]*x509.Certificate{{bare}},
+	}
+	if got := RateKey(r); got != "" {
+		t.Fatalf("RateKey = %q, want the address fallback with no sandbox ID", got)
 	}
 }
