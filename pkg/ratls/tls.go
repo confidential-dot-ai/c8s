@@ -60,6 +60,11 @@ type ServerConfig struct {
 	// The certificate is rotated automatically at 50% of TTL.
 	CertTTL time.Duration
 
+	// ConfigClaims, when non-nil, is embedded in the serving certificate and
+	// bound into its attestation evidence (docs/ratls.md). Self-signed
+	// provisioning only; ignored when CertProvider is set.
+	ConfigClaims *ConfigClaims
+
 	// ClientPolicy, when set, enables mTLS: the server requires client
 	// certificates and verifies their RA-TLS attestation against this policy.
 	// When nil, the server does not request client certificates.
@@ -433,9 +438,10 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 			Platform:   cfg.Platform,
 			AttestFunc: cfg.AttestFunc,
 			Opts: &CertOptions{
-				Subject:  cfg.Subject,
-				TTL:      cfg.CertTTL,
-				DNSNames: cfg.DNSNames,
+				Subject:      cfg.Subject,
+				TTL:          cfg.CertTTL,
+				DNSNames:     cfg.DNSNames,
+				ConfigClaims: cfg.ConfigClaims,
 			},
 		}
 	}
@@ -662,8 +668,21 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				if _, err := VerifyCert(cert, &evidencePolicy, nil); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
 				}
+				return nil
 			}
-			return nil
+			// Legacy/dev mode: trust the CA chain, but any configured
+			// config-claims pins still must hold — they ride the certificate,
+			// so a CA-signed leaf with absent or mismatched claims must not be
+			// accepted when a pin is configured. Without this, configuring
+			// claim pins silently degrades to CA-only trust for every
+			// CA-signed peer (the RA-TLS path already enforces them via
+			// VerifyCert). checkClaimsPins is a no-op when no pin is set.
+			if policy != nil {
+				if err := checkClaimsPins(ExtractConfigClaimsBytes(cert), policy); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed config-claims pins: %w", err)
+				}
+			}
+			return nil // CA-signed cert with satisfied sandbox and claim pins — valid.
 		}
 
 		// Fall back to RA-TLS attestation verification. A sandbox-ID pin cannot

@@ -49,6 +49,30 @@ type VerifyPolicy struct {
 	// [VerifyAttestation] fails closed when it is set.
 	SandboxID string
 
+	// Config-claims pins (docs/ratls.md). When set, the
+	// certificate must carry a config-claims extension whose corresponding
+	// digest byte-equals the pinned value:
+	//   OperatorKeysDigest — operatorauth.KeySetDigest of the expected set
+	//   SeedDigest         — allowlist.CanonicalDigest of the expected seed
+	// ratls.UnsetDigest() pins "not applicable". Empty = claims are folded
+	// into the REPORTDATA check when present but that field is not enforced.
+	// Only [VerifyCert] can enforce these (claims ride the certificate);
+	// [VerifyAttestation] fails closed when any is set.
+	OperatorKeysDigest []byte
+	SeedDigest         []byte
+	// MeshCADigest pins the issuing mesh CA the attesting component vouches
+	// for (claims v2+). Pinning it is what turns "chains to a CA I was handed"
+	// into "chains to the CA a verified CDS attested to" — the CA stops being
+	// an out-of-band anchor. A v1 certificate carries UnsetDigest here and can
+	// therefore never satisfy this pin.
+	MeshCADigest []byte
+	// AllowlistDigest pins the LIVE allowlist the attesting component is
+	// serving (claims v3+), as opposed to SeedDigest's boot-time seed. This is
+	// the pin that catches a permissive entry added after startup, which
+	// SeedDigest structurally cannot. A v1/v2 certificate carries UnsetDigest
+	// here and can therefore never satisfy this pin.
+	AllowlistDigest []byte
+
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
 	// binding, debug policy, and minimum TCB. Required: there is no
@@ -68,7 +92,8 @@ type VerifyPolicy struct {
 	// RequireCAEvidence selects the production trust mode for the dual CA /
 	// RA-TLS peer verifier (dualVerifyPeerCallback). When false (default), a
 	// peer whose leaf chains to a configured CA is accepted on the CA chain
-	// alone (a sandbox-ID pin is still enforced) — the legacy/dev mode that
+	// alone (a sandbox-ID pin and any config-claims pins are still
+	// enforced) — the legacy/dev mode that
 	// eases rolling upgrades and CA rotation. When true, a valid CA chain is no
 	// longer sufficient: the leaf must ALSO carry re-verifiable RA-TLS evidence
 	// (issuer.SignCSR copies the requester's nonce-free .1.1 extension onto the
@@ -118,6 +143,13 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 		// The ID rides the certificate, which this path never sees.
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
+	if len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 ||
+		len(policy.MeshCADigest) > 0 || len(policy.AllowlistDigest) > 0 {
+		// Claims ride the certificate, which this path never sees. Every pin
+		// must be listed here: a pin this path silently ignored would read as
+		// enforced by the caller and enforce nothing.
+		return nil, fmt.Errorf("%w: config-claims pins require VerifyCert", ErrPolicyViolation)
+	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
 	if err != nil {
@@ -128,13 +160,17 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 }
 
 // VerifyCert verifies an RA-TLS certificate: it extracts the TEE attestation
-// extension and verifies it against the cert's public key.
+// extension and verifies it against the cert's public key. A config-claims
+// extension, when carried, is folded into the expected REPORTDATA (the
+// evidence binds it) and checked against the policy's config-claims pins
+// (docs/ratls.md).
 //
 // Trust comes from the hardware attestation chain (AMD ARK → ASK → VCEK, or
 // Intel equivalent for TDX) as verified by the same-TCB attestation-api, not
 // from any certificate authority signature. A sandbox-ID pin therefore cannot
 // be enforced here: the ID rests on CDS's signature over the leaf, which this
-// path does not check (docs/ratls.md, "Sandbox identity").
+// path does not check (docs/ratls.md, "Sandbox identity"). Config-claims pins
+// CAN: the claims are hardware-bound via REPORTDATA, not CA-authenticated.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
@@ -157,12 +193,58 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
-	expectedReportData, err := ReportDataForKey(pub, nonce)
+	claimsBytes, claimsPresent := configClaimsExtension(cert)
+	if claimsPresent && len(claimsBytes) == 0 {
+		// An empty value would fall through to the claims-free binding while
+		// still looking claims-bearing to anyone gating on extension presence.
+		return nil, fmt.Errorf("%w: config-claims extension present but empty", ErrInvalidReport)
+	}
+	if err := checkClaimsPins(claimsBytes, policy); err != nil {
+		return nil, err
+	}
+
+	expectedReportData, err := ReportDataForKeyAndClaims(pub, claimsBytes, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
 	}
 
 	return verifyReport(att, policy, expectedReportData)
+}
+
+// checkClaimsPins enforces the policy's config-claims pins against the raw
+// claims extension bytes. INVARIANT: a pin can only reject; acceptance still
+// requires the evidence to bind claimsBytes (the REPORTDATA check downstream).
+func checkClaimsPins(claimsBytes []byte, policy *VerifyPolicy) error {
+	pins := []struct {
+		name     string
+		expected []byte
+		attested func(*ConfigClaims) []byte
+	}{
+		{"operator-keys", policy.OperatorKeysDigest, func(c *ConfigClaims) []byte { return c.OperatorKeysDigest }},
+		{"allowlist-seed", policy.SeedDigest, func(c *ConfigClaims) []byte { return c.SeedDigest }},
+		{"mesh-ca", policy.MeshCADigest, func(c *ConfigClaims) []byte { return c.MeshCADigest }},
+		{"allowlist", policy.AllowlistDigest, func(c *ConfigClaims) []byte { return c.AllowlistDigest }},
+	}
+	anyPinned := false
+	for _, p := range pins {
+		anyPinned = anyPinned || len(p.expected) > 0
+	}
+	if !anyPinned {
+		return nil
+	}
+	if len(claimsBytes) == 0 {
+		return fmt.Errorf("%w: config-claims pin set but certificate carries no config-claims extension", ErrPolicyViolation)
+	}
+	claims, err := UnmarshalConfigClaims(claimsBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
+	}
+	for _, p := range pins {
+		if len(p.expected) > 0 && !bytes.Equal(p.attested(claims), p.expected) {
+			return fmt.Errorf("%w: attested %s digest %x does not match pinned %x", ErrPolicyViolation, p.name, p.attested(claims), p.expected)
+		}
+	}
+	return nil
 }
 
 // CheckSandboxPin enforces expectedID against a leaf whose CA chain the caller
