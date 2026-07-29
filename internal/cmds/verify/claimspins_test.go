@@ -393,3 +393,18 @@ func TestRenderTextClaimsSections(t *testing.T) {
 		}
 	})
 }
+
+// The claims pin commits ONE issuing CA; a bundle is ambiguous and must be
+// refused rather than silently pinning the first block — a rotation-era
+// two-cert file would otherwise read as an attack at verification time.
+func TestExpectedMeshCADigestRejectsMultiBlockPEM(t *testing.T) {
+	single, _ := selfSignedCertPEM(t)
+	other, _ := selfSignedCertPEM(t)
+	bundle := single + other
+	if _, err := expectedMeshCADigest(config{kind: "cds", meshCA: writeTemp(t, "bundle.pem", bundle)}); err == nil {
+		t.Fatal("multi-block --mesh-ca must be refused in claims-pin mode")
+	}
+	if _, err := expectedMeshCADigest(config{kind: "cds", meshCA: writeTemp(t, "single.pem", single)}); err != nil {
+		t.Fatalf("single-block --mesh-ca must still work: %v", err)
+	}
+}

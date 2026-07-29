@@ -196,13 +196,15 @@ enforcement); the two are independent and either or both may run.
 Requires a guest kernel exposing the TDX RTMR-extend sysfs
 (`/sys/devices/virtual/misc/tdx_guest/measurements/`, mainline ≥ 6.16).
 
-**Convention.** Pinned by [`pkg/rtmr3`](../pkg/rtmr3/rtmr3.go), the
+**Convention.** Pinned by
+[`pkg/runtimemeasure`](../pkg/runtimemeasure/runtimemeasure.go), the
 single source of truth for both sides:
 `event = SHA384("sha256:"+hex)`, `RTMR3' = SHA384(RTMR3 ‖ event)`,
-folded from the boot value (all zeros). Golden vectors in
-`pkg/rtmr3/rtmr3_test.go` freeze it; a client-side verifier is a
-tracked follow-up and MUST build on `pkg/rtmr3`, never re-derive the
-convention.
+folded from the boot value (all zeros, or the operator-key seed —
+`ForOperatorKey` — on a node launched with one). Golden vectors in
+`pkg/runtimemeasure/runtimemeasure_test.go` freeze it; verifiers (`c8s
+verify --expected-rtmr3` / `--operator-key`) build on the same package,
+never re-deriving the convention.
 
 **Dedup and restart safety.** RTMR[3] is hardware-append-only, so each
 DISTINCT image must extend exactly once: restarts and replicas (same

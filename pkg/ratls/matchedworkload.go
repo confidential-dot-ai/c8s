@@ -10,13 +10,17 @@
 // from that same allowlist via allowlist.MatchingWorkloadEntries /
 // WorkloadEntriesDigest and confirm the stamp.
 //
-// The match is over image digests only — argv never reaches CDS — so when two
-// entries share their digest sets and differ only in argv policy, BOTH are
-// named. The stamp then means "one of these entries", which is the honest
-// claim; the digest covers every named entry's full policy, argv included, so
-// a verifier still learns the exact set of argv policies the pod is confined
-// to. Anything narrower is for the admission side (the NRI plugin evaluates
-// real argv), not for this extension.
+// The match is argv-aware: CDS fetches each admitted container's effective
+// (digest, argv) from the inventory that admitted it and requires the argv to
+// satisfy an entry's policy for that digest, so two entries sharing image
+// digests are usually distinguished by what the pod actually runs. More than
+// one name survives only when argv genuinely cannot separate the entries
+// (e.g. both carry an "any" policy for the shared digest); the stamp then
+// means "one of these entries", which is the honest claim. The digest covers
+// every named entry's full policy, argv included, so a verifier still learns
+// the exact set of argv policies the pod is confined to. Inventories that
+// predate per-container detail yield no stamp at all rather than a weaker
+// digest-only one.
 
 package ratls
 

@@ -183,6 +183,14 @@ func (a *Allowlist) HasNonFloor(running []RunningContainer) bool {
 
 // nonFloorContainers is the subset of running whose digests are not floor
 // entries.
+// NonFloorContainers returns the containers whose digest is not a floor
+// entry — the ones workload-entry matching actually considers. Exported so
+// CDS can pre-screen the same subset the matcher will see (e.g. for the
+// missing-argv degradation) without duplicating the floor rule.
+func (a *Allowlist) NonFloorContainers(running []RunningContainer) []RunningContainer {
+	return a.nonFloorContainers(running)
+}
+
 func (a *Allowlist) nonFloorContainers(running []RunningContainer) []RunningContainer {
 	out := make([]RunningContainer, 0, len(running))
 	for _, r := range running {

@@ -502,3 +502,25 @@ func TestAttest_SandboxWorkload_ArgvMatchingNoEntryRefuses(t *testing.T) {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
 }
+
+// A container reported WITH per-container detail but WITHOUT argv means the
+// argv was never recorded (mixed-version skew during the inventory upgrade
+// window), not that the process runs argv-less — OCI requires argv[0]. Its
+// true argv is unknown, so an exact-policy entry can neither be matched nor
+// refuted: degrade exactly like a detail-less inventory (flat gate already
+// passed, no stamp) instead of refusing renewal of an admitted pod.
+func TestAttest_SandboxWorkload_EmptyArgvDetailIssuesWithoutStamp(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = fakeStore{
+		workloads: map[string]pkgallowlist.Workload{
+			"kimi-k3": {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: exactArgs("--model", "kimi-k3")}}},
+		},
+	}
+	containers := sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA}) // detail present, argv absent
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
+
+	if matched := stampFromResponse(t, h, signer); matched != nil {
+		t.Fatalf("argv-less container detail must degrade to no stamp, got %+v", matched)
+	}
+}

@@ -266,7 +266,9 @@ type operatorKeysReport struct {
 // serving cert (see fetchOperatorKeyFingerprints). A failed fetch degrades to
 // a note for claims-free targets, but records fetchErr so applyClaimsPolicy
 // can fail the verdict when the evidence binds config-claims: the
-// served-vs-attested key cross-check is mandatory there, and an endpoint
+// served-vs-attested key cross-check is required for network targets (it
+// cannot run for --from-file / no-URL targets, where the attested digest
+// alone anchors the pin), and an endpoint
 // erroring on /operator-keys must not dodge it.
 func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorKeysReport {
 	if cfg.kind != "cds" {
@@ -605,9 +607,15 @@ func expectedMeshCADigest(cfg config) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read --mesh-ca: %w", err)
 		}
-		block, _ := pem.Decode(pemBytes)
+		block, rest := pem.Decode(pemBytes)
 		if block == nil || block.Type != "CERTIFICATE" {
 			return nil, fmt.Errorf("--mesh-ca: %s is not a PEM CERTIFICATE", cfg.meshCA)
+		}
+		// The claims commit ONE issuing CA (sha256 of mesh.Cert.Raw). A bundle
+		// is ambiguous here: silently digesting the first block would make a
+		// rotation-era two-cert file read as an attack. Refuse instead.
+		if next, _ := pem.Decode(rest); next != nil {
+			return nil, fmt.Errorf("--mesh-ca: %s holds more than one PEM block; the claims pin commits a single issuing CA — pass exactly the one to pin (or use --mesh-ca-digest)", cfg.meshCA)
 		}
 		// Digest the DER, matching what CDS commits (sha256 of mesh.Cert.Raw).
 		sum := sha256.Sum256(block.Bytes)
@@ -875,7 +883,7 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	// The served key list must be the set the measured code attested to
 	// loading; a mismatch means MITM on the fetch or a CDS bug. A failed fetch
 	// fails closed too: an endpoint erroring on /operator-keys must not dodge
-	// a mandatory cross-check (a 404 is not an error — it maps to the
+	// a required cross-check on network targets (a 404 is not an error — it maps to the
 	// empty-set digest in fetchOperatorKeyFingerprints).
 	if ev.configClaims != nil && opKeys.fetchErr != nil {
 		fail("could not fetch /operator-keys to cross-check the attested operator-key set: %v", opKeys.fetchErr)

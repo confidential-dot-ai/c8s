@@ -416,6 +416,21 @@ func (h AttestHandler) matchWorkloadEntries(containers []workloadclaims.SandboxC
 	for _, c := range containers {
 		running = append(running, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
 	}
+	// Mixed-version skew: a NON-FLOOR container reported with empty Argv means
+	// the inventory admitted it before argv recording existed — its true argv
+	// is unknown, not empty (OCI requires argv[0]). Matching unknown argv
+	// against exact policies would refuse renewal of a pod whose admission was
+	// accepted, so degrade exactly like a detail-less inventory: the flat gate
+	// already passed, issue with no stamp. Floor containers (the injected
+	// sidecars) are excluded from matching anyway, so their missing argv is
+	// irrelevant.
+	for _, c := range doc.NonFloorContainers(running) {
+		if len(c.Argv) == 0 {
+			slog.Warn("inventory reports a non-floor container without argv detail; issuing without a matched-workload stamp",
+				"digest", c.Digest)
+			return nil, nil
+		}
+	}
 	names := doc.MatchingWorkloadEntries(running)
 	if len(names) == 0 {
 		// Distinguish "nothing to match" (floor-only pod) from "no entry

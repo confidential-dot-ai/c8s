@@ -103,9 +103,14 @@ The full `1.3.6.1.4.1.59888.1` arc a c8s certificate may carry:
 |---|---|---|
 | `…1.1` | RA-TLS attestation (`TEEAttestation`, above) — `extension.go` | the attesting component, on its own certificate and on its CSR |
 | `…1.2` | SHA-256 audit digest of the issuance evidence — `pkg/certutil` | CDS, on every issued leaf |
+| `…1.3` | config-claims (CDS governance digests) — `claims.go` | CDS, on its OWN self-signed serving certificate only |
 | `…1.4` | pod sandbox ID — `sandbox.go`, see [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key) | CDS, on a leaf whose requester presented a sandbox token |
+| `…1.5` | matched workload entry — `matchedworkload.go` | CDS, on a leaf whose sandbox containers matched allowlist entries |
 
-`…1.3` was the config-claims extension; it is retired and not reusable.
+`…1.3` no longer appears on issued workload leaves (per-leaf claims were
+retired with the sandbox-digests flow); it carries CDS's own governance
+digests — operator keys, seed, mesh CA, live allowlist — on the serving
+certificate a client attests once.
 
 The `report` field carries one of two shapes, auto-detected on parse
 (`extension.go`):
