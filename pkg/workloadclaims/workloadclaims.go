@@ -203,6 +203,12 @@ func peerFromRequest(r *http.Request) Peer {
 	return peerFrom(conn)
 }
 
+// PeerFromConn captures the peer credentials of a unix connection, for a server
+// outside this package that binds its callers the same way. Exported so that
+// server does not reimplement SO_PEERCRED; the returned Peer's pidfd must be
+// released with Close.
+func PeerFromConn(c net.Conn) Peer { return peerFrom(c) }
+
 // maxSandboxRequestBytes bounds a SandboxPath request body; it carries one
 // PKIX public key.
 const maxSandboxRequestBytes = 64 << 10
