@@ -32,14 +32,8 @@ type ctrRec struct {
 }
 
 // sbxRec is a sandbox's admission high-water mark: every distinct (digest,
-// argv) admitted in it, keyed for dedup. It is never pruned while the sandbox
-// lives.
-//
-// containers alone cannot answer /digests. A container is removed and recreated
-// across a CrashLoopBackOff, so a live view lets a pod arrange for a container
-// to be absent at the moment it is asked and present a set it does not have —
-// the release check would then see only the containers of an entry it is not
-// (docs/secrets.md). Admission is monotone; membership here is too.
+// argv) admitted in it, keyed for dedup, never pruned while the sandbox lives.
+// See docs/secrets.md — "The report is a high-water mark".
 type sbxRec struct {
 	byKey      map[string]workloadclaims.SandboxContainer
 	unresolved bool // some admitted container never resolved a digest
@@ -89,9 +83,9 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	b.sandboxes[sandboxID] = struct{}{}
 }
 
-// remove evicts a stopped container from caller resolution. It deliberately
-// does NOT touch the sandbox's admission record: what ran there is what ran
-// there, and forgetting it is the TOCTOU sbxRec exists to close.
+// remove evicts a stopped container from caller resolution only. The sandbox's
+// admission record keeps it: a stopped container must not bind a caller, but it
+// still ran here (sbxRec).
 func (b *admissionInventory) remove(containerID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
