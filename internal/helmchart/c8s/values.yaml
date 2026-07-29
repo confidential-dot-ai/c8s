@@ -161,12 +161,11 @@ cds:
   ## pointing the sandbox-digests callback at its own pod IP and answering as
   ## the inventory.
   ##
-  ## REQUIRED for sandbox identity. Unset means CDS refuses every request
-  ## carrying a sandbox token, so workload pods still get mesh certificates but
-  ## with no sandbox ID and no issuance-time image gate; CDS logs a warning at
-  ## startup when it is empty. `c8s install` fills this in from the cluster as
-  ## one host route per node — see docs/operator.md for why host routes rather
-  ## than a range, and what that means for scale-up.
+  ## Unset (default), CDS derives the bound live from the cluster's node list —
+  ## one host route per node, kept current as nodes come and go — and the chart
+  ## grants its ServiceAccount read-only node access for that. Set a range only
+  ## when the node network is separate from the pod network; on CNIs that assign
+  ## pod IPs from the node subnet a range admits pods too (docs/operator.md).
   sandboxInventoryCIDRs: []
   service:
     type: NodePort

@@ -73,14 +73,25 @@ func parseInventoryHost(host string) (string, error) {
 	return ip.String(), nil
 }
 
-// InventoryHosts is the set of CIDRs an inventory may live in — the operator's
-// node addresses. CDS refuses to dial anything outside them, which is what
-// keeps a pod (whose IP is in the pod CIDR) from standing in for a node.
-type InventoryHosts []*net.IPNet
+// InventoryHosts bounds which addresses an inventory may live at — the
+// operator's node addresses. CDS refuses to dial anything outside the set,
+// which is what keeps a pod (whose IP is in the pod CIDR) from standing in
+// for a node. Implementations: CIDRHosts (operator-given CIDRs, static) and
+// NodeHosts (derived live from the cluster's node objects).
+type InventoryHosts interface {
+	// Contains reports whether host is inside the set. An empty set contains
+	// nothing: callers must fail closed rather than dial anywhere.
+	Contains(host string) bool
+	// Empty reports whether the set currently holds nothing.
+	Empty() bool
+}
+
+// CIDRHosts is the static InventoryHosts parsed from operator-given CIDRs.
+type CIDRHosts []*net.IPNet
 
 // ParseInventoryHosts builds the set from CIDR strings.
-func ParseInventoryHosts(cidrs []string) (InventoryHosts, error) {
-	out := make(InventoryHosts, 0, len(cidrs))
+func ParseInventoryHosts(cidrs []string) (CIDRHosts, error) {
+	out := make(CIDRHosts, 0, len(cidrs))
 	for _, c := range cidrs {
 		_, network, err := net.ParseCIDR(strings.TrimSpace(c))
 		if err != nil {
@@ -91,20 +102,8 @@ func ParseInventoryHosts(cidrs []string) (InventoryHosts, error) {
 	return out, nil
 }
 
-// Contains reports whether host is inside the set. An empty set contains
-// nothing: callers must fail closed rather than dial anywhere.
-func (h InventoryHosts) Contains(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	for _, n := range h {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+func (h CIDRHosts) Contains(host string) bool { return cidrSet(h).contains(host) }
+func (h CIDRHosts) Empty() bool               { return len(h) == 0 }
 
 // ResolveAdvertiseHost returns the node IP an inventory signs into its sandbox
 // tokens. An explicit host always wins; the chart supplies one from the
