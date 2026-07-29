@@ -135,6 +135,11 @@ func openWithRetry(ctx context.Context, cfg config, attempt func(context.Context
 		}
 		lastErr = err
 		if n == cfg.Attempts {
+			// The last attempt's error is the one that matters: log it at
+			// ERROR so a stuck release shows its real cause in the sidecar's
+			// own log, not just the generic per-attempt INFO line.
+			slog.Error("volume release failed on the final attempt",
+				"attempt", n, "of", cfg.Attempts, "error", err)
 			break
 		}
 		slog.Info("volume not released yet; retrying",

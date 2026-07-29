@@ -4080,6 +4080,10 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.image.tag=dev",
 		"--set", "nriImagePolicy.image.tag=dev",
+		// volumed is off by default, so its image is unused unless a test
+		// enables it; set the tag here so those tests need not repeat it (its
+		// own image requires a tag or digest, like every component).
+		"--set", "volumed.image.tag=dev",
 		// tls-lb has no default upstream (a silently-plaintext VIP was
 		// removed); a c8s-<id> headless-Service address (what `c8s install
 		// --upstream` derives) is the representative mesh-wrapped baseline, and
@@ -5268,6 +5272,52 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 	})
 }
 
+// volumed runs its own image, so like every other component its digest must be
+// derived into the NRI floor when it is enabled — otherwise the plugin denies
+// the daemon's own container (the failure mode observed in testing). It must be
+// absent when volumed is off (the default), so a plain install neither resolves
+// nor allowlists an image it does not deploy.
+func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
+	const volD = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+
+	t.Run("enabled: digest in the floor", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "volumed.enabled=true",
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		}
+	})
+
+	t.Run("disabled: digest absent", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		}
+	})
+}
+
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live
@@ -6263,8 +6313,20 @@ func TestChartVolumedDaemonSetShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("volumed container missing; have %v", containerNames(spec.Containers))
 	}
+	// volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
+	// NOT the distroless operator image (which has neither, so every open
+	// would fail with "executable file not found").
+	if !strings.Contains(c.Image, "/volumed") {
+		t.Errorf("volumed image = %q, want its own /volumed image (not the operator image)", c.Image)
+	}
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
 		t.Error("volumed is not privileged; device-mapper and mount(2) need it")
+	}
+	// The image is nonroot (USER 65532) and privileged grants no effective
+	// caps to a non-root process: without runAsUser 0 the daemon cannot even
+	// bind its socket.
+	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
+		t.Error("volumed must set runAsUser: 0; the nonroot image user has no effective capabilities")
 	}
 	// RuntimeDefault seccomp blocks mount(2), so the daemon must not carry one.
 	if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {

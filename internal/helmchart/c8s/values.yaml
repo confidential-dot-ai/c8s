@@ -25,6 +25,9 @@ c8sComponents:
   - valuePath: nriImagePolicy.image
     enabledPath: nriImagePolicy.enabled
     cdsExempt: false
+  - valuePath: volumed.image
+    enabledPath: volumed.enabled
+    cdsExempt: false
 
 ## Operator container image. The same image runs every c8s mode that
 ## doesn't need extra OS bins: controller manager and injected get-cert.
@@ -990,10 +993,19 @@ nriImagePolicy:
 ## (docs/volumes.md). Off by default: it runs privileged with hostPID and a
 ## writable bind of the kubelet directory, and nothing needs it until a
 ## workload consumes a volume.
-##
-## It shares the chart-wide `image` with the operator — it is the same binary.
 volumed:
   enabled: false
+
+  ## Container image. Its own debian-slim image (cmd/volumed/Dockerfile) carries
+  ## cryptsetup/veritysetup, which the distroless operator image cannot. `tag`
+  ## and `digest` are consumer-supplied (like every component image); `c8s
+  ## install` resolves and pins the digest, which also derives it into the NRI
+  ## floor so the daemon's own image is admitted.
+  image:
+    repository: ghcr.io/confidential-dot-ai/volumed
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
 
   ## Host paths the daemon works through. The socket lives in the inventory's
   ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only

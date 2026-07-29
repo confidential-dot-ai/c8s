@@ -130,6 +130,8 @@ jobs:
               - '{cmd/ratls-mesh/**,internal/cmds/ratlsmesh/**}'
             nri-image-policy:
               - '{cmd/nri-image-policy/**,internal/cmds/nri-image-policy/**}'
+            volumed:
+              - '{cmd/volumed/**,internal/cmds/volumed/**}'
       - name: Build Docker matrix
         id: docker-matrix
         env:
@@ -139,6 +141,7 @@ jobs:
           GET_CERT: ${{ steps.filter.outputs['get-cert'] }}
           RATLS_MESH: ${{ steps.filter.outputs['ratls-mesh'] }}
           NRI_IMAGE_POLICY: ${{ steps.filter.outputs['nri-image-policy'] }}
+          VOLUMED: ${{ steps.filter.outputs.volumed }}
         run: .github/scripts/docker-build-matrix.sh
 
   go-modules:
