@@ -196,4 +196,3 @@ func TestHandleAdmitsSecretsWithInventorySocket(t *testing.T) {
 		t.Fatalf("Handle denied a serviceable secrets pod: %v", resp.Result)
 	}
 }
-
