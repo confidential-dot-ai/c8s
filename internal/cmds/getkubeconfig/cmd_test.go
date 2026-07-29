@@ -60,6 +60,7 @@ func TestNewCmdEndToEnd(t *testing.T) {
 		"--apiserver-url", "https://node:6443",
 		"--operator-key", env.keyPath,
 		"--out", env.outPath,
+		"--image-manifest", env.manifestPath,
 		"--context", "testctx",
 		"--tls-server-name", "c8s-cvm",
 		"--timeout", "10s")

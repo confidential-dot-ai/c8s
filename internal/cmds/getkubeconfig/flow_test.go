@@ -104,10 +104,11 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 // RA-TLS cred-release endpoint, and a stubbed verifier that accepts iff
 // rtmr_3 == H(op_pub).
 type testEnv struct {
-	keyPath    string
-	attestURL  string
-	releaseURL string
-	outPath    string
+	keyPath      string
+	attestURL    string
+	releaseURL   string
+	outPath      string
+	manifestPath string
 }
 
 func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody string) testEnv {
@@ -133,10 +134,11 @@ func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody strin
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
 
 	return testEnv{
-		keyPath:    keyPath,
-		attestURL:  attest.URL + "/attest",
-		releaseURL: release.URL,
-		outPath:    filepath.Join(dir, "kubeconfig"),
+		keyPath:      keyPath,
+		attestURL:    attest.URL + "/attest",
+		releaseURL:   release.URL,
+		outPath:      filepath.Join(dir, "kubeconfig"),
+		manifestPath: writeTestManifest(t),
 	}
 }
 
@@ -148,6 +150,7 @@ func (e testEnv) config() Config {
 		ReleaseBaseURL:  e.releaseURL,
 		APIServerURL:    "https://node:6443",
 		OperatorKeyPath: e.keyPath,
+		Image:           ImagePolicy{ManifestPath: e.manifestPath},
 		ContextName:     "c8s",
 		TLSServerName:   "c8s-cvm",
 		OutPath:         e.outPath,
@@ -220,7 +223,7 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 	cfg.ReleaseBaseURL = release.URL
 
 	err := Run(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "RTMR[3] mismatch") {
+	if err == nil || !strings.Contains(err.Error(), "RTMR[3]") {
 		t.Fatalf("want RTMR[3] mismatch, got %v", err)
 	}
 	if n := releaseHits.Load(); n != 0 {
@@ -292,7 +295,7 @@ func TestRequestCredentialErrors(t *testing.T) {
 
 func TestVerifyEvidenceErrors(t *testing.T) {
 	t.Run("bad envelope JSON", func(t *testing.T) {
-		_, err := verifyEvidence([]byte("not json"), nil)
+		_, err := verifyEvidence(context.Background(), []byte("not json"), nil, testPins(t, operatorPub(t)))
 		if err == nil || !strings.Contains(err.Error(), "parse evidence envelope") {
 			t.Fatalf("want parse error, got %v", err)
 		}
@@ -300,27 +303,29 @@ func TestVerifyEvidenceErrors(t *testing.T) {
 
 	t.Run("verifier error", func(t *testing.T) {
 		stubVerify(t, nil, fmt.Errorf("boom"))
-		_, err := verifyEvidence([]byte(tdxEnvelope), nil)
+		_, err := verifyEvidence(context.Background(), []byte(tdxEnvelope), nil, testPins(t, operatorPub(t)))
 		if err == nil || !strings.Contains(err.Error(), "verify evidence: boom") {
 			t.Fatalf("want wrapped verifier error, got %v", err)
 		}
 	})
 
 	t.Run("signature invalid", func(t *testing.T) {
-		res := verifiedResult("aa")
+		pub := operatorPub(t)
+		res := verifiedResult(expectedRTMR3(pub))
 		res.SignatureValid = false
 		stubVerify(t, res, nil)
-		_, err := verifyEvidence([]byte(tdxEnvelope), nil)
+		_, err := verifyEvidence(context.Background(), []byte(tdxEnvelope), nil, testPins(t, pub))
 		if err == nil || !strings.Contains(err.Error(), "quote signature invalid") {
 			t.Fatalf("want signature error, got %v", err)
 		}
 	})
 }
 
-func TestCheckRTMR3NoClaim(t *testing.T) {
-	res := verifiedResult("")
-	err := checkRTMR3(res, operatorPub(t))
-	if err == nil || !strings.Contains(err.Error(), "no rtmr_3") {
+func TestVerifyEvidenceNoRTMR3Claim(t *testing.T) {
+	pub := operatorPub(t)
+	stubVerify(t, verifiedResult(""), nil)
+	_, err := verifyEvidence(context.Background(), []byte(tdxEnvelope), nil, testPins(t, pub))
+	if err == nil || !strings.Contains(err.Error(), "rtmr_3") {
 		t.Fatalf("want no-rtmr_3 error, got %v", err)
 	}
 }
@@ -370,4 +375,17 @@ func TestPublicKeyPEMFromPrivateErrors(t *testing.T) {
 			t.Fatal("want PKCS8 parse error, got nil")
 		}
 	})
+}
+
+// newCountingRelease serves cred-release over plain HTTP and counts every hit,
+// so a test can prove the flow stopped at the trust gate: any request — even
+// one that would fail the RA-TLS handshake — reaches the handler and is counted.
+func newCountingRelease(t *testing.T, hits *atomic.Int32) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		releaseHandler(t, http.StatusOK, goodRelease).ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
