@@ -97,11 +97,6 @@ const defaultGetCertRunAsNonRoot = true
 const discoveryPublicTLSModeCDS = "cds"
 const discoveryPublicTLSModeWebPKI = "webpki"
 
-// reservedCertContainerName is the injected mesh-cert sidecar's name. It is
-// operator-reserved: a pod may not declare its own container under it. The
-// webhook rebuilds the sidecar every call (injectInitContainers) and rejects
-// the name in the regular/ephemeral lists (rejectReservedCertContainer); the
-// cw-label-integrity VAP enforces its presence in the API server.
 // reservedSecretContainerName is the injected secret fetcher. Reserved like
 // the cert containers: a pod that declared the name itself would have the
 // webhook's container silently replace or collide with it.
@@ -123,6 +118,11 @@ const defaultSecretDir = "/run/c8s/secrets"
 // writes into the shared directory pressure the pod rather than fail.
 const secretsVolumeSizeLimit = "1Mi"
 
+// reservedCertContainerName is the injected mesh-cert sidecar's name. It is
+// operator-reserved: a pod may not declare its own container under it. The
+// webhook rebuilds the sidecar every call (injectInitContainers) and rejects
+// the name in the regular/ephemeral lists (rejectReservedCertContainer); the
+// cw-label-integrity VAP enforces its presence in the API server.
 const reservedCertContainerName = "c8s-cert"
 
 // reservedCertWaitContainerName is the injected gate init container that blocks
@@ -570,6 +570,18 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
 			errInvalidInjectionAnnotation, AnnotationWorkload))
+	}
+	// The fetcher redeems a sandbox token from the node's inventory over the
+	// mounted nri-image-policy socket, and unlike get-cert it has no guest
+	// (kata loopback) endpoint. Without the host dir there is no socket to
+	// mount, so injecting it would produce a Running pod whose fetcher
+	// CrashLoops on a missing socket while the workload blocks forever waiting
+	// for a file that never lands. Refuse at admission instead — kata secrets
+	// are out of scope for further reasons too (see docs/secrets.md).
+	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" {
+		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+			"%w: %s needs the node inventory socket, which this operator is not configured with (kata, or nri-image-policy disabled); see docs/secrets.md",
+			errInvalidInjectionAnnotation, AnnotationSecrets))
 	}
 	if inj != nil && inj.SAN == "" {
 		// req.Namespace, not pod.Namespace: template-created pods reach
@@ -1125,11 +1137,7 @@ func secretsVolume() corev1.Volume {
 // that, but Kubernetes strips spec.ephemeralContainers at CREATE, so that check
 // only ever runs against an empty list.
 func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
-	certVolume := strings.TrimSpace(pod.Annotations[AnnotationCertVolume])
-	if certVolume == "" {
-		certVolume = defaultCertVolumeName
-	}
-	reserved := map[string]bool{secretsVolumeName: true, certVolume: true}
+	reserved := reservedVolumeNames(pod)
 	for _, c := range pod.Spec.EphemeralContainers {
 		if isReservedCertName(c.Name) {
 			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s containers",
@@ -1143,6 +1151,37 @@ func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
 		}
 	}
 	return nil
+}
+
+// reservedVolumeNames is the set of volumes holding c8s material on this pod:
+// what the injected sidecars mount, plus the cert volume the annotation names.
+//
+// The sidecars' own mounts are what makes this sound. AnnotationCertVolume
+// stays mutable on a running pod — the mutating webhook intercepts CREATE and
+// pods/ephemeralcontainers but not a plain pod UPDATE, and the
+// cw-label-integrity VAP freezes only confidential.ai/cw — so a caller holding
+// `patch pods` can rewrite it to name a decoy and then attach an ephemeral
+// container mounting the volume that actually holds the leaf key. Reading the
+// mounts off spec.initContainers, immutable after CREATE, closes that: the
+// sidecar names the real volume whatever the annotation was rewritten to say.
+//
+// The annotation (or the default when unset) is still folded in, so a pod whose
+// sidecars were never injected is judged exactly as before.
+func reservedVolumeNames(pod *corev1.Pod) map[string]bool {
+	certVolume := strings.TrimSpace(pod.Annotations[AnnotationCertVolume])
+	if certVolume == "" {
+		certVolume = defaultCertVolumeName
+	}
+	reserved := map[string]bool{secretsVolumeName: true, certVolume: true}
+	for _, c := range pod.Spec.InitContainers {
+		if !isReservedCertName(c.Name) {
+			continue
+		}
+		for _, m := range c.VolumeMounts {
+			reserved[m.Name] = true
+		}
+	}
+	return reserved
 }
 
 // rejectReservedSecretsVolume denies a pod that pre-declares the secrets volume
@@ -1358,10 +1397,25 @@ func rejectReservedCertVolume(pod *corev1.Pod, volName string) error {
 	return nil
 }
 
+// mountAll gives every container in pod the mount, read-only.
+//
+// A container that already declares the volume keeps its own mount path, but
+// the mount is forced read-only: matching on the name alone and skipping would
+// let a pod pre-declare `{name: c8s-secrets}` with readOnly omitted (defaulting
+// to false) and keep write access to the shared directory, which is exactly the
+// invariant secretContainer relies on ("the only container with write access").
+// The same holds for the cert volume, where a writable mount means overwriting
+// the sidecar-managed leaf key.
+//
+// The fetcher's own read-write mount is unaffected: mountAll runs against the
+// pod's containers before the c8s sidecars are appended, and injectInitContainers
+// rebuilds them from scratch afterwards, so a coerced stale copy is discarded on
+// a webhook reinvocation.
 func mountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 	add := func(cs []corev1.Container) []corev1.Container {
 		for i := range cs {
-			if containerHasMount(cs[i], mount.Name) {
+			if existing := containerMount(&cs[i], mount.Name); existing != nil {
+				existing.ReadOnly = true
 				continue
 			}
 			cs[i].VolumeMounts = append(cs[i].VolumeMounts, mount)
@@ -1372,11 +1426,13 @@ func mountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 	pod.Spec.InitContainers = add(pod.Spec.InitContainers)
 }
 
-func containerHasMount(c corev1.Container, name string) bool {
-	for _, m := range c.VolumeMounts {
-		if m.Name == name {
-			return true
+// containerMount returns c's mount of the named volume, or nil. The pointer
+// aliases the container's slice so callers can amend the mount in place.
+func containerMount(c *corev1.Container, name string) *corev1.VolumeMount {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == name {
+			return &c.VolumeMounts[i]
 		}
 	}
-	return false
+	return nil
 }

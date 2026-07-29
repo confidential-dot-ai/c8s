@@ -30,6 +30,13 @@ measurement requirement above is unmeetable there. Two other reasons stand
 independently: the kata sandbox ID comes from a host-written CRI annotation, and
 argv enforcement in the guest is watch-and-kill rather than synchronous.
 
+This is enforced, not just documented: the fetcher redeems its sandbox token
+over the mounted nri-image-policy socket and has no guest (loopback) endpoint,
+so an operator without `--workload-claims-host-dir` has nothing to mount. The
+webhook rejects `confidential.ai/c8s-secrets` at admission there rather than
+admitting a pod whose fetcher would CrashLoop while the workload blocked
+forever on a file that never lands.
+
 ## Asking for a secret
 
 Annotate the pod alongside `confidential.ai/cw`:
