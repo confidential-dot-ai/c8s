@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
 	"log/slog"
@@ -212,10 +213,17 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("digest operator keys: %w", err)
 	}
+	// Commit the mesh CA CDS issues under, so a client that attests CDS also
+	// authenticates the CA instead of pinning it out of band. CDS's RA-TLS cert
+	// is self-signed and served without a chain, so without this the CA is an
+	// unauthenticated anchor the operator has to distribute by hand — and it
+	// regenerates on every install.
+	meshCADigest := sha256.Sum256(mesh.Cert.Raw)
 	configClaims := &ratls.ConfigClaims{
 		OperatorKeysDigest: opKeysDigest,
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     ratls.UnsetDigest(),
+		MeshCADigest:       meshCADigest[:],
 	}
 
 	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)

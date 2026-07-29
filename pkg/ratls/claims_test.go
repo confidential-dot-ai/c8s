@@ -3,6 +3,8 @@ package ratls
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -23,6 +25,7 @@ func testClaims(t *testing.T) (*ConfigClaims, []byte) {
 		OperatorKeysDigest: bytes.Repeat([]byte{0xAB}, ClaimsDigestSize),
 		SeedDigest:         bytes.Repeat([]byte{0xCD}, ClaimsDigestSize),
 		WorkloadDigest:     UnsetDigest(),
+		MeshCADigest:       UnsetDigest(),
 	}
 	ext, err := claims.MarshalExtension()
 	if err != nil {
@@ -88,6 +91,7 @@ func TestConfigClaimsSentinels(t *testing.T) {
 		OperatorKeysDigest: bytes.Repeat([]byte{1}, ClaimsDigestSize),
 		SeedDigest:         UnsetDigest(),
 		WorkloadDigest:     UnsetDigest(),
+		MeshCADigest:       UnsetDigest(),
 	}
 	ext, err := claims.MarshalExtension()
 	if err != nil {
@@ -363,6 +367,7 @@ func TestVerifyCertUnpinnedSurvivesClaimsVersionSkew(t *testing.T) {
 		OperatorKeysDigest: bytes.Repeat([]byte{0xAB}, ClaimsDigestSize),
 		SeedDigest:         bytes.Repeat([]byte{0xCD}, ClaimsDigestSize),
 		WorkloadDigest:     unsetDigest,
+		MeshCADigest:       UnsetDigest(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -517,5 +522,97 @@ func TestVerifyCertRejectsEmptyClaimsExtension(t *testing.T) {
 
 	if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}}, nil); err == nil {
 		t.Fatal("VerifyCert accepted a present-but-empty config-claims extension")
+	}
+}
+
+// v2 added meshCADigest. A v1 certificate must keep parsing — an in-place CDS
+// upgrade must not invalidate leaves already issued — but it must NOT be able
+// to satisfy a verifier pinning a real CA digest.
+func TestUnmarshalConfigClaimsV1StillParses(t *testing.T) {
+	v1 := configClaimsASN1V1{
+		Version:            1,
+		OperatorKeysDigest: bytes.Repeat([]byte{0xaa}, ClaimsDigestSize),
+		SeedDigest:         bytes.Repeat([]byte{0xbb}, ClaimsDigestSize),
+		WorkloadDigest:     bytes.Repeat([]byte{0xcc}, ClaimsDigestSize),
+	}
+	der, err := asn1.Marshal(v1)
+	if err != nil {
+		t.Fatalf("marshal v1: %v", err)
+	}
+	got, err := UnmarshalConfigClaims(der)
+	if err != nil {
+		t.Fatalf("v1 claims must still parse: %v", err)
+	}
+	if !bytes.Equal(got.SeedDigest, v1.SeedDigest) {
+		t.Error("v1 seed digest not preserved")
+	}
+	if got.HasMeshCA() {
+		t.Error("v1 claims must not report a mesh CA")
+	}
+	if !bytes.Equal(got.MeshCADigest, UnsetDigest()) {
+		t.Error("absent v1 mesh CA must read as the sentinel, not empty")
+	}
+}
+
+// The reason the sentinel matters: a v1 cert must never satisfy a real pin.
+func TestV1ClaimsCannotSatisfyAMeshCAPin(t *testing.T) {
+	v1 := configClaimsASN1V1{
+		Version:            1,
+		OperatorKeysDigest: UnsetDigest(),
+		SeedDigest:         UnsetDigest(),
+		WorkloadDigest:     UnsetDigest(),
+	}
+	der, _ := asn1.Marshal(v1)
+	got, err := UnmarshalConfigClaims(der)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	realCA := bytes.Repeat([]byte{0x42}, ClaimsDigestSize)
+	if bytes.Equal(got.MeshCADigest, realCA) {
+		t.Fatal("a v1 certificate satisfied a mesh-CA pin")
+	}
+}
+
+func TestUnmarshalConfigClaimsRejectsUnknownVersion(t *testing.T) {
+	future := configClaimsASN1{
+		Version:            99,
+		OperatorKeysDigest: UnsetDigest(),
+		SeedDigest:         UnsetDigest(),
+		WorkloadDigest:     UnsetDigest(),
+		MeshCADigest:       UnsetDigest(),
+	}
+	der, _ := asn1.Marshal(future)
+	if _, err := UnmarshalConfigClaims(der); err == nil {
+		t.Fatal("an unknown claims version must fail closed")
+	}
+}
+
+// The mesh CA digest must be covered by the REPORTDATA binding, or committing
+// it buys nothing: a host could swap the CA and reuse the evidence.
+func TestMeshCADigestIsBound(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	base := func(caByte byte) [64]byte {
+		c := &ConfigClaims{
+			OperatorKeysDigest: UnsetDigest(),
+			SeedDigest:         UnsetDigest(),
+			WorkloadDigest:     UnsetDigest(),
+			MeshCADigest:       bytes.Repeat([]byte{caByte}, ClaimsDigestSize),
+		}
+		ext, err := c.MarshalExtension()
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		rd, err := ReportDataForKeyAndClaims(priv.Public(), ext.Value, []byte("nonce"))
+		if err != nil {
+			t.Fatalf("report data: %v", err)
+		}
+		return rd
+	}
+	a, b := base(0x01), base(0x02)
+	if bytes.Equal(a[:], b[:]) {
+		t.Fatal("changing the mesh CA digest did not change REPORTDATA — the CA is not bound")
 	}
 }

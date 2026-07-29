@@ -248,6 +248,7 @@ func TestAttest_WorkloadClaims_RejectsForgedGovernanceFields(t *testing.T) {
 		OperatorKeysDigest: bytes.Repeat([]byte{0xEE}, ratls.ClaimsDigestSize),
 		SeedDigest:         bytes.Repeat([]byte{0xDD}, ratls.ClaimsDigestSize),
 		WorkloadDigest:     wd,
+		MeshCADigest:       ratls.UnsetDigest(),
 	}
 	ext, err := forged.MarshalExtension()
 	if err != nil {
