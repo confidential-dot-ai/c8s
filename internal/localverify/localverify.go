@@ -52,16 +52,41 @@ type Params struct {
 	MinTCB *teetypes.SnpTcb
 	// Measurements pins the launch digest (SNP MEASUREMENT / TDX MR_TD).
 	// Empty = no pin; with a pin, a missing launch digest fails closed.
-	Measurements [][]byte
-	// ExpectedRTMR3 pins the guest's runtime measurement register — on a c8s
-	// node, the operator-key seed and any per-workload extends chained onto
-	// it (pkg/runtimemeasure). 48 bytes, or nil for no pin.
 	//
-	// TDX only: the register does not exist on SNP, and attestation-go
-	// consults ExpectedRTMRs only on the TDX path, so a pin set against any
-	// other platform would be silently ignored. Verify rejects that rather
-	// than reporting a pass nothing enforced.
-	ExpectedRTMR3 []byte
+	// On TDX this pins MRTD, which measures the TDVF firmware's measured
+	// regions and NOTHING ELSE — not the kernel, not the rootfs. Two entirely
+	// different guest images built against the same firmware share an MRTD, so
+	// a measurement pin alone does not establish which OS booted. That lives in
+	// ExpectedRTMRs[1] and [2].
+	Measurements [][]byte
+	// ExpectedRTMRs pins the TDX runtime measurement registers by index; a nil
+	// entry skips that register. Each non-nil entry is 48 bytes.
+	//
+	//	[0] firmware/config events (not currently pinned by c8s)
+	//	[1] UKI PE image identity + GPT + boot — the guest kernel
+	//	[2] the UKI section measurement chain — the guest rootfs
+	//	[3] runtime extends: the operator-key seed and any per-workload
+	//	    measurements chained onto it (pkg/runtimemeasure)
+	//
+	// [1] and [2] answer "which image booted", and their reference values come
+	// from the confos build manifest published alongside the image. [3] answers
+	// "whose deployment is this". Together with Measurements they are what makes
+	// a verdict specific rather than "some genuine TEE running some c8s build".
+	//
+	// TDX only: SNP has no runtime-extend registers, and attestation-go consults
+	// RTMR pins only on the TDX path, so a pin set against any other platform
+	// would be silently ignored. Verify rejects that rather than reporting a
+	// pass nothing enforced.
+	ExpectedRTMRs [4][]byte
+}
+
+// rtmrMeaning labels each register for error messages, so a mismatch says what
+// actually differs rather than quoting a bare index.
+var rtmrMeaning = [4]string{
+	"firmware/config events",
+	"guest kernel (UKI image identity)",
+	"guest rootfs (UKI section chain)",
+	"runtime extends (operator key / workloads)",
 }
 
 // VerifyFunc is the signature of [Verify], taken as a parameter by consumers
@@ -79,10 +104,11 @@ func (e *CollateralError) Unwrap() error { return e.Err }
 // ErrMeasurementNotAllowed reports a launch digest outside Params.Measurements.
 var ErrMeasurementNotAllowed = errors.New("launch measurement not in the allowed set")
 
-// ErrRTMR3NotAllowed reports a runtime measurement register that does not match
-// Params.ExpectedRTMR3 — the node was not launched to trust the pinned operator
-// key, or it measured workloads the pin does not account for.
-var ErrRTMR3NotAllowed = errors.New("RTMR[3] does not match the expected value")
+// ErrRTMRNotAllowed reports a runtime measurement register that does not match
+// the corresponding Params.ExpectedRTMRs entry: a different guest image booted
+// ([1]/[2]), or the node was not launched to trust the pinned operator key
+// ([3]).
+var ErrRTMRNotAllowed = errors.New("runtime measurement register does not match the expected value")
 
 // Verify verifies a self-describing evidence envelope and enforces p. The
 // chain, binding, debug, and min-TCB checks are attestation-go's verdict; the
@@ -94,23 +120,26 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		AllowDebug:         p.AllowDebug,
 		MinTCB:             p.MinTCB,
 	}
-	if p.ExpectedRTMR3 != nil {
-		if len(p.ExpectedRTMR3) != runtimemeasure.Size {
-			return nil, fmt.Errorf("expected RTMR[3] is %d bytes, want %d", len(p.ExpectedRTMR3), runtimemeasure.Size)
+	for i, want := range p.ExpectedRTMRs {
+		if want == nil {
+			continue
 		}
-		// The register is TDX-only, and attestation-go consults RTMR pins only
+		if len(want) != runtimemeasure.Size {
+			return nil, fmt.Errorf("expected RTMR[%d] is %d bytes, want %d", i, len(want), runtimemeasure.Size)
+		}
+		// The registers are TDX-only, and attestation-go consults RTMR pins only
 		// on the TDX path — accepting one for any other platform would drop it
 		// silently, leaving a pin that looks configured and enforces nothing.
 		if platform != string(teetypes.PlatformTDX) {
-			return nil, fmt.Errorf("platform is %q: the runtime measurement register is TDX-only, so an RTMR[3] pin cannot be enforced here", platform)
+			return nil, fmt.Errorf("platform is %q: runtime measurement registers are TDX-only, so an RTMR[%d] pin cannot be enforced here", platform, i)
 		}
 		// Deliberately NOT passed down as teetypes.ExpectedRTMRs: go-tdx-guest
 		// would reject the mismatch first, and its message reports the register
-		// 1-based ("RTMR[4]" for RTMR[3]) without naming the operator key, which
-		// reads as a hardware fault rather than the identity mismatch it is.
-		// Enforced below on the signature-verified claim instead — the same
+		// 1-based ("RTMR[4]" for RTMR[3]) without naming what actually differs,
+		// which reads as a hardware fault rather than an identity mismatch.
+		// Enforced below on the signature-verified claims instead — the same
 		// posture the --measurements pin uses, and the same one `confai verify`
-		// and `c8s get-kubeconfig` already take for this exact register.
+		// and `c8s get-kubeconfig` already take for RTMR[3].
 	}
 
 	res, err := dispatch(ctx, platform, evidence, params)
@@ -141,22 +170,26 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 			return nil, fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
 		}
 	}
-	// The rtmr_3 claim is read off the signature-verified quote body, so
-	// comparing it here is as strong as a check inside the quote parser — and
+	// The rtmr_N claims are read off the signature-verified quote body, so
+	// comparing them here is as strong as a check inside the quote parser — and
 	// it can say what actually went wrong. Missing or malformed fails closed.
-	if p.ExpectedRTMR3 != nil {
-		got, _ := res.Claims.PlatformData["rtmr_3"].(string)
+	for i, want := range p.ExpectedRTMRs {
+		if want == nil {
+			continue
+		}
+		key := fmt.Sprintf("rtmr_%d", i)
+		got, _ := res.Claims.PlatformData[key].(string)
+		got = strings.ToLower(strings.TrimSpace(got))
 		if got == "" {
-			return nil, fmt.Errorf("%w: quote carries no rtmr_3 (is this a TDX guest with runtime measurement?)", ErrRTMR3NotAllowed)
+			return nil, fmt.Errorf("%w: quote carries no %s (is this a TDX guest with runtime measurement?)", ErrRTMRNotAllowed, key)
 		}
-		gb, err := hex.DecodeString(strings.TrimSpace(got))
+		gb, err := hex.DecodeString(got)
 		if err != nil {
-			return nil, fmt.Errorf("%w: rtmr_3 claim is malformed (%q)", ErrRTMR3NotAllowed, got)
+			return nil, fmt.Errorf("%w: %s claim is malformed (%q)", ErrRTMRNotAllowed, key, got)
 		}
-		if !bytes.Equal(gb, p.ExpectedRTMR3) {
-			return nil, fmt.Errorf("%w: node reports %s, expected %s "+
-				"(the node was NOT launched to trust this operator key, or it measured workloads the pin does not account for)",
-				ErrRTMR3NotAllowed, strings.ToLower(strings.TrimSpace(got)), hex.EncodeToString(p.ExpectedRTMR3))
+		if !bytes.Equal(gb, want) {
+			return nil, fmt.Errorf("%w: RTMR[%d] (%s) is %s, expected %s",
+				ErrRTMRNotAllowed, i, rtmrMeaning[i], got, hex.EncodeToString(want))
 		}
 	}
 	return res, nil
