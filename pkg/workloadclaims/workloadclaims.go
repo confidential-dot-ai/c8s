@@ -229,6 +229,10 @@ func BuildConfigClaims(initImages, mainImages []string) (*ratls.ConfigClaims, er
 		OperatorKeysDigest: ratls.UnsetDigest(),
 		SeedDigest:         ratls.UnsetDigest(),
 		WorkloadDigest:     wd,
+		// A workload issues nothing, so it vouches for no CA. Only CDS sets
+		// this; a verifier pinning a real CA digest can never be satisfied by
+		// the sentinel.
+		MeshCADigest: ratls.UnsetDigest(),
 	}, nil
 }
 

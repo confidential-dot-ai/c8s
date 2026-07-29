@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
+	"reflect"
 )
 
 // OIDRATLSConfigClaims identifies the config-claims extension (see
@@ -20,8 +21,9 @@ import (
 //	1.3.6.1.4.1.59888.1.3 - RA-TLS config-claims extension
 var OIDRATLSConfigClaims = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 3}
 
-// configClaimsVersion is the only claims version this package emits or parses.
-const configClaimsVersion = 1
+// configClaimsVersion is the claims version this package EMITS. v1 is still
+// parsed for certificates issued before meshCADigest existed.
+const configClaimsVersion = 2
 
 // claimsDomainSep tags the config-claims REPORTDATA transcript
 // (ReportDataForKeyAndClaims), keeping it disjoint from a plain key+nonce
@@ -64,9 +66,25 @@ type ConfigClaims struct {
 	// container image digests. Set by the workload (get-cert via
 	// workloadclaims.BuildConfigClaims), not by CDS.
 	WorkloadDigest []byte
+	// MeshCADigest is SHA-256 of the issuing mesh CA's DER, or UnsetDigest on
+	// certificates that do not issue under one. Set by CDS.
+	//
+	// This is what lets a client stop pinning the mesh CA out of band. CDS's
+	// own RA-TLS certificate is self-signed and presented without a chain, so
+	// attesting CDS proves "a measured CDS vouches for allowlist X" but says
+	// nothing about which CA it signs leaves under — leaving the CA an
+	// unauthenticated, manually distributed anchor that rotates on every
+	// install. Committing its digest here folds the CA into the same hardware
+	// evidence as the rest of the claims, so a verified CDS attestation
+	// authenticates the CA, and the LB's leaf chaining to that CA becomes a
+	// verified step rather than a trusted one.
+	//
+	// Present from claims v2. A v1 certificate parses with UnsetDigest here.
+	MeshCADigest []byte
 }
 
-// configClaimsASN1 is the ASN.1 DER encoding structure (docs/ratls.md,
+// configClaimsASN1V1 is the v1 DER encoding, still parsed so certificates
+// issued before meshCADigest existed keep verifying (docs/ratls.md,
 // Config-claims).
 //
 //	C8SConfigClaims ::= SEQUENCE {
@@ -75,11 +93,35 @@ type ConfigClaims struct {
 //	    seedDigest          OCTET STRING,
 //	    workloadDigest      OCTET STRING
 //	}
+type configClaimsASN1V1 struct {
+	Version            int
+	OperatorKeysDigest []byte
+	SeedDigest         []byte
+	WorkloadDigest     []byte
+}
+
+// configClaimsASN1 is the current (v2) encoding: v1 plus meshCADigest.
+//
+//	C8SConfigClaims ::= SEQUENCE {
+//	    version             INTEGER,
+//	    operatorKeysDigest  OCTET STRING,
+//	    seedDigest          OCTET STRING,
+//	    workloadDigest      OCTET STRING,
+//	    meshCADigest        OCTET STRING
+//	}
+//
+// The version had to change rather than the field being appended optionally:
+// UnmarshalConfigClaims requires a byte-exact round-trip, so any additional
+// element is a different encoding by construction. That strictness is
+// deliberate — it is what makes "parses as vN" mean "is the one vN encoding" —
+// and it means a pre-v2 verifier rejects these claims outright instead of
+// silently ignoring a field it cannot see. Fail closed, not fail quiet.
 type configClaimsASN1 struct {
 	Version            int
 	OperatorKeysDigest []byte
 	SeedDigest         []byte
 	WorkloadDigest     []byte
+	MeshCADigest       []byte
 }
 
 // MarshalExtension encodes the claims as a DER-encoded X.509 extension.
@@ -94,6 +136,7 @@ func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 		{"operator-keys", c.OperatorKeysDigest},
 		{"seed", c.SeedDigest},
 		{"workload", c.WorkloadDigest},
+		{"mesh-ca", c.MeshCADigest},
 	} {
 		if len(f.d) != ClaimsDigestSize {
 			return pkix.Extension{}, fmt.Errorf("ratls: %s claims digest must be %d bytes, got %d", f.name, ClaimsDigestSize, len(f.d))
@@ -104,6 +147,7 @@ func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 		OperatorKeysDigest: c.OperatorKeysDigest,
 		SeedDigest:         c.SeedDigest,
 		WorkloadDigest:     c.WorkloadDigest,
+		MeshCADigest:       c.MeshCADigest,
 	})
 	if err != nil {
 		return pkix.Extension{}, fmt.Errorf("ratls: marshal config claims: %w", err)
@@ -116,43 +160,105 @@ func (c *ConfigClaims) MarshalExtension() (pkix.Extension, error) {
 // that cannot interpret the claims must not enforce policy against them
 // (binding verification never needs to parse — docs/ratls.md).
 func UnmarshalConfigClaims(der []byte) (*ConfigClaims, error) {
-	var raw configClaimsASN1
-	rest, err := asn1.Unmarshal(der, &raw)
-	if err != nil {
+	// Peek at the version before choosing a shape: unmarshalling v1 bytes into
+	// the v2 struct would fail on the missing element and vice versa, and the
+	// resulting error should name the version, not the arity.
+	var probe struct {
+		Version int
+		Rest    asn1.RawValue `asn1:"optional"`
+	}
+	if _, err := asn1.Unmarshal(der, &probe); err != nil {
 		return nil, fmt.Errorf("ratls: unmarshal config claims: %w", err)
 	}
-	if len(rest) > 0 {
-		return nil, fmt.Errorf("ratls: %d trailing bytes after config-claims extension", len(rest))
-	}
-	if raw.Version != configClaimsVersion {
-		return nil, fmt.Errorf("ratls: unsupported config-claims version %d (supported: %d)", raw.Version, configClaimsVersion)
-	}
-	for _, d := range [][]byte{raw.OperatorKeysDigest, raw.SeedDigest, raw.WorkloadDigest} {
-		if len(d) != ClaimsDigestSize {
-			return nil, fmt.Errorf("ratls: config-claims digest is %d bytes, want %d", len(d), ClaimsDigestSize)
+
+	switch probe.Version {
+	case 2:
+		var raw configClaimsASN1
+		if err := unmarshalExact(der, &raw, 2); err != nil {
+			return nil, err
 		}
+		claims := &ConfigClaims{
+			OperatorKeysDigest: raw.OperatorKeysDigest,
+			SeedDigest:         raw.SeedDigest,
+			WorkloadDigest:     raw.WorkloadDigest,
+			MeshCADigest:       raw.MeshCADigest,
+		}
+		if err := claims.validateDigests(); err != nil {
+			return nil, err
+		}
+		return claims, nil
+
+	case 1:
+		// Pre-meshCADigest certificates. Accepted so an in-place CDS upgrade
+		// does not invalidate leaves already issued; the missing field reads as
+		// UnsetDigest, which a verifier pinning a real CA digest can never
+		// match — so old claims cannot satisfy a new pin.
+		var raw configClaimsASN1V1
+		if err := unmarshalExact(der, &raw, 1); err != nil {
+			return nil, err
+		}
+		claims := &ConfigClaims{
+			OperatorKeysDigest: raw.OperatorKeysDigest,
+			SeedDigest:         raw.SeedDigest,
+			WorkloadDigest:     raw.WorkloadDigest,
+			MeshCADigest:       UnsetDigest(),
+		}
+		if err := claims.validateDigests(); err != nil {
+			return nil, err
+		}
+		return claims, nil
+
+	default:
+		return nil, fmt.Errorf("ratls: unsupported config-claims version %d (supported: 1, %d)", probe.Version, configClaimsVersion)
 	}
-	// encoding/asn1 tolerates extra elements inside the SEQUENCE and
-	// non-minimal encodings; requiring the input to round-trip byte-exactly
-	// keeps "parses as v1" equivalent to "is the one v1 encoding", so no two
-	// distinct extension values yield the same ConfigClaims.
-	reencoded, err := asn1.Marshal(raw)
+}
+
+// unmarshalExact decodes into v and requires the input to be the one canonical
+// encoding of that shape. encoding/asn1 tolerates extra elements inside the
+// SEQUENCE and non-minimal encodings; demanding a byte-exact round-trip keeps
+// "parses as vN" equivalent to "is the one vN encoding", so no two distinct
+// extension values can yield the same ConfigClaims — which matters because the
+// REPORTDATA binding covers the raw bytes.
+func unmarshalExact(der []byte, v any, version int) error {
+	rest, err := asn1.Unmarshal(der, v)
 	if err != nil {
-		return nil, fmt.Errorf("ratls: re-encode config claims: %w", err)
+		return fmt.Errorf("ratls: unmarshal v%d config claims: %w", version, err)
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("ratls: %d trailing bytes after config-claims extension", len(rest))
+	}
+	// asn1.Marshal rejects pointers, and v must be one for Unmarshal — so
+	// re-encode the pointed-to value.
+	reencoded, err := asn1.Marshal(reflect.ValueOf(v).Elem().Interface())
+	if err != nil {
+		return fmt.Errorf("ratls: re-encode config claims: %w", err)
 	}
 	if !bytes.Equal(reencoded, der) {
-		return nil, fmt.Errorf("ratls: config-claims extension is not the exact v%d encoding (%d bytes, canonical is %d)", configClaimsVersion, len(der), len(reencoded))
+		return fmt.Errorf("ratls: config-claims extension is not the exact v%d encoding (%d bytes, canonical is %d)", version, len(der), len(reencoded))
 	}
-	return &ConfigClaims{
-		OperatorKeysDigest: raw.OperatorKeysDigest,
-		SeedDigest:         raw.SeedDigest,
-		WorkloadDigest:     raw.WorkloadDigest,
-	}, nil
+	return nil
+}
+
+// validateDigests rejects a claims set carrying a wrong-size digest. Applied
+// after decoding so both versions share one rule.
+func (c *ConfigClaims) validateDigests() error {
+	for _, d := range [][]byte{c.OperatorKeysDigest, c.SeedDigest, c.WorkloadDigest, c.MeshCADigest} {
+		if len(d) != ClaimsDigestSize {
+			return fmt.Errorf("ratls: config-claims digest is %d bytes, want %d", len(d), ClaimsDigestSize)
+		}
+	}
+	return nil
 }
 
 // HasSeed reports whether the claims attest a configured allowlist seed.
 func (c *ConfigClaims) HasSeed() bool {
 	return !bytes.Equal(c.SeedDigest, unsetDigest)
+}
+
+// HasMeshCA reports whether the claims attest an issuing mesh CA. False on
+// v1 claims, which predate the field.
+func (c *ConfigClaims) HasMeshCA() bool {
+	return !bytes.Equal(c.MeshCADigest, unsetDigest)
 }
 
 // HasWorkload reports whether the claims attest a workload digest.
