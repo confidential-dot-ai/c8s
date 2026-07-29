@@ -98,6 +98,13 @@ func TestVerityOpenPassesGeometryAndNoSuperblock(t *testing.T) {
 	if !hasFlag(args, "--no-superblock") {
 		t.Fatal("verity would read a superblock off the device")
 	}
+	// veritysetup's open action has no confirmation prompt and does not define
+	// --batch-mode (a cryptsetup-only global); passing it makes veritysetup
+	// exit with a usage error, failing every volume open. See cryptOpenArgs,
+	// where --batch-mode is valid.
+	if hasFlag(args, "--batch-mode") {
+		t.Fatal("veritysetup open rejects --batch-mode; it must not be passed")
+	}
 	for flag, want := range map[string]string{
 		"--hash":            "sha256",
 		"--format":          "1",

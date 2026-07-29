@@ -148,7 +148,6 @@ func verityOpenArgs(dataDev, mapper string, v volume.Verity) []string {
 		"--data-blocks", strconv.FormatUint(v.DataBlocks, 10),
 		"--hash-offset", strconv.FormatUint(v.HashOffset, 10),
 		"--salt", v.Salt,
-		"--batch-mode",
 	}
 }
 

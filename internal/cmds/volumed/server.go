@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -150,8 +151,14 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrTooManyMounts):
 		http.Error(w, "too many open volumes on this node", http.StatusInsufficientStorage)
 	default:
+		// Forward the underlying cause, not just a generic 500: the caller is
+		// the in-pod get-volume sidecar over a node-local socket, same tenant
+		// on a single-tenant node-as-CVM, so this leaks nothing across the
+		// trust boundary — and without it a systemic failure (a missing
+		// cryptsetup, a verity mismatch) is invisible to the operator, who
+		// sees only the sidecar giving up after every attempt.
 		s.logger().Error("volume open failed", "pod", pod.UID, "name", req.Name, "error", err)
-		http.Error(w, "could not open the volume", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("could not open the volume: %v", err), http.StatusInternalServerError)
 	}
 }
 

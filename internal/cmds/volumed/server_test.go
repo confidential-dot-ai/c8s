@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -175,6 +176,13 @@ func TestServerReportsAFailedOpen(t *testing.T) {
 	resp := f.post(t, openBody(t))
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	// The body forwards the underlying cause so the in-pod sidecar (same
+	// tenant, node-local socket) can surface why a release keeps failing
+	// instead of retrying blind against a generic 500.
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "CryptOpen failed") {
+		t.Fatalf("500 body = %q, want it to carry the underlying cause", string(body))
 	}
 	if c, v, m := f.ops.leaked(); c != 0 || v != 0 || m != 0 {
 		t.Fatalf("a failed open leaked crypt=%d verity=%d mounts=%d", c, v, m)

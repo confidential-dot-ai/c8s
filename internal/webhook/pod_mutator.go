@@ -1326,15 +1326,16 @@ func volumeNames(specs []string) []string {
 }
 
 // openedVolume is the mount point the node agent mounts a decrypted volume
-// over. It holds nothing itself, so the medium only governs what a workload
-// could write before the mount lands.
+// over. It holds nothing itself — the plaintext lives on the opened device
+// mounted over it — and it must share the pod directory's filesystem: volumed
+// resolves the target with RESOLVE_NO_XDEV, so a memory-backed (tmpfs)
+// placeholder is unreachable by construction.
 func openedVolume(name string) corev1.Volume {
 	limit := resource.MustParse(volumeMountSizeLimit)
 	return corev1.Volume{
 		Name: volumed.KubeVolumeName(name),
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
 				SizeLimit: &limit,
 			},
 		},
@@ -1382,8 +1383,8 @@ func rejectReservedVolumeVolume(pod *corev1.Pod) error {
 		if !strings.HasPrefix(v.Name, volumed.KubeVolumePrefix) {
 			continue
 		}
-		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory {
-			return fmt.Errorf("%w: volume %q is reserved for an encrypted volume; it must be a memory-backed emptyDir (medium: Memory) or omitted",
+		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumDefault {
+			return fmt.Errorf("%w: volume %q is reserved for an encrypted volume; it must be a default-medium emptyDir or omitted (see openedVolume)",
 				errInvalidInjectionAnnotation, v.Name)
 		}
 	}

@@ -100,12 +100,34 @@ func TestVolumeDirOverride(t *testing.T) {
 // The injected volume and mount are RECONSTRUCTED. ensureVolume and mountAll
 // are both idempotent by skipping, so a host-authored spec that pre-declares
 // either would otherwise choose where the plaintext lands.
+// The placeholder must be a default-medium emptyDir: volumed resolves the
+// mount target with RESOLVE_NO_XDEV, and a memory-backed placeholder is a
+// tmpfs boundary it refuses to cross.
+func TestInjectedVolumePlaceholderSharesPodFilesystem(t *testing.T) {
+	pod := podWithApp()
+	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "")
+	name := volumed.KubeVolumeName("weights")
+	for _, v := range pod.Spec.Volumes {
+		if v.Name != name {
+			continue
+		}
+		if v.EmptyDir == nil {
+			t.Fatalf("placeholder is not an emptyDir: %+v", v.VolumeSource)
+		}
+		if v.EmptyDir.Medium != corev1.StorageMediumDefault {
+			t.Fatalf("placeholder medium = %q; a tmpfs placeholder is unreachable under volumed's RESOLVE_NO_XDEV", v.EmptyDir.Medium)
+		}
+		return
+	}
+	t.Fatalf("placeholder %q not injected", name)
+}
+
 func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 	pod := podWithApp()
 	name := volumed.KubeVolumeName("weights")
 	pod.Spec.Volumes = []corev1.Volume{{
 		Name:         name,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
 		Name:      name,

@@ -54,10 +54,14 @@ spec:
         {{- toYaml .Values.volumed.tolerations | nindent 8 }}
       containers:
         - name: volumed
-          image: {{ include "c8s.image" . }}
+          image: {{ include "volumed.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             privileged: true
+            # The image is nonroot (USER 65532) and privileged grants no
+            # effective caps to a non-root process; the daemon must be root.
+            runAsUser: 0
+            runAsGroup: 0
           args:
             - volumed
             - --socket-dir

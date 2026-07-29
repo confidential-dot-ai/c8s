@@ -1396,6 +1396,7 @@ func TestChartComponentsFromValues(t *testing.T) {
 		"cds.image":            "ghcr.io/confidential-dot-ai/cds",
 		"ratlsMesh.image":      "ghcr.io/confidential-dot-ai/ratls-mesh",
 		"nriImagePolicy.image": "ghcr.io/confidential-dot-ai/nri-image-policy",
+		"volumed.image":        "ghcr.io/confidential-dot-ai/volumed",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)
