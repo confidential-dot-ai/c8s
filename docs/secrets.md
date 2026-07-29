@@ -169,6 +169,47 @@ pausing over for that reason: the pods that generated the value go on using it.
 Revoking a value means restarting CDS, which empties the whole store — see
 "Restarts".
 
+## Diagnosing a refusal
+
+A refused pod is told only that it was refused, and the set that decides the
+matter — what the sandbox is running — is visible only to CDS. `explain` is
+where that is read:
+
+```sh
+c8s secrets explain --sandbox "$ID" --url "$CDS" --measurements "$M" \
+  --operator-key operator.key
+```
+
+```
+sandbox    0123456789abcdef…
+inventory  10.0.0.7
+reported   3 container(s)
+dropped    1 injected by c8s
+candidates 2
+    sha256:1111…  [/serve]
+  - sha256:9999…  [get-secret]
+    sha256:8888…  [sh -c sleep 1]
+
+vllm-llama  NEAR MISS
+  foreign  sha256:8888…  [sh -c sleep 1]
+           no container in this entry declares it
+
+nothing is released: no entry describes the candidate set
+```
+
+The sandbox ID is on the pod's certificate; `c8s verify` prints it. `--json`
+emits the report as it arrives.
+
+It reads the same inventory, binding and allowlist the release path reads, and
+measures entries with the same matcher, so it reports the decision rather than a
+reconstruction of it. It answers to the operator key, since it describes a pod
+the caller may not own. The report carries grant paths; a value never appears in
+it.
+
+`GET /secrets-explain/{sandboxID}` is a sibling of `/secrets`, not a path under
+it: a literal segment beats the wildcard in routing, so mounting it below
+`/secrets` would make every secret stored under that prefix unreachable.
+
 ## What CDS checks
 
 1. The client certificate chains to the mesh CA — verified by crypto/tls, not

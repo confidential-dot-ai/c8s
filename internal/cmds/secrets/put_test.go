@@ -21,6 +21,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
 // fakeCDS serves PUT /secrets/* with the create-safe semantics the real handler
@@ -315,6 +316,148 @@ func TestPutSurfacesServerErrors(t *testing.T) {
 	key := writeOperatorKey(t)
 	_, _, err := run(t, "v", "put", "/a", "--url", url, "--insecure", "--operator-key", key)
 	if err == nil || !strings.Contains(err.Error(), "cds returned 500") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// --- explain ---
+
+// explainServer answers the diagnostic route with a canned report, recording
+// what the CLI asked for.
+func explainServer(t *testing.T, resp intsecrets.ExplainResponse) (*string, *string, string) {
+	t.Helper()
+	var gotPath, gotAuthz string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuthz = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return &gotPath, &gotAuthz, srv.URL
+}
+
+const testSandboxID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestExplainPrintsAResolvedGrant(t *testing.T) {
+	path, authz, url := explainServer(t, intsecrets.ExplainResponse{
+		SandboxID:     testSandboxID,
+		InventoryHost: "10.0.0.7",
+		Reported: []intsecrets.ReportedContainer{
+			{Digest: "sha256:app", Argv: []string{"/serve"}},
+			{Digest: "sha256:c8s", Argv: []string{"get-secret"}, Injected: true},
+		},
+		Candidates: []intsecrets.ReportedContainer{{Digest: "sha256:app", Argv: []string{"/serve"}}},
+		Entries:    []intsecrets.EntryVerdict{{Name: "api", Matches: true, HasGrant: true}},
+		Match:      "api",
+		Grant:      &pkgallowlist.SecretsPolicy{Policy: "allow", Read: []string{"/api/**"}},
+	})
+	key := writeOperatorKey(t)
+
+	out, _, err := run(t, "", "explain", "--sandbox", testSandboxID, "--url", url, "--insecure", "--operator-key", key)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	for _, want := range []string{"reported   2", "dropped    1 injected", "candidates 1", "api  MATCH", "released via", "/api/**"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if *path != "/secrets-explain/"+testSandboxID {
+		t.Fatalf("path = %q", *path)
+	}
+	if !strings.HasPrefix(*authz, "Bearer ") {
+		t.Fatalf("Authorization = %q, want an operator bearer token", *authz)
+	}
+}
+
+// The near miss is the reason the command exists, so the foreign container and
+// the refusal both have to be legible.
+func TestExplainPrintsANearMiss(t *testing.T) {
+	_, _, url := explainServer(t, intsecrets.ExplainResponse{
+		SandboxID: testSandboxID,
+		Entries: []intsecrets.EntryVerdict{{
+			Name:         "api",
+			Foreign:      []intsecrets.ReportedContainer{{Digest: "sha256:busybox", Argv: []string{"sh", "-c", "sleep"}}},
+			MissingMains: []intsecrets.MissingContainer{{Digest: "sha256:app", Image: "ghcr.io/x/app"}},
+		}},
+		Refusal: "no entry describes the candidate set",
+	})
+	key := writeOperatorKey(t)
+
+	out, _, err := run(t, "", "explain", "--sandbox", testSandboxID, "--url", url, "--insecure", "--operator-key", key)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	for _, want := range []string{
+		"api  NEAR MISS",
+		"foreign  sha256:busybox",
+		"no container in this entry declares it",
+		"missing  sha256:app (ghcr.io/x/app)",
+		"nothing is released: no entry describes the candidate set",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A container with no reported argv is never dropped as injected, so its
+// absence has to be visible rather than rendered as an empty gap.
+func TestExplainRendersAnEmptyArgv(t *testing.T) {
+	_, _, url := explainServer(t, intsecrets.ExplainResponse{
+		SandboxID: testSandboxID,
+		Reported:  []intsecrets.ReportedContainer{{Digest: "sha256:app"}},
+		Refusal:   "no entry describes the candidate set",
+	})
+	key := writeOperatorKey(t)
+	out, _, err := run(t, "", "explain", "--sandbox", testSandboxID, "--url", url, "--insecure", "--operator-key", key)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	if !strings.Contains(out, "(no argv reported)") {
+		t.Fatalf("output = %s", out)
+	}
+}
+
+func TestExplainJSONPassesTheReportThrough(t *testing.T) {
+	_, _, url := explainServer(t, intsecrets.ExplainResponse{SandboxID: testSandboxID, Refusal: "no inventory is bound"})
+	key := writeOperatorKey(t)
+
+	out, _, err := run(t, "", "explain", "--sandbox", testSandboxID, "--url", url, "--insecure", "--operator-key", key, "--json")
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	var got intsecrets.ExplainResponse
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json did not emit JSON: %v\n%s", err, out)
+	}
+	if got.Refusal != "no inventory is bound" {
+		t.Fatalf("got = %+v", got)
+	}
+}
+
+func TestExplainValidatesItsArguments(t *testing.T) {
+	_, _, url := explainServer(t, intsecrets.ExplainResponse{})
+	key := writeOperatorKey(t)
+
+	if _, _, err := run(t, "", "explain", "--sandbox", "bad!id", "--url", url, "--insecure", "--operator-key", key); err == nil ||
+		!strings.Contains(err.Error(), "--sandbox") {
+		t.Fatalf("err = %v, want a --sandbox error", err)
+	}
+	if _, _, err := run(t, "", "explain", "--url", url, "--insecure", "--operator-key", key); err == nil {
+		t.Fatal("--sandbox is required")
+	}
+}
+
+func TestExplainSurfacesServerErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	key := writeOperatorKey(t)
+
+	_, _, err := run(t, "", "explain", "--sandbox", testSandboxID, "--url", srv.URL, "--insecure", "--operator-key", key)
+	if err == nil || !strings.Contains(err.Error(), "cds returned 401") {
 		t.Fatalf("err = %v", err)
 	}
 }

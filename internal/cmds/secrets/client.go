@@ -92,6 +92,39 @@ func (c client) put(ctx context.Context, path string, value []byte, overwrite bo
 	}
 }
 
-// maxResponseBytes bounds a CDS reply. The body is a three-field status
-// object; anything approaching this is a wrong endpoint.
-const maxResponseBytes = 64 * 1024
+// explain asks CDS what a sandbox resolves to and why.
+func (c client) explain(ctx context.Context, sandboxID string, auth authorizer) (intsecrets.ExplainResponse, error) {
+	var out intsecrets.ExplainResponse
+	url := c.baseURL + "/secrets-explain/" + sandboxID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return out, err
+	}
+	authz, err := auth.Authorization(http.MethodGet, req.URL.Path, nil)
+	if err != nil {
+		return out, fmt.Errorf("authorize request: %w", err)
+	}
+	req.Header.Set("Authorization", authz)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return out, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return out, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return out, fmt.Errorf("cds returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("decode response: %w", err)
+	}
+	return out, nil
+}
+
+// maxResponseBytes bounds a CDS reply. The largest is an explain report over
+// every workload entry; anything approaching this is a wrong endpoint.
+const maxResponseBytes = 1 << 20

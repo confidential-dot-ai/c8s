@@ -31,6 +31,7 @@ type dependencies struct {
 	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
 	SecretsChallenges *attestation.ChallengeStore
 	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
+	SecretsExplain    *secrets.ExplainHandler  // release diagnostic; routed with SecretsHandler
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -75,13 +76,14 @@ func newRouter(deps dependencies) http.Handler {
 	// token. PUT is the operator's, on allowlistWrite so it carries the same
 	// body-bound operator token an allowlist mutation does.
 	if deps.SecretsHandler != nil {
-		if deps.SecretsOperator == nil {
-			panic("cds: dependencies.SecretsOperator must be set alongside SecretsHandler")
+		if deps.SecretsOperator == nil || deps.SecretsExplain == nil {
+			panic("cds: dependencies.SecretsOperator and SecretsExplain must be set alongside SecretsHandler")
 		}
 		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.protected(attestation.HandleAuthenticate(deps.SecretsChallenges)))
 		r.Method(http.MethodGet, secrets.Route, deps.protected(deps.SecretsHandler))
 		r.Method(http.MethodPost, secrets.Route, deps.protected(deps.SecretsHandler))
 		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
+		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
 	}
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
