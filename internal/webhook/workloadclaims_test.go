@@ -133,3 +133,27 @@ func TestWorkloadClaims_InjectsInventorySupplementalGroup(t *testing.T) {
 		t.Fatalf("pod missing inventory supplemental group %d: %v", workloadclaims.InventorySocketGID, pod.Spec.SecurityContext.SupplementalGroups)
 	}
 }
+
+// Under kata the inventory is policy-monitor inside the guest, reached on the
+// guest's loopback address. get-cert must be told to use that shape, and the
+// webhook must not inject a socket mount there is nothing to mount.
+func TestWorkloadClaims_KataUsesGuestLoopback(t *testing.T) {
+	pod := newInjectablePod()
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage:        "img",
+		CDSURL:              "http://cds:8443",
+		AttestationApiURL:   "http://127.0.0.1:8400",
+		CertDir:             "/etc/c8s/certs",
+		WorkloadClaimsGuest: true,
+	})
+
+	cert := pod.Spec.InitContainers[0]
+	for _, want := range []string{"--workload-claims", "--workload-claims-guest"} {
+		if !hasArg(cert.Args, want) {
+			t.Fatalf("c8s-cert missing %s: %v", want, cert.Args)
+		}
+	}
+	if findVolume(pod, workloadClaimsVolumeName) != nil {
+		t.Fatal("kata pod got an inventory socket volume; the guest serves it on loopback")
+	}
+}

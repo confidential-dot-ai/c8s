@@ -248,8 +248,7 @@ Properties worth noting:
   runs the same challenge/evidence flow but returns a signed EAR JWT (ES256,
   JWKS at `/.well-known/jwks.json`) for a caller-held key instead of signing
   a CSR. Callers already holding an EAR can have a CSR signed via
-  `POST /sign-csr`. Used by CDS's own handoff machinery and by the inventories
-  (see Sandbox identity).
+  `POST /sign-csr`. Used by CDS's own handoff machinery.
 - **The serving certificate commits only CDS's key and measurement** — not its
   operator-key set, not its allowlist seed. A verifier cross-checks the key set
   CDS *serves* at `/operator-keys`, fetched over that attested serving cert
@@ -324,11 +323,13 @@ What it does **not** guarantee:
 - **Workload-granular identity beyond the TEE boundary.** The unit of
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS
-  issued it to, and CDS issues only after the sandbox's own inventory reports an
-  allowlisted, single-workload image set (see Sandbox identity) — but that ID is
+  issued it to, and CDS issues only after the sandbox's own inventory reports
+  images that are all allowlisted (see Sandbox identity) — but that ID is
   vouched by the mesh CA signature, not by hardware evidence, and it is only as
-  good as the inventory's honesty about what it admitted. Enforcing per-workload
-  measurement at `/attest` is unimplemented (GAPS §Trust model).
+  good as the inventory's honesty about what it admitted. The gate is
+  membership, not composition, so it does not say the pod runs one particular
+  workload. Enforcing per-workload measurement at `/attest` is unimplemented
+  (GAPS §Trust model).
 - **Post-boot integrity.** The launch digest covers boot state; runtime
   compromise inside a measured guest is out of scope (that is the image
   allowlist and guest lockdown's job — [kata-image-policy.md](kata-image-policy.md)).
@@ -352,20 +353,45 @@ nri-image-policy on node-CVM, policy-monitor inside the kata guest — so it is
 the arbiter of both which sandbox a process belongs to and what runs in that
 sandbox. It serves two disjoint surfaces (`pkg/workloadclaims`):
 
-| Surface | Listener | Route | Caller bound by |
+| Surface | Route | Listener | Caller bound by |
 |---|---|---|---|
-| tokens | node-local Unix socket | `POST /sandbox` | kernel peer credentials (`SO_PEERCRED` + `SO_PEERPIDFD`) |
-| digests | network endpoint, mutually-attested RA-TLS | `GET /digests/{sandboxID}` | the client leaf's launch measurement (CDS's) |
+| tokens | `POST /sandbox` | node-CVM: a node-local Unix socket. kata: the guest's loopback `127.0.0.1:8401` (`workloadclaims.GuestTokenPort`) | node-CVM: kernel peer credentials (`SO_PEERCRED` + `SO_PEERPIDFD`). kata: the guest boundary — one pod per guest, so there is no caller to disambiguate |
+| identity + digests | `GET /identity`, `GET /digests/{sandboxID}` | `:1019` (`workloadclaims.DigestsPort`), mutually-attested RA-TLS | the client leaf's launch measurement (CDS's) |
 
-The socket cannot enumerate other sandboxes; the network endpoint cannot mint
-identity.
+The token surface cannot enumerate other sandboxes; the network surface cannot
+mint identity.
+
+### The privileged port is the inventory's identity
+
+`DigestsPort` is a compiled constant, not a deployment value, and it is
+privileged (`< 1024`, IANA-unassigned). Binding it requires the node's own
+network namespace, which the chart's `deny-host-namespaces`
+ValidatingAdmissionPolicy withholds from tenant pods
+(`hostNamespacePolicy.enabled`, on by default). A pod can bind any port inside
+its own netns, so an unprivileged port would let any workload answer as the
+inventory.
+
+That is what CDS's trust in the sandbox-token signing key rests on, because
+measurement cannot make the distinction: on node-CVM every pod shares the node's
+launch digest, so "attested TEE on an allowed measurement" is satisfied by every
+tenant. "Answers on `:1019` in the node's network namespace, at an address inside
+an operator-configured node CIDR" is not.
+
+Two things this rests on that attestation does not enforce:
+
+- the ValidatingAdmissionPolicy (or an equivalent PodSecurity floor) holds. It
+  is a values flag, and it exempts the release namespace and `kube-system`.
+- privileged node DaemonSets — CNI, CSI, the NVIDIA GPU operator — *can* bind
+  the port. They are already root inside the node CVM and can read another
+  pod's memory directly, so they are effectively part of the node's TCB;
+  sandbox identity does not narrow that set.
 
 ### The sandbox token
 
 get-cert fetches the CDS challenge for this issuance first, then POSTs its CSR
 public key and that challenge to `/sandbox`. The inventory resolves the
-*caller's* kernel identity to a sandbox — nothing the caller sends names the
-pod — and signs
+*caller's* identity to a sandbox — nothing the caller sends names the pod — and
+signs
 
 ```text
 SandboxToken ::= SEQUENCE {
@@ -373,20 +399,20 @@ SandboxToken ::= SEQUENCE {
     sandboxId      IA5String,
     keyDigest      OCTET STRING (32),  -- SHA-256(requester PKIX pubkey DER)
     nonce          OCTET STRING,       -- the CDS challenge for this issuance
-    inventoryAddr  IA5String           -- host:port of this inventory's digests endpoint
+    inventoryHost  IA5String           -- IP of the node/guest serving :1019
 }
 ```
 
-with an in-process P-256 key it had CDS attest via `POST /attest-key`. The
-signature is ECDSA over `SHA-256("c8s/sandbox-token/v1\0" ‖ tokenDER)`, and the
-envelope (`workloadclaims.SignedSandboxToken`: `token`, `signature`, `ear`)
-carries the resulting EAR, so CDS keeps no per-node key state.
-`inventoryAddr` is inside the signature, so the untrusted host cannot rewrite it
-in flight. It is **not** trusted beyond that: a token is mintable by anything
-holding an `/attest-key` EAR, which on node-CVM is every pod, so CDS treats the
-address as attacker-chosen and bounds what it may dial
-(`parseInventoryAddr`: routable unicast IP literals only, no names, no
-loopback/link-local/metadata) — see [THREAT_MODEL.md](THREAT_MODEL.md).
+with an in-process P-256 key. The signature is ECDSA over
+`SHA-256("c8s/sandbox-token/v1\0" ‖ tokenDER)`, and the envelope
+(`workloadclaims.SignedSandboxToken`) is just `token` and `signature`: it
+carries **no** credential for the signing key. CDS resolves the key by dialing
+`GET /identity` at the signer's own privileged port.
+
+`inventoryHost` is an IP only — the port is not carried, since CDS holds it. The
+key is never persisted; an inventory restart mints a new one, which CDS picks up
+because it re-reads `/identity` on every issuance rather than caching a
+credential.
 
 ### Issuance
 
@@ -394,31 +420,44 @@ get-cert forwards the envelope opaquely in the `/attest` request body
 (`sandbox_token`). **It never reports its pod's images.** CDS then, in order
 (`internal/cmds/cds/attest.go`):
 
-1. validates the EAR against its own JWKS, expected issuer, and measurement
-   allowlist, and takes the inventory's signing key from it;
-2. verifies the token signature, requires `version == 2`, requires `nonce` to
-   be the same single-use challenge it is consuming for this request, and
-   requires `keyDigest` to name the CSR key — whose possession the CSR
-   signature and evidence binding already prove;
-3. verifies the requester's evidence, measurement, and CSR policy as usual;
-4. dials `inventoryAddr` over mutually-attested RA-TLS
-   (`workloadclaims.DigestsClient`, pinning the same measurement allowlist
-   `/attest` uses and presenting CDS's own RA-TLS certificate) and asks
-   `GET /digests/{sandboxID}`;
-5. gates issuance on the answer: every image the sandbox is running must be
-   allowlisted;
-6. stamps the sandbox ID into the leaf's signed area
+1. reads `inventoryHost` out of the *unverified* token
+   (`workloadclaims.UnverifiedInventoryHost`). The host names the endpoint
+   holding the key that would verify the signature, so it has to be read before
+   verification can happen; it is trusted for nothing else. It only selects a
+   dial target, and a wrong value simply yields a key the signature fails under.
+2. requires that host to be a routable unicast IP literal (no names — DNS would
+   decide the destination after the check — and no loopback, link-local/IMDS,
+   multicast, or unspecified address) inside a CIDR the operator configured with
+   `--sandbox-inventory-cidr`. Unset means CDS refuses every request carrying a
+   sandbox token. A pod's IP is in the pod CIDR, so a workload cannot name
+   itself as its node's inventory.
+3. fetches the signing key from `https://<host>:1019/identity` over
+   mutually-attested RA-TLS (`workloadclaims.DigestsClient.InventoryKey`,
+   pinning the same measurement allowlist `/attest` uses and presenting CDS's
+   own RA-TLS certificate).
+4. verifies the token signature under that key, requires `version == 2`,
+   requires `nonce` to be the same single-use challenge it is consuming for this
+   request, requires `keyDigest` to name the CSR key — whose possession the CSR
+   signature and evidence binding already prove — and requires the sandbox ID to
+   be syntactically valid.
+5. verifies the requester's evidence, measurement, and CSR policy as usual.
+6. asks `GET /digests/{sandboxID}` at the same endpoint and gates issuance on
+   the answer: every image the sandbox is running must be allowlisted.
+7. stamps the sandbox ID into the leaf's signed area
    (`internal/issuer/sign.go`).
 
 So the ID is redeemable only by the get-cert holding the bound key, usable only
 for the one issuance whose challenge it carries — no clock, no replay window —
-and provably signed by a TEE-attested inventory. An unreachable inventory, an
-unknown sandbox, or a non-allowlisted image refuses the certificate. A request
-carrying no token gets a leaf with no sandbox ID.
+and signed by a key that answered on a privileged port inside the operator's
+node range. An unreachable inventory, an unknown sandbox, or a non-allowlisted
+image refuses the certificate, and so does an **empty** digest set — a sandbox
+always runs at least the sidecar that is asking, so an empty answer is no
+evidence at all rather than "nothing to check". A request carrying no token gets
+a leaf with no sandbox ID.
 
 Because the digests are fetched live from the admitting component rather than
 reported by the requester, the binding holds at **first** issuance: get-cert's
-own sidecar container is already tracked when it asks for the token, and step 4
+own sidecar container is already tracked when it asks for the token, and step 6
 reads whatever the sandbox is running at that instant.
 
 The gate is **membership only** — it does not require the running set to match a
@@ -451,12 +490,17 @@ authenticates it. The verifier encodes that:
 A self-signed RA-TLS peer can put any string in the extension and must never
 satisfy a pin.
 
-**Residual trust.** The EAR proves the inventory's signing key lives in a TEE on
-an allowed measurement — the same granularity as the rest of the platform: on
-node-CVM every process in the measured node shares that measurement, so "came
-from nri-image-policy" ultimately rests on the measured node image running only
-the intended inventories (the honest-node assumption of
-[getcert-workload-binding.md](getcert-workload-binding.md), Corners 6–7).
+**Residual trust.** The key's provenance is "answered on `:1019` at an address
+inside a configured node CIDR, over RA-TLS on an allowed measurement". That
+narrows to a *node*, not to a process: anything able to bind that port on a node
+— the inventory, or a privileged node DaemonSet — can sign for any sandbox that
+node admitted. Under kata each guest holds one pod, and the token's host selects
+which guest CDS asks, so a cross-guest forgery fails. Fleet-wide the residual is
+a peer node: it shares the launch measurement, and the threat model already
+grants the host the ability to serve its own TEE attestation on the pod network,
+so a hostile node could in principle answer for a node whose traffic it can
+intercept ([getcert-workload-binding.md](getcert-workload-binding.md),
+Corners 6–7).
 
 ### Reading a peer's sandbox ID
 
@@ -480,26 +524,50 @@ the supplied mesh CA"), so an unqualified ID never reads as attested.
 
 ### Deployment
 
-The digests endpoint is a new inbound network path, so CDS must be able to
-reach node-CVM nodes and kata guest pods on it: port 9443 by default, from
-`nriImagePolicy.sandboxDigests.port` (config `workload_claims.digests_port`) and
-policy-monitor's `SandboxDigestsPort`. The advertised host is inferred from the
-route to CDS; set `nriImagePolicy.sandboxDigests.advertiseHost`
-(`workload_claims.advertise_host`) or `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` when
-that inference is wrong, e.g. behind NAT.
+Both shapes are wired.
+
+- **node-CVM.** nri-image-policy — a host process containerd launches, not a pod
+  — serves the token socket in `nriImagePolicy.hostPaths.runtimeDir`, which the
+  webhook mounts read-only into the `c8s-cert` sidecar, and `/identity` +
+  `/digests` on `:1019`. The node IP it signs into tokens comes from the
+  installer DaemonSet's downward API `status.hostIP`, written to a `node-ip`
+  file beside the socket; `nriImagePolicy.sandboxDigests.advertiseHost`
+  overrides it. Route inference is the last resort and is wrong under the
+  chart's own default, since the plugin dials the CDS NodePort over loopback.
+- **kata.** policy-monitor serves the token route on the guest's loopback
+  `127.0.0.1:8401` and the digests routes on `:1019` inside the guest. No
+  socket, no mount, and no configuration selects it: the port is compiled, so
+  the untrusted host cannot disable the binding by withholding a value.
+  `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` overrides the advertised guest IP.
+
+get-cert picks the shape with `--workload-claims-guest`, which the webhook
+injects under kata (and then injects no socket volume). Both endpoints are
+compiled in, so the flag selects a shape and never an address: a wrong setting
+fails closed against a port nothing serves.
+
+CDS must be able to reach every node and kata guest on `:1019`, and
+`cds.sandboxInventoryCIDRs` (`c8s install --node-cidr`) must cover those
+addresses — unset means CDS refuses any request carrying a sandbox token.
 
 An empty measurement allowlist does not disable any of this — it tracks the same
 posture `/attest` takes (see "What RA-TLS guarantees"): both ends still require
 a hardware-attested RA-TLS peer, they just pin no measurement, so any TEE can
 answer as the inventory and any TEE can read what a node runs. Both ends log it
 as UNSAFE outside development. The token verification and the issuance-time
-allowlist gate are unaffected.
+allowlist gate are unaffected. A `--measurements` entry that is not hex fails
+CDS startup rather than silently unpinning the callback.
 
 What does disable the callback is a CDS with no `--ratls-platform`: it has no
 RA-TLS identity to present, so it makes no callback and **refuses** any request
-carrying a sandbox token. An inventory whose CDS measurements fail to *parse*
-(a typo, as opposed to being unset) serves no tokens, and get-cert then issues
-without a sandbox ID.
+carrying a sandbox token. In the kata guest, CDS measurements that fail to
+*parse* (a typo, as opposed to being unset) disable tokens and get-cert issues
+without a sandbox ID; on node-CVM the same typo fails the plugin's config
+validation at startup.
+
+A digests endpoint that fails to start is logged, not fatal, on both
+inventories: containerd sets `required_plugins`, so a plugin exit takes
+container creation down node-wide, whereas a missing digests endpoint only
+degrades issuance — CDS refuses the tokens it cannot check.
 
 ### Cross-implementation note
 
@@ -606,8 +674,8 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 | CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, key 0600) — inside the pod's TEE in both shapes | mesh CA, after challenge–attest–certify | workload's own listeners; tls-lb upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
 | tls-lb public leaf | tls-lb pod volume (get-cert init container), or an operator-supplied `publicTLS` Secret | mesh CA (default) or external CA | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into SNP REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
-| Inventory sandbox-digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's digests endpoint (:9443 default), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS ask what a pod sandbox is running before issuing that pod a leaf |
-| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr`, `/handoff`, and inside a sandbox token | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (CA handoff, EAR-gated signing, inventory sandbox-token signing) |
+| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
+| EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` and `/handoff` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (CA handoff, EAR-gated signing) |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:
 
@@ -633,7 +701,9 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
    challenge–attest–certify flow.
 4. [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) — the dataplane
    that puts it on every connection.
-5. [getcert-workload-binding.md](getcert-workload-binding.md) — how a pod's
+5. [`pkg/workloadclaims`](../pkg/workloadclaims/) — the inventory's two
+   surfaces, the sandbox token, and the digests callback.
+6. [getcert-workload-binding.md](getcert-workload-binding.md) — how a pod's
    sandbox identity is established and how CDS gates issuance on what that
    sandbox runs.
-6. [THREAT_MODEL.md](THREAT_MODEL.md) — what all of this is for.
+7. [THREAT_MODEL.md](THREAT_MODEL.md) — what all of this is for.

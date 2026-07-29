@@ -183,10 +183,15 @@ type Config struct {
 	// WorkloadClaimsHostDir, when set (node-CVM), is the host directory holding
 	// the nri-image-policy inventory socket. The webhook mounts it read-only at
 	// workloadclaims.SidecarSocketDir in the c8s-cert sidecar and injects
-	// --workload-claims so get-cert binds a workload-digest claim from
-	// that socket (docs/ratls.md). Empty ⇒ no workload claims (the kata guest
-	// path is not yet wired).
+	// --workload-claims so get-cert redeems a sandbox token over that socket
+	// (docs/ratls.md).
 	WorkloadClaimsHostDir string
+
+	// WorkloadClaimsGuest selects the kata shape: the inventory is
+	// policy-monitor inside the guest, reached on the guest's loopback address
+	// rather than a mounted socket, so no volume is injected. Mutually
+	// exclusive with WorkloadClaimsHostDir — the chart sets exactly one.
+	WorkloadClaimsGuest bool
 }
 
 // Register wires the pod mutator onto the manager's webhook server.
@@ -801,9 +806,13 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// node-CVM: get-cert redeems a sandbox token from the nri-image-policy
-	// inventory over its compiled socket path (mounted below).
-	if cfg.WorkloadClaimsHostDir != "" {
+	// get-cert redeems a sandbox token from the node's inventory: over the
+	// mounted socket on node-CVM, or the guest's loopback address under kata,
+	// where policy-monitor is in the same guest and there is nothing to mount.
+	switch {
+	case cfg.WorkloadClaimsGuest:
+		args = append(args, "--workload-claims", "--workload-claims-guest")
+	case cfg.WorkloadClaimsHostDir != "":
 		args = append(args, "--workload-claims")
 	}
 	if inj.Verbose {

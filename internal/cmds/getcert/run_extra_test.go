@@ -91,9 +91,7 @@ func startFakeInventory(t *testing.T, resolver workloadclaims.SandboxResolver, s
 
 func testTokenSigner(t *testing.T) *workloadclaims.SandboxTokenSigner {
 	t.Helper()
-	signer, err := workloadclaims.NewSandboxTokenSigner(func(context.Context, []byte) (string, error) {
-		return "test-ear", nil
-	}, "10.0.0.7:9443")
+	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +115,7 @@ func TestFetchSandboxTokenForwardsSignedToken(t *testing.T) {
 	if err := json.Unmarshal(raw, &token); err != nil {
 		t.Fatalf("token is not a SignedSandboxToken: %v", err)
 	}
-	if len(token.Token) == 0 || len(token.Signature) == 0 || token.EAR != "test-ear" {
+	if len(token.Token) == 0 || len(token.Signature) == 0 {
 		t.Fatalf("incomplete token forwarded: %+v", token)
 	}
 }

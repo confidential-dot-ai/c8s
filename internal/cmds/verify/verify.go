@@ -522,19 +522,13 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 		return
 	}
 
-	// Report the ID only once the hardware evidence verified, and always say
-	// what stands behind it: an unqualified "sandbox: X" would read as
-	// attested, which it is not.
-	if oc.Verified && ev.sandboxID != "" {
-		oc.SandboxID = ev.sandboxID
-		if cfg.meshCA == "" {
-			oc.SandboxIDNote = "not verified: CDS's signature on the leaf vouches for this ID; pass --mesh-ca to check it"
-		} else {
-			oc.SandboxIDNote = "verified: the leaf chains to the supplied mesh CA"
+	// The chain check runs before the ID is reported, so the note can never
+	// claim "verified" for a check that then failed.
+	if cfg.meshCA != "" {
+		if ev.leaf == nil {
+			fail("--mesh-ca needs the target's leaf certificate (use a cert mode, not --mode attestation-endpoint or a discovery target)")
+			return
 		}
-	}
-
-	if cfg.meshCA != "" && ev.leaf != nil {
 		pool, err := meshCAPool(cfg.meshCA)
 		if err != nil {
 			fail("%v", err)
@@ -548,15 +542,28 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 			return
 		}
 	}
+
+	// Report the ID only once the hardware evidence verified, and always say
+	// what stands behind it: an unqualified "sandbox: X" would read as
+	// attested, which it is not.
+	if oc.Verified && ev.sandboxID != "" {
+		oc.SandboxID = ev.sandboxID
+		if cfg.meshCA == "" {
+			oc.SandboxIDNote = "not verified: CDS's signature on the leaf vouches for this ID; pass --mesh-ca to check it"
+		} else {
+			oc.SandboxIDNote = "verified: the leaf chains to the supplied mesh CA"
+		}
+	}
 	if cfg.sandboxID != "" {
 		if ev.leaf == nil {
 			fail("--sandbox-id needs the target's leaf certificate (use a cert mode, not --mode attestation-endpoint)")
 			return
 		}
-		if ev.sandboxID == "" {
-			fail("--sandbox-id set but the leaf carries no sandbox-ID extension")
-		} else if ev.sandboxID != cfg.sandboxID {
-			fail("leaf sandbox ID %q does not match --sandbox-id %q", ev.sandboxID, cfg.sandboxID)
+		// One implementation of the pin, shared with the mesh's CA path — and
+		// reached only after the chain check above, which is what authenticates
+		// the ID.
+		if err := ratls.CheckSandboxPin(ev.leaf, cfg.sandboxID); err != nil {
+			fail("%v", err)
 		}
 	}
 
@@ -574,6 +581,13 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	}
 	if opKeys.fetchErr != nil {
 		fail("could not fetch /operator-keys to check it against --operator-keys: %v", opKeys.fetchErr)
+		return
+	}
+	if opKeys.digest == nil {
+		// Never fetched (wrong --kind, or a --from-file target). Say that,
+		// rather than comparing against an empty digest and reporting a
+		// mismatch the operator cannot act on.
+		fail("--operator-keys cannot be checked: %s", opKeys.note)
 		return
 	}
 	if !bytes.Equal(opKeys.digest, expected) {

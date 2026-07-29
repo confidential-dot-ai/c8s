@@ -217,6 +217,9 @@ spec:
             {{- with .Values.cds.measurements }}
             - --measurements={{ join "," . }}
             {{- end }}
+            {{- with .Values.cds.sandboxInventoryCIDRs }}
+            - --sandbox-inventory-cidr={{ join "," . }}
+            {{- end }}
             {{- if .Values.cds.operatorKeys }}
             - --operator-keys=/etc/cds-operator-keys/keys.pem
             {{- end }}

@@ -135,11 +135,10 @@ func (b *admissionInventory) SandboxForPeer(peer workloadclaims.Peer) (string, e
 }
 
 // DigestsForSandbox returns the sorted, deduplicated image digests of every
-// tracked container in the sandbox — injected containers included: this is an
-// inventory of what runs in the sandbox, not a workload claim, so the
-// exclusion rationale of ContainersForPeer does not apply. An unresolved
-// digest fails the whole answer rather than commit a subset as if it were the
-// inventory (same fail-closed rule as ContainersForPeer).
+// tracked container in the sandbox, injected containers included: this is an
+// inventory of what runs there, and CDS drops the injected images itself (they
+// are allowlist floor entries). An unresolved digest fails the whole answer
+// rather than commit a subset as if it were the whole inventory.
 func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, bool, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

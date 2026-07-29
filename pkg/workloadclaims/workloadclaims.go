@@ -5,9 +5,11 @@
 //
 // It serves two disjoint surfaces (docs/ratls.md, "Sandbox identity"):
 //
-//   - a node-local Unix socket, where get-cert redeems its kernel peer
-//     credentials for a signed sandbox token naming its own sandbox — nothing
-//     the caller sends names the pod;
+//   - a node-local token route, where get-cert redeems its identity for a
+//     signed sandbox token naming its own sandbox — nothing the caller sends
+//     names the pod. On node-CVM that is a Unix socket, whose kernel peer
+//     credentials bind the caller; inside a kata guest it is guest loopback,
+//     where the single-pod guest boundary does;
 //   - a network endpoint over mutually-attested RA-TLS, where CDS asks which
 //     image digests a named sandbox is currently running.
 //
@@ -27,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,7 +42,15 @@ import (
 const (
 	SandboxPath          = "/sandbox"
 	SandboxDigestsPrefix = "/digests/"
+	IdentityPath         = "/identity"
 )
+
+// InventoryIdentity is the IdentityPath answer: the inventory's sandbox-token
+// signing key, PKIX DER. Served on the same privileged-port listener as the
+// digests, which is what makes it an identity rather than an assertion.
+type InventoryIdentity struct {
+	PublicKey []byte `json:"public_key"`
+}
 
 // SocketName is the fixed filename of the inventory's Unix socket, and
 // SidecarSocketDir is where the socket directory is presented inside the
@@ -48,19 +59,35 @@ const (
 // control plane cannot redirect the fetch to a rogue inventory
 // (docs/getcert-workload-binding.md Corner 5). The inventory (nri-image-policy on
 // node-CVM, policy-monitor in the kata guest) creates its socket as SocketName
-// under its configured directory; the platform maps that directory to
-// SidecarSocketDir in the pod (a webhook hostPath mount on node-CVM, a guest
-// bind-mount under kata).
+// under its configured directory, and the webhook hostPath-mounts that
+// directory at SidecarSocketDir in the pod. node-CVM only: a kata guest serves
+// the token route on loopback instead (GuestTokenPort), with nothing to mount.
 const (
 	SocketName       = "workload-claims.sock"
 	SidecarSocketDir = "/run/c8s/workload-claims"
 )
 
-// InventoryEndpoint is get-cert's compiled inventory endpoint: the in-sidecar Unix
-// socket path, fixed at build time so it is not control-plane-supplied. Both
-// deployment shapes present the socket here.
+// GuestTokenPort is the in-guest loopback port policy-monitor serves the token
+// route on under kata, alongside the attestation-service on 8400. A kata guest
+// holds exactly one pod and its containers share the guest's network namespace,
+// so loopback reaches the inventory without a shared filesystem — the same
+// transport the in-guest attestation-service already uses. Peer credentials are
+// not needed there: with one pod per guest there is no caller to disambiguate.
+const GuestTokenPort = 8401
+
+// InventoryEndpoint is get-cert's compiled inventory endpoint on node-CVM: the
+// in-sidecar Unix socket path, whose peer credentials bind the caller to its
+// pod.
 func InventoryEndpoint() string {
 	return "unix://" + SidecarSocketDir + "/" + SocketName
+}
+
+// GuestInventoryEndpoint is get-cert's compiled inventory endpoint inside a kata
+// guest. Like InventoryEndpoint it is fixed at build time: the control plane
+// selects which of the two shapes applies, never an address, so the worst a
+// wrong selection does is fail closed against a port nothing serves.
+func GuestInventoryEndpoint() string {
+	return "http://127.0.0.1:" + strconv.Itoa(GuestTokenPort)
 }
 
 // InventorySocketGID owns the inventory's Unix socket. The inventory runs as root, but
@@ -160,10 +187,11 @@ func peerFromRequest(r *http.Request) Peer {
 // PKIX public key.
 const maxSandboxRequestBytes = 64 << 10
 
-// ServeTokens runs the token socket on l (a unix listener in both deployment
-// shapes) until ctx is done. It serves POST SandboxPath only: the caller is
-// bound by kernel peer credentials, so this listener must stay local. Errors
-// from the resolver are returned as 500s — get-cert fails closed on them.
+// ServeTokens runs the token route on l until ctx is done — a unix listener on
+// node-CVM, a guest-loopback listener under kata. It serves POST SandboxPath
+// only, and l must stay node- or guest-local: on the socket the caller is bound
+// by kernel peer credentials, and in the guest by the single-pod boundary.
+// Errors from the resolver are returned as 500s — get-cert fails closed on them.
 //
 // A nil signer serves nothing (404 on the route): no signer means no CDS to
 // attest the signing key against, and an unverifiable token is worse than none.
@@ -197,7 +225,7 @@ func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, 
 				http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
 				return
 			}
-			token, err := signer.Sign(r.Context(), id, keyDigest, req.Nonce)
+			token, err := signer.Sign(id, keyDigest, req.Nonce)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("sign sandbox token: %v", err), http.StatusInternalServerError)
 				return
@@ -214,8 +242,12 @@ func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, 
 // sandbox — so l MUST be a mutually-attested RA-TLS listener that admits only
 // CDS (BuildDigestsTLSConfig). Over a plain listener this would disclose the
 // node's running images to anyone who can reach the port.
-func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver) error {
+func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver, identity []byte) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+IdentityPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(InventoryIdentity{PublicKey: identity})
+	})
 	mux.HandleFunc("GET "+SandboxDigestsPrefix+"{sandboxID}", func(w http.ResponseWriter, r *http.Request) {
 		digests, known, err := resolver.DigestsForSandbox(r.PathValue("sandboxID"))
 		if err != nil {
@@ -239,9 +271,16 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver)
 // through the request context so handlers can read kernel peer credentials
 // from it (ServeTokens).
 func serveUntil(ctx context.Context, l net.Listener, mux *http.ServeMux) error {
+	// All four bounds are set explicitly: Go's defaults are infinite, and
+	// ServeDigests runs this on a network listener reachable by anything that
+	// can route to the node.
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			return context.WithValue(ctx, connKey{}, c)
 		},
@@ -258,29 +297,32 @@ func serveUntil(ctx context.Context, l net.Listener, mux *http.ServeMux) error {
 	return nil
 }
 
-// inventoryDo performs a request against the inventory at endpoint. endpoint must
-// be a "unix:///path/to.sock" socket — the only transport that carries the
-// peer credentials the answers are bound to, and the shape both deployments
-// use (docs/getcert-workload-binding.md "Why a unix socket").
+// inventoryDo performs a request against the inventory at endpoint, which must
+// be one of the two compiled endpoints: the node-CVM unix socket (whose peer
+// credentials bind the caller) or the kata guest's loopback address (where the
+// guest boundary does). Anything else is refused, so no control-plane value can
+// redirect the request (docs/getcert-workload-binding.md, Corner 5).
 func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Reader, timeout time.Duration) (*http.Response, error) {
-	path, ok := strings.CutPrefix(endpoint, "unix://")
-	if !ok {
-		return nil, fmt.Errorf("workloadclaims: endpoint must be unix://, got %q", endpoint)
+	base := "http://inventory.invalid"
+	transport := &http.Transport{}
+	switch {
+	case strings.HasPrefix(endpoint, "unix://"):
+		path := strings.TrimPrefix(endpoint, "unix://")
+		// Host placeholder — the dialer ignores it and connects to path.
+		// .invalid is RFC 2606-reserved, so it can never resolve.
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
+		}
+	case endpoint == GuestInventoryEndpoint():
+		base = endpoint
+	default:
+		return nil, fmt.Errorf("workloadclaims: endpoint must be the compiled unix socket or guest loopback, got %q", endpoint)
 	}
-	client := &http.Client{
-		Timeout: timeout,
-		// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose.
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", path)
-			},
-		},
-	}
+	// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose.
+	client := &http.Client{Timeout: timeout, Transport: transport}
 
-	// Host placeholder — the dialer above ignores it and connects to path.
-	// .invalid is RFC 2606-reserved, so it can never resolve.
-	req, err := http.NewRequestWithContext(ctx, method, "http://inventory.invalid"+route, body)
+	req, err := http.NewRequestWithContext(ctx, method, base+route, body)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +371,7 @@ func FetchSandboxToken(ctx context.Context, endpoint string, timeout time.Durati
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("workloadclaims: decode inventory response: %w", err)
 	}
-	if len(out.Token) == 0 || len(out.Signature) == 0 || out.EAR == "" {
+	if len(out.Token) == 0 || len(out.Signature) == 0 {
 		return nil, fmt.Errorf("workloadclaims: inventory returned an incomplete sandbox token")
 	}
 	return &out, nil

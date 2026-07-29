@@ -605,7 +605,7 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 			// a sandbox-ID pin can be enforced: CDS's signature over the leaf is
 			// what authenticates the ID. No-op when no pin is set.
 			if policy != nil {
-				if err := checkSandboxPin(cert, policy); err != nil {
+				if err := CheckSandboxPin(cert, policy.SandboxID); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed the sandbox-ID pin: %w", err)
 				}
 			}

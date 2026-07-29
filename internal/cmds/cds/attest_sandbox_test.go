@@ -4,18 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
-	"github.com/confidential-dot-ai/c8s/internal/ear"
-	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -23,19 +19,32 @@ import (
 
 const testSandboxID = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
 
-// testInventoryAddr is the callback address the signer stamps into tokens. The
+// testInventoryHost is the callback host the signer stamps into tokens. The
 // tests answer it with fakeDigests rather than dialing.
-const testInventoryAddr = "10.0.0.7:9443"
+const testInventoryHost = "10.0.0.7"
 
 // fakeDigests answers the inventory callback from a sandbox -> digests map. A
 // missing sandbox is workloadclaims.ErrSandboxUnknown, like a 404 on the wire.
-type fakeDigests map[string][]string
+type fakeDigests struct {
+	digests map[string][]string
+	key     *ecdsa.PublicKey
+}
 
-func (f fakeDigests) Fetch(_ context.Context, addr, sandboxID string) ([]string, error) {
-	if addr != testInventoryAddr {
-		return nil, fmt.Errorf("unexpected inventory address %q", addr)
+func (f fakeDigests) InventoryKey(_ context.Context, host string) (*ecdsa.PublicKey, error) {
+	if host != testInventoryHost {
+		return nil, fmt.Errorf("unexpected inventory host %q", host)
 	}
-	d, ok := f[sandboxID]
+	if f.key == nil {
+		return nil, fmt.Errorf("no inventory at %s", host)
+	}
+	return f.key, nil
+}
+
+func (f fakeDigests) Fetch(_ context.Context, host, sandboxID string) ([]string, error) {
+	if host != testInventoryHost {
+		return nil, fmt.Errorf("unexpected inventory host %q", host)
+	}
+	d, ok := f.digests[sandboxID]
 	if !ok {
 		return nil, workloadclaims.ErrSandboxUnknown
 	}
@@ -44,46 +53,33 @@ func (f fakeDigests) Fetch(_ context.Context, addr, sandboxID string) ([]string,
 
 // newSandboxTestEnv wires an AttestHandler that can validate inventory EARs, and
 // an inventory signer whose EARs that handler accepts: the signer's EAR source
-// mints /attest-key-shaped EARs from the same issuer the handler's
-// KeyProvider verifies, with launchDigest as the inventory's attested
-// measurement.
+// newSandboxTestEnv wires an AttestHandler that resolves an inventory key the
+// way production does — from the inventory's own endpoint — and the signer
+// holding that key. launchDigest is unused now that the key's provenance is the
+// privileged-port callback rather than an EAR, but is kept in the signature so
+// the call sites read the same.
 func newSandboxTestEnv(t *testing.T, mockURL, launchDigest string) (AttestHandler, *workloadclaims.SandboxTokenSigner) {
 	t.Helper()
+	_ = launchDigest
 	h := newTestAttestHandler(t, mockURL, nil)
-	// A token now triggers the digests callback, so every sandbox test needs an
-	// inventory to answer and an allowlist admitting what it reports.
+
+	signer, err := workloadclaims.NewSandboxTokenSigner(testInventoryHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A token triggers the digests callback, so every sandbox test needs an
+	// inventory to answer, an allowlist admitting what it reports, and node
+	// CIDRs the callback host falls inside.
 	h.AllowlistStore = floorStore(wlDigestA)
-	h.SandboxDigests = fakeDigests{testSandboxID: {wlDigestA}}
-
-	keyPEM, err := earsigner.Generate()
+	h.SandboxDigests = fakeDigests{
+		digests: map[string][]string{testSandboxID: {wlDigestA}},
+		key:     signer.PublicKey(),
+	}
+	hosts, err := workloadclaims.ParseInventoryHosts([]string{"10.0.0.0/24"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.EARKeyProvider = rotator
-	h.EARIssuer = "cds"
-
-	signer, err := workloadclaims.NewSandboxTokenSigner(func(_ context.Context, pubDER []byte) (string, error) {
-		pubAny, err := x509.ParsePKIXPublicKey(pubDER)
-		if err != nil {
-			return "", err
-		}
-		pub, ok := pubAny.(*ecdsa.PublicKey)
-		if !ok {
-			return "", fmt.Errorf("inventory key is not ECDSA")
-		}
-		return earIss.IssueAttestedKey(json.RawMessage(`{"test":true}`), launchDigest, pub, "")
-	}, testInventoryAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.InventoryHosts = hosts
 	return h, signer
 }
 
@@ -104,7 +100,7 @@ func signedSandboxToken(t *testing.T, signer *workloadclaims.SandboxTokenSigner,
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := signer.Sign(context.Background(), testSandboxID, keyDigest, nonce)
+	token, err := signer.Sign(testSandboxID, keyDigest, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,14 +195,56 @@ func TestAttest_SandboxToken_RejectsForeignInventoryEAR(t *testing.T) {
 	}
 }
 
-// An inventory EAR on a non-allowlisted measurement must be rejected when the
-// CDS pins measurements.
-func TestAttest_SandboxToken_RejectsDeniedMeasurement(t *testing.T) {
+// The core of the design: a token signed by a key the inventory does not hold
+// is rejected. This is what stops a compromised workload — which shares the
+// node's launch measurement and can reach CDS — from minting a token naming
+// another pod's sandbox. CDS resolves the key from the inventory's own
+// privileged-port endpoint, so the impostor's own key never matches.
+func TestAttest_SandboxToken_RejectsKeyTheInventoryDoesNotHold(t *testing.T) {
 	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "badbadbad")
-	h.Measurements = map[string]bool{"deadbeef": true}
-	csrPEM, _ := generateCSR(t)
+	h, _ := newSandboxTestEnv(t, mock.URL, "deadbeef")
 
+	// An attacker signs its own token for someone else's sandbox.
+	impostor, err := workloadclaims.NewSandboxTokenSigner(testInventoryHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, impostor, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// A token naming a host outside the operator's node CIDRs is refused before
+// anything is dialed — that boundary is what stops a workload pointing the
+// callback at its own pod IP and answering as its node's inventory.
+func TestAttest_SandboxToken_RejectsHostOutsideNodeCIDRs(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	hosts, err := workloadclaims.ParseInventoryHosts([]string{"192.168.99.0/24"}) // not testInventoryHost
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.InventoryHosts = hosts
+
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// With no CIDRs configured CDS has no boundary to apply, so it refuses tokens
+// outright rather than dialing wherever it is pointed.
+func TestAttest_SandboxToken_RejectsWithoutConfiguredCIDRs(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.InventoryHosts = nil
+
+	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
 	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
 	if w.Code != http.StatusForbidden {
@@ -235,7 +273,7 @@ func TestAttest_SandboxToken_RejectsStaleNonce(t *testing.T) {
 func TestAttest_SandboxToken_RejectsWhenUnverifiable(t *testing.T) {
 	mock := newMockAttestationApi(t, "deadbeef")
 	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
-	h.EARKeyProvider = nil
+	h.SandboxDigests = nil
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)

@@ -90,6 +90,10 @@ type Options struct {
 	// socket directory: the webhook mounts it into c8s-cert and injects the
 	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
 	WorkloadClaimsHostDir string
+
+	// WorkloadClaimsGuest selects the kata shape: the inventory is reached on
+	// the guest's loopback address, so no socket is mounted.
+	WorkloadClaimsGuest bool
 }
 
 var scheme = runtime.NewScheme()
@@ -239,6 +243,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			KataEnforce:           opts.KataEnforce,
 			HardwarePlatform:      opts.HardwarePlatform,
 			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
+			WorkloadClaimsGuest:   opts.WorkloadClaimsGuest,
 		}); err != nil {
 			return fmt.Errorf("register webhook: %w", err)
 		}

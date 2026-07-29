@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
@@ -61,24 +62,25 @@ type AttestHandler struct {
 	// request carrying a sandbox token, since it could not be checked.
 	AllowlistStore allowlistGate
 
-	// SandboxDigests asks a sandbox's own inventory what it is running, over
-	// mutually-attested RA-TLS. nil rejects any request carrying a sandbox
-	// token, for the same reason as a nil AllowlistStore.
+	// SandboxDigests resolves a sandbox's inventory: its signing key and what
+	// the sandbox is running, over mutually-attested RA-TLS to a privileged
+	// port. nil rejects any request carrying a sandbox token, for the same
+	// reason as a nil AllowlistStore.
 	SandboxDigests sandboxDigestSource
 
-	// EARKeyProvider and EARIssuer validate the inventory EAR inside a sandbox
-	// token (docs/ratls.md, "Sandbox identity") — the same JWKS/issuer pair
-	// /sign-csr uses. A nil provider disables sandbox-token verification; a
-	// request carrying a token is then rejected.
-	EARKeyProvider issuer.KeyProvider
-	EARIssuer      string
+	// InventoryHosts bounds which addresses the callback may dial — the
+	// operator's node CIDRs. Empty rejects any request carrying a sandbox
+	// token: without it a workload could point CDS at its own pod IP and
+	// answer as the inventory.
+	InventoryHosts workloadclaims.InventoryHosts
 }
 
 // sandboxDigestSource is the inventory callback, satisfied by
 // *workloadclaims.DigestsClient. An interface so tests can drive issuance
 // without standing up an RA-TLS inventory.
 type sandboxDigestSource interface {
-	Fetch(ctx context.Context, addr, sandboxID string) ([]string, error)
+	InventoryKey(ctx context.Context, host string) (*ecdsa.PublicKey, error)
+	Fetch(ctx context.Context, host, sandboxID string) ([]string, error)
 }
 
 // allowlistGate answers the one attest-time question: is this digest admitted
@@ -132,7 +134,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// above, so a token carrying it is fresh for exactly this issuance.
 	var sandbox workloadclaims.VerifiedSandbox
 	if len(req.SandboxToken) > 0 {
-		sandbox, err = h.verifySandboxToken(req.SandboxToken, csrPubKey, challengeBytes)
+		sandbox, err = h.verifySandboxToken(ctx, req.SandboxToken, csrPubKey, challengeBytes)
 		if err != nil {
 			slog.Warn("sandbox token rejected", "error", err)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
@@ -191,7 +193,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		// the address CDS just dialled, so echoing what happened there would
 		// hand it a reachability oracle for CDS's network position.
 		slog.Warn("sandbox workload rejected",
-			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryAddr, "error", err)
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err)
 		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, "sandbox workload not authorized")
 		return
 	}
@@ -233,14 +235,17 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 
 // verifySandboxToken verifies an inventory-signed sandbox token and returns its
 // sandbox ID. The chain (docs/ratls.md, "Sandbox identity"): the envelope's
-// EAR must be a CDS-issued /attest-key credential on an allowed measurement;
-// the EAR's attested key must sign the token; the token's nonce must be this
-// request's challenge (freshness, single-use); and its key digest must name
-// the requester's CSR key — so only the key's holder can redeem it, only for
-// this issuance, and only with inventory provenance.
-func (h AttestHandler) verifySandboxToken(raw json.RawMessage, requesterPub crypto.PublicKey, nonce []byte) (workloadclaims.VerifiedSandbox, error) {
-	if h.EARKeyProvider == nil {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but this CDS cannot verify it")
+// signing key is fetched from the inventory's own endpoint on a node address
+// the operator configured; that key must sign the token; the token's nonce must
+// be this request's challenge (freshness, single-use); and its key digest must
+// name the requester's CSR key — so only the key's holder can redeem it, only
+// for this issuance, and only with inventory provenance.
+func (h AttestHandler) verifySandboxToken(ctx context.Context, raw json.RawMessage, requesterPub crypto.PublicKey, nonce []byte) (workloadclaims.VerifiedSandbox, error) {
+	if h.SandboxDigests == nil {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but this CDS cannot reach an inventory to verify it")
+	}
+	if len(h.InventoryHosts) == 0 {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but no inventory CIDRs are configured to bound the callback")
 	}
 	var token workloadclaims.SignedSandboxToken
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -248,18 +253,28 @@ func (h AttestHandler) verifySandboxToken(raw json.RawMessage, requesterPub cryp
 	if err := dec.Decode(&token); err != nil {
 		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("decode sandbox token: %w", err)
 	}
-	claims, err := issuer.ValidateEARToken(token.EAR, h.EARKeyProvider, h.EARIssuer)
+
+	// The host says which endpoint holds the key that would verify the
+	// signature, so it has to be read before verification can happen. Nothing
+	// is trusted on its basis: it only selects a dial target, which must be a
+	// node address the operator configured — a pod IP is never dialed, so a
+	// workload cannot stand in for its node's inventory. A wrong host simply
+	// yields a key the signature fails under.
+	host, err := workloadclaims.UnverifiedInventoryHost(token.Token)
 	if err != nil {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("inventory EAR invalid: %w", err)
+		return workloadclaims.VerifiedSandbox{}, err
 	}
-	// Same pinning semantics as the /attest evidence check above:
-	// CheckMeasurement is a no-op with empty Measurements (UNSAFE outside dev).
-	if err := issuer.CheckMeasurement(claims, h.Measurements, "attest sandbox-token"); err != nil {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("inventory EAR measurement not allowed")
+	if !h.InventoryHosts.Contains(host) {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token names an inventory outside the configured node CIDRs")
 	}
-	inventoryPub, err := issuer.AttestedECDSAKey(claims)
+	// The key comes from the inventory's own endpoint on a privileged port,
+	// which is what separates the inventory from a compromised workload in the
+	// same node: an unprivileged pod cannot bind the node's network namespace
+	// (the chart's deny-host-namespaces policy). Measurement alone cannot make
+	// that distinction on node-CVM, where every pod shares the node's.
+	inventoryPub, err := h.SandboxDigests.InventoryKey(ctx, host)
 	if err != nil {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("inventory EAR key: %w", err)
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("resolve inventory key: %w", err)
 	}
 	// Freshness is the challenge itself: the token must carry the same nonce
 	// CDS is consuming for this request, so it cannot be replayed against a
@@ -305,9 +320,16 @@ func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox worklo
 	if h.SandboxDigests == nil {
 		return fmt.Errorf("sandbox token presented but this CDS cannot reach the inventory for its digests")
 	}
-	digests, err := h.SandboxDigests.Fetch(ctx, sandbox.InventoryAddr, sandbox.SandboxID)
+	digests, err := h.SandboxDigests.Fetch(ctx, sandbox.InventoryHost, sandbox.SandboxID)
 	if err != nil {
-		return fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryAddr, err)
+		return fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryHost, err)
+	}
+	if len(digests) == 0 {
+		// "No containers" is not "nothing to check" — it is no evidence at all,
+		// and looping over it would pass the gate vacuously. A sandbox always
+		// runs at least the sidecar that is asking, so an empty answer means
+		// the inventory is still syncing (or is lying), both of which must wait.
+		return fmt.Errorf("inventory reports no containers in sandbox %s", sandbox.SandboxID)
 	}
 	for _, d := range digests {
 		digest, err := types.ParseDigest(d)

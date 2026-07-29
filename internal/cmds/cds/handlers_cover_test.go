@@ -24,7 +24,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -124,23 +123,6 @@ func TestAttest_RejectsNonECDSACSR(t *testing.T) {
 	}
 }
 
-func generateCSRWithRATLSExtension(t *testing.T, extValue []byte) (string, *ecdsa.PrivateKey) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("gen key: %v", err)
-	}
-	tmpl := &x509.CertificateRequest{
-		Subject:         pkix.Name{CommonName: "test-node"},
-		ExtraExtensions: []pkix.Extension{{Id: ratls.OIDRATLSAttestation, Value: extValue}},
-	}
-	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
-	if err != nil {
-		t.Fatalf("create csr: %v", err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), key
-}
-
 // An unloaded CA makes in-process signing fail after all validation passed.
 // Also exercises the RequestTimeout>0 wrapping.
 func TestAttest_SignFailureReturns500(t *testing.T) {
@@ -174,11 +156,11 @@ func (errStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 func TestVerifySandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
 	h := AttestHandler{
 		AllowlistStore: errStore{},
-		SandboxDigests: fakeDigests{testSandboxID: {wlDigestA}},
+		SandboxDigests: fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}},
 	}
 	err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
 		SandboxID:     testSandboxID,
-		InventoryAddr: testInventoryAddr,
+		InventoryHost: testInventoryHost,
 	})
 	if err == nil {
 		t.Fatal("expected error when the allowlist store fails")

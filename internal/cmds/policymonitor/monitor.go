@@ -53,7 +53,6 @@ import (
 
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // runMonitor is the long-running entry. It's package-private rather
@@ -96,21 +95,24 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		revalidateInterval: 10 * time.Second,
 	}
 
-	// Admission inventory (docs/ratls.md): serve the guest
-	// pod's admitted digests to the in-guest get-cert over a Unix socket the
-	// guest bind-mounts into the pod.
-	if cfg.WorkloadClaimsSocketDir != "" {
+	// Admission inventory (docs/ratls.md): the guest's sandbox identity, served
+	// to the in-guest get-cert on loopback. Always on — a guest always holds a
+	// pod that will ask, and gating it on configuration would let the untrusted
+	// host switch it off.
+	{
 		m.inventory = newAdmissionInventory()
-		socketPath := filepath.Join(cfg.WorkloadClaimsSocketDir, workloadclaims.SocketName)
 		signer := sandboxTokenSigner(cfg, logger)
-		if err := startAdmissionInventory(ctx, logger, m.inventory, socketPath, signer); err != nil {
+		if err := startAdmissionInventory(ctx, logger, m.inventory, signer); err != nil {
 			return fmt.Errorf("start admission inventory: %w", err)
 		}
 		// Only useful alongside tokens: the address CDS dials is signed into
 		// them, so without a signer nothing can direct CDS here.
+		// Fail-soft: a missing digests endpoint degrades issuance (CDS refuses
+		// tokens it cannot check), which is cheaper than taking the guest's
+		// only image-policy enforcer down with it.
 		if signer != nil {
-			if err := startSandboxDigests(ctx, logger, cfg, m.inventory); err != nil {
-				return fmt.Errorf("start sandbox-digests endpoint: %w", err)
+			if err := startSandboxDigests(ctx, logger, cfg, m.inventory, signer); err != nil {
+				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
 			}
 		}
 	}
@@ -139,7 +141,7 @@ type monitor struct {
 	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
 	overlay            *policyOverlay // latest CDS pull's workload argv policy
 	killer             containerKiller
-	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); nil ⇔ disabled (no workload-claims socket dir)
+	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
 	revalidateInterval time.Duration
@@ -286,6 +288,16 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			// unwatched).
 			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && filepath.Clean(evt.Name) == filepath.Clean(m.cfg.WatchDir) {
 				return watchDirGone("inotify " + evt.Op.String())
+			}
+			// A bundle disappearing means its container is gone; drop it
+			// from the inventory so /digests answers what the sandbox is
+			// running rather than everything it ever ran. The watch dir's
+			// own removal was handled above, so this is a child path.
+			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && m.pathLooksLikeContainer(evt.Name) {
+				if m.inventory != nil {
+					m.inventory.remove(filepath.Base(filepath.Clean(evt.Name)))
+				}
+				continue
 			}
 			// We only care about new entries appearing under the
 			// watched directory. IN_CREATE covers both dirs and

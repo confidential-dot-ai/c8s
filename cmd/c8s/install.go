@@ -63,6 +63,7 @@ var (
 	installResolveDigests bool
 	installAttestEnabled  bool
 	installMeasurements   []string
+	installInventoryCIDRs []string
 )
 
 // Flag names referenced in more than one place (registration plus a Changed()
@@ -1185,6 +1186,11 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
 		)
 	}
+	for i, c := range installInventoryCIDRs {
+		helmArgs = append(helmArgs,
+			"--set-string", fmt.Sprintf("cds.sandboxInventoryCIDRs[%d]=%s", i, c),
+		)
+	}
 	return helmArgs, nil
 }
 
@@ -1853,6 +1859,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's node addresses (repeatable/comma-separated). CDS dials a node's admission inventory inside them and nowhere else, which is what stops a workload pointing the sandbox-digests callback at its own pod IP. Without it CDS refuses any request carrying a sandbox token, so workload pods get certificates with no sandbox identity")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Pins the internal mesh (cds.measurements + ratlsMesh.measurements) on this install; empty = no pinning (UNSAFE). Not valid with --cvm-mode=pod")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")

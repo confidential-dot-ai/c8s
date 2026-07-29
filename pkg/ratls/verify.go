@@ -165,14 +165,15 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	return verifyReport(att, policy, expectedReportData)
 }
 
-// checkSandboxPin enforces policy.SandboxID against a leaf whose CA chain the
-// caller has ALREADY verified. The ID is stamped by CDS into the signed area
-// after it verifies the inventory-signed sandbox token, so the mesh CA
-// signature — not the hardware evidence — is what authenticates it. Calling
-// this on an unverified (e.g. self-signed) leaf would pin an attacker-chosen
-// string.
-func checkSandboxPin(cert *x509.Certificate, policy *VerifyPolicy) error {
-	if policy.SandboxID == "" {
+// CheckSandboxPin enforces expectedID against a leaf whose CA chain the caller
+// has ALREADY verified. The ID is stamped by CDS into the signed area after it
+// verifies the inventory-signed sandbox token, so the mesh CA signature — not
+// the hardware evidence — is what authenticates it. Calling this on an
+// unverified (e.g. self-signed) leaf would pin an attacker-chosen string.
+//
+// Empty expectedID is a no-op, so callers can invoke it unconditionally.
+func CheckSandboxPin(cert *x509.Certificate, expectedID string) error {
+	if expectedID == "" {
 		return nil
 	}
 	id, err := SandboxIDFromCert(cert)
@@ -182,8 +183,8 @@ func checkSandboxPin(cert *x509.Certificate, policy *VerifyPolicy) error {
 	if id == "" {
 		return fmt.Errorf("%w: sandbox-ID pin set but certificate carries no sandbox-ID extension", ErrPolicyViolation)
 	}
-	if id != policy.SandboxID {
-		return fmt.Errorf("%w: certificate sandbox ID %q does not match pinned %q", ErrPolicyViolation, id, policy.SandboxID)
+	if id != expectedID {
+		return fmt.Errorf("%w: certificate sandbox ID %q does not match pinned %q", ErrPolicyViolation, id, expectedID)
 	}
 	return nil
 }

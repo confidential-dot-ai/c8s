@@ -12,17 +12,19 @@ rules*.
 
 ## The one-paragraph version
 
-`get-cert` (the injected `c8s-cert` sidecar) asks a node-local **inventory** —
+`get-cert` (the injected `c8s-cert` sidecar) asks a local **inventory** —
 part of the image-admission component itself (`nri-image-policy` on node-CVM,
 `policy-monitor` on kata), not a standalone service — "which pod sandbox am I
-in?" *without saying who it is*. The inventory learns the caller's identity
-from the **kernel** (unix-socket peer credentials), maps it to a sandbox, and
+in?" *without saying who it is*. The inventory learns the caller's identity from
+the **kernel** (unix-socket peer credentials on node-CVM; under kata the guest
+holds one pod, so there is nobody to disambiguate), maps it to a sandbox, and
 returns a **signed token** naming that sandbox, the requester's key, this
-issuance's CDS challenge, and the address of its own digests endpoint.
-`get-cert` forwards the token to CDS and says nothing about its own images.
-CDS verifies the token, then calls that inventory back over mutually-attested
-RA-TLS and asks what the sandbox is running; it issues only if every image is
-allowlisted, and stamps the sandbox ID onto the leaf. A relying party can then pin the workload
+issuance's CDS challenge, and the IP of the node or guest serving its own
+identity+digests endpoint. `get-cert` forwards the token to CDS and says nothing
+about its own images. CDS dials that endpoint on a fixed **privileged** port to
+fetch the key the token is signed under, then asks what the sandbox is running;
+it issues only if every image is allowlisted, and stamps the sandbox ID onto the
+leaf. A relying party can then pin the workload
 (`c8s verify --sandbox-id <id> --mesh-ca ca.pem`) or read a live mesh peer's ID
 off the connection with `ratls.PeerSandboxID` (docs/ratls.md, "Reading a peer's
 sandbox ID").
@@ -64,23 +66,26 @@ the image set it does not have to trust get-cert at all: get-cert is a conduit
 for a token it cannot forge, and CDS asks the inventory itself. get-cert's own
 integrity is still allowlist/measurement-rooted — under node-CVM its image runs
 only because nri-image-policy admitted it; under kata it is baked into the
-measured guest image — and the compiled-in socket path means the control plane
-cannot repoint it at a rogue inventory. (Corner 5, Corner 6.)
+measured guest image — and both inventory endpoints are compiled in, so the
+control plane selects a shape, never an address. (Corner 5, Corner 6.)
 
 **What stops a malicious pod claiming some other workload's identity?** It
-cannot mint the token. The sandbox token is signed by an in-process inventory
-key whose EAR CDS issued against an allowed launch measurement, and it names
-the sandbox the *kernel* said the caller is in — so a pod can only ever obtain
-its own sandbox ID. It cannot suppress the callback either: the inventory
-address is inside the signature, and CDS re-verifies the RA-TLS identity of
-whatever answers there. What a malicious pod *can* do is present no token at
+cannot mint a token CDS will accept. The token names the sandbox the *kernel*
+said the caller is in, so a pod can only ever obtain its own sandbox ID — and
+the signing key CDS verifies it under is not a credential the token carries.
+CDS fetches that key from the endpoint the token names, on a **privileged port
+in the node's own network namespace**, at an address inside the operator's node
+CIDRs. A tenant pod has neither (the chart's `deny-host-namespaces` policy
+withholds `hostNetwork`, and its IP is in the pod CIDR), so a token it signs
+verifies under nothing. What a malicious pod *can* do is present no token at
 all, which yields a leaf with **no** sandbox ID — and that fails any
 `--sandbox-id` pin. What remains is not forgery but trust in the inventory
 itself (Corner 6) and in the mesh CA signature that carries the ID (docs/ratls.md,
 "What vouches for the ID").
 
-**Is the unix socket secured so a malicious pod can't hijack it?** Two separate
-threats:
+**Is the token surface secured so a malicious pod can't hijack it?** Under kata
+it is the guest's own loopback, inside the measurement, so there is nothing to
+hijack. On node-CVM it is a unix socket, and there are two separate threats:
 
 - *Impersonating another pod over the socket* — closed by `SO_PEERCRED`. The
   socket's mode gates who can *reach* the inventory, but identity comes from the
@@ -88,12 +93,12 @@ threats:
   is bound to its own pod.
 - *Replacing the socket file* — the real hijack vector. get-cert mounts the
   socket directory **read-only**, so it cannot swap the socket from inside its
-  own pod. On node-CVM the socket lives on a host directory, so a *separate*
-  malicious pod that could `hostPath`-mount that directory read-write could
-  swap the socket before get-cert connects — a PodSecurity / filesystem-
-  permission concern (the socket dir must be unwritable by untrusted pods), not something attestation closes. Under kata the mount is a
-  guest bind-mount inside the measured VM, so there is nothing host-supplied to
-  swap. **Who creates the socket, and why the L0 host can't inject one, is
+  own pod. The socket lives on a host directory, so a *separate* malicious pod
+  that could `hostPath`-mount that directory read-write could swap the socket
+  before get-cert connects — a PodSecurity / filesystem-permission concern (the
+  socket dir must be unwritable by untrusted pods), which the chart's
+  `deny-host-namespaces` policy also denies outright for tenant namespaces.
+  **Who creates the socket, and why the L0 host can't inject one, is
   Corner 7.** (Corner 5, "Why a unix socket".)
 
 ---
@@ -106,15 +111,18 @@ threats:
   (`internal/cmds/getcert`)
 - **The inventory** — the component that already makes the admit/deny decision,
   so what it vouches for is exactly what was admitted. It serves two disjoint
-  surfaces (`pkg/workloadclaims`): `POST /sandbox` on a node-local **unix
-  socket** get-cert dials at one compiled path, and `GET /digests/{sandboxID}`
-  on a **network endpoint over mutually-attested RA-TLS** that only CDS can
-  reach. The socket cannot enumerate other sandboxes; the network endpoint
-  cannot mint identity.
-  - **node-CVM**: `nri-image-policy` (the host NRI plugin). The node is the
-    confidential VM, so the plugin is in the TCB.
-  - **pod-CVM (kata)**: `policy-monitor` inside the measured guest, whose
-    socket directory the guest bind-mounts into the pod.
+  surfaces (`pkg/workloadclaims`): `POST /sandbox` on a **local** endpoint
+  get-cert dials at one of two compiled addresses, and `GET /identity` +
+  `GET /digests/{sandboxID}` on a **network endpoint over mutually-attested
+  RA-TLS**, at the fixed privileged port `workloadclaims.DigestsPort` (1019),
+  that only CDS talks to. The token endpoint cannot enumerate other sandboxes;
+  the network endpoint cannot mint identity.
+  - **node-CVM**: `nri-image-policy` (the host NRI plugin), token route on a
+    node-local unix socket. The node is the confidential VM, so the plugin is
+    in the TCB.
+  - **pod-CVM (kata)**: `policy-monitor` inside the measured guest, token route
+    on the guest's loopback `127.0.0.1:8401` — the pod's containers share the
+    guest's network namespace, so nothing is mounted.
 - **CDS** — verifies the evidence and the sandbox token, calls the inventory
   back for the sandbox's images, checks each against the allowlist store, signs
   the leaf with the mesh CA, stamps the sandbox ID.
@@ -130,34 +138,38 @@ threats:
    the issuance's existing freshness rather than a wall clock of its own
    (`internal/cmds/getcert/run.go`, `obtainCert`).
 
-2. **get-cert asks, anonymously.** It opens the inventory at its compiled Unix
-   socket path (`--workload-claims`, the same in both shapes) and `POST`s
-   `/sandbox` carrying only its CSR public key and that challenge. The request
-   carries **no** PID, pod name, or container ID. (See "Corner 1".)
+2. **get-cert asks, anonymously.** `--workload-claims` opens the inventory at a
+   compiled address — the unix socket, or the guest's loopback when
+   `--workload-claims-guest` selects the kata shape — and `POST`s `/sandbox`
+   carrying only its CSR public key and that challenge. The request carries
+   **no** PID, pod name, or container ID. (See "Corner 1".)
 
-3. **The inventory binds the caller from the kernel and signs.** On the unix
-   socket it reads the peer's PID with `getsockopt(SO_PEERCRED)`
+3. **The inventory binds the caller and signs.** On the unix socket it reads the
+   peer's PID with `getsockopt(SO_PEERCRED)`
    (`pkg/workloadclaims/peercred_linux.go`), resolves that PID to a container
-   via `/proc/<pid>/cgroup` (`cgroup.go`), maps container → sandbox from its own
-   admission record (`SandboxForPeer`), and signs a token over
-   `(version 2, sandboxID, SHA-256(requester pubkey), challenge, inventoryAddr)`
-   with an in-process key CDS attested via `POST /attest-key`. Nothing the
-   caller *sent* is used for identity.
+   via `/proc/<pid>/cgroup` (`cgroup.go`), and maps container → sandbox from its
+   own admission record (`SandboxForPeer`); in a kata guest there is one pod, so
+   the single observed sandbox is the answer. It then signs a token over
+   `(version 2, sandboxID, SHA-256(requester pubkey), challenge, inventoryHost)`
+   with an in-process P-256 key. Nothing the caller *sent* is used for identity.
 
-4. **get-cert forwards the token.** The envelope (token, signature, EAR) rides
-   the `/attest` request body as `sandbox_token`, opaque to get-cert. It
-   forwards **no image digests** — it has none to forward.
+4. **get-cert forwards the token.** The envelope — `token` and `signature`, no
+   credential for the key — rides the `/attest` request body as `sandbox_token`,
+   opaque to get-cert. It forwards **no image digests**; it has none to forward.
 
-5. **CDS verifies, calls back, gates, and stamps.** It validates the EAR against
-   its own JWKS, issuer, and measurement allowlist; verifies the token signature
-   with the EAR's attested key; requires the token's nonce to be the challenge
-   it is consuming and its key digest to name the CSR key. It verifies the
-   requester's evidence and CSR policy as usual. Then it dials the token's
-   `inventoryAddr` over mutually-attested RA-TLS (`workloadclaims.DigestsClient`,
-   pinning the same measurements `/attest` uses, presenting CDS's own RA-TLS
-   certificate) and asks `GET /digests/{sandboxID}`. Every returned image must
-   be allowlisted. All pass ⇒ it signs the leaf and stamps the sandbox ID into
-   its signed area (`internal/cmds/cds/attest.go` `verifySandboxToken` /
+5. **CDS resolves the key, verifies, calls back, gates, and stamps.** It reads
+   `inventoryHost` from the unverified token purely to pick a dial target,
+   requires it to be a routable unicast IP literal inside an operator-configured
+   node CIDR (`--sandbox-inventory-cidr`), and fetches the signing key from
+   `GET /identity` at `<host>:1019` over mutually-attested RA-TLS
+   (`workloadclaims.DigestsClient`, pinning the same measurements `/attest`
+   uses, presenting CDS's own RA-TLS certificate). Only then does it verify the
+   signature, and require the token's nonce to be the challenge it is consuming
+   and its key digest to name the CSR key. It verifies the requester's evidence
+   and CSR policy as usual, then asks `GET /digests/{sandboxID}` at the same
+   endpoint. Every returned image must be allowlisted, and an empty set is
+   refused. All pass ⇒ it signs the leaf and stamps the sandbox ID into its
+   signed area (`internal/cmds/cds/attest.go` `verifySandboxToken` /
    `verifySandboxWorkload`, `internal/issuer/sign.go`).
 
 6. **The relying party pins.** `c8s verify --sandbox-id <id> --mesh-ca ca.pem`
@@ -204,12 +216,16 @@ namespace, and `/proc/<host-pid>/cgroup` on the host resolves to the
 container's cgroup. This is why the plugin needs the host PID view and why
 `workload_claims.proc_root` is `/proc` (the host's), not a mounted `/host/proc`.
 
-**kata is simpler.** `policy-monitor` serves the *same* unix socket
-(`policymonitor/inventory.go`), but in a kata guest there is exactly one pod, so
-there is nobody to disambiguate: the inventory ignores the peer PID and returns
-the guest's single sandbox ID (failing closed until it has observed one). Peer-cred
-co-location does not matter here — the guest boundary *is* the isolation — but
-reusing the socket lets get-cert dial one compiled path in both shapes.
+**kata is simpler.** `policy-monitor` serves the token route on the guest's
+loopback (`policymonitor/inventory.go`), because in a kata guest there is exactly
+one pod and its containers share the guest's network namespace. There is nobody
+to disambiguate: the inventory ignores the peer PID and returns the guest's
+single sandbox ID (failing closed until it has observed one). Peer credentials
+are unnecessary for the same reason a socket is — the guest boundary *is* the
+isolation — and loopback is the transport the in-guest attestation-service
+already uses, so no shared filesystem is involved. The binding is also
+unconditional: gating it on an env var would let the untrusted host switch it
+off by withholding a value.
 
 ---
 
@@ -345,28 +361,36 @@ wrong sandbox ID.
 
 Two independent properties keep a malicious control plane out of the loop.
 
-**get-cert's inventory target is measured, not injected.** get-cert dials a
-**compiled** Unix socket path (`workloadclaims.InventoryEndpoint`, selected by
-`--workload-claims`) in both shapes — the platform injects only the
-read-only socket *mount* (a webhook hostPath on node-CVM, a guest bind-mount
-under kata), never the path — so the control plane cannot point get-cert at a
-rogue inventory by changing an arg.
+**get-cert's inventory target is measured, not injected.** Both endpoints are
+compiled: `workloadclaims.InventoryEndpoint` (the node-CVM unix socket path) and
+`workloadclaims.GuestInventoryEndpoint` (`http://127.0.0.1:8401` in the kata
+guest). `--workload-claims-guest` selects *which shape applies*, never an
+address, so the worst a control plane achieves by flipping it is a fail-closed
+dial against a port nothing serves. On node-CVM the platform injects the
+read-only socket *mount*, never the path; under kata it injects nothing at all.
 
-**CDS's callback target is bounded, and re-verified on arrival.** The
-`inventoryAddr` CDS dials comes from the sandbox token, covered by the signature
-over the whole token — a host that rewrites it in flight invalidates the token.
-That is the only thing the signature buys: minting a *fresh* token needs only an
-`/attest-key` EAR, which on node-CVM every pod can obtain, so CDS treats the
-address as attacker-chosen. `parseInventoryAddr` therefore restricts it to
+**CDS's callback target is bounded by the operator, and the port is the
+identity.** The token is not self-authenticating: the envelope carries no
+credential for the signing key, so `inventoryHost` is read from the *unverified*
+token and used for exactly one thing — picking a dial target. A wrong value
+yields a key the signature fails under. `parseInventoryHost` restricts it to
 routable unicast IP literals — no names (DNS could redirect after the check), no
-loopback, link-local, metadata, multicast, or unspecified addresses — and CDS
-returns a generic denial rather than the callback's outcome, so the requester
-learns nothing about what it reached. And reaching the address is not
-sufficient: the callback is
-mutually-attested RA-TLS, so whatever answers must present a leaf whose launch
-measurement is in the same allowlist `/attest` pins, and must in turn accept
-CDS's own attested client certificate. An unreachable or unpinnable endpoint
-refuses the issuance rather than downgrading it.
+loopback, link-local, metadata, multicast, or unspecified addresses — and
+`InventoryHosts.Contains` additionally requires it to fall inside the node CIDRs
+the operator configured with `--sandbox-inventory-cidr`. With none configured,
+CDS refuses every request carrying a token.
+
+What actually establishes the inventory's identity is *where the key comes
+from*: `GET /identity` on `workloadclaims.DigestsPort` (1019), a privileged port
+in the node's own network namespace, over mutually-attested RA-TLS. Binding it
+needs `hostNetwork`, which the chart's `deny-host-namespaces` policy withholds
+from tenant pods; a pod's own IP is in the pod CIDR anyway. Measurement alone
+could not make this distinction on node-CVM, where every pod shares the node's
+launch digest. Whatever answers must also present a leaf whose measurement is in
+the same allowlist `/attest` pins and accept CDS's own attested client
+certificate, and CDS returns a generic denial rather than the callback's
+outcome, so the requester learns nothing about what it reached. An unreachable
+or unpinnable endpoint refuses the issuance rather than downgrading it.
 
 **Neither is an identity proof on its own.** The remaining assumption is the
 inventory's honesty about what it admitted (Corner 6), and the fact that the
@@ -381,14 +405,14 @@ malicious *allowlisted* pod able to mount that directory read-write could swap
 the socket file before get-cert connects. That is a PodSecurity /
 filesystem-permission concern (the socket dir must be unwritable by untrusted
 pods; overlaps THREAT_MODEL §Addressable), not a redirectable arg — see
-the residual note under "Why a unix socket". Under kata the mount is a guest
-bind-mount inside the measured VM, so it is not control-plane-supplied at all.
+the residual note under "Why a unix socket". Under kata there is no mount: the
+token endpoint is guest-internal loopback.
 
 ### Why a unix socket, not an HTTP/DNS endpoint
 
-The *token* surface is reached over a **unix socket** (a kernel filesystem path)
-in both shapes — never a network/hostname endpoint. That is deliberate; an HTTP
-endpoint addressed by name would forfeit three properties:
+On node-CVM the *token* surface is a **unix socket** (a kernel filesystem path),
+never a network/hostname endpoint. That is deliberate; an HTTP endpoint
+addressed by name would forfeit three properties:
 
 - **Co-location.** `SO_PEERCRED` works only across a same-kernel socket, so the
   inventory get-cert reaches *is provably the one on its own node* — the real
@@ -397,8 +421,6 @@ endpoint addressed by name would forfeit three properties:
   measurement check yet answer for the wrong pod (the "any attested TEE passes"
   problem). This is also why authenticating the inventory's RA-TLS cert would not
   help — a cert proves *measurement*, not that you reached the local inventory.
-  (Under kata there is one pod per guest, so co-location is free — but reusing
-  the socket keeps get-cert on one compiled path in both shapes.)
 - **DNS-immunity.** A kernel path has no name-resolution step. Cluster DNS is
   control-plane-configured, so a hostname endpoint would be redirectable
   *regardless of what value is baked in* — baking the name buys nothing. A unix
@@ -409,15 +431,21 @@ endpoint addressed by name would forfeit three properties:
   only the socket mount, not the path. A network endpoint would be only as
   fixed as the arg carrying it.
 
-The *digests* surface is a network endpoint precisely because none of those
-three apply to it: CDS is not co-located with the inventory, it needs no
+Under kata the token surface is the guest's **loopback**, and all three still
+hold for the same reasons that make the socket unnecessary there: one pod per
+guest makes co-location free, `127.0.0.1` resolves nothing, and the address is a
+compiled constant. A shared filesystem would only add a host-supplied mount to a
+path that needs none.
+
+The *identity/digests* surface is a network endpoint precisely because none of
+those three apply to it: CDS is not co-located with the inventory, it needs no
 peer-credential binding (it names the sandbox the token already vouched for),
-and its target address is signature-covered rather than name-resolved. What it
-does need — that the answering party is a measured inventory and the asking
-party is CDS — is exactly what mutual RA-TLS provides. The pattern: go over the
-network by name only when you can authenticate the endpoint's measurement; stay
-on the kernel-local socket when what you need is co-location, which attestation
-cannot prove.
+and it is reached at a numeric address the operator's CIDRs bound rather than a
+resolved name. What it does need — that the answering party holds the node's
+network namespace and is a measured inventory, and that the asking party is CDS
+— is what the privileged port plus mutual RA-TLS provides. The pattern: go over
+the network only when you can authenticate what answers; stay on the local
+endpoint when what you need is co-location, which attestation cannot prove.
 
 The residual left is neither DNS nor attestation: the socket file lives on a
 node path, so a malicious *allowlisted* pod that can `hostPath`-mount that
@@ -444,10 +472,12 @@ named:
 - **The evidence proves the requester is a measured TEE**, bound to the CSR key
   and challenge. That is what gates issuance at all; it says nothing about
   images.
-- **The sandbox ID comes from the kernel, via a key CDS attested.** get-cert
-  cannot choose it (Corner 1) and cannot forge the token (the signing key's EAR
-  is a CDS-issued credential on an allowed measurement). It can only decline to
-  present one, which costs it the sandbox ID entirely.
+- **The sandbox ID comes from the kernel, via a key only a node can serve.**
+  get-cert cannot choose it (Corner 1) and cannot forge the token: CDS accepts
+  only a signature it can verify under a key fetched from a privileged port in
+  a node's own network namespace, at an address in the operator's node CIDRs
+  (Corner 5). It can only decline to present a token, which costs it the sandbox
+  ID entirely.
 - **The ground truth for "what runs" is the inventory** — the admission record —
   and CDS asks it *directly*, at issuance, over a mutually-attested channel.
   There is no requester-supplied list to re-derive or cross-check, because the
@@ -457,16 +487,21 @@ named:
   smuggle an unallowlisted image past issuance. It *can* report a combination no
   workload entry authorizes, since CDS no longer matches whole sets (Corner 4).
 - **The remaining assumption is the honest inventory on an honest node.** The
-  EAR proves the signing key lives in a TEE on an allowed measurement — on
-  node-CVM that is the whole node, so "came from nri-image-policy" rests on the
-  measured node image running only the intended inventories (Corner 7). Under
-  kata the guest boundary is per-pod, which is tighter.
+  key's provenance narrows to a node, not to a process: on node-CVM anything
+  that can bind `:1019` in the node's netns — the inventory, or a privileged
+  node DaemonSet — can sign for any sandbox that node admitted. Those DaemonSets
+  are already root inside the node CVM and can read another pod's memory
+  directly, so they are effectively node TCB; that is an assumption, not
+  something attestation checks. Fleet-wide, a peer node shares the launch
+  measurement, so a hostile node could answer for a node whose traffic it can
+  intercept. Under kata the guest boundary is per-pod, and the token's host
+  selects which guest CDS asks, which is tighter.
 
 "Did get-cert reach the *real* inventory" is not a control-plane-supplied link:
-get-cert bakes one compiled Unix socket path for both shapes (Corner 5). What
+both endpoints are compiled and the flag selects only a shape (Corner 5). What
 remains is the node-CVM socket-file swap — a PodSecurity / filesystem-permission
-item, not attestation (and under kata even that is gone, the mount being a
-measured guest bind-mount).
+item, not attestation (and under kata even that is gone, the token endpoint
+being guest-internal loopback).
 
 ---
 
@@ -483,9 +518,9 @@ a pre-installed NRI plugin, and the *runtime directory*
 plugin**: containerd launches it as a node process and `workloadclaims.ListenUnix`
 calls `net.Listen("unix", …)` — that syscall materializes the socket. It
 `os.Remove`s the path first, so any pre-existing (stale or planted) socket is
-deleted before it binds its own. Under kata the same is true of `policy-monitor`
-inside the guest. So: **the inventory creates the socket, not the installer and not
-the host.**
+deleted before it binds its own. Under kata there is no socket at all —
+`policy-monitor` binds the guest's loopback port directly. So: **the inventory
+creates the socket, not the installer and not the host.**
 
 **The reframe that answers the challenge.** The socket is not a root of trust —
 it is intra-TCB plumbing between two components that are *both already inside*
@@ -496,13 +531,13 @@ splits cleanly:
 - **The L0 hypervisor — defeated by hardware.** The runtime dir is under `/run`,
   which is **tmpfs (RAM)**, and under SEV-SNP / TDX the guest's RAM is
   hardware-encrypted. The L0 host physically cannot read, write, inject, or swap
-  a socket in that memory. Under **kata** this is total: `policy-monitor`
-  creates the socket inside the measured guest, there is exactly one pod per
-  guest (no co-tenant), and the bind-mount is guest-internal — nothing outside
-  the guest can reach it. Under **node-CVM** the whole node is the CVM and the
-  socket sits in the node's encrypted tmpfs, so the L0 host is out the same way.
-  A guest the host booted with a swapped plugin would not match the launch
-  measurement, so a CDS with `--measurements` set refuses to issue to it.
+  a socket in that memory. Under **kata** the question does not arise:
+  `policy-monitor` binds a loopback port inside the measured guest, there is
+  exactly one pod per guest (no co-tenant), and nothing outside the guest can
+  reach it. Under **node-CVM** the whole node is the CVM and the socket sits in
+  the node's encrypted tmpfs, so the L0 host is out the same way. A guest the
+  host booted with a swapped plugin would not match the launch measurement, so a
+  CDS with `--measurements` set refuses to issue to it.
 
 - **The residual is a co-tenant, not the L0 host** (node-CVM only). The exposure
   is a *malicious allowlisted pod* — inside the node's TCB in the TEE sense, but
@@ -510,9 +545,11 @@ splits cleanly:
   swap the file. This is a PodSecurity / filesystem-permission problem, the same
   residual as "Why a unix socket" (overlaps THREAT_MODEL §Addressable). It is
   gated by: the dir is **root-owned `0711`** (untrusted pods cannot write it),
-  get-cert's own mount is **read-only**, and get-cert dials a **compiled** path
-  the control plane cannot redirect. It opens only if PodSecurity lets untrusted
-  pods RW-mount host paths. (One nuance: the mount *source*
+  get-cert's own mount is **read-only**, get-cert dials a **compiled** path the
+  control plane cannot redirect, and the chart's `deny-host-namespaces` policy
+  denies `hostPath` volumes to tenant namespaces outright. It opens only if that
+  policy is disabled and PodSecurity lets untrusted pods RW-mount host paths.
+  (One nuance: the mount *source*
   `WorkloadClaimsHostDir` is operator-supplied, so a malicious operator could
   point it at a rogue dir — but the operator/webhook runs inside the node-CVM
   and is measured, so this reduces to "is the node's TCB intact", which the node
@@ -520,30 +557,42 @@ splits cleanly:
   node measurement + allowlist + guest lockdown, not on the socket.)
 
 **And a subverted socket is bounded anyway.** A swapped socket can hand get-cert
-a token, but not one CDS accepts: the signature must verify under a key whose
-EAR CDS itself issued against an allowed measurement, and the `inventoryAddr` it
-names must answer over mutually-attested RA-TLS. The worst a co-tenant swap
-achieves is denying the pod its sandbox ID.
+a token, but not one CDS accepts: the signature must verify under a key CDS
+fetched from `:1019` at an address inside the operator's node CIDRs, over
+mutually-attested RA-TLS. Naming a real node's address does not help — that
+node's inventory holds the key, and it did not sign this token. The worst a
+co-tenant swap achieves is denying the pod its sandbox ID.
 
-The **digests endpoint** needs no equivalent argument: it is not a filesystem
-object, it never answers an unauthenticated caller, and its address is
-signature-covered. It does need to be *reachable* from CDS — see Enablement.
+The **identity/digests endpoint** needs no equivalent argument: it is not a
+filesystem object, it never answers an unauthenticated caller, and reaching it
+requires the node's network namespace. It does need to be *reachable* from CDS —
+see Enablement.
 
 ---
 
 ## Enablement
 
-Always on for node-CVM: the chart wires the NRI inventory socket, the webhook
-mount, the digests port, and the operator flag. get-cert is fail-closed on an
-inventory error, so a broken nri-image-policy blocks workload cert issuance
-node-wide — by design.
+Always on in both shapes. On node-CVM the chart wires the NRI inventory socket,
+the webhook mount, and the operator flag; under kata the operator injects
+`--workload-claims --workload-claims-guest` and no volume, and `policy-monitor`
+binds its loopback token port unconditionally — gating it on configuration would
+let the untrusted host switch it off. get-cert is fail-closed on an inventory
+error, so a broken inventory blocks workload cert issuance — by design.
 
-**Network reachability.** The digests endpoint is a new *inbound* path: CDS must
-be able to reach node-CVM nodes (and kata guest pods) on
-`nriImagePolicy.sandboxDigests.port` / policy-monitor's `SandboxDigestsPort`,
-9443 by default. The advertised host is inferred from the route to CDS; set
-`nriImagePolicy.sandboxDigests.advertiseHost` or
-`$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` when that inference is wrong (NAT).
+**Network reachability.** The identity/digests endpoint is a new *inbound* path:
+CDS must be able to reach node-CVM nodes and kata guest pods on
+`workloadclaims.DigestsPort` (1019, fixed), and `cds.sandboxInventoryCIDRs`
+(`c8s install --node-cidr`) must cover those addresses or CDS refuses every
+request carrying a token. The advertised host defaults to the installer
+DaemonSet's own `status.hostIP`, written to a `node-ip` file beside the socket;
+set `nriImagePolicy.sandboxDigests.advertiseHost` or
+`$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` to override. Route inference is the last
+resort and is wrong under the chart's default, where the plugin dials the CDS
+NodePort over loopback.
+
+**A failed digests endpoint is not fatal.** Both inventories log and continue:
+containerd sets `required_plugins`, so a plugin exit takes container creation
+down node-wide, whereas a missing digests endpoint only degrades issuance.
 
 **Unpinned measurements do not disable the flow.** With an empty measurement
 allowlist both ends still require a hardware-attested RA-TLS peer but pin no
@@ -551,8 +600,10 @@ measurement — any TEE can answer as the inventory, and any TEE that can reach
 the port can read what a node runs. Both log it as UNSAFE outside development;
 the allowlist gate still runs. A CDS with no `--ratls-platform` has no RA-TLS
 identity to present, makes no callback, and **refuses** any request carrying a
-sandbox token; an inventory whose CDS measurements fail to parse serves no
-tokens, and get-cert issues without a sandbox ID.
+sandbox token. A `--measurements` entry that is not hex fails CDS startup rather
+than silently unpinning the callback; in the kata guest, unparseable CDS
+measurements disable tokens and get-cert issues without a sandbox ID, while on
+node-CVM the same typo fails the plugin's config validation at startup.
 
 **Upgrade ordering.** Because get-cert fails closed on an inventory error, roll
 `nri-image-policy` (which creates the socket and serves both surfaces) **before
@@ -561,13 +612,10 @@ webhook starts injecting the flag while an old plugin (no inventory socket) is
 still running — or before the socket's host directory exists for the hostPath
 mount — every newly admitted `cw` pod fails cert issuance until the plugin is
 current. A chart upgrade that rolls both together is safe; a partial rollout is
-not.
-
-(The kata path is not yet chart-wired: the guest image must serve
-`policy-monitor`'s inventory socket via `--workload-claims-socket-dir` and
-bind-mount that directory into pod containers at
-`workloadclaims.SidecarSocketDir` before the chart injects
-`--workload-claims` for kata pods — a follow-up.)
+not. Under kata the equivalent ordering is the guest image: a guest whose
+`policy-monitor` predates the loopback token route answers nothing on
+`127.0.0.1:8401`, so roll the guest image before the operator starts injecting
+`--workload-claims-guest`.
 
 ## Audit pointers
 
@@ -575,7 +623,7 @@ bind-mount that directory into pod containers at
 |---|---|
 | Inventory protocol (both surfaces), sandbox token, peer-cred + cgroup binding | `pkg/workloadclaims/` |
 | node-CVM inventory (shallowest-tracked resolution, sandbox/container eviction) | `internal/cmds/nri-image-policy/inventory.go` |
-| kata guest inventory (single-pod, same unix socket) | `internal/cmds/policymonitor/inventory.go` |
+| kata guest inventory (single-pod, loopback token route) | `internal/cmds/policymonitor/inventory.go` |
 | get-cert challenge → token fetch → `/attest` forward | `internal/cmds/getcert/run.go`, `pkg/attestclient/client.go` |
 | get-cert leaf-embed (nonce-free RA-TLS extension on the CSR) | `pkg/attestclient/ratls.go` (`AttestationExtension`) |
 | CDS token verify + inventory callback + allowlist membership gate + leaf stamp | `internal/cmds/cds/attest.go`, `internal/issuer/sign.go` |

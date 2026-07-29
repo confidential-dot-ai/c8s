@@ -26,8 +26,8 @@ const (
 	digestB = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 )
 
-// testAddr is a syntactically valid advertise address; the tests never dial it.
-const testAddr = "10.0.0.7:9443"
+// testHost is a syntactically valid advertise host; the tests never dial it.
+const testHost = "10.0.0.7"
 
 // fakeResolver is a SandboxResolver test double that records the peer PID the
 // inventory resolved.
@@ -74,15 +74,13 @@ func serveDigestsOnUnix(t *testing.T, resolver SandboxResolver) string {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = ServeDigests(ctx, l, resolver) }()
+	go func() { _ = ServeDigests(ctx, l, resolver, []byte("test-identity")) }()
 	return sock
 }
 
 func testSigner(t *testing.T) *SandboxTokenSigner {
 	t.Helper()
-	signer, err := NewSandboxTokenSigner(func(context.Context, []byte) (string, error) {
-		return "test-ear", nil
-	}, testAddr)
+	signer, err := NewSandboxTokenSigner(testHost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,9 +133,6 @@ func TestSandboxTokenRoute(t *testing.T) {
 	if resolver.pid != os.Getpid() {
 		t.Fatalf("inventory saw peer pid %d, want caller pid %d", resolver.pid, os.Getpid())
 	}
-	if token.EAR != "test-ear" {
-		t.Fatalf("EAR = %q, want the inventory credential", token.EAR)
-	}
 	sandbox, err := token.Verify(signer.PublicKey(), &requester.PublicKey, testNonce)
 	if err != nil {
 		t.Fatalf("verify token: %v", err)
@@ -147,8 +142,8 @@ func TestSandboxTokenRoute(t *testing.T) {
 	}
 	// CDS reaches the inventory back at the address inside the signature, so a
 	// hostile host cannot redirect the callback.
-	if sandbox.InventoryAddr != testAddr {
-		t.Fatalf("inventory addr = %q, want %q", sandbox.InventoryAddr, testAddr)
+	if sandbox.InventoryHost != testHost {
+		t.Fatalf("inventory addr = %q, want %q", sandbox.InventoryHost, testHost)
 	}
 
 	// The token is bound to the requester key: any other key must fail.
@@ -213,7 +208,7 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := signer.Sign(context.Background(), "sandbox-1", keyDigest, testNonce)
+	token, err := signer.Sign("sandbox-1", keyDigest, testNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +227,7 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 		SandboxID:     "sandbox-1",
 		KeyDigest:     keyDigest,
 		Nonce:         []byte("stale-challenge"),
-		InventoryAddr: testAddr,
+		InventoryHost: testHost,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +236,7 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale := &SignedSandboxToken{Token: der, Signature: sig, EAR: "test-ear"}
+	stale := &SignedSandboxToken{Token: der, Signature: sig}
 	if _, err := stale.Verify(signer.PublicKey(), &requester.PublicKey, testNonce); err == nil {
 		t.Fatal("token carrying a stale nonce verified against the current challenge")
 	}
@@ -253,7 +248,7 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 		SandboxID:     "sandbox-1",
 		KeyDigest:     keyDigest,
 		Nonce:         testNonce,
-		InventoryAddr: "not-a-host-port",
+		InventoryHost: "not-an-ip",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -262,7 +257,7 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	badToken := &SignedSandboxToken{Token: bad, Signature: badSig, EAR: "test-ear"}
+	badToken := &SignedSandboxToken{Token: bad, Signature: badSig}
 	if _, err := badToken.Verify(signer.PublicKey(), &requester.PublicKey, testNonce); err == nil {
 		t.Fatal("token with a malformed inventory address verified")
 	}
@@ -273,24 +268,42 @@ func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
 func TestSignRejectsBadNonce(t *testing.T) {
 	signer := testSigner(t)
 	keyDigest := []byte("00000000000000000000000000000000")
-	if _, err := signer.Sign(context.Background(), "sandbox-1", keyDigest, nil); err == nil {
+	if _, err := signer.Sign("sandbox-1", keyDigest, nil); err == nil {
 		t.Fatal("signed a token with an empty nonce")
 	}
-	if _, err := signer.Sign(context.Background(), "sandbox-1", keyDigest, make([]byte, maxNonceLen+1)); err == nil {
+	if _, err := signer.Sign("sandbox-1", keyDigest, make([]byte, maxNonceLen+1)); err == nil {
 		t.Fatal("signed a token with an over-long nonce")
 	}
 }
 
-// NewSandboxTokenSigner refuses an address CDS could not dial, so the failure
+// NewSandboxTokenSigner refuses a host CDS could not dial, so the failure
 // surfaces at startup rather than as an unreachable callback at issuance.
-func TestNewSandboxTokenSignerValidatesAddr(t *testing.T) {
-	for _, addr := range []string{"", "nohost", "host:0", "host:99999", ":9443"} {
-		if _, err := NewSandboxTokenSigner(func(context.Context, []byte) (string, error) {
-			return "test-ear", nil
-		}, addr); err == nil {
-			t.Fatalf("addr %q accepted", addr)
+func TestNewSandboxTokenSignerValidatesHost(t *testing.T) {
+	for _, host := range []string{"", "nohost", "127.0.0.1", "10.0.0.1:9443"} {
+		if _, err := NewSandboxTokenSigner(host); err == nil {
+			t.Fatalf("host %q accepted", host)
 		}
 	}
+}
+
+// The identity route serves the signing key CDS resolves the token against.
+// Serving it on the same privileged-port listener as the digests is what makes
+// it an identity: a workload cannot bind the node's netns to answer here.
+func TestServeDigestsServesIdentity(t *testing.T) {
+	signer := testSigner(t)
+	sock := serveDigestsOnUnix(t, &fakeResolver{sandboxID: "sandbox-1"})
+	status, body := inventoryGetRaw(t, sock, IdentityPath)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var out InventoryIdentity
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.PublicKey, []byte("test-identity")) {
+		t.Fatalf("identity = %x, want the served key", out.PublicKey)
+	}
+	_ = signer
 }
 
 // An inventory without a signer serves no token route; FetchSandboxToken maps
@@ -314,8 +327,8 @@ func TestTokenSocketDoesNotServeDigests(t *testing.T) {
 	}
 }
 
-// A resolution failure (unknown caller) and a failing EAR source must stay
-// fail-closed, distinct from the route-absent case above.
+// A resolution failure (unknown caller) stays fail-closed, distinct from the
+// route-absent case above.
 func TestSandboxTokenFailuresAreClosed(t *testing.T) {
 	requester := testRequesterKey(t)
 
@@ -323,18 +336,6 @@ func TestSandboxTokenFailuresAreClosed(t *testing.T) {
 	_, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
 	if err == nil || errors.Is(err, ErrSandboxUnsupported) {
 		t.Fatalf("err = %v, want a hard failure (resolver error)", err)
-	}
-
-	noEAR, err := NewSandboxTokenSigner(func(context.Context, []byte) (string, error) {
-		return "", fmt.Errorf("CDS unreachable")
-	}, testAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sock = serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, noEAR)
-	_, err = FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
-	if err == nil || errors.Is(err, ErrSandboxUnsupported) {
-		t.Fatalf("err = %v, want a hard failure (EAR source error)", err)
 	}
 }
 
@@ -407,15 +408,15 @@ func TestFetchRejectsNonUnixEndpoint(t *testing.T) {
 	}
 }
 
-func TestValidateInventoryAddr(t *testing.T) {
-	for _, ok := range []string{"10.0.0.1:9443", "192.0.2.5:443", "[2001:db8::1]:9443"} {
-		if err := ValidateInventoryAddr(ok); err != nil {
-			t.Fatalf("addr %q rejected: %v", ok, err)
+func TestValidateInventoryHost(t *testing.T) {
+	for _, ok := range []string{"10.0.0.1", "192.0.2.5", "2001:db8::1"} {
+		if err := ValidateInventoryHost(ok); err != nil {
+			t.Fatalf("host %q rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "10.0.0.1", ":9443", "10.0.0.1:0", "10.0.0.1:70000", "10.0.0.1:http"} {
-		if err := ValidateInventoryAddr(bad); err == nil {
-			t.Fatalf("addr %q accepted", bad)
+	for _, bad := range []string{"", "10.0.0.1:9443", "not-an-ip"} {
+		if err := ValidateInventoryHost(bad); err == nil {
+			t.Fatalf("host %q accepted", bad)
 		}
 	}
 }
@@ -426,63 +427,86 @@ func TestValidateInventoryAddr(t *testing.T) {
 // and names that let DNS pick the destination after the check.
 func TestInventoryAddrRejectsRequestForgeryTargets(t *testing.T) {
 	for _, bad := range []string{
-		"169.254.169.254:80",   // cloud metadata (IMDS)
-		"169.254.169.254:9443", // ... on the expected port
-		"[fe80::1]:9443",       // IPv6 link-local
-		"127.0.0.1:9443",       // CDS's own loopback
-		"[::1]:9443",           // IPv6 loopback
-		"0.0.0.0:9443",         // unspecified
-		"[::]:9443",            // IPv6 unspecified
-		"224.0.0.1:9443",       // multicast
-		"metadata.google.internal:80",
-		"localhost:9443",
-		"inventory.example:9443", // any name: DNS could resolve anywhere
+		"169.254.169.254", // cloud metadata (IMDS)
+		"fe80::1",         // IPv6 link-local
+		"127.0.0.1",       // CDS's own loopback
+		"::1",             // IPv6 loopback
+		"0.0.0.0",         // unspecified
+		"::",              // IPv6 unspecified
+		"224.0.0.1",       // multicast
+		"metadata.google.internal",
+		"localhost",
+		"inventory.example", // any name: DNS could resolve anywhere
 	} {
-		if err := ValidateInventoryAddr(bad); err == nil {
-			t.Fatalf("request-forgery target %q accepted as an inventory address", bad)
+		if err := ValidateInventoryHost(bad); err == nil {
+			t.Fatalf("request-forgery target %q accepted as an inventory host", bad)
 		}
 	}
 }
 
 // What gets dialed is rebuilt from the parsed IP and port, not passed through
 // from the caller's bytes.
-func TestParseInventoryAddrNormalizes(t *testing.T) {
-	got, err := parseInventoryAddr("[2001:0db8:0000::1]:09443")
+func TestParseInventoryHostNormalizes(t *testing.T) {
+	got, err := parseInventoryHost("2001:0db8:0000::1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "[2001:db8::1]:9443" {
-		t.Fatalf("normalized addr = %q, want the re-serialized form", got)
+	if got != "2001:db8::1" {
+		t.Fatalf("normalized host = %q, want the re-serialized form", got)
+	}
+}
+
+// The node CIDRs are the boundary that stops a workload answering as its own
+// node's inventory: a pod IP is outside them, so CDS never dials it.
+func TestInventoryHostsBoundsTheCallback(t *testing.T) {
+	hosts, err := ParseInventoryHosts([]string{"10.0.0.0/24", "192.168.1.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hosts.Contains("10.0.0.7") || !hosts.Contains("192.168.1.9") {
+		t.Fatal("node address rejected")
+	}
+	for _, outside := range []string{"10.244.1.5", "172.16.0.1", "not-an-ip", ""} {
+		if hosts.Contains(outside) {
+			t.Fatalf("address %q outside the node CIDRs was accepted", outside)
+		}
+	}
+	// Empty contains nothing, so an unconfigured CDS dials nowhere.
+	if (InventoryHosts{}).Contains("10.0.0.7") {
+		t.Fatal("empty CIDR set accepted an address")
+	}
+	if _, err := ParseInventoryHosts([]string{"nonsense"}); err == nil {
+		t.Fatal("malformed CIDR accepted")
 	}
 }
 
 // Fetch must reject a forged address before it opens any connection.
 func TestFetchRejectsForgedAddrBeforeDialing(t *testing.T) {
 	c := &DigestsClient{timeout: time.Second}
-	if _, err := c.Fetch(context.Background(), "169.254.169.254:80", "sandbox-1"); err == nil {
+	if _, err := c.Fetch(context.Background(), "169.254.169.254", "sandbox-1"); err == nil {
 		t.Fatal("Fetch dialed the metadata service")
 	}
-	if _, err := c.Fetch(context.Background(), "10.0.0.1:9443", "../../etc/passwd"); err == nil {
+	if _, err := c.Fetch(context.Background(), "10.0.0.1", "../../etc/passwd"); err == nil {
 		t.Fatal("Fetch accepted a sandbox ID that is not a sandbox ID")
 	}
 }
 
-func TestResolveAdvertiseAddrPrefersExplicitHost(t *testing.T) {
-	addr, err := ResolveAdvertiseAddr("10.1.2.3", 9443, "cds.invalid:8443")
+func TestResolveAdvertiseHostPrefersExplicitHost(t *testing.T) {
+	host, err := ResolveAdvertiseHost("10.1.2.3", "cds.invalid:8443")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if addr != "10.1.2.3:9443" {
-		t.Fatalf("addr = %q, want 10.1.2.3:9443", addr)
+	if host != "10.1.2.3" {
+		t.Fatalf("host = %q, want 10.1.2.3", host)
 	}
 }
 
 // An address CDS could never dial back is rejected where it is configured, so
 // the inventory fails at startup instead of minting tokens that steer CDS
 // somewhere useless.
-func TestResolveAdvertiseAddrRejectsUnreachableHost(t *testing.T) {
+func TestResolveAdvertiseHostRejectsUnreachableHost(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "169.254.169.254", "inventory.example"} {
-		if _, err := ResolveAdvertiseAddr(host, 9443, "cds.invalid:8443"); err == nil {
+		if _, err := ResolveAdvertiseHost(host, "cds.invalid:8443"); err == nil {
 			t.Fatalf("advertise host %q accepted", host)
 		}
 	}

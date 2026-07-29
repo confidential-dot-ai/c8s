@@ -2,7 +2,6 @@ package policymonitor
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -27,13 +25,12 @@ var sandboxIDAnnotations = []string{
 
 // admissionInventory implements workloadclaims.SandboxResolver for the kata
 // guest — the same API shape nri-image-policy serves on node-CVM
-// (docs/ratls.md, "Sandbox identity"). A kata guest
-// holds exactly one pod, so there is no caller to disambiguate: peer PIDs are
-// ignored, and the sandbox set is the guest's single sandbox ID, learned from
-// the CRI annotations kata-agent hands the guest. It is fed from the same
-// admission decisions policy-monitor already makes. It listens on a Unix
-// socket inside the measured guest — no host-reachable socket and no
-// peer-credential check are needed; the guest boundary is the isolation.
+// (docs/ratls.md, "Sandbox identity"). A kata guest holds exactly one pod, so
+// there is no caller to disambiguate: peer PIDs are ignored, and the sandbox
+// set is the guest's single sandbox ID, learned from the CRI annotations
+// kata-agent hands the guest. It is fed from the same admission decisions
+// policy-monitor already makes. The token route is served on guest loopback —
+// the guest boundary is the isolation, so no peer-credential check is needed.
 type admissionInventory struct {
 	mu         sync.RWMutex
 	containers map[string]string // container id -> image digest
@@ -53,6 +50,14 @@ func (b *admissionInventory) record(cid, digest string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.containers[cid] = digest
+}
+
+// remove evicts a container whose bundle kata-agent has torn down, so a stopped
+// container's image cannot linger in a later /digests answer.
+func (b *admissionInventory) remove(cid string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.containers, cid)
 }
 
 // recordSandboxID notes the guest's pod sandbox ID (from the CRI annotations
@@ -109,9 +114,9 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 	return ""
 }
 
-// sandboxTokenSigner builds the inventory's sandbox-token signer over the same
-// RA-TLS-pinned CDS access the allowlist refresh uses; its EAR comes from
-// CDS's /attest-key via the in-guest attestation-service. Config problems
+// sandboxTokenSigner builds the guest's sandbox-token signer. The key needs no
+// credential of its own: CDS reads it from this guest's digests endpoint on a
+// privileged port, which is what establishes whose key it is. Config problems
 // disable tokens (nil signer) but never crash the monitor — the same
 // fail-open-to-degraded posture as runAllowlistRefresh; get-cert then issues
 // without a sandbox ID.
@@ -132,50 +137,46 @@ func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.Sandbo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	addr, err := sandboxDigestsAddr(cfg)
+	host, err := sandboxDigestsHost(cfg)
 	if err != nil {
-		logger.Error("sandbox tokens disabled: no reachable digests address", "error", err)
+		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
 		return nil
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
-	if err != nil {
-		logger.Error("sandbox tokens disabled: build RA-TLS client failed", "error", err)
-		return nil
-	}
-	cdsClient := attestclient.NewClientWithHTTP(cfg.CDSURL, httpClient)
-	attestationURL := cfg.AttestationServiceURL
-	signer, err := workloadclaims.NewSandboxTokenSigner(func(ctx context.Context, pubDER []byte) (string, error) {
-		return cdsClient.AttestKey(ctx, attestationURL, pubDER)
-	}, addr)
+	signer, err := workloadclaims.NewSandboxTokenSigner(host)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: create signer failed", "error", err)
 		return nil
 	}
-	logger.Info("sandbox tokens enabled", "digests_addr", addr)
+	logger.Info("sandbox tokens enabled", "digests_host", host, "digests_port", workloadclaims.DigestsPort)
 	return signer
 }
 
-// sandboxDigestsAddr is the host:port every sandbox token names for CDS's
-// digests callback — the guest's pod IP and the in-guest digests port.
-func sandboxDigestsAddr(cfg *Config) (string, error) {
+// sandboxDigestsHost is the guest IP every sandbox token names for CDS's
+// digests callback.
+func sandboxDigestsHost(cfg *Config) (string, error) {
 	cdsHost := cfg.CDSURL
 	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
 		cdsHost = u.Host
 	}
-	return workloadclaims.ResolveAdvertiseAddr(cfg.SandboxDigestsAdvertiseHost, cfg.SandboxDigestsPort, cdsHost)
+	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cdsHost)
 }
 
-// startAdmissionInventory serves the token socket the guest bind-mounts into
-// the pod's containers, the same transport nri-image-policy uses on node-CVM
-// (docs/ratls.md). The shared socket path lets get-cert dial one compiled
-// endpoint in both shapes.
-func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, socketPath string, signer *workloadclaims.SandboxTokenSigner) error {
-	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.InventorySocketGID)
+// startAdmissionInventory serves the token route on the guest's loopback
+// address, which the pod's containers share (docs/ratls.md). No shared
+// filesystem is involved, and no configuration selects it: the port is
+// compiled, so the untrusted host cannot disable the binding by withholding a
+// value the way an env-gated socket path allowed.
+//
+// Loopback is sound here for the reason peer credentials are unnecessary: a
+// kata guest holds exactly one pod, so there is no caller to tell apart.
+func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(workloadclaims.GuestTokenPort))
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	go func() {
-		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
+		logger.Info("starting admission inventory", "addr", addr, "sandbox_tokens", signer != nil)
 		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
@@ -185,37 +186,13 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 
 // startSandboxDigests serves the CDS-facing digests endpoint inside the guest
 // over mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
-func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory) error {
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
 	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
 		return fmt.Errorf("parse CDS measurements: %w", err)
 	}
-	tlsCfg, certMgr, err := workloadclaims.DigestsServerTLSConfig(
+	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		string(types.PlatformSnp),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),
-		cfg.AttestationServiceURL,
-		measurements,
-		0,
-	)
-	if err != nil {
-		return err
-	}
-	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err = certMgr.WarmUp(warmupCtx)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("warm up sandbox-digests cert: %w", err)
-	}
-	addr := net.JoinHostPort("", strconv.Itoa(cfg.SandboxDigestsPort))
-	l, err := tls.Listen("tcp", addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", addr, err)
-	}
-	go func() {
-		logger.Info("starting sandbox-digests endpoint", "addr", addr)
-		if err := workloadclaims.ServeDigests(ctx, l, inventory); err != nil {
-			logger.Error("sandbox-digests endpoint error", "error", err)
-		}
-	}()
-	return nil
+		cfg.AttestationServiceURL, measurements)
 }

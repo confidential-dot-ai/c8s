@@ -11,10 +11,13 @@ package workloadclaims
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -24,75 +27,99 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-// ValidateInventoryAddr reports whether addr is a dialable inventory address.
-// See parseInventoryAddr for the rules.
-func ValidateInventoryAddr(addr string) error {
-	_, err := parseInventoryAddr(addr)
+// DigestsPort is the port every inventory serves its digests endpoint on, and
+// the only port CDS will dial for one. It is fixed rather than carried in the
+// token, and it is privileged (<1024, IANA-unassigned), because that is what
+// makes it an identity: binding it requires the node's own network namespace,
+// which the chart's deny-host-namespaces policy withholds from tenant pods. A
+// pod can bind any port inside its own netns, so an unprivileged port would let
+// any workload answer as the inventory.
+const DigestsPort = 1019
+
+// dialPort is the port DigestsClient connects to. It is a package variable only
+// so tests can bind an unprivileged listener; production always uses
+// DigestsPort, which is never taken from the wire.
+var dialPort = DigestsPort
+
+// ValidateInventoryHost reports whether host is a usable inventory host.
+// See parseInventoryHost for the rules.
+func ValidateInventoryHost(host string) error {
+	_, err := parseInventoryHost(host)
 	return err
 }
 
-// parseInventoryAddr validates addr and returns it rebuilt from its parsed
-// parts, so what gets dialed is derived from a checked IP and port rather than
+// parseInventoryHost validates host and returns it re-serialized from the
+// parsed IP, so what gets dialed is derived from a checked value rather than
 // from the caller's bytes.
 //
-// SECURITY: this bounds a request-forgery primitive. The address rides a sandbox
-// token, and a token is mintable by anything holding a CDS /attest-key EAR —
-// which on node-CVM is every pod, since they all share the node's launch
-// measurement. Without these rules any workload could steer CDS's callback at an
-// address of its choosing. Hence:
-//
-//   - an IP literal, never a name: a resolvable name lets DNS decide the
-//     destination after the check (rebinding), and every real deployment
-//     advertises an IP already (downward-API hostIP/podIP, or the outbound-route
-//     inference in ResolveAdvertiseAddr);
-//   - global unicast only: loopback, link-local (169.254.0.0/16 and fe80::/10 —
-//     the cloud metadata service), multicast, and the unspecified address are all
-//     rejected. An inventory has no legitimate reason to advertise any of them,
-//     so this costs nothing real.
-//
-// What remains is a connection to a routable address on the requester's chosen
-// port. RA-TLS makes it useless for talking to anything that is not an attested
-// peer, and Fetch's caller must not echo the outcome back — see
-// docs/THREAT_MODEL.md.
-func parseInventoryAddr(addr string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("workloadclaims: inventory address %q is not host:port: %w", addr, err)
-	}
+// SECURITY: this bounds a request-forgery primitive. The host rides a sandbox
+// token, and a token is signable by anything that can reach CDS — the signature
+// is only meaningful once CDS has resolved the key, which requires dialing this
+// host first. Hence: an IP literal, never a name (a resolvable name lets DNS
+// decide the destination after the check), and global unicast only (no
+// loopback, link-local/IMDS, multicast, or unspecified). Callers additionally
+// constrain it to the operator's inventory CIDRs — see InventoryHosts.
+func parseInventoryHost(host string) (string, error) {
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return "", fmt.Errorf("workloadclaims: inventory address %q must use an IP literal, not a name", addr)
+		return "", fmt.Errorf("workloadclaims: inventory host %q must be an IP literal, not a name", host)
 	}
-	if !ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() {
-		return "", fmt.Errorf("workloadclaims: inventory address %q is not a routable unicast address", addr)
+	if !ip.IsGlobalUnicast() {
+		return "", fmt.Errorf("workloadclaims: inventory host %q is not a routable unicast address", host)
 	}
-	p, err := strconv.Atoi(port)
-	if err != nil || p < 1 || p > 65535 {
-		return "", fmt.Errorf("workloadclaims: inventory address %q has an invalid port", addr)
-	}
-	return net.JoinHostPort(ip.String(), strconv.Itoa(p)), nil
+	return ip.String(), nil
 }
 
-// ResolveAdvertiseAddr returns the host:port an inventory signs into its
-// sandbox tokens for CDS to dial back. host wins when set (the chart supplies
-// it from the downward API — status.hostIP on node-CVM, status.podIP in a kata
-// guest). Otherwise it is inferred as the local address the kernel would use
-// to reach cdsHost, which is the interface CDS's replies already traverse.
+// InventoryHosts is the set of CIDRs an inventory may live in — the operator's
+// node addresses. CDS refuses to dial anything outside them, which is what
+// keeps a pod (whose IP is in the pod CIDR) from standing in for a node.
+type InventoryHosts []*net.IPNet
+
+// ParseInventoryHosts builds the set from CIDR strings.
+func ParseInventoryHosts(cidrs []string) (InventoryHosts, error) {
+	out := make(InventoryHosts, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(c))
+		if err != nil {
+			return nil, fmt.Errorf("workloadclaims: inventory CIDR %q: %w", c, err)
+		}
+		out = append(out, network)
+	}
+	return out, nil
+}
+
+// Contains reports whether host is inside the set. An empty set contains
+// nothing: callers must fail closed rather than dial anywhere.
+func (h InventoryHosts) Contains(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range h {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveAdvertiseHost returns the node IP an inventory signs into its sandbox
+// tokens. An explicit host always wins; the chart supplies one from the
+// installer DaemonSet's downward API (status.hostIP).
 //
-// A wrong answer here fails closed and loudly: CDS cannot reach the endpoint,
-// so issuance is refused rather than silently unverified.
-func ResolveAdvertiseAddr(host string, port int, cdsHost string) (string, error) {
+// Inference is the fallback and is deliberately weak: it asks the routing table
+// which local address would reach cdsHost. That answer is wrong whenever CDS is
+// reached over loopback — which the chart's own default does, since the plugin
+// dials the CDS NodePort on 127.0.0.1 — so it fails loudly rather than
+// advertising something CDS could never dial back.
+func ResolveAdvertiseHost(host, cdsHost string) (string, error) {
 	if host == "" {
 		var err error
 		if host, err = outboundHost(cdsHost); err != nil {
-			return "", fmt.Errorf("workloadclaims: infer the inventory advertise address (set it explicitly): %w", err)
+			return "", fmt.Errorf("workloadclaims: infer the inventory advertise host (set it explicitly): %w", err)
 		}
 	}
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	if err := ValidateInventoryAddr(addr); err != nil {
-		return "", err
-	}
-	return addr, nil
+	return parseInventoryHost(host)
 }
 
 // outboundHost reports the local IP the kernel would source from when talking
@@ -147,6 +174,40 @@ func requireAttestationApi(url string) error {
 	return nil
 }
 
+// StartDigestsEndpoint binds DigestsPort and serves the identity and digests
+// routes on it. Shared by both inventories, which differ only in where their
+// configuration comes from.
+//
+// The listener is bound before the certificate warm-up so a token never names a
+// port nothing is listening on, and so a port conflict surfaces immediately
+// rather than after the warm-up window. Warm-up failure is logged, not fatal:
+// the endpoint provisions on the first handshake instead, and taking the
+// inventory down would cost far more than a slow first callback.
+func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte) error {
+	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsMeasurements, 0)
+	if err != nil {
+		return err
+	}
+	addr := net.JoinHostPort("", strconv.Itoa(DigestsPort))
+	l, err := tls.Listen("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	go func() {
+		warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := certMgr.WarmUp(warmupCtx)
+		cancel()
+		if err != nil {
+			logger.Error("sandbox-digests cert warm-up failed; the endpoint will provision on first handshake", "error", err)
+		}
+		logger.Info("starting sandbox-digests endpoint", "addr", addr)
+		if err := ServeDigests(ctx, l, resolver, identity); err != nil {
+			logger.Error("sandbox-digests endpoint error", "error", err)
+		}
+	}()
+	return nil
+}
+
 // DigestsClient is CDS's side of the callback: an RA-TLS client that verifies
 // the inventory's attestation — pinning its launch measurement when one is
 // configured — and presents CDS's own RA-TLS certificate, so the inventory can
@@ -193,8 +254,16 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 		http: &http.Client{
 			Timeout: timeout,
 			// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose
-			// on a call whose whole point is to reach one attested peer.
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			// on a call whose whole point is to reach one attested peer. The
+			// idle pool is bounded because the dial target is chosen by the
+			// requester: unbounded, never-expiring idle conns would be a
+			// retention primitive rather than a reuse optimisation.
+			Transport: &http.Transport{
+				TLSClientConfig:     tlsCfg,
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 2,
+				IdleConnTimeout:     30 * time.Second,
+			},
 		},
 		timeout: timeout,
 	}, nil
@@ -206,33 +275,67 @@ func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx 
 // fail-closed for issuance.
 var ErrSandboxUnknown = fmt.Errorf("workloadclaims: inventory does not know this sandbox")
 
-// Fetch asks the inventory at addr which image digests sandboxID is running.
-// addr comes from the verified sandbox token, so it names the inventory that
-// vouched for the sandbox; the RA-TLS handshake then proves whatever answers
-// there is a TEE on an allowed measurement.
+// InventoryKey fetches the sandbox-token signing key of the inventory on host.
 //
-// Both inputs are rebuilt from validated parts before they reach the URL
-// (parseInventoryAddr, ratls.ValidateSandboxID), because both originate in a
-// token a workload can mint.
-func (c *DigestsClient) Fetch(ctx context.Context, addr, sandboxID string) ([]string, error) {
-	dialAddr, err := parseInventoryAddr(addr)
+// This is what gives an inventory an identity CDS can check. The key arrives
+// over RA-TLS from DigestsPort — a privileged port in the node's own network
+// namespace — so answering here requires a privilege the chart's
+// deny-host-namespaces policy withholds from tenant pods. Sharing the node's
+// launch measurement, which every pod on a node-CVM does, is not enough.
+func (c *DigestsClient) InventoryKey(ctx context.Context, host string) (*ecdsa.PublicKey, error) {
+	resp, err := c.get(ctx, host, IdentityPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("workloadclaims: inventory %s identity returned %d", host, resp.StatusCode)
+	}
+	var out InventoryIdentity
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("workloadclaims: decode inventory identity: %w", err)
+	}
+	pubAny, err := x509.ParsePKIXPublicKey(out.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("workloadclaims: parse inventory key: %w", err)
+	}
+	pub, ok := pubAny.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("workloadclaims: inventory key is not ECDSA")
+	}
+	return pub, nil
+}
+
+// get dials the inventory on host at DigestsPort and performs a GET.
+func (c *DigestsClient) get(ctx context.Context, host, route string) (*http.Response, error) {
+	dialHost, err := parseInventoryHost(host)
+	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-
-	url := "https://" + dialAddr + SandboxDigestsPrefix + sandboxID
+	url := "https://" + net.JoinHostPort(dialHost, strconv.Itoa(dialPort)) + route
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("workloadclaims: reach inventory %s: %w", dialAddr, err)
+		return nil, fmt.Errorf("workloadclaims: reach inventory %s: %w", dialHost, err)
+	}
+	return resp, nil
+}
+
+// Fetch asks the inventory on host which image digests sandboxID is running.
+// host comes from the verified sandbox token, so it names the inventory that
+// vouched for the sandbox.
+func (c *DigestsClient) Fetch(ctx context.Context, host, sandboxID string) ([]string, error) {
+	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
+		return nil, err
+	}
+	resp, err := c.get(ctx, host, SandboxDigestsPrefix+sandboxID)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -240,7 +343,7 @@ func (c *DigestsClient) Fetch(ctx context.Context, addr, sandboxID string) ([]st
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", dialAddr, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", host, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out SandboxDigestsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {

@@ -212,6 +212,14 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
+	inventoryHosts, err := workloadclaims.ParseInventoryHosts(cfg.inventoryCIDRs)
+	if err != nil {
+		return err
+	}
+	if len(inventoryHosts) == 0 {
+		slog.Warn("--sandbox-inventory-cidr not set: CDS will refuse any request carrying a sandbox token, since it has no node CIDRs to bound the inventory callback to")
+	}
+
 	var sandboxDigests *workloadclaims.DigestsClient
 	if cfg.ratlsPlatform == "" {
 		slog.Warn("no --ratls-platform: CDS cannot call inventories back for sandbox digests, so requests carrying a sandbox token will be refused")
@@ -219,12 +227,16 @@ func run(cfg config) error {
 		if len(measurements) == 0 {
 			slog.Warn("--measurements empty: CDS accepts ANY RA-TLS-attested inventory as the source of a sandbox's container digests, so the issuance-time allowlist gate rests on an unpinned peer. UNSAFE outside development.")
 		}
+		measurementBytes, mErr := measurementDigests(measurements)
+		if mErr != nil {
+			return mErr
+		}
 		sandboxDigests, err = workloadclaims.NewDigestsClient(
 			ctx,
 			cfg.ratlsPlatform,
 			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
 			cfg.attestationApiURL,
-			measurementDigests(measurements),
+			measurementBytes,
 			cfg.requestTimeout,
 		)
 		if err != nil {
@@ -250,8 +262,7 @@ func run(cfg config) error {
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
 			SandboxDigests:    sandboxDigests,
-			EARKeyProvider:    rotator,
-			EARIssuer:         cfg.expectedIssuer,
+			InventoryHosts:    inventoryHosts,
 		},
 		SignCSRHandler: SignCSRHandler{
 			CA:             mesh,
@@ -514,14 +525,19 @@ func loadOperatorKeys(path string) ([]*ecdsa.PublicKey, []byte, error) {
 // measurementDigests renders the /attest measurement allowlist as the raw
 // digests ratls.VerifyPolicy pins, so the sandbox-digests callback accepts
 // exactly the platforms /attest does.
-func measurementDigests(allowed map[string]bool) [][]byte {
+func measurementDigests(allowed map[string]bool) ([][]byte, error) {
 	out := make([][]byte, 0, len(allowed))
 	for m := range allowed {
-		if d, err := hex.DecodeString(m); err == nil {
-			out = append(out, d)
+		d, err := hex.DecodeString(m)
+		if err != nil {
+			// Dropping it would silently unpin the callback while /attest still
+			// enforces the same entry as a string — two derivations of one
+			// allowlist must not be able to disagree.
+			return nil, fmt.Errorf("--measurements entry %q is not hex", m)
 		}
+		out = append(out, d)
 	}
-	return out
+	return out, nil
 }
 
 func parseMeasurementAllowlist(raw []string) map[string]bool {
