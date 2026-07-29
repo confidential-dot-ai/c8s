@@ -267,8 +267,7 @@ has to enumerate c8s's own sidecars.
 
 A container is dropped when its digest is an allowlist **floor** entry *and* its
 entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
-Both halves
-are load-bearing. Floor membership alone would let a pod add busybox running a
+Both halves are load-bearing. Floor membership alone would let a pod add busybox running a
 shell — also a floor entry — and have it ignored.
 
 The floor is the source. It already carries the injected image, since it could
