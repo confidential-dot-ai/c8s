@@ -175,11 +175,20 @@ func TestExplainReportsEarlyRefusals(t *testing.T) {
 			t.Fatalf("refusal = %q", resp.Refusal)
 		}
 	})
-	t.Run("host outside the CIDRs", func(t *testing.T) {
+	t.Run("host outside the bound", func(t *testing.T) {
 		eh := newExplainHarness(t)
 		eh.h.Bindings = fakeBindings{host: "192.168.1.1"}
 		_, resp := eh.serve(testSandbox)
-		if !strings.Contains(resp.Refusal, "outside the configured") {
+		if !strings.Contains(resp.Refusal, "outside the node addresses") {
+			t.Fatalf("refusal = %q", resp.Refusal)
+		}
+	})
+	// A CDS whose bound never resolved must refuse rather than dereference it.
+	t.Run("no bound at all", func(t *testing.T) {
+		eh := newExplainHarness(t)
+		eh.h.InventoryHosts = nil
+		_, resp := eh.serve(testSandbox)
+		if !strings.Contains(resp.Refusal, "outside the node addresses") {
 			t.Fatalf("refusal = %q", resp.Refusal)
 		}
 	})

@@ -148,8 +148,6 @@ jobs:
                                   # resurfaces -> CDS Pending (run 29536583462).
             ratlsPlatform: sev-snp
             measurements: ["RUNTIME_MEASUREMENT"]
-            # NODE_CIDR placeholder: payload substitutes the node's InternalIP/32 (matching `c8s install`'s per-node host routes) — CDS fail-closes sandbox-token CSRs without it (#168; this lane writes raw values, so `c8s install` never fills it).
-            sandboxInventoryCIDRs: ["NODE_CIDR"]
           attestationApi:
             image:
               tag: "$AATAG"
@@ -202,7 +200,7 @@ jobs:
           CW=$(base64 -w0 c8s/samples/nginx-confidential-pod.yaml)
 
           # RENDER GATE: fail chart validation HERE (30s) not in the CVM (20min).
-          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' | sed 's|NODE_CIDR|10.0.0.1/32|' > /tmp/gate-vals.yaml
+          printf %s "$VALS" | base64 -d | sed 's/RUNTIME_MEASUREMENT/000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/' > /tmp/gate-vals.yaml
           helm template c8s c8s/internal/helmchart/c8s -f /tmp/gate-vals.yaml > /dev/null
           echo "render gate: chart+values validate clean"
 
@@ -218,11 +216,8 @@ jobs:
           \$K create ns c8s-system >/dev/null 2>&1
           \$K label ns c8s-system pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/audit=privileged --overwrite >/dev/null 2>&1 && say NS_LABELED || say FAIL_NS
           if printf '%s' "\$MEAS" | grep -qE '^[0-9a-fA-F]{96}\$'; then MSED="s/RUNTIME_MEASUREMENT/\$MEAS/"; MMARK=MEAS_ENFORCED; else MSED='s/\["RUNTIME_MEASUREMENT"\]/[]/'; MMARK=MEAS_ACCEPTANY; fi
-          NODEIP=\$(\$K get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
-          { printf '%s' "\$NODEIP" | grep -qE '^[0-9.]+\$'; } || { say FAIL_NODEIP; exit 0; }
-          say "NODE_CIDR \$NODEIP/32"
           { printf 'apiVersion: helm.cattle.io/v1\nkind: HelmChart\nmetadata:\n  name: c8s\n  namespace: kube-system\nspec:\n  chartContent: %s\n  targetNamespace: c8s-system\n  createNamespace: false\n  valuesContent: |\n' "\$CC"
-            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed "s|NODE_CIDR|\$NODEIP/32|" | sed 's/^/    /'
+            printf %s '$VALS' | base64 -d | sed "\$MSED" | sed 's/^/    /'
           } | \$K apply -f - 2>&1 | sed 's/^/@@HCAPPLY /;s/\$/@@/'
           say \$MMARK
           HOK=0

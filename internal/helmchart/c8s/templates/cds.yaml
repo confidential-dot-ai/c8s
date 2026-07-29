@@ -148,7 +148,8 @@ spec:
       runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
       serviceAccountName: {{ include "c8s.cdsName" . }}
-      automountServiceAccountToken: false
+      # The live node-list bound needs the API token; static CIDRs do not.
+      automountServiceAccountToken: {{ empty .Values.cds.sandboxInventoryCIDRs }}
       {{- /* CDS is a singleton trust root reached over a node-local NodePort
              and (with persistence) an RWO volume, so pin it to a known node.
              The CDS digest is always in the NRI floor (c8s.imageAllowlist),

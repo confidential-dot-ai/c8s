@@ -88,21 +88,20 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
 - Sandbox identity needs the node addresses CDS may dial for a pod's admission
-  inventory (`cds.sandboxInventoryCIDRs`). `c8s install` reads them from the
-  cluster and emits **one host route per node** — a `/32`, not a covering range,
-  because on a CNI that assigns pod IPs from the node subnet (AWS VPC CNI, Azure
-  CNI) any range covering the nodes covers the pods too, and the bound would be
-  absent while looking configured. The install fails rather than proceeding if it
-  cannot determine them; without them CDS refuses every sandbox token and
-  workload pods get mesh certificates carrying no sandbox ID and no
-  issuance-time image gate.
+  inventory. CDS derives them **live from the cluster's node objects** — one
+  host route per node InternalIP, kept current as nodes are added, replaced,
+  or removed — over read-only node access the chart grants its ServiceAccount.
+  A host route per node rather than a covering range, because on a CNI that
+  assigns pod IPs from the node subnet (AWS VPC CNI, Azure CNI) any range
+  covering the nodes covers the pods too, and the bound would be absent while
+  looking configured. `c8s install` preflights the same derivation and fails
+  rather than proceeding if it cannot determine them or a node address sits
+  inside a pod range; such an address is excluded from the bound at runtime
+  too, and CDS logs it.
 
-  **Host routes are a snapshot.** A node added afterwards is not covered, and
-  workloads scheduled onto it get certificates with no sandbox ID until the
-  value is refreshed (`helm upgrade` with a new `cds.sandboxInventoryCIDRs`, or
-  re-running `c8s install`). On a cluster whose node network is separate from the
-  pod network, pass `--node-cidr <range>` instead — a range survives scale-up.
-  (docs/ratls.md, "Sandbox identity".)
+  On a cluster whose node network is separate from the pod network, pass
+  `--node-cidr <range>` instead: CDS then uses the static range and the chart
+  grants no node access. (docs/ratls.md, "Sandbox identity".)
 - `image.tag` or `image.digest`, `attestationApi.image.tag` or
   `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
