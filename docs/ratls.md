@@ -381,8 +381,12 @@ with an in-process P-256 key it had CDS attest via `POST /attest-key`. The
 signature is ECDSA over `SHA-256("c8s/sandbox-token/v1\0" ‖ tokenDER)`, and the
 envelope (`workloadclaims.SignedSandboxToken`: `token`, `signature`, `ear`)
 carries the resulting EAR, so CDS keeps no per-node key state.
-`inventoryAddr` is inside the signature — a hostile host cannot redirect the
-callback below.
+`inventoryAddr` is inside the signature, so the untrusted host cannot rewrite it
+in flight. It is **not** trusted beyond that: a token is mintable by anything
+holding an `/attest-key` EAR, which on node-CVM is every pod, so CDS treats the
+address as attacker-chosen and bounds what it may dial
+(`parseInventoryAddr`: routable unicast IP literals only, no names, no
+loopback/link-local/metadata) — see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ### Issuance
 

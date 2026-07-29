@@ -408,7 +408,7 @@ func TestFetchRejectsNonUnixEndpoint(t *testing.T) {
 }
 
 func TestValidateInventoryAddr(t *testing.T) {
-	for _, ok := range []string{"10.0.0.1:9443", "node.example:443", "[::1]:9443"} {
+	for _, ok := range []string{"10.0.0.1:9443", "192.0.2.5:443", "[2001:db8::1]:9443"} {
 		if err := ValidateInventoryAddr(ok); err != nil {
 			t.Fatalf("addr %q rejected: %v", ok, err)
 		}
@@ -420,6 +420,53 @@ func TestValidateInventoryAddr(t *testing.T) {
 	}
 }
 
+// A sandbox token is mintable by anything holding an /attest-key EAR, so the
+// address it carries is attacker-chosen. These are the request-forgery targets
+// that must never be dialable: the cloud metadata service, CDS's own loopback,
+// and names that let DNS pick the destination after the check.
+func TestInventoryAddrRejectsRequestForgeryTargets(t *testing.T) {
+	for _, bad := range []string{
+		"169.254.169.254:80",   // cloud metadata (IMDS)
+		"169.254.169.254:9443", // ... on the expected port
+		"[fe80::1]:9443",       // IPv6 link-local
+		"127.0.0.1:9443",       // CDS's own loopback
+		"[::1]:9443",           // IPv6 loopback
+		"0.0.0.0:9443",         // unspecified
+		"[::]:9443",            // IPv6 unspecified
+		"224.0.0.1:9443",       // multicast
+		"metadata.google.internal:80",
+		"localhost:9443",
+		"inventory.example:9443", // any name: DNS could resolve anywhere
+	} {
+		if err := ValidateInventoryAddr(bad); err == nil {
+			t.Fatalf("request-forgery target %q accepted as an inventory address", bad)
+		}
+	}
+}
+
+// What gets dialed is rebuilt from the parsed IP and port, not passed through
+// from the caller's bytes.
+func TestParseInventoryAddrNormalizes(t *testing.T) {
+	got, err := parseInventoryAddr("[2001:0db8:0000::1]:09443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "[2001:db8::1]:9443" {
+		t.Fatalf("normalized addr = %q, want the re-serialized form", got)
+	}
+}
+
+// Fetch must reject a forged address before it opens any connection.
+func TestFetchRejectsForgedAddrBeforeDialing(t *testing.T) {
+	c := &DigestsClient{timeout: time.Second}
+	if _, err := c.Fetch(context.Background(), "169.254.169.254:80", "sandbox-1"); err == nil {
+		t.Fatal("Fetch dialed the metadata service")
+	}
+	if _, err := c.Fetch(context.Background(), "10.0.0.1:9443", "../../etc/passwd"); err == nil {
+		t.Fatal("Fetch accepted a sandbox ID that is not a sandbox ID")
+	}
+}
+
 func TestResolveAdvertiseAddrPrefersExplicitHost(t *testing.T) {
 	addr, err := ResolveAdvertiseAddr("10.1.2.3", 9443, "cds.invalid:8443")
 	if err != nil {
@@ -427,6 +474,17 @@ func TestResolveAdvertiseAddrPrefersExplicitHost(t *testing.T) {
 	}
 	if addr != "10.1.2.3:9443" {
 		t.Fatalf("addr = %q, want 10.1.2.3:9443", addr)
+	}
+}
+
+// An address CDS could never dial back is rejected where it is configured, so
+// the inventory fails at startup instead of minting tokens that steer CDS
+// somewhere useless.
+func TestResolveAdvertiseAddrRejectsUnreachableHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "169.254.169.254", "inventory.example"} {
+		if _, err := ResolveAdvertiseAddr(host, 9443, "cds.invalid:8443"); err == nil {
+			t.Fatalf("advertise host %q accepted", host)
+		}
 	}
 }
 

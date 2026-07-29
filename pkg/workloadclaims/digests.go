@@ -24,22 +24,53 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-// ValidateInventoryAddr rejects anything that is not a dialable host:port. The
-// address is signed into a sandbox token and dialed by CDS, so it is bounded
-// here rather than trusted from the wire.
+// ValidateInventoryAddr reports whether addr is a dialable inventory address.
+// See parseInventoryAddr for the rules.
 func ValidateInventoryAddr(addr string) error {
+	_, err := parseInventoryAddr(addr)
+	return err
+}
+
+// parseInventoryAddr validates addr and returns it rebuilt from its parsed
+// parts, so what gets dialed is derived from a checked IP and port rather than
+// from the caller's bytes.
+//
+// SECURITY: this bounds a request-forgery primitive. The address rides a sandbox
+// token, and a token is mintable by anything holding a CDS /attest-key EAR —
+// which on node-CVM is every pod, since they all share the node's launch
+// measurement. Without these rules any workload could steer CDS's callback at an
+// address of its choosing. Hence:
+//
+//   - an IP literal, never a name: a resolvable name lets DNS decide the
+//     destination after the check (rebinding), and every real deployment
+//     advertises an IP already (downward-API hostIP/podIP, or the outbound-route
+//     inference in ResolveAdvertiseAddr);
+//   - global unicast only: loopback, link-local (169.254.0.0/16 and fe80::/10 —
+//     the cloud metadata service), multicast, and the unspecified address are all
+//     rejected. An inventory has no legitimate reason to advertise any of them,
+//     so this costs nothing real.
+//
+// What remains is a connection to a routable address on the requester's chosen
+// port. RA-TLS makes it useless for talking to anything that is not an attested
+// peer, and Fetch's caller must not echo the outcome back — see
+// docs/THREAT_MODEL.md.
+func parseInventoryAddr(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("workloadclaims: inventory address %q is not host:port: %w", addr, err)
+		return "", fmt.Errorf("workloadclaims: inventory address %q is not host:port: %w", addr, err)
 	}
-	if host == "" {
-		return fmt.Errorf("workloadclaims: inventory address %q has no host", addr)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", fmt.Errorf("workloadclaims: inventory address %q must use an IP literal, not a name", addr)
+	}
+	if !ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() {
+		return "", fmt.Errorf("workloadclaims: inventory address %q is not a routable unicast address", addr)
 	}
 	p, err := strconv.Atoi(port)
 	if err != nil || p < 1 || p > 65535 {
-		return fmt.Errorf("workloadclaims: inventory address %q has an invalid port", addr)
+		return "", fmt.Errorf("workloadclaims: inventory address %q has an invalid port", addr)
 	}
-	return nil
+	return net.JoinHostPort(ip.String(), strconv.Itoa(p)), nil
 }
 
 // ResolveAdvertiseAddr returns the host:port an inventory signs into its
@@ -179,8 +210,13 @@ var ErrSandboxUnknown = fmt.Errorf("workloadclaims: inventory does not know this
 // addr comes from the verified sandbox token, so it names the inventory that
 // vouched for the sandbox; the RA-TLS handshake then proves whatever answers
 // there is a TEE on an allowed measurement.
+//
+// Both inputs are rebuilt from validated parts before they reach the URL
+// (parseInventoryAddr, ratls.ValidateSandboxID), because both originate in a
+// token a workload can mint.
 func (c *DigestsClient) Fetch(ctx context.Context, addr, sandboxID string) ([]string, error) {
-	if err := ValidateInventoryAddr(addr); err != nil {
+	dialAddr, err := parseInventoryAddr(addr)
+	if err != nil {
 		return nil, err
 	}
 	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
@@ -189,14 +225,14 @@ func (c *DigestsClient) Fetch(ctx context.Context, addr, sandboxID string) ([]st
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	url := "https://" + addr + SandboxDigestsPrefix + sandboxID
+	url := "https://" + dialAddr + SandboxDigestsPrefix + sandboxID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("workloadclaims: reach inventory %s: %w", addr, err)
+		return nil, fmt.Errorf("workloadclaims: reach inventory %s: %w", dialAddr, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -204,7 +240,7 @@ func (c *DigestsClient) Fetch(ctx context.Context, addr, sandboxID string) ([]st
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", addr, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("workloadclaims: inventory %s returned %d: %s", dialAddr, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out SandboxDigestsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {

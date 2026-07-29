@@ -352,10 +352,17 @@ read-only socket *mount* (a webhook hostPath on node-CVM, a guest bind-mount
 under kata), never the path — so the control plane cannot point get-cert at a
 rogue inventory by changing an arg.
 
-**CDS's callback target is inside a signature, and re-verified on arrival.** The
-`inventoryAddr` CDS dials comes from the sandbox token, covered by the
-inventory's signature over the whole token — a host that rewrites it invalidates
-the token. And reaching the address is not sufficient: the callback is
+**CDS's callback target is bounded, and re-verified on arrival.** The
+`inventoryAddr` CDS dials comes from the sandbox token, covered by the signature
+over the whole token — a host that rewrites it in flight invalidates the token.
+That is the only thing the signature buys: minting a *fresh* token needs only an
+`/attest-key` EAR, which on node-CVM every pod can obtain, so CDS treats the
+address as attacker-chosen. `parseInventoryAddr` therefore restricts it to
+routable unicast IP literals — no names (DNS could redirect after the check), no
+loopback, link-local, metadata, multicast, or unspecified addresses — and CDS
+returns a generic denial rather than the callback's outcome, so the requester
+learns nothing about what it reached. And reaching the address is not
+sufficient: the callback is
 mutually-attested RA-TLS, so whatever answers must present a leaf whose launch
 measurement is in the same allowlist `/attest` pins, and must in turn accept
 CDS's own attested client certificate. An unreachable or unpinnable endpoint

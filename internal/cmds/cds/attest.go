@@ -187,8 +187,12 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// actually running and gate issuance on the allowlist. The requester never
 	// gets a say in the answer.
 	if err := h.verifySandboxWorkload(ctx, sandbox); err != nil {
-		slog.Warn("sandbox workload rejected", "sandbox_id", sandbox.SandboxID, "error", err)
-		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
+		// The detail stays in the log. A requester picks both the sandbox ID and
+		// the address CDS just dialled, so echoing what happened there would
+		// hand it a reachability oracle for CDS's network position.
+		slog.Warn("sandbox workload rejected",
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryAddr, "error", err)
+		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, "sandbox workload not authorized")
 		return
 	}
 
