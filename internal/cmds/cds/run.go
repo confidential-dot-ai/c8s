@@ -262,20 +262,19 @@ func run(cfg config) error {
 	go sandboxBindings.EvictionLoop(ctx.Done(), cfg.rateLimiterEvictInterval)
 
 	var secretsHandler *secrets.Handler
-	if cfg.secrets {
+	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
 		secretsHandler = &secrets.Handler{
-			Store:      secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes),
-			Challenges: &secretsChallenges,
-			Inventory:  sandboxDigests,
-			Bindings:   sandboxBindings,
-			Policy:     secrets.NewCachedPolicy(&allowlistStore),
-
-			InventoryHosts:  inventoryHosts,
-			InjectedDigests: cfg.injectedComponentDigest,
-			InjectedArgv0:   secrets.InjectedEntrypoints,
-			Logger:          slog.Default(),
+			Store:          secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes),
+			Challenges:     &secretsChallenges,
+			Inventory:      sandboxDigests,
+			Bindings:       sandboxBindings,
+			Policy:         secrets.NewCachedPolicy(&allowlistStore),
+			InventoryHosts: inventoryHosts,
+			Logger:         slog.Default(),
 		}
-		slog.Info("secrets enabled", "injected_digests", len(cfg.injectedComponentDigest))
+		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
+	} else {
+		slog.Warn("NOT serving /secrets: any workload depending on a secret will fail to start", "reason", why)
 	}
 
 	deps := dependencies{
@@ -342,15 +341,13 @@ func run(cfg config) error {
 			CertTTL:    cfg.ratlsCertTTL,
 			Logger:     slog.Default(),
 		}
-		if cfg.secrets {
-			// /secrets reads a CDS-stamped field out of the caller's leaf, so
-			// the chain has to be verified by crypto/tls against the mesh CA:
-			// the RA-TLS path would admit a self-signed peer whose sandbox-ID
-			// extension is whatever it chose. VerifyClientCertIfGiven keeps the
-			// certless routes reachable — no other CDS client presents one.
-			serverCfg.ClientCAs = []*x509.Certificate{mesh.Cert}
-			serverCfg.ClientAuth = tls.VerifyClientCertIfGiven
-		}
+		// /secrets reads a CDS-stamped field out of the caller's leaf, so the
+		// chain has to be verified by crypto/tls against the mesh CA: the
+		// RA-TLS path would admit a self-signed peer whose sandbox-ID extension
+		// is whatever it chose. VerifyClientCertIfGiven keeps every other route
+		// reachable by a caller with no certificate.
+		serverCfg.ClientCAs = []*x509.Certificate{mesh.Cert}
+		serverCfg.ClientAuth = tls.VerifyClientCertIfGiven
 		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(serverCfg)
 		if err != nil {
 			return fmt.Errorf("ratls server config: %w", err)
@@ -477,48 +474,40 @@ func normalizeHTTPServerConfig(cfg config) config {
 	return cfg
 }
 
-// validateSecretsConfig refuses to start with secrets half-configured.
-//
-// Every one of these is a silent failure at request time rather than a loud
-// one: an empty measurement list means any TEE may answer as an inventory, an
-// unset injected digest makes every pod look like it runs a foreign container,
-// and a missing platform or CIDR set leaves the callback unusable. All fail
-// closed, which is correct but indistinguishable from a genuine denial — so
-// they are startup errors instead.
+// validateSecretsConfig checks the bounds on secret storage. What secrets are
+// released to is policy, not configuration — see secretsEnabled.
 func validateSecretsConfig(cfg config) error {
-	if !cfg.secrets {
-		return nil
-	}
-	if cfg.ratlsPlatform == "" {
-		return fmt.Errorf("--secrets requires --ratls-platform: without it CDS has no attested channel to an inventory")
-	}
-	if len(cfg.measurements) == 0 {
-		return fmt.Errorf("--secrets requires --measurements: an unpinned inventory callback is answerable by any TEE")
-	}
-	if len(cfg.inventoryCIDRs) == 0 {
-		return fmt.Errorf("--secrets requires --sandbox-inventory-cidr to bound which addresses the inventory callback may dial")
-	}
-	if len(cfg.injectedComponentDigest) == 0 {
-		return fmt.Errorf("--secrets requires --injected-component-digest: without it every pod appears to run a container its workload entry does not declare, and none is ever released a secret")
-	}
-	for _, d := range cfg.injectedComponentDigest {
-		if _, err := types.ParseDigest(d); err != nil {
-			return fmt.Errorf("--injected-component-digest %q: %w", d, err)
-		}
-	}
 	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxValueBytes <= 0 || cfg.sandboxLedgerMax <= 0 {
 		return fmt.Errorf("--secrets-max-paths, --secrets-max-value-bytes and --sandbox-ledger-max-entries must be positive")
 	}
-	if cfg.handoffPeerURL != "" || len(cfg.handoffMeasurements) > 0 {
-		// A handoff roll puts two CDS pods behind the Service at once. The
-		// second holds an empty store, so a workload landing on it creates a
-		// fresh value while its siblings hold the old one — divergence with no
-		// error anywhere. The store does not survive a restart either way
-		// (docs/secrets.md, "Restarts"), so there is nothing for handoff to
-		// preserve.
-		return fmt.Errorf("--secrets cannot be combined with handoff: a surge replica would serve an empty store and mint values diverging from the ones already delivered")
-	}
 	return nil
+}
+
+// secretsEnabled reports whether CDS serves /secrets, and why not when it does
+// not.
+//
+// Release is gated on an allowlist entry carrying a grant, so an entry without
+// one releases nothing and mounting the endpoint is inert until an operator
+// writes a grant. What this decides is narrower: whether CDS can answer at all,
+// which is what sandbox identity already needs.
+//
+// Handoff is the exception: a roll puts two CDS pods behind the Service at
+// once, and the surge replica serves an empty store — so a workload landing on
+// it mints a value diverging from the one its siblings already hold, with no
+// error anywhere. Refusing to serve is better than that divergence, and better
+// than failing startup, which would strand every existing handoff install.
+func secretsEnabled(cfg config, sandboxDigests *workloadclaims.DigestsClient, inventoryHosts workloadclaims.InventoryHosts) (bool, string) {
+	switch {
+	case cfg.handoffPeerURL != "" || len(cfg.handoffMeasurements) > 0:
+		return false, "handoff is configured: a surge replica would serve an empty secret store and mint values diverging from those already delivered"
+	case sandboxDigests == nil:
+		return false, "no --ratls-platform, so CDS has no attested channel to an inventory"
+	case len(inventoryHosts) == 0:
+		return false, "no --sandbox-inventory-cidr to bound which addresses the inventory callback may dial"
+	case len(cfg.measurements) == 0:
+		return false, "no --measurements, so any TEE could answer as a sandbox's inventory"
+	}
+	return true, ""
 }
 
 func validateConfig(cfg config) error {

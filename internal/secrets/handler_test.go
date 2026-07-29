@@ -145,7 +145,11 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{
+	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: map[string]string{
+		testInjected:    "ghcr.io/confidential-dot-ai/c8s@" + testInjected,
+		testInjectedOld: "ghcr.io/confidential-dot-ai/c8s@" + testInjectedOld,
+		testOther:       "docker.io/library/busybox@" + testOther,
+	}, Workloads: map[string]pkgallowlist.Workload{
 		"api": {
 			Containers: []pkgallowlist.Container{{
 				Digest:  mustDigest(t, testAppImg),
@@ -170,14 +174,12 @@ func newHarness(t *testing.T) *harness {
 	store := NewMemoryStore(16, 64)
 	return &harness{
 		h: Handler{
-			Store:           store,
-			Challenges:      challenges,
-			Inventory:       inv,
-			Bindings:        fakeBindings{host: testHost},
-			Policy:          fakePolicy{al: al},
-			InventoryHosts:  cidrs,
-			InjectedDigests: []string{testInjected, testInjectedOld},
-			InjectedArgv0:   []string{"get-cert", "get-secret", "/c8s"},
+			Store:          store,
+			Challenges:     challenges,
+			Inventory:      inv,
+			Bindings:       fakeBindings{host: testHost},
+			Policy:         fakePolicy{al: al},
+			InventoryHosts: cidrs,
 		},
 		signer: signer, leaf: leaf, challenges: challenges, inv: inv, store: store,
 	}
@@ -338,9 +340,10 @@ func TestTokenHostMustMatchBinding(t *testing.T) {
 	}
 }
 
-// An image the entry does not declare means this pod is not that workload —
-// even though the extra image is itself allowlisted elsewhere.
-func TestForeignContainerRefused(t *testing.T) {
+// A floor image the entry does not declare is still foreign: floor membership
+// alone must not drop a container, or a pod could add busybox running a shell
+// and have it ignored.
+func TestForeignFloorContainerRefused(t *testing.T) {
 	hn := newHarness(t)
 	hn.inv.containers = append(hn.inv.containers,
 		workloadclaims.SandboxContainer{Digest: testOther, Argv: []string{"/bin/sh"}})
@@ -374,7 +377,11 @@ func TestInventoryWithoutContainerDetailRefused(t *testing.T) {
 
 func TestEntryWithoutGrantRefused(t *testing.T) {
 	hn := newHarness(t)
-	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: map[string]pkgallowlist.Workload{
+	al := &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Digests: map[string]string{
+		testInjected:    "ghcr.io/confidential-dot-ai/c8s@" + testInjected,
+		testInjectedOld: "ghcr.io/confidential-dot-ai/c8s@" + testInjectedOld,
+		testOther:       "docker.io/library/busybox@" + testOther,
+	}, Workloads: map[string]pkgallowlist.Workload{
 		"api": {Containers: []pkgallowlist.Container{{
 			Digest:  mustDigest(t, testAppImg),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/serve"}},
@@ -421,11 +428,12 @@ func TestInjectedImageFromPreviousReleaseIsDropped(t *testing.T) {
 	}
 }
 
-// An unconfigured drop set refuses everything rather than dropping nothing
-// quietly — which is why it is a startup requirement, not a runtime default.
-func TestNoInjectedDigestsRefuses(t *testing.T) {
+// A floor with no c8s image in it drops nothing, so the injected sidecar looks
+// like a container the entry does not declare and release is refused. (It also
+// has no workloads, so there is nothing to match either.)
+func TestEmptyFloorRefuses(t *testing.T) {
 	hn := newHarness(t)
-	hn.h.InjectedDigests = nil
+	hn.h.Policy = fakePolicy{al: &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}}
 	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
 		t.Fatalf("unconfigured drop set = %d, want 403", w.Code)
 	}

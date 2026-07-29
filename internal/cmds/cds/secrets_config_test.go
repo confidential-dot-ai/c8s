@@ -3,84 +3,101 @@ package cds
 import (
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-// secretsConfig is a --secrets configuration with everything satisfied, so each
-// case below can remove exactly one requirement.
-func secretsConfig() config {
+// secretsReadyConfig can serve /secrets: sandbox identity is fully configured
+// and no handoff is set.
+func secretsReadyConfig() config {
 	return config{
-		secrets:                 true,
-		ratlsPlatform:           "sev-snp",
-		measurements:            []string{strings.Repeat("ab", 48)},
-		inventoryCIDRs:          []string{"10.0.0.0/24"},
-		injectedComponentDigest: []string{"sha256:" + strings.Repeat("1", 64)},
-		secretsMaxPaths:         16,
-		secretsMaxValueBytes:    64,
-		sandboxLedgerMax:        16,
+		ratlsPlatform:        "sev-snp",
+		measurements:         []string{strings.Repeat("ab", 48)},
+		inventoryCIDRs:       []string{"10.0.0.0/24"},
+		secretsMaxPaths:      16,
+		secretsMaxValueBytes: 64,
+		sandboxLedgerMax:     16,
 	}
 }
 
-func TestSecretsConfigAccepted(t *testing.T) {
-	if err := validateSecretsConfig(secretsConfig()); err != nil {
-		t.Fatalf("a fully configured --secrets was refused: %v", err)
+func testInventoryHosts(t *testing.T) workloadclaims.InventoryHosts {
+	t.Helper()
+	hosts, err := workloadclaims.ParseInventoryHosts([]string{"10.0.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hosts
+}
+
+// A fully-configured CDS serves /secrets with no flag to turn it on: release is
+// gated on an allowlist entry carrying a grant, not on configuration.
+func TestSecretsEnabledWhenSandboxIdentityWorks(t *testing.T) {
+	enabled, why := secretsEnabled(secretsReadyConfig(), &workloadclaims.DigestsClient{}, testInventoryHosts(t))
+	if !enabled {
+		t.Fatalf("secrets not served on a fully configured CDS: %s", why)
 	}
 }
 
-func TestSecretsDisabledSkipsChecks(t *testing.T) {
-	if err := validateSecretsConfig(config{}); err != nil {
-		t.Fatalf("--secrets off should require nothing: %v", err)
-	}
-}
-
-// Each of these fails closed at request time in a way indistinguishable from a
-// genuine denial, so it has to stop startup instead.
-func TestSecretsConfigRequirements(t *testing.T) {
+// Each of these leaves CDS unable to establish what a sandbox runs, so it must
+// not answer at all rather than answer badly.
+func TestSecretsDisabledWhenItCannotAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		break_ func(*config)
+		cfg    func(*config)
+		client *workloadclaims.DigestsClient
 		want   string
 	}{
-		{"no platform", func(c *config) { c.ratlsPlatform = "" }, "--ratls-platform"},
-		{"no measurements", func(c *config) { c.measurements = nil }, "--measurements"},
-		{"no inventory cidrs", func(c *config) { c.inventoryCIDRs = nil }, "--sandbox-inventory-cidr"},
-		{"no injected digest", func(c *config) { c.injectedComponentDigest = nil }, "--injected-component-digest"},
-		{"malformed injected digest", func(c *config) { c.injectedComponentDigest = []string{"not-a-digest"} }, "--injected-component-digest"},
-		{"zero max paths", func(c *config) { c.secretsMaxPaths = 0 }, "must be positive"},
-		{"zero max value", func(c *config) { c.secretsMaxValueBytes = 0 }, "must be positive"},
-		{"zero ledger max", func(c *config) { c.sandboxLedgerMax = 0 }, "must be positive"},
+		{"no platform", func(*config) {}, nil, "--ratls-platform"},
+		{"no measurements", func(c *config) { c.measurements = nil }, &workloadclaims.DigestsClient{}, "--measurements"},
+		{"handoff peer", func(c *config) { c.handoffPeerURL = "https://cds.example" }, &workloadclaims.DigestsClient{}, "handoff"},
+		{"handoff measurements", func(c *config) { c.handoffMeasurements = []string{"ab"} }, &workloadclaims.DigestsClient{}, "handoff"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := secretsConfig()
-			tc.break_(&cfg)
-			err := validateSecretsConfig(cfg)
-			if err == nil {
-				t.Fatal("expected a startup error")
+			cfg := secretsReadyConfig()
+			tc.cfg(&cfg)
+			enabled, why := secretsEnabled(cfg, tc.client, testInventoryHosts(t))
+			if enabled {
+				t.Fatal("secrets served despite the prerequisite being unmet")
 			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error %q does not mention %q", err, tc.want)
+			if !strings.Contains(why, tc.want) {
+				t.Fatalf("reason %q does not mention %q", why, tc.want)
 			}
 		})
 	}
 }
 
-// A handoff roll puts two CDS pods behind the Service, and the surge replica
-// holds an empty store — so a workload landing on it mints a value diverging
-// from the one its siblings already hold.
-func TestSecretsRefusedWithHandoff(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		break_ func(*config)
-	}{
-		{"peer url", func(c *config) { c.handoffPeerURL = "https://cds.example" }},
-		{"measurements", func(c *config) { c.handoffMeasurements = []string{strings.Repeat("cd", 48)} }},
+// Without CIDRs there is nothing bounding which address the callback may dial.
+func TestSecretsDisabledWithoutInventoryCIDRs(t *testing.T) {
+	enabled, why := secretsEnabled(secretsReadyConfig(), &workloadclaims.DigestsClient{}, nil)
+	if enabled || !strings.Contains(why, "--sandbox-inventory-cidr") {
+		t.Fatalf("enabled=%v reason=%q", enabled, why)
+	}
+}
+
+// Handoff is checked before anything else: it is the one case where CDS could
+// answer but must not, so its reason has to be the one an operator sees.
+func TestHandoffReasonWinsOverOtherGaps(t *testing.T) {
+	cfg := secretsReadyConfig()
+	cfg.handoffPeerURL = "https://cds.example"
+	cfg.measurements = nil
+	if _, why := secretsEnabled(cfg, nil, nil); !strings.Contains(why, "handoff") {
+		t.Fatalf("reason = %q, want the handoff refusal", why)
+	}
+}
+
+func TestSecretsSizingMustBePositive(t *testing.T) {
+	for _, brk := range []func(*config){
+		func(c *config) { c.secretsMaxPaths = 0 },
+		func(c *config) { c.secretsMaxValueBytes = 0 },
+		func(c *config) { c.sandboxLedgerMax = 0 },
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := secretsConfig()
-			tc.break_(&cfg)
-			err := validateSecretsConfig(cfg)
-			if err == nil || !strings.Contains(err.Error(), "handoff") {
-				t.Fatalf("err = %v, want a handoff refusal", err)
-			}
-		})
+		cfg := secretsReadyConfig()
+		brk(&cfg)
+		if err := validateSecretsConfig(cfg); err == nil {
+			t.Fatal("a non-positive bound was accepted")
+		}
+	}
+	if err := validateSecretsConfig(secretsReadyConfig()); err != nil {
+		t.Fatalf("valid bounds refused: %v", err)
 	}
 }

@@ -79,25 +79,6 @@ type Handler struct {
 	// every request: without it a workload could name its own pod.
 	InventoryHosts workloadclaims.InventoryHosts
 
-	// InjectedDigests are the images the platform injects into every
-	// confidential pod. Containers running one are not part of a workload's
-	// declared set, so they are dropped before matching.
-	//
-	// It is a set, not a single digest, for two reasons: the injected
-	// containers need not all share an image, and an image bump changes the
-	// digest while pods created before it keep running the old one. A CDS that
-	// knew only the current digest would find an undroppable container in every
-	// older pod and refuse it a secret until it was recreated, so both digests
-	// belong here for the length of an upgrade.
-	//
-	// InjectedArgv0 are the entrypoints those images are injected with. A
-	// container must match a digest AND an entrypoint to be dropped: these
-	// images are argv-unconstrained allowlist floor entries, so dropping on the
-	// digest alone would let a pod add a container running one of them as
-	// anything at all and have it ignored.
-	InjectedDigests []string
-	InjectedArgv0   []string
-
 	Logger *slog.Logger
 }
 
@@ -283,14 +264,13 @@ func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (
 		return nil, deny("%v", err)
 	}
 
-	containers, err := h.runningContainers(ctx, host, sandboxID)
-	if err != nil {
-		return nil, deny("%v", err)
-	}
-
 	al, err := h.Policy.Allowlist()
 	if err != nil {
 		return nil, fmt.Errorf("load allowlist: %w", err)
+	}
+	containers, err := h.workloadContainers(ctx, al, host, sandboxID)
+	if err != nil {
+		return nil, deny("%v", err)
 	}
 	name, workload, err := al.MatchWorkload(containers)
 	if err != nil {
@@ -375,10 +355,10 @@ func (h Handler) verifyToken(ctx context.Context, token *workloadclaims.SignedSa
 	return host, nil
 }
 
-// runningContainers asks the bound inventory what the sandbox has run, and
-// drops the platform's own injected containers so a workload entry need not
-// enumerate them.
-func (h Handler) runningContainers(ctx context.Context, host, sandboxID string) ([]pkgallowlist.RunningContainer, error) {
+// workloadContainers asks the bound inventory what the sandbox has run and
+// removes the platform's own injected containers, so a workload entry never has
+// to enumerate c8s's sidecars.
+func (h Handler) workloadContainers(ctx context.Context, al *pkgallowlist.Allowlist, host, sandboxID string) ([]pkgallowlist.RunningContainer, error) {
 	resp, err := h.Inventory.FetchSandbox(ctx, host, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox containers: %w", err)
@@ -389,7 +369,7 @@ func (h Handler) runningContainers(ctx context.Context, host, sandboxID string) 
 	}
 	out := make([]pkgallowlist.RunningContainer, 0, len(reported))
 	for _, c := range reported {
-		if h.isInjected(c) {
+		if isInjected(al, c) {
 			continue
 		}
 		out = append(out, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
@@ -400,11 +380,26 @@ func (h Handler) runningContainers(ctx context.Context, host, sandboxID string) 
 	return out, nil
 }
 
-// isInjected reports whether a reported container is one the platform injected.
-// Both the image and the entrypoint must match — see InjectedDigests.
-func (h Handler) isInjected(c workloadclaims.SandboxContainer) bool {
-	if len(c.Argv) == 0 || !slices.Contains(h.InjectedDigests, c.Digest) {
+// isInjected reports whether a reported container is one c8s injected.
+//
+// The image must be an allowlist floor entry AND its entrypoint one c8s
+// injects. Floor membership alone is not enough — floor images are admitted
+// regardless of argv by design, so busybox running a shell is a floor entry
+// too, and dropping on that alone would let a pod add one and have it ignored.
+//
+// The floor is additive, so it holds the previous digest alongside the new one
+// for as long as pods are still running it, and the drop set tracks an image
+// bump on its own.
+//
+// What this rests on: no floor image other than c8s's has an executable at one
+// of InjectedEntrypoints. Floor contents are operator-controlled and auditable,
+// but that is a property of the deployment rather than something enforced here.
+func isInjected(al *pkgallowlist.Allowlist, c workloadclaims.SandboxContainer) bool {
+	if len(c.Argv) == 0 {
 		return false
 	}
-	return slices.Contains(h.InjectedArgv0, c.Argv[0])
+	if _, floor := al.Digests[c.Digest]; !floor {
+		return false
+	}
+	return slices.Contains(InjectedEntrypoints, c.Argv[0])
 }
