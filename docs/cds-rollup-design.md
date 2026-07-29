@@ -121,23 +121,47 @@ transcript = … ‖ LP(cds_cert_der) ‖ LP(cds_quote)
 keeps the components independent and the cache makes the second trip rare.
 Freshness is the one thing A must get right.
 
-### Freshness for a cached CDS verdict
+### Freshness: decided — cache long-lived, CDS is a CA
+
+**Decision (2026-07-29): cache the verified CDS verdict for a long time, keyed
+on cert fingerprint. No CDS attest endpoint.**
 
 The CDS RA-TLS cert commits an *issuance* challenge (`.1.2`), not a
-client-supplied one — so a cached verdict proves "this CDS was genuine when the
-cert was issued", not "right now". Options:
+client-supplied one, so `c8s verify` correctly reports "freshness NOT proven".
+That sounds like a problem and isn't, because liveness is not what this
+attestation is for.
 
-1. **Bound by cert TTL** — accept the cached verdict until `notAfter`. Simple;
-   the guarantee is exactly the TTL. Requires a sane `ratlsCertTTL`.
-2. **Client nonce via a CDS attest endpoint** — CDS mints fresh evidence over a
-   caller nonce, like the LB's `/attestation?nonce=`. Strongest, but needs a new
-   CDS endpoint and defeats caching unless the nonce path is separate from the
-   cached-cert path.
-3. **Hybrid** — cache on the cert, and re-verify with a nonce whenever the
-   allowlist digest the client cares about changes, or on a long timer.
+CDS is a **certificate authority for confidential computing**. The claim being
+cached is "this key belonged to a genuine, measured CDS that vouched for
+allowlist X" — a statement about a key, not about what is running this instant.
+Web PKI treats roots the same way: nobody re-attests a CA per connection.
 
-Start with (1) because it is honest and simple, and state the TTL in the UI.
-Move to (3) once there is a CDS attest endpoint.
+Consequences:
+
+- cert rotation is a **cache miss**, not a failure — re-attest and continue
+- freshness where it genuinely matters (is the LB I am talking to alive and
+  genuine *now*) stays with the LB's nonce-bound attestation, which already
+  works and is unchanged
+- a CDS attest endpoint is **not needed**; dropped from scope
+
+The one property to preserve: the cached entry must be keyed on the cert
+fingerprint **and** the verified measurement, so a re-issued cert from a
+different image cannot silently reuse a cached verdict.
+
+### Note on "expose" vs "attest"
+
+Exposing the CDS RA-TLS cert *is* how the client attests CDS — the TDX quote
+rides inside it as extension `.1.1`, and REPORTDATA binds the cert's public key
+together with the claims DER. Verifying the cert therefore proves a genuine TD,
+running the measured image, holds this key and vouches for that allowlist
+digest. There is no separate attestation object to fetch.
+
+Demonstrated end to end on the live cluster with
+`c8s verify --kind cds --mode ratls-cert --image-manifest … --operator-key …`,
+which returns the attested `allowlist-seed digest` from nothing but the cert.
+The client-side work is the verification (parse `.1.1`, verify quote, check
+measurements, read `.1.3`) — the transport work is only making those bytes
+reachable.
 
 ## Deltas per repo
 
@@ -148,7 +172,7 @@ Move to (3) once there is a CDS attest endpoint.
   quote. Do not reuse `/.well-known/cds-cert.pem` — that serves the mesh leaf
   and changing it would break existing callers. Consider renaming that route
   in docs to `mesh-leaf.pem`; the current name is actively misleading.
-- Optional: a CDS attest endpoint taking a client nonce (freshness option 2).
+- No CDS attest endpoint: CDS is treated as a CA and its verdict is cached (see Freshness).
 - `pkg/ratls` already exports `ExtractConfigClaimsBytes` — reuse rather than
   reimplement.
 
