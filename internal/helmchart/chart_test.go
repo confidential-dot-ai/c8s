@@ -595,6 +595,63 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 	if got, want := worker.Spec.Template.Labels["app.kubernetes.io/component"], "nri-installer-worker"; got != want {
 		t.Errorf("worker installer pod component label = %q, want %q", got, want)
 	}
+	// The install script writes ${NODE_IP:?} to the node-ip file the plugin
+	// reads, so the env var must sit on the install container itself, not on
+	// the rke2-only containerd-prep sibling.
+	install, ok := findContainer(worker.Spec.Template.Spec.InitContainers, "install")
+	if !ok {
+		t.Fatalf("install init container missing; have %v", containerNames(worker.Spec.Template.Spec.InitContainers))
+	}
+	if !hasNodeIPEnv(install) {
+		t.Errorf("install init container missing NODE_IP downward-API env; have %+v", install.Env)
+	}
+}
+
+// The webhook injects a read-only hostPath mount of the inventory socket dir
+// (nriImagePolicy.hostPaths.runtimeDir) into every CW pod, so the
+// deny-host-namespaces VAP must carve out exactly that dir — a blanket
+// hostPath deny rejects every confidential workload the platform itself
+// mutates.
+func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var hostPathExpr string
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, "hostPath") {
+			hostPathExpr = v.Expression
+		}
+	}
+	if hostPathExpr == "" {
+		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
+	}
+	for _, want := range []string{
+		`"/var/run/nri-image-policy"`, // the claims dir, and nothing wider
+		`'Directory'`,                 // the exact type the webhook injects
+		"m.readOnly",                  // every referencing mount must be read-only
+	} {
+		if !strings.Contains(hostPathExpr, want) {
+			t.Errorf("hostPath validation missing %s; expression=%q", want, hostPathExpr)
+		}
+	}
+}
+
+// hasNodeIPEnv reports whether the container carries a NODE_IP env var sourced
+// from the status.hostIP downward-API field — the sandbox-digests callback
+// address the installer writes down for the host-process plugin.
+func hasNodeIPEnv(c corev1.Container) bool {
+	for _, e := range c.Env {
+		if e.Name == "NODE_IP" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
+			e.ValueFrom.FieldRef.FieldPath == "status.hostIP" {
+			return true
+		}
+	}
+	return false
 }
 
 // Single-node (empty cds.node.selector) renders the installer identically to

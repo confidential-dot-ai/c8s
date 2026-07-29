@@ -66,15 +66,6 @@ spec:
           securityContext:
             privileged: true
           env:
-            # The address CDS dials for this node's sandbox-digests endpoint.
-            # The plugin is a host process with no downward API of its own, so
-            # the installer hands it down through a file (see the install
-            # script). Inferring it from the route to CDS does not work: the
-            # chart points the plugin at the CDS NodePort on loopback.
-            - name: NODE_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
             - name: HOST_CONTAINERD_DIR
               value: {{ include "nri-image-policy.containerdConfigDir" . | quote }}
             # The literal RKE2 base-config include, written verbatim into a
@@ -96,6 +87,16 @@ spec:
           imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
           securityContext:
             privileged: true
+          env:
+            # The address CDS dials for this node's sandbox-digests endpoint.
+            # The plugin is a host process with no downward API of its own, so
+            # the install script hands it down through a file. Inferring it
+            # from the route to CDS does not work: the chart points the plugin
+            # at the CDS NodePort on loopback.
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           command: ["/bin/sh", "-c"]
           args:
             - |
