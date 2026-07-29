@@ -245,6 +245,21 @@ func (s *Store) Contains(digest types.Digest) (bool, error) {
 }
 
 // queryAll reads all floor rows under the lock and returns them as a slice.
+// Version returns the current allowlist version counter — the same value the
+// worker pull ETag carries. It is a single-row read, so a caller that must not
+// pay for LoadAll on every request can use it to decide whether a cached
+// document is still current.
+func (s *Store) Version() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var version string
+	if err := s.db.QueryRow("SELECT version FROM allowlist_version LIMIT 1").Scan(&version); err != nil {
+		return "", fmt.Errorf("read allowlist version: %w", err)
+	}
+	return version, nil
+}
+
 func (s *Store) queryAll() ([]row, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

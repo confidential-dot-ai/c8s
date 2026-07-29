@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
+	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
+	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -161,6 +164,9 @@ func run(cfg config) error {
 
 	asClient := attestationclient.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
+	// A separate pool for /secrets: sharing one would make a nonce minted for
+	// issuance redeemable against a secret, and vice versa.
+	secretsChallenges := attestation.NewChallengeStore(cfg.challengeTTL)
 	checker := readiness.NewChecker(asClient, cfg.readinessInterval)
 
 	// Seed before serving so the first GET /allowlist returns the bootstrap
@@ -249,6 +255,29 @@ func run(cfg config) error {
 		return err
 	}
 
+	// The ledger is written on every issuance, not only when secrets are on:
+	// enabling the feature later would otherwise start with an empty ledger and
+	// fail closed for every pod until its certificate next renews.
+	sandboxBindings := sandboxledger.New(issuer.CapTTL(cfg.certTTL, issuer.MaxLeafTTL), cfg.sandboxLedgerMax)
+	go sandboxBindings.EvictionLoop(ctx.Done(), cfg.rateLimiterEvictInterval)
+
+	var secretsHandler *secrets.Handler
+	if cfg.secrets {
+		secretsHandler = &secrets.Handler{
+			Store:      secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes),
+			Challenges: &secretsChallenges,
+			Inventory:  sandboxDigests,
+			Bindings:   sandboxBindings,
+			Policy:     secrets.NewCachedPolicy(&allowlistStore),
+
+			InventoryHosts:  inventoryHosts,
+			InjectedDigests: cfg.injectedComponentDigest,
+			InjectedArgv0:   secrets.InjectedEntrypoints,
+			Logger:          slog.Default(),
+		}
+		slog.Info("secrets enabled", "injected_digests", len(cfg.injectedComponentDigest))
+	}
+
 	deps := dependencies{
 		AttestHandler: AttestHandler{
 			Challenges:        &challengeStore,
@@ -263,6 +292,7 @@ func run(cfg config) error {
 			AllowlistStore:    &allowlistStore,
 			SandboxDigests:    sandboxDigests,
 			InventoryHosts:    inventoryHosts,
+			SandboxBindings:   sandboxBindings,
 		},
 		SignCSRHandler: SignCSRHandler{
 			CA:             mesh,
@@ -280,15 +310,17 @@ func run(cfg config) error {
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
-		AttestKeyHandler: attestKeyHandler,
-		HandoffHandler:   handoffHandler,
-		ReadyFn:          readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:        earIssuer,
-		JWKSFunc:         rotator.JWKSetJSON,
-		CACertPEM:        caChainPEM,
-		OperatorKeysPEM:  operatorKeysPEM,
-		RateLimiter:      rateLimiter,
-		MaxRequestSize:   cfg.maxRequestSize,
+		AttestKeyHandler:  attestKeyHandler,
+		HandoffHandler:    handoffHandler,
+		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
+		EarIssuer:         earIssuer,
+		JWKSFunc:          rotator.JWKSetJSON,
+		CACertPEM:         caChainPEM,
+		OperatorKeysPEM:   operatorKeysPEM,
+		RateLimiter:       rateLimiter,
+		MaxRequestSize:    cfg.maxRequestSize,
+		SecretsHandler:    secretsHandler,
+		SecretsChallenges: &secretsChallenges,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)
@@ -304,12 +336,22 @@ func run(cfg config) error {
 
 	if cfg.ratlsPlatform != "" {
 		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
-		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		serverCfg := &ratls.ServerConfig{
 			Platform:   cfg.ratlsPlatform,
 			AttestFunc: attestFunc,
 			CertTTL:    cfg.ratlsCertTTL,
 			Logger:     slog.Default(),
-		})
+		}
+		if cfg.secrets {
+			// /secrets reads a CDS-stamped field out of the caller's leaf, so
+			// the chain has to be verified by crypto/tls against the mesh CA:
+			// the RA-TLS path would admit a self-signed peer whose sandbox-ID
+			// extension is whatever it chose. VerifyClientCertIfGiven keeps the
+			// certless routes reachable — no other CDS client presents one.
+			serverCfg.ClientCAs = []*x509.Certificate{mesh.Cert}
+			serverCfg.ClientAuth = tls.VerifyClientCertIfGiven
+		}
+		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(serverCfg)
 		if err != nil {
 			return fmt.Errorf("ratls server config: %w", err)
 		}
@@ -435,6 +477,50 @@ func normalizeHTTPServerConfig(cfg config) config {
 	return cfg
 }
 
+// validateSecretsConfig refuses to start with secrets half-configured.
+//
+// Every one of these is a silent failure at request time rather than a loud
+// one: an empty measurement list means any TEE may answer as an inventory, an
+// unset injected digest makes every pod look like it runs a foreign container,
+// and a missing platform or CIDR set leaves the callback unusable. All fail
+// closed, which is correct but indistinguishable from a genuine denial — so
+// they are startup errors instead.
+func validateSecretsConfig(cfg config) error {
+	if !cfg.secrets {
+		return nil
+	}
+	if cfg.ratlsPlatform == "" {
+		return fmt.Errorf("--secrets requires --ratls-platform: without it CDS has no attested channel to an inventory")
+	}
+	if len(cfg.measurements) == 0 {
+		return fmt.Errorf("--secrets requires --measurements: an unpinned inventory callback is answerable by any TEE")
+	}
+	if len(cfg.inventoryCIDRs) == 0 {
+		return fmt.Errorf("--secrets requires --sandbox-inventory-cidr to bound which addresses the inventory callback may dial")
+	}
+	if len(cfg.injectedComponentDigest) == 0 {
+		return fmt.Errorf("--secrets requires --injected-component-digest: without it every pod appears to run a container its workload entry does not declare, and none is ever released a secret")
+	}
+	for _, d := range cfg.injectedComponentDigest {
+		if _, err := types.ParseDigest(d); err != nil {
+			return fmt.Errorf("--injected-component-digest %q: %w", d, err)
+		}
+	}
+	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxValueBytes <= 0 || cfg.sandboxLedgerMax <= 0 {
+		return fmt.Errorf("--secrets-max-paths, --secrets-max-value-bytes and --sandbox-ledger-max-entries must be positive")
+	}
+	if cfg.handoffPeerURL != "" || len(cfg.handoffMeasurements) > 0 {
+		// A handoff roll puts two CDS pods behind the Service at once. The
+		// second holds an empty store, so a workload landing on it creates a
+		// fresh value while its siblings hold the old one — divergence with no
+		// error anywhere. The store does not survive a restart either way
+		// (docs/secrets.md, "Restarts"), so there is nothing for handoff to
+		// preserve.
+		return fmt.Errorf("--secrets cannot be combined with handoff: a surge replica would serve an empty store and mint values diverging from the ones already delivered")
+	}
+	return nil
+}
+
 func validateConfig(cfg config) error {
 	for _, timeout := range []struct {
 		name  string
@@ -463,6 +549,9 @@ func validateConfig(cfg config) error {
 	}
 	if len(cfg.handoffMeasurements) > 0 && cfg.operatorKeys == "" {
 		return fmt.Errorf("--handoff-measurements requires --operator-keys so the operator policy is bound into handoff attestation")
+	}
+	if err := validateSecretsConfig(cfg); err != nil {
+		return err
 	}
 	if cfg.handoffPeerURL != "" {
 		if !strings.HasPrefix(cfg.handoffPeerURL, "https://") {

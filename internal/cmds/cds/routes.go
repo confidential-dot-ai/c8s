@@ -10,23 +10,26 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/internal/server"
 )
 
 // dependencies bundles everything the cds router needs.
 type dependencies struct {
-	AttestHandler    AttestHandler
-	AttestKeyHandler attestation.Handler
-	SignCSRHandler   SignCSRHandler
-	AllowlistHandler allowlist.Handler
-	HandoffHandler   *issuer.HandoffHandler // nil disables /handoff (no --handoff-measurements)
-	ReadyFn          attestation.ReadinessFunc
-	EarIssuer        ear.Issuer
-	JWKSFunc         func() []byte
-	CACertPEM        []byte
-	OperatorKeysPEM  []byte                // pinned operator public keys; empty = /operator-keys 404s
-	RateLimiter      *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
-	MaxRequestSize   int64                 // applied to write endpoints; must be > 0
+	AttestHandler     AttestHandler
+	AttestKeyHandler  attestation.Handler
+	SignCSRHandler    SignCSRHandler
+	AllowlistHandler  allowlist.Handler
+	HandoffHandler    *issuer.HandoffHandler // nil disables /handoff (no --handoff-measurements)
+	ReadyFn           attestation.ReadinessFunc
+	EarIssuer         ear.Issuer
+	JWKSFunc          func() []byte
+	CACertPEM         []byte
+	OperatorKeysPEM   []byte                // pinned operator public keys; empty = /operator-keys 404s
+	RateLimiter       *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
+	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
+	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
+	SecretsChallenges *attestation.ChallengeStore
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -66,6 +69,12 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodDelete, "/allowlist/digests", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteDigests)))
 	r.Method(http.MethodPut, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandlePutWorkload)))
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
+
+	if deps.SecretsHandler != nil {
+		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.protected(attestation.HandleAuthenticate(deps.SecretsChallenges)))
+		r.Method(http.MethodGet, secrets.Route, deps.protected(deps.SecretsHandler))
+		r.Method(http.MethodPost, secrets.Route, deps.protected(deps.SecretsHandler))
+	}
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
 	r.Get("/operator-keys", handleOperatorKeys(deps.OperatorKeysPEM))

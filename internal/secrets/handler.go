@@ -25,10 +25,22 @@ import (
 // only ever match a top-level path.
 const Route = "/secrets/*"
 
+// ChallengeRoute mints the single-use nonce a secret request must carry. It is
+// "/secrets" exactly, which Route (which always has a path under it) can never
+// match, so no store path is shadowed by it.
+const ChallengeRoute = "/secrets"
+
 // authScheme prefixes the sandbox token in the Authorization header. The token
 // travels in a header rather than the URL so it is covered by the server's
 // header bound and never reaches a request log.
 const authScheme = "SandboxToken "
+
+// InjectedEntrypoints are the argv[0] values the admission webhook injects the
+// c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
+// and get-secret for the fetcher. A container must be running one of these, on
+// an injected digest, to be excluded from workload matching — see
+// Handler.InjectedDigests.
+var InjectedEntrypoints = []string{"get-cert", "get-secret", "/c8s"}
 
 // challengeSource issues and consumes the single-use nonces that make a request
 // fresh. The secrets listener holds its own, so a nonce minted for issuance
