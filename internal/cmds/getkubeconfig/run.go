@@ -27,6 +27,10 @@ type Config struct {
 	// alone is reproducible by anyone holding the operator's PUBLIC key, which
 	// includes the untrusted host that staged it. See ImagePolicy.
 	Image ImagePolicy
+	// WorkloadImages are the images the node's runtime measurer has already
+	// chained onto the operator-key seed in RTMR[3], in first-extend order.
+	// Empty expects the bare seed. See WorkloadImages.
+	WorkloadImages WorkloadImages
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -56,7 +60,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 1. Resolve the measurement policy BEFORE touching the network, so a
 	//    missing image pin is a usage error rather than a verdict reached
 	//    against an unpinned node.
-	policy, err := cfg.Image.resolve(pubPEM)
+	policy, err := cfg.Image.resolve(pubPEM, cfg.WorkloadImages)
 	if err != nil {
 		return err
 	}

@@ -149,7 +149,7 @@ func TestImagePolicyRejectsPartialPin(t *testing.T) {
 		"manifest + registers": {ManifestPath: writeTestManifest(t), RTMR1Hex: testRTMR1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := p.resolve(pub); err == nil {
+			if _, err := p.resolve(pub, nil); err == nil {
 				t.Fatal("resolve accepted a partial image pin")
 			}
 		})
@@ -160,7 +160,7 @@ func TestImagePolicyRejectsPartialPin(t *testing.T) {
 // the digests but not the file.
 func TestImagePolicyIndividualFlagsMatchManifest(t *testing.T) {
 	pub := operatorPub(t)
-	fromManifest, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub)
+	fromManifest, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestImagePolicyIndividualFlagsMatchManifest(t *testing.T) {
 		MeasurementHex: testMRTD,
 		RTMR1Hex:       testRTMR1,
 		RTMR2Hex:       testRTMR2,
-	}.resolve(pub)
+	}.resolve(pub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestImagePolicyIndividualFlagsMatchManifest(t *testing.T) {
 // re-derive it.
 func TestImagePolicySeedsRTMR3FromOperatorKey(t *testing.T) {
 	pub := operatorPub(t)
-	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub)
+	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,12 +212,12 @@ func TestImagePolicyRejectsBadManifest(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := (ImagePolicy{ManifestPath: path}).resolve(pub); err == nil {
+			if _, err := (ImagePolicy{ManifestPath: path}).resolve(pub, nil); err == nil {
 				t.Fatal("resolve accepted a malformed manifest")
 			}
 		})
 	}
-	if _, err := (ImagePolicy{ManifestPath: filepath.Join(dir, "absent.json")}).resolve(pub); err == nil {
+	if _, err := (ImagePolicy{ManifestPath: filepath.Join(dir, "absent.json")}).resolve(pub, nil); err == nil {
 		t.Fatal("resolve accepted a missing manifest")
 	}
 }
@@ -237,5 +237,99 @@ func TestRATLSDialEnforcesImagePin(t *testing.T) {
 	}
 	if !errors.Is(err, localverify.ErrRTMRNotAllowed) {
 		t.Fatalf("want an RTMR policy failure, got %v", err)
+	}
+}
+
+// The seeded chain: once the node's runtime measurer has extended workload
+// images onto the operator-key seed, RTMR[3] is no longer the seed. Naming the
+// images must reproduce the register exactly — otherwise the operator's only
+// way to connect is to drop the pin, which is what it exists to prevent.
+func TestWorkloadImagesChainOntoSeed(t *testing.T) {
+	pub := operatorPub(t)
+	const (
+		digA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		digB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub, WorkloadImages{
+		"ghcr.io/org/app:v1@" + digA,
+		digB,
+		digA, // a replica of the first image: the measurer extends it once
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{digA, digB})
+	if hex.EncodeToString(p.rtmrs[3]) != hex.EncodeToString(want[:]) {
+		t.Error("RTMR[3] pin does not match the seeded workload chain")
+	}
+	// The bare seed must NOT satisfy a node that has measured workloads.
+	seed := runtimemeasure.ForOperatorKey(pub)
+	if hex.EncodeToString(p.rtmrs[3]) == hex.EncodeToString(seed[:]) {
+		t.Error("chained RTMR[3] equals the bare seed — the extends were ignored")
+	}
+}
+
+// Order is part of the value: the register is append-only, so a different
+// first-extend order is a different node state, not the same one.
+func TestWorkloadImageOrderMatters(t *testing.T) {
+	pub := operatorPub(t)
+	const (
+		digA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		digB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	manifest := writeTestManifest(t)
+	ab, err := ImagePolicy{ManifestPath: manifest}.resolve(pub, WorkloadImages{digA, digB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba, err := ImagePolicy{ManifestPath: manifest}.resolve(pub, WorkloadImages{digB, digA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(ab.rtmrs[3]) == hex.EncodeToString(ba.rtmrs[3]) {
+		t.Error("extend order must change RTMR[3]")
+	}
+}
+
+// No workloads named = the bare seed, which is what a node reports before its
+// measurer runs and always on a guest that has none.
+func TestNoWorkloadImagesIsBareSeed(t *testing.T) {
+	pub := operatorPub(t)
+	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := runtimemeasure.ForOperatorKey(pub)
+	if hex.EncodeToString(p.rtmrs[3]) != hex.EncodeToString(seed[:]) {
+		t.Error("with no workloads the pin must be the bare operator-key seed")
+	}
+}
+
+// A tag is not content-bound, so it cannot name what was measured.
+func TestWorkloadImageRejectsUnpinnedReference(t *testing.T) {
+	_, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(operatorPub(t),
+		WorkloadImages{"ghcr.io/org/app:v1"})
+	if err == nil || !strings.Contains(err.Error(), "--workload-image") {
+		t.Fatalf("want a --workload-image rejection, got %v", err)
+	}
+}
+
+// End to end: a node whose measurer has extended a workload verifies when the
+// operator names it, and does not when they don't.
+func TestRunAcceptsNodeWithMeasuredWorkload(t *testing.T) {
+	const dig = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	pub := operatorPubFromKeyFile(t, env.keyPath)
+	extended := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig})
+	stubVerify(t, verifiedResult(hex.EncodeToString(extended[:])), nil)
+
+	cfg := env.config()
+	if err := Run(context.Background(), cfg); err == nil {
+		t.Fatal("a node past the bare seed must not verify against the seed alone")
+	}
+
+	cfg.WorkloadImages = WorkloadImages{dig}
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("naming the measured workload must verify the node: %v", err)
 	}
 }

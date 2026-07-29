@@ -63,6 +63,17 @@ func readOwnRTMR3() ([]byte, error) {
 // With this check, the on-disk pubkey is anchored to RTMR[3], and RTMR[3] is
 // what the operator's own attestation pins to their key: both directions bind
 // to the same measured key, so neither side trusts the host.
+//
+// INVARIANT — this compares against the BARE SEED, so it is only meaningful
+// while RTMR[3] still holds it. The register is append-only: once a runtime
+// measurer chains per-workload extends onto the seed (pkg/runtimemeasure), it
+// no longer equals ForOperatorKey(pubkey) and this check cannot pass. That is
+// why the service reads the key ONCE at startup, before any workload is
+// admitted, and holds it for the life of the TD (see Run). A guest that runs a
+// measurer must therefore start cred-release ahead of it; the mismatch below
+// says so explicitly rather than blaming the host, because from a single hash
+// the two causes are indistinguishable and calling it an attack would send an
+// operator hunting a compromise that isn't there.
 func verifyKeyMeasured(pubkey []byte) error {
 	own, err := readOwnRTMR3()
 	if err != nil {
@@ -72,7 +83,7 @@ func verifyKeyMeasured(pubkey []byte) error {
 	// Not secret (a public-key hash) — plain compare is fine.
 	if !bytes.Equal(own, want) {
 		return fmt.Errorf(
-			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
+			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s — either the pubkey file was substituted after boot, or RTMR[3] has already been extended past the operator-key seed (a runtime measurer started before cred-release did). Both are refused: the on-disk key cannot be anchored to the register either way",
 			hex.EncodeToString(own), hex.EncodeToString(want))
 	}
 	return nil

@@ -48,7 +48,7 @@ func writeTestManifest(t *testing.T) string {
 // what Run derives internally, for tests that call the verify helpers directly.
 func testPins(t *testing.T, operatorPubPEM []byte) pins {
 	t.Helper()
-	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(operatorPubPEM)
+	p, err := ImagePolicy{ManifestPath: writeTestManifest(t)}.resolve(operatorPubPEM, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

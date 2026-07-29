@@ -60,6 +60,22 @@ type ImagePolicy struct {
 	RTMR2Hex       string
 }
 
+// WorkloadImages are the image digests the guest's runtime measurer extended
+// into RTMR[3] AFTER the operator-key seed, in first-extend order.
+//
+// RTMR[3] is append-only and carries two kinds of value in sequence: the
+// operator-key seed the initrd writes before switch_root, then one extend per
+// distinct workload image the guest admits (pkg/runtimemeasure). Comparing
+// against the bare seed is therefore only correct until the first workload is
+// measured; after that the node reports FromDigestsSeeded(seed, digests) and a
+// seed-equality check fails a perfectly healthy cluster — pushing the operator
+// to drop the pin, which is the outcome the pin exists to prevent. Naming the
+// expected images keeps it exact instead.
+//
+// Empty means "nothing measured yet": the bare seed, which is what a node
+// reports before its measurer runs and always on a guest that has none.
+type WorkloadImages []string
+
 // pins is a resolved measurement policy: the launch digest allowlist plus the
 // runtime registers, ready for localverify.
 type pins struct {
@@ -74,7 +90,11 @@ type pins struct {
 // the kernel is RTMR[1] and the rootfs RTMR[2] — so a partial pin is refused
 // rather than accepted as "better than nothing": it would report the same
 // verdict shape as a full pin while leaving the guest OS unconstrained.
-func (p ImagePolicy) resolve(operatorPubPEM []byte) (pins, error) {
+//
+// workloads are the image digests the guest's runtime measurer has chained
+// onto the operator-key seed in RTMR[3]; empty means the register still holds
+// the bare seed.
+func (p ImagePolicy) resolve(operatorPubPEM []byte, workloads WorkloadImages) (pins, error) {
 	var out pins
 	individual := p.MeasurementHex != "" || p.RTMR1Hex != "" || p.RTMR2Hex != ""
 
@@ -111,10 +131,40 @@ func (p ImagePolicy) resolve(operatorPubPEM []byte) (pins, error) {
 	}
 
 	// RTMR[3] closes the other half: the image is the operator's, and this
-	// deployment was launched to trust the operator's key.
-	reg := runtimemeasure.ForOperatorKey(operatorPubPEM)
-	out.rtmrs[3] = reg[:]
+	// deployment was launched to trust the operator's key. Per-workload
+	// extends chain onto that seed in first-extend order, so the expected
+	// register is the seed only while nothing has been measured yet.
+	reg, err := workloads.expectedRTMR3(operatorPubPEM)
+	if err != nil {
+		return pins{}, err
+	}
+	out.rtmrs[3] = reg
 	return out, nil
+}
+
+// expectedRTMR3 computes the register value a node reports for this operator
+// key after measuring w, in order. Digests are canonicalized and deduplicated
+// first-seen, mirroring the in-guest measurer: it extends each DISTINCT image
+// once, so restarts and replicas do not double-extend the append-only
+// register. A reference that is not digest-pinned is refused — a tag is not
+// content-bound, so it cannot name what was measured.
+func (w WorkloadImages) expectedRTMR3(operatorPubPEM []byte) ([]byte, error) {
+	seed := runtimemeasure.ForOperatorKey(operatorPubPEM)
+	seen := make(map[string]bool, len(w))
+	digests := make([]string, 0, len(w))
+	for _, ref := range w {
+		d, err := runtimemeasure.CanonicalDigest(ref)
+		if err != nil {
+			return nil, fmt.Errorf("--workload-image %q: %w", ref, err)
+		}
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		digests = append(digests, d)
+	}
+	reg := runtimemeasure.FromDigestsSeeded(seed, digests)
+	return reg[:], nil
 }
 
 // verifyEvidence verifies an evidence envelope in-process (HW chain +

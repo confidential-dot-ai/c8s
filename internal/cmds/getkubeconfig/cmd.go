@@ -57,6 +57,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.Image.MeasurementHex, "measurement", "", "expected MRTD as 96 hex chars, if you have the digests rather than the manifest. TDX MRTD covers only the firmware, so it must be given with --expected-rtmr1 and --expected-rtmr2")
 	f.StringVar(&cfg.Image.RTMR1Hex, "expected-rtmr1", "", "expected RTMR[1] as 96 hex chars — the guest kernel (UKI image identity + GPT + boot)")
 	f.StringVar(&cfg.Image.RTMR2Hex, "expected-rtmr2", "", "expected RTMR[2] as 96 hex chars — the guest rootfs (UKI section measurement chain)")
+	f.StringArrayVar((*[]string)(&cfg.WorkloadImages), "workload-image", nil, "image digest (sha256:<hex> or <ref>@sha256:<hex>; repeatable, in first-extend order) the node's runtime measurer already extended into RTMR[3] on top of the operator-key seed. Omit for a node whose register still holds the bare seed — the expected value is otherwise wrong the moment the first workload is measured")
 	f.StringVar(&cfg.ContextName, "context", "c8s", "kubeconfig cluster/context/user name")
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")
 	f.StringVar(&cfg.OutPath, "out", "", "output kubeconfig path (required)")
