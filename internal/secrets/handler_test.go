@@ -205,7 +205,7 @@ func (hn *harness) requestWith(t *testing.T, method, path string, leaf *x509.Cer
 
 	r := httptest.NewRequest(method, "/secrets"+path, nil)
 	r.Header.Set("X-C8s-Challenge", base64.StdEncoding.EncodeToString(nonce))
-	r.Header.Set("Authorization", authScheme+base64.StdEncoding.EncodeToString(body))
+	r.Header.Set("Authorization", AuthScheme+base64.StdEncoding.EncodeToString(body))
 	r.TLS = &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{leaf},
 		VerifiedChains:   [][]*x509.Certificate{{leaf}},

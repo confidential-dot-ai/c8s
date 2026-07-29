@@ -80,9 +80,9 @@ func TestTokenHeaderRejections(t *testing.T) {
 	}{
 		{"missing", ""},
 		{"wrong scheme", "Bearer " + base64.StdEncoding.EncodeToString([]byte(`{"token":"","signature":""}`))},
-		{"not base64", authScheme + "!!!"},
-		{"not json", authScheme + base64.StdEncoding.EncodeToString([]byte("not json"))},
-		{"unknown field", authScheme + base64.StdEncoding.EncodeToString([]byte(`{"token":"AA==","signature":"AA==","extra":1}`))},
+		{"not base64", AuthScheme + "!!!"},
+		{"not json", AuthScheme + base64.StdEncoding.EncodeToString([]byte("not json"))},
+		{"unknown field", AuthScheme + base64.StdEncoding.EncodeToString([]byte(`{"token":"AA==","signature":"AA==","extra":1}`))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hn := newHarness(t)
