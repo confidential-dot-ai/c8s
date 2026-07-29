@@ -125,7 +125,7 @@
   parsing lives with the zone rendering in tls-lb-configmap.yaml (same
   c8s.positiveInt, so either template failing first reports the same message).
 */ -}}
-{{- if and $tlsLB.enabled (eq (include "tls-lb.renderAllowlistRoute" .) "true") -}}
+{{- if and $tlsLB.enabled (eq (include "tls-lb.renderCDSProxy" .) "true") -}}
 {{- $writeRate := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
 {{- $writeBurst := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
 {{- $writeTotalRate := int (include "c8s.positiveInt" (dict "value" $tlsLB.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}

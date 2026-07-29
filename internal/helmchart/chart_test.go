@@ -1905,10 +1905,12 @@ func TestChartTLSLBServiceType(t *testing.T) {
 		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
 		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
-		// Without the built-in allowlist route there is no source-IP-keyed
-		// limiter, so the default policy must not regress reachability
-		// through nodes that do not run the tls-lb pod.
-		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		// Without either built-in control-plane route there is no
+		// source-IP-keyed limiter, so the default policy must not regress
+		// reachability through nodes that do not run the tls-lb pod.
+		{name: "LoadBalancer without control-plane routes", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false", "--set", "tlsLb.secrets.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		// One route alone (secrets here) still keys limiters on source IP.
+		{name: "LoadBalancer with secrets route only", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2430,7 +2432,10 @@ func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
 }
 
 func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
-	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+	// Both control-plane routes off: the proxy sidecar and its rate zones
+	// must disappear with them (the secrets route alone keeps them alive —
+	// see TestTLSLBSecretsRouteAloneKeepsProxy).
+	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false", "--set", "secrets.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
@@ -2453,13 +2458,81 @@ func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
 	}
 }
 
+// The /secrets operator surface rides the same attested proxy and rate budget
+// as /allowlist. Workload secret reads authenticate with the pod's mesh leaf,
+// which never crosses this hop, so the route exposes only operator-key-signed
+// writes.
+func TestTLSLBExposesSecretsRouteByDefault(t *testing.T) {
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, route := range []struct {
+		match string
+		path  string
+	}{
+		{match: "exact", path: "/secrets"},
+		{match: "prefix", path: "/secrets/"},
+	} {
+		location := cfg.location(t, route.match, route.path)
+		location.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
+		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=5", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=15", "nodelay")
+		location.assertDirective(t, "limit_req_status", "429")
+	}
+}
+
+func TestTLSLBSecretsRouteCanBeDisabled(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "secrets.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/secrets"},
+		{match: "prefix", path: "/secrets/"},
+	} {
+		if _, ok := cfg.locations[key]; ok {
+			t.Fatalf("nginx config contains disabled built-in secrets location %#v", key)
+		}
+	}
+	// The allowlist route still renders, so the proxy and zones stay.
+	cfg.location(t, "exact", "/allowlist")
+	renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+}
+
+func TestTLSLBSecretsRouteAloneKeepsProxy(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "exact", "/secrets")
+	cfg.location(t, "prefix", "/secrets/")
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		if _, ok := cfg.locations[key]; ok {
+			t.Fatalf("nginx config contains disabled built-in allowlist location %#v", key)
+		}
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=1r/s")
+	renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+}
+
 func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
+	// secrets.enabled=false so the proxy/zone assertions below see the
+	// explicit route standing entirely alone.
 	out, err := helmTemplateTLSLB(t,
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
 		"--set-string", "routes[0].backend.protocol=https",
 		"--set", "routes[0].backend.tls.verify=true",
+		"--set", "secrets.enabled=false",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -5633,10 +5706,11 @@ func renderExampleTLSLBNginxConf() string {
 		"--set", "cds.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001",
 		"--set", "nriImagePolicy.image.digest="+baseNRIDigest,
 		"--set-string", "nriImagePolicy.bootstrapAllowlist.digests."+baseNRIDigest+"=ghcr.io/confidential-dot-ai/nri-image-policy@"+baseNRIDigest,
-		// discovery defaults to enabled; scope this example to route rendering
-		// (discovery's own locations are covered by a dedicated test above).
+		// discovery and the built-in secrets route default to enabled; scope
+		// this example to route rendering (each has its own dedicated test).
 		"--set", "tlsLb.discovery.enabled=false",
 		"--set", "tlsLb.attest.enabled=false",
+		"--set", "tlsLb.secrets.enabled=false",
 		"--set-string", "tlsLb.upstream.address=vllm:8000",
 		"--set", "tlsLb.upstream.protocol=https",
 		"--set", "tlsLb.upstream.tls.verify=true",

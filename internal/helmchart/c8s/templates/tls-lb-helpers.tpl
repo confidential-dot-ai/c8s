@@ -177,6 +177,33 @@ both the built-in nginx locations and their loopback proxy sidecar.
 {{- end -}}
 
 {{/*
+Render the built-in /secrets route: the `c8s secrets put` operator surface,
+published through the same attested loopback proxy as /allowlist. A typed
+tlsLb.routes entry owning /secrets suppresses it, like the allowlist route.
+*/}}
+{{- define "tls-lb.renderSecretsRoute" -}}
+{{- if not (kindIs "bool" .Values.tlsLb.secrets.enabled) -}}
+{{- fail (printf "tlsLb.secrets.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.secrets.enabled) -}}
+{{- end -}}
+{{- $found := false -}}
+{{- range $route := .Values.tlsLb.routes -}}
+{{- $path := toString (default "" $route.path) -}}
+{{- if or (eq $path "/secrets") (eq $path "/secrets/") -}}
+{{- $found = true -}}
+{{- end -}}
+{{- end -}}
+{{- and .Values.tlsLb.secrets.enabled (not $found) -}}
+{{- end -}}
+
+{{/*
+True when either built-in CDS control-plane route renders — the condition for
+the loopback proxy sidecar, its rate zones, and Local traffic policy.
+*/}}
+{{- define "tls-lb.renderCDSProxy" -}}
+{{- or (eq (include "tls-lb.renderAllowlistRoute" .) "true") (eq (include "tls-lb.renderSecretsRoute" .) "true") -}}
+{{- end -}}
+
+{{/*
 Render one half of the built-in CDS allowlist route. The caller emits an exact
 /allowlist location and a /allowlist/ prefix location so unrelated paths such
 as /allowlisted never reach the loopback proxy. proxy_pass includes $request_uri

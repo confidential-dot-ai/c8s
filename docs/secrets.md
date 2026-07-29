@@ -144,6 +144,12 @@ c8s secrets put /tenant-a/hf-token --url "$CDS" --measurements "$M" \
   --operator-key operator.key < token.txt
 ```
 
+The default chart also publishes this surface through tls-lb
+(`tlsLb.secrets.enabled`), the same attested front door as `/allowlist`, so
+`--url` can be the tls-lb URL. Workload secret reads authenticate with the
+pod's mesh leaf, which never crosses that hop — the public route can only
+carry operator-key-signed writes.
+
 The value is read from stdin or `--from-file`, and the bytes are stored exactly
 as read — a trailing newline is part of the value. The byte count is printed to
 confirm which one was sent.

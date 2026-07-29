@@ -13,12 +13,12 @@ metadata:
 spec:
   type: {{ $svc.type }}
   {{- if or (eq $svc.type "LoadBalancer") (eq $svc.type "NodePort") }}
-  {{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" }}
-  {{- $policy := default (ternary "Local" "Cluster" $renderAllowlistRoute) $svc.externalTrafficPolicy }}
+  {{- $renderCDSProxy := eq (include "tls-lb.renderCDSProxy" .) "true" }}
+  {{- $policy := default (ternary "Local" "Cluster" $renderCDSProxy) $svc.externalTrafficPolicy }}
   {{- if not (or (eq $policy "Local") (eq $policy "Cluster")) }}
   {{- fail (printf "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: %s" $policy) }}
   {{- end }}
-  # Local (the default while the built-in /allowlist route renders) preserves
+  # Local (the default while a built-in control-plane route renders) preserves
   # the public source IP its per-client limiters key on; see values.yaml.
   externalTrafficPolicy: {{ $policy }}
   {{- end }}

@@ -88,6 +88,11 @@ func (c client) put(ctx context.Context, path string, value []byte, overwrite bo
 		// CLI report a refusal for a write that landed.
 		return result{}, fmt.Errorf("cds replaced a value for a request that did not ask to: %s", path)
 	default:
+		// A 404/405 with a non-JSON body never reached CDS: it is a front
+		// door (an older tls-lb) without the /secrets route.
+		if (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) && !json.Valid(raw) {
+			return result{}, fmt.Errorf("%s answered %d without reaching CDS: this front door does not route /secrets. Upgrade tls-lb to a chart that publishes it (tlsLb.secrets.enabled), or use a direct CDS URL via a port-forward (kubectl port-forward svc/c8s-cds 8443:8443, then --url https://localhost:8443)", c.baseURL, resp.StatusCode)
+		}
 		return result{}, fmt.Errorf("cds returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 }
