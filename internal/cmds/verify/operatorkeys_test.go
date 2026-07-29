@@ -131,3 +131,96 @@ func TestFetchOperatorKeys404MeansDisabled(t *testing.T) {
 		t.Fatalf("expected no fingerprints, the empty-set digest, and an explanatory note, got fps=%v digest=%x note=%q", fps, digest, note)
 	}
 }
+
+func TestGatherOperatorKeys(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("skipped for non-cds kinds and file targets", func(t *testing.T) {
+		got := gatherOperatorKeys(ctx, config{kind: "lb", url: "x"}, &evidence{})
+		if !strings.Contains(got.note, "skipped") || got.fingerprints != nil || got.fetchErr != nil {
+			t.Errorf("non-cds kind must skip the cross-check without fetching, got %+v", got)
+		}
+		if got := gatherOperatorKeys(ctx, config{kind: "cds"}, &evidence{}); got.note != "" {
+			t.Errorf("no url should be a no-op, got %+v", got)
+		}
+	})
+
+	t.Run("no serving cert to bind to", func(t *testing.T) {
+		got := gatherOperatorKeys(ctx, config{kind: "cds", url: "cds.example.com"}, &evidence{})
+		if got.note == "" || got.fingerprints != nil {
+			t.Errorf("no attested cert must skip the fetch with a note, got %+v", got)
+		}
+	})
+
+	t.Run("bad target", func(t *testing.T) {
+		got := gatherOperatorKeys(ctx, config{kind: "cds", url: "https://\x7f"}, &evidence{certSHA256: "aa"})
+		if !strings.HasPrefix(got.note, "not fetched:") || got.fetchErr != nil {
+			t.Errorf("unparseable target should degrade to a note, got %+v", got)
+		}
+	})
+
+	t.Run("fetches and binds to the attested cert", func(t *testing.T) {
+		pubPEM, wantFP := operatorPubPEM(t)
+		base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/operator-keys" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write(pubPEM)
+		})
+		got := gatherOperatorKeys(ctx, config{kind: "cds", url: base, timeout: 5 * time.Second}, &evidence{certSHA256: certSHA})
+		if got.fetchErr != nil || got.note != "" {
+			t.Fatalf("fetch failed: %+v", got)
+		}
+		if len(got.fingerprints) != 1 || got.fingerprints[0] != wantFP {
+			t.Errorf("fingerprints = %v, want [%s]", got.fingerprints, wantFP)
+		}
+	})
+
+	t.Run("fetch failure records fetchErr", func(t *testing.T) {
+		base, _ := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		})
+		got := gatherOperatorKeys(ctx, config{kind: "cds", url: base, timeout: 5 * time.Second}, &evidence{certSHA256: strings.Repeat("ab", 32)})
+		if got.fetchErr == nil || !strings.HasPrefix(got.note, "not fetched:") {
+			t.Errorf("expected a recorded fetch error, got %+v", got)
+		}
+	})
+}
+
+func TestFetchOperatorKeyFingerprints_Errors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no attested cert pin", func(t *testing.T) {
+		if _, _, _, err := fetchOperatorKeyFingerprints(ctx, "https://x", "", "", time.Second); err == nil {
+			t.Error("empty wantCertSHA256 must be rejected")
+		}
+	})
+
+	t.Run("non-200 non-404", func(t *testing.T) {
+		base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		})
+		if _, _, _, err := fetchOperatorKeyFingerprints(ctx, base, "", certSHA, 5*time.Second); err == nil || !strings.Contains(err.Error(), "500") {
+			t.Errorf("expected a 500 error, got %v", err)
+		}
+	})
+
+	t.Run("oversized response", func(t *testing.T) {
+		base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write(bytes.Repeat([]byte("A"), maxOperatorKeysBytes+2))
+		})
+		if _, _, _, err := fetchOperatorKeyFingerprints(ctx, base, "", certSHA, 5*time.Second); err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("expected an oversize rejection, got %v", err)
+		}
+	})
+
+	t.Run("unparseable body", func(t *testing.T) {
+		base, certSHA := startKeysTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("not pem at all"))
+		})
+		if _, _, _, err := fetchOperatorKeyFingerprints(ctx, base, "", certSHA, 5*time.Second); err == nil || !strings.Contains(err.Error(), "parse /operator-keys") {
+			t.Errorf("expected a parse error, got %v", err)
+		}
+	})
+}

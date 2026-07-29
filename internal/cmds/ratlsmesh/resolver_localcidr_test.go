@@ -106,3 +106,29 @@ func TestNewK8sResolverBootTimeoutBudget(t *testing.T) {
 		t.Errorf("zero budget took only %v; want the 1s default budget to apply", elapsed)
 	}
 }
+
+func TestRunLocalCIDRRefreshLoop(t *testing.T) {
+	_, cidr, _ := net.ParseCIDR("10.244.0.0/24")
+	r := &k8sResolver{
+		nodeIP:          "10.0.0.1",
+		logger:          testLogger(),
+		podMap:          map[string]podEntry{},
+		localRouteCheck: passthroughLocalRouteCheck,
+		localCIDRSource: func(string) ([]localCIDR, error) {
+			return testLocalCIDRs(cidr), nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		r.runLocalCIDRRefreshLoop(ctx, 5*time.Millisecond)
+		close(done)
+	}()
+	assertEventually(t, 5*time.Second, func() bool { return r.LocalCIDRCount() == 1 }, "refresh loop never reconciled")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh loop did not stop on cancel")
+	}
+}

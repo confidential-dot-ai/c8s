@@ -122,3 +122,43 @@ func TestAttestationTLSCertBindingUnconfigured(t *testing.T) {
 		t.Fatalf("status = %d, want 501 when serving cert is not configured", resp.StatusCode)
 	}
 }
+
+func TestServingLeafSPKIErrors(t *testing.T) {
+	dir := t.TempDir()
+	notCert := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(notCert, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1, 2, 3}}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badDER := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(badDER, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"missing file", filepath.Join(dir, "nope.pem")},
+		{"not a certificate PEM", notCert},
+		{"garbage certificate DER", badDER},
+	}
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer(Config{Evidence: &capturingProvider{}, ServingCertFile: tc.file})
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?nonce=" + b64url(nonce) + "&pq=false")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Fatalf("status = %d, want 501", resp.StatusCode)
+			}
+			if e := decodeErr(t, resp); e.Error != types.ErrorCodeBindingUnavailable {
+				t.Fatalf("error code = %q", e.Error)
+			}
+		})
+	}
+}
