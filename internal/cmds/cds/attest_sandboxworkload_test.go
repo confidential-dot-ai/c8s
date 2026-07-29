@@ -524,3 +524,46 @@ func TestAttest_SandboxWorkload_EmptyArgvDetailIssuesWithoutStamp(t *testing.T) 
 		t.Fatalf("argv-less container detail must degrade to no stamp, got %+v", matched)
 	}
 }
+
+// An inventory whose per-container detail names a digest its flat set does not
+// is reporting two different sandboxes in one response. Even with every
+// individual digest allowlisted, the divergence refuses issuance — gating on
+// one view and stamping from the other would let the difference slip through
+// whichever check only saw its half.
+func TestAttest_SandboxWorkload_ContainerOutsideDigestSetRefuses(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = floorStore(wlDigestA, wlDigestB)
+	h.SandboxDigests = fakeDigests{
+		digests:    map[string][]string{testSandboxID: {wlDigestA}},
+		containers: sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA}, workloadclaims.SandboxContainer{Digest: wlDigestB}),
+		key:        signer.PublicKey(),
+	}
+
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// The mirror image: a flat digest with no per-container detail is a container
+// the argv matching would never see. Same refusal.
+func TestAttest_SandboxWorkload_DigestWithoutDetailRefuses(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = floorStore(wlDigestA, wlDigestB)
+	h.SandboxDigests = fakeDigests{
+		digests:    map[string][]string{testSandboxID: {wlDigestA, wlDigestB}},
+		containers: sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA}),
+		key:        signer.PublicKey(),
+	}
+
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+	}
+}
