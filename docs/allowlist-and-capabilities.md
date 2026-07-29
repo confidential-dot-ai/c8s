@@ -147,14 +147,13 @@ for what the admission inventory contributes to a release decision.
 - A grant that releases nothing is omitted from the canonical document, so an
   entry without one serializes exactly as it did before the field existed.
 
-**No enforcer consumes `secrets` yet** — the CDS secret store and its release
-endpoint are not implemented, so a grant releases nothing today. It is carried,
-validated, and canonicalized so the schema and the operator tooling are ready.
+CDS enforces this grant at `GET`/`POST /secrets/*`. Writing a grant is what
+turns release on: an entry without one releases nothing
+([`secrets.md`](secrets.md#when-it-is-served)).
 
-This replaces the per-container `paths` field, which named filesystem locations
-and never had an enforcer. Filesystem location is not an authorization boundary
-— a workload owns its own filesystem once a value is inside it — so only the
-store path is policy. Upgrading an install that still sets `paths` is covered in
+Filesystem location is not an authorization boundary — a workload owns its own
+filesystem once a value is inside it — so a grant names store paths only. An
+install still setting the per-container `paths` field needs
 [`secrets.md`](secrets.md#upgrading).
 
 ## Where it's enforced
@@ -193,10 +192,11 @@ Corner 4). The honest guarantee is therefore: **per-container digest + argv
 everywhere; no combination gating.**
 
 Combination gating wants a point where the pod is complete and the decision is
-worth blocking on — secrets release is the intended home, and is not implemented
-yet. Making a combination itself *attested* (so it gates container start) is the
-RTMR3 per-workload-measurement path tracked in
-[`THREAT_MODEL.md`](THREAT_MODEL.md); both are out of scope here.
+worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
+it happens once every main container is up, so it can require a whole entry
+rather than membership. That gates a secret, not container start — making a
+combination itself *attested* is the RTMR3 per-workload-measurement path tracked
+in [`THREAT_MODEL.md`](THREAT_MODEL.md), and is out of scope here.
 
 ### The injected-container carve-out
 

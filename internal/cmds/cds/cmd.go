@@ -77,6 +77,10 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.rateLimiterEvictInterval, "rate-limiter-evict-interval", time.Minute, "interval for per-IP rate limiter eviction sweep")
 	flags.DurationVar(&cfg.rateLimiterIdleTimeout, "rate-limiter-idle-timeout", 5*time.Minute, "idle duration before a per-IP rate limiter entry is evicted")
 
+	flags.IntVar(&cfg.secretsMaxPaths, "secrets-max-paths", 1024, "max distinct secret paths held in memory")
+	flags.IntVar(&cfg.secretsMaxValueBytes, "secrets-max-value-bytes", 4096, "max bytes in one secret value")
+	flags.IntVar(&cfg.sandboxLedgerMax, "sandbox-ledger-max-entries", 10000, "max sandbox-to-inventory bindings held in memory")
+
 	flags.DurationVar(&cfg.rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "EAR signing key rotation interval (0 disables)")
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
 	flags.Float64Var(&cfg.rotationJitter, "token-signer-rotation-jitter", 0.1, "")
@@ -154,4 +158,8 @@ type config struct {
 	rateLimiterMax           int
 	rateLimiterEvictInterval time.Duration
 	rateLimiterIdleTimeout   time.Duration
+
+	secretsMaxPaths      int
+	secretsMaxValueBytes int
+	sandboxLedgerMax     int
 }

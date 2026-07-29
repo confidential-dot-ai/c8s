@@ -73,6 +73,18 @@ type AttestHandler struct {
 	// token: without it a workload could point CDS at its own pod IP and
 	// answer as the inventory.
 	InventoryHosts workloadclaims.InventoryHosts
+
+	// SandboxBindings records which inventory vouched for a sandbox, so a
+	// later decision about that sandbox asks the same one rather than one the
+	// requester names (internal/sandboxledger). nil records nothing.
+	SandboxBindings sandboxBinder
+}
+
+// sandboxBinder records the inventory that vouched for a sandbox. Record
+// reports whether the binding holds; a false is never a reason to refuse
+// issuance — see recordSandboxBinding.
+type sandboxBinder interface {
+	Record(sandboxID, inventoryHost string) bool
 }
 
 // sandboxDigestSource is the inventory callback, satisfied by
@@ -202,6 +214,12 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		attestation.WriteError(w, http.StatusGatewayTimeout, types.ErrorCodeTimeout, "request timeout")
 		return
 	}
+
+	// Every other gate has passed, so this sandbox is about to be named on a
+	// leaf: bind it to the inventory that vouched for it. Recorded here rather
+	// than at token verification so a request that then fails the measurement
+	// or workload check cannot claim a sandbox ID it never got a cert for.
+	h.recordSandboxBinding(sandbox)
 
 	// The leaf's OID .1.1 RA-TLS extension is copied from the client's CSR
 	// (see issuer.SignCSR): the client embeds evidence bound to
@@ -345,6 +363,25 @@ func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox worklo
 		}
 	}
 	return nil
+}
+
+// recordSandboxBinding notes which inventory vouched for this sandbox.
+//
+// A refused binding — a second inventory claiming a sandbox another one already
+// owns — does NOT refuse the certificate. get-cert has no token-less retry
+// (internal/cmds/getcert/run.go), so denying here would let one pre-claim wedge
+// a pod for a whole certificate lifetime, which is worse than what it prevents.
+// The consequence is narrower and lands where the stake is: no binding means no
+// inventory the secrets path is willing to believe about the sandbox, so it
+// fails closed there instead.
+func (h AttestHandler) recordSandboxBinding(sandbox workloadclaims.VerifiedSandbox) {
+	if h.SandboxBindings == nil || sandbox.SandboxID == "" {
+		return
+	}
+	if !h.SandboxBindings.Record(sandbox.SandboxID, sandbox.InventoryHost) {
+		slog.Warn("sandbox is already bound to a different inventory; issuing anyway, but secrets will refuse it",
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost)
+	}
 }
 
 func (h AttestHandler) caChainPEM() []byte {
