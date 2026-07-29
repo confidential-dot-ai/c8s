@@ -88,6 +88,17 @@ serviceAccount:
 statusMirror:
   enabled: true
 
+## Denies tenant pods the host-namespace and hostPath privileges that would let
+## them impersonate a node-level c8s component from inside the node's TCB. The
+## sandbox-identity flow's inventory authentication rests on this — see the
+## template and docs/getcert-workload-binding.md, Corner 7. Disable only if
+## another admission policy already enforces the equivalent.
+hostNamespacePolicy:
+  enabled: true
+  ## Namespaces exempt in addition to the release namespace and kube-system,
+  ## for node-level components installed outside them.
+  exemptNamespaces: []
+
 ## Mutating admission webhook that injects get-cert containers into pods
 ## annotated with confidential.ai/cw.
 webhook:
@@ -142,6 +153,18 @@ cds:
     digest: ""
     pullPolicy: IfNotPresent
   port: 8443
+  ## CIDR(s) holding this cluster's node addresses. CDS dials a node's admission
+  ## inventory inside them and nowhere else, which is what stops a workload
+  ## pointing the sandbox-digests callback at its own pod IP and answering as
+  ## the inventory.
+  ##
+  ## REQUIRED for sandbox identity. Unset means CDS refuses every request
+  ## carrying a sandbox token, so workload pods still get mesh certificates but
+  ## with no sandbox ID and no issuance-time image gate; CDS logs a warning at
+  ## startup when it is empty. `c8s install` fills this in from the cluster as
+  ## one host route per node — see docs/operator.md for why host routes rather
+  ## than a range, and what that means for scale-up.
+  sandboxInventoryCIDRs: []
   service:
     type: NodePort
     nodePort: 30808
@@ -849,6 +872,18 @@ nriImagePolicy:
     configDir: /etc/nri/conf.d
     cacheDir: /var/lib/nri-image-policy
     runtimeDir: /var/run/nri-image-policy
+
+  ## The CDS-facing sandbox-digests endpoint (docs/ratls.md, "Sandbox
+  ## identity"). Its port is a compiled constant, not a value: it is privileged
+  ## so that binding it requires the node's network namespace, which is what
+  ## distinguishes this inventory from a workload sharing the node measurement.
+  ## CDS must be able to reach every node on it.
+  ##
+  ## The advertised host defaults to the installer's own status.hostIP, handed
+  ## to the host process through a file. Override only when that is not the
+  ## address CDS reaches the node on.
+  sandboxDigests:
+    advertiseHost: ""
 
   # Containerd configuration the installer targets. The config directory,
   # socket, and restart command default from distro; set the fields below only

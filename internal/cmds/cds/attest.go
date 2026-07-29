@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/sha512"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,7 +18,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -58,27 +57,37 @@ type AttestHandler struct {
 	// ValidateCSR rejects any CSR carrying IP SANs.
 	SANValidation bool
 
-	// AllowlistStore, when set, is consulted to gate workload-digest claims:
-	// every container digest a requester commits to must be allowlisted, and a
-	// claim touching workload (non-floor) images must match one entry's set
-	// (docs/ratls.md). nil disables workload-claims verification — a request
-	// carrying claims is then rejected, since they cannot be checked.
+	// AllowlistStore, when set, gates a sandbox's running images: every image
+	// the inventory reports must be allowlisted (docs/ratls.md). nil rejects any
+	// request carrying a sandbox token, since it could not be checked.
 	AllowlistStore allowlistGate
 
-	// EARKeyProvider and EARIssuer validate the inventory EAR inside a sandbox
-	// token (docs/ratls.md, "Sandbox identity") — the same JWKS/issuer pair
-	// /sign-csr uses. A nil provider disables sandbox-token verification; a
-	// request carrying a token is then rejected.
-	EARKeyProvider issuer.KeyProvider
-	EARIssuer      string
+	// SandboxDigests resolves a sandbox's inventory: its signing key and what
+	// the sandbox is running, over mutually-attested RA-TLS to a privileged
+	// port. nil rejects any request carrying a sandbox token, for the same
+	// reason as a nil AllowlistStore.
+	SandboxDigests sandboxDigestSource
+
+	// InventoryHosts bounds which addresses the callback may dial — the
+	// operator's node CIDRs. Empty rejects any request carrying a sandbox
+	// token: without it a workload could point CDS at its own pod IP and
+	// answer as the inventory.
+	InventoryHosts workloadclaims.InventoryHosts
 }
 
-// allowlistGate answers the two attest-time questions: per-digest membership
-// (floor OR workload) and the full document for the combination check.
-// Satisfied by *internal/allowlist.Store.
+// sandboxDigestSource is the inventory callback, satisfied by
+// *workloadclaims.DigestsClient. An interface so tests can drive issuance
+// without standing up an RA-TLS inventory.
+type sandboxDigestSource interface {
+	InventoryKey(ctx context.Context, host string) (*ecdsa.PublicKey, error)
+	Fetch(ctx context.Context, host, sandboxID string) ([]string, error)
+}
+
+// allowlistGate answers the one attest-time question: is this digest admitted
+// at all, as a floor entry or as any workload container. Satisfied by
+// *internal/allowlist.Store.
 type allowlistGate interface {
 	Contains(digest types.Digest) (bool, error)
-	LoadAll() (*pkgallowlist.Allowlist, string, error)
 }
 
 func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
@@ -117,39 +126,15 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
 		return
 	}
-	// Workload claims (docs/ratls.md): the requester binds a
-	// config-claims extension into its evidence REPORTDATA and forwards both
-	// the DER and the container-digest list it commits to. Decode the DER
-	// first so the SAME bytes are folded into the expected REPORTDATA below —
-	// a tampered claim then fails the evidence check.
-	var claimsDER []byte
-	if req.WorkloadClaims != "" {
-		claimsDER, err = base64.StdEncoding.DecodeString(req.WorkloadClaims)
-		if err != nil {
-			attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "invalid workload_claims encoding")
-			return
-		}
-		// A stamped workload claim is downstream-verifiable only if the leaf
-		// carries hardware evidence binding it. get-cert embeds a nonce-free
-		// RA-TLS attestation extension into the CSR for exactly this, and
-		// SignCSR copies it onto the leaf. Verify at issuance that the embedded
-		// evidence actually binds these claims — fail fast here instead of
-		// leaving a leaf that only fails at relying-party time (docs/ratls.md).
-		if err := verifyEmbeddedClaimsBinding(csr, csrPubKey, claimsDER); err != nil {
-			attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
-			return
-		}
-	}
-
 	// Sandbox token (docs/ratls.md, "Sandbox identity"): an inventory-signed
-	// binding of the pod's sandbox ID to the requester's CSR key and this
-	// request's challenge. Verified before the expensive evidence round-trip;
-	// the resulting ID is stamped on the leaf only after every other check
-	// passes. challengeBytes was consumed above, so a token carrying it is
-	// fresh for exactly this issuance.
-	var sandboxID string
+	// binding of the pod's sandbox ID — and of the inventory to ask about it —
+	// to the requester's CSR key and this request's challenge. Verified before
+	// the expensive evidence round-trip; the resulting ID is stamped on the
+	// leaf only after every other check passes. challengeBytes was consumed
+	// above, so a token carrying it is fresh for exactly this issuance.
+	var sandbox workloadclaims.VerifiedSandbox
 	if len(req.SandboxToken) > 0 {
-		sandboxID, err = h.verifySandboxToken(req.SandboxToken, csrPubKey, challengeBytes)
+		sandbox, err = h.verifySandboxToken(ctx, req.SandboxToken, csrPubKey, challengeBytes)
 		if err != nil {
 			slog.Warn("sandbox token rejected", "error", err)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
@@ -157,7 +142,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	expectedReportData, err := ratls.ReportDataForKeyAndClaims(csrPubKey, claimsDER, challengeBytes)
+	expectedReportData, err := ratls.ReportDataForKey(csrPubKey, challengeBytes)
 	if err != nil {
 		attestation.WriteError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
 		return
@@ -199,14 +184,17 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The evidence bound claimsDER (folded into expectedReportData above and
-	// confirmed by VerifyEnforced), so the claims are TEE-attested. Now verify
-	// the requester's init/main digest lists hash to the attested workload
-	// digest and that every listed image is allowlisted, then stamp the claims
-	// on the leaf so peers and `c8s verify` can read the attested workload.
-	if err := h.verifyWorkloadClaims(claimsDER, req.InitContainerDigests, req.ContainerDigests); err != nil {
-		slog.Warn("workload claims rejected", "error", err)
-		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
+	// The token proved which sandbox the requester is in and named the
+	// inventory that admitted it. Ask that inventory what the sandbox is
+	// actually running and gate issuance on the allowlist. The requester never
+	// gets a say in the answer.
+	if err := h.verifySandboxWorkload(ctx, sandbox); err != nil {
+		// The detail stays in the log. A requester picks both the sandbox ID and
+		// the address CDS just dialled, so echoing what happened there would
+		// hand it a reachability oracle for CDS's network position.
+		slog.Warn("sandbox workload rejected",
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err)
+		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, "sandbox workload not authorized")
 		return
 	}
 
@@ -223,11 +211,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// issuance but is NOT embeddable — its REPORTDATA includes the consumed
 	// challenge, so re-verification against the bare key would always fail.
 	certPEM, _, err := h.CA.SignCSR(issuer.SignCSRParams{
-		CSR:             csr,
-		TTL:             issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
-		Evidence:        evidenceJSON,
-		ConfigClaimsExt: claimsDER,
-		SandboxID:       sandboxID,
+		CSR:       csr,
+		TTL:       issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
+		Evidence:  evidenceJSON,
+		SandboxID: sandbox.SandboxID,
 	})
 	if err != nil {
 		slog.Error("in-process sign failed", "error", err)
@@ -248,102 +235,103 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 
 // verifySandboxToken verifies an inventory-signed sandbox token and returns its
 // sandbox ID. The chain (docs/ratls.md, "Sandbox identity"): the envelope's
-// EAR must be a CDS-issued /attest-key credential on an allowed measurement;
-// the EAR's attested key must sign the token; the token's nonce must be this
-// request's challenge (freshness, single-use); and its key digest must name
-// the requester's CSR key — so only the key's holder can redeem it, only for
-// this issuance, and only with inventory provenance.
-func (h AttestHandler) verifySandboxToken(raw json.RawMessage, requesterPub crypto.PublicKey, nonce []byte) (string, error) {
-	if h.EARKeyProvider == nil {
-		return "", fmt.Errorf("sandbox token presented but this CDS cannot verify it")
+// signing key is fetched from the inventory's own endpoint on a node address
+// the operator configured; that key must sign the token; the token's nonce must
+// be this request's challenge (freshness, single-use); and its key digest must
+// name the requester's CSR key — so only the key's holder can redeem it, only
+// for this issuance, and only with inventory provenance.
+func (h AttestHandler) verifySandboxToken(ctx context.Context, raw json.RawMessage, requesterPub crypto.PublicKey, nonce []byte) (workloadclaims.VerifiedSandbox, error) {
+	if h.SandboxDigests == nil {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but this CDS cannot reach an inventory to verify it")
+	}
+	if len(h.InventoryHosts) == 0 {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but no inventory CIDRs are configured to bound the callback")
 	}
 	var token workloadclaims.SignedSandboxToken
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&token); err != nil {
-		return "", fmt.Errorf("decode sandbox token: %w", err)
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("decode sandbox token: %w", err)
 	}
-	claims, err := issuer.ValidateEARToken(token.EAR, h.EARKeyProvider, h.EARIssuer)
+
+	// The host says which endpoint holds the key that would verify the
+	// signature, so it has to be read before verification can happen. Nothing
+	// is trusted on its basis: it only selects a dial target, which must be a
+	// node address the operator configured — a pod IP is never dialed, so a
+	// workload cannot stand in for its node's inventory. A wrong host simply
+	// yields a key the signature fails under.
+	host, err := workloadclaims.UnverifiedInventoryHost(token.Token)
 	if err != nil {
-		return "", fmt.Errorf("inventory EAR invalid: %w", err)
+		return workloadclaims.VerifiedSandbox{}, err
 	}
-	// Same pinning semantics as the /attest evidence check above:
-	// CheckMeasurement is a no-op with empty Measurements (UNSAFE outside dev).
-	if err := issuer.CheckMeasurement(claims, h.Measurements, "attest sandbox-token"); err != nil {
-		return "", fmt.Errorf("inventory EAR measurement not allowed")
+	if !h.InventoryHosts.Contains(host) {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token names an inventory outside the configured node CIDRs")
 	}
-	inventoryPub, err := issuer.AttestedECDSAKey(claims)
+	// The key comes from the inventory's own endpoint on a privileged port,
+	// which is what separates the inventory from a compromised workload in the
+	// same node: an unprivileged pod cannot bind the node's network namespace
+	// (the chart's deny-host-namespaces policy). Measurement alone cannot make
+	// that distinction on node-CVM, where every pod shares the node's.
+	inventoryPub, err := h.SandboxDigests.InventoryKey(ctx, host)
 	if err != nil {
-		return "", fmt.Errorf("inventory EAR key: %w", err)
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("resolve inventory key: %w", err)
 	}
 	// Freshness is the challenge itself: the token must carry the same nonce
 	// CDS is consuming for this request, so it cannot be replayed against a
 	// later request or pre-signed against a future one.
-	sandboxID, err := token.Verify(inventoryPub, requesterPub, nonce)
+	sandbox, err := token.Verify(inventoryPub, requesterPub, nonce)
 	if err != nil {
-		return "", err
+		return workloadclaims.VerifiedSandbox{}, err
 	}
-	if err := ratls.ValidateSandboxID(sandboxID); err != nil {
-		return "", err
+	if err := ratls.ValidateSandboxID(sandbox.SandboxID); err != nil {
+		return workloadclaims.VerifiedSandbox{}, err
 	}
-	return sandboxID, nil
+	return sandbox, nil
 }
 
-// verifyEmbeddedClaimsBinding fails closed unless the CSR carries an RA-TLS
-// attestation extension whose evidence binds the config-claims (docs/ratls.md).
-// SignCSR copies that extension onto the leaf; if it is absent — or binds
-// different claims — the leaf's config-claims could never verify against the
-// evidence at a relying party. For SEV-SNP the REPORTDATA is compared locally
-// (no attestation-api call); envelope evidence (az-snp/TDX) has no in-process
-// parser, so it is accepted on presence and its binding is proven at
-// relying-party time.
-func verifyEmbeddedClaimsBinding(csr *x509.CertificateRequest, pub crypto.PublicKey, claimsDER []byte) error {
-	extValue := csrRATLSExtensionValue(csr)
-	if extValue == nil {
-		return fmt.Errorf("workload claims require an embedded RA-TLS attestation extension on the CSR")
-	}
-	att, err := ratls.UnmarshalExtension(extValue)
-	if err != nil {
-		return fmt.Errorf("embedded RA-TLS attestation does not parse: %w", err)
-	}
-	expected, err := ratls.ReportDataForKeyAndClaims(pub, claimsDER, nil)
-	if err != nil {
-		return err
-	}
-	if reportData, ok := att.ReportData(); ok && !bytes.Equal(reportData[:sha512.Size384], expected[:sha512.Size384]) {
-		return fmt.Errorf("embedded RA-TLS evidence does not bind the config-claims")
-	}
-	return nil
-}
-
-// csrRATLSExtensionValue returns the value of the CSR's RA-TLS attestation
-// extension (the one SignCSR copies onto the leaf), or nil when absent.
-func csrRATLSExtensionValue(csr *x509.CertificateRequest) []byte {
-	for _, ext := range csr.Extensions {
-		if ext.Id.Equal(ratls.OIDRATLSAttestation) {
-			return ext.Value
-		}
-	}
-	return nil
-}
-
-// verifyWorkloadClaims checks that the requester's container-digest list matches
-// the attested workload digest, that every listed image is allowlisted, and —
-// when any listed image is a workload (non-floor) image — that the claimed
-// init/main set exactly matches one workload entry, so containers from different
-// entries cannot be mixed into an unauthorized pod (docs/ratls.md). claimsDER
-// nil ⇒ nothing to verify; it fails closed if claims are present with no store.
-func (h AttestHandler) verifyWorkloadClaims(claimsDER []byte, initDigests, mainDigests []string) error {
-	if len(claimsDER) == 0 {
+// verifySandboxWorkload asks the sandbox's own inventory which images it is
+// running and requires every one of them to be allowlisted before issuing
+// (docs/ratls.md, "Sandbox identity").
+//
+// Membership only. It deliberately does NOT require the running set to match a
+// whole workload entry: issuance happens at arbitrary points in the pod
+// lifecycle — while a user init container runs, between main containers coming
+// up, while one restarts, and after completed init containers are reaped — and
+// in every one of those the running set is a strict subset of what the pod
+// declares. Gating on the whole set would deny certificates for ordinary
+// lifecycle states, permanently so for pods with init containers. Membership is
+// subset-safe: any subset of an allowlisted set is still allowlisted.
+//
+// Whole-set enforcement belongs where the pod is complete and the stake is
+// high — secrets release — not at cert issuance. Until then a leaf's sandbox ID
+// says "this key belongs to pod X", not "pod X runs exactly workload Y".
+//
+// No sandbox ⇒ nothing to check: a requester that presents no token gets a leaf
+// with no sandbox ID. With a token, an unreachable inventory or a
+// non-allowlisted image is fail-closed — CDS cannot establish what the pod
+// runs, or has established that it should not run.
+func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox workloadclaims.VerifiedSandbox) error {
+	if sandbox.SandboxID == "" {
 		return nil
 	}
 	if h.AllowlistStore == nil {
-		return fmt.Errorf("workload claims presented but this CDS cannot verify them")
+		return fmt.Errorf("sandbox token presented but this CDS has no allowlist to check it against")
 	}
-	if _, err := workloadclaims.VerifyWorkloadDigest(claimsDER, initDigests, mainDigests); err != nil {
-		return err
+	if h.SandboxDigests == nil {
+		return fmt.Errorf("sandbox token presented but this CDS cannot reach the inventory for its digests")
 	}
-	for _, d := range append(append([]string{}, initDigests...), mainDigests...) {
+	digests, err := h.SandboxDigests.Fetch(ctx, sandbox.InventoryHost, sandbox.SandboxID)
+	if err != nil {
+		return fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryHost, err)
+	}
+	if len(digests) == 0 {
+		// "No containers" is not "nothing to check" — it is no evidence at all,
+		// and looping over it would pass the gate vacuously. A sandbox always
+		// runs at least the sidecar that is asking, so an empty answer means
+		// the inventory is still syncing (or is lying), both of which must wait.
+		return fmt.Errorf("inventory reports no containers in sandbox %s", sandbox.SandboxID)
+	}
+	for _, d := range digests {
 		digest, err := types.ParseDigest(d)
 		if err != nil {
 			return fmt.Errorf("container digest %q: %w", d, err)
@@ -356,71 +344,7 @@ func (h AttestHandler) verifyWorkloadClaims(claimsDER []byte, initDigests, mainD
 			return fmt.Errorf("container image %s is not allowlisted", digest)
 		}
 	}
-	doc, _, err := h.AllowlistStore.LoadAll()
-	if err != nil {
-		return fmt.Errorf("load allowlist: %w", err)
-	}
-	return enforceWorkloadCombination(doc, initDigests, mainDigests)
-}
-
-// enforceWorkloadCombination requires the non-floor portion of the claimed
-// init/main sets to equal one workload entry's non-floor init/main sets.
-//
-// Floor digests are excluded from both sides: they are admitted alone and carry
-// no combination policy. Injected c8s containers (get-cert) are floor entries,
-// so their measured digest drops out here — that floor pin is the exclusion
-// (name-based exclusion happens upstream at the inventory, before CDS sees only
-// digests).
-func enforceWorkloadCombination(doc *pkgallowlist.Allowlist, initDigests, mainDigests []string) error {
-	floor := doc.Digests
-	claimInit := nonFloorSet(initDigests, floor)
-	claimMain := nonFloorSet(mainDigests, floor)
-	if len(claimInit) == 0 && len(claimMain) == 0 {
-		return nil
-	}
-	for _, w := range doc.Workloads {
-		if setsEqual(claimInit, nonFloorSet(digestStrings(w.InitContainers), floor)) &&
-			setsEqual(claimMain, nonFloorSet(digestStrings(w.Containers), floor)) {
-			return nil
-		}
-	}
-	return fmt.Errorf("claimed container set matches no single workload entry")
-}
-
-// nonFloorSet is the canonical digests in ds that are not floor entries.
-func nonFloorSet(ds []string, floor map[string]string) map[string]struct{} {
-	set := make(map[string]struct{}, len(ds))
-	for _, d := range ds {
-		parsed, err := types.ParseDigest(d)
-		if err != nil {
-			continue
-		}
-		if _, isFloor := floor[parsed.String()]; isFloor {
-			continue
-		}
-		set[parsed.String()] = struct{}{}
-	}
-	return set
-}
-
-func digestStrings(cs []pkgallowlist.Container) []string {
-	out := make([]string, len(cs))
-	for i, c := range cs {
-		out[i] = c.Digest.String()
-	}
-	return out
-}
-
-func setsEqual(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
-			return false
-		}
-	}
-	return true
+	return nil
 }
 
 func (h AttestHandler) caChainPEM() []byte {

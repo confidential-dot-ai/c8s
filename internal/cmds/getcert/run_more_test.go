@@ -402,9 +402,9 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	}))
 	defer attestationApi.Close()
 
-	ext, err := attestclient.NewClient("").AttestationExtensionForClaims(context.Background(), attestationApi.URL, &key.PublicKey, nil)
+	ext, err := attestclient.NewClient("").AttestationExtension(context.Background(), attestationApi.URL, &key.PublicKey)
 	if err != nil {
-		t.Fatalf("AttestationExtensionForClaims: %v", err)
+		t.Fatalf("AttestationExtension: %v", err)
 	}
 
 	want, err := ratls.ReportDataForKey(&key.PublicKey, nil)
@@ -458,19 +458,19 @@ func TestInventoryEndpointIsCompiledUnixPath(t *testing.T) {
 	}
 }
 
-// Without --workload-claims, workloadClaims is a no-op: it returns the
-// empty (claims-free) result without contacting any inventory.
-func TestWorkloadClaimsWithoutFlagIsClaimFree(t *testing.T) {
+// Without --workload-claims, fetchSandboxToken is a no-op: no token, and no
+// inventory is contacted.
+func TestFetchSandboxTokenWithoutFlagIsTokenFree(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := workloadClaims(context.Background(), config{WorkloadClaims: false}, &key.PublicKey, []byte("test-nonce"))
+	raw, err := fetchSandboxToken(context.Background(), config{WorkloadClaims: false}, &key.PublicKey, []byte("test-nonce"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil || res.sandboxToken != nil {
-		t.Fatalf("no --workload-claims but a claim was produced: %+v", res)
+	if raw != nil {
+		t.Fatalf("no --workload-claims but a token was produced: %s", raw)
 	}
 }
 

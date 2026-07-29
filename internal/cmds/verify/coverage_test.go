@@ -98,12 +98,15 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err := os.WriteFile(path, pubPEM, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		policy, err := buildPolicy(config{operatorKeys: path})
-		if err != nil {
+		if _, err := buildPolicy(config{operatorKeys: path}); err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(policy.OperatorKeysDigest) == 0 {
-			t.Error("OperatorKeysDigest not set from --operator-keys")
+		digest, err := expectedOperatorKeysDigest(config{operatorKeys: path})
+		if err != nil {
+			t.Fatalf("expectedOperatorKeysDigest: %v", err)
+		}
+		if len(digest) == 0 {
+			t.Error("no digest computed from --operator-keys")
 		}
 	})
 
@@ -123,56 +126,17 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		}
 	})
 
-	t.Run("workload image pin", func(t *testing.T) {
-		img := "sha256:" + strings.Repeat("11", 32)
-		initImg := "sha256:" + strings.Repeat("22", 32)
-		policy, err := buildPolicy(config{workloadImages: []string{img}, workloadInitImages: []string{initImg}})
-		if err != nil {
-			t.Fatalf("buildPolicy: %v", err)
-		}
-		if len(policy.WorkloadDigest) == 0 {
-			t.Error("WorkloadDigest not set from --workload-image")
+	t.Run("sandbox id needs the mesh CA", func(t *testing.T) {
+		// The ID is vouched by CDS's signature on the leaf, so pinning it
+		// without checking that signature would pin an attacker-chosen string.
+		if _, err := buildPolicy(config{sandboxID: "abc123"}); err == nil {
+			t.Error("--sandbox-id without --mesh-ca must fail")
 		}
 	})
 
-	t.Run("bad workload image", func(t *testing.T) {
-		if _, err := buildPolicy(config{workloadImages: []string{"not-a-digest"}}); err == nil {
-			t.Error("malformed --workload-image must fail")
-		}
-	})
-}
-
-func TestExpectedSeedDigest_SeedFile(t *testing.T) {
-	dir := t.TempDir()
-
-	t.Run("valid seed", func(t *testing.T) {
-		seed := []byte(`{"schema":"c8s.allowlist/v1","digests":{"sha256:` + strings.Repeat("ab", 32) + `":"example/image"}}`)
-		path := filepath.Join(dir, "seed.json")
-		if err := os.WriteFile(path, seed, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		digest, err := expectedSeedDigest(config{allowlistSeed: path})
-		if err != nil {
-			t.Fatalf("expectedSeedDigest: %v", err)
-		}
-		if len(digest) != ratls.ClaimsDigestSize {
-			t.Errorf("digest is %d bytes, want %d", len(digest), ratls.ClaimsDigestSize)
-		}
-	})
-
-	t.Run("missing seed file", func(t *testing.T) {
-		if _, err := expectedSeedDigest(config{allowlistSeed: filepath.Join(dir, "absent")}); err == nil {
-			t.Error("missing --allowlist-seed must fail")
-		}
-	})
-
-	t.Run("invalid seed JSON", func(t *testing.T) {
-		path := filepath.Join(dir, "bad.json")
-		if err := os.WriteFile(path, []byte(`{"digests":{"bogus":"x"}}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := expectedSeedDigest(config{allowlistSeed: path}); err == nil {
-			t.Error("invalid seed content must fail")
+	t.Run("malformed sandbox id", func(t *testing.T) {
+		if _, err := buildPolicy(config{sandboxID: "bad id!", meshCA: "unused"}); err == nil {
+			t.Error("malformed --sandbox-id must fail")
 		}
 	})
 }
@@ -483,7 +447,7 @@ func TestFetchDiscoveryDoc(t *testing.T) {
 
 func TestGatherFromFile(t *testing.T) {
 	t.Run("attested certificate PEM", func(t *testing.T) {
-		cert := claimsCert(t, nil)
+		cert := attestedCert(t, "")
 		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 		ev, err := gatherFromFile(pemBytes, nil, "file")
 		if err != nil {

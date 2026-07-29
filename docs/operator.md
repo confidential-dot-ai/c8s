@@ -87,6 +87,22 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 - allowlist admin is EAR-authorized through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
+- Sandbox identity needs the node addresses CDS may dial for a pod's admission
+  inventory (`cds.sandboxInventoryCIDRs`). `c8s install` reads them from the
+  cluster and emits **one host route per node** — a `/32`, not a covering range,
+  because on a CNI that assigns pod IPs from the node subnet (AWS VPC CNI, Azure
+  CNI) any range covering the nodes covers the pods too, and the bound would be
+  absent while looking configured. The install fails rather than proceeding if it
+  cannot determine them; without them CDS refuses every sandbox token and
+  workload pods get mesh certificates carrying no sandbox ID and no
+  issuance-time image gate.
+
+  **Host routes are a snapshot.** A node added afterwards is not covered, and
+  workloads scheduled onto it get certificates with no sandbox ID until the
+  value is refreshed (`helm upgrade` with a new `cds.sandboxInventoryCIDRs`, or
+  re-running `c8s install`). On a cluster whose node network is separate from the
+  pod network, pass `--node-cidr <range>` instead — a range survives scale-up.
+  (docs/ratls.md, "Sandbox identity".)
 - `image.tag` or `image.digest`, `attestationApi.image.tag` or
   `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when

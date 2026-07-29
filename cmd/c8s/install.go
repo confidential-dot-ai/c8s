@@ -63,6 +63,7 @@ var (
 	installResolveDigests bool
 	installAttestEnabled  bool
 	installMeasurements   []string
+	installInventoryCIDRs []string
 )
 
 // Flag names referenced in more than one place (registration plus a Changed()
@@ -797,6 +798,15 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			}
 		}
 
+		// The sandbox-digests callback dials node addresses and nothing else.
+		// Resolve them here, where the cluster is reachable, so a default
+		// install does not quietly ship with sandbox identity disabled.
+		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
+		if err != nil {
+			return err
+		}
+		installInventoryCIDRs = resolved
+
 		// The install always ships pods that exceed the restricted pod-security
 		// profile: nri-image-policy runs privileged unconditionally, ratls-mesh's
 		// iptables init containers run as root with NET_ADMIN/NET_RAW, and
@@ -1183,6 +1193,11 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
 			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
+		)
+	}
+	for i, c := range installInventoryCIDRs {
+		helmArgs = append(helmArgs,
+			"--set-string", fmt.Sprintf("cds.sandboxInventoryCIDRs[%d]=%s", i, c),
 		)
 	}
 	return helmArgs, nil
@@ -1853,6 +1868,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's node addresses (repeatable/comma-separated). CDS dials a node's admission inventory inside them and nowhere else, which is what stops a workload pointing the sandbox-digests callback at its own pod IP. Defaults to one host route per node, read from the cluster; set this to a range when the node network is separate, so nodes added later stay covered")
 	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Pins the internal mesh (cds.measurements + ratlsMesh.measurements) on this install; empty = no pinning (UNSAFE). Not valid with --cvm-mode=pod")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")

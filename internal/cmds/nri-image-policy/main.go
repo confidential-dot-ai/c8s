@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -162,6 +164,15 @@ func Run(args []string) error {
 		socketPath := filepath.Join(cfg.WorkloadClaims.SocketDir, workloadclaims.SocketName)
 		if err := startAdmissionInventory(ctx, logger, plugin.inventory, socketPath, signer); err != nil {
 			return fmt.Errorf("start admission inventory: %w", err)
+		}
+		// Fail-soft, like the allowlist pull below: containerd requires this
+		// plugin (required_plugins), so exiting takes container creation down
+		// node-wide. A missing digests endpoint only degrades issuance — CDS
+		// refuses tokens it cannot check — which is the cheaper failure.
+		if signer != nil {
+			if err := startSandboxDigests(ctx, logger, cfg, plugin.inventory, signer); err != nil {
+				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
+			}
 		}
 	}
 
@@ -471,32 +482,73 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) error {
 	return nil
 }
 
-// sandboxTokenSigner builds the inventory's sandbox-token signer over the same
-// RA-TLS CDS client config the allowlist pull uses; its EAR comes from CDS's
-// /attest-key. Without pull config there is no CDS to attest the key against,
-// so sandbox tokens are disabled (get-cert then issues without a sandbox ID).
+// sandboxTokenSigner builds the inventory's sandbox-token signer. The key needs
+// no credential of its own: CDS reads it from this inventory's digests endpoint
+// on a privileged port, which is what establishes whose key it is. Without pull
+// config there is no CDS in the picture at all, so tokens are disabled and
+// get-cert issues without a sandbox ID.
 func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.SandboxTokenSigner, error) {
 	if !cfg.PullEnabled() {
 		logger.Warn("admission inventory has no CDS pull config; sandbox tokens disabled")
 		return nil, nil
 	}
-	httpClient, err := allowlistPullHTTPClient(cfg.Allowlist.Pull)
+	host, err := digestsAdvertiseHost(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create sandbox-token CDS client: %w", err)
+		return nil, err
 	}
-	cdsClient := attestclient.NewClientWithHTTP(cfg.Allowlist.Pull.URL, httpClient)
-	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
-	signer, err := workloadclaims.NewSandboxTokenSigner(func(ctx context.Context, pubDER []byte) (string, error) {
-		return cdsClient.AttestKey(ctx, attestationApiURL, pubDER)
-	})
+	signer, err := workloadclaims.NewSandboxTokenSigner(host)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox-token signer: %w", err)
 	}
+	logger.Info("sandbox tokens enabled", "digests_host", host, "digests_port", workloadclaims.DigestsPort)
 	return signer, nil
 }
 
-// startAdmissionInventory serves the node-CVM admission inventory on a
-// Unix socket (docs/ratls.md).
+// digestsAdvertiseHost is the node IP every sandbox token names for CDS's
+// digests callback: the configured override, else the address the installer
+// wrote from its own status.hostIP. Route inference is the last resort and
+// usually wrong here — the chart points the plugin at the CDS NodePort on
+// loopback, whose route source is loopback.
+func digestsAdvertiseHost(cfg *config) (string, error) {
+	// Config first, then the file the chart's installer writes, then the
+	// environment — the node image bakes the plugin without an installer, so
+	// cloud-init supplies it there. None of these needs to be trustworthy: a
+	// wrong host makes CDS fetch a key the token signature fails under, so it
+	// can only fail closed, never redirect.
+	host := cfg.WorkloadClaims.AdvertiseHost
+	if host == "" {
+		if b, err := os.ReadFile(filepath.Join(cfg.WorkloadClaims.SocketDir, NodeIPFile)); err == nil {
+			host = strings.TrimSpace(string(b))
+		}
+	}
+	if host == "" {
+		host = strings.TrimSpace(os.Getenv("C8S_SANDBOX_DIGESTS_ADVERTISE_HOST"))
+	}
+	cdsHost := cfg.Allowlist.Pull.URL
+	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
+		cdsHost = u.Host
+	}
+	return workloadclaims.ResolveAdvertiseHost(host, cdsHost)
+}
+
+// startSandboxDigests serves the CDS-facing digests endpoint over
+// mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
+	measurements, err := ratls.ParseHexMeasurementsList(cfg.Allowlist.Pull.CDSMeasurements)
+	if err != nil {
+		return fmt.Errorf("parse CDS measurements: %w", err)
+	}
+	if len(measurements) == 0 {
+		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
+	}
+	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
+	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
+		string(types.PlatformSnp),
+		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
+		attestationApiURL, measurements)
+}
+
+// startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).
 func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, socketPath string, signer *workloadclaims.SandboxTokenSigner) error {
 	l, err := workloadclaims.ListenUnix(socketPath, workloadclaims.InventorySocketGID)
 	if err != nil {
@@ -504,7 +556,7 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 	}
 	go func() {
 		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
-		if err := workloadclaims.Serve(ctx, l, inventory, signer); err != nil {
+		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
 	}()

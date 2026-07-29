@@ -63,10 +63,10 @@ semantics](#a-digest-may-run-many-ways).
 ```
 
 `schema` is the format identity. It is the first field of the canonical
-serialization, so it is covered by the attested seed digest (below) and a
-verifier pins the exact format. It also makes a malformed or foreign body fail
-loud instead of parsing as an empty (and therefore deny-all or, worse,
-allow-nothing-changed) allowlist.
+serialization (`allowlist.Canonical`), so any holder of an equivalent document
+reproduces the same bytes and pins the exact format. It also makes a malformed
+or foreign body fail loud instead of parsing as an empty (and therefore deny-all
+or, worse, allow-nothing-changed) allowlist.
 
 ## Process policy: command and args
 
@@ -147,13 +147,13 @@ is entitled to.
   `/**` (subtree). These rules exist so a grant cannot be widened by path
   trickery once an enforcer consumes it.
 
-**No enforcer consumes `paths` yet.** It is carried, validated, canonicalized,
-and attested (it is part of the seed digest), so the schema and the operator
-tooling are ready — but it grants nothing until the secret-release component
-exists. When that component lands, a grant's subject must be bound to the
-**attested workload digest**, never to a self-asserted image reference, or any
-allowlisted workload could claim another's grant. The field is inert-with-a-spec
-by design; it is not a live capability.
+**No enforcer consumes `paths` yet.** It is carried, validated, and
+canonicalized, so the schema and the operator tooling are ready — but it grants
+nothing until the secret-release component exists. When that component lands, a
+grant's subject must be bound to the leaf's CDS-stamped **sandbox identity**
+(`docs/ratls.md`, "Sandbox identity"), never to a self-asserted image reference,
+or any allowlisted workload could claim another's grant. The field is
+inert-with-a-spec by design; it is not a live capability.
 
 ## Where it's enforced
 
@@ -170,48 +170,54 @@ Three independent points enforce, at different strengths:
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
    container. It reads the digest and `process.args` and applies the same index.
 
-3. **CDS at cert issuance**, in `verifyWorkloadClaims`. A pod's identity binds
-   its role-partitioned init/main digest set. CDS requires every claimed digest
-   to be allowlisted (floor or workload) and, when the set includes workload
-   digests, requires it to **match a single workload entry's set exactly** — the
-   combination gate — after excluding the c8s-injected containers.
+3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
+   for a pod, CDS asks that pod's own inventory which images its sandbox is
+   running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
+   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
+   where the running set is a strict subset of the declared one, so requiring a
+   whole entry would deny ordinary states
+   ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
 
 ### What each layer can and cannot promise
 
 Per-container digest+argv admission holds at all three points. **Combinations**
-("only this init+main set may run together") can only be checked where the whole
-set is visible atomically, which is issuance — and there the set is the one the
-workload *claims*. NRI and policy-monitor see containers one at a time and cannot
-detect a *missing* container, so they cannot enforce a combination. The honest
-guarantee is therefore: **per-container digest + argv everywhere; combination
-gating at identity issuance.** Making a combination itself attested (so it gates
-container start, not just issuance) is the RTMR3 per-workload-measurement path
-tracked in [`THREAT_MODEL.md`](THREAT_MODEL.md); it is out of scope here.
+("only this image set may run together") are **not enforced anywhere today**.
+NRI and policy-monitor see containers one at a time and cannot detect a
+*missing* container, so they cannot enforce a combination; CDS sees the whole
+reported set but only at issuance, which lands mid-lifecycle when that set is
+still a subset of the declared one, so it checks membership rather than
+composition ([getcert-workload-binding.md](getcert-workload-binding.md),
+Corner 4). The honest guarantee is therefore: **per-container digest + argv
+everywhere; no combination gating.**
+
+Combination gating wants a point where the pod is complete and the decision is
+worth blocking on — secrets release is the intended home, and is not implemented
+yet. Making a combination itself *attested* (so it gates container start) is the
+RTMR3 per-workload-measurement path tracked in
+[`THREAT_MODEL.md`](THREAT_MODEL.md); both are out of scope here.
 
 ### The injected-container carve-out
 
 c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. The combination gate must exclude them, or every
-workload's expected set would have to enumerate c8s's own sidecars. The exclusion
-pins the injected container by **name and its measured get-cert digest**: a
-container named `c8s-cert` whose digest is not the measured get-cert digest is
-treated as a workload container, not skipped. Name alone is not identity — the
-host writes the container-name annotation — so the digest pin is what makes the
-carve-out sound. get-cert itself is a floor digest (in the measured seed) and
-runs with per-pod dynamic arguments, which is exactly why standalone/injected
-images are digest-only: their argv is not fixed and must not be argv-policed.
+(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
+by name: injected component images are allowlist floor entries, so a workload
+entry never has to enumerate c8s's own sidecars. Nothing rests on the container
+*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+which is exactly why standalone/injected images are digest-only floor entries:
+their argv is not fixed and must not be argv-policed.
 
 ## Distribution and trust
 
 CDS serves the allowlist over an RA-TLS channel that consumers pin to CDS's
 launch measurement. The document body is not itself signed; its integrity in
-transit is the attested channel, and its provenance is the **seed digest** and
-the **operator-key-set digest** that CDS binds into its serving certificate's
-config-claims (`ratls.ConfigClaims`, see [`ratls.md`](ratls.md)). A verifier
-pins those with `c8s cds verify`. The canonical serialization
+transit is the attested channel. Provenance of the *write policy* is checkable:
+`c8s cds verify --operator-keys` cross-checks the key set CDS serves at
+`/operator-keys` — fetched over the attested serving cert — against the
+operator's own bundle. The serving certificate itself commits neither the key
+set nor the seed (see [`ratls.md`](ratls.md)). The canonical serialization
 (`allowlist.Canonical`) is deterministic — fixed field order, sorted map keys,
 sorted container and path lists — so any holder of an equivalent document
-reproduces the same digest.
+reproduces the same bytes.
 
 Writes are authorized by an operator EC key. The `c8s allowlist` CLI mints a
 short-lived token bound to the exact method, path, and body (so a captured token
@@ -316,6 +322,7 @@ document carries. `--online` cross-checks digests against the registry with
 
 Generating an operator key and pinning its public half is unchanged; see the
 README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
-the pinned set's digest is attested, so a verifier detects a changed write policy.
-The path grants (`paths`) will, when their enforcer lands, be managed with the
-same `workload edit`/`apply` flow and bound to the attested workload digest.
+a verifier detects a changed write policy by comparing the served
+`/operator-keys` list against its own bundle. The path grants (`paths`) will,
+when their enforcer lands, be managed with the same `workload edit`/`apply` flow
+and bound to the leaf's sandbox identity.

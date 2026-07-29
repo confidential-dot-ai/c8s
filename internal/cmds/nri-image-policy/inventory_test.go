@@ -1,6 +1,7 @@
 package nriimagepolicy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,16 +10,21 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-func digestsOf(b *admissionInventory, pid int) ([]string, error) {
-	cs, err := b.ContainersForPeer(workloadclaims.PeerForPID(pid))
+// sandboxDigestsFor walks the production path CDS drives: bind the caller by
+// kernel credentials to its sandbox, then list what that sandbox runs.
+func sandboxDigestsFor(b *admissionInventory, pid int) ([]string, error) {
+	id, err := b.SandboxForPeer(workloadclaims.PeerForPID(pid))
 	if err != nil {
 		return nil, err
 	}
-	var out []string
-	for _, c := range cs {
-		out = append(out, c.Digest)
+	digests, known, err := b.DigestsForSandbox(id)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	if !known {
+		return nil, fmt.Errorf("sandbox %s unknown", id)
+	}
+	return digests, nil
 }
 
 const (
@@ -58,9 +64,9 @@ func itoa(i int) string {
 	return string(b)
 }
 
-// TestInventoryResolvesPodAndExcludesInjected: a get-cert caller in pod P gets P's
-// app-container digests, excluding the injected sidecar and any other pod.
-func TestInventoryResolvesPodAndExcludesInjected(t *testing.T) {
+// A get-cert caller in pod P resolves to P's sandbox, whose inventory is P's
+// containers — the injected sidecar included, and never another pod's.
+func TestInventoryResolvesPodAndIsolatesOtherPods(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
 
@@ -78,15 +84,14 @@ func TestInventoryResolvesPodAndExcludesInjected(t *testing.T) {
 	// The caller is the get-cert process in pod1.
 	writeCgroup(t, procRoot, 4242, cidGetCert)
 
-	got, err := digestsOf(b, 4242)
+	got, err := sandboxDigestsFor(b, 4242)
 	if err != nil {
 		t.Fatal(err)
 	}
-	slices.Sort(got)
-	want := []string{digestApp2, digestApp} // sorted: 2... < a...
+	want := []string{digestOther, digestApp, digestApp2}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		t.Fatalf("digests = %v, want %v (pod1 app containers, no sidecar, no pod2)", got, want)
+		t.Fatalf("digests = %v, want %v (pod1's containers incl. sidecar, no pod2)", got, want)
 	}
 }
 
@@ -95,11 +100,11 @@ func TestInventoryRejectsUntrackedAndZeroPID(t *testing.T) {
 	b := newAdmissionInventory(procRoot)
 	b.record(cidApp1, "sandbox-1", "app", digestApp)
 
-	if _, err := digestsOf(b, 0); err == nil {
+	if _, err := sandboxDigestsFor(b, 0); err == nil {
 		t.Fatal("peer pid 0 accepted (node-CVM must bind the caller)")
 	}
 	writeCgroup(t, procRoot, 55, cidOther)
-	if _, err := digestsOf(b, 55); err == nil {
+	if _, err := sandboxDigestsFor(b, 55); err == nil {
 		t.Fatal("untracked caller container accepted")
 	}
 }
@@ -128,7 +133,7 @@ func TestInventoryRejectsNestedVictimCgroup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := digestsOf(b, 999)
+	got, err := sandboxDigestsFor(b, 999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +145,8 @@ func TestInventoryRejectsNestedVictimCgroup(t *testing.T) {
 	}
 }
 
-// An unresolved digest must fail the whole fetch: serving the siblings that did
-// resolve would pass a subset off as the pod's whole image set.
+// An unresolved digest must fail the whole answer: serving the siblings that
+// did resolve would pass a subset off as the sandbox's whole image set.
 func TestInventoryRefusesUnresolvedDigest(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
@@ -152,28 +157,8 @@ func TestInventoryRefusesUnresolvedDigest(t *testing.T) {
 	b.record(cidApp2, pod1, "worker", "") // resolve failed at admission
 	writeCgroup(t, procRoot, 4242, cidGetCert)
 
-	if _, err := digestsOf(b, 4242); err == nil {
-		t.Fatal("served a subset of the pod's images as if it were the whole set")
-	}
-}
-
-// The sidecar is excluded from the claim, so its own digest never gates the
-// answer — otherwise a first issuance could not proceed.
-func TestInventoryIgnoresUnresolvedInjectedDigest(t *testing.T) {
-	procRoot := t.TempDir()
-	b := newAdmissionInventory(procRoot)
-
-	const pod1 = "sandbox-1"
-	b.record(cidGetCert, pod1, "c8s-cert", "")
-	b.record(cidApp1, pod1, "app", digestApp)
-	writeCgroup(t, procRoot, 4242, cidGetCert)
-
-	got, err := digestsOf(b, 4242)
-	if err != nil {
-		t.Fatalf("unresolved sidecar digest blocked the answer: %v", err)
-	}
-	if !slices.Equal(got, []string{digestApp}) {
-		t.Fatalf("digests = %v, want %v", got, []string{digestApp})
+	if _, err := sandboxDigestsFor(b, 4242); err == nil {
+		t.Fatal("served a subset of the sandbox's images as if it were the whole set")
 	}
 }
 
@@ -185,17 +170,17 @@ func TestInventoryEvicts(t *testing.T) {
 	writeCgroup(t, procRoot, 77, cidGetCert)
 
 	b.remove(cidApp1)
-	got, err := digestsOf(b, 77)
+	got, err := sandboxDigestsFor(b, 77)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("evicted digest still served: %v", got)
+	if !slices.Equal(got, []string{digestOther}) {
+		t.Fatalf("digests = %v, want only the surviving sidecar", got)
 	}
 }
 
-// SandboxForPeer binds the caller the same way ContainersForPeer does: kernel
-// PID → cgroup → tracked container → its sandbox. An untracked caller fails.
+// SandboxForPeer binds the caller by kernel PID → cgroup → tracked container
+// → its sandbox. An untracked caller fails.
 func TestInventorySandboxForPeer(t *testing.T) {
 	procRoot := t.TempDir()
 	b := newAdmissionInventory(procRoot)
@@ -256,9 +241,8 @@ func slicesSorted(in []string) []string {
 	return out
 }
 
-// An unresolved digest fails the whole inventory rather than serve a subset —
-// the same rule ContainersForPeer applies, with no injected exemption: the
-// inventory covers every running container.
+// An unresolved digest fails the whole inventory rather than serve a subset:
+// the inventory covers every running container, injected ones included.
 func TestInventoryDigestsForSandboxRefusesUnresolved(t *testing.T) {
 	b := newAdmissionInventory(t.TempDir())
 	b.record(cidGetCert, "sandbox-1", "c8s-cert", "")

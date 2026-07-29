@@ -183,10 +183,15 @@ type Config struct {
 	// WorkloadClaimsHostDir, when set (node-CVM), is the host directory holding
 	// the nri-image-policy inventory socket. The webhook mounts it read-only at
 	// workloadclaims.SidecarSocketDir in the c8s-cert sidecar and injects
-	// --workload-claims so get-cert binds a workload-digest claim from
-	// that socket (docs/ratls.md). Empty ⇒ no workload claims (the kata guest
-	// path is not yet wired).
+	// --workload-claims so get-cert redeems a sandbox token over that socket
+	// (docs/ratls.md).
 	WorkloadClaimsHostDir string
+
+	// WorkloadClaimsGuest selects the kata shape: the inventory is
+	// policy-monitor inside the guest, reached on the guest's loopback address
+	// rather than a mounted socket, so no volume is injected. Mutually
+	// exclusive with WorkloadClaimsHostDir — the chart sets exactly one.
+	WorkloadClaimsGuest bool
 }
 
 // Register wires the pod mutator onto the manager's webhook server.
@@ -218,10 +223,6 @@ type injection struct {
 	Discovery discoverySpec
 	Security  getCertSecuritySpec
 	Verbose   bool
-	// InitContainerNames are the pod's own init-container names (before c8s
-	// injection). get-cert uses them to split the inventory's containers into the
-	// init vs main image sets for the workload digest (docs/ratls.md).
-	InitContainerNames []string
 }
 
 type certSpec struct {
@@ -735,11 +736,6 @@ func kataIncompatible(pod *corev1.Pod) bool {
 func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	cfg = cfg.withDefaults()
 	effective := inj.withDefaults(cfg)
-	// Capture the pod's own init-container names before c8s prepends its own,
-	// so get-cert can classify the inventory's containers by role.
-	for _, c := range pod.Spec.InitContainers {
-		effective.InitContainerNames = append(effective.InitContainerNames, c.Name)
-	}
 	if *cfg.CertFSGroup >= 0 {
 		ensureFSGroup(pod, *cfg.CertFSGroup)
 	}
@@ -810,14 +806,14 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
-	// node-CVM: get-cert fetches from the nri-image-policy inventory over its
-	// compiled socket path (mounted below). The pod's init-container names
-	// travel so get-cert can split the digest by role.
-	if cfg.WorkloadClaimsHostDir != "" {
+	// get-cert redeems a sandbox token from the node's inventory: over the
+	// mounted socket on node-CVM, or the guest's loopback address under kata,
+	// where policy-monitor is in the same guest and there is nothing to mount.
+	switch {
+	case cfg.WorkloadClaimsGuest:
+		args = append(args, "--workload-claims", "--workload-claims-guest")
+	case cfg.WorkloadClaimsHostDir != "":
 		args = append(args, "--workload-claims")
-		for _, name := range inj.InitContainerNames {
-			args = append(args, "--workload-init-container="+name)
-		}
 	}
 	if inj.Verbose {
 		args = append(args, "--verbose")

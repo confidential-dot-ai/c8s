@@ -177,7 +177,7 @@ func TestRun_ErrorPaths(t *testing.T) {
 		{
 			name:    "unsupported ratls platform",
 			mutate:  func(_ *testing.T, cfg *config) { cfg.ratlsPlatform = "bogus-platform" },
-			wantSub: "ratls server config",
+			wantSub: "unsupported TEE platform",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,4 +316,29 @@ func TestLoadOperatorKeys(t *testing.T) {
 			t.Fatal("expected error for bundle without EC public key")
 		}
 	})
+}
+
+// measurementDigests renders the /attest allowlist for the callback's pin. It
+// must not silently drop an entry: /attest compares the same allowlist as
+// strings, so a dropped entry would leave the callback unpinned while /attest
+// still enforced it — two derivations of one allowlist disagreeing in the
+// direction that weakens the callback.
+func TestMeasurementDigests(t *testing.T) {
+	valid := map[string]bool{"abcd": true, "ef01": true}
+	got, err := measurementDigests(valid)
+	if err != nil {
+		t.Fatalf("measurementDigests: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d digests, want 2", len(got))
+	}
+
+	if _, err := measurementDigests(map[string]bool{"abcd": true, "0xnothex": true}); err == nil {
+		t.Fatal("a non-hex measurement was dropped instead of failing startup")
+	}
+
+	empty, err := measurementDigests(nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty allowlist: got %v, %v", empty, err)
+	}
 }

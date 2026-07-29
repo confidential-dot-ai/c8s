@@ -23,7 +23,7 @@ const maxOperatorKeysBytes = 256 * 1024
 // SHA-256 fingerprint of each pinned operator public key (of its PKIX/SPKI DER,
 // so `openssl pkey -pubin -outform DER < operator.pub | sha256sum` reproduces
 // it), plus the served set's KeySetDigest for comparison against the attested
-// config-claims (applyClaimsPolicy).
+// --operator-keys bundle (applySandboxPolicy).
 //
 // The fetch is bound to the endpoint whose attestation was just verified: the
 // TLS handshake requires the presented leaf certificate's SHA-256 to equal
@@ -32,7 +32,7 @@ const maxOperatorKeysBytes = 256 * 1024
 // report.
 //
 // A 404 sets note and returns the empty-set digest: the endpoint reports
-// allowlist writes disabled, which must agree with the attested claims.
+// allowlist writes disabled, which --operator-keys can still be checked against.
 func fetchOperatorKeyFingerprints(ctx context.Context, base, serverName, wantCertSHA256 string, timeout time.Duration) (fingerprints []string, digest []byte, note string, err error) {
 	if wantCertSHA256 == "" {
 		return nil, nil, "", fmt.Errorf("no attested serving certificate to bind the fetch to")
@@ -68,8 +68,8 @@ func fetchOperatorKeyFingerprints(ctx context.Context, base, serverName, wantCer
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		// Writes disabled — the empty set. Returning its digest lets the
-		// claims cross-check catch a CDS that attests keys it does not serve.
+		// Writes disabled — the empty set. Returning its digest lets
+		// --operator-keys distinguish "no keys" from "not fetched".
 		emptyDigest, err := operatorauth.KeySetDigest(nil)
 		if err != nil {
 			return nil, nil, "", err

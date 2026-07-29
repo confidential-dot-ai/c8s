@@ -66,8 +66,8 @@ type config struct {
 	DiscoveryMeshCAURL     string
 	DiscoveryPublicTLSMode string
 	WorkloadClaims         bool
+	WorkloadClaimsGuest    bool
 	WorkloadClaimsTimeout  time.Duration
-	WorkloadInitContainers []string
 }
 
 // inventoryEndpoint returns the compiled admission-inventory endpoint. It is a
@@ -135,9 +135,9 @@ alongside a workload that uses the obtained certificate.`,
 	flags.StringVar(&cfg.DiscoveryCDSCertURL, "discovery-cds-cert-url", "", "Public URL path where the CDS certificate PEM is served")
 	flags.StringVar(&cfg.DiscoveryMeshCAURL, "discovery-mesh-ca-url", "", "Public URL path where the mesh CA PEM is served")
 	flags.StringVar(&cfg.DiscoveryPublicTLSMode, "discovery-public-tls-mode", "cds", "Public TLS mode to report in discovery metadata (cds or webpki)")
-	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Bind a workload-digest claim by fetching this pod's admitted containers — and an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf — from the local inventory at get-cert's compiled Unix socket path (docs/ratls.md) — nri-image-policy on node-CVM, policy-monitor in the kata guest. The path is baked in, not supplied, so the control plane cannot redirect the fetch; fail-closed if the inventory is unreachable")
-	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory fetch")
-	flags.StringArrayVar(&cfg.WorkloadInitContainers, "workload-init-container", nil, "Name of a pod-spec init container (repeatable); the inventory's containers are split into the init vs main image sets by these names for the workload digest (docs/ratls.md)")
+	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM, policy-monitor in the kata guest (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
+	flags.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
+	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory request")
 
 	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
@@ -317,17 +317,15 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 		return fmt.Errorf("invalid challenge from cds: %w", err)
 	}
 
-	wc, err := workloadClaims(ctx, cfg, &privateKey.PublicKey, nonce)
+	sandboxToken, err := fetchSandboxToken(ctx, cfg, &privateKey.PublicKey, nonce)
 	if err != nil {
 		return err
 	}
 
 	// Always embed a nonce-free RA-TLS .1.1 extension so a downstream ratls-mode
-	// verifier (secret-inventory --peer-verify=ratls) can re-verify the leaf. When
-	// the pod binds a workload claim the extension covers the claims too
-	// (`c8s verify --workload-image`); with no claim it binds the bare key — the
-	// same nonce-free embed the mesh client uses (docs/ratls.md).
-	ext, err := client.AttestationExtensionForClaims(ctx, cfg.AttestationApiURL, &privateKey.PublicKey, wc.claimsDER)
+	// verifier (secret-inventory --peer-verify=ratls) can re-verify the leaf —
+	// the same nonce-free embed the mesh client uses (docs/ratls.md).
+	ext, err := client.AttestationExtension(ctx, cfg.AttestationApiURL, &privateKey.PublicKey)
 	if err != nil {
 		return fmt.Errorf("build RA-TLS attestation extension: %w", err)
 	}
@@ -337,8 +335,8 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 		return err
 	}
 
-	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN, "workload_claims", wc.claimsDER != nil, "sandbox_token", len(wc.sandboxToken) > 0)
-	result, err := client.ObtainCertificateWithClaimsContext(ctx, cfg.AttestationApiURL, string(csrPEM), challenge.Challenge, wc.claimsDER, wc.initDigests, wc.mainDigests, wc.sandboxToken)
+	slog.Info("requesting certificate from cds", "cds_url", cfg.CDSURL, "san", cfg.SAN, "sandbox_token", len(sandboxToken) > 0)
+	result, err := client.ObtainCertificateWithSandboxContext(ctx, cfg.AttestationApiURL, string(csrPEM), challenge.Challenge, sandboxToken)
 	if err != nil {
 		return fmt.Errorf("attestation failed: %w", err)
 	}
@@ -347,80 +345,40 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 	return writeOutputs(cfg, keyPEM, result)
 }
 
-// workloadClaimsResult carries the claims DER to bind, the role-partitioned
-// digest lists to forward to CDS, and the inventory-signed sandbox token
-// (workloadclaims.SignedSandboxToken JSON) for CDS to verify and stamp. All
-// zero ⇒ the plain, claims-free flow.
-type workloadClaimsResult struct {
-	claimsDER    []byte
-	initDigests  []string
-	mainDigests  []string
-	sandboxToken json.RawMessage
-}
-
-// workloadClaims fetches this pod's signed sandbox token and admitted
-// containers from the inventory, splits the containers into init/main by the
-// pod-spec-declared init names, and builds the config-claims extension to
-// bind (docs/ratls.md). pub is the CSR key the sandbox token is bound to;
-// nonce is the CDS challenge the token must carry for CDS to accept it as
-// fresh. Without --workload-claims it returns an empty (claims-free) result;
-// with it an inventory error is fail-closed — issuance aborts rather than
-// silently dropping the workload binding.
-func workloadClaims(ctx context.Context, cfg config, pub crypto.PublicKey, nonce []byte) (workloadClaimsResult, error) {
+// fetchSandboxToken redeems this pod's kernel peer credentials at the
+// inventory for a signed token naming its sandbox (docs/ratls.md, "Sandbox
+// identity"). pub is the CSR key the token is bound to; nonce is the CDS
+// challenge it must carry for CDS to accept it as fresh.
+//
+// get-cert never reports its pod's images: the token names the sandbox and the
+// inventory that admitted it, and CDS asks that inventory directly. So this
+// resolves at first issuance — the sidecar's own container is already tracked
+// — where a self-reported image set would still be empty.
+//
+// Without --workload-claims it returns nil. With it, an inventory that does not
+// serve the route issues without a sandbox ID; any other failure is
+// fail-closed, so issuance aborts rather than silently dropping the binding.
+func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, nonce []byte) (json.RawMessage, error) {
 	if !cfg.WorkloadClaims {
-		return workloadClaimsResult{}, nil
+		return nil, nil
 	}
-	// The sandbox token resolves even at first issuance — the sidecar's own
-	// container is already tracked. An inventory without the route issues without
-	// a sandbox ID; any other failure is fail-closed like the digests fetch
-	// below.
-	token, err := workloadclaims.FetchSandboxToken(ctx, inventoryEndpoint(), cfg.WorkloadClaimsTimeout, pub, nonce)
+	endpoint := inventoryEndpoint()
+	if cfg.WorkloadClaimsGuest {
+		endpoint = workloadclaims.GuestInventoryEndpoint()
+	}
+	token, err := workloadclaims.FetchSandboxToken(ctx, endpoint, cfg.WorkloadClaimsTimeout, pub, nonce)
 	switch {
 	case errors.Is(err, workloadclaims.ErrSandboxUnsupported):
 		slog.Info("inventory does not serve the sandbox route; issuing without a sandbox ID")
+		return nil, nil
 	case err != nil:
-		return workloadClaimsResult{}, fmt.Errorf("fetch sandbox token: %w", err)
+		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	}
-	var out workloadClaimsResult
-	if token != nil {
-		raw, err := json.Marshal(token)
-		if err != nil {
-			return workloadClaimsResult{}, fmt.Errorf("marshal sandbox token: %w", err)
-		}
-		out.sandboxToken = raw
-	}
-
-	containers, err := workloadclaims.Fetch(ctx, inventoryEndpoint(), cfg.WorkloadClaimsTimeout)
+	raw, err := json.Marshal(token)
 	if err != nil {
-		return workloadClaimsResult{}, fmt.Errorf("fetch workload claims: %w", err)
+		return nil, fmt.Errorf("marshal sandbox token: %w", err)
 	}
-	if len(containers) == 0 {
-		// Expected at first issuance: the c8s-cert native sidecar runs before
-		// the app containers, so the inventory has admitted none yet. Issue
-		// without a claim now; a renewal (re-attestation) binds them once the
-		// app is up (docs/ratls.md).
-		slog.Info("admission inventory reports no app containers admitted yet; issuing without a workload claim (renewal will bind it)")
-		return out, nil
-	}
-
-	initNames := make(map[string]struct{}, len(cfg.WorkloadInitContainers))
-	for _, n := range cfg.WorkloadInitContainers {
-		initNames[n] = struct{}{}
-	}
-	initDigests, mainDigests := workloadclaims.Partition(containers, initNames)
-
-	claims, err := workloadclaims.BuildConfigClaims(initDigests, mainDigests)
-	if err != nil {
-		return workloadClaimsResult{}, fmt.Errorf("build workload claims: %w", err)
-	}
-	ext, err := claims.MarshalExtension()
-	if err != nil {
-		return workloadClaimsResult{}, err
-	}
-	out.claimsDER = ext.Value
-	out.initDigests = initDigests
-	out.mainDigests = mainDigests
-	return out, nil
+	return raw, nil
 }
 
 // reloadNginx sends SIGHUP to the nginx master process to reload certs.

@@ -41,6 +41,11 @@ mkdir -p "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
 # world-writable, so an untrusted pod can't swap the socket (docs/pitfalls.md).
 chmod 0711 "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
 
+# Written separately from the boot config so it never participates in the
+# config-changed comparison that decides whether to restart containerd.
+printf '%s' "${NODE_IP:?NODE_IP is required}" > "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}/node-ip"
+chmod 0644 "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}/node-ip"
+
 config_changed=0
 if write_file "/host{{ include "nri-image-policy.hostConfigPath" $root }}" 0644 <<'IMAGE_POLICY_EOF'
 {{ .bootConfig }}
@@ -181,6 +186,7 @@ workload_claims:
   # The plugin is launched by containerd on the host, so its /proc is the
   # host's — a caller PID from SO_PEERCRED resolves directly.
   proc_root: "/proc"
+  advertise_host: {{ $root.Values.nriImagePolicy.sandboxDigests.advertiseHost | quote }}
 allowlist:
   pull:
     url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}

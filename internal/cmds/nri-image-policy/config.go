@@ -43,6 +43,11 @@ type workloadClaimsConfig struct {
 	// ProcRoot is the /proc mount used to resolve a caller PID to its
 	// container cgroup. Defaults to "/proc".
 	ProcRoot string `yaml:"proc_root"`
+	// AdvertiseHost is the node address CDS dials to reach this inventory's
+	// digests endpoint. Empty reads it from NodeIPFile, which the installer
+	// writes from its own status.hostIP — the plugin is a host process and has
+	// no downward API of its own.
+	AdvertiseHost string `yaml:"advertise_host"`
 }
 
 // allowlistConfig groups the digest-source mechanisms.
@@ -116,6 +121,10 @@ type loggingConfig struct {
 
 const defaultPullInterval = 30 * time.Second
 const defaultPullTimeout = 30 * time.Second
+
+// NodeIPFile is the filename, inside SocketDir, the installer writes this
+// node's address to. Read only when advertise_host is unset.
+const NodeIPFile = "node-ip"
 
 // loadConfig loads configuration from a YAML file.
 func loadConfig(path string) (*config, error) {

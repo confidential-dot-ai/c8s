@@ -282,8 +282,8 @@ func TestObtainCertificateForwardsSandboxToken(t *testing.T) {
 	}))
 
 	c := NewClient(cdsURL)
-	if _, err := c.ObtainCertificateWithClaimsContext(context.Background(), apiURL, csrPEM, challenge, nil, nil, nil, sandboxToken); err != nil {
-		t.Fatalf("ObtainCertificateWithClaimsContext: %v", err)
+	if _, err := c.ObtainCertificateWithSandboxContext(context.Background(), apiURL, csrPEM, challenge, sandboxToken); err != nil {
+		t.Fatalf("ObtainCertificateWithSandboxContext: %v", err)
 	}
 	if got := string(sawBody["sandbox_token"]); got != string(sandboxToken) {
 		t.Fatalf("sandbox_token on the wire = %s, want %s", got, sandboxToken)
@@ -351,12 +351,12 @@ func TestAttestBadRequestURL(t *testing.T) {
 }
 
 func TestReportDataForCSRBadPEM(t *testing.T) {
-	if _, err := reportDataForCSR("garbage", nil, nil); err == nil {
+	if _, err := reportDataForCSR("garbage", nil); err == nil {
 		t.Fatal("expected error for non-PEM input")
 	}
 	// Wrong PEM type.
 	wrongType := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	if _, err := reportDataForCSR(wrongType, nil, nil); err == nil {
+	if _, err := reportDataForCSR(wrongType, nil); err == nil {
 		t.Fatal("expected error for wrong PEM type")
 	}
 }

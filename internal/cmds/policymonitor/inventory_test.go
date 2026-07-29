@@ -15,22 +15,14 @@ const (
 	pmSandboxID     = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
 )
 
-// The workload claim excludes injected sidecars at query time (they are
-// recorded, matching the node-CVM inventory), while the sandbox inventory
-// includes them.
-func TestKataInventoryClaimExcludesInjectedInventoryIncludes(t *testing.T) {
+// The sandbox inventory reports every recorded container, injected sidecars
+// included: it answers what runs in the sandbox, and CDS drops the injected
+// images itself (they are allowlist floor entries).
+func TestKataInventoryIncludesInjectedSidecars(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", "app", pmDigestApp)
-	b.record("cid-cert", "c8s-cert", pmDigestSidecar)
-
-	containers, err := b.ContainersForPeer(workloadclaims.PeerForPID(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(containers) != 1 || containers[0].Digest != pmDigestApp {
-		t.Fatalf("claim containers = %v, want only the app", containers)
-	}
+	b.record("cid-app", pmDigestApp)
+	b.record("cid-cert", pmDigestSidecar)
 
 	digests, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
@@ -79,5 +71,42 @@ func TestSandboxIDFromAnnotations(t *testing.T) {
 	}
 	if got := sandboxIDFromAnnotations(map[string]string{}); got != "" {
 		t.Fatalf("no key: got %q", got)
+	}
+}
+
+// The guest inventory must evict a container whose bundle kata-agent tore down,
+// or /digests reports everything the guest ever ran rather than what it runs.
+func TestKataInventoryEvictsRemovedContainer(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record("cid-app", pmDigestApp)
+	b.record("cid-gone", pmDigestSidecar)
+
+	b.remove("cid-gone")
+
+	digests, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if !slices.Equal(digests, []string{pmDigestApp}) {
+		t.Fatalf("digests = %v, want only the surviving container", digests)
+	}
+}
+
+// The advertise host CDS dials back: explicit config wins, and a host it could
+// never reach is rejected where it is configured rather than at issuance.
+func TestSandboxDigestsHost(t *testing.T) {
+	got, err := sandboxDigestsHost(&Config{
+		SandboxDigestsAdvertiseHost: "10.2.3.4",
+		CDSURL:                      "https://cds.invalid:8443",
+	})
+	if err != nil || got != "10.2.3.4" {
+		t.Fatalf("host = %q, err = %v; want 10.2.3.4", got, err)
+	}
+	if _, err := sandboxDigestsHost(&Config{
+		SandboxDigestsAdvertiseHost: "127.0.0.1",
+		CDSURL:                      "https://cds.invalid:8443",
+	}); err == nil {
+		t.Fatal("loopback accepted as an advertise host")
 	}
 }

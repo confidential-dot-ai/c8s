@@ -65,11 +65,16 @@ spec:
             - --hardware-platform={{ include "c8s.hardwarePlatform" . }}
             {{- end }}
             {{- /* Workload-digest claims (docs/ratls.md): get-cert
-                   fetches from the local broker over its compiled Unix socket,
-                   with the nri-image-policy socket mounted into c8s-cert.
-                   node-CVM only for now — the kata guest bind-mount lands with
-                   the guest-image support. */}}
-            {{- if and .Values.nriImagePolicy.enabled (not .Values.kata.enabled) }}
+                   redeems a sandbox token from the node's inventory over a
+                   compiled endpoint: the nri-image-policy socket mounted into
+                   c8s-cert on node-CVM, or guest loopback under kata, where
+                   policy-monitor is in the same guest and nothing is mounted. */}}
+            {{- if .Values.kata.enabled }}
+            - --workload-claims-guest
+            {{- else if or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node") }}
+            {{- /* cvmMode=node bakes the plugin into the node image instead of
+                   installing it from the chart, so nriImagePolicy.enabled is
+                   false there — but the socket still exists at the same path. */}}
             - --workload-claims-host-dir={{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
             {{- end }}
             {{- range .Values.operator.extraArgs }}
