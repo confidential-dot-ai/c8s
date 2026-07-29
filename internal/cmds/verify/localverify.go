@@ -20,6 +20,7 @@ func verifyInProcess(ctx context.Context, ev *evidence, policy *ratls.VerifyPoli
 		ExpectedReportData: ev.erd,
 		AllowDebug:         policy.AllowDebug,
 		MinTCB:             minTCB,
+		ExpectedRTMRs:      policy.ExpectedRTMRs,
 	})
 	if err != nil {
 		var ce *localverify.CollateralError

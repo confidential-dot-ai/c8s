@@ -103,7 +103,7 @@ func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 	}
 
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{}, ev, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{}, ev)
 	if oc.SandboxID != id {
 		t.Fatalf("SandboxID = %q, want %q", oc.SandboxID, id)
 	}
@@ -113,7 +113,7 @@ func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 
 	// A failed hardware verdict must not surface an "attested-looking" ID.
 	failed := Outcome{Verified: false}
-	applySandboxPolicy(&failed, config{}, ev, operatorKeysReport{})
+	applySandboxPolicy(&failed, config{}, ev)
 	if failed.SandboxID != "" {
 		t.Fatalf("SandboxID = %q on a failed verdict, want empty", failed.SandboxID)
 	}
@@ -153,7 +153,7 @@ func TestApplySandboxPolicySelfSignedFailsMeshCA(t *testing.T) {
 	}
 
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{sandboxID: id, meshCA: caPath}, ev, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{sandboxID: id, meshCA: caPath}, ev)
 	if oc.Verified {
 		t.Fatal("self-signed leaf claiming the pinned sandbox ID passed --mesh-ca")
 	}
@@ -165,7 +165,7 @@ func TestApplySandboxPolicySelfSignedFailsMeshCA(t *testing.T) {
 // A malformed sandbox-ID extension fails the verdict rather than being ignored.
 func TestApplySandboxPolicyUnparseableIDFailsClosed(t *testing.T) {
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{}, &evidence{sandboxErr: errSandboxTest}, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{}, &evidence{sandboxErr: errSandboxTest})
 	if oc.Verified {
 		t.Fatal("unparseable sandbox-ID extension did not fail the verdict")
 	}
@@ -242,7 +242,7 @@ func TestApplySandboxPolicyVerifiedAgainstMeshCA(t *testing.T) {
 	ev := &evidence{leaf: leaf, sandboxID: id}
 
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{sandboxID: id, meshCA: caPath}, ev, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{sandboxID: id, meshCA: caPath}, ev)
 	if !oc.Verified {
 		t.Fatalf("verdict failed: %s", oc.Error)
 	}
@@ -252,7 +252,7 @@ func TestApplySandboxPolicyVerifiedAgainstMeshCA(t *testing.T) {
 
 	// A different expected ID on the same chain-valid leaf must still fail.
 	mismatch := Outcome{Verified: true}
-	applySandboxPolicy(&mismatch, config{sandboxID: "someother", meshCA: caPath}, ev, operatorKeysReport{})
+	applySandboxPolicy(&mismatch, config{sandboxID: "someother", meshCA: caPath}, ev)
 	if mismatch.Verified {
 		t.Fatal("a mismatched --sandbox-id passed on a chain-valid leaf")
 	}
@@ -263,16 +263,17 @@ func TestApplySandboxPolicyVerifiedAgainstMeshCA(t *testing.T) {
 func TestApplySandboxPolicyMeshCANeedsALeaf(t *testing.T) {
 	_, caPath := caSignedLeaf(t, "abc")
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{meshCA: caPath}, &evidence{}, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{meshCA: caPath}, &evidence{})
 	if oc.Verified {
 		t.Fatal("--mesh-ca silently passed with no leaf to check")
 	}
 }
 
-// --operator-keys compares against the list the attested target serves. Each
-// way that can fail must demote the verdict, and an unfetched list must say so
-// rather than compare against nothing.
-func TestApplySandboxPolicyOperatorKeys(t *testing.T) {
+// --operator-keys pins the attested config-claims digest, with the served list
+// cross-checked against the attested value. Each way that can fail must demote
+// the verdict, and a claims-free target must fail closed rather than compare
+// against nothing.
+func TestOperatorKeysPinAgainstClaims(t *testing.T) {
 	pubPEM, _ := operatorPubPEM(t)
 	keysPath := filepath.Join(t.TempDir(), "op.pub")
 	if err := os.WriteFile(keysPath, pubPEM, 0o600); err != nil {
@@ -282,20 +283,29 @@ func TestApplySandboxPolicyOperatorKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	claims := &ratls.ConfigClaims{
+		OperatorKeysDigest: expected,
+		SeedDigest:         ratls.UnsetDigest(),
+		WorkloadDigest:     ratls.UnsetDigest(),
+		MeshCADigest:       ratls.UnsetDigest(),
+		AllowlistDigest:    ratls.UnsetDigest(),
+	}
+	policy := &ratls.VerifyPolicy{OperatorKeysDigest: expected}
 
 	for _, tc := range []struct {
 		name   string
+		ev     *evidence
 		report operatorKeysReport
 		want   bool
 	}{
-		{"served set matches", operatorKeysReport{digest: expected}, true},
-		{"served set differs", operatorKeysReport{digest: []byte("different")}, false},
-		{"fetch failed", operatorKeysReport{fetchErr: errSandboxTest}, false},
-		{"never fetched", operatorKeysReport{note: "kind is not cds"}, false},
+		{"attested and served match", &evidence{configClaims: claims}, operatorKeysReport{digest: expected}, true},
+		{"served set differs from attested", &evidence{configClaims: claims}, operatorKeysReport{digest: []byte("different")}, false},
+		{"fetch failed", &evidence{configClaims: claims}, operatorKeysReport{fetchErr: errSandboxTest}, false},
+		{"no claims to pin against", &evidence{}, operatorKeysReport{note: "kind is not cds"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oc := Outcome{Verified: true}
-			applySandboxPolicy(&oc, config{operatorKeys: keysPath}, &evidence{}, tc.report)
+			applyClaimsPolicy(&oc, tc.ev, policy, tc.report)
 			if oc.Verified != tc.want {
 				t.Fatalf("Verified = %v, want %v (error: %s)", oc.Verified, tc.want, oc.Error)
 			}
@@ -324,7 +334,7 @@ func TestMeshCABundleErrors(t *testing.T) {
 	// And at policy-application time, where the file is read again.
 	leaf, _ := caSignedLeaf(t, "abc")
 	oc := Outcome{Verified: true}
-	applySandboxPolicy(&oc, config{meshCA: notPEM}, &evidence{leaf: leaf}, operatorKeysReport{})
+	applySandboxPolicy(&oc, config{meshCA: notPEM}, &evidence{leaf: leaf})
 	if oc.Verified {
 		t.Fatal("an unusable --mesh-ca bundle passed at apply time")
 	}

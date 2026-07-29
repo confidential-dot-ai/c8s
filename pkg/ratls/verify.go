@@ -21,8 +21,30 @@ type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
 	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
-	// covered by this policy, including the per-workload RTMR[3].
+	// covered by this field — see ExpectedRTMRs for the runtime registers.
 	Measurements [][]byte
+
+	// ExpectedRTMRs pins the TDX runtime measurement registers by index; a nil
+	// entry skips that register, each non-nil entry is 48 bytes.
+	//
+	//	[1] guest kernel — UKI PE image identity + GPT + boot
+	//	[2] guest rootfs — the UKI section measurement chain
+	//	[3] runtime extends — the operator-key seed plus any per-workload
+	//	    measurements chained onto it (pkg/runtimemeasure)
+	//
+	// These carry the identity Measurements cannot. On TDX, Measurements pins
+	// MRTD, which covers only the TDVF firmware's measured regions: two
+	// completely different guest images built against the same firmware have
+	// the same MRTD. [1] and [2] are what establish which OS actually booted,
+	// and their reference values are published in the confos build manifest
+	// alongside the image. [3] establishes whose deployment it is — a launch
+	// measurement says "a genuine build of the audited image", which anyone can
+	// reproduce, whereas the operator key is unique to this cluster.
+	//
+	// Enforced by the in-process verifier (internal/localverify, via the c8s
+	// verify CLI), which fails closed on any non-TDX platform; the online
+	// attestation-api path does not consult it.
+	ExpectedRTMRs [4][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component
