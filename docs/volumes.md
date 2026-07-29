@@ -4,11 +4,6 @@ Data too large to be a secret, encrypted at rest on host-visible storage, and
 decryptable only inside a TEE by a workload the allowlist names. Model weights
 are the case this is built for.
 
-> **Status.** `c8s volume create` builds a volume and stores its key. **Delivery
-> is not built yet**: nothing mounts a volume into a pod, so the annotations and
-> the daemon described under [Consuming a volume](#consuming-a-volume) do not
-> exist. Volumes are read-only; read-write is out of scope.
-
 This complements [`secrets.md`](secrets.md) — a volume key *is* a secret, stored
 and released by exactly the machinery described there. What is new is the
 artifact the key opens, and the fact that it persists.
@@ -148,26 +143,76 @@ whether a workload may see the plaintext.
 
 ## Consuming a volume
 
-> Not built. Described here because the grant and the artifact above are built
-> against it.
+A pod names its volumes in an annotation:
 
-A pod will name its volumes in an annotation, and an injected sidecar will fetch
-the key over the attested `/secrets` flow and hand it to a node daemon that opens
-the device and mounts it read-only.
+```yaml
+annotations:
+  confidential.ai/cw: llama-infer
+  confidential.ai/c8s-volumes: "weights=/tenant-a/volumes/weights"
+  confidential.ai/c8s-volume-dir: "/models"    # optional; default /run/c8s/volumes
+```
+
+Each entry is `NAME=/store/path`. `NAME` selects the node's device by its
+`c8s-vol-<NAME>` serial and names the directory the plaintext appears in under
+the volume dir — above, `/models/weights`. It must be a DNS-1123 label of at
+most 12 characters, because the serial holds no more.
+
+The webhook injects a `c8s-volume` sidecar and, per volume, an `emptyDir`
+mounted read-only with `mountPropagation: HostToContainer`. The sidecar fetches
+the key over the attested `/secrets` flow and posts `{name, blob}` to
+`c8s volumed` — a privileged daemon on every node — over a unix socket in the
+inventory's socket directory. The daemon opens the device and mounts it
+read-only into that pod's `emptyDir`.
+
+The daemon is a DaemonSet, **off by default**: it runs privileged, with
+`hostPID` and a writable bind of the kubelet directory. Turn it on with
+`volumed.enabled=true` where volumes are served. A pod requesting a volume on a
+cluster without it — under kata, or with `nri-image-policy` disabled — is
+refused at admission rather than left waiting on a mount that can never land.
 
 What decides whether a mount happens, in order:
 
 1. CDS releases the blob to the pod's sandbox — verified mesh leaf, single-use
    challenge, inventory-signed sandbox token, whole-container-set match against
    one workload entry, grant covers the path.
-2. The daemon **independently** repeats the entry match and the grant check for
-   the sandbox the kernel says is calling. Possession of a blob is not authority
-   on its own.
+2. The daemon mounts into **the calling pod's directory and no other**. The pod
+   comes from the caller's cgroup via kernel peer credentials; the request has no
+   field naming it, and the mount target is built from the resolved UID.
 3. The device opens only if the key is right and the verity root hash matches.
+
+A request naming a volume already open under that pod must present the same key
+and root hash. Without that the volume *name* — a label in a host-written
+annotation — would be the credential.
 
 The volume appears **after the workload starts**, because release is gated on
 the whole container set having been admitted. A consumer must wait for it rather
 than read it at startup.
+
+The key must already be in the store. Unlike a secret — where the first pod to
+ask is the one that defines the value — `get-volume` only ever reads, so a pod
+scheduled before `c8s volume create` has run retries and then fails.
+
+Teardown follows the pod's cgroup, not its kubelet directory: kubelet cannot
+remove that directory while a volume is mounted under it, so it survives exactly
+as long as the mount that would be torn down.
+
+### Possession of the blob is the authorization
+
+The daemon does not repeat CDS's release decision. It resolves who is calling
+only to decide where to mount, and checks nothing about what that caller is
+entitled to — any pod on the node presenting a well-formed blob has that volume
+opened into its own directory.
+
+This rests on **node-as-CVM being single-tenant**: every pod on the node belongs
+to the same tenant, so a blob one of them can obtain is one they are all entitled
+to. Under kata, volumes are refused at admission, so the case does not arise
+there.
+
+A node shared between tenants, or a kata path for volumes, needs a daemon-side
+check restored. That needs the caller's *sandbox*, which the daemon cannot
+resolve for itself — the inventory's socket answers only for the process asking
+it — so the sandbox has to arrive as an inventory-signed token, bound to a nonce
+the daemon issued, because such a token is otherwise transferable between pods.
 
 ## What this defends
 
@@ -185,6 +230,10 @@ a modified data block surfaces as an I/O error when it is read, not at open.
 
 ### What it does not
 
+- **Any pod on the node can open a volume whose blob it holds.** The daemon
+  authorizes on possession, not entitlement — see [Possession of the blob is the
+  authorization](#possession-of-the-blob-is-the-authorization). The blob still
+  only comes from CDS, and only to a pod the grant covers.
 - **Anyone with pod create or exec RBAC in the workload's namespace can read a
   mounted volume.** Under `--cvm-mode=node` the control plane runs inside the
   node CVM, so this is not a capability the host has — but it is a Kubernetes

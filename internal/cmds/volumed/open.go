@@ -30,19 +30,19 @@ type DeviceOps interface {
 	Unmount(ctx context.Context, target string) error
 }
 
-// ErrNotAuthorized is returned both for a caller presenting the wrong key for a
-// volume already open and for one with no claim to it at all. One error for
-// both: distinguishing them would tell an unentitled pod which volumes are
-// mounted on its node.
+// ErrNotAuthorized is returned when a caller presents the wrong key for a
+// volume already open under its pod.
 var ErrNotAuthorized = errors.New("volumed: not authorized for this volume")
 
 // ErrTooManyMounts reports the per-node cap. Each mount costs two device-mapper
 // devices and a mount, and every cw pod can reach the socket.
 var ErrTooManyMounts = errors.New("volumed: too many open volumes on this node")
 
-// Request is one open, after the caller has been resolved and authorized.
+// Request is one open, after the caller has been resolved.
 type Request struct {
-	PodUID string
+	// Pod is the calling pod, as the kernel placed it. Its cgroup path is held
+	// so teardown can ask whether the pod still exists.
+	Pod    PodCgroup
 	Name   string
 	Device string
 	Blob   volume.Blob
@@ -51,7 +51,7 @@ type Request struct {
 // mount is a live volume. The commitment is what a second caller must reproduce
 // to be handed the same mapping.
 type mount struct {
-	podUID     string
+	pod        PodCgroup
 	name       string
 	commitment [sha256.Size]byte
 	cryptDev   string
@@ -101,7 +101,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 	if o.mounts == nil {
 		o.mounts = map[string]*mount{}
 	}
-	if existing, ok := o.mounts[mountKey(req.PodUID, req.Name)]; ok {
+	if existing, ok := o.mounts[mountKey(req.Pod.UID, req.Name)]; ok {
 		o.mu.Unlock()
 		if subtle.ConstantTimeCompare(existing.commitment[:], commitment[:]) != 1 {
 			return ErrNotAuthorized
@@ -122,9 +122,9 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 	// A concurrent identical request may have won the race; keep one mapping
 	// and tear the loser down outside the lock.
 	o.mu.Lock()
-	existing, lost := o.mounts[mountKey(req.PodUID, req.Name)]
+	existing, lost := o.mounts[mountKey(req.Pod.UID, req.Name)]
 	if !lost {
-		o.mounts[mountKey(req.PodUID, req.Name)] = m
+		o.mounts[mountKey(req.Pod.UID, req.Name)] = m
 	}
 	o.mu.Unlock()
 	if !lost {
@@ -141,7 +141,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 // step fails. A half-open volume leaves a device-mapper target holding the key
 // in kernel memory with nothing owning it.
 func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [sha256.Size]byte) (*mount, error) {
-	target, err := TargetDir(o.KubeletRoot, req.PodUID, req.Name)
+	target, err := TargetDir(o.KubeletRoot, req.Pod.UID, KubeVolumeName(req.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -155,13 +155,13 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 		return nil, err
 	}
 
-	cryptMapper := mapperName("crypt", req.PodUID, req.Name)
+	cryptMapper := mapperName("crypt", req.Pod.UID, req.Name)
 	if err := o.Ops.CryptOpen(ctx, req.Device, cryptMapper, key); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-crypt: %w", err))
 	}
 	undo = append(undo, func() { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
-	verityMapper := mapperName("verity", req.PodUID, req.Name)
+	verityMapper := mapperName("verity", req.Pod.UID, req.Name)
 	if err := o.Ops.VerityOpen(ctx, devPath(cryptMapper), verityMapper, req.Blob.Verity); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-verity: %w", err))
 	}
@@ -172,7 +172,7 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	}
 
 	return &mount{
-		podUID:     req.PodUID,
+		pod:        req.Pod,
 		name:       req.Name,
 		commitment: commitment,
 		cryptDev:   cryptMapper,
@@ -195,12 +195,16 @@ func (o *Opener) Close(ctx context.Context, podUID, name string) {
 	}
 }
 
-// ClosePod tears down every volume a pod holds, for when the pod goes away.
-func (o *Opener) ClosePod(ctx context.Context, podUID string) {
+// ClosePod tears down every volume a pod holds, for when the pod goes away, and
+// reports how many it closed.
+func (o *Opener) ClosePod(ctx context.Context, podUID string) int {
+	if podUID == "" {
+		return 0
+	}
 	o.mu.Lock()
 	var doomed []*mount
 	for k, m := range o.mounts {
-		if m.podUID == podUID {
+		if m.pod.UID == podUID {
 			doomed = append(doomed, m)
 			delete(o.mounts, k)
 		}
@@ -209,6 +213,7 @@ func (o *Opener) ClosePod(ctx context.Context, podUID string) {
 	for _, m := range doomed {
 		o.teardown(ctx, m)
 	}
+	return len(doomed)
 }
 
 // teardown unwinds in reverse and does not stop at the first failure: the
@@ -218,6 +223,23 @@ func (o *Opener) teardown(ctx context.Context, m *mount) {
 	_ = o.Ops.Unmount(ctx, m.target)
 	_ = o.Ops.VerityClose(ctx, m.verityDev)
 	_ = o.Ops.CryptClose(ctx, m.cryptDev)
+}
+
+// Pods returns the distinct pods holding a volume, so teardown can ask which of
+// them still exist.
+func (o *Opener) Pods() []PodCgroup {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	seen := map[string]struct{}{}
+	var out []PodCgroup
+	for _, m := range o.mounts {
+		if _, dup := seen[m.pod.UID]; dup {
+			continue
+		}
+		seen[m.pod.UID] = struct{}{}
+		out = append(out, m.pod)
+	}
+	return out
 }
 
 // Len reports live volumes, for metrics and tests.
@@ -252,7 +274,11 @@ func mapperName(kind, podUID, name string) string {
 	return fmt.Sprintf("c8s-%s-%s-%s", kind, podUID, name)
 }
 
-func devPath(mapper string) string { return "/dev/mapper/" + mapper }
+// mapperDir is where device-mapper publishes its nodes. A mapper name is a bare
+// name beneath it, never a path.
+const mapperDir = "/dev/mapper"
+
+func devPath(mapper string) string { return mapperDir + "/" + mapper }
 
 // zero best-effort clears a key buffer. The blob arrived as JSON, so copies
 // exist that cannot be reached; this clears the one that was used.

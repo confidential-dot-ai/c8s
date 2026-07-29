@@ -6226,3 +6226,153 @@ func TestChartOperatorOmitsCDSMeasurementsWhenUnset(t *testing.T) {
 		t.Errorf("operator carries --cds-measurements with none configured: %s", args)
 	}
 }
+
+// volumed is off by default: it runs privileged with hostPID and a writable
+// bind of the kubelet directory, and nothing needs it until a workload
+// consumes a volume.
+func TestChartVolumedOffByDefault(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-volumed") {
+		t.Error("volumed DaemonSet rendered without volumed.enabled")
+	}
+}
+
+// The privileges the daemon cannot work without: hostPID so SO_PEERCRED
+// resolves a caller in another pod's namespace to a real PID, privileged plus
+// Bidirectional propagation so the mount it makes reaches the workload's pod
+// directory, and the device and cgroup trees it reads.
+func TestChartVolumedDaemonSetShape(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-volumed")
+	spec := ds.Spec.Template.Spec
+
+	if !spec.HostPID {
+		t.Error("hostPID is off; a peer in another pod's PID namespace resolves to PID 0")
+	}
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("volumed mounts an API token it has no use for")
+	}
+
+	c, ok := findContainer(spec.Containers, "volumed")
+	if !ok {
+		t.Fatalf("volumed container missing; have %v", containerNames(spec.Containers))
+	}
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Error("volumed is not privileged; device-mapper and mount(2) need it")
+	}
+	// RuntimeDefault seccomp blocks mount(2), so the daemon must not carry one.
+	if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
+		t.Errorf("seccomp profile %v would block mount(2)", c.SecurityContext.SeccompProfile.Type)
+	}
+
+	kubelet, ok := containerVolumeMount(c, "kubelet-root")
+	if !ok {
+		t.Fatal("no kubelet-root mount; there is nowhere to mount a volume")
+	}
+	if kubelet.MountPropagation == nil {
+		t.Error("kubelet-root sets no mount propagation; the mount would not reach the pod")
+	} else if *kubelet.MountPropagation != corev1.MountPropagationBidirectional {
+		t.Errorf("kubelet-root propagation = %s, want Bidirectional; the mount would not reach the pod", *kubelet.MountPropagation)
+	}
+	if kubelet.ReadOnly {
+		t.Error("kubelet-root is read-only; the daemon mounts into it")
+	}
+
+	for _, name := range []string{"dev", "sys", "cgroup", "inventory-socket-dir"} {
+		if _, ok := containerVolumeMount(c, name); !ok {
+			t.Errorf("missing %s mount", name)
+		}
+		if _, ok := podVolume(spec, name); !ok {
+			t.Errorf("missing %s volume", name)
+		}
+	}
+	// /sys whole rather than /sys/block: the block entries are symlinks into
+	// /sys/devices, and the volume's serial is read through them.
+	if v, ok := podVolume(spec, "sys"); ok && (v.HostPath == nil || v.HostPath.Path != "/sys") {
+		t.Errorf("sys volume = %+v, want a hostPath of /sys", v.HostPath)
+	}
+}
+
+// The daemon's socket has to land in the inventory's socket directory: the
+// deny-host-namespaces VAP carves out that exact path by string equality, and
+// it is the directory the webhook mounts into cw pods. A daemon serving
+// anywhere else is a daemon no confidential pod can reach.
+func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
+	const runtimeDir = "/var/run/c8s-inventory-elsewhere"
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "nriImagePolicy.hostPaths.runtimeDir="+runtimeDir,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	c, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	if got := argAfter(c.Args, "--socket-dir"); got != runtimeDir {
+		t.Errorf("--socket-dir = %q, want the inventory socket dir %q", got, runtimeDir)
+	}
+
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var carved bool
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, strconv.Quote(runtimeDir)) {
+			carved = true
+		}
+	}
+	if !carved {
+		t.Errorf("the VAP does not carve out %s, so the socket dir the daemon serves in is denied to cw pods", runtimeDir)
+	}
+}
+
+// argAfter returns the value following flag in an argv, or "" if absent.
+func argAfter(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// The sidecar reaches volumed through the directory the webhook mounts into cw
+// pods, which the operator learns from --workload-claims-host-dir. If the two
+// templates ever disagree the socket is simply not there, and every
+// volume-consuming pod hangs waiting for a mount.
+func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	daemon, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	socketDir := argAfter(daemon.Args, "--socket-dir")
+	if socketDir == "" {
+		t.Fatal("volumed has no --socket-dir")
+	}
+
+	operator := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
+	var hostDir string
+	for _, a := range operator.Args {
+		if v, ok := strings.CutPrefix(a, "--workload-claims-host-dir="); ok {
+			hostDir = v
+		}
+	}
+	if hostDir != socketDir {
+		t.Errorf("the operator mounts %q into cw pods but volumed serves in %q", hostDir, socketDir)
+	}
+}
