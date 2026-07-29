@@ -264,17 +264,19 @@ func run(cfg config) error {
 	var (
 		secretsHandler  *secrets.Handler
 		secretsOperator *secrets.OperatorHandler
+		secretsExplain  *secrets.ExplainHandler
 	)
 	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
 		// One store behind both handlers: an operator write and a workload read
 		// are two doors onto the same paths.
 		store := secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes)
+		policy := secrets.NewCachedPolicy(&allowlistStore)
 		secretsHandler = &secrets.Handler{
 			Store:          store,
 			Challenges:     &secretsChallenges,
 			Inventory:      sandboxDigests,
 			Bindings:       sandboxBindings,
-			Policy:         secrets.NewCachedPolicy(&allowlistStore),
+			Policy:         policy,
 			InventoryHosts: inventoryHosts,
 			Logger:         slog.Default(),
 		}
@@ -283,6 +285,16 @@ func run(cfg config) error {
 			Authorize:    writeAuthorizer,
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Logger:       slog.Default(),
+		}
+		// The same inventory, binding and policy the release path reads, so the
+		// diagnostic answers about the decision rather than about a copy of it.
+		secretsExplain = &secrets.ExplainHandler{
+			Inventory:      sandboxDigests,
+			Bindings:       sandboxBindings,
+			Policy:         policy,
+			InventoryHosts: inventoryHosts,
+			Authorize:      writeAuthorizer,
+			Logger:         slog.Default(),
 		}
 		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
 	} else {
@@ -333,6 +345,7 @@ func run(cfg config) error {
 		SecretsHandler:    secretsHandler,
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
+		SecretsExplain:    secretsExplain,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)

@@ -35,6 +35,7 @@ func secretsRouter(t *testing.T, enabled bool) http.Handler {
 		deps.SecretsHandler = &secrets.Handler{}
 		deps.SecretsChallenges = &secretsCS
 		deps.SecretsOperator = &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)}
+		deps.SecretsExplain = &secrets.ExplainHandler{}
 	}
 	return newRouter(deps)
 }
@@ -73,6 +74,7 @@ func TestRouter_SecretsUnroutedWhenDisabled(t *testing.T) {
 		{http.MethodGet, "/secrets/api/db"},
 		{http.MethodPost, "/secrets/api/db"},
 		{http.MethodPut, "/secrets/api/db"},
+		{http.MethodGet, "/secrets-explain/" + strings.Repeat("a", 64)},
 	} {
 		if code := get(t, r, tc.method, tc.path); code != http.StatusNotFound {
 			t.Fatalf("%s %s = %d with secrets disabled, want 404", tc.method, tc.path, code)
@@ -97,6 +99,7 @@ func TestRouter_SecretsChallengePoolIsSeparate(t *testing.T) {
 		SecretsHandler:    &secrets.Handler{},
 		SecretsChallenges: &secretsCS,
 		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)},
+		SecretsExplain:    &secrets.ExplainHandler{},
 	}
 	_ = newRouter(deps)
 
@@ -137,6 +140,7 @@ func TestRouter_SecretsPutUsesTheAllowlistWriteCap(t *testing.T) {
 		MaxRequestSize:    8,
 		SecretsHandler:    &secrets.Handler{},
 		SecretsChallenges: &secretsCS,
+		SecretsExplain:    &secrets.ExplainHandler{},
 		SecretsOperator: &secrets.OperatorHandler{
 			Store:        secrets.NewMemoryStore(8, 4096),
 			MaxBodyBytes: allowlistWriteBodyCap,
@@ -154,5 +158,25 @@ func TestRouter_SecretsPutUsesTheAllowlistWriteCap(t *testing.T) {
 	}
 	if seen != len(body) {
 		t.Fatalf("authorizer saw %d bytes, want the whole %d-byte body", seen, len(body))
+	}
+}
+
+// The diagnostic is a sibling of /secrets, not a path beneath it. chi prefers a
+// literal segment over a wildcard, so had it been mounted at
+// /secrets/explain/... every secret stored under /explain/ would have become
+// unreachable — a store path silently shadowed by a route.
+func TestRouter_ExplainDoesNotShadowSecretPaths(t *testing.T) {
+	r := secretsRouter(t, true)
+
+	sandbox := strings.Repeat("a", 64)
+	if code := get(t, r, http.MethodGet, "/secrets-explain/"+sandbox); code != http.StatusUnauthorized {
+		t.Fatalf("GET /secrets-explain = %d, want 401 (operator-authorized)", code)
+	}
+	// A secret literally under /explain still reaches the release handler,
+	// which refuses it for want of a client certificate rather than 404ing.
+	for _, p := range []string{"/secrets/explain", "/secrets/explain/" + sandbox, "/secrets/explain/db"} {
+		if code := get(t, r, http.MethodGet, p); code == http.StatusNotFound {
+			t.Fatalf("GET %s = 404: the explain route shadowed a store path", p)
+		}
 	}
 }

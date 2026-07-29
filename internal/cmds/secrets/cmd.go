@@ -51,7 +51,7 @@ docs/secrets.md).`,
 	}
 
 	cdsconn.BindFlags(cmd.PersistentFlags(), &o.Options)
-	cmd.AddCommand(newPutCmd(o))
+	cmd.AddCommand(newPutCmd(o), newExplainCmd(o))
 	return cmd
 }
 

@@ -148,12 +148,17 @@ before upload; --strict makes lint warnings fatal.`,
 				return err
 			}
 
-			warnings := lintOffline(desired)
-			for _, wmsg := range warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "lint: %s\n", wmsg)
+			findings := lintOffline(desired)
+			for _, f := range findings {
+				fmt.Fprintf(cmd.ErrOrStderr(), "lint: %s\n", f)
 			}
-			if strict && len(warnings) > 0 {
-				return fmt.Errorf("refusing to upload: %d lint warning(s) with --strict", len(warnings))
+			// An error means the document cannot do what it says, so --force
+			// does not reach it: that flag is about missing components.
+			if errs := countErrors(findings); errs > 0 {
+				return fmt.Errorf("refusing to upload: %d lint error(s)", errs)
+			}
+			if strict && len(findings) > 0 {
+				return fmt.Errorf("refusing to upload: %d lint warning(s) with --strict", len(findings))
 			}
 
 			reqComponents := defaultRequiredComponents
