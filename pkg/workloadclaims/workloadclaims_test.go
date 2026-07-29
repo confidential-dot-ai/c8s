@@ -657,3 +657,102 @@ func TestDigestsCallbackAcceptsEmptyMeasurements(t *testing.T) {
 		t.Fatalf("server config rejected empty measurements: %v", err)
 	}
 }
+
+// ListenUnix must leave the socket reachable by the non-root get-cert sidecar
+// and must not fail on a stale socket file from a previous run.
+func TestListenUnixReplacesStaleSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "wc.sock")
+	first, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	// The file survives the close; a restart must reclaim it rather than
+	// fail with EADDRINUSE.
+	second, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatalf("stale socket not reclaimed: %v", err)
+	}
+	defer second.Close()
+
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o660 {
+		t.Fatalf("socket mode = %v, want 0660", fi.Mode().Perm())
+	}
+}
+
+// An unwritable directory fails closed rather than leaving the inventory
+// silently unreachable.
+func TestListenUnixFailsOnBadPath(t *testing.T) {
+	if _, err := ListenUnix(filepath.Join(t.TempDir(), "no-such-dir", "wc.sock"), 0); err == nil {
+		t.Fatal("listen succeeded on a nonexistent directory")
+	}
+}
+
+// The host is read from unverified bytes purely to pick a dial target, so it
+// must fail rather than return garbage when the token does not parse.
+func TestUnverifiedInventoryHostRejectsGarbage(t *testing.T) {
+	if _, err := UnverifiedInventoryHost([]byte("not-der")); err == nil {
+		t.Fatal("garbage token yielded a host")
+	}
+}
+
+// The token route rejects every malformed request before it reaches the
+// resolver, so a hostile caller cannot drive the signer with garbage.
+func TestServeTokensRejectsMalformedRequests(t *testing.T) {
+	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t))
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"not JSON", "{"},
+		{"public key is not PKIX", `{"public_key":"bm90LWtleQ==","nonce":"AAAA"}`},
+		{"missing nonce", `{"public_key":"","nonce":""}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodPost, SandboxPath,
+				bytes.NewReader([]byte(tc.body)), 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				t.Fatalf("malformed request accepted (status %d)", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// The kata guest reaches its inventory on loopback, which is the second of the
+// two compiled endpoints inventoryDo accepts. Nothing else is dialable, so no
+// control-plane value can redirect the request.
+func TestGuestInventoryEndpointIsDialable(t *testing.T) {
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoaTest(GuestTokenPort)))
+	if err != nil {
+		t.Skipf("guest token port %d unavailable here: %v", GuestTokenPort, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeTokens(ctx, l, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t)) }()
+
+	requester := testRequesterKey(t)
+	token, err := FetchSandboxToken(ctx, GuestInventoryEndpoint(), 5*time.Second, &requester.PublicKey, testNonce)
+	if err != nil {
+		t.Fatalf("guest loopback fetch: %v", err)
+	}
+	sandbox, err := token.Verify(testSignerKeyFor(t, token), &requester.PublicKey, testNonce)
+	if err == nil && sandbox.SandboxID != "sandbox-1" {
+		t.Fatalf("sandbox = %q", sandbox.SandboxID)
+	}
+}
+
+// testSignerKeyFor is a stand-in: the guest test only needs a key to drive
+// Verify's signature branch, not a real inventory identity.
+func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
+	t.Helper()
+	return testSigner(t).PublicKey()
+}

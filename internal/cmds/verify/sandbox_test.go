@@ -176,3 +176,156 @@ var errSandboxTest = &sandboxTestError{}
 type sandboxTestError struct{}
 
 func (*sandboxTestError) Error() string { return "bad sandbox extension" }
+
+// caSignedLeaf mints a leaf carrying sandboxID and signed by a fresh CA,
+// returning the leaf and the CA bundle path — the shape CDS produces.
+func caSignedLeaf(t *testing.T, sandboxID string) (*x509.Certificate, string) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "mesh-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := ratls.MarshalSandboxIDExtension(sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:    big.NewInt(2),
+		Subject:         pkix.Name{CommonName: "workload"},
+		NotBefore:       time.Now().Add(-time.Hour),
+		NotAfter:        time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{ext},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, certutil.EncodeCertPEM(caDER), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return leaf, path
+}
+
+// With a mesh CA the leaf chains to, the pin holds and the note says the ID was
+// actually verified rather than merely reported.
+func TestApplySandboxPolicyVerifiedAgainstMeshCA(t *testing.T) {
+	const id = "8d9f6c2b1a0e"
+	leaf, caPath := caSignedLeaf(t, id)
+	ev := &evidence{leaf: leaf, sandboxID: id}
+
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{sandboxID: id, meshCA: caPath}, ev, operatorKeysReport{})
+	if !oc.Verified {
+		t.Fatalf("verdict failed: %s", oc.Error)
+	}
+	if !strings.Contains(oc.SandboxIDNote, "verified: the leaf chains") {
+		t.Fatalf("note = %q, want it to record the chain check", oc.SandboxIDNote)
+	}
+
+	// A different expected ID on the same chain-valid leaf must still fail.
+	mismatch := Outcome{Verified: true}
+	applySandboxPolicy(&mismatch, config{sandboxID: "someother", meshCA: caPath}, ev, operatorKeysReport{})
+	if mismatch.Verified {
+		t.Fatal("a mismatched --sandbox-id passed on a chain-valid leaf")
+	}
+}
+
+// --mesh-ca asks a question; with no leaf to ask it of, that is an error rather
+// than a silently skipped check reported as success.
+func TestApplySandboxPolicyMeshCANeedsALeaf(t *testing.T) {
+	_, caPath := caSignedLeaf(t, "abc")
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{meshCA: caPath}, &evidence{}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("--mesh-ca silently passed with no leaf to check")
+	}
+}
+
+// --operator-keys compares against the list the attested target serves. Each
+// way that can fail must demote the verdict, and an unfetched list must say so
+// rather than compare against nothing.
+func TestApplySandboxPolicyOperatorKeys(t *testing.T) {
+	pubPEM, _ := operatorPubPEM(t)
+	keysPath := filepath.Join(t.TempDir(), "op.pub")
+	if err := os.WriteFile(keysPath, pubPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := expectedOperatorKeysDigest(config{operatorKeys: keysPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		report operatorKeysReport
+		want   bool
+	}{
+		{"served set matches", operatorKeysReport{digest: expected}, true},
+		{"served set differs", operatorKeysReport{digest: []byte("different")}, false},
+		{"fetch failed", operatorKeysReport{fetchErr: errSandboxTest}, false},
+		{"never fetched", operatorKeysReport{note: "kind is not cds"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oc := Outcome{Verified: true}
+			applySandboxPolicy(&oc, config{operatorKeys: keysPath}, &evidence{}, tc.report)
+			if oc.Verified != tc.want {
+				t.Fatalf("Verified = %v, want %v (error: %s)", oc.Verified, tc.want, oc.Error)
+			}
+		})
+	}
+}
+
+// An unreadable or empty --mesh-ca bundle fails the verdict rather than being
+// treated as "no CA supplied", which would silently downgrade the check.
+func TestMeshCABundleErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := filepath.Join(dir, "absent.pem")
+	if _, err := buildPolicy(config{meshCA: missing}); err == nil {
+		t.Fatal("buildPolicy accepted a missing --mesh-ca file")
+	}
+
+	notPEM := filepath.Join(dir, "junk.pem")
+	if err := os.WriteFile(notPEM, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildPolicy(config{meshCA: notPEM}); err == nil {
+		t.Fatal("buildPolicy accepted a --mesh-ca file with no certificates")
+	}
+
+	// And at policy-application time, where the file is read again.
+	leaf, _ := caSignedLeaf(t, "abc")
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{meshCA: notPEM}, &evidence{leaf: leaf}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("an unusable --mesh-ca bundle passed at apply time")
+	}
+}

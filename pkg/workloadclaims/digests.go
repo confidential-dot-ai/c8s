@@ -36,10 +36,13 @@ import (
 // any workload answer as the inventory.
 const DigestsPort = 1019
 
-// dialPort is the port DigestsClient connects to. It is a package variable only
-// so tests can bind an unprivileged listener; production always uses
-// DigestsPort, which is never taken from the wire.
-var dialPort = DigestsPort
+// dialPort and listenPort are the ports the client connects to and the endpoint
+// binds. They are package variables only so tests can use an unprivileged port;
+// production always uses DigestsPort, which is never taken from the wire.
+var (
+	dialPort   = DigestsPort
+	listenPort = DigestsPort
+)
 
 // ValidateInventoryHost reports whether host is a usable inventory host.
 // See parseInventoryHost for the rules.
@@ -188,7 +191,7 @@ func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver San
 	if err != nil {
 		return err
 	}
-	addr := net.JoinHostPort("", strconv.Itoa(DigestsPort))
+	addr := net.JoinHostPort("", strconv.Itoa(listenPort))
 	l, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)

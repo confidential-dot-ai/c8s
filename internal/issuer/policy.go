@@ -2,7 +2,6 @@ package issuer
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
@@ -114,27 +113,6 @@ func SourceIPFromRemoteAddr(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
-}
-
-// AttestedECDSAKey returns the ECDSA public key an EAR claims as
-// TEE-attested (the tee_public_key claim).
-func AttestedECDSAKey(claims *EARClaims) (*ecdsa.PublicKey, error) {
-	if claims.TEEPubKey == "" {
-		return nil, fmt.Errorf("EAR is missing %s claim", earclaims.TEEPublicKey)
-	}
-	pubDER, err := base64.RawURLEncoding.DecodeString(claims.TEEPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s claim: %w", earclaims.TEEPublicKey, err)
-	}
-	pubAny, err := x509.ParsePKIXPublicKey(pubDER)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s claim: %w", earclaims.TEEPublicKey, err)
-	}
-	pub, ok := pubAny.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("%s claim is not ECDSA: %T", earclaims.TEEPublicKey, pubAny)
-	}
-	return pub, nil
 }
 
 // VerifyKeyBinding asserts that the CSR's public key is the same key the EAR

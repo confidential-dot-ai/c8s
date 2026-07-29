@@ -282,3 +282,26 @@ func TestAttest_SandboxToken_RejectsWhenUnverifiable(t *testing.T) {
 		t.Fatalf("status %d, want 403; body=%s", w.Code, w.Body.String())
 	}
 }
+
+// A malformed token envelope, and one whose signed bytes are not a token, are
+// both refused before any callback is attempted.
+func TestAttest_SandboxToken_RejectsMalformedEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token json.RawMessage
+	}{
+		{"wrong JSON shape", json.RawMessage(`[]`)},
+		{"unknown field", json.RawMessage(`{"token":"AA==","signature":"AA==","ear":"x"}`)},
+		{"token bytes are not DER", json.RawMessage(`{"token":"bm90LWRlcg==","signature":"AA=="}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newMockAttestationApi(t, "deadbeef")
+			h, _ := newSandboxTestEnv(t, mock.URL, "deadbeef")
+			csrPEM, _ := generateCSR(t)
+			w := postAttestSandbox(t, h, issueChallenge(t, h), csrPEM, tc.token)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
