@@ -599,3 +599,55 @@ func TestStartWorkloadClaimsBroker_ListenErrorSurfaces(t *testing.T) {
 		t.Fatal("expected a listen error for a missing socket directory")
 	}
 }
+
+func TestRunMonitor_BadLogLevel(t *testing.T) {
+	cfg := &Config{LogLevel: "not-a-level"}
+	if err := runMonitor(context.Background(), cfg); err == nil {
+		t.Fatal("expected error for invalid log level")
+	}
+}
+
+func TestRunMonitor_MissingAllowlist(t *testing.T) {
+	cfg := &Config{
+		LogLevel:      "info",
+		AllowlistPath: filepath.Join(t.TempDir(), "absent.json"),
+		WatchDir:      t.TempDir(),
+		CgroupRoot:    t.TempDir(),
+	}
+	if err := runMonitor(context.Background(), cfg); err == nil {
+		t.Fatal("expected error loading a missing allowlist")
+	}
+}
+
+func TestRunMonitor_RunsAndStopsOnContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	allowlistPath := filepath.Join(dir, "allowlist.json")
+	body, _ := json.Marshal(bootstrapAllowlistFile{Sha256Digests: []string{"sha256:" + strings.Repeat("a", 64)}})
+	if err := os.WriteFile(allowlistPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		LogLevel:      "info",
+		AllowlistPath: allowlistPath,
+		WatchDir:      filepath.Join(dir, "watch"), // created by runMonitor
+		CgroupRoot:    t.TempDir(),
+		// CDSURL empty: stays baked-seed-only, never touches the network.
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runMonitor(ctx, cfg) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runMonitor returned err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runMonitor did not stop after context cancel")
+	}
+	// The watch dir should have been created.
+	if _, err := os.Stat(cfg.WatchDir); err != nil {
+		t.Errorf("watch dir not created: %v", err)
+	}
+}

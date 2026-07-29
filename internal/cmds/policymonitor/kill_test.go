@@ -299,3 +299,38 @@ func TestCgroupKiller_PropagatesMissingKillInterface(t *testing.T) {
 		t.Fatalf("kill = (%v, %v), want missing cgroup.kill error", ok, err)
 	}
 }
+
+func TestMonitorKill_KillerError(t *testing.T) {
+	m, killer, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	killer.err = os.ErrPermission
+	m.kill("somecid")
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected one cgroup kill attempt, got %+v", calls)
+	}
+}
+
+func TestMonitorKill_CgroupNotFound(t *testing.T) {
+	m, killer, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	killer.ok = false
+	m.kill("somecid")
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected one cgroup lookup, got %+v", calls)
+	}
+}
+
+func TestNewCgroupKiller_Defaults(t *testing.T) {
+	killer := newCgroupKiller("/sys/fs/cgroup")
+	if killer.cgroupRoot != "/sys/fs/cgroup" {
+		t.Errorf("cgroupRoot = %q", killer.cgroupRoot)
+	}
+	if killer.waitTimeout <= 0 || killer.pollInterval <= 0 {
+		t.Errorf("expected positive wait/poll, got %v/%v", killer.waitTimeout, killer.pollInterval)
+	}
+}
+
+func TestFindCgroupDir_EmptyID(t *testing.T) {
+	_, err := findCgroupDir(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("expected error for empty container id")
+	}
+}

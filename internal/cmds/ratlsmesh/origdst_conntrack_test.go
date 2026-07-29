@@ -3,6 +3,7 @@
 package ratlsmesh
 
 import (
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"strings"
@@ -110,5 +111,13 @@ func TestDefaultLocalRouteCheckLoopbackStrict(t *testing.T) {
 	}
 	if ok {
 		t.Error("route to 127.0.0.1 must not match a bogus allowlist")
+	}
+}
+
+func TestNtohs(t *testing.T) {
+	kernel := [2]byte{0x1f, 0x90} // 8080 in network byte order
+	n := binary.NativeEndian.Uint16(kernel[:])
+	if got := ntohs(n); got != 8080 {
+		t.Errorf("ntohs = %d, want 8080", got)
 	}
 }

@@ -218,3 +218,90 @@ func csrForKeyBindingTest(t *testing.T) *x509.CertificateRequest {
 	}
 	return csr
 }
+
+func TestVerifyKeyBindingSuccess(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatalf("create CSR: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatalf("parse CSR: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal pub: %v", err)
+	}
+	claims := &issuer.EARClaims{TEEPubKey: base64.RawURLEncoding.EncodeToString(pubDER)}
+	if err := issuer.VerifyKeyBinding(csr, claims); err != nil {
+		t.Fatalf("VerifyKeyBinding: %v", err)
+	}
+}
+
+func TestVerifyKeyBindingMissingClaim(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatalf("create CSR: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatalf("parse CSR: %v", err)
+	}
+	if err := issuer.VerifyKeyBinding(csr, &issuer.EARClaims{}); err == nil {
+		t.Fatal("expected error for missing TEEPubKey claim")
+	}
+}
+
+func TestVerifyKeyBindingBadBase64(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatalf("create CSR: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatalf("parse CSR: %v", err)
+	}
+	if err := issuer.VerifyKeyBinding(csr, &issuer.EARClaims{TEEPubKey: "!!!not-base64!!!"}); err == nil {
+		t.Fatal("expected error for non-base64 TEEPubKey")
+	}
+}
+
+func TestVerifyKeyBindingDifferentKey(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatalf("create CSR: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatalf("parse CSR: %v", err)
+	}
+	// A different key of identical DER length -> bytes.Equal fails.
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate other key: %v", err)
+	}
+	otherDER, err := x509.MarshalPKIXPublicKey(&other.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal other: %v", err)
+	}
+	err = issuer.VerifyKeyBinding(csr, &issuer.EARClaims{TEEPubKey: base64.RawURLEncoding.EncodeToString(otherDER)})
+	if err == nil || !strings.Contains(err.Error(), "does not match TEE-attested key") {
+		t.Fatalf("err = %v, want mismatch", err)
+	}
+}

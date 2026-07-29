@@ -1180,3 +1180,46 @@ func hasNonEmptyObjectClaim(v any) bool {
 		return false
 	}
 }
+
+func TestValidateCAKeyPair(t *testing.T) {
+	ca, err := NewCA("handoff ca", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	other, err := NewCA("other ca", time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA other: %v", err)
+	}
+
+	if err := ValidateCAKeyPair(ca.Cert, ca.Key); err != nil {
+		t.Fatalf("valid CA keypair: unexpected error %v", err)
+	}
+	if err := ValidateCAKeyPair(nil, ca.Key); err == nil {
+		t.Error("nil cert: expected error")
+	}
+	if err := ValidateCAKeyPair(ca.Cert, nil); err == nil {
+		t.Error("nil key: expected error")
+	}
+	if err := ValidateCAKeyPair(ca.Cert, other.Key); err == nil {
+		t.Error("mismatched key: expected error")
+	}
+
+	expired := *ca.Cert
+	expired.NotBefore = time.Now().Add(-2 * time.Hour)
+	expired.NotAfter = time.Now().Add(-time.Hour)
+	if err := ValidateCAKeyPair(&expired, ca.Key); err == nil {
+		t.Error("expired cert: expected error")
+	}
+
+	notCA := *ca.Cert
+	notCA.IsCA = false
+	if err := ValidateCAKeyPair(&notCA, ca.Key); err == nil {
+		t.Error("non-CA cert: expected error")
+	}
+
+	noCertSign := *ca.Cert
+	noCertSign.KeyUsage = x509.KeyUsageDigitalSignature
+	if err := ValidateCAKeyPair(&noCertSign, ca.Key); err == nil {
+		t.Error("cert without cert-sign usage: expected error")
+	}
+}

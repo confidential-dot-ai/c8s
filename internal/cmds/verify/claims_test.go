@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,3 +194,38 @@ func TestExpectedSeedDigestFlags(t *testing.T) {
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+func TestExpectedSeedDigest_SeedFile(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("valid seed", func(t *testing.T) {
+		seed := []byte(`{"schema":"c8s.allowlist/v1","digests":{"sha256:` + strings.Repeat("ab", 32) + `":"example/image"}}`)
+		path := filepath.Join(dir, "seed.json")
+		if err := os.WriteFile(path, seed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := expectedSeedDigest(config{allowlistSeed: path})
+		if err != nil {
+			t.Fatalf("expectedSeedDigest: %v", err)
+		}
+		if len(digest) != ratls.ClaimsDigestSize {
+			t.Errorf("digest is %d bytes, want %d", len(digest), ratls.ClaimsDigestSize)
+		}
+	})
+
+	t.Run("missing seed file", func(t *testing.T) {
+		if _, err := expectedSeedDigest(config{allowlistSeed: filepath.Join(dir, "absent")}); err == nil {
+			t.Error("missing --allowlist-seed must fail")
+		}
+	})
+
+	t.Run("invalid seed JSON", func(t *testing.T) {
+		path := filepath.Join(dir, "bad.json")
+		if err := os.WriteFile(path, []byte(`{"digests":{"bogus":"x"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := expectedSeedDigest(config{allowlistSeed: path}); err == nil {
+			t.Error("invalid seed content must fail")
+		}
+	})
+}

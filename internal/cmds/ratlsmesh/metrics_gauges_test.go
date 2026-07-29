@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -125,5 +126,13 @@ func TestCertModeGauges(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecordOutboundDestRejectedUnknownReason(t *testing.T) {
+	m := testMetrics()
+	m.recordOutboundDestRejected("some-new-reason")
+	if got := testutil.ToFloat64(m.outboundDestRejected.WithLabelValues(outboundRejectUnknownPod)); got != 1 {
+		t.Errorf("unknown reason not folded into unknown_pod bucket: %v", got)
 	}
 }

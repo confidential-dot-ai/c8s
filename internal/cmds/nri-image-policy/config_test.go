@@ -417,3 +417,14 @@ policy:
 		t.Fatalf("expected 1 label rule, got %d", len(cfg.Policy.LabelRules))
 	}
 }
+
+func TestLabelOperator(t *testing.T) {
+	for _, op := range []string{OpIn, OpNotIn, OpExists, OpDoesNotExist} {
+		if _, err := labelOperator(op); err != nil {
+			t.Errorf("labelOperator(%q) returned error: %v", op, err)
+		}
+	}
+	if _, err := labelOperator("Bogus"); err == nil {
+		t.Fatal("expected error for unknown operator")
+	}
+}
