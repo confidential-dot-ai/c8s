@@ -29,6 +29,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -73,6 +74,13 @@ const (
 	AnnotationGetCertRunAsGroup      = "confidential.ai/c8s-get-cert-run-as-group"
 	AnnotationGetCertRunAsNonRoot    = "confidential.ai/c8s-get-cert-run-as-non-root"
 	AnnotationGetCertVerbose         = "confidential.ai/c8s-get-cert-verbose"
+
+	// AnnotationSecrets requests secrets for the pod, as a comma-separated
+	// list of NAME=/store/path. NAME is the file each value is written to
+	// under AnnotationSecretDir. Setting it injects the fetcher sidecar.
+	AnnotationSecrets = "confidential.ai/c8s-secrets"
+	// AnnotationSecretDir overrides where the files land.
+	AnnotationSecretDir = "confidential.ai/c8s-secret-dir"
 )
 
 var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation")
@@ -94,6 +102,27 @@ const discoveryPublicTLSModeWebPKI = "webpki"
 // webhook rebuilds the sidecar every call (injectInitContainers) and rejects
 // the name in the regular/ephemeral lists (rejectReservedCertContainer); the
 // cw-label-integrity VAP enforces its presence in the API server.
+// reservedSecretContainerName is the injected secret fetcher. Reserved like
+// the cert containers: a pod that declared the name itself would have the
+// webhook's container silently replace or collide with it.
+const reservedSecretContainerName = "c8s-secret"
+
+// defaultCertVolumeName is the injected cert volume when a pod does not name
+// its own with AnnotationCertVolume.
+const defaultCertVolumeName = "c8s-certs"
+
+// secretsVolumeName is the memory-backed volume the fetcher writes to and the
+// workload reads from.
+const secretsVolumeName = "c8s-secrets"
+
+// defaultSecretDir is where the fetcher writes, matching its own default.
+const defaultSecretDir = "/run/c8s/secrets"
+
+// secretsVolumeSizeLimit bounds the tmpfs. It is charged to the pod's memory
+// (the guest's, under kata), so an unbounded one would let a workload's own
+// writes into the shared directory pressure the pod rather than fail.
+const secretsVolumeSizeLimit = "1Mi"
+
 const reservedCertContainerName = "c8s-cert"
 
 // reservedCertWaitContainerName is the injected gate init container that blocks
@@ -144,6 +173,11 @@ type Config struct {
 
 	// AttestationApiURL points at the node-local attestation-api.
 	AttestationApiURL string
+
+	// CDSMeasurements are the launch measurements the secret fetcher requires
+	// CDS to present. Empty pins none, which leaves an impostor CDS able to
+	// answer with a value of its choosing.
+	CDSMeasurements []string
 
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
@@ -222,7 +256,15 @@ type injection struct {
 	Reload    reloadSpec
 	Discovery discoverySpec
 	Security  getCertSecuritySpec
+	Secrets   secretsSpec
 	Verbose   bool
+}
+
+// secretsSpec is the pod's secret request: which secrets, and where the files
+// land. Empty Specs means no fetcher is injected.
+type secretsSpec struct {
+	Specs []string
+	Dir   string
 }
 
 type certSpec struct {
@@ -278,6 +320,10 @@ func parseAnnotations(pod *corev1.Pod) (*injection, error) {
 		Reload: reloadSpec{
 			WatchVolume:    annotations[AnnotationReloadWatchVolume],
 			WatchMountPath: annotations[AnnotationReloadWatchMountPath],
+		},
+		Secrets: secretsSpec{
+			Specs: listAnnotation(annotations, AnnotationSecrets),
+			Dir:   strings.TrimSpace(annotations[AnnotationSecretDir]),
 		},
 		Discovery: discoverySpec{
 			Volume:        annotations[AnnotationDiscoveryVolume],
@@ -398,6 +444,8 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 		AnnotationGetCertRunAsGroup,
 		AnnotationGetCertRunAsNonRoot,
 		AnnotationGetCertVerbose,
+		AnnotationSecrets,
+		AnnotationSecretDir,
 	} {
 		if annotations[name] != "" {
 			return true
@@ -495,6 +543,17 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
+	// An ephemeral container is attached to a running pod, so nothing here is
+	// injected — the only decision is whether it may reach what the injected
+	// containers already put on that pod.
+	if req.SubResource == "ephemeralcontainers" {
+		if err := rejectEphemeralReservedMounts(pod); err != nil {
+			l.Info("denying ephemeral container", "reason", err.Error())
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		return admission.Allowed("ephemeral container mounts no reserved c8s volume")
+	}
+
 	if err := validateWorkloadLabel(pod); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -555,6 +614,11 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		// to persistent, host-visible storage outside the TEE memory boundary.
 		// Reject anything but the expected memory-backed emptyDir.
 		if err := rejectReservedCertVolume(pod, inj.withDefaults(m.cfg).Cert.Volume); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		// Same reasoning for the released secrets: a hostPath here would write
+		// them to host-visible storage.
+		if err := rejectReservedSecretsVolume(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
@@ -759,8 +823,20 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		pod.Spec.ShareProcessNamespace = boolPtr(true)
 	}
 
-	pod.Spec.InitContainers = injectInitContainers(pod.Spec.InitContainers,
-		certContainer(&effective, cfg), certWaitContainer(&effective, cfg))
+	injected := []corev1.Container{certContainer(&effective, cfg), certWaitContainer(&effective, cfg)}
+	if len(effective.Secrets.Specs) > 0 {
+		ensureVolume(pod, secretsVolume())
+		// Read-only for the workload, and mounted before the fetcher is built
+		// so mountAll (which skips a container that already has the mount)
+		// leaves the fetcher's own read-write mount alone.
+		mountAll(pod, corev1.VolumeMount{
+			Name:      secretsVolumeName,
+			MountPath: effective.Secrets.Dir,
+			ReadOnly:  true,
+		})
+		injected = append(injected, secretContainer(&effective, cfg))
+	}
+	pod.Spec.InitContainers = injectInitContainers(pod.Spec.InitContainers, injected...)
 
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -940,7 +1016,7 @@ func (inj *injection) withDefaults(cfg Config) injection {
 		effective.SAN = effective.WorkloadID
 	}
 	if effective.Cert.Volume == "" {
-		effective.Cert.Volume = "c8s-certs"
+		effective.Cert.Volume = defaultCertVolumeName
 	}
 	if effective.Cert.Dir == "" {
 		effective.Cert.Dir = cfg.CertDir
@@ -953,6 +1029,9 @@ func (inj *injection) withDefaults(cfg Config) injection {
 	}
 	if effective.Cert.RenewInterval <= 0 {
 		effective.Cert.RenewInterval = cfg.CertRenewInterval
+	}
+	if effective.Secrets.Dir == "" {
+		effective.Secrets.Dir = defaultSecretDir
 	}
 	if effective.Security.RunAsUser == nil {
 		effective.Security.RunAsUser = cfg.GetCertRunAsUser
@@ -1016,6 +1095,118 @@ func boolPtr(v bool) *bool {
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+// secretsVolume is the memory-backed volume released values are written to.
+// Bounded: it is charged to the pod's memory, so an unbounded tmpfs would let
+// writes into the shared directory pressure the pod instead of failing.
+func secretsVolume() corev1.Volume {
+	limit := resource.MustParse(secretsVolumeSizeLimit)
+	return corev1.Volume{
+		Name: secretsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &limit,
+			},
+		},
+	}
+}
+
+// rejectEphemeralReservedMounts denies an ephemeral container that mounts a
+// volume holding c8s material — the released secrets, or the pod's private key.
+//
+// The release check cannot help here: it gates the fetch, and by the time an
+// ephemeral container is attached the file already exists. Without this,
+// `kubectl debug` with any allowlisted image and a volumeMount reads a secret
+// straight out of a live pod.
+//
+// Reserved container names are checked too. The pod-CREATE path already does
+// that, but Kubernetes strips spec.ephemeralContainers at CREATE, so that check
+// only ever runs against an empty list.
+func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
+	certVolume := strings.TrimSpace(pod.Annotations[AnnotationCertVolume])
+	if certVolume == "" {
+		certVolume = defaultCertVolumeName
+	}
+	reserved := map[string]bool{secretsVolumeName: true, certVolume: true}
+	for _, c := range pod.Spec.EphemeralContainers {
+		if isReservedCertName(c.Name) {
+			return fmt.Errorf("%w: ephemeral container name %q is reserved for the injected c8s containers",
+				errInvalidInjectionAnnotation, c.Name)
+		}
+		for _, m := range c.VolumeMounts {
+			if reserved[m.Name] {
+				return fmt.Errorf("%w: ephemeral container %q may not mount %q, which holds c8s-released material",
+					errInvalidInjectionAnnotation, c.Name, m.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// rejectReservedSecretsVolume denies a pod that pre-declares the secrets volume
+// as anything but the expected memory-backed emptyDir. ensureVolume keeps an
+// existing same-named volume rather than overwriting it, so without this a pod
+// spec could point it at a hostPath and have a CDS-released secret written to
+// persistent, host-visible storage outside the TEE boundary. Omitting it is
+// fine — the webhook injects it.
+func rejectReservedSecretsVolume(pod *corev1.Pod) error {
+	for i := range pod.Spec.Volumes {
+		v := &pod.Spec.Volumes[i]
+		if v.Name != secretsVolumeName {
+			continue
+		}
+		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory {
+			return fmt.Errorf("%w: volume %q is reserved for released secrets; it must be a memory-backed emptyDir (medium: Memory) or omitted",
+				errInvalidInjectionAnnotation, secretsVolumeName)
+		}
+	}
+	return nil
+}
+
+// secretContainer is the workload's secret fetcher.
+//
+// A native sidecar (restartPolicy: Always), and ordered after c8s-cert-wait so
+// the leaf it authenticates with is already on disk. It cannot be a plain init
+// container: CDS releases only once every main container is running, so an init
+// container would be asking before its siblings exist and would deadlock the
+// pod it is gating (docs/secrets.md).
+func secretContainer(inj *injection, cfg Config) corev1.Container {
+	args := []string{
+		"get-secret",
+		"--cds-url=" + cfg.CDSURL,
+		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
+		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
+		"--out-dir=" + inj.Secrets.Dir,
+	}
+	for _, spec := range inj.Secrets.Specs {
+		args = append(args, "--secret="+spec)
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, "--measurements="+m)
+	}
+
+	always := corev1.ContainerRestartPolicyAlways
+	return corev1.Container{
+		Name:            reservedSecretContainerName,
+		Image:           cfg.GetCertImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   &always,
+		Args:            args,
+		Env:             getCertEnv(inj),
+		// The only container with write access: the shared directory is
+		// readable pod-wide by design, but a workload able to write it could
+		// replace a value another container has yet to read.
+		VolumeMounts: append(
+			append(getCertVolumeMounts(inj, false), corev1.VolumeMount{
+				Name:      secretsVolumeName,
+				MountPath: inj.Secrets.Dir,
+			}),
+			workloadClaimsMounts(cfg)...),
+		SecurityContext: getCertSecurityContext(inj),
+	}
 }
 
 func certsVolume(name string) corev1.Volume {
@@ -1141,7 +1332,9 @@ func rejectReservedCertContainer(pod *corev1.Pod) error {
 }
 
 func isReservedCertName(name string) bool {
-	return name == reservedCertContainerName || name == reservedCertWaitContainerName
+	return name == reservedCertContainerName ||
+		name == reservedCertWaitContainerName ||
+		name == reservedSecretContainerName
 }
 
 // rejectReservedCertVolume denies a pod that pre-declares the reserved cert

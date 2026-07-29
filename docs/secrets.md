@@ -3,9 +3,9 @@
 How a workload is authorized to read a secret, and what the allowlist and the
 admission inventory contribute to that decision.
 
-> **Status.** Nothing fetches from the endpoint yet — the injected fetcher and
-> its webhook wiring are not implemented, so a workload today must call the API
-> itself.
+> **Status.** Delivery works end to end. Still missing: an operator diagnostic
+> for a denied release (`c8s secrets explain`) and the lint checks that catch an
+> ambiguous or under-declared entry.
 
 ## When it is served
 
@@ -34,10 +34,54 @@ measurement requirement above is unmeetable there. Two other reasons stand
 independently: the kata sandbox ID comes from a host-written CRI annotation, and
 argv enforcement in the guest is watch-and-kill rather than synchronous.
 
+## Asking for a secret
+
+Annotate the pod alongside `confidential.ai/cw`:
+
+| Annotation | |
+|---|---|
+| `confidential.ai/c8s-secrets` | comma-separated `NAME=/store/path`; `NAME` is the file each value is written to |
+| `confidential.ai/c8s-secret-dir` | where the files land; default `/run/c8s/secrets` |
+
+```yaml
+annotations:
+  confidential.ai/cw: api
+  confidential.ai/c8s-secrets: "DB=/tenant-a/db,HF=/tenant-a/hf-token"
+```
+
+The webhook injects a `c8s-secret` sidecar and a memory-backed volume. Every
+container in the pod mounts that volume **read-only**; only the fetcher may
+write it. The volume and the container name are reserved — a pod declaring
+either is rejected, since a `hostPath` there would write a released secret to
+host-visible storage, and an ephemeral container mounting it would read one out
+of a running pod.
+
+### The file appears after your container starts
+
+This is the part to design around. CDS releases only once **every** main
+container is running, because that is when the sandbox matches a whole workload
+entry. The fetcher therefore starts alongside the workload, is refused while the
+set is incomplete, and writes when it completes. A consumer must wait for its
+file rather than read it at startup:
+
+```sh
+until [ -f /run/c8s/secrets/DB ]; do sleep 1; done
+```
+
+Nothing can remove this. An init container would be asking before its siblings
+exist and would deadlock the pod it gates. The consequence is that a terminal
+fetch failure leaves a `Running` pod with no secret and an
+`Init:CrashLoopBackOff` sub-status — there is no fail-closed delivery gate to be
+had under combination gating.
+
+A workload that finds its path empty creates it, so the first pod of a workload
+to ask defines the value.
+
 ## The API
 
-Every request needs a single-use challenge and a fresh sandbox token, so a
-release is bound to one caller and cannot be replayed.
+The injected fetcher speaks this; a workload does not have to. Every request
+needs a single-use challenge and a fresh sandbox token, so a release is bound to
+one caller and cannot be replayed.
 
 ```
 POST /secrets                      → {"challenge": "<base64>"}
@@ -221,7 +265,7 @@ reports this. A partially-rolled Deployment ends up with two different values
 for one path.
 
 So after a CDS restart, restart every secret-consuming workload rather than
-letting them recover piecemeal. Treat a released value as ephemeral for the
+letting them recover piecemeal — a rolling restart of each Deployment. Treat a released value as ephemeral for the
 lifetime of the CDS process; nothing durable may be keyed on one.
 
 The sandbox ledger is process memory too, so a leaf that outlives a restart has

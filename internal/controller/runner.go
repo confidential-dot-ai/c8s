@@ -55,6 +55,10 @@ type Options struct {
 	// AttestationApiURL points at the attestation-api.
 	AttestationApiURL string
 
+	// CDSMeasurements are the launch measurements the injected secret fetcher
+	// requires CDS to present. Empty pins none.
+	CDSMeasurements []string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -234,6 +238,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			GetCertImage:          opts.GetCertImage,
 			CDSURL:                opts.CDSURL,
 			AttestationApiURL:     opts.AttestationApiURL,
+			CDSMeasurements:       opts.CDSMeasurements,
 			CertFSGroup:           int64Ptr(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,
