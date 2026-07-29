@@ -204,7 +204,11 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// the requester's init/main digest lists hash to the attested workload
 	// digest and that every listed image is allowlisted, then stamp the claims
 	// on the leaf so peers and `c8s verify` can read the attested workload.
-	if err := h.verifyWorkloadClaims(claimsDER, req.InitContainerDigests, req.ContainerDigests); err != nil {
+	// The allowlist entry (or entries) the digest sets matched is stamped too,
+	// so a verifier learns WHICH admitted policy governs this pod, not only
+	// that some entry does.
+	matched, err := h.verifyWorkloadClaims(claimsDER, req.InitContainerDigests, req.ContainerDigests)
+	if err != nil {
 		slog.Warn("workload claims rejected", "error", err)
 		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
 		return
@@ -228,6 +232,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		Evidence:        evidenceJSON,
 		ConfigClaimsExt: claimsDER,
 		SandboxID:       sandboxID,
+		MatchedWorkload: matched,
 	})
 	if err != nil {
 		slog.Error("in-process sign failed", "error", err)
@@ -333,90 +338,78 @@ func csrRATLSExtensionValue(csr *x509.CertificateRequest) []byte {
 // init/main set exactly matches one workload entry, so containers from different
 // entries cannot be mixed into an unauthorized pod (docs/ratls.md). claimsDER
 // nil ⇒ nothing to verify; it fails closed if claims are present with no store.
-func (h AttestHandler) verifyWorkloadClaims(claimsDER []byte, initDigests, mainDigests []string) error {
+//
+// On success it returns the matched workload entries for stamping (nil for a
+// claims-free or floor-only request). The match is over image digests only —
+// argv never reaches CDS — so entries sharing digest sets and differing only in
+// argv policy all match, and the stamp names the whole set rather than
+// asserting an identity the digests do not establish
+// (pkg/ratls/matchedworkload.go).
+func (h AttestHandler) verifyWorkloadClaims(claimsDER []byte, initDigests, mainDigests []string) (*ratls.MatchedWorkload, error) {
 	if len(claimsDER) == 0 {
-		return nil
+		return nil, nil
 	}
 	if h.AllowlistStore == nil {
-		return fmt.Errorf("workload claims presented but this CDS cannot verify them")
+		return nil, fmt.Errorf("workload claims presented but this CDS cannot verify them")
 	}
 	if _, err := workloadclaims.VerifyWorkloadDigest(claimsDER, initDigests, mainDigests); err != nil {
-		return err
+		return nil, err
 	}
 	for _, d := range append(append([]string{}, initDigests...), mainDigests...) {
 		digest, err := types.ParseDigest(d)
 		if err != nil {
-			return fmt.Errorf("container digest %q: %w", d, err)
+			return nil, fmt.Errorf("container digest %q: %w", d, err)
 		}
 		allowed, err := h.AllowlistStore.Contains(digest)
 		if err != nil {
-			return fmt.Errorf("check allowlist: %w", err)
+			return nil, fmt.Errorf("check allowlist: %w", err)
 		}
 		if !allowed {
-			return fmt.Errorf("container image %s is not allowlisted", digest)
+			return nil, fmt.Errorf("container image %s is not allowlisted", digest)
 		}
 	}
 	doc, _, err := h.AllowlistStore.LoadAll()
 	if err != nil {
-		return fmt.Errorf("load allowlist: %w", err)
+		return nil, fmt.Errorf("load allowlist: %w", err)
 	}
-	return enforceWorkloadCombination(doc, initDigests, mainDigests)
+	return matchWorkloadEntries(doc, initDigests, mainDigests)
 }
 
-// enforceWorkloadCombination requires the non-floor portion of the claimed
-// init/main sets to equal one workload entry's non-floor init/main sets.
+// matchWorkloadEntries requires the non-floor portion of the claimed init/main
+// sets to equal at least one workload entry's non-floor init/main sets, and
+// returns the matched entries plus their canonical digest for stamping.
 //
 // Floor digests are excluded from both sides: they are admitted alone and carry
 // no combination policy. Injected c8s containers (get-cert) are floor entries,
 // so their measured digest drops out here — that floor pin is the exclusion
 // (name-based exclusion happens upstream at the inventory, before CDS sees only
-// digests).
-func enforceWorkloadCombination(doc *pkgallowlist.Allowlist, initDigests, mainDigests []string) error {
-	floor := doc.Digests
-	claimInit := nonFloorSet(initDigests, floor)
-	claimMain := nonFloorSet(mainDigests, floor)
-	if len(claimInit) == 0 && len(claimMain) == 0 {
-		return nil
-	}
-	for _, w := range doc.Workloads {
-		if setsEqual(claimInit, nonFloorSet(digestStrings(w.InitContainers), floor)) &&
-			setsEqual(claimMain, nonFloorSet(digestStrings(w.Containers), floor)) {
-			return nil
+// digests). A floor-only pod matches no entry and is stamped with nothing.
+func matchWorkloadEntries(doc *pkgallowlist.Allowlist, initDigests, mainDigests []string) (*ratls.MatchedWorkload, error) {
+	names := doc.MatchingWorkloadEntries(initDigests, mainDigests)
+	if len(names) == 0 {
+		// Distinguish "nothing to match" (floor-only pod) from "no entry
+		// matches" — the first admits with no stamp, the second refuses.
+		if floorOnly(doc, initDigests, mainDigests) {
+			return nil, nil
 		}
+		return nil, fmt.Errorf("claimed container set matches no single workload entry")
 	}
-	return fmt.Errorf("claimed container set matches no single workload entry")
+	digest, err := doc.WorkloadEntriesDigest(names)
+	if err != nil {
+		return nil, fmt.Errorf("digest matched workload entries: %w", err)
+	}
+	return &ratls.MatchedWorkload{Names: names, EntriesDigest: digest}, nil
 }
 
-// nonFloorSet is the canonical digests in ds that are not floor entries.
-func nonFloorSet(ds []string, floor map[string]string) map[string]struct{} {
-	set := make(map[string]struct{}, len(ds))
-	for _, d := range ds {
+// floorOnly reports whether every claimed digest is a floor entry (or
+// unparseable, which upstream validation has already excluded).
+func floorOnly(doc *pkgallowlist.Allowlist, initDigests, mainDigests []string) bool {
+	for _, d := range append(append([]string{}, initDigests...), mainDigests...) {
 		parsed, err := types.ParseDigest(d)
 		if err != nil {
 			continue
 		}
-		if _, isFloor := floor[parsed.String()]; isFloor {
-			continue
-		}
-		set[parsed.String()] = struct{}{}
-	}
-	return set
-}
-
-func digestStrings(cs []pkgallowlist.Container) []string {
-	out := make([]string, len(cs))
-	for i, c := range cs {
-		out[i] = c.Digest.String()
-	}
-	return out
-}
-
-func setsEqual(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
+		if _, isFloor := doc.Digests[parsed.String()]; !isFloor {
 			return false
 		}
 	}

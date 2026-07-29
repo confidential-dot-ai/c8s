@@ -72,6 +72,15 @@ type evidence struct {
 	// The binding still folds the raw bytes, but policy against the claims is
 	// impossible — the verdict fails closed on it.
 	claimsErr error
+	// matchedWorkload is the CDS-stamped matched-workload-entry extension
+	// (cert modes only; nil when the leaf carries none). Unlike config-claims
+	// it is NOT covered by the requester's REPORTDATA — it is a statement by
+	// CDS under the mesh-CA signature, checkable against the attested
+	// allowlist (pkg/ratls/matchedworkload.go).
+	matchedWorkload *ratls.MatchedWorkload
+	// matchedErr records a carried matched-workload extension this build
+	// cannot interpret; damage must not read as absence.
+	matchedErr error
 }
 
 // platformOrDefault returns p, or "snp" when p is empty (the historical default
@@ -138,17 +147,20 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 		binding = "REPORTDATA binds the certificate public key and its config-claims extension (no per-request nonce — not a freshness proof)"
 		claims, claimsErr = ratls.UnmarshalConfigClaims(claimsRaw)
 	}
+	matched, matchedErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:     platform,
-		rawEvidence:  raw,
-		erd:          erd,
-		fresh:        false,
-		source:       source,
-		certSHA256:   hex.EncodeToString(sum[:]),
-		bindingNote:  binding,
-		configClaims: claims,
-		claimsErr:    claimsErr,
+		platform:        platform,
+		rawEvidence:     raw,
+		erd:             erd,
+		fresh:           false,
+		source:          source,
+		certSHA256:      hex.EncodeToString(sum[:]),
+		bindingNote:     binding,
+		configClaims:    claims,
+		claimsErr:       claimsErr,
+		matchedWorkload: matched,
+		matchedErr:      matchedErr,
 	}, nil
 }
 

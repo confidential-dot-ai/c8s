@@ -672,6 +672,19 @@ type Outcome struct {
 	SeedAttestedDigest         string   `json:"allowlist_seed_attested_digest,omitempty"`
 	AllowlistAttestedDigest    string   `json:"allowlist_attested_digest,omitempty"`
 	WorkloadAttestedDigest     string   `json:"workload_attested_digest,omitempty"`
+
+	// MatchedWorkloadEntries are the allowlist entry names CDS stamped on the
+	// leaf at issuance: the entry (or entries) whose digest sets the attested
+	// containers matched. More than one name means the images alone could not
+	// distinguish them (same digests, different argv policy) and the pod is
+	// one of the set — an honest ambiguity, not an error. The digest is
+	// allowlist.WorkloadEntriesDigest over the named entries, recomputable
+	// from the allowlist in force at issuance. Stamped by CDS under the
+	// mesh-CA signature — trusting it requires trusting the issuing CDS,
+	// which the mesh-CA/allowlist config-claims pins establish.
+	MatchedWorkloadEntries       []string `json:"matched_workload_entries,omitempty"`
+	MatchedWorkloadEntriesDigest string   `json:"matched_workload_entries_digest,omitempty"`
+	MatchedWorkloadAmbiguous     bool     `json:"matched_workload_ambiguous,omitempty"`
 }
 
 // applyClaimsPolicy surfaces the attested config-claims digests and fails the
@@ -700,6 +713,11 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 			oc.WorkloadAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadDigest)
 		}
 	}
+	if oc.Verified && ev.matchedWorkload != nil {
+		oc.MatchedWorkloadEntries = ev.matchedWorkload.Names
+		oc.MatchedWorkloadEntriesDigest = hex.EncodeToString(ev.matchedWorkload.EntriesDigest)
+		oc.MatchedWorkloadAmbiguous = ev.matchedWorkload.Ambiguous()
+	}
 	fail := func(format string, args ...any) {
 		oc.Verified = false
 		if oc.Error == "" {
@@ -708,6 +726,12 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	}
 	if ev.claimsErr != nil {
 		fail("config-claims extension unparseable (newer target than this CLI?): %v", ev.claimsErr)
+		return
+	}
+	if ev.matchedErr != nil {
+		// A malformed stamp must not read as "no stamp": that is exactly how a
+		// tampered leaf would try to shed its workload identity.
+		fail("matched-workload extension unparseable: %v", ev.matchedErr)
 		return
 	}
 	// Every claims pin must be listed here AND in the comparisons below. A pin
@@ -887,6 +911,16 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.WorkloadAttestedDigest != "" {
 		fmt.Fprintf(out, "  workload digest (attested via config-claims): sha256:%s\n", oc.WorkloadAttestedDigest)
+	}
+	if len(oc.MatchedWorkloadEntries) > 0 {
+		if oc.MatchedWorkloadAmbiguous {
+			fmt.Fprintf(out, "  matched workload entries (stamped by CDS): %s\n", strings.Join(oc.MatchedWorkloadEntries, ", "))
+			fmt.Fprintf(out, "                (AMBIGUOUS — these entries share image digests and differ only in argv\n"+
+				"                policy; the pod is ONE of them, the digests cannot say which)\n")
+		} else {
+			fmt.Fprintf(out, "  matched workload entry (stamped by CDS): %s\n", oc.MatchedWorkloadEntries[0])
+		}
+		fmt.Fprintf(out, "                entries digest: sha256:%s (recompute from the attested allowlist)\n", oc.MatchedWorkloadEntriesDigest)
 	}
 	if len(oc.OperatorKeys) > 0 {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"

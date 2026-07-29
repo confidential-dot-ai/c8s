@@ -210,7 +210,7 @@ func (errStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 func TestVerifyWorkloadClaims_FailsClosedOnStoreError(t *testing.T) {
 	h := AttestHandler{AllowlistStore: errStore{}}
 	digests := []string{wlDigestA}
-	err := h.verifyWorkloadClaims(claimsDERFor(t, nil, digests), nil, digests)
+	_, err := h.verifyWorkloadClaims(claimsDERFor(t, nil, digests), nil, digests)
 	if err == nil {
 		t.Fatal("expected error when the allowlist store fails")
 	}

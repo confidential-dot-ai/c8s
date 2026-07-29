@@ -307,6 +307,108 @@ func TestAttest_WorkloadClaims_CombinationGate(t *testing.T) {
 	}
 }
 
+// The matched entry is stamped on the leaf. Two entries sharing the same image
+// digest and differing only in argv policy BOTH match — the stamp must name
+// the whole set (the digests cannot distinguish them) and its digest must be
+// recomputable from the allowlist document.
+func TestAttest_WorkloadClaims_StampsMatchedEntries(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	exactArgv := func(argv ...string) pkgallowlist.ArgvPolicy {
+		return pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: argv}
+	}
+	store := fakeStore{workloads: map[string]pkgallowlist.Workload{
+		"kimi-k3": {
+			Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Args: exactArgv("--model", "kimi-k3")}},
+		},
+		"sglang-dev": {
+			Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Args: exactArgv("--model", "qwen3-0.6b")}},
+		},
+	}}
+	h.AllowlistStore = store
+
+	digests := []string{wlDigestA}
+	w := postAttestClaims(t, h, issueChallenge(t, h), claimsDERFor(t, nil, digests), nil, digests)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
+	}
+	leaf := leafFromAttestResponse(t, w)
+	matched, err := ratls.MatchedWorkloadFromCert(leaf)
+	if err != nil {
+		t.Fatalf("matched-workload from leaf: %v", err)
+	}
+	if matched == nil {
+		t.Fatal("leaf carries no matched-workload stamp")
+	}
+	if len(matched.Names) != 2 || matched.Names[0] != "kimi-k3" || matched.Names[1] != "sglang-dev" {
+		t.Fatalf("stamp must name BOTH same-digest entries sorted, got %v", matched.Names)
+	}
+	if !matched.Ambiguous() {
+		t.Fatal("same-digest entries must be stamped ambiguous")
+	}
+	doc, _, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := doc.WorkloadEntriesDigest(matched.Names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(matched.EntriesDigest, want) {
+		t.Fatalf("stamped digest %x is not WorkloadEntriesDigest(%v) = %x", matched.EntriesDigest, matched.Names, want)
+	}
+}
+
+// A floor-only pod matches no workload entry: it must be admitted (existing
+// behavior) and carry NO matched-workload stamp — absence is the truthful
+// statement, not an empty stamp.
+func TestAttest_WorkloadClaims_NoStampForFloorOnlyPod(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	h.AllowlistStore = floorStore(wlDigestA)
+
+	digests := []string{wlDigestA}
+	w := postAttestClaims(t, h, issueChallenge(t, h), claimsDERFor(t, nil, digests), nil, digests)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
+	}
+	leaf := leafFromAttestResponse(t, w)
+	matched, err := ratls.MatchedWorkloadFromCert(leaf)
+	if err != nil {
+		t.Fatalf("matched-workload from leaf: %v", err)
+	}
+	if matched != nil {
+		t.Fatalf("floor-only pod must carry no stamp, got %+v", matched)
+	}
+}
+
+// A unique-digest entry stamps exactly one name, unambiguous.
+func TestAttest_WorkloadClaims_StampsSingleEntry(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	store := fakeStore{workloads: map[string]pkgallowlist.Workload{
+		"web": {
+			InitContainers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA)}},
+			Containers:     []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestB)}},
+		},
+	}}
+	h.AllowlistStore = store
+
+	claimsDER := claimsDERFor(t, []string{wlDigestA}, []string{wlDigestB})
+	w := postAttestClaims(t, h, issueChallenge(t, h), claimsDER, []string{wlDigestA}, []string{wlDigestB})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
+	}
+	leaf := leafFromAttestResponse(t, w)
+	matched, err := ratls.MatchedWorkloadFromCert(leaf)
+	if err != nil {
+		t.Fatalf("matched-workload from leaf: %v", err)
+	}
+	if matched == nil || len(matched.Names) != 1 || matched.Names[0] != "web" || matched.Ambiguous() {
+		t.Fatalf("want unambiguous stamp [web], got %+v", matched)
+	}
+}
+
 func mustCSR(t *testing.T) string {
 	t.Helper()
 	csr, _ := generateCSR(t)
