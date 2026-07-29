@@ -18,6 +18,7 @@ func testClaims(opKeys, seed byte) *ratls.ConfigClaims {
 		SeedDigest:         bytes.Repeat([]byte{seed}, ratls.ClaimsDigestSize),
 		WorkloadDigest:     ratls.UnsetDigest(),
 		MeshCADigest:       ratls.UnsetDigest(),
+		AllowlistDigest:    ratls.UnsetDigest(),
 	}
 }
 
@@ -125,6 +126,7 @@ func TestApplyClaimsPolicy(t *testing.T) {
 			SeedDigest:         ratls.UnsetDigest(),
 			WorkloadDigest:     ratls.UnsetDigest(),
 			MeshCADigest:       ratls.UnsetDigest(),
+			AllowlistDigest:    ratls.UnsetDigest(),
 		}
 		applyClaimsPolicy(&oc, &evidence{configClaims: noSeed}, &ratls.VerifyPolicy{}, operatorKeysReport{})
 		if !oc.Verified || oc.SeedAttestedDigest != "none (no seed configured)" {

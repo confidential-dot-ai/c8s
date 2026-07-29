@@ -233,6 +233,9 @@ func BuildConfigClaims(initImages, mainImages []string) (*ratls.ConfigClaims, er
 		// this; a verifier pinning a real CA digest can never be satisfied by
 		// the sentinel.
 		MeshCADigest: ratls.UnsetDigest(),
+		// A workload serves no allowlist either — it is the thing the
+		// allowlist governs, not the authority over it. Only CDS sets this.
+		AllowlistDigest: ratls.UnsetDigest(),
 	}, nil
 }
 

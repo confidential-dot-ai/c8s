@@ -83,6 +83,12 @@ type VerifyPolicy struct {
 	// an out-of-band anchor. A v1 certificate carries UnsetDigest here and can
 	// therefore never satisfy this pin.
 	MeshCADigest []byte
+	// AllowlistDigest pins the LIVE allowlist the attesting component is
+	// serving (claims v3+), as opposed to SeedDigest's boot-time seed. This is
+	// the pin that catches a permissive entry added after startup, which
+	// SeedDigest structurally cannot. A v1/v2 certificate carries UnsetDigest
+	// here and can therefore never satisfy this pin.
+	AllowlistDigest []byte
 
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
@@ -150,7 +156,8 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
 	if len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 ||
-		len(policy.WorkloadDigest) > 0 || len(policy.MeshCADigest) > 0 {
+		len(policy.WorkloadDigest) > 0 || len(policy.MeshCADigest) > 0 ||
+		len(policy.AllowlistDigest) > 0 {
 		// Claims ride the certificate, which this path never sees. Every pin
 		// must be listed here: a pin this path silently ignored would read as
 		// enforced by the caller and enforce nothing.
@@ -224,6 +231,7 @@ func checkClaimsPins(claimsBytes []byte, policy *VerifyPolicy) error {
 		{"allowlist-seed", policy.SeedDigest, func(c *ConfigClaims) []byte { return c.SeedDigest }},
 		{"workload", policy.WorkloadDigest, func(c *ConfigClaims) []byte { return c.WorkloadDigest }},
 		{"mesh-ca", policy.MeshCADigest, func(c *ConfigClaims) []byte { return c.MeshCADigest }},
+		{"allowlist", policy.AllowlistDigest, func(c *ConfigClaims) []byte { return c.AllowlistDigest }},
 	}
 	anyPinned := false
 	for _, p := range pins {

@@ -26,6 +26,7 @@ func testClaims(t *testing.T) (*ConfigClaims, []byte) {
 		SeedDigest:         bytes.Repeat([]byte{0xCD}, ClaimsDigestSize),
 		WorkloadDigest:     UnsetDigest(),
 		MeshCADigest:       UnsetDigest(),
+		AllowlistDigest:    UnsetDigest(),
 	}
 	ext, err := claims.MarshalExtension()
 	if err != nil {
@@ -92,6 +93,7 @@ func TestConfigClaimsSentinels(t *testing.T) {
 		SeedDigest:         UnsetDigest(),
 		WorkloadDigest:     UnsetDigest(),
 		MeshCADigest:       UnsetDigest(),
+		AllowlistDigest:    UnsetDigest(),
 	}
 	ext, err := claims.MarshalExtension()
 	if err != nil {
@@ -368,6 +370,7 @@ func TestVerifyCertUnpinnedSurvivesClaimsVersionSkew(t *testing.T) {
 		SeedDigest:         bytes.Repeat([]byte{0xCD}, ClaimsDigestSize),
 		WorkloadDigest:     unsetDigest,
 		MeshCADigest:       UnsetDigest(),
+		AllowlistDigest:    UnsetDigest(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -580,6 +583,7 @@ func TestUnmarshalConfigClaimsRejectsUnknownVersion(t *testing.T) {
 		SeedDigest:         UnsetDigest(),
 		WorkloadDigest:     UnsetDigest(),
 		MeshCADigest:       UnsetDigest(),
+		AllowlistDigest:    UnsetDigest(),
 	}
 	der, _ := asn1.Marshal(future)
 	if _, err := UnmarshalConfigClaims(der); err == nil {
@@ -600,6 +604,7 @@ func TestMeshCADigestIsBound(t *testing.T) {
 			SeedDigest:         UnsetDigest(),
 			WorkloadDigest:     UnsetDigest(),
 			MeshCADigest:       bytes.Repeat([]byte{caByte}, ClaimsDigestSize),
+			AllowlistDigest:    UnsetDigest(),
 		}
 		ext, err := c.MarshalExtension()
 		if err != nil {
