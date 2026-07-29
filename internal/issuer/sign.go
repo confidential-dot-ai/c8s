@@ -25,6 +25,13 @@ type SignCSRParams struct {
 	// sandbox token it came from — SignCSR does not re-verify (docs/ratls.md,
 	// "Sandbox identity").
 	SandboxID string
+
+	// MatchedWorkload, when set, is stamped as the matched-workload-entry
+	// extension (ratls.OIDMatchedWorkload): the allowlist entry (or entries)
+	// the sandbox's verified (digest, argv) containers matched. The caller MUST
+	// have run the allowlist match that produced it — SignCSR does not
+	// re-verify (pkg/ratls/matchedworkload.go).
+	MatchedWorkload *ratls.MatchedWorkload
 }
 
 // SignCSR signs csr against this CA, returning the leaf certificate PEM and
@@ -68,6 +75,13 @@ func (c *CA) SignCSR(p SignCSRParams) (certPEM []byte, serial *big.Int, err erro
 			return nil, nil, err
 		}
 		template.ExtraExtensions = append(template.ExtraExtensions, sandboxExt)
+	}
+	if p.MatchedWorkload != nil {
+		matchedExt, err := ratls.MarshalMatchedWorkloadExtension(p.MatchedWorkload)
+		if err != nil {
+			return nil, nil, err
+		}
+		template.ExtraExtensions = append(template.ExtraExtensions, matchedExt)
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, c.Cert, p.CSR.PublicKey, c.Key)

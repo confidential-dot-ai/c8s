@@ -1,12 +1,14 @@
 package cds
 
 import (
+	"bytes"
 	"net/http"
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -279,6 +281,219 @@ func TestAttest_SandboxWorkload_UnpinnedStillEnforcesAllowlist(t *testing.T) {
 	h.Measurements = nil
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
+
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// sandboxContainers is the per-container detail a current inventory reports for
+// the test sandbox: each running (digest, argv) pair.
+func sandboxContainers(pairs ...workloadclaims.SandboxContainer) map[string][]workloadclaims.SandboxContainer {
+	return map[string][]workloadclaims.SandboxContainer{testSandboxID: pairs}
+}
+
+func digestsOf(cs map[string][]workloadclaims.SandboxContainer) map[string][]string {
+	out := map[string][]string{}
+	for id, list := range cs {
+		for _, c := range list {
+			out[id] = append(out[id], c.Digest)
+		}
+	}
+	return out
+}
+
+func anyArgv() pkgallowlist.ArgvPolicy {
+	return pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyAny}
+}
+
+func exactArgs(argv ...string) pkgallowlist.ArgvPolicy {
+	return pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: argv}
+}
+
+// stampFromResponse issues against h with a sandbox token and returns the
+// leaf's matched-workload stamp (nil when the leaf carries none).
+func stampFromResponse(t *testing.T, h AttestHandler, signer *workloadclaims.SandboxTokenSigner) *ratls.MatchedWorkload {
+	t.Helper()
+	csrPEM, _ := generateCSR(t)
+	challenge := issueChallenge(t, h)
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	leaf := leafFromAttestResponse(t, w)
+	matched, err := ratls.MatchedWorkloadFromCert(leaf)
+	if err != nil {
+		t.Fatalf("matched-workload from leaf: %v", err)
+	}
+	return matched
+}
+
+// Two entries sharing the same image digest but pinning different exact argv
+// are told apart by the container's actual command: the stamp names exactly
+// the one entry the argv satisfies, unambiguous. This is what the digest-only
+// match could never do.
+func TestAttest_SandboxWorkload_ArgvDisambiguatesSameDigestEntries(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	store := fakeStore{
+		floor: map[string]bool{wlDigestC: true},
+		workloads: map[string]pkgallowlist.Workload{
+			"kimi-k3":    {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: exactArgs("--model", "kimi-k3")}}},
+			"sglang-dev": {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: exactArgs("--model", "qwen3-0.6b")}}},
+		},
+	}
+	containers := sandboxContainers(
+		workloadclaims.SandboxContainer{Digest: wlDigestC},
+		workloadclaims.SandboxContainer{Digest: wlDigestA, Argv: []string{"--model", "kimi-k3"}},
+	)
+	h.AllowlistStore = store
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
+
+	matched := stampFromResponse(t, h, signer)
+	if matched == nil {
+		t.Fatal("leaf carries no matched-workload stamp")
+	}
+	if len(matched.Names) != 1 || matched.Names[0] != "kimi-k3" {
+		t.Fatalf("argv must resolve the same-digest entries to exactly kimi-k3, got %v", matched.Names)
+	}
+	if matched.Ambiguous() {
+		t.Fatal("an argv-resolved single entry must not be stamped ambiguous")
+	}
+	doc, _, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := doc.WorkloadEntriesDigest(matched.Names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(matched.EntriesDigest, want) {
+		t.Fatalf("stamped digest %x is not WorkloadEntriesDigest(%v) = %x", matched.EntriesDigest, matched.Names, want)
+	}
+}
+
+// When the running argv satisfies BOTH entries — here both carry an "any"
+// policy over the same image — the stamp must name the whole set sorted and
+// mark it ambiguous, rather than asserting an identity the evidence does not
+// establish. Its digest must be recomputable from the allowlist document.
+func TestAttest_SandboxWorkload_StampsAmbiguousWhenArgvSatisfiesBoth(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	store := fakeStore{
+		workloads: map[string]pkgallowlist.Workload{
+			"kimi-k3":    {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: anyArgv()}}},
+			"sglang-dev": {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: anyArgv()}}},
+		},
+	}
+	containers := sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA, Argv: []string{"--model", "kimi-k3"}})
+	h.AllowlistStore = store
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
+
+	matched := stampFromResponse(t, h, signer)
+	if matched == nil {
+		t.Fatal("leaf carries no matched-workload stamp")
+	}
+	if len(matched.Names) != 2 || matched.Names[0] != "kimi-k3" || matched.Names[1] != "sglang-dev" {
+		t.Fatalf("stamp must name BOTH argv-compatible entries sorted, got %v", matched.Names)
+	}
+	if !matched.Ambiguous() {
+		t.Fatal("entries the argv cannot distinguish must be stamped ambiguous")
+	}
+	doc, _, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := doc.WorkloadEntriesDigest(matched.Names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(matched.EntriesDigest, want) {
+		t.Fatalf("stamped digest %x is not WorkloadEntriesDigest(%v) = %x", matched.EntriesDigest, matched.Names, want)
+	}
+}
+
+// A unique-digest entry stamps exactly one name, unambiguous.
+func TestAttest_SandboxWorkload_StampsSingleEntry(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	store := fakeStore{
+		floor: map[string]bool{wlDigestC: true},
+		workloads: map[string]pkgallowlist.Workload{
+			"web": {
+				InitContainers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: anyArgv()}},
+				Containers:     []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestB), Command: anyArgv(), Args: anyArgv()}},
+			},
+		},
+	}
+	containers := sandboxContainers(
+		workloadclaims.SandboxContainer{Digest: wlDigestC},
+		workloadclaims.SandboxContainer{Digest: wlDigestA, Argv: []string{"init"}},
+		workloadclaims.SandboxContainer{Digest: wlDigestB, Argv: []string{"serve"}},
+	)
+	h.AllowlistStore = store
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
+
+	matched := stampFromResponse(t, h, signer)
+	if matched == nil {
+		t.Fatal("leaf carries no matched-workload stamp")
+	}
+	if len(matched.Names) != 1 || matched.Names[0] != "web" || matched.Ambiguous() {
+		t.Fatalf("stamp = %+v, want exactly [web], unambiguous", matched)
+	}
+}
+
+// A floor-only pod matches no workload entry: it must be admitted (existing
+// behavior) and carry NO matched-workload stamp — absence is the truthful
+// statement, not an empty stamp.
+func TestAttest_SandboxWorkload_NoStampForFloorOnlyPod(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	containers := sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA, Argv: []string{"sh"}})
+	h.AllowlistStore = floorStore(wlDigestA)
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
+
+	if matched := stampFromResponse(t, h, signer); matched != nil {
+		t.Fatalf("floor-only pod must carry no stamp, got %+v", matched)
+	}
+}
+
+// An inventory too old to report per-container detail cannot support an argv
+// match: the flat digest gate still runs, and the leaf carries no stamp —
+// degradation, not failure, so a node-image skew cannot brick issuance.
+func TestAttest_SandboxWorkload_NoContainerDetailIssuesWithoutStamp(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = fakeStore{
+		workloads: map[string]pkgallowlist.Workload{
+			"api": {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: anyArgv()}}},
+		},
+	}
+	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}, key: signer.PublicKey()}
+
+	if matched := stampFromResponse(t, h, signer); matched != nil {
+		t.Fatalf("a digests-only inventory must not produce a stamp, got %+v", matched)
+	}
+}
+
+// A non-floor container whose argv satisfies no entry's policy refuses
+// issuance outright. This restores the combination enforcement #168 dropped —
+// containers from different entries (or off-policy commands) cannot be mixed
+// into an unauthorized pod — and it is strictly stronger than the pre-#168
+// digest-set match because the digests here ARE admitted; only the argv is not.
+func TestAttest_SandboxWorkload_ArgvMatchingNoEntryRefuses(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	h.AllowlistStore = fakeStore{
+		workloads: map[string]pkgallowlist.Workload{
+			"kimi-k3": {Containers: []pkgallowlist.Container{{Digest: wlDigest(t, wlDigestA), Command: anyArgv(), Args: exactArgs("--model", "kimi-k3")}}},
+		},
+	}
+	containers := sandboxContainers(workloadclaims.SandboxContainer{Digest: wlDigestA, Argv: []string{"--model", "exfiltrator"}})
+	h.SandboxDigests = fakeDigests{digests: digestsOf(containers), containers: containers, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)

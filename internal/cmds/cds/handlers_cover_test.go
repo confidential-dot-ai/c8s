@@ -158,7 +158,7 @@ func TestVerifySandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
 		AllowlistStore: errStore{},
 		SandboxDigests: fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}},
 	}
-	err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
+	_, err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
 		SandboxID:     testSandboxID,
 		InventoryHost: testInventoryHost,
 	})
