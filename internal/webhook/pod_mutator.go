@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -81,6 +83,14 @@ const (
 	AnnotationSecrets = "confidential.ai/c8s-secrets"
 	// AnnotationSecretDir overrides where the files land.
 	AnnotationSecretDir = "confidential.ai/c8s-secret-dir"
+
+	// AnnotationVolumes requests encrypted volumes for the pod, as a
+	// comma-separated list of NAME=/store/path. NAME selects the node's device
+	// by serial and names the directory the plaintext appears in under
+	// AnnotationVolumeDir. Setting it injects the volume fetcher sidecar.
+	AnnotationVolumes = "confidential.ai/c8s-volumes"
+	// AnnotationVolumeDir overrides where the volumes are mounted.
+	AnnotationVolumeDir = "confidential.ai/c8s-volume-dir"
 )
 
 var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation")
@@ -117,6 +127,18 @@ const defaultSecretDir = "/run/c8s/secrets"
 // (the guest's, under kata), so an unbounded one would let a workload's own
 // writes into the shared directory pressure the pod rather than fail.
 const secretsVolumeSizeLimit = "1Mi"
+
+// reservedVolumeContainerName is the injected volume fetcher. Reserved like the
+// cert containers.
+const reservedVolumeContainerName = "c8s-volume"
+
+// defaultVolumeDir is where opened volumes are mounted, one directory each.
+const defaultVolumeDir = "/run/c8s/volumes"
+
+// volumeMountSizeLimit bounds the emptyDir the node agent mounts the decrypted
+// device over. It holds nothing itself; the bound stops a workload filling node
+// memory through a mount that has not landed yet.
+const volumeMountSizeLimit = "1Mi"
 
 // reservedCertContainerName is the injected mesh-cert sidecar's name. It is
 // operator-reserved: a pod may not declare its own container under it. The
@@ -257,12 +279,20 @@ type injection struct {
 	Discovery discoverySpec
 	Security  getCertSecuritySpec
 	Secrets   secretsSpec
+	Volumes   volumesSpec
 	Verbose   bool
 }
 
 // secretsSpec is the pod's secret request: which secrets, and where the files
 // land. Empty Specs means no fetcher is injected.
 type secretsSpec struct {
+	Specs []string
+	Dir   string
+}
+
+// volumesSpec is the pod's encrypted-volume request: which volumes, and where
+// they are mounted. Empty Specs means no fetcher is injected.
+type volumesSpec struct {
 	Specs []string
 	Dir   string
 }
@@ -324,6 +354,10 @@ func parseAnnotations(pod *corev1.Pod) (*injection, error) {
 		Secrets: secretsSpec{
 			Specs: listAnnotation(annotations, AnnotationSecrets),
 			Dir:   strings.TrimSpace(annotations[AnnotationSecretDir]),
+		},
+		Volumes: volumesSpec{
+			Specs: listAnnotation(annotations, AnnotationVolumes),
+			Dir:   strings.TrimSpace(annotations[AnnotationVolumeDir]),
 		},
 		Discovery: discoverySpec{
 			Volume:        annotations[AnnotationDiscoveryVolume],
@@ -446,6 +480,8 @@ func hasInjectionDetailAnnotations(annotations map[string]string) bool {
 		AnnotationGetCertVerbose,
 		AnnotationSecrets,
 		AnnotationSecretDir,
+		AnnotationVolumes,
+		AnnotationVolumeDir,
 	} {
 		if annotations[name] != "" {
 			return true
@@ -473,6 +509,39 @@ func (inj *injection) validate() error {
 	}
 	if err := inj.Discovery.validate(); err != nil {
 		return err
+	}
+	if err := inj.Volumes.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validate checks each NAME=/store/path pair. The name is rejected here rather
+// than at the node so a spec the device lookup could never resolve does not
+// reach a Running pod, and because it becomes a Kubernetes volume name.
+func (v volumesSpec) validate() error {
+	seen := map[string]bool{}
+	for _, spec := range v.Specs {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok {
+			return fmt.Errorf("%w: %s entry %q must be NAME=/store/path",
+				errInvalidInjectionAnnotation, AnnotationVolumes, spec)
+		}
+		name = strings.TrimSpace(name)
+		if err := volumed.ValidVolumeName(name); err != nil {
+			return fmt.Errorf("%w: %s: %s", errInvalidInjectionAnnotation, AnnotationVolumes, err)
+		}
+		if seen[name] {
+			return fmt.Errorf("%w: %s names %q twice; each is a distinct device and mount",
+				errInvalidInjectionAnnotation, AnnotationVolumes, name)
+		}
+		seen[name] = true
+		if _, err := pkgallowlist.CanonicalSecretPath(strings.TrimSpace(path)); err != nil {
+			return fmt.Errorf("%w: %s %q: %s", errInvalidInjectionAnnotation, AnnotationVolumes, name, err)
+		}
+	}
+	if v.Dir != "" && !strings.HasPrefix(v.Dir, "/") {
+		return fmt.Errorf("%w: %s must be an absolute path", errInvalidInjectionAnnotation, AnnotationVolumeDir)
 	}
 	return nil
 }
@@ -583,6 +652,16 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			"%w: %s needs the node inventory socket, which this operator is not configured with (kata, or nri-image-policy disabled); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
 	}
+	// Same for volumes, and more so: the fetcher hands the key to a node agent
+	// over that same socket directory, and the agent mounts into the pod's
+	// kubelet directory — neither of which exists for a kata guest. Refuse at
+	// admission rather than leave the workload waiting on a mount that can
+	// never land (docs/volumes.md).
+	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" {
+		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
+			"%w: %s needs the node volume agent, which this operator is not configured with (kata, or nri-image-policy disabled); see docs/volumes.md",
+			errInvalidInjectionAnnotation, AnnotationVolumes))
+	}
 	if inj != nil && inj.SAN == "" {
 		// req.Namespace, not pod.Namespace: template-created pods reach
 		// admission with an empty metadata.namespace.
@@ -631,6 +710,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		// Same reasoning for the released secrets: a hostPath here would write
 		// them to host-visible storage.
 		if err := rejectReservedSecretsVolume(pod); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		if err := rejectReservedVolumeVolume(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
@@ -848,6 +930,24 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		})
 		injected = append(injected, secretContainer(&effective, cfg))
 	}
+	if len(effective.Volumes.Specs) > 0 {
+		// Reconstructed, not ensured: ensureVolume and mountAll are both
+		// idempotent by SKIPPING what the pod already declares, so a
+		// host-authored spec could pre-declare the volume or the mount and
+		// choose where the decrypted plaintext lands.
+		for _, name := range volumeNames(effective.Volumes.Specs) {
+			replaceVolume(pod, openedVolume(name))
+			remountAll(pod, corev1.VolumeMount{
+				Name:      volumed.KubeVolumeName(name),
+				MountPath: filepath.Join(effective.Volumes.Dir, name),
+				ReadOnly:  true,
+				// The node agent makes the mount outside this pod; without
+				// propagation the container keeps seeing the empty directory.
+				MountPropagation: &hostToContainer,
+			})
+		}
+		injected = append(injected, volumeContainer(&effective, cfg))
+	}
 	pod.Spec.InitContainers = injectInitContainers(pod.Spec.InitContainers, injected...)
 
 	if pod.Annotations == nil {
@@ -1045,6 +1145,9 @@ func (inj *injection) withDefaults(cfg Config) injection {
 	if effective.Secrets.Dir == "" {
 		effective.Secrets.Dir = defaultSecretDir
 	}
+	if effective.Volumes.Dir == "" {
+		effective.Volumes.Dir = defaultVolumeDir
+	}
 	if effective.Security.RunAsUser == nil {
 		effective.Security.RunAsUser = cfg.GetCertRunAsUser
 	}
@@ -1144,7 +1247,9 @@ func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
 				errInvalidInjectionAnnotation, c.Name)
 		}
 		for _, m := range c.VolumeMounts {
-			if reserved[m.Name] {
+			// By prefix as well as by set: an opened volume is reserved
+			// whatever the host-written annotation says its name is.
+			if reserved[m.Name] || strings.HasPrefix(m.Name, volumed.KubeVolumePrefix) {
 				return fmt.Errorf("%w: ephemeral container %q may not mount %q, which holds c8s-released material",
 					errInvalidInjectionAnnotation, c.Name, m.Name)
 			}
@@ -1202,6 +1307,122 @@ func rejectReservedSecretsVolume(pod *corev1.Pod) error {
 		}
 	}
 	return nil
+}
+
+var hostToContainer = corev1.MountPropagationHostToContainer
+
+// volumeNames returns the NAME of each NAME=/store/path spec, in order.
+// validate has already rejected anything malformed.
+func volumeNames(specs []string) []string {
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		name, _, ok := strings.Cut(spec, "=")
+		if !ok {
+			continue
+		}
+		out = append(out, strings.TrimSpace(name))
+	}
+	return out
+}
+
+// openedVolume is the mount point the node agent mounts a decrypted volume
+// over. It holds nothing itself, so the medium only governs what a workload
+// could write before the mount lands.
+func openedVolume(name string) corev1.Volume {
+	limit := resource.MustParse(volumeMountSizeLimit)
+	return corev1.Volume{
+		Name: volumed.KubeVolumeName(name),
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &limit,
+			},
+		},
+	}
+}
+
+// replaceVolume overwrites a same-named volume rather than keeping it, which is
+// what ensureVolume does. See the call site in mutatePod.
+func replaceVolume(pod *corev1.Pod, v corev1.Volume) {
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == v.Name {
+			pod.Spec.Volumes[i] = v
+			return
+		}
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, v)
+}
+
+// remountAll gives every container the mount, overwriting one it already
+// declares rather than keeping it, which is what mountAll does. See the call
+// site in mutatePod.
+func remountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
+	replace := func(cs []corev1.Container) []corev1.Container {
+		for i := range cs {
+			if existing := containerMount(&cs[i], mount.Name); existing != nil {
+				*existing = mount
+				continue
+			}
+			cs[i].VolumeMounts = append(cs[i].VolumeMounts, mount)
+		}
+		return cs
+	}
+	pod.Spec.Containers = replace(pod.Spec.Containers)
+	pod.Spec.InitContainers = replace(pod.Spec.InitContainers)
+}
+
+// rejectReservedVolumeVolume denies a pod that pre-declares any volume under
+// the reserved prefix as anything but the expected memory-backed emptyDir.
+// Reserved by prefix rather than by re-deriving names from the annotation: the
+// annotation is host-written, so a guard that reads it can be steered away from
+// the name it is meant to protect.
+func rejectReservedVolumeVolume(pod *corev1.Pod) error {
+	for i := range pod.Spec.Volumes {
+		v := &pod.Spec.Volumes[i]
+		if !strings.HasPrefix(v.Name, volumed.KubeVolumePrefix) {
+			continue
+		}
+		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory {
+			return fmt.Errorf("%w: volume %q is reserved for an encrypted volume; it must be a memory-backed emptyDir (medium: Memory) or omitted",
+				errInvalidInjectionAnnotation, v.Name)
+		}
+	}
+	return nil
+}
+
+// volumeContainer is the workload's volume fetcher.
+//
+// A native sidecar ordered after c8s-cert-wait, like the secret fetcher and for
+// the same reason: it authenticates with the leaf that sidecar writes, and CDS
+// releases only once every main container is running.
+func volumeContainer(inj *injection, cfg Config) corev1.Container {
+	args := []string{
+		"get-volume",
+		"--cds-url=" + cfg.CDSURL,
+		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
+		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
+	}
+	for _, spec := range inj.Volumes.Specs {
+		args = append(args, "--volume="+spec)
+	}
+	for _, m := range cfg.CDSMeasurements {
+		args = append(args, "--measurements="+m)
+	}
+
+	always := corev1.ContainerRestartPolicyAlways
+	return corev1.Container{
+		Name:            reservedVolumeContainerName,
+		Image:           cfg.GetCertImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   &always,
+		Args:            args,
+		Env:             getCertEnv(inj),
+		// It reads the leaf and talks to the node agent's socket; the volumes
+		// themselves are mounted into the workload, not into this.
+		VolumeMounts:    append(getCertVolumeMounts(inj, false), workloadClaimsMounts(cfg)...),
+		SecurityContext: getCertSecurityContext(inj),
+	}
 }
 
 // secretContainer is the workload's secret fetcher.
@@ -1373,7 +1594,8 @@ func rejectReservedCertContainer(pod *corev1.Pod) error {
 func isReservedCertName(name string) bool {
 	return name == reservedCertContainerName ||
 		name == reservedCertWaitContainerName ||
-		name == reservedSecretContainerName
+		name == reservedSecretContainerName ||
+		name == reservedVolumeContainerName
 }
 
 // rejectReservedCertVolume denies a pod that pre-declares the reserved cert

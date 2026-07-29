@@ -13,17 +13,16 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
-	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 type fakeIdentity struct {
-	podUID, sandboxID string
-	err               error
+	pod PodCgroup
+	err error
 }
 
-func (f fakeIdentity) Resolve(workloadclaims.Peer) (string, string, error) {
-	return f.podUID, f.sandboxID, f.err
+func (f fakeIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
+	return f.pod, f.err
 }
 
 type fakeDevices struct {
@@ -46,16 +45,11 @@ type serverFixture struct {
 	srv    *Server
 }
 
-func newServerFixture(t *testing.T, ident Identity, grant *pkgallowlist.SecretsPolicy) *serverFixture {
+func newServerFixture(t *testing.T, ident Identity) *serverFixture {
 	t.Helper()
 	ops := newOps()
 	opener := testOpener(t, ops)
-	srv := &Server{
-		Identity:   ident,
-		Authorizer: authorizerFor(runningApp(), grant),
-		Opener:     opener,
-		Devices:    fakeDevices{},
-	}
+	srv := &Server{Identity: ident, Opener: opener, Devices: fakeDevices{}}
 
 	sock := filepath.Join(t.TempDir(), "volumed.sock")
 	l, err := net.Listen("unix", sock)
@@ -98,15 +92,15 @@ func (f *serverFixture) post(t *testing.T, body any) *http.Response {
 func openBody(t *testing.T) OpenRequest {
 	t.Helper()
 	req := testRequest(t)
-	return OpenRequest{Name: req.Name, Path: storePath, Blob: req.Blob}
+	return OpenRequest{Name: req.Name, Blob: req.Blob}
 }
 
 func resolvedIdentity() fakeIdentity {
-	return fakeIdentity{podUID: testPodUID, sandboxID: sandboxID}
+	return fakeIdentity{pod: testPod(testPodUID)}
 }
 
-func TestServerOpensForAnAuthorizedCaller(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+func TestServerOpensForAResolvedCaller(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
 	resp := f.post(t, openBody(t))
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
@@ -116,25 +110,10 @@ func TestServerOpensForAnAuthorizedCaller(t *testing.T) {
 	}
 }
 
-// The grant is checked before anything privileged happens, so a caller with no
-// claim never reaches device-mapper.
-func TestServerRefusesUngrantedPathBeforeOpening(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant("/tenant-b/volumes/other"))
-	resp := f.post(t, openBody(t))
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
-	}
-	if f.ops.sequence() != "" {
-		t.Fatalf("an unauthorized request reached the privileged steps: %q", f.ops.sequence())
-	}
-	if f.opener.Len() != 0 {
-		t.Fatal("an unauthorized request produced a mount")
-	}
-}
-
-// A caller the kernel cannot place in a pod is refused outright.
+// A caller the kernel cannot place in a pod is refused before anything
+// privileged happens: there is no directory to mount into.
 func TestServerRefusesUnresolvableCaller(t *testing.T) {
-	f := newServerFixture(t, fakeIdentity{err: errors.New("no pod cgroup")}, readGrant(storePath))
+	f := newServerFixture(t, fakeIdentity{err: errors.New("no pod cgroup")})
 	resp := f.post(t, openBody(t))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
@@ -144,10 +123,10 @@ func TestServerRefusesUnresolvableCaller(t *testing.T) {
 	}
 }
 
-// A wrong key for an already-open volume answers exactly as a failed grant
-// check does; a distinct status would tell an unentitled pod what is mounted.
-func TestServerGivesOneAnswerForBothRefusals(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+// The volume name is a label in a host-written annotation, so a caller naming
+// one already open must still present its key.
+func TestServerRefusesAWrongKeyForAnOpenVolume(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
 	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
 		t.Fatalf("first open: status %d", got)
 	}
@@ -159,21 +138,19 @@ func TestServerGivesOneAnswerForBothRefusals(t *testing.T) {
 	}
 	body.Blob = blob
 
-	wrongKey := f.post(t, body).StatusCode
-
-	g := newServerFixture(t, resolvedIdentity(), readGrant("/elsewhere"))
-	ungranted := g.post(t, openBody(t)).StatusCode
-
-	if wrongKey != ungranted {
-		t.Fatalf("wrong key answers %d but an ungranted path answers %d", wrongKey, ungranted)
+	if got := f.post(t, body).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d for a wrong key", got, http.StatusForbidden)
+	}
+	if f.opener.Len() != 1 {
+		t.Fatalf("opener holds %d mounts, want the original 1", f.opener.Len())
 	}
 }
 
 // The caller never names its own pod; a body field claiming to is rejected
 // rather than ignored.
 func TestServerRejectsUnknownRequestFields(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
-	raw := map[string]any{"name": "weights", "path": storePath, "pod_uid": "someone-else"}
+	f := newServerFixture(t, resolvedIdentity())
+	raw := map[string]any{"name": "weights", "pod_uid": "someone-else"}
 	resp := f.post(t, raw)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -181,7 +158,7 @@ func TestServerRejectsUnknownRequestFields(t *testing.T) {
 }
 
 func TestServerReportsAMissingDevice(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+	f := newServerFixture(t, resolvedIdentity())
 	f.srv.Devices = fakeDevices{err: errors.New("no such serial")}
 	resp := f.post(t, openBody(t))
 	if resp.StatusCode != http.StatusNotFound {
@@ -193,7 +170,7 @@ func TestServerReportsAMissingDevice(t *testing.T) {
 }
 
 func TestServerReportsAFailedOpen(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+	f := newServerFixture(t, resolvedIdentity())
 	f.ops.failOn = "CryptOpen"
 	resp := f.post(t, openBody(t))
 	if resp.StatusCode != http.StatusInternalServerError {
@@ -207,7 +184,7 @@ func TestServerReportsAFailedOpen(t *testing.T) {
 // A restarted sidecar re-sends its request; the repeat must not open a second
 // mapping or fail.
 func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+	f := newServerFixture(t, resolvedIdentity())
 	for i := 0; i < 3; i++ {
 		if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
 			t.Fatalf("attempt %d: status %d", i, got)
@@ -221,9 +198,25 @@ func TestServerIsIdempotentForARepeatedRequest(t *testing.T) {
 	}
 }
 
+// The node cap answers differently from a refusal: a caller turned away here
+// may succeed once something else is torn down.
+func TestServerReportsTheNodeMountCap(t *testing.T) {
+	f := newServerFixture(t, resolvedIdentity())
+	f.opener.MaxMounts = 1
+	if got := f.post(t, openBody(t)).StatusCode; got != http.StatusNoContent {
+		t.Fatalf("first open: status %d", got)
+	}
+
+	body := openBody(t)
+	body.Name = "datasets"
+	if got := f.post(t, body).StatusCode; got != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want %d", got, http.StatusInsufficientStorage)
+	}
+}
+
 // Only POST is served; the route exists for one verb.
 func TestServerServesOnlyPost(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+	f := newServerFixture(t, resolvedIdentity())
 	resp, err := f.client.Get("http://volumed" + VolumePath)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -235,9 +228,9 @@ func TestServerServesOnlyPost(t *testing.T) {
 }
 
 func TestServerBoundsTheRequestBody(t *testing.T) {
-	f := newServerFixture(t, resolvedIdentity(), readGrant(storePath))
+	f := newServerFixture(t, resolvedIdentity())
 	body := openBody(t)
-	body.Path = "/" + strings.Repeat("a", maxRequestBytes)
+	body.Name = strings.Repeat("a", maxRequestBytes)
 	if got := f.post(t, body).StatusCode; got != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d for an oversized body", got, http.StatusBadRequest)
 	}
@@ -286,49 +279,4 @@ func TestAcquireIsRaceFree(t *testing.T) {
 	if len(s.inFlight) != 0 {
 		t.Fatalf("in-flight table leaked %d entries", len(s.inFlight))
 	}
-}
-
-func TestKernelIdentityNeedsASandboxResolver(t *testing.T) {
-	if _, _, err := (KernelIdentity{}).Resolve(workloadclaims.PeerForPID(1)); err == nil {
-		t.Fatal("resolved with no sandbox resolver")
-	}
-}
-
-func TestKernelIdentityTakesTheShallowestPodUID(t *testing.T) {
-	root := procWith(t, 4242, "0::/kubepods.slice/kubepods-burstable.slice/"+
-		"kubepods-burstable-pod3f4a1b2c_5d6e_7f80_9a0b_1c2d3e4f5061.slice/"+
-		"cri-containerd-aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111.scope/"+
-		"pod99999999-8888-7777-6666-555555555555/nested\n")
-
-	k := KernelIdentity{ProcRoot: root, Sandboxes: fakeSandboxes{id: sandboxID}}
-	podUID, gotSandbox, err := k.Resolve(workloadclaims.PeerForPID(4242))
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if podUID != testPodUID {
-		t.Fatalf("pod uid = %q, want the runtime-assigned %q", podUID, testPodUID)
-	}
-	if gotSandbox != sandboxID {
-		t.Fatalf("sandbox = %q", gotSandbox)
-	}
-}
-
-func TestKernelIdentitySurfacesSandboxFailure(t *testing.T) {
-	k := KernelIdentity{ProcRoot: t.TempDir(), Sandboxes: fakeSandboxes{err: errors.New("unknown")}}
-	if _, _, err := k.Resolve(workloadclaims.PeerForPID(1)); err == nil {
-		t.Fatal("resolved despite an unknown sandbox")
-	}
-}
-
-type fakeSandboxes struct {
-	id  string
-	err error
-}
-
-func (f fakeSandboxes) SandboxForPeer(workloadclaims.Peer) (string, error) {
-	return f.id, f.err
-}
-
-func (f fakeSandboxes) DigestsForSandbox(string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
-	return nil, nil, false, nil
 }

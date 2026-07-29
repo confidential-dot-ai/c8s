@@ -121,7 +121,7 @@ func (f *fakeOps) sequence() string {
 func testOpener(t *testing.T, ops DeviceOps) *Opener {
 	t.Helper()
 	root, base := kubeletTree(t)
-	if err := os.Mkdir(filepath.Join(base, "weights"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(base, KubeVolumeName("weights")), 0o755); err != nil {
 		t.Fatalf("mkdir volume dir: %v", err)
 	}
 	return &Opener{Ops: ops, KubeletRoot: root}
@@ -138,7 +138,16 @@ func testRequest(t *testing.T) Request {
 	if err != nil {
 		t.Fatalf("blob: %v", err)
 	}
-	return Request{PodUID: testPodUID, Name: "weights", Device: "/dev/disk/by-id/virtio-c8s-vol-weights", Blob: blob}
+	return Request{Pod: testPod(testPodUID), Name: "weights", Device: "/dev/disk/by-id/virtio-c8s-vol-weights", Blob: blob}
+}
+
+// testPod is a pod as the kernel would report it: the UID naming its kubelet
+// directory, and the systemd-driver slice that disappears when it goes.
+func testPod(uid string) PodCgroup {
+	return PodCgroup{
+		UID:  uid,
+		Path: "/kubepods.slice/kubepods-pod" + strings.ReplaceAll(uid, "-", "_") + ".slice",
+	}
 }
 
 func volumeKey() []byte {
@@ -271,7 +280,7 @@ func TestOpenCapsLiveMounts(t *testing.T) {
 
 	// A different pod, so it is not the idempotent path.
 	other := testRequest(t)
-	other.PodUID = "99999999-8888-7777-6666-555555555555"
+	other.Pod = testPod("99999999-8888-7777-6666-555555555555")
 	if err := o.Open(t.Context(), other); !errors.Is(err, ErrTooManyMounts) {
 		t.Fatalf("got %v, want ErrTooManyMounts", err)
 	}
@@ -285,7 +294,7 @@ func TestCloseTearsDownInReverse(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 
-	o.Close(t.Context(), req.PodUID, req.Name)
+	o.Close(t.Context(), req.Pod.UID, req.Name)
 	if got := ops.sequence(); !strings.HasSuffix(got, "Unmount,VerityClose,CryptClose") {
 		t.Fatalf("teardown order = %q", got)
 	}
@@ -306,9 +315,9 @@ func TestCloseIsIdempotent(t *testing.T) {
 	if err := o.Open(t.Context(), req); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	o.Close(t.Context(), req.PodUID, req.Name)
+	o.Close(t.Context(), req.Pod.UID, req.Name)
 	before := ops.sequence()
-	o.Close(t.Context(), req.PodUID, req.Name)
+	o.Close(t.Context(), req.Pod.UID, req.Name)
 	if ops.sequence() != before {
 		t.Fatal("closing an absent volume issued more privileged calls")
 	}
@@ -325,7 +334,7 @@ func TestTeardownContinuesPastAFailedUnmount(t *testing.T) {
 	}
 	ops.failOn = "Unmount"
 
-	o.Close(t.Context(), req.PodUID, req.Name)
+	o.Close(t.Context(), req.Pod.UID, req.Name)
 	if c, v, _ := ops.leaked(); c != 0 || v != 0 {
 		t.Fatalf("a failed unmount left crypt=%d verity=%d behind", c, v)
 	}
@@ -335,7 +344,7 @@ func TestClosePodTearsDownEveryVolumeItHolds(t *testing.T) {
 	ops := newOps()
 	root, base := kubeletTree(t)
 	for _, n := range []string{"weights", "datasets"} {
-		if err := os.Mkdir(filepath.Join(base, n), 0o755); err != nil {
+		if err := os.Mkdir(filepath.Join(base, KubeVolumeName(n)), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", n, err)
 		}
 	}

@@ -986,6 +986,46 @@ nriImagePolicy:
   # plugin.health_addr config field (rendered as "unix://<path>").
   healthSocketName: health.sock
 
+## Node agent that opens encrypted volumes for the pods on a node
+## (docs/volumes.md). Off by default: it runs privileged with hostPID and a
+## writable bind of the kubelet directory, and nothing needs it until a
+## workload consumes a volume.
+##
+## It shares the chart-wide `image` with the operator — it is the same binary.
+volumed:
+  enabled: false
+
+  ## Host paths the daemon works through. The socket lives in the inventory's
+  ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only
+  ## hostPath the deny-host-namespaces VAP admits into a cw pod.
+  hostPaths:
+    kubeletRoot: /var/lib/kubelet
+    cgroupRoot: /sys/fs/cgroup
+
+  ## Volumes open on one node at once. Each costs two device-mapper devices and
+  ## a mount, and every confidential pod on the node can reach the socket.
+  maxMounts: 64
+
+  ## How often teardown checks which pods have gone.
+  reapInterval: 15s
+
+  imagePullSecrets: []
+  priorityClassName: system-node-critical
+  nodeSelector: {}
+  tolerations:
+    - operator: "Exists"
+      effect: "NoExecute"
+    - operator: "Exists"
+      effect: "NoSchedule"
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
 tlsLb:
   enabled: true
 

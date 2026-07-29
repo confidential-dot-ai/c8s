@@ -23,6 +23,10 @@
 {{- printf "%s-kata-deploy" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "c8s.volumedName" -}}
+{{- printf "%s-volumed" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{/* int64 (fixes float64 -f values rendering as 7e+06) + reject non-ints so a
    bad -f can't fall open to UID 0. */}}
 {{- define "c8s.int" -}}

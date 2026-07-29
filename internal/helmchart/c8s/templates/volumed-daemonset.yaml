@@ -1,0 +1,117 @@
+{{- if .Values.volumed.enabled }}
+{{- /*
+  Node agent that opens encrypted volumes for the pods on it (docs/volumes.md).
+
+  It lands in the release namespace, which is labelled pod-security=privileged;
+  tenant namespaces are PSA restricted and cannot host it.
+
+  THREAT MODEL: privileged, hostPID, and a writable bind of the kubelet
+  directory. That is inherent to opening a device and mounting into another
+  pod's directory — it is a host-side operator component, outside the guest TEE
+  boundary. Which pod a mount lands in comes from the caller's kernel peer
+  credentials, never from the request.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "c8s.volumedName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: volumed
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: volumed
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c8s-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: volumed
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      # SO_PEERCRED reports a peer's PID in the reader's PID namespace, so a
+      # caller in another pod resolves to 0 without this.
+      hostPID: true
+      # It reaches no API server: everything it acts on is node-local.
+      automountServiceAccountToken: false
+      {{- with .Values.volumed.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.volumed.imagePullSecrets) | nindent 6 }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.volumed.nodeSelector }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+      tolerations:
+        {{- toYaml .Values.volumed.tolerations | nindent 8 }}
+      containers:
+        - name: volumed
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          args:
+            - volumed
+            - --socket-dir
+            - {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
+            - --kubelet-root
+            - {{ .Values.volumed.hostPaths.kubeletRoot | quote }}
+            - --cgroup-root
+            - {{ .Values.volumed.hostPaths.cgroupRoot | quote }}
+            - --reap-interval
+            - {{ .Values.volumed.reapInterval | quote }}
+            - --max-mounts
+            - {{ include "c8s.positiveInt" (dict "value" .Values.volumed.maxMounts "label" "volumed.maxMounts") | quote }}
+          volumeMounts:
+            # Bidirectional: the mount is made here and has to reach the
+            # workload's pod directory on the node.
+            - name: kubelet-root
+              mountPath: {{ .Values.volumed.hostPaths.kubeletRoot }}
+              mountPropagation: Bidirectional
+            - name: dev
+              mountPath: /dev
+            # /sys whole, not /sys/block: the block entries are symlinks into
+            # /sys/devices, and the serial is read through them.
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: cgroup
+              mountPath: {{ .Values.volumed.hostPaths.cgroupRoot }}
+              readOnly: true
+            # The daemon's socket must live in the inventory's socket directory:
+            # the deny-host-namespaces VAP carves out that exact path by string
+            # equality, and it is what the webhook mounts into cw pods.
+            - name: inventory-socket-dir
+              mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+          resources:
+            {{- toYaml .Values.volumed.resources | nindent 12 }}
+      volumes:
+        - name: kubelet-root
+          hostPath:
+            path: {{ .Values.volumed.hostPaths.kubeletRoot }}
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: cgroup
+          hostPath:
+            path: {{ .Values.volumed.hostPaths.cgroupRoot }}
+            type: Directory
+        - name: inventory-socket-dir
+          hostPath:
+            path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+            type: DirectoryOrCreate
+{{- end }}

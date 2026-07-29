@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -41,54 +40,13 @@ const (
 // naming itself.
 type OpenRequest struct {
 	// Name selects the volume, and with it the device the agent will open.
-	Name string `json:"name"`
-	// Path is the secret-store path the blob came from, checked against the
-	// caller's grant.
-	Path string      `json:"path"`
+	Name string      `json:"name"`
 	Blob volume.Blob `json:"blob"`
 }
 
 // Identity resolves a connected process to the pod it belongs to.
 type Identity interface {
-	Resolve(peer workloadclaims.Peer) (podUID, sandboxID string, err error)
-}
-
-// KernelIdentity binds a caller using only what the kernel and the inventory
-// say. ProcRoot is normally "/proc".
-type KernelIdentity struct {
-	ProcRoot  string
-	Sandboxes workloadclaims.SandboxResolver
-}
-
-// Resolve returns the caller's pod UID and sandbox ID.
-//
-// Both come from the same peer credentials, and the shallowest pod UID is
-// taken for the reason PodUIDCandidatesForPID documents. IsAlive is rechecked
-// afterwards so a process that exited between the credential read and the
-// /proc lookup cannot have its PID reused by another pod's container.
-func (k KernelIdentity) Resolve(peer workloadclaims.Peer) (string, string, error) {
-	if k.Sandboxes == nil {
-		return "", "", fmt.Errorf("volumed: no sandbox resolver configured")
-	}
-	sandboxID, err := k.Sandboxes.SandboxForPeer(peer)
-	if err != nil {
-		return "", "", fmt.Errorf("volumed: resolve sandbox: %w", err)
-	}
-	uids, err := PodUIDCandidatesForPID(k.procRoot(), peer.PID())
-	if err != nil {
-		return "", "", err
-	}
-	if !peer.IsAlive() {
-		return "", "", fmt.Errorf("volumed: caller exited during resolution")
-	}
-	return uids[0], sandboxID, nil
-}
-
-func (k KernelIdentity) procRoot() string {
-	if k.ProcRoot != "" {
-		return k.ProcRoot
-	}
-	return "/proc"
+	Resolve(peer workloadclaims.Peer) (PodCgroup, error)
 }
 
 // Devices maps a volume name to the block device carrying it.
@@ -98,11 +56,10 @@ type Devices interface {
 
 // Server serves VolumePath on a unix socket.
 type Server struct {
-	Identity   Identity
-	Authorizer Authorizer
-	Opener     *Opener
-	Devices    Devices
-	Logger     *slog.Logger
+	Identity Identity
+	Opener   *Opener
+	Devices  Devices
+	Logger   *slog.Logger
 
 	mu       sync.Mutex
 	inFlight map[string]int
@@ -153,13 +110,6 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	peer := workloadclaims.PeerFromConn(conn)
 	defer peer.Close()
 
-	podUID, sandboxID, err := s.Identity.Resolve(peer)
-	if err != nil {
-		s.logger().Warn("volume request rejected", "reason", err)
-		http.Error(w, "caller could not be resolved", http.StatusForbidden)
-		return
-	}
-
 	var req OpenRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	dec.DisallowUnknownFields()
@@ -168,21 +118,19 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, ok := s.acquire(podUID)
+	pod, err := s.Identity.Resolve(peer)
+	if err != nil {
+		s.logger().Warn("volume request rejected", "reason", err)
+		http.Error(w, "caller could not be resolved", http.StatusForbidden)
+		return
+	}
+
+	release, ok := s.acquire(pod.UID)
 	if !ok {
 		http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
 		return
 	}
 	defer release()
-
-	// The blob already passed CDS's release decision, and this repeats it. The
-	// caller hands over a key, a name and a geometry; without a check of its
-	// own the first open of any name is authorized by nothing.
-	if err := s.Authorizer.Authorize(r.Context(), sandboxID, req.Path); err != nil {
-		s.logger().Warn("volume request denied", "sandbox", sandboxID, "path", req.Path, "reason", err)
-		http.Error(w, "not authorized for this volume", http.StatusForbidden)
-		return
-	}
 
 	device, err := s.Devices.Device(req.Name)
 	if err != nil {
@@ -191,22 +139,18 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.Opener.Open(r.Context(), Request{
-		PodUID: podUID, Name: req.Name, Device: device, Blob: req.Blob,
-	})
+	err = s.Opener.Open(r.Context(), Request{Pod: pod, Name: req.Name, Device: device, Blob: req.Blob})
 	switch {
 	case err == nil:
-		s.logger().Info("volume opened", "pod", podUID, "name", req.Name, "path", req.Path)
+		s.logger().Info("volume opened", "pod", pod.UID, "name", req.Name)
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, ErrNotAuthorized):
-		// Same answer as a failed grant check: telling a caller that a volume
-		// is open but its key is wrong would enumerate what is mounted here.
-		s.logger().Warn("volume request denied", "pod", podUID, "name", req.Name, "reason", err)
+		s.logger().Warn("volume request denied", "pod", pod.UID, "name", req.Name, "reason", err)
 		http.Error(w, "not authorized for this volume", http.StatusForbidden)
 	case errors.Is(err, ErrTooManyMounts):
 		http.Error(w, "too many open volumes on this node", http.StatusInsufficientStorage)
 	default:
-		s.logger().Error("volume open failed", "pod", podUID, "name", req.Name, "error", err)
+		s.logger().Error("volume open failed", "pod", pod.UID, "name", req.Name, "error", err)
 		http.Error(w, "could not open the volume", http.StatusInternalServerError)
 	}
 }
