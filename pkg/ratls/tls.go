@@ -65,6 +65,26 @@ type ServerConfig struct {
 	// When nil, the server does not request client certificates.
 	ClientPolicy *VerifyPolicy
 
+	// ClientCAs, when set, has crypto/tls verify a presented client
+	// certificate against these roots, with no RA-TLS branch: a leaf that does
+	// not chain is rejected in the handshake. Mutually exclusive with
+	// ClientPolicy, whose dual verifier accepts a self-signed RA-TLS peer as a
+	// fallback — for a handler that reads a CDS-stamped field out of the leaf
+	// (the sandbox ID), that fallback would let any attested TEE assert an
+	// arbitrary value.
+	//
+	// Pair it with ClientAuth to choose whether a certificate is required.
+	// Because the chain is verified here, r.TLS.VerifiedChains is populated and
+	// a handler need not re-verify.
+	ClientCAs []*x509.Certificate
+
+	// ClientAuth selects how a client certificate is demanded when ClientCAs is
+	// set; it defaults to tls.VerifyClientCertIfGiven, which lets a certless
+	// caller still reach the routes that need no identity while holding any
+	// certificate that IS presented to the ClientCAs roots. Ignored unless
+	// ClientCAs is set.
+	ClientAuth tls.ClientAuthType
+
 	// RotationTimeout is the maximum time allowed for background certificate
 	// rotation. If the attestation binary doesn't respond within this duration,
 	// rotation is aborted and retried on the next handshake past rotateAt.
@@ -436,7 +456,21 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 
 	// mTLS: require and verify client certificates.
 	var sharedCA *sharedCACerts
-	if cfg.ClientPolicy != nil {
+	switch {
+	case len(cfg.ClientCAs) > 0:
+		if cfg.ClientPolicy != nil {
+			return nil, nil, fmt.Errorf("ratls: ClientCAs and ClientPolicy are mutually exclusive (ClientPolicy admits a self-signed RA-TLS peer, which ClientCAs exists to refuse)")
+		}
+		pool := x509.NewCertPool()
+		for _, c := range cfg.ClientCAs {
+			pool.AddCert(c)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = cfg.ClientAuth
+		if tlsCfg.ClientAuth == tls.NoClientCert {
+			tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+		}
+	case cfg.ClientPolicy != nil:
 		tlsCfg.ClientAuth = tls.RequireAnyClientCert
 		if len(cfg.CACert) > 0 || cfg.DynamicCACert {
 			sharedCA = newSharedCACerts(cfg.CACert) // empty slice is fine — falls through to RA-TLS

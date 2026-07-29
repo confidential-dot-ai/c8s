@@ -144,20 +144,13 @@ type SandboxTokenRequest struct {
 	Nonce []byte `json:"nonce"`
 }
 
-// SandboxDigestsResponse is the SandboxDigestsPrefix answer.
+// SandboxDigestsResponse is the SandboxDigestsPrefix answer. Both fields
+// describe every container ever admitted in the sandbox, not only those running
+// now — see docs/secrets.md, "The report is a high-water mark".
 //
-// Digests is the deduplicated image-digest set, and is what cert issuance gates
-// on (membership). Containers is the per-container detail secret release needs:
-// it is NOT deduplicated, and it carries each container's effective argv, so a
-// consumer can hold a sandbox to a whole workload entry — the same (digest,
-// argv) pair admission evaluated — rather than to a digest set that says nothing
-// about what those images were told to run.
-//
-// Both describe every container ever admitted in the sandbox, not only those
-// running now: a container is removed and recreated across a CrashLoopBackOff,
-// so a live snapshot would let a pod present a set it does not really have by
-// arranging for a container to be absent at the moment it is asked (see
-// docs/secrets.md).
+// Digests is the deduplicated digest set cert issuance gates on. Containers
+// carries each container's effective argv and is not deduplicated, so a consumer
+// can hold a sandbox to the same (digest, argv) pair admission evaluated.
 //
 // Digests is [] (never null) for a known sandbox with no containers. Containers
 // is absent on an inventory that predates it, which consumers must treat as

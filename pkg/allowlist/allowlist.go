@@ -50,11 +50,9 @@ type Allowlist struct {
 }
 
 // Workload is a named policy entry. Label is an informational image reference.
-// Secrets is nil when the entry grants nothing, which is also what a "deny"
-// grant normalizes to — so an entry without a grant serializes exactly as it
-// did before the field existed. That is what lets a CDS carrying this field be
-// deployed ahead of the enforcing consumers baked into node and guest images:
-// they only ever see "secrets" once an operator writes a real grant.
+// Secrets is nil when the entry grants nothing, which is what a "deny" grant
+// normalizes to: an entry that releases nothing carries no "secrets" key at
+// all, so a consumer that does not know the field never sees it.
 type Workload struct {
 	Label          string         `json:"label,omitempty"`
 	InitContainers []Container    `json:"initContainers"`
@@ -101,15 +99,9 @@ func ParseJSON(data []byte) (*Allowlist, error) {
 }
 
 // ParseServedJSON decodes a document served by CDS, ignoring fields it does not
-// know.
-//
-// The enforcing consumers (nri-image-policy, policy-monitor) are baked into node
-// and guest images, so their launch measurement pins which schema version they
-// understand. Rejecting unknown fields there would mean a CDS serving any newer
-// field silently freezes every un-upgraded node's policy — refreshOnce keeps the
-// previous allowlist on a parse error — and unfreezing it would cost a node
-// image rebuild and a measurement change. Consumers enforce the fields they
-// know; ignoring the rest is what lets the document grow without a flag day.
+// know. Its consumers pin a schema version in a launch measurement, so a strict
+// parse would make any newer field freeze their policy until a node-image
+// rebuild. See docs/secrets.md — "Upgrading".
 func ParseServedJSON(data []byte) (*Allowlist, error) {
 	return parseJSON(data, false)
 }

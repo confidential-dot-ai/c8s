@@ -60,9 +60,8 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
-// admission record is deliberately kept: a container is removed and recreated
-// across a CrashLoopBackOff, and forgetting it would let a pod present a
-// container set it does not have (docs/secrets.md).
+// admission record keeps it — it still ran in this guest. See docs/secrets.md,
+// "The report is a high-water mark".
 func (b *admissionInventory) remove(cid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
