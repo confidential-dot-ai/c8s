@@ -335,7 +335,7 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	_ = store.Close()
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
-	if err := seedStore(&store, path); err == nil {
+	if _, err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
 	}
 }

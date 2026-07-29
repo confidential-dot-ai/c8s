@@ -13,13 +13,15 @@
 //
 // Canonical is Go's json.Marshal of the normalized struct: fixed field order,
 // map keys sorted by encoding/json, container and path lists sorted by
-// normalize. Workers compare it byte-for-byte across pulls, so any
-// nondeterminism would show up as spurious churn — normalize exists to remove
-// it.
+// normalize. CanonicalDigest (SHA-256 of that) is what CDS binds into its
+// attestation config-claims, so any nondeterminism would break the verifier
+// pin — normalize exists to remove it. Workers also compare the canonical
+// bytes byte-for-byte across pulls.
 package allowlist
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -30,7 +32,7 @@ import (
 )
 
 // Schema identifies the allowlist document format. It is the first field of the
-// canonical form.
+// canonical form, so it is covered by CanonicalDigest and pinned by verifiers.
 const Schema = "c8s.allowlist/v1"
 
 // Policy values. Argv policies use Deny/Any/Exact; secrets grants use
@@ -162,6 +164,17 @@ func (w Workload) Digests() []types.Digest {
 // normalized struct.
 func (a *Allowlist) Canonical() ([]byte, error) {
 	return json.Marshal(a)
+}
+
+// CanonicalDigest returns SHA-256 of Canonical — the value CDS binds into its
+// attestation config-claims (docs/ratls.md) and verifiers pin against.
+func (a *Allowlist) CanonicalDigest() ([]byte, error) {
+	canonical, err := a.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return sum[:], nil
 }
 
 func (a *Allowlist) normalize() error {

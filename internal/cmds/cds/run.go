@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -69,6 +70,7 @@ func run(cfg config) error {
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
 		return fmt.Errorf("allowlist writes are disabled: set --operator-keys")
 	}
+	var operatorKeys []*ecdsa.PublicKey
 	var operatorKeysPEM []byte
 	var operatorKeysHash string
 	if cfg.operatorKeys != "" {
@@ -80,6 +82,7 @@ func run(cfg config) error {
 		if err != nil {
 			return fmt.Errorf("hash --operator-keys %q: %w", cfg.operatorKeys, err)
 		}
+		operatorKeys = keys
 		operatorKeysPEM = pemBytes
 		writeAuthorizer = operatorauth.Verifier{
 			Keys:      keys,
@@ -173,8 +176,10 @@ func run(cfg config) error {
 	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
+	seedDigest := ratls.UnsetDigest()
 	if cfg.allowlistSeed != "" {
-		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
+		var err error
+		if seedDigest, err = seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
 			return fmt.Errorf("seed allowlist: %w", err)
 		}
 	}
@@ -248,6 +253,38 @@ func run(cfg config) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Config claims (docs/ratls.md): digests of the loaded
+	// operator-key set (empty set included, so "writes disabled" is
+	// attestable) and of the applied allowlist seed. Bound into the RA-TLS
+	// serving-cert evidence — verifiers pin them via `c8s cds verify`. The
+	// /handoff path commits the operator-key set separately via its
+	// REPORTDATA-bound hash (operatorKeysHash).
+	opKeysDigest, err := operatorauth.KeySetDigest(operatorKeys)
+	if err != nil {
+		return fmt.Errorf("digest operator keys: %w", err)
+	}
+	// Commit the mesh CA CDS issues under, so a client that attests CDS also
+	// authenticates the CA instead of pinning it out of band. CDS's RA-TLS cert
+	// is self-signed and served without a chain, so without this the CA is an
+	// unauthenticated anchor the operator has to distribute by hand — and it
+	// regenerates on every install.
+	meshCADigest := sha256.Sum256(mesh.Cert.Raw)
+	// The allowlist CDS is serving right now, as distinct from the seed it
+	// booted with. Re-issued on every change by watchAllowlistReissue, so a
+	// client that attests this certificate learns the policy in force rather
+	// than the one loaded at startup.
+	allowlistDigest, err := liveAllowlistDigest(&allowlistStore)
+	if err != nil {
+		return fmt.Errorf("digest live allowlist: %w", err)
+	}
+	configClaims := &ratls.ConfigClaims{
+		OperatorKeysDigest: opKeysDigest,
+		SeedDigest:         seedDigest,
+		WorkloadDigest:     ratls.UnsetDigest(),
+		MeshCADigest:       meshCADigest[:],
+		AllowlistDigest:    allowlistDigest,
 	}
 
 	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
@@ -335,11 +372,27 @@ func run(cfg config) error {
 
 	if cfg.ratlsPlatform != "" {
 		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
+		// newProvider reproduces the provider NewServerTLSConfig builds below,
+		// with only the claims replaced — used for re-issue on an allowlist
+		// change. The initial certificate deliberately still goes through the
+		// ConfigClaims path so NewServerTLSConfig keeps validating the
+		// platform at config time rather than deferring it to warm-up.
+		newProvider := func(claims *ratls.ConfigClaims) ratls.CertProvider {
+			return &ratls.SelfSignedProvider{
+				Platform:   cfg.ratlsPlatform,
+				AttestFunc: attestFunc,
+				Opts: &ratls.CertOptions{
+					TTL:          cfg.ratlsCertTTL,
+					ConfigClaims: claims,
+				},
+			}
+		}
 		serverCfg := &ratls.ServerConfig{
-			Platform:   cfg.ratlsPlatform,
-			AttestFunc: attestFunc,
-			CertTTL:    cfg.ratlsCertTTL,
-			Logger:     slog.Default(),
+			Platform:     cfg.ratlsPlatform,
+			AttestFunc:   attestFunc,
+			CertTTL:      cfg.ratlsCertTTL,
+			ConfigClaims: configClaims,
+			Logger:       slog.Default(),
 		}
 		// /secrets reads a CDS-stamped field out of the caller's leaf, so the
 		// chain has to be verified by crypto/tls against the mesh CA: the
@@ -362,6 +415,7 @@ func run(cfg config) error {
 		}
 
 		go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
+		go watchAllowlistReissue(ctx, &allowlistStore, certMgr.SwapProvider, *configClaims, newProvider, reissuePollInterval)
 
 		slog.Info("cds listening (RA-TLS)", "addr", addr, "platform", cfg.ratlsPlatform)
 		if err := srv.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
