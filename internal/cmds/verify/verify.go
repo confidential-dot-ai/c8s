@@ -670,6 +670,7 @@ type Outcome struct {
 	OperatorKeysNote           string   `json:"operator_keys_note,omitempty"`
 	OperatorKeysAttestedDigest string   `json:"operator_keys_attested_digest,omitempty"`
 	SeedAttestedDigest         string   `json:"allowlist_seed_attested_digest,omitempty"`
+	AllowlistAttestedDigest    string   `json:"allowlist_attested_digest,omitempty"`
 	WorkloadAttestedDigest     string   `json:"workload_attested_digest,omitempty"`
 }
 
@@ -687,6 +688,13 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 			oc.SeedAttestedDigest = hex.EncodeToString(ev.configClaims.SeedDigest)
 		} else {
 			oc.SeedAttestedDigest = "none (no seed configured)"
+		}
+		if ev.configClaims.HasAllowlist() {
+			oc.AllowlistAttestedDigest = hex.EncodeToString(ev.configClaims.AllowlistDigest)
+		} else {
+			// v1/v2 claims predate the field. Say so rather than printing
+			// nothing, so a stale target cannot read as "no allowlist served".
+			oc.AllowlistAttestedDigest = "not attested (target predates claims v3)"
 		}
 		if ev.configClaims.HasWorkload() {
 			oc.WorkloadAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadDigest)
@@ -869,6 +877,10 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.OperatorKeysAttestedDigest != "" {
 		fmt.Fprintf(out, "  operator-keys digest (attested via config-claims): sha256:%s\n", oc.OperatorKeysAttestedDigest)
+	}
+	if oc.AllowlistAttestedDigest != "" {
+		fmt.Fprintf(out, "  live allowlist digest (attested via config-claims): %s\n", oc.AllowlistAttestedDigest)
+		fmt.Fprintf(out, "                        (compare: sha256 of the exact GET /allowlist response bytes)\n")
 	}
 	if oc.SeedAttestedDigest != "" {
 		fmt.Fprintf(out, "  allowlist-seed digest (attested via config-claims): %s\n", oc.SeedAttestedDigest)
