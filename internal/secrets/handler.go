@@ -30,10 +30,14 @@ const Route = "/secrets/*"
 // match, so no store path is shadowed by it.
 const ChallengeRoute = "/secrets"
 
-// authScheme prefixes the sandbox token in the Authorization header. The token
-// travels in a header rather than the URL so it is covered by the server's
-// header bound and never reaches a request log.
-const authScheme = "SandboxToken "
+// AuthScheme prefixes the sandbox token in the Authorization header, and
+// ChallengeHeader carries the nonce. The token travels in a header rather than
+// the URL so it is covered by the server's header bound and never reaches a
+// request log.
+const (
+	AuthScheme      = "SandboxToken "
+	ChallengeHeader = "X-C8s-Challenge"
+)
 
 // InjectedEntrypoints are the argv[0] values the admission webhook injects the
 // c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
@@ -227,7 +231,7 @@ func (h Handler) consumeChallenge(r *http.Request) ([]byte, error) {
 	if h.Challenges == nil {
 		return nil, fmt.Errorf("no challenge store configured")
 	}
-	raw := r.Header.Get("X-C8s-Challenge")
+	raw := r.Header.Get(ChallengeHeader)
 	if raw == "" {
 		return nil, fmt.Errorf("missing challenge")
 	}
@@ -298,7 +302,7 @@ func verifiedLeaf(r *http.Request) (*x509.Certificate, error) {
 }
 
 func (h Handler) parseToken(r *http.Request) (*workloadclaims.SignedSandboxToken, error) {
-	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), authScheme)
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), AuthScheme)
 	if !ok || raw == "" {
 		return nil, fmt.Errorf("missing sandbox token")
 	}
