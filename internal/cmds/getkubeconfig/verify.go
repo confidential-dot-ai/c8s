@@ -185,8 +185,14 @@ func verifyEvidence(ctx context.Context, envelopeJSON, expectedReportData []byte
 	if env.Platform != teetypes.PlatformTDX {
 		return nil, fmt.Errorf("node platform is %q: the operator-key binding lives in RTMR[3], so credential release requires a TDX guest", env.Platform)
 	}
+	if len(env.Evidence) == 0 {
+		return nil, fmt.Errorf("evidence envelope carries no evidence object")
+	}
 
-	res, err := verifyEvidenceFn(ctx, string(teetypes.PlatformTDX), envelopeJSON, localverify.Params{
+	// localverify takes the INNER, platform-specific evidence and builds the
+	// envelope itself, so hand it env.Evidence — passing the whole envelope
+	// double-wraps it and the quote parse fails on empty bytes.
+	res, err := verifyEvidenceFn(ctx, string(teetypes.PlatformTDX), env.Evidence, localverify.Params{
 		ExpectedReportData: expectedReportData,
 		Measurements:       policy.measurements,
 		ExpectedRTMRs:      policy.rtmrs,

@@ -3,6 +3,7 @@ package getkubeconfig
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -331,5 +332,34 @@ func TestRunAcceptsNodeWithMeasuredWorkload(t *testing.T) {
 	cfg.WorkloadImages = WorkloadImages{dig}
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("naming the measured workload must verify the node: %v", err)
+	}
+}
+
+// localverify.Verify takes the INNER, platform-specific evidence and builds
+// the {platform, evidence} envelope itself. Handing it the whole envelope
+// double-wraps it, so the TDX quote parses as empty bytes and every run fails
+// with "unable to determine quote format" — regardless of policy. A stub that
+// ignores the evidence bytes cannot see that, so assert the shape explicitly.
+func TestVerifierReceivesInnerEvidenceNotEnvelope(t *testing.T) {
+	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	pub := operatorPubFromKeyFile(t, env.keyPath)
+	stubVerify(t, verifiedResult(expectedRTMR3(pub)), nil)
+
+	if err := Run(context.Background(), env.config()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(lastEvidence) == 0 {
+		t.Fatal("no evidence reached the verifier")
+	}
+	var wrapped struct {
+		Platform string          `json:"platform"`
+		Evidence json.RawMessage `json:"evidence"`
+	}
+	if err := json.Unmarshal(lastEvidence, &wrapped); err == nil && wrapped.Platform != "" {
+		t.Fatalf("verifier got a full envelope (platform=%q); it must receive the inner evidence object", wrapped.Platform)
+	}
+	// The fixture's inner evidence is the literal `{}` from tdxEnvelope.
+	if got := strings.TrimSpace(string(lastEvidence)); got != "{}" {
+		t.Errorf("evidence = %s, want the envelope's inner evidence object", got)
 	}
 }

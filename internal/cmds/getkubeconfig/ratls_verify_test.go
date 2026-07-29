@@ -113,8 +113,9 @@ func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) *loca
 	t.Helper()
 	var got localverify.Params
 	orig := verifyEvidenceFn
-	verifyEvidenceFn = func(_ context.Context, _ string, _ json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+	verifyEvidenceFn = func(_ context.Context, _ string, ev json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
 		got = p
+		lastEvidence = ev
 		if err != nil {
 			return nil, err
 		}
@@ -126,6 +127,12 @@ func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) *loca
 	t.Cleanup(func() { verifyEvidenceFn = orig })
 	return &got
 }
+
+// lastEvidence records the evidence bytes the most recent stubbed call
+// received. localverify wraps what it is given into an envelope itself, so
+// handing it a whole envelope double-wraps it and the quote parse fails on
+// empty bytes — a live-only failure until this was asserted.
+var lastEvidence json.RawMessage
 
 // enforceStubPins mirrors internal/localverify's measurement and RTMR checks
 // (which have their own tests) so a stubbed verifier still fails closed on a
