@@ -155,8 +155,8 @@ func setupLogging(verbose bool) {
 	slog.SetDefault(slog.New(handler))
 }
 
-func newCDSClient(cfg config) (attestclient.Client, error) {
-	httpClient, err := cdsHTTPClient(cfg)
+func newCDSClient(cfg config, onPeer func(*x509.Certificate)) (attestclient.Client, error) {
+	httpClient, err := cdsHTTPClient(cfg, onPeer)
 	if err != nil {
 		var zero attestclient.Client
 		return zero, err
@@ -164,7 +164,7 @@ func newCDSClient(cfg config) (attestclient.Client, error) {
 	return attestclient.NewClientWithHTTP(cfg.CDSURL, httpClient), nil
 }
 
-func cdsHTTPClient(cfg config) (*http.Client, error) {
+func cdsHTTPClient(cfg config, onPeer func(*x509.Certificate)) (*http.Client, error) {
 	parsed, err := url.Parse(cfg.CDSURL)
 	if err != nil {
 		return nil, fmt.Errorf("--cds-url: %w", err)
@@ -186,7 +186,7 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		slog.Warn("--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
 	}
 
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClientWithPeerObserver(measurements, cfg.AttestationApiURL, onPeer)
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}
@@ -205,7 +205,11 @@ func run(cfg config) error {
 	}
 	slog.Debug("output paths validated")
 
-	client, err := newCDSClient(cfg)
+	// Record the CDS certificate this process verifies during issuance, so the
+	// discovery document can republish it for clients that cannot reach CDS.
+	cdsIdentity := &cdsIdentityRecorder{}
+
+	client, err := newCDSClient(cfg, cdsIdentity.observe)
 	if err != nil {
 		return err
 	}
@@ -213,7 +217,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	if err := obtainCertWithRetry(ctx, cfg, client); err != nil {
+	if err := obtainCertWithRetry(ctx, cfg, client, cdsIdentity); err != nil {
 		if cfg.RenewInterval <= 0 || !cfg.ContinueOnInitialError {
 			return err
 		}
@@ -248,7 +252,7 @@ func run(cfg config) error {
 			slog.Info("shutting down cert renewer")
 			return nil
 		case <-ticker.C:
-			if err := obtainCert(ctx, cfg, client); err != nil {
+			if err := obtainCert(ctx, cfg, client, cdsIdentity); err != nil {
 				slog.Error("certificate renewal failed, will retry next interval", "error", err)
 				continue
 			}
@@ -282,13 +286,13 @@ func run(cfg config) error {
 // container into kubelet's minutes-long CrashLoopBackOff. It still fails closed:
 // once the deadline passes the last error is returned and the pod does not
 // start without a real mesh cert.
-func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client) error {
+func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client, cdsIdentity *cdsIdentityRecorder) error {
 	if cfg.InitialRetryTimeout <= 0 {
-		return obtainCert(ctx, cfg, client)
+		return obtainCert(ctx, cfg, client, cdsIdentity)
 	}
 	bo := backoff.NewConstantBackOff(cfg.InitialRetryInterval)
 	_, err := backoff.Retry(ctx, func() (struct{}, error) {
-		return struct{}{}, obtainCert(ctx, cfg, client)
+		return struct{}{}, obtainCert(ctx, cfg, client, cdsIdentity)
 	},
 		backoff.WithBackOff(bo),
 		backoff.WithMaxElapsedTime(cfg.InitialRetryTimeout),
@@ -299,7 +303,7 @@ func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Cl
 	return err
 }
 
-func obtainCert(ctx context.Context, cfg config, client attestclient.Client) error {
+func obtainCert(ctx context.Context, cfg config, client attestclient.Client, cdsIdentity *cdsIdentityRecorder) error {
 	privateKey, keyPEM, err := loadOrGenerateKey(cfg)
 	if err != nil {
 		return err
@@ -344,7 +348,7 @@ func obtainCert(ctx context.Context, cfg config, client attestclient.Client) err
 	}
 	slog.Info("certificate obtained")
 
-	return writeOutputs(cfg, keyPEM, result)
+	return writeOutputs(cfg, keyPEM, result, cdsIdentity)
 }
 
 // workloadClaimsResult carries the claims DER to bind, the role-partitioned
@@ -688,7 +692,7 @@ func caBundleFromChain(chainPEM []byte) ([]byte, error) {
 }
 
 // writeOutputs writes the certificate, key, and optional discovery metadata.
-func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult) error {
+func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResult, cdsIdentity *cdsIdentityRecorder) error {
 	if cfg.KeyOutPath != "" {
 		keyMode, err := parseFileMode(cfg.KeyMode)
 		if err != nil {
@@ -726,7 +730,7 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 	}
 
 	if cfg.DiscoveryOutPath != "" {
-		doc, err := buildDiscoveryDocument(cfg, result)
+		doc, err := buildDiscoveryDocument(cfg, result, cdsIdentity)
 		if err != nil {
 			return err
 		}
@@ -744,7 +748,7 @@ func writeOutputs(cfg config, keyPEM []byte, result attestclient.CertificateResu
 	return nil
 }
 
-func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (types.DiscoveryDocument, error) {
+func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult, cdsIdentity *cdsIdentityRecorder) (types.DiscoveryDocument, error) {
 	cert, err := certutil.ParseCertificatePEM([]byte(result.Certificate))
 	if err != nil {
 		return types.DiscoveryDocument{}, fmt.Errorf("parse issued certificate for discovery: %w", err)
@@ -764,6 +768,7 @@ func buildDiscoveryDocument(cfg config, result attestclient.CertificateResult) (
 			CertificateURL:    cfg.DiscoveryCDSCertURL,
 			MeshCAURL:         cfg.DiscoveryMeshCAURL,
 		},
+		CDSIdentity: cdsIdentity.discovery(),
 		Attestation: types.AttestationDiscovery{
 			Challenge: result.Challenge,
 			Platform:  result.Platform,

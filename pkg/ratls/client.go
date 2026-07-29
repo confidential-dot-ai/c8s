@@ -1,6 +1,7 @@
 package ratls
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,11 +21,25 @@ import (
 // Connection-pool and timeout knobs: 5s dial, 10s response-header, 30s
 // overall, MaxIdleConns=5, MaxConnsPerHost=2.
 func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*http.Client, error) {
+	return NewVerifyingHTTPClientWithPeerObserver(measurements, attestationApiURL, nil)
+}
+
+// NewVerifyingHTTPClientWithPeerObserver is NewVerifyingHTTPClient plus a hook
+// that receives the peer certificate once its attestation has verified. Used to
+// record the CDS certificate a workload trusted at issuance so it can be
+// republished (see types.CDSIdentityDiscovery); nil onPeer is identical to
+// NewVerifyingHTTPClient.
+func NewVerifyingHTTPClientWithPeerObserver(
+	measurements [][]byte,
+	attestationApiURL string,
+	onPeer func(*x509.Certificate),
+) (*http.Client, error) {
 	if attestationApiURL == "" {
 		return nil, fmt.Errorf("ratls client config: attestation-api URL is required")
 	}
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{
-		Policy: &VerifyPolicy{Measurements: measurements, AttestationApiURL: attestationApiURL},
+		Policy:         &VerifyPolicy{Measurements: measurements, AttestationApiURL: attestationApiURL},
+		OnVerifiedPeer: onPeer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)
