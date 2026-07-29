@@ -21,7 +21,7 @@ var (
 
 	rateLimiterEntries = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cds_rate_limiter_entries",
-		Help: "Current number of entries in the per-IP rate limiter.",
+		Help: "Current number of entries in the rate limiter.",
 	})
 )
 
@@ -30,9 +30,10 @@ type ipLimiterEntry struct {
 	lastSeen time.Time
 }
 
-// IPRateLimiter implements per-source-IP rate limiting with bounded memory.
-// Entries beyond MaxEntries are evicted LRU in O(n); idle entries are evicted
-// by EvictionLoop at IdleTimeout.
+// IPRateLimiter implements keyed rate limiting with bounded memory. Entries
+// beyond MaxEntries are evicted LRU in O(n); idle entries are evicted by
+// EvictionLoop at IdleTimeout. RateLimitMiddleware keys on the source address;
+// RateLimitBy keys on whatever identifies the caller.
 type IPRateLimiter struct {
 	mu         sync.Mutex
 	limiters   map[string]*ipLimiterEntry
@@ -111,19 +112,49 @@ func (rl *IPRateLimiter) evict(idleTimeout time.Duration) {
 	rateLimiterEntries.Set(float64(len(rl.limiters)))
 }
 
+// KeyFunc names the bucket a request is charged to. Returning "" charges it to
+// the source address.
+//
+// Keys carry a kind prefix so two namespaces can share one limiter without a
+// value in either being able to name a bucket in the other.
+type KeyFunc func(*http.Request) string
+
 // RateLimitMiddleware wraps next with per-source-IP rate limiting against rl.
 // On reject it returns 429 and increments the rejection counter.
 func RateLimitMiddleware(rl *IPRateLimiter, next http.Handler) http.Handler {
+	return RateLimitBy(rl, nil, next)
+}
+
+// RateLimitBy wraps next, charging each request to the bucket key names.
+//
+// Use it where the source address is not the caller: pods reach CDS through a
+// NodePort and the host-network mesh proxy, so every pod on a node presents the
+// same address and one of them could exhaust the bucket every other one shares.
+// A request with no identity to key on still falls back to the address, so
+// nothing escapes limiting by declining to identify itself.
+func RateLimitBy(rl *IPRateLimiter, key KeyFunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if ip == "" {
-			ip = r.RemoteAddr
+		bucket := ""
+		if key != nil {
+			bucket = key(r)
 		}
-		if !rl.getLimiter(ip).Allow() {
+		if bucket == "" {
+			bucket = SourceAddrKey(r)
+		}
+		if !rl.getLimiter(bucket).Allow() {
 			rateLimitRejectionsTotal.Inc()
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// SourceAddrKey charges a request to the address it arrived from.
+func SourceAddrKey(r *http.Request) string {
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	return "addr:" + ip
 }

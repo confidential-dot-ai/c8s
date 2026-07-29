@@ -120,6 +120,14 @@ A path that is not granted is `404`, indistinguishable from one that does not
 exist — otherwise the API enumerates the store. Denials are opaque to the
 client; the reason goes to the CDS log.
 
+**These routes are rate-limited per sandbox**, keyed on the ID in the verified
+client certificate. Pods reach CDS through a NodePort and the host-network mesh
+proxy, so every pod on a node arrives from the node's address: bounded on that,
+one pod could spend the budget its co-tenants share and hold their fetchers in a
+CrashLoop. A request whose certificate is absent or unverified is bounded by
+address instead — it is refused by the handler regardless, and a caller cannot
+opt out of the limit by withholding an identity.
+
 Paths must arrive already canonical: absolute, clean, no trailing slash, and no
 percent-encoding. They are rejected rather than repaired, so the bytes matched
 against a grant and the bytes used as a store key are the bytes the client

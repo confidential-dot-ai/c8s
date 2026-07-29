@@ -46,6 +46,30 @@ const (
 // Handler.InjectedDigests.
 var InjectedEntrypoints = []string{"get-cert", "get-secret", "/c8s"}
 
+// RateKey charges a request to the sandbox its client certificate names, so a
+// rate limit bounds one workload rather than one address.
+//
+// Pods reach CDS through a NodePort and the host-network mesh proxy, so every
+// pod on a node arrives from the same address: keyed on that, one hostile pod
+// exhausts the bucket its co-tenants share and wedges their fetchers into a
+// CrashLoop. The sandbox ID is stamped by CDS into a leaf that crypto/tls has
+// verified against the mesh CA, so a caller can only ever name its own.
+//
+// An unverified or absent certificate returns "", charging the request to the
+// source address. Such a request is refused by the handler regardless, and a
+// caller cannot escape limiting by withholding a certificate.
+func RateKey(r *http.Request) string {
+	leaf, err := verifiedLeaf(r)
+	if err != nil {
+		return ""
+	}
+	id, err := ratls.SandboxIDFromCert(leaf)
+	if err != nil || id == "" {
+		return ""
+	}
+	return "sandbox:" + id
+}
+
 // challengeSource issues and consumes the single-use nonces that make a request
 // fresh. The secrets listener holds its own, so a nonce minted for issuance
 // cannot be redeemed here.
