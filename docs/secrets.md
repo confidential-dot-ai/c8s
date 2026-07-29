@@ -3,10 +3,6 @@
 How a workload is authorized to read a secret, and what the allowlist and the
 admission inventory contribute to that decision.
 
-> **Status.** Delivery works end to end. Still missing: an operator diagnostic
-> for a denied release (`c8s secrets explain`) and the lint checks that catch an
-> ambiguous or under-declared entry.
-
 ## When it is served
 
 Release is gated on an allowlist entry carrying a grant, which is operator-signed
@@ -89,6 +85,9 @@ GET  /secrets/<store path>         → 200 {"value": "<base64>"} | 404 | 403
 POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403
 ```
 
+`PUT` on the same paths is the operator's, authorized by the operator key
+instead — see "Operator-supplied values".
+
 `POST /secrets` is the challenge route; the wildcard can never match it, so no
 store path is shadowed by it — a secret at `/challenge` still resolves.
 
@@ -118,6 +117,57 @@ Paths must arrive already canonical: absolute, clean, no trailing slash, and no
 percent-encoding. They are rejected rather than repaired, so the bytes matched
 against a grant and the bytes used as a store key are the bytes the client
 sent.
+
+## Operator-supplied values
+
+CDS generates a value it is asked for and finds missing, which covers a session
+key but not an API token, a database password, or a wrapped key. Those come from
+an operator:
+
+```sh
+c8s secrets put /tenant-a/hf-token --url "$CDS" --measurements "$M" \
+  --operator-key operator.key < token.txt
+```
+
+The value is read from stdin or `--from-file`, and the bytes are stored exactly
+as read — a trailing newline is part of the value. The byte count is printed to
+confirm which one was sent.
+
+```
+PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
+                            → 201 {"created": true}
+                            → 409 {"existing": "workload"|"operator"}
+                            → 200 {"existing": "workload"|"operator"}
+```
+
+Authorization is the operator key that CDS already pins for allowlist writes
+(`cds --operator-keys`) — the same key the `secrets` grants are rooted in. Its
+token binds the method, path, and body, so a captured one cannot be replayed
+against a different path or a different value. `overwrite` travels in the body
+for that reason: a query parameter is outside what the token covers.
+
+### Replacing a value
+
+A path that already holds a value answers `409` and names what put it there —
+a workload that found the path empty, or an earlier operator write. Nothing is
+written. `--overwrite` replaces it, and the CLI prints what it is replacing
+before it does:
+
+```
+$ c8s secrets put /tenant-a/db --overwrite < db.txt
+~ /tenant-a/db (replaces a workload-generated value)
+wrote 24 bytes to /tenant-a/db
+```
+
+The store has no versioning and no delete, so a displaced value is gone.
+
+**A workload reads its secret into a file once, at startup.** Replacing a value
+reaches a pod when that pod next restarts, so a Deployment holding the old value
+keeps it until it is rolled. Replacing a path a workload created is worth
+pausing over for that reason: the pods that generated the value go on using it.
+
+Revoking a value means restarting CDS, which empties the whole store — see
+"Restarts".
 
 ## What CDS checks
 

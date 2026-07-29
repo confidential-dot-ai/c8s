@@ -16,8 +16,11 @@ import (
 type failingStore struct{ err error }
 
 func (f failingStore) Get(context.Context, string) ([]byte, error) { return nil, f.err }
-func (f failingStore) PutIfAbsent(context.Context, string, []byte) ([]byte, bool, error) {
-	return nil, false, f.err
+func (f failingStore) PutIfAbsent(context.Context, string, []byte, Origin) ([]byte, Held, error) {
+	return nil, Held{}, f.err
+}
+func (f failingStore) Put(context.Context, string, []byte, Origin) (Held, error) {
+	return Held{}, f.err
 }
 
 // A store failure is not a policy denial: the caller is told the secret is

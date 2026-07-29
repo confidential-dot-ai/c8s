@@ -182,13 +182,13 @@ func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, grant *pk
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	_, created, err := h.Store.PutIfAbsent(ctx, path, candidate)
+	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, OriginWorkload)
 	if err != nil {
 		h.logger().Error("secret create failed", "path", path, "error", err)
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	if !created {
+	if held.Exists {
 		// The existing value is withheld: returning it here would make a write
 		// grant a read grant. A caller that also holds read re-reads with GET,
 		// which is how the replica that loses this race recovers.
