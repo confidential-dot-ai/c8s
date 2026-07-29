@@ -149,7 +149,9 @@ for what the admission inventory contributes to a release decision.
 
 CDS enforces this grant at `GET`/`POST /secrets/*`. Writing a grant is what
 turns release on: an entry without one releases nothing
-([`secrets.md`](secrets.md#when-it-is-served)).
+([`secrets.md`](secrets.md#when-it-is-served)). An operator supplying a value at
+`PUT /secrets/*` is authorized by the operator key instead
+([`secrets.md`](secrets.md#operator-supplied-values)).
 
 Filesystem location is not an authorization boundary — a workload owns its own
 filesystem once a value is inside it — so a grant names store paths only. An

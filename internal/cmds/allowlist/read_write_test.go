@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // servingCDS is an httptest server that serves the given digests on GET (as a
@@ -89,66 +89,10 @@ func TestClientRejectsUnknownScheme(t *testing.T) {
 	}
 }
 
-// --- loadMeasurements ---
-
-func TestLoadMeasurementsFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "measurements.txt")
-	m1 := strings.Repeat("42", ratls.SNPMeasurementSize)
-	m2 := strings.Repeat("ab", ratls.SNPMeasurementSize)
-	// blank lines and surrounding whitespace must be tolerated
-	if err := os.WriteFile(path, []byte(m1+"\n\n  "+m2+"  \n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	o := &options{measurementsFile: path}
-	got, err := o.loadMeasurements()
-	if err != nil {
-		t.Fatalf("loadMeasurements: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 measurements, got %d", len(got))
-	}
-}
-
-func TestLoadMeasurementsCombinesFlagAndFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "measurements.txt")
-	if err := os.WriteFile(path, []byte(strings.Repeat("ab", ratls.SNPMeasurementSize)+"\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	o := &options{
-		measurements:     []string{strings.Repeat("42", ratls.SNPMeasurementSize)},
-		measurementsFile: path,
-	}
-	got, err := o.loadMeasurements()
-	if err != nil {
-		t.Fatalf("loadMeasurements: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("expected flag+file to combine into 2 measurements, got %d", len(got))
-	}
-}
-
-func TestLoadMeasurementsFileMissing(t *testing.T) {
-	o := &options{measurementsFile: filepath.Join(t.TempDir(), "nope.txt")}
-	if _, err := o.loadMeasurements(); err == nil || !strings.Contains(err.Error(), "read --measurements-file") {
-		t.Fatalf("expected a read error, got %v", err)
-	}
-}
-
-func TestLoadMeasurementsRejectsBadHex(t *testing.T) {
-	o := &options{measurements: []string{"not-hex"}}
-	if _, err := o.loadMeasurements(); err == nil {
-		t.Fatal("expected invalid hex to be rejected")
-	}
-}
-
 // --- signer error paths ---
 
 func TestSignerMissingKeyFile(t *testing.T) {
-	o := &options{operatorKey: filepath.Join(t.TempDir(), "nope.key")}
+	o := &options{Options: cdsconn.Options{OperatorKey: filepath.Join(t.TempDir(), "nope.key")}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "read operator key") {
 		t.Fatalf("expected a read error, got %v", err)
 	}
@@ -160,7 +104,7 @@ func TestSignerRejectsGarbagePEM(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a pem"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	o := &options{operatorKey: path}
+	o := &options{Options: cdsconn.Options{OperatorKey: path}}
 	if _, err := o.signer(); err == nil || !strings.Contains(err.Error(), "load operator key") {
 		t.Fatalf("expected a key-parse error, got %v", err)
 	}

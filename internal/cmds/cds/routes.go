@@ -30,6 +30,7 @@ type dependencies struct {
 	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
 	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
 	SecretsChallenges *attestation.ChallengeStore
+	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -70,10 +71,17 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodPut, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandlePutWorkload)))
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
 
+	// GET and POST are the workload's, authenticated by mesh leaf and sandbox
+	// token. PUT is the operator's, on allowlistWrite so it carries the same
+	// body-bound operator token an allowlist mutation does.
 	if deps.SecretsHandler != nil {
+		if deps.SecretsOperator == nil {
+			panic("cds: dependencies.SecretsOperator must be set alongside SecretsHandler")
+		}
 		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.protected(attestation.HandleAuthenticate(deps.SecretsChallenges)))
 		r.Method(http.MethodGet, secrets.Route, deps.protected(deps.SecretsHandler))
 		r.Method(http.MethodPost, secrets.Route, deps.protected(deps.SecretsHandler))
+		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
 	}
 
 	r.Get("/ca", handleCA(deps.CACertPEM))

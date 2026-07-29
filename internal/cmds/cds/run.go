@@ -67,7 +67,7 @@ func run(cfg config) error {
 	// canonical hash is committed to REPORTDATA by both replicas and compared
 	// before any CA or allowlist state is released.
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
-		return fmt.Errorf("allowlist writes are disabled: set --operator-keys")
+		return fmt.Errorf("operator writes are disabled: set --operator-keys")
 	}
 	var operatorKeysPEM []byte
 	var operatorKeysHash string
@@ -85,9 +85,9 @@ func run(cfg config) error {
 			Keys:      keys,
 			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
-		slog.Info("allowlist write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
+		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
 	} else {
-		slog.Warn("--operator-keys empty: allowlist writes are disabled (reads still served)")
+		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served)")
 	}
 
 	allowlistStore, err := allowlist.OpenStore(cfg.allowlistDB)
@@ -261,16 +261,28 @@ func run(cfg config) error {
 	sandboxBindings := sandboxledger.New(issuer.CapTTL(cfg.certTTL, issuer.MaxLeafTTL), cfg.sandboxLedgerMax)
 	go sandboxBindings.EvictionLoop(ctx.Done(), cfg.rateLimiterEvictInterval)
 
-	var secretsHandler *secrets.Handler
+	var (
+		secretsHandler  *secrets.Handler
+		secretsOperator *secrets.OperatorHandler
+	)
 	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
+		// One store behind both handlers: an operator write and a workload read
+		// are two doors onto the same paths.
+		store := secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes)
 		secretsHandler = &secrets.Handler{
-			Store:          secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes),
+			Store:          store,
 			Challenges:     &secretsChallenges,
 			Inventory:      sandboxDigests,
 			Bindings:       sandboxBindings,
 			Policy:         secrets.NewCachedPolicy(&allowlistStore),
 			InventoryHosts: inventoryHosts,
 			Logger:         slog.Default(),
+		}
+		secretsOperator = &secrets.OperatorHandler{
+			Store:        store,
+			Authorize:    writeAuthorizer,
+			MaxBodyBytes: allowlistWriteBodyCap,
+			Logger:       slog.Default(),
 		}
 		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
 	} else {
@@ -320,6 +332,7 @@ func run(cfg config) error {
 		MaxRequestSize:    cfg.maxRequestSize,
 		SecretsHandler:    secretsHandler,
 		SecretsChallenges: &secretsChallenges,
+		SecretsOperator:   secretsOperator,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)
