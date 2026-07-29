@@ -51,6 +51,12 @@ spec:
             - --webhook-service-name={{ include "c8s.operatorName" . }}
             - --webhook-service-namespace={{ .Release.Namespace }}
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            {{- /* The same measurements CDS is pinned to elsewhere: the
+                   injected secret fetcher verifies CDS before handing it a
+                   sandbox token and taking a value back. */}}
+            {{- range .Values.cds.measurements }}
+            - --cds-measurements={{ . }}
+            {{- end }}
             {{- range .Values.webhook.extraExcluded }}
             - --exclude-namespaces={{ . }}
             {{- end }}
