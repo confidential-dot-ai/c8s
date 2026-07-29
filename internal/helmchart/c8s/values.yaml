@@ -1138,8 +1138,26 @@ tlsLb:
   # `routes[i].cors.enabled: false` to disable CORS on that route while
   # leaving the global block enabled. Only the `enabled` key is honored on a
   # per-route cors block.
+  #
+  # Independent of this block, the c8s protocol-owned endpoints
+  # (/.well-known/c8s/*, the discovery document and certificate endpoints,
+  # and the built-in /allowlist route) serve wide-open CORS by default —
+  # see `protocolEndpoints` below.
   cors:
     enabled: false
+    # -- Wide-open CORS (Access-Control-Allow-Origin "*", no credentials) on
+    # the c8s protocol-owned endpoints only: /.well-known/c8s/*, the
+    # discovery document and certificate endpoints, and the built-in
+    # /allowlist route. On by default because those endpoints exist to be
+    # verified by any browser anywhere: responses are self-authenticating
+    # (hardware evidence, CDS-signed certificates, sealed tunnel records) or
+    # public by design, and no request relies on ambient browser credentials
+    # (allowlist mutations are operator-signed). An origin allowlist there
+    # cannot protect anything and only breaks third-party verifiers. Workload
+    # locations (`routes` and the catch-all upstream) are never affected by
+    # this flag. Ignored while `enabled` is true — the operator policy below
+    # then covers every location, protocol endpoints included.
+    protocolEndpoints: true
     # -- Allowed Origin values. Use ["*"] to allow any origin (cannot be
     # combined with allowCredentials: true; browsers reject that pairing).
     # Otherwise list exact origins; the request Origin header is echoed back

@@ -211,6 +211,8 @@ data:
             location = {{ .Values.tlsLb.discovery.path }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/json;
@@ -221,6 +223,8 @@ data:
             location = {{ .Values.tlsLb.discovery.cdsCertPath }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
@@ -232,6 +236,8 @@ data:
             location = {{ .Values.tlsLb.discovery.meshCAPath }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
@@ -249,6 +255,8 @@ data:
             location /.well-known/c8s/ {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
                 proxy_set_header Host $host;

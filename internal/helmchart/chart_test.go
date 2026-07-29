@@ -2246,6 +2246,84 @@ func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	}
 }
 
+// protocolCORSLocations are the c8s protocol-owned nginx locations that serve
+// wide-open CORS by default: their responses are self-authenticating or
+// public by design, and browser verifiers on any origin must be able to
+// reach them.
+var protocolCORSLocations = []struct{ match, path string }{
+	{"exact", "/allowlist"},
+	{"prefix", "/allowlist/"},
+	{"exact", "/v1/discovery"},
+	{"exact", "/.well-known/cds-cert.pem"},
+	{"exact", "/.well-known/mesh-ca.pem"},
+	{"prefix", "/.well-known/c8s/"},
+}
+
+func TestTLSLBProtocolEndpointsCORSByDefault(t *testing.T) {
+	// With no CORS configuration at all, the protocol-owned endpoints must be
+	// callable from a browser on any origin — that is the whole point of
+	// in-browser attestation — while workload locations stay untouched.
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", `"*"`, "always")
+	}
+	// The workload catch-all inherits nothing from the protocol default.
+	cfg.location(t, "prefix", "/").assertNoDirective(t, "add_header")
+	// The built-in policy is self-contained: none of the global CORS
+	// http-level maps are rendered.
+	if _, ok := cfg.maps[nginxMapKey{source: "$http_origin", target: "$cors_origin"}]; ok {
+		t.Fatal("global CORS maps rendered without tlsLb.cors.enabled")
+	}
+}
+
+func TestTLSLBProtocolEndpointsCORSOptOut(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "cors.protocolEndpoints=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	conf := renderedTLSLBNginxConf(t, out)
+	if strings.Contains(conf, "Access-Control") {
+		t.Fatalf("CORS directives rendered with cors.protocolEndpoints=false:\n%s", conf)
+	}
+}
+
+func TestTLSLBGlobalCORSCoversProtocolEndpoints(t *testing.T) {
+	// An enabled global CORS block is an explicit operator policy; it covers
+	// the protocol endpoints too (as it always has), and the built-in
+	// wide-open block steps aside rather than double-emitting headers.
+	out, err := helmTemplateTLSLB(t,
+		"--set", "cors.enabled=true",
+		"--set", "cors.allowOrigins={https://example.github.io}",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", "$cors_out_origin", "always")
+	}
+	if conf := renderedTLSLBNginxConf(t, out); strings.Contains(conf, `Access-Control-Allow-Origin  "*"`) ||
+		strings.Contains(conf, `Access-Control-Allow-Origin "*"`) {
+		t.Fatalf("wide-open protocol CORS rendered alongside an enabled global block:\n%s", conf)
+	}
+}
+
+func TestTLSLBRejectsStringProtocolEndpoints(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set-string", "cors.protocolEndpoints=false")
+	if err == nil {
+		t.Fatal("helm template succeeded with string cors.protocolEndpoints, want error")
+	}
+	if !strings.Contains(out, "tlsLb.cors.protocolEndpoints must be a boolean") {
+		t.Fatalf("unexpected error output:\n%s", out)
+	}
+}
+
 func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	out, err := helmTemplateTLSLB(t)
 	if err != nil {
