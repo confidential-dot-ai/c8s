@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // verifyEnvelope verifies a self-describing evidence envelope in-process with
@@ -28,13 +28,13 @@ import (
 // verdict.
 var verifyEnvelope = teeverify.Verify
 
-// expectedRTMR3 computes RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)) — the
-// value the guest reports iff it was launched to trust this exact key. The
-// operator computes it offline from their own key, so a match is not TOFU.
+// expectedRTMR3 is the value the guest reports iff it was launched to trust
+// this exact key. The operator computes it offline from their own key, so a
+// match is not TOFU. The convention itself lives in pkg/runtimemeasure so the initrd,
+// cred-release, and every verifier cannot drift apart.
 func expectedRTMR3(operatorPubPEM []byte) string {
-	keyDigest := sha512.Sum384(operatorPubPEM)
-	rtmr3 := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	return hex.EncodeToString(rtmr3[:])
+	reg := runtimemeasure.ForOperatorKey(operatorPubPEM)
+	return hex.EncodeToString(reg[:])
 }
 
 // verifyEvidence verifies an evidence envelope with attestation-go (HW chain +

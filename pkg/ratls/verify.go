@@ -21,8 +21,19 @@ type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
 	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
-	// covered by this policy, including the per-workload RTMR[3].
+	// covered by this field — see ExpectedRTMR3 for the runtime register.
 	Measurements [][]byte
+
+	// ExpectedRTMR3 pins the TDX runtime measurement register: on a c8s node
+	// the operator-key seed, plus any per-workload extends chained onto it
+	// (pkg/runtimemeasure). 48 bytes, or nil for no pin.
+	//
+	// This is what proves cluster *identity* rather than cluster *code*: a
+	// launch measurement only says "a genuine build of the audited image", which
+	// an attacker can reproduce; the operator key is unique to this deployment.
+	// TDX only — SNP has no runtime-extend register, and a pin set against any
+	// other platform is rejected rather than silently ignored.
+	ExpectedRTMR3 []byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component

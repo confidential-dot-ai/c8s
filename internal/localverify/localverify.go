@@ -7,6 +7,7 @@
 package localverify
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha512"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/go-sev-guest/verify/trust"
@@ -24,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -50,6 +53,15 @@ type Params struct {
 	// Measurements pins the launch digest (SNP MEASUREMENT / TDX MR_TD).
 	// Empty = no pin; with a pin, a missing launch digest fails closed.
 	Measurements [][]byte
+	// ExpectedRTMR3 pins the guest's runtime measurement register — on a c8s
+	// node, the operator-key seed and any per-workload extends chained onto
+	// it (pkg/runtimemeasure). 48 bytes, or nil for no pin.
+	//
+	// TDX only: the register does not exist on SNP, and attestation-go
+	// consults ExpectedRTMRs only on the TDX path, so a pin set against any
+	// other platform would be silently ignored. Verify rejects that rather
+	// than reporting a pass nothing enforced.
+	ExpectedRTMR3 []byte
 }
 
 // VerifyFunc is the signature of [Verify], taken as a parameter by consumers
@@ -67,6 +79,11 @@ func (e *CollateralError) Unwrap() error { return e.Err }
 // ErrMeasurementNotAllowed reports a launch digest outside Params.Measurements.
 var ErrMeasurementNotAllowed = errors.New("launch measurement not in the allowed set")
 
+// ErrRTMR3NotAllowed reports a runtime measurement register that does not match
+// Params.ExpectedRTMR3 — the node was not launched to trust the pinned operator
+// key, or it measured workloads the pin does not account for.
+var ErrRTMR3NotAllowed = errors.New("RTMR[3] does not match the expected value")
+
 // Verify verifies a self-describing evidence envelope and enforces p. The
 // chain, binding, debug, and min-TCB checks are attestation-go's verdict; the
 // measurement pin is enforced here on its claims. ctx bounds any AMD KDS
@@ -76,6 +93,24 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		ExpectedReportData: p.ExpectedReportData,
 		AllowDebug:         p.AllowDebug,
 		MinTCB:             p.MinTCB,
+	}
+	if p.ExpectedRTMR3 != nil {
+		if len(p.ExpectedRTMR3) != runtimemeasure.Size {
+			return nil, fmt.Errorf("expected RTMR[3] is %d bytes, want %d", len(p.ExpectedRTMR3), runtimemeasure.Size)
+		}
+		// The register is TDX-only, and attestation-go consults RTMR pins only
+		// on the TDX path — accepting one for any other platform would drop it
+		// silently, leaving a pin that looks configured and enforces nothing.
+		if platform != string(teetypes.PlatformTDX) {
+			return nil, fmt.Errorf("platform is %q: the runtime measurement register is TDX-only, so an RTMR[3] pin cannot be enforced here", platform)
+		}
+		// Deliberately NOT passed down as teetypes.ExpectedRTMRs: go-tdx-guest
+		// would reject the mismatch first, and its message reports the register
+		// 1-based ("RTMR[4]" for RTMR[3]) without naming the operator key, which
+		// reads as a hardware fault rather than the identity mismatch it is.
+		// Enforced below on the signature-verified claim instead — the same
+		// posture the --measurements pin uses, and the same one `confai verify`
+		// and `c8s get-kubeconfig` already take for this exact register.
 	}
 
 	res, err := dispatch(ctx, platform, evidence, params)
@@ -104,6 +139,24 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		}
 		if !ratls.MeasurementAllowed(mb, p.Measurements) {
 			return nil, fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
+		}
+	}
+	// The rtmr_3 claim is read off the signature-verified quote body, so
+	// comparing it here is as strong as a check inside the quote parser — and
+	// it can say what actually went wrong. Missing or malformed fails closed.
+	if p.ExpectedRTMR3 != nil {
+		got, _ := res.Claims.PlatformData["rtmr_3"].(string)
+		if got == "" {
+			return nil, fmt.Errorf("%w: quote carries no rtmr_3 (is this a TDX guest with runtime measurement?)", ErrRTMR3NotAllowed)
+		}
+		gb, err := hex.DecodeString(strings.TrimSpace(got))
+		if err != nil {
+			return nil, fmt.Errorf("%w: rtmr_3 claim is malformed (%q)", ErrRTMR3NotAllowed, got)
+		}
+		if !bytes.Equal(gb, p.ExpectedRTMR3) {
+			return nil, fmt.Errorf("%w: node reports %s, expected %s "+
+				"(the node was NOT launched to trust this operator key, or it measured workloads the pin does not account for)",
+				ErrRTMR3NotAllowed, strings.ToLower(strings.TrimSpace(got)), hex.EncodeToString(p.ExpectedRTMR3))
 		}
 	}
 	return res, nil
