@@ -132,6 +132,16 @@ type ClientConfig struct {
 	// CertManager.UpdateCACerts.
 	DynamicCACert bool
 
+	// OnVerifiedPeer, when set, is called with the peer certificate AFTER its
+	// attestation has verified against Policy — never before, and never on a
+	// failed handshake. It lets a caller record the exact certificate it
+	// trusted, so that certificate can be republished for third parties to
+	// verify independently (the tls-lb publishes CDS's certificate this way,
+	// so a browser can attest CDS without reaching CDS itself).
+	//
+	// It must not block: it runs inline on the handshake path.
+	OnVerifiedPeer func(*x509.Certificate)
+
 	// CertTTL is the client certificate lifetime. Default: 24h.
 	// Only used when Platform and AttestFunc are set.
 	CertTTL time.Duration
@@ -544,6 +554,7 @@ func NewClientTLSConfig(cfg *ClientConfig) (*tls.Config, *CertManager, error) {
 	} else {
 		tlsCfg.VerifyPeerCertificate = verifyPeerCallback(cfg.Policy)
 	}
+	tlsCfg.VerifyPeerCertificate = observeVerifiedPeer(tlsCfg.VerifyPeerCertificate, cfg.OnVerifiedPeer)
 
 	var mgr *CertManager
 
@@ -575,6 +586,37 @@ func NewClientTLSConfig(cfg *ClientConfig) (*tls.Config, *CertManager, error) {
 	}
 
 	return tlsCfg, mgr, nil
+}
+
+// observeVerifiedPeer wraps a VerifyPeerCertificate callback so observe sees
+// only peers that actually verified. The ordering is the whole point: the
+// observer exists so the recorded certificate can be republished as trusted,
+// and recording one before (or despite) a failed verification would publish an
+// unverified certificate under that label. Returns inner unchanged when there
+// is nothing to observe.
+func observeVerifiedPeer(
+	inner func([][]byte, [][]*x509.Certificate) error,
+	observe func(*x509.Certificate),
+) func([][]byte, [][]*x509.Certificate) error {
+	if observe == nil {
+		return inner
+	}
+	return func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
+		if err := inner(rawCerts, chains); err != nil {
+			return err
+		}
+		if len(rawCerts) == 0 {
+			return nil
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			// inner already parsed it, so this is unreachable in practice;
+			// fail the handshake rather than proceed with no observation.
+			return fmt.Errorf("ratls: parse verified peer cert: %w", err)
+		}
+		observe(cert)
+		return nil
+	}
 }
 
 // verifyPeerCallback returns a VerifyPeerCertificate function that checks

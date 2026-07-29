@@ -174,7 +174,7 @@ func TestObtainCertAttestationExtensionError(t *testing.T) {
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}
-	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cds.URL))
+	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cds.URL), &cdsIdentityRecorder{})
 	if err == nil {
 		t.Fatal("obtainCert succeeded, want attestation extension error")
 	}
@@ -287,7 +287,7 @@ func TestWriteOutputsPrintsToStdoutWithoutOutPath(t *testing.T) {
 	}
 	oldStdout := os.Stdout
 	os.Stdout = w
-	writeErr := writeOutputs(config{}, nil, attestclient.CertificateResult{Certificate: "CHAIN-PEM"})
+	writeErr := writeOutputs(config{}, nil, attestclient.CertificateResult{Certificate: "CHAIN-PEM"}, &cdsIdentityRecorder{})
 	os.Stdout = oldStdout
 	w.Close()
 
@@ -304,7 +304,7 @@ func TestWriteOutputsPrintsToStdoutWithoutOutPath(t *testing.T) {
 }
 
 func TestBuildDiscoveryDocumentRejectsUnparseableCert(t *testing.T) {
-	if _, err := buildDiscoveryDocument(config{}, attestclient.CertificateResult{Certificate: "junk"}); err == nil {
+	if _, err := buildDiscoveryDocument(config{}, attestclient.CertificateResult{Certificate: "junk"}, &cdsIdentityRecorder{}); err == nil {
 		t.Fatal("buildDiscoveryDocument succeeded, want parse error")
 	}
 }
