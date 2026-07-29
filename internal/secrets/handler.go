@@ -41,10 +41,13 @@ const (
 
 // InjectedEntrypoints are the argv[0] values the admission webhook injects the
 // c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
-// and get-secret for the fetcher. A container must be running one of these, on
-// an injected digest, to be excluded from workload matching — see
-// Handler.InjectedDigests.
-var InjectedEntrypoints = []string{"get-cert", "get-secret", "/c8s"}
+// get-secret for the fetcher, and get-volume for the volume fetcher. A
+// container must be running one of these, on an injected digest, to be excluded
+// from workload matching — see Handler.InjectedDigests.
+//
+// An entrypoint added here widens the assumption in docs/secrets.md that no
+// floor image other than c8s's carries an executable at one of these names.
+var InjectedEntrypoints = []string{"get-cert", "get-secret", "get-volume", "/c8s"}
 
 // RateKey charges a request to the sandbox its client certificate names, so a
 // rate limit bounds one workload rather than one address.
