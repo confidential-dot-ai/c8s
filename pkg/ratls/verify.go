@@ -24,16 +24,26 @@ type VerifyPolicy struct {
 	// covered by this field — see ExpectedRTMR3 for the runtime register.
 	Measurements [][]byte
 
-	// ExpectedRTMR3 pins the TDX runtime measurement register: on a c8s node
-	// the operator-key seed, plus any per-workload extends chained onto it
-	// (pkg/runtimemeasure). 48 bytes, or nil for no pin.
+	// ExpectedRTMRs pins the TDX runtime measurement registers by index; a nil
+	// entry skips that register, each non-nil entry is 48 bytes.
 	//
-	// This is what proves cluster *identity* rather than cluster *code*: a
-	// launch measurement only says "a genuine build of the audited image", which
-	// an attacker can reproduce; the operator key is unique to this deployment.
-	// TDX only — SNP has no runtime-extend register, and a pin set against any
+	//	[1] guest kernel — UKI PE image identity + GPT + boot
+	//	[2] guest rootfs — the UKI section measurement chain
+	//	[3] runtime extends — the operator-key seed plus any per-workload
+	//	    measurements chained onto it (pkg/runtimemeasure)
+	//
+	// These carry the identity Measurements cannot. On TDX, Measurements pins
+	// MRTD, which covers only the TDVF firmware's measured regions: two
+	// completely different guest images built against the same firmware have
+	// the same MRTD. [1] and [2] are what establish which OS actually booted,
+	// and their reference values are published in the confos build manifest
+	// alongside the image. [3] establishes whose deployment it is — a launch
+	// measurement says "a genuine build of the audited image", which anyone can
+	// reproduce, whereas the operator key is unique to this cluster.
+	//
+	// TDX only — SNP has no runtime-extend registers, and a pin set against any
 	// other platform is rejected rather than silently ignored.
-	ExpectedRTMR3 []byte
+	ExpectedRTMRs [4][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component

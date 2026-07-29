@@ -88,8 +88,11 @@ type config struct {
 	measurements        []string
 	measurementsFile    string
 	operatorKeys        string
+	expectedRTMR1Hex    string
+	expectedRTMR2Hex    string
 	expectedRTMR3Hex    string
 	operatorKeyFile     string
+	imageManifest       string
 	allowlistSeed       string
 	allowlistSeedDigest string
 	workloadImages      []string
@@ -175,6 +178,9 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the target's attested config-claims digest matches this set (kind=cds targets)")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars; verification fails unless the guest's runtime measurement register matches. Mutually exclusive with --operator-key (TDX only)")
 	f.StringVar(&cfg.operatorKeyFile, "operator-key", "", "operator PUBLIC key file bound into RTMR[3] at launch; pins RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), proving the node was launched to trust only this key. Mutually exclusive with --expected-rtmr3 (TDX only)")
+	f.StringVar(&cfg.expectedRTMR1Hex, "expected-rtmr1", "", "expected TDX RTMR[1] as 96 hex chars — the guest KERNEL (UKI image identity + GPT + boot). --measurements pins MRTD, which on TDX covers only the firmware, so without this the guest image is NOT pinned (TDX only)")
+	f.StringVar(&cfg.expectedRTMR2Hex, "expected-rtmr2", "", "expected TDX RTMR[2] as 96 hex chars — the guest ROOTFS (UKI section measurement chain). See --expected-rtmr1 (TDX only)")
+	f.StringVar(&cfg.imageManifest, "image-manifest", "", "confos build manifest.json for the expected guest image; pins tdx.mrtd, tdx.rtmr1 and tdx.rtmr2 together, so the whole image is verified rather than just the firmware. Fetch it from the published image artifact (oras pull ghcr.io/…/c8s-base:<tag>). Overrides --measurements/--expected-rtmr1/--expected-rtmr2 (TDX only)")
 	f.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "expected allowlist seed JSON file; verification fails unless the target's attested seed digest matches its canonical digest (kind=cds targets)")
 	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
 	f.StringSliceVar(&cfg.workloadImages, "workload-image", nil, "expected main container image digest(s) (sha256:...; repeatable/comma-separated); with --workload-init-image, verification fails unless the target leaf's attested workload digest matches these role sets (docs/ratls.md)")
@@ -351,9 +357,14 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		}
 	}
 
-	expectedRTMR3, err := expectedRTMR3Pin(cfg)
+	rtmrs, manifestMRTD, err := expectedRTMRPins(cfg)
 	if err != nil {
 		return nil, err
+	}
+	// --image-manifest is the one-flag form of the whole image pin: MRTD from
+	// the same manifest as RTMR[1]/[2], so the three cannot drift apart.
+	if manifestMRTD != nil {
+		measurements = [][]byte{manifestMRTD}
 	}
 
 	seedDigest, err := expectedSeedDigest(cfg)
@@ -374,55 +385,107 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		OperatorKeysDigest: opKeysDigest,
 		SeedDigest:         seedDigest,
 		WorkloadDigest:     workloadDigest,
-		ExpectedRTMR3:      expectedRTMR3,
+		ExpectedRTMRs:      rtmrs,
 	}, nil
 }
 
-// expectedRTMR3Pin resolves the runtime-register pin from --expected-rtmr3 (the
-// hex value directly) or --operator-key (derived from the public key that was
-// bound at launch). Nil means no pin.
-//
-// Both spellings exist because they suit different callers: an operator holds
-// the key file and should not have to precompute a digest, while a relying
-// party who was handed a published reference value has no key at all. The
-// derivation itself lives in pkg/runtimemeasure so it cannot drift from the
-// initrd that performs the extend.
-func expectedRTMR3Pin(cfg config) ([]byte, error) {
-	switch {
-	case cfg.expectedRTMR3Hex != "" && cfg.operatorKeyFile != "":
-		return nil, fmt.Errorf("--expected-rtmr3 and --operator-key are mutually exclusive")
+// confosManifest is the subset of a confos build manifest.json this CLI reads:
+// the reference registers computed by the image build.
+type confosManifest struct {
+	TDX struct {
+		MRTD  string `json:"mrtd"`
+		RTMR1 string `json:"rtmr1"`
+		RTMR2 string `json:"rtmr2"`
+	} `json:"tdx"`
+}
 
-	case cfg.expectedRTMR3Hex != "":
-		b, err := hex.DecodeString(strings.TrimSpace(cfg.expectedRTMR3Hex))
+// expectedRTMRPins resolves the runtime-register pins. Returns the register
+// array and, when --image-manifest was used, the MRTD from that same manifest
+// so the caller can pin all three together.
+//
+// On TDX, MRTD covers only the TDVF firmware's measured regions — the kernel
+// and rootfs are in RTMR[1] and RTMR[2]. A --measurements pin alone therefore
+// says nothing about which guest image booted, which is why --image-manifest
+// exists: it pins all three from one provenanced source.
+func expectedRTMRPins(cfg config) (pins [4][]byte, manifestMRTD []byte, err error) {
+	parse := func(flag, s string) ([]byte, error) {
+		b, err := hex.DecodeString(strings.TrimSpace(s))
 		if err != nil {
-			return nil, fmt.Errorf("--expected-rtmr3: not hex: %w", err)
+			return nil, fmt.Errorf("%s: not hex: %w", flag, err)
 		}
 		if len(b) != runtimemeasure.Size {
-			return nil, fmt.Errorf("--expected-rtmr3 is %d bytes (%d hex chars), want %d (%d hex chars)",
-				len(b), len(cfg.expectedRTMR3Hex), runtimemeasure.Size, runtimemeasure.Size*2)
+			return nil, fmt.Errorf("%s is %d bytes (%d hex chars), want %d (%d hex chars)",
+				flag, len(b), len(strings.TrimSpace(s)), runtimemeasure.Size, runtimemeasure.Size*2)
 		}
 		return b, nil
+	}
+
+	if cfg.imageManifest != "" {
+		if cfg.expectedRTMR1Hex != "" || cfg.expectedRTMR2Hex != "" {
+			return pins, nil, fmt.Errorf("--image-manifest already pins RTMR[1] and RTMR[2]; drop --expected-rtmr1/--expected-rtmr2")
+		}
+		data, rerr := os.ReadFile(cfg.imageManifest)
+		if rerr != nil {
+			return pins, nil, fmt.Errorf("read --image-manifest: %w", rerr)
+		}
+		var m confosManifest
+		if jerr := json.Unmarshal(data, &m); jerr != nil {
+			return pins, nil, fmt.Errorf("--image-manifest: not a confos manifest.json: %w", jerr)
+		}
+		if m.TDX.MRTD == "" || m.TDX.RTMR1 == "" || m.TDX.RTMR2 == "" {
+			return pins, nil, fmt.Errorf("--image-manifest: missing tdx.mrtd/tdx.rtmr1/tdx.rtmr2 (is this a TDX image manifest?)")
+		}
+		if manifestMRTD, err = parse("--image-manifest tdx.mrtd", m.TDX.MRTD); err != nil {
+			return pins, nil, err
+		}
+		if pins[1], err = parse("--image-manifest tdx.rtmr1", m.TDX.RTMR1); err != nil {
+			return pins, nil, err
+		}
+		if pins[2], err = parse("--image-manifest tdx.rtmr2", m.TDX.RTMR2); err != nil {
+			return pins, nil, err
+		}
+	} else {
+		if cfg.expectedRTMR1Hex != "" {
+			if pins[1], err = parse("--expected-rtmr1", cfg.expectedRTMR1Hex); err != nil {
+				return pins, nil, err
+			}
+		}
+		if cfg.expectedRTMR2Hex != "" {
+			if pins[2], err = parse("--expected-rtmr2", cfg.expectedRTMR2Hex); err != nil {
+				return pins, nil, err
+			}
+		}
+	}
+
+	switch {
+	case cfg.expectedRTMR3Hex != "" && cfg.operatorKeyFile != "":
+		return pins, nil, fmt.Errorf("--expected-rtmr3 and --operator-key are mutually exclusive")
+
+	case cfg.expectedRTMR3Hex != "":
+		if pins[3], err = parse("--expected-rtmr3", cfg.expectedRTMR3Hex); err != nil {
+			return pins, nil, err
+		}
 
 	case cfg.operatorKeyFile != "":
 		// The initrd hashes the pubkey FILE verbatim, so these bytes go in
 		// unmodified — parsing and re-encoding the PEM would change the digest
 		// and silently fail every comparison.
-		pub, err := os.ReadFile(cfg.operatorKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read --operator-key: %w", err)
+		pub, rerr := os.ReadFile(cfg.operatorKeyFile)
+		if rerr != nil {
+			return pins, nil, fmt.Errorf("read --operator-key: %w", rerr)
 		}
 		if len(pub) == 0 {
-			return nil, fmt.Errorf("--operator-key: %s is empty", cfg.operatorKeyFile)
+			return pins, nil, fmt.Errorf("--operator-key: %s is empty", cfg.operatorKeyFile)
 		}
 		// Catch a private key handed over by mistake: it would derive a pin that
 		// can never match, and the failure would look like a compromised node.
 		if bytes.Contains(pub, []byte("PRIVATE KEY")) {
-			return nil, fmt.Errorf("--operator-key: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", cfg.operatorKeyFile)
+			return pins, nil, fmt.Errorf("--operator-key: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", cfg.operatorKeyFile)
 		}
 		reg := runtimemeasure.ForOperatorKey(pub)
-		return reg[:], nil
+		pins[3] = reg[:]
 	}
-	return nil, nil
+	return pins, manifestMRTD, nil
 }
 
 // expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON
@@ -567,12 +630,13 @@ type Outcome struct {
 	Pinned      bool      `json:"measurement_pinned"`
 	Error       string    `json:"error,omitempty"`
 
-	// RTMR3Pinned is the runtime measurement register value that was enforced
-	// (hex), empty when no pin was supplied. Rendered so a reader can tell an
-	// identity-checked verdict from one that only proved genuine hardware
-	// running audited code — the measurement alone cannot distinguish this
-	// cluster from anyone else's copy of the same image.
-	RTMR3Pinned string `json:"rtmr3_pinned,omitempty"`
+	// RTMRsPinned lists the runtime measurement registers that were enforced,
+	// as "<index>:<hex>". Rendered so a reader can tell what a verdict actually
+	// covers. On TDX the measurement pin is MRTD, which covers only the
+	// firmware — without RTMR[1]/[2] the guest image is unverified, and without
+	// RTMR[3] the deployment is. A verdict that proves neither should not look
+	// the same as one that proves both.
+	RTMRsPinned []string `json:"rtmrs_pinned,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
 	// operator public keys the target pins for allowlist writes (served list,
@@ -658,8 +722,10 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		CertSHA256: ev.certSHA256,
 		Pinned:     pinned,
 	}
-	if len(policy.ExpectedRTMR3) > 0 {
-		oc.RTMR3Pinned = hex.EncodeToString(policy.ExpectedRTMR3)
+	for i, want := range policy.ExpectedRTMRs {
+		if len(want) > 0 {
+			oc.RTMRsPinned = append(oc.RTMRsPinned, fmt.Sprintf("%d:%s", i, hex.EncodeToString(want)))
+		}
 	}
 	if verr != nil {
 		oc.Error = verr.Error()
@@ -756,8 +822,15 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  cert sha256:  %s\n", oc.CertSHA256)
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
-	if oc.RTMR3Pinned != "" {
-		fmt.Fprintf(out, "  RTMR[3]:      %s (matched — node launched to trust the pinned operator key)\n", oc.RTMR3Pinned)
+	rtmrLabel := [4]string{"firmware events", "guest kernel", "guest rootfs", "operator key / workloads"}
+	for _, p := range oc.RTMRsPinned {
+		idx, hexval, _ := strings.Cut(p, ":")
+		i, _ := strconv.Atoi(idx)
+		fmt.Fprintf(out, "  RTMR[%s]:      %s (matched — %s)\n", idx, hexval, rtmrLabel[i%4])
+	}
+	if len(oc.RTMRsPinned) == 0 && oc.Platform == "tdx" {
+		fmt.Fprintf(out, "  note:         no RTMR pinned — MRTD covers only the TDVF firmware, so the guest image and\n"+
+			"                deployment identity are NOT verified (see --image-manifest and --operator-key)\n")
 	}
 	if oc.OperatorKeysAttestedDigest != "" {
 		fmt.Fprintf(out, "  operator-keys digest (attested via config-claims): sha256:%s\n", oc.OperatorKeysAttestedDigest)
