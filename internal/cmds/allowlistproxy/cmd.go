@@ -161,6 +161,8 @@ func newRouter(proxy http.Handler) http.Handler {
 	})
 	mux.Handle("/allowlist", proxy)
 	mux.Handle("/allowlist/", proxy)
+	mux.Handle("/secrets", proxy)
+	mux.Handle("/secrets/", proxy)
 	return mux
 }
 

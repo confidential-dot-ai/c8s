@@ -1153,6 +1153,15 @@ tlsLb:
     # -- Container resources for the allowlist proxy.
     resources: {}
 
+  # -- Publish the operator `c8s secrets put` surface (/secrets) through the
+  # same attested loopback proxy and rate budget as /allowlist. Workload
+  # secret reads authenticate with the pod's mesh leaf, which never crosses
+  # this hop, so the route exposes only operator-key-signed writes. Set
+  # enabled: false to keep secret writes off the public route (a direct CDS
+  # URL still works).
+  secrets:
+    enabled: true
+
   # -- Additional path routes proxied before the default upstream backend.
   # Useful for preserving control-plane endpoints while the catch-all route
   # points at an inference backend.
