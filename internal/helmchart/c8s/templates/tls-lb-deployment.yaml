@@ -146,19 +146,39 @@ spec:
           imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
           args:
             - cds-attest
+            {{- if .Values.tlsLb.attest.expectedWorkload }}
+            {{- /* kubelet's httpGet readiness probe dials the pod IP, which a
+            loopback-only listener cannot answer. nginx keeps proxying to
+            loopback and no Service exposes this port. */}}
+            - --host=0.0.0.0
+            {{- else }}
             - --host=127.0.0.1
+            {{- end }}
             - --port={{ .Values.tlsLb.attest.port }}
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
             - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
+            # attest-lb transport trust rests on the serving key being TEE-held:
+            # a publicTLS Secret's key is host-visible, so that front door is
+            # attest-pq-only and the sidecar refuses attest-lb with
+            # unsupported_front_door.
+            {{- if .Values.tlsLb.publicTLS.secretName }}
+            - --front-door-mode=webpki
+            {{- else }}
+            - --front-door-mode=cds
+            {{- end }}
             # Bind the *exact* leaf nginx presents on the wire (ssl_certificate =
-            # publicCertPath), so the tls-cert attestation binding (GET
-            # .../attestation?pq=false) commits report_data to the SPKI a direct-TLS
-            # client (e.g. TEErminator Flow B) actually sees. With the default
-            # (publicTLS unset) this is the mesh leaf at tlsMountPath/cert.pem; with a
-            # publicTLS secret it is that cert (mounted below). Re-read per request, so
-            # get-cert renewals are picked up.
+            # publicCertPath), so the attest-lb binding (GET
+            # /.well-known/c8s/attest-lb) commits report_data to the leaf DER a
+            # direct-TLS client actually sees. With the default (publicTLS
+            # unset) this is the mesh leaf at tlsMountPath/cert.pem; with a
+            # publicTLS secret it is that cert (mounted below, attest-pq-only
+            # per --front-door-mode above). Re-read per request, so get-cert
+            # renewals are picked up.
             - --serving-cert-file={{ include "tls-lb.publicCertPath" . }}
+            {{- if .Values.tlsLb.attest.expectedWorkload }}
+            - --expected-workload={{ .Values.tlsLb.attest.expectedWorkload }}
+            {{- end }}
             # The identity-bound PQ flow must use the TEE-held mesh
             # credential, never the optional publicTLS Secret: report_data
             # commits the hybrid session key to this leaf and the sidecar
@@ -191,13 +211,26 @@ spec:
           env:
             {{- . | nindent 12 }}
           {{- end }}
+          {{- if .Values.tlsLb.attest.expectedWorkload }}
+          # Workload-verified ingress gate (docs/THREAT_MODEL.md §10): ready
+          # only while the installed mesh identity leaf carries a
+          # matched-workload stamp naming expectedWorkload, so ingress
+          # withholds traffic while the committed identity is unnamed (initial
+          # deploy, or after a foreign admission unnames the next renewal).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.tlsLb.attest.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- end }}
           volumeMounts:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
             {{- if .Values.tlsLb.publicTLS.secretName }}
-            # cds-attest reads the same public leaf nginx serves (for the tls-cert
-            # binding's --serving-cert-file).
+            # cds-attest reads the same public leaf nginx serves
+            # (--serving-cert-file).
             - name: public-tls
               mountPath: {{ .Values.tlsLb.publicTLS.mountPath }}
               readOnly: true

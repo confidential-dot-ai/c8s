@@ -1,18 +1,21 @@
 // Package cdsattest implements the tls-lb attestation + over-encryption sidecar:
-// the *dynamic* browser-facing endpoints of the c8s-verify protocol. The
+// the *dynamic* client-facing endpoints of the c8s-verify protocol. The
 // tls-lb nginx front-end terminates public TLS, serves the static CDS/mesh-CA
-// certs, and reverse-proxies the attestation challenge, the handshake, and the
-// over-encrypted application paths to this sidecar on loopback. It lets an
-// out-of-cluster JavaScript client verify that the LB is a genuine, CDS-issued,
-// TEE-attested endpoint and then talk to it over a post-quantum over-encrypted
-// channel that terminates inside the LB's enclave — independent of whatever TLS
-// terminator sits in front of it. See c8s-verify-js/PROTOCOL.md.
+// certs, and reverse-proxies the two explicit attestation endpoints
+// (attest-pq, attest-lb), the handshake, and the over-encrypted application
+// paths to this sidecar on loopback. attest-pq lets an out-of-cluster
+// JavaScript client verify that the LB is a genuine, CDS-issued, TEE-attested
+// endpoint and then talk to it over a post-quantum over-encrypted channel that
+// terminates inside the LB's enclave — independent of whatever TLS terminator
+// sits in front of it. attest-lb binds fresh evidence to the exact serving
+// leaf for native clients that ride ordinary nginx TLS instead. See
+// c8s-verify-js/PROTOCOL.md.
 package cdsattest
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha512"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -30,14 +33,25 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/server"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const wellKnownPrefix = "/.well-known/c8s"
 
-// minNonceBytes is the smallest client nonce accepted for the attestation
-// challenge; below this the report_data freshness binding is not meaningful.
-const minNonceBytes = 16
+// nonceBytes is the exact client nonce length both attestation endpoints
+// require: the transcripts frame a 32-byte nonce and anything else is refused
+// rather than truncated or padded.
+const nonceBytes = 32
+
+// Front-door modes: which credential terminates the public TLS in front of
+// this sidecar. attest-lb transport trust rests on the serving key being
+// TEE-held, so it is served only in cds mode; a WebPKI Secret's key is
+// host-visible and that deployment shape is attest-pq-only.
+const (
+	FrontDoorModeCDS    = "cds"
+	FrontDoorModeWebPKI = "webpki"
+)
 
 // Backend handles a decrypted application request and returns the response. The
 // sidecar seals the response back to the client. Implementations forward the
@@ -50,20 +64,32 @@ type Backend interface {
 type Config struct {
 	Logger   *slog.Logger
 	Evidence EvidenceProvider
+	// FrontDoorMode says which credential terminates public TLS in front of
+	// this sidecar (FrontDoorModeCDS or FrontDoorModeWebPKI). Anything but
+	// cds — including an unset mode — refuses attest-lb, so a
+	// misconfiguration can never serve a transport binding for a
+	// host-visible key.
+	FrontDoorMode string
 	// ServingCertFile is the path to the LB serving-leaf PEM (the cert nginx
-	// presents on the wire). When set, GET .../attestation?pq=false binds
-	// report_data to this leaf's SPKI instead of a per-session over-encryption
-	// key. Empty disables the tls-cert binding.
+	// presents on the wire). In cds front-door mode, GET .../attest-lb binds
+	// report_data to this exact leaf DER plus the mesh identity. Re-read per
+	// request so a get-cert renewal (which SIGHUPs nginx to a new leaf) is
+	// picked up without restarting the sidecar.
 	ServingCertFile string
 	// MeshIdentity* are the TEE-held mesh leaf, matching private key, and CA
-	// bundle used by the identity-bound PQ flow. They are deliberately
-	// separate from ServingCertFile, which may name a host-visible public TLS
-	// credential. All three files are re-read for each attestation request.
+	// bundle whose possession both attestation endpoints prove. They are
+	// deliberately separate from ServingCertFile, which may name a
+	// host-visible public TLS credential. All three files are re-read for
+	// each attestation request.
 	MeshIdentityCertFile string
 	MeshIdentityKeyFile  string
 	MeshIdentityCAFile   string
-	Backend              Backend // over-encrypted application backend (nil => EchoBackend)
-	SessionTTL           time.Duration
+	// ExpectedWorkload gates /readyz on the installed mesh identity leaf
+	// carrying a matched-workload stamp with this exact name. Empty keeps
+	// /readyz unconditionally 200.
+	ExpectedWorkload string
+	Backend          Backend // over-encrypted application backend (nil => EchoBackend)
+	SessionTTL       time.Duration
 	// NonceTTL bounds how long a pending handshake nonce stays valid between
 	// the attestation fetch and the handshake POST. Defaults to SessionTTL.
 	NonceTTL time.Duration
@@ -121,7 +147,16 @@ func (s *Server) Handler() http.Handler {
 	r.Use(server.RequestLogger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	r.Get(wellKnownPrefix+"/attestation", s.handleAttestation)
+	r.Get("/readyz", s.handleReadyz)
+	r.Get(wellKnownPrefix+"/attest-pq", s.handleAttestPQ)
+	r.Get(wellKnownPrefix+"/attest-lb", s.handleAttestLB)
+	// The pre-split endpoint. Kept registered so a stale client gets the
+	// explicit versioned 400 — never a 404 it might treat as transient, and
+	// never an alias or downgrade.
+	r.Get(wellKnownPrefix+"/attestation", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest,
+			"the /.well-known/c8s/attestation endpoint is gone: use attest-pq (encrypted session) or attest-lb (ordinary TLS)")
+	})
 	r.Post(wellKnownPrefix+"/handshake", s.handleHandshake)
 	// Over-encrypted application traffic: a single tunnel endpoint. The real
 	// method/path/headers/body are sealed inside the request envelope, so nginx
@@ -130,50 +165,47 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
-	nonceB64 := r.URL.Query().Get("nonce")
+// attestNonce validates the shared request shape of both attestation
+// endpoints and returns the decoded nonce, or writes the 400 and returns nil.
+// The endpoints take no binding or pq parameter: each serves exactly one
+// binding, so there is nothing to negotiate, and a stale query-selecting
+// client must get a loud 400, never something else than it expects.
+func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce []byte) {
+	q := r.URL.Query()
+	if q.Get("pq") != "" {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the pq query selector is gone: the endpoint path selects the binding")
+		return "", nil
+	}
+	if q.Get("binding") != "" {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the attestation endpoints take no binding parameter")
+		return "", nil
+	}
+	nonceB64 = q.Get("nonce")
 	if nonceB64 == "" {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "missing nonce")
-		return
+		return "", nil
 	}
-	nonce, err := base64.RawURLEncoding.DecodeString(nonceB64)
+	decoded, err := base64.RawURLEncoding.DecodeString(nonceB64)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce must be base64url")
-		return
+		return "", nil
 	}
-	// The freshness guarantee rests on a high-entropy, client-chosen nonce bound
-	// into report_data; reject anything too short to carry it.
-	if len(nonce) < minNonceBytes {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "nonce too short")
-		return
+	// Both transcripts frame an exact 32-byte client nonce; refuse anything
+	// else rather than truncate or pad the freshness binding.
+	if len(decoded) != nonceBytes {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, fmt.Sprintf("nonce must be %d bytes, got %d", nonceBytes, len(decoded)))
+		return "", nil
 	}
-
-	// The endpoint takes no binding parameter: the identity-bound PQ binding is
-	// the only over-encryption binding, so there is nothing to negotiate. A
-	// stale client asking for one must get a loud 400, never something else
-	// than it expects.
-	if r.URL.Query().Get("binding") != "" {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the attestation endpoint takes no binding parameter")
-		return
-	}
-	// pq=false selects the tls-cert binding: report_data commits to the LB's
-	// serving-leaf SPKI instead of a per-session over-encryption key. It is for
-	// clients that ride the validated upstream TLS (e.g. TEErminator Flow B)
-	// rather than the post-quantum tunnel. pq=true (or absent) is the default.
-	if r.URL.Query().Get("pq") == "false" {
-		s.handleAttestationTLSCert(w, r, nonceB64, nonce)
-		return
-	}
-	s.handleAttestationOverEncryption(w, r, nonceB64, nonce)
+	return nonceB64, decoded
 }
 
-// handleAttestationOverEncryption serves the identity-bound over-encryption
-// binding: report_data commits the hybrid session key, nonce, exact mesh leaf,
-// and issuing mesh CA to one domain-separated transcript, and the leaf signs
-// that transcript to prove possession of its private key.
-func (s *Server) handleAttestationOverEncryption(w http.ResponseWriter, r *http.Request, nonceB64 string, nonce []byte) {
-	if len(nonce) != 32 {
-		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "identity-bound PQ requires a 32-byte nonce")
+// handleAttestPQ serves the identity-bound over-encryption binding:
+// report_data commits the hybrid session key, nonce, exact mesh leaf, and
+// issuing mesh CA to one domain-separated transcript, and the leaf signs that
+// transcript to prove possession of its private key.
+func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
+	nonceB64, nonce := attestNonce(w, r)
+	if nonce == nil {
 		return
 	}
 	if s.cfg.MeshIdentityCertFile == "" || s.cfg.MeshIdentityKeyFile == "" || s.cfg.MeshIdentityCAFile == "" {
@@ -219,7 +251,7 @@ func (s *Server) handleAttestationOverEncryption(w http.ResponseWriter, r *http.
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:    types.ProtocolVersion,
+		Version:    types.BindingAttestPQ,
 		Platform:   platform,
 		Generation: generation,
 		Nonce:      nonceB64,
@@ -233,23 +265,46 @@ func (s *Server) handleAttestationOverEncryption(w http.ResponseWriter, r *http.
 	})
 }
 
-// handleAttestationTLSCert serves the tls-cert binding: report_data =
-// SHA-384(serving_leaf_spki || nonce). No over-encryption keypair is minted and
-// no pending session is stored — the client verifies the binding against the LB
-// leaf it already sees on the connection, then rides that TLS. The bundle
-// carries no chain: the client validates that leaf against its own anchor.
-func (s *Server) handleAttestationTLSCert(w http.ResponseWriter, r *http.Request, nonceB64 string, nonce []byte) {
-	spki, err := s.servingLeafSPKI()
+// handleAttestLB serves the ordinary-TLS binding: report_data commits the
+// nonce, the exact serving leaf nginx presents, the exact mesh leaf, and the
+// issuing mesh CA (overenc.LBTranscriptHash), and the mesh leaf signs that
+// transcript. No over-encryption keypair is minted and no pending session is
+// stored — the client recomputes the transcript from the leaf it observed on
+// its own TLS connection and then rides that TLS.
+func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
+	nonceB64, nonce := attestNonce(w, r)
+	if nonce == nil {
+		return
+	}
+	// The exact-DER binding detects leaf substitution, not key sharing: a
+	// WebPKI Secret's serving key is host-visible, so the host could terminate
+	// the client's TLS with the same leaf and proxy this request. Only a
+	// TEE-held (cds-mode) serving key supports transport binding.
+	if s.cfg.FrontDoorMode != FrontDoorModeCDS {
+		writeErr(w, http.StatusBadRequest, types.ErrorCodeUnsupportedFrontDoor,
+			"attest-lb requires a TEE-held serving key (public_tls.mode=cds); this front door is attest-pq-only")
+		return
+	}
+	servingLeafDER, err := s.servingLeafDER()
 	if err != nil {
-		s.log.Error("tls-cert binding unavailable", "error", err)
-		writeErr(w, http.StatusNotImplemented, types.ErrorCodeBindingUnavailable,
-			"tls-cert binding is not configured on this LB (set --serving-cert-file)")
+		s.log.Error("attest-lb binding unavailable", "error", err)
+		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable,
+			"the serving certificate is unavailable; attest-lb cannot bind this connection")
+		return
+	}
+	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
+	if err != nil {
+		s.log.Error("mesh identity binding unavailable", "error", err)
+		writeErr(w, http.StatusServiceUnavailable, types.ErrorCodeBindingUnavailable, "mesh identity credentials are temporarily unavailable")
 		return
 	}
 
-	// report_data = SHA-384(serving_leaf_spki || nonce): binds the LB's TLS
-	// identity and the client nonce into the hardware report.
-	reportData := reportDataForCert(spki, nonce)
+	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce)
+	if err != nil {
+		s.log.Error("bind serving leaf", "error", err)
+		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "serving-leaf binding failed")
+		return
+	}
 
 	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
@@ -258,20 +313,25 @@ func (s *Server) handleAttestationTLSCert(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	servingLeafHash := sha256.Sum256(servingLeafDER)
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:    types.ProtocolVersion,
-		Platform:   platform,
-		Generation: generation,
-		Nonce:      nonceB64,
-		Evidence:   evidence,
+		Version:           types.BindingAttestLB,
+		Platform:          platform,
+		Generation:        generation,
+		Nonce:             nonceB64,
+		Evidence:          evidence,
+		CDSCertPEM:        string(identity.bundlePEM),
+		IdentityProof:     proof,
+		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
 	})
 }
 
-// servingLeafSPKI reads the LB serving-leaf PEM and returns its
-// SubjectPublicKeyInfo (DER). It is read per request so a get-cert renewal
-// (which SIGHUPs nginx to a new leaf) is picked up without restarting the
-// sidecar.
-func (s *Server) servingLeafSPKI() ([]byte, error) {
+// servingLeafDER reads the LB serving-leaf PEM and returns the whole leaf DER.
+// It is read per request so a get-cert renewal (which SIGHUPs nginx to a new
+// leaf) is picked up without restarting the sidecar. Exactly one certificate
+// is committed; per-SNI or multi-certificate serving is unsupported and fails
+// the client's exact-DER comparison closed.
+func (s *Server) servingLeafDER() ([]byte, error) {
 	if s.cfg.ServingCertFile == "" {
 		return nil, fmt.Errorf("no --serving-cert-file configured")
 	}
@@ -287,7 +347,54 @@ func (s *Server) servingLeafSPKI() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse serving cert: %w", err)
 	}
-	return cert.RawSubjectPublicKeyInfo, nil
+	return cert.Raw, nil
+}
+
+// handleReadyz gates readiness on the committed mesh identity, not the outer
+// serving leaf: with --expected-workload set, ready means the installed mesh
+// leaf carries a valid matched-workload stamp naming that workload, so ingress
+// never routes external traffic to a front door whose committed identity is
+// unnamed (initial deploy, or a post-foreign renewal). Absent, malformed, or
+// duplicate stamps fail closed. Without the flag, today's always-ready
+// behavior is kept.
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if s.cfg.ExpectedWorkload == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	notReady := func(reason string) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintln(w, reason)
+	}
+	pemBytes, err := os.ReadFile(s.cfg.MeshIdentityCertFile)
+	if err != nil {
+		notReady("mesh identity leaf unreadable")
+		return
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		notReady("mesh identity leaf is not a PEM certificate")
+		return
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		notReady("mesh identity leaf unparseable")
+		return
+	}
+	workload, err := ratls.MatchedWorkloadFromCert(leaf)
+	if err != nil {
+		notReady("matched-workload stamp malformed")
+		return
+	}
+	if workload == nil {
+		notReady("mesh identity leaf carries no matched-workload stamp")
+		return
+	}
+	if workload.Name != s.cfg.ExpectedWorkload {
+		notReady(fmt.Sprintf("mesh identity leaf is stamped for workload %q, expected %q", workload.Name, s.cfg.ExpectedWorkload))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {
@@ -422,16 +529,6 @@ func (s *Server) sweep() {
 		}
 	}
 	s.mu.Unlock()
-}
-
-// reportDataForCert is the tls-cert binding: SHA-384(serving_leaf_spki || nonce).
-// A client recomputes it from the SPKI of the certificate it sees on the wire.
-func reportDataForCert(spkiDER, nonce []byte) []byte {
-	buf := make([]byte, 0, len(spkiDER)+len(nonce))
-	buf = append(buf, spkiDER...)
-	buf = append(buf, nonce...)
-	sum := sha512.Sum384(buf)
-	return sum[:]
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

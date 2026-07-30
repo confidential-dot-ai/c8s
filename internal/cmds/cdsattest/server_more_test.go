@@ -47,11 +47,12 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 	}{
 		{"missing nonce", ""},
 		{"nonce not base64url", "?nonce=%21%40%23"},
-		{"nonce too short", "?nonce=" + b64url(make([]byte, minNonceBytes-1))},
+		{"nonce too short", "?nonce=" + b64url(make([]byte, nonceBytes-1))},
+		{"nonce too long", "?nonce=" + b64url(make([]byte, nonceBytes+1))},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation" + tc.query)
+			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq" + tc.query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -66,10 +67,11 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 }
 
 func TestAttestationEvidenceUnavailable(t *testing.T) {
-	certPath, _ := writeTestLeaf(t)
+	certPath, _ := writeTestServingLeaf(t)
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             failingProvider{},
+		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -81,24 +83,21 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
 
-	for _, query := range []string{
-		"?nonce=" + b64url(nonce),               // over-encryption binding
-		"?nonce=" + b64url(nonce) + "&pq=false", // tls-cert binding
-	} {
-		resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation" + query)
+	for _, path := range []string{"/attest-pq", "/attest-lb"} {
+		resp, err := http.Get(ts.URL + "/.well-known/c8s" + path + "?nonce=" + b64url(nonce))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if resp.StatusCode != http.StatusBadGateway {
-			t.Fatalf("%s: status = %d, want 502", query, resp.StatusCode)
+			t.Fatalf("%s: status = %d, want 502", path, resp.StatusCode)
 		}
 		if e := decodeErr(t, resp); e.Error != types.ErrorCodeAttestationUnavailable {
-			t.Fatalf("%s: error code = %q", query, e.Error)
+			t.Fatalf("%s: error code = %q", path, e.Error)
 		}
 	}
 }
 
-func TestServingLeafSPKIErrors(t *testing.T) {
+func TestServingLeafErrors(t *testing.T) {
 	dir := t.TempDir()
 	notCert := filepath.Join(dir, "key.pem")
 	if err := os.WriteFile(notCert, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1, 2, 3}}), 0o600); err != nil {
@@ -121,15 +120,15 @@ func TestServingLeafSPKIErrors(t *testing.T) {
 	rand.Read(nonce)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := NewServer(Config{Evidence: &capturingProvider{}, ServingCertFile: tc.file})
+			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS, ServingCertFile: tc.file})
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
-			resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?nonce=" + b64url(nonce) + "&pq=false")
+			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resp.StatusCode != http.StatusNotImplemented {
-				t.Fatalf("status = %d, want 501", resp.StatusCode)
+			if resp.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", resp.StatusCode)
 			}
 			if e := decodeErr(t, resp); e.Error != types.ErrorCodeBindingUnavailable {
 				t.Fatalf("error code = %q", e.Error)

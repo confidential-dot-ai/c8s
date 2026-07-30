@@ -1887,9 +1887,41 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"--reload-watch=/edge-tls/public.crt",
 		"--reload-watch=/edge-tls/public.key",
 	)
+	// A WebPKI-secret front door is attest-pq-only: its host-visible serving
+	// key cannot support attest-lb's transport binding.
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest, "--front-door-mode=webpki")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
 		t.Fatalf("tls-lb shareProcessNamespace = %v, want true", got)
+	}
+}
+
+// TestChartTLSLBAttestFrontDoorModeAndReadinessGate pins the endpoint-split
+// wiring: a default (mesh-issued serving leaf) front door runs cds-attest in
+// cds front-door mode with no readiness gate, and tlsLb.attest.expectedWorkload
+// wires the /readyz matched-workload gate — the sidecar then binds the pod IP
+// so kubelet's httpGet probe can reach it.
+func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest, "--front-door-mode=cds", "--host=127.0.0.1")
+	if attest.ReadinessProbe != nil {
+		t.Fatalf("no expectedWorkload: cds-attest must keep today's probe-less shape, got %+v", attest.ReadinessProbe)
+	}
+
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer")
+	if err != nil {
+		t.Fatalf("helm template with expectedWorkload: %v\n%s", err, out)
+	}
+	attest = renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest, "--front-door-mode=cds", "--expected-workload=infer", "--host=0.0.0.0")
+	rp := attest.ReadinessProbe
+	if rp == nil || rp.HTTPGet == nil || rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.IntValue() != 8800 {
+		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe on the attest port, got %+v", rp)
 	}
 }
 

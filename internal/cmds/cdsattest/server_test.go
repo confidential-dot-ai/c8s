@@ -65,7 +65,7 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce
 
 func fetchBundle(t *testing.T, base string, nonce []byte) types.AttestationBundle {
 	t.Helper()
-	resp, err := http.Get(base + "/.well-known/c8s/attestation?nonce=" + b64url(nonce))
+	resp, err := http.Get(base + "/.well-known/c8s/attest-pq?nonce=" + b64url(nonce))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	rand.Read(nonce)
 	bundle := fetchBundle(t, ts.URL, nonce)
 
-	if bundle.Version != types.ProtocolVersion || bundle.Platform != "snp" || bundle.Generation != "genoa" {
+	if bundle.Version != types.BindingAttestPQ || bundle.Platform != "snp" || bundle.Generation != "genoa" {
 		t.Fatalf("unexpected bundle header: %+v", bundle)
 	}
 	if bundle.IdentityProof == nil {

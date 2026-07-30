@@ -1279,11 +1279,11 @@ tlsLb:
     #    nginx. Must be shorter than the cert TTL issued by CDS.
     renewInterval: "1h"
 
-  # -- Attestation + over-encryption sidecar (c8s-verify/v1). When enabled, an
-  # in-pod `c8s cds-attest` container serves the *dynamic* browser-facing
-  # endpoints (the per-session attestation challenge and the post-quantum
-  # over-encryption handshake) and nginx reverse-proxies `/.well-known/c8s/` to
-  # it on loopback. The static CDS/mesh-CA certs are still served by nginx via
+  # -- Attestation + over-encryption sidecar (the c8s-verify protocol). When
+  # enabled, an in-pod `c8s cds-attest` container serves the *dynamic*
+  # client-facing endpoints (the explicit attest-pq and attest-lb per-session
+  # challenges and the post-quantum over-encryption handshake) and nginx
+  # reverse-proxies `/.well-known/c8s/` to it on loopback. The static CDS/mesh-CA certs are still served by nginx via
   # `discovery`. The browser client is lunal-dev/c8s-verify-js (wire contract:
   # c8s-verify-js/PROTOCOL.md).
   #
@@ -1306,6 +1306,14 @@ tlsLb:
     # -- Attestation-api URL the sidecar binds session keys against. Empty
     # defaults to this chart's attestation-api.
     attestationApiURL: ""
+    # -- Workload-verified ingress gate: when set to an allowlist entry name,
+    # the sidecar serves /readyz as 200 only while the installed mesh identity
+    # leaf carries a matched-workload stamp with exactly this name, and the
+    # chart wires a readinessProbe on the cds-attest container (binding it on
+    # the pod IP so kubelet can probe it), so ingress withholds traffic while
+    # the front door's committed mesh identity is unnamed. Empty keeps today's
+    # always-ready behavior.
+    expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.
     resources: {}
 

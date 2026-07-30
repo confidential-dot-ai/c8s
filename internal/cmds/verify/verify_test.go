@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -24,7 +25,9 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // selfSignedCertPEM returns a throwaway ECDSA P-256 certificate (PEM) and its
@@ -174,40 +177,120 @@ func TestParseExpectedReportData(t *testing.T) {
 	}
 }
 
-func TestEndpointReportData_KnownVector(t *testing.T) {
-	x := []byte("x25519-key")
-	m := []byte("mlkem-key")
-	n := []byte("nonce")
-	h := sha512.New384()
-	h.Write(x)
-	h.Write(m)
-	h.Write(n)
-	want := h.Sum(nil)
+// endpointIdentity is a minted mesh identity (CA-signed ECDSA leaf plus its
+// issuing CA) used to build attest-pq responses whose identity transcript and
+// proof of possession actually verify.
+type endpointIdentity struct {
+	leaf     *x509.Certificate
+	ca       *x509.Certificate
+	key      *ecdsa.PrivateKey
+	chainPEM string
+}
 
-	got := endpointReportData(x, m, n)
-	if !bytes.Equal(got, want) {
-		t.Errorf("endpointReportData mismatch")
+func mintEndpointIdentity(t *testing.T) *endpointIdentity {
+	t.Helper()
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Azure vTPM verifiers compare the anchor raw against the quote's 48-byte
-	// extraData — a zero-padded 64-byte anchor fails there (the az-snp CDS
-	// verify regression).
-	if len(got) != sha512.Size384 {
-		t.Errorf("anchor is %d bytes, want unpadded SHA-384 (%d)", len(got), sha512.Size384)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mesh CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
+	return &endpointIdentity{leaf: leaf, ca: ca, key: leafKey, chainPEM: chain}
+}
+
+// transcript computes the identity transcript the server would have bound for
+// this identity and session.
+func (id *endpointIdentity) transcript(t *testing.T, nonce, x25519, mlkem []byte) []byte {
+	t.Helper()
+	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return erd
+}
+
+// proofJSON builds the wire identity_proof object: ECDSA-SHA384 by the leaf
+// key over sha512.Sum384(transcript), mirroring the sidecar's prove().
+func (id *endpointIdentity) proofJSON(t *testing.T, transcript []byte) map[string]any {
+	t.Helper()
+	digest := sha512.Sum384(transcript)
+	sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafHash := sha256.Sum256(id.leaf.Raw)
+	caHash := sha256.Sum256(id.ca.Raw)
+	b64u := base64.RawURLEncoding.EncodeToString
+	return map[string]any{
+		"algorithm":      "ecdsa-sha384",
+		"leaf_sha256":    b64u(leafHash[:]),
+		"mesh_ca_sha256": b64u(caHash[:]),
+		"signature":      b64u(sig),
 	}
 }
 
-// buildEndpointJSON makes an attestation-response body with the given fields.
-func buildEndpointJSON(t *testing.T, nonce, report, vcek, x25519, mlkem []byte) []byte {
+// buildEndpointJSON makes an attest-pq attestation-response body with the
+// given fields. A nil identity omits the mesh chain and identity proof.
+func buildEndpointJSON(t *testing.T, id *endpointIdentity, nonce, report, vcek, x25519, mlkem []byte) []byte {
+	t.Helper()
+	evidence := map[string]any{
+		"attestation_report": base64.StdEncoding.EncodeToString(report),
+		"cert_chain":         map[string]any{"vcek": base64.StdEncoding.EncodeToString(vcek)},
+	}
+	return buildEndpointJSONWithEvidence(t, id, nonce, evidence, x25519, mlkem)
+}
+
+func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []byte, evidence any, x25519, mlkem []byte) []byte {
 	t.Helper()
 	b64u := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	resp := map[string]any{
-		"platform": "snp",
-		"nonce":    b64u(nonce),
-		"evidence": map[string]any{
-			"attestation_report": base64.StdEncoding.EncodeToString(report),
-			"cert_chain":         map[string]any{"vcek": base64.StdEncoding.EncodeToString(vcek)},
-		},
+		"version":        types.BindingAttestPQ,
+		"platform":       "snp",
+		"nonce":          b64u(nonce),
+		"evidence":       evidence,
 		"session_pubkey": map[string]any{"x25519": b64u(x25519), "mlkem768": b64u(mlkem)},
+	}
+	if id != nil {
+		resp["cds_cert_pem"] = id.chainPEM
+		resp["identity_proof"] = id.proofJSON(t, id.transcript(t, nonce, x25519, mlkem))
 	}
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -219,11 +302,27 @@ func buildEndpointJSON(t *testing.T, nonce, report, vcek, x25519, mlkem []byte) 
 func TestEvidenceFromEndpointJSON(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, 32)
-	m := bytes.Repeat([]byte{0x03}, 1184)
-	data := buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
+	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m)
 
-	t.Run("fresh when nonce echoes", func(t *testing.T) {
+	// mutateProof rebuilds data with one identity_proof field replaced.
+	mutateProof := func(t *testing.T, field, value string) []byte {
+		t.Helper()
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["identity_proof"].(map[string]any)[field] = value
+		out, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	t.Run("fresh when nonce echoes; erd is the identity transcript", func(t *testing.T) {
 		ev, err := evidenceFromEndpointJSON(data, nonce, "test")
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
@@ -231,8 +330,111 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		if !ev.fresh {
 			t.Error("expected fresh=true when challenge echoes")
 		}
-		if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
-			t.Error("erd does not match expected report_data binding")
+		if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
+			t.Error("erd does not match the identity transcript over keys, nonce, leaf, and CA")
+		}
+		if ev.leaf == nil || !bytes.Equal(ev.leaf.Raw, id.leaf.Raw) {
+			t.Error("the transcript-committed mesh leaf should surface for the --mesh-ca/--workload paths")
+		}
+	})
+
+	t.Run("from-file (no expected nonce) verifies but stays non-fresh", func(t *testing.T) {
+		ev, err := evidenceFromEndpointJSON(data, nil, "file")
+		if err != nil {
+			t.Fatalf("unexpected: %v", err)
+		}
+		if ev.fresh {
+			t.Error("a saved response must not count as a freshness proof")
+		}
+		if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
+			t.Error("erd must still be the identity transcript")
+		}
+	})
+
+	t.Run("tampered proof signature is a security error", func(t *testing.T) {
+		sig, err := ecdsa.SignASN1(rand.Reader, id.key, bytes.Repeat([]byte{0x5C}, 48))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutated := mutateProof(t, "signature", base64.RawURLEncoding.EncodeToString(sig))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on a signature over the wrong transcript, got %v", err)
+		}
+	})
+
+	t.Run("wrong leaf hash in the proof is a security error", func(t *testing.T) {
+		otherHash := sha256.Sum256([]byte("not-the-leaf"))
+		mutated := mutateProof(t, "leaf_sha256", base64.RawURLEncoding.EncodeToString(otherHash[:]))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on leaf_sha256 mismatch, got %v", err)
+		}
+	})
+
+	t.Run("committed CA absent from the served chain is a security error", func(t *testing.T) {
+		otherHash := sha256.Sum256([]byte("not-a-served-ca"))
+		mutated := mutateProof(t, "mesh_ca_sha256", base64.RawURLEncoding.EncodeToString(otherHash[:]))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError when no served cert matches mesh_ca_sha256, got %v", err)
+		}
+	})
+
+	t.Run("unknown proof algorithm is a security error", func(t *testing.T) {
+		mutated := mutateProof(t, "algorithm", "ecdsa-sha256")
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on an unknown proof algorithm, got %v", err)
+		}
+	})
+
+	t.Run("leaf not signed by the committed CA is a security error", func(t *testing.T) {
+		// Serve id's leaf with a *different* identity's CA and commit that CA
+		// honestly in the transcript and proof: everything verifies except the
+		// issuing relationship, which must fail closed.
+		other := mintEndpointIdentity(t)
+		b64u := base64.RawURLEncoding.EncodeToString
+		erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha512.Sum384(erd)
+		sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafHash := sha256.Sum256(id.leaf.Raw)
+		caHash := sha256.Sum256(other.ca.Raw)
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["cds_cert_pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.leaf.Raw})) +
+			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: other.ca.Raw}))
+		obj["identity_proof"] = map[string]any{
+			"algorithm":      "ecdsa-sha384",
+			"leaf_sha256":    b64u(leafHash[:]),
+			"mesh_ca_sha256": b64u(caHash[:]),
+			"signature":      b64u(sig),
+		}
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) || !strings.Contains(err.Error(), "not signed by") {
+			t.Fatalf("expected a chain securityError, got %v", err)
+		}
+	})
+
+	t.Run("missing identity proof rejected", func(t *testing.T) {
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		delete(obj, "identity_proof")
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "identity_proof") {
+			t.Fatalf("expected a missing-proof error, got %v", err)
 		}
 	})
 
@@ -246,26 +448,49 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong or missing version rejected (cross-endpoint responses)", func(t *testing.T) {
+		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB, "c8s/attest-pq/v2"} {
+			var obj map[string]any
+			if err := json.Unmarshal(data, &obj); err != nil {
+				t.Fatal(err)
+			}
+			if version == "" {
+				delete(obj, "version")
+			} else {
+				obj["version"] = version
+			}
+			mutated, err := json.Marshal(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "version") {
+				t.Errorf("version %q should be rejected, got %v", version, err)
+			}
+		}
+	})
+
 	t.Run("missing session keys rejected", func(t *testing.T) {
-		bare := buildEndpointJSON(t, nonce, report, []byte("vcek"), nil, nil)
+		bare := buildEndpointJSON(t, nil, nonce, report, []byte("vcek"), nil, nil)
 		if _, err := evidenceFromEndpointJSON(bare, nonce, "test"); err == nil {
 			t.Fatal("expected error when session_pubkey is absent")
 		}
 	})
 
-	t.Run("non-canonical session-key length is accepted (lengths not policed)", func(t *testing.T) {
-		// 16 bytes is not the PROTOCOL.md-canonical x25519 length, but the verifier
-		// does not enforce lengths — the binding (REPORTDATA == SHA-384 over these
-		// exact bytes) is what the hardware-signed report is checked against
-		// downstream, so a wrong length just produces a binding that won't match.
-		shortX16 := bytes.Repeat([]byte{0x02}, 16)
-		data := buildEndpointJSON(t, nonce, report, []byte("vcek"), shortX16, m)
-		ev, err := evidenceFromEndpointJSON(data, nonce, "test")
-		if err != nil {
-			t.Fatalf("non-canonical key length should be accepted: %v", err)
+	t.Run("wrong-size session key rejected", func(t *testing.T) {
+		// The transcript is length-framed; IdentityTranscriptHash refuses a
+		// non-canonical key size outright rather than producing a binding that
+		// fails report-data match downstream.
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
 		}
-		if !bytes.Equal(ev.erd, endpointReportData(shortX16, m, nonce)) {
-			t.Error("erd must bind the session-key bytes as provided")
+		obj["session_pubkey"].(map[string]any)["x25519"] = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x02}, 16))
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "X25519") {
+			t.Fatalf("expected a key-size error from the transcript, got %v", err)
 		}
 	})
 
@@ -291,24 +516,40 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 // wouldn't notice.
 func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0xA1}, nonceSize)
-	x := bytes.Repeat([]byte{0xB2}, x25519PubLen)
-	m := bytes.Repeat([]byte{0xC3}, mlkem768EncapLen)
+	x := bytes.Repeat([]byte{0xB2}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0xC3}, overenc.MLKEM768EKBytes)
 	report := bytes.Repeat([]byte{0xD4}, 64)
 	b64u := base64.RawURLEncoding.EncodeToString
 
+	id := mintEndpointIdentity(t)
+	erd := id.transcript(t, nonce, x, m)
+	digest := sha512.Sum384(erd)
+	sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafHash := sha256.Sum256(id.leaf.Raw)
+	caHash := sha256.Sum256(id.ca.Raw)
+
 	payload := fmt.Sprintf(`{
+  "version": %q,
   "platform": "snp",
   "nonce": %q,
   "evidence": {
     "attestation_report": %q,
     "cert_chain": { "vcek": %q }
   },
-  "session_pubkey": { "x25519": %q, "mlkem768": %q }
+  "cds_cert_pem": %q,
+  "session_pubkey": { "x25519": %q, "mlkem768": %q },
+  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q }
 }`,
+		types.BindingAttestPQ,
 		b64u(nonce),
 		base64.StdEncoding.EncodeToString(report),
 		base64.StdEncoding.EncodeToString([]byte("vcek-der")),
+		id.chainPEM,
 		b64u(x), b64u(m),
+		b64u(leafHash[:]), b64u(caHash[:]), b64u(sig),
 	)
 
 	ev, err := evidenceFromEndpointJSON([]byte(payload), nonce, "endpoint")
@@ -321,8 +562,8 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	if ev.platform != "snp" {
 		t.Errorf("platform = %q, want snp", ev.platform)
 	}
-	if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
-		t.Error("erd does not match SHA-384(x25519‖mlkem768‖nonce)")
+	if !bytes.Equal(ev.erd, erd) {
+		t.Error("erd does not match the identity transcript")
 	}
 	// The platform-specific evidence object is forwarded verbatim.
 	if !bytes.Contains(ev.rawEvidence, []byte("attestation_report")) {
@@ -361,23 +602,28 @@ func TestParseRealSNPEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonce := bytes.Repeat([]byte{0x5A}, nonceSize)
-	x := bytes.Repeat([]byte{0xB2}, x25519PubLen)
-	m := bytes.Repeat([]byte{0xC3}, mlkem768EncapLen)
-	b64u := base64.RawURLEncoding.EncodeToString
-	resp := fmt.Sprintf(`{"platform":"snp","nonce":%q,"evidence":%s,"session_pubkey":{"x25519":%q,"mlkem768":%q}}`,
-		b64u(nonce), string(env.Evidence), b64u(x), b64u(m))
+	x := bytes.Repeat([]byte{0xB2}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0xC3}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
+	resp := buildEndpointJSONWithEvidence(t, id, nonce, env.Evidence, x, m)
 
-	ev, err := evidenceFromEndpointJSON([]byte(resp), nonce, "endpoint")
+	ev, err := evidenceFromEndpointJSON(resp, nonce, "endpoint")
 	if err != nil {
 		t.Fatalf("evidenceFromEndpointJSON on the real-evidence response: %v", err)
 	}
 	if !ev.fresh {
 		t.Error("expected fresh=true when the challenge echoes")
 	}
-	if !bytes.Equal(ev.rawEvidence, env.Evidence) {
-		t.Error("real evidence object should round-trip verbatim through the endpoint parser")
+	// json.Marshal compacts an embedded RawMessage, so compare against the
+	// compacted fixture bytes: the value must round-trip unchanged.
+	var wantEvidence bytes.Buffer
+	if err := json.Compact(&wantEvidence, env.Evidence); err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
+	if !bytes.Equal(ev.rawEvidence, wantEvidence.Bytes()) {
+		t.Error("real evidence object should round-trip unchanged through the endpoint parser")
+	}
+	if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
 		t.Error("erd binding mismatch")
 	}
 }
@@ -417,8 +663,9 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 
 func TestGatherFromEndpoint_Integration(t *testing.T) {
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, 32)
-	m := bytes.Repeat([]byte{0x03}, 1184)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != attestationPath {
@@ -428,7 +675,7 @@ func TestGatherFromEndpoint_Integration(t *testing.T) {
 		nb := r.URL.Query().Get("nonce")
 		nonce, _ := base64.RawURLEncoding.DecodeString(nb)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m))
+		w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 	}))
 	defer srv.Close()
 
@@ -616,7 +863,7 @@ func TestResolveMode(t *testing.T) {
 		{"auto kind, auto mode", "auto", "auto", "auto"},
 		{"empty kind, empty mode", "", "", "auto"},
 		{"explicit mode overrides lb kind", "lb", "ratls-cert", "ratls-cert"},
-		{"explicit mode overrides cds kind", "cds", "attestation-endpoint", "attestation-endpoint"},
+		{"explicit mode overrides cds kind", "cds", "attest-pq", "attest-pq"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

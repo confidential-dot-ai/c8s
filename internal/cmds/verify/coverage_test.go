@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // attestedTLSServer starts an httptest TLS server whose serving certificate is
@@ -287,18 +289,23 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("attestation-endpoint mode", func(t *testing.T) {
+	t.Run("attest-pq mode", func(t *testing.T) {
 		report := bytes.Repeat([]byte{0x01}, 64)
-		x := bytes.Repeat([]byte{0x02}, 32)
-		m := bytes.Repeat([]byte{0x03}, 1184)
+		x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+		m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+		id := mintEndpointIdentity(t)
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/.well-known/c8s/attest-pq" {
+				http.NotFound(w, r)
+				return
+			}
 			nonce, _ := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("nonce"))
-			w.Write(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m))
+			w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 		}))
 		defer srv.Close()
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attestation-endpoint", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, nil)
 		if err != nil {
-			t.Fatalf("attestation-endpoint mode: %v", err)
+			t.Fatalf("attest-pq mode: %v", err)
 		}
 		if !ev.fresh {
 			t.Error("endpoint evidence should be fresh")
@@ -324,12 +331,13 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, 32)
-	m := bytes.Repeat([]byte{0x03}, 1184)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
 
 	mutate := func(field, value string) []byte {
 		var obj map[string]any
-		if err := json.Unmarshal(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m), &obj); err != nil {
+		if err := json.Unmarshal(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m), &obj); err != nil {
 			t.Fatal(err)
 		}
 		switch field {
@@ -469,7 +477,8 @@ func TestGatherFromFile(t *testing.T) {
 	t.Run("override falls through to endpoint parsing", func(t *testing.T) {
 		// Not bare evidence (no evidence object), so the bare path fails and the
 		// endpoint parser reports its own error.
-		if _, err := gatherFromFile([]byte(`{}`), []byte{0x01}, "file"); err == nil || !strings.Contains(err.Error(), "no evidence") {
+		payload := []byte(`{"version":"` + types.BindingAttestPQ + `"}`)
+		if _, err := gatherFromFile(payload, []byte{0x01}, "file"); err == nil || !strings.Contains(err.Error(), "no evidence") {
 			t.Errorf("expected the endpoint parser's error, got %v", err)
 		}
 	})
@@ -492,6 +501,21 @@ func TestEvidenceFromBareJSON_Errors(t *testing.T) {
 }
 
 func TestRun_UsageAndGatherFailures(t *testing.T) {
+	t.Run("retired attestation-endpoint mode is a usage error, not an alias", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: "x", mode: "attestation-endpoint"}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "attest-pq") {
+			t.Errorf("code = %d, want %d with the valid mode list; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("unknown mode is a usage error", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		if code := run(context.Background(), config{url: "x", mode: "bogus"}, &out, &errOut); code != exitUsage {
+			t.Errorf("code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
 	t.Run("policy error", func(t *testing.T) {
 		var out, errOut bytes.Buffer
 		if code := run(context.Background(), config{minTCBSNP: 256, url: "x"}, &out, &errOut); code != exitUsage {

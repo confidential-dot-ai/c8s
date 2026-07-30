@@ -18,8 +18,19 @@ type SessionPublicKey struct {
 }
 
 const (
-	// ProtocolVersion is the c8s-verify wire version stamped on every bundle.
+	// ProtocolVersion is the attest-pq identity-transcript domain: the exact
+	// string overenc.IdentityTranscriptHash frames into report_data. It is a
+	// hash input shipped in deployed evidence, so it never changes; the wire
+	// discriminator clients check is the per-endpoint binding identifier below.
 	ProtocolVersion = "c8s-verify/v1"
+
+	// BindingAttestPQ / BindingAttestLB are the response binding identifiers
+	// carried in AttestationBundle.Version by the two explicit attestation
+	// endpoints. A client requires the identifier selected by its endpoint
+	// mode and rejects the other response shape even if its evidence is
+	// otherwise valid — there is no negotiation, alias, or fallback.
+	BindingAttestPQ = "c8s/attest-pq/v1"
+	BindingAttestLB = "c8s/attest-lb/v1"
 
 	// MeshIdentityProofECDSASHA384 is the proof-of-possession algorithm.
 	MeshIdentityProofECDSASHA384 = "ecdsa-sha384"
@@ -37,27 +48,34 @@ type MeshIdentityProof struct {
 	Signature    string `json:"signature"`      // base64url ASN.1 DER ECDSA signature
 }
 
-// AttestationBundle is the response body of
-// GET /.well-known/c8s/attestation?nonce=<b64url>[&pq=false]. The default
-// (over-encryption) response binds report_data to the per-session hybrid key
-// and the mesh identity; pq=false selects the tls-cert response, whose
-// report_data commits to the LB's serving-leaf SPKI instead, for clients
-// (e.g. TEErminator Flow B) that ride the validated upstream TLS rather than
-// the post-quantum tunnel. The client knows which shape it asked for; the
-// response carries no discriminator.
+// AttestationBundle is the response body of the two explicit attestation
+// endpoints, GET /.well-known/c8s/attest-pq?nonce=<b64url> and
+// GET /.well-known/c8s/attest-lb?nonce=<b64url>. attest-pq binds report_data
+// to the per-session hybrid key and the mesh identity
+// (overenc.IdentityTranscriptHash); attest-lb binds it to the exact outer
+// serving leaf plus the mesh identity (overenc.LBTranscriptHash) for native
+// clients that ride ordinary nginx TLS. Version carries the endpoint's
+// binding identifier (BindingAttestPQ / BindingAttestLB); a client requires
+// the one its endpoint mode selects.
 type AttestationBundle struct {
-	Version    string          `json:"version"`      // ProtocolVersion
+	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
 	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
 	Generation string          `json:"generation"`   // AMD gen for "snp": milan|genoa|turin; empty otherwise
 	Nonce      string          `json:"nonce"`        // echoed client nonce (b64url)
 	Evidence   json.RawMessage `json:"evidence"`     // platform-shaped attestation-rs evidence
-	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data; empty for tls-cert
-	// SessionPubKey is the per-session over-encryption key, present only for the
-	// over-encryption response; omitted (nil) for tls-cert.
+	CDSCertPEM string          `json:"cds_cert_pem"` // exact mesh leaf + issuing CA committed by report_data
+	// SessionPubKey is the per-session over-encryption key, present only for
+	// the attest-pq response; attest-lb creates no session.
 	SessionPubKey *SessionPublicKey `json:"session_pubkey,omitempty"`
-	// IdentityProof is present for the over-encryption response: it proves
-	// possession of the mesh leaf committed by report_data.
+	// IdentityProof proves possession of the mesh leaf committed by
+	// report_data, over the endpoint's transcript.
 	IdentityProof *MeshIdentityProof `json:"identity_proof,omitempty"`
+	// ServingLeafSHA256 (attest-lb only) is the unpadded base64url SHA-256 of
+	// the serving-leaf DER the sidecar committed into report_data.
+	// Informational: the client MUST recompute this hash from the leaf it
+	// observed on its own TLS connection and verify the transcript with that
+	// value — trusting the served field would let a relay substitute the leaf.
+	ServingLeafSHA256 string `json:"serving_leaf_sha256,omitempty"`
 }
 
 // HandshakeRequest is the body of POST /.well-known/c8s/handshake: the client

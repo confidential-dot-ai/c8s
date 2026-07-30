@@ -248,10 +248,13 @@ data:
 
             {{- end }}
             {{- if .Values.tlsLb.attest.enabled }}
-            # c8s-verify/v1 attestation + over-encryption sidecar (loopback).
+            # c8s-verify attestation + over-encryption sidecar (loopback).
             # nginx serves the static cert(s) via discovery above; the dynamic
-            # per-session attestation challenge and PQ handshake are proxied to
-            # the in-pod `cds-attest` sidecar.
+            # per-session endpoints — the explicit attest-pq and attest-lb
+            # challenges and the PQ handshake/tunnel — are proxied to the
+            # in-pod `cds-attest` sidecar. The prefix also covers the retired
+            # /attestation path so the sidecar serves its explicit versioned
+            # 400 (no alias or downgrade) instead of nginx 404ing it.
             location /.well-known/c8s/ {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}

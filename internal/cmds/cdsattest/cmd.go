@@ -22,10 +22,12 @@ type config struct {
 	host                 string
 	port                 int
 	logLevel             string
+	frontDoorMode        string
 	servingCertFile      string
 	meshIdentityCertFile string
 	meshIdentityKeyFile  string
 	meshIdentityCAFile   string
+	expectedWorkload     string
 	evidenceFixture      string
 	attestationAPIURL    string
 	platform             string
@@ -42,26 +44,28 @@ type config struct {
 }
 
 // NewCmd returns the `cds-attest` subcommand: a sidecar that runs inside the
-// tls-lb pod and serves the *dynamic* browser-facing attestation +
-// over-encryption endpoints (the c8s-verify/v1 protocol). The tls-lb nginx
+// tls-lb pod and serves the *dynamic* client-facing attestation +
+// over-encryption endpoints (the c8s-verify protocol). The tls-lb nginx
 // front-end terminates public TLS, serves the static CDS/mesh-CA certs, and
-// reverse-proxies /.well-known/c8s/attestation, /handshake, and the
+// reverse-proxies /.well-known/c8s/attest-pq, /attest-lb, /handshake, and the
 // over-encrypted application paths to this sidecar on loopback.
 func NewCmd() *cobra.Command {
 	var cfg config
 	cmd := &cobra.Command{
 		Use:   "cds-attest",
-		Short: "Run the tls-lb attestation + over-encryption sidecar (c8s-verify/v1)",
+		Short: "Run the tls-lb attestation + over-encryption sidecar (attest-pq / attest-lb)",
 		RunE:  func(_ *cobra.Command, _ []string) error { return run(cfg) },
 	}
 	f := cmd.Flags()
 	f.StringVar(&cfg.host, "host", "127.0.0.1", "listen host (loopback: nginx proxies to it)")
 	f.IntVarP(&cfg.port, "port", "p", 8800, "listen port")
 	f.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn, error")
-	f.StringVar(&cfg.servingCertFile, "serving-cert-file", "", "path to the LB serving-leaf PEM (the cert nginx presents). Enables the tls-cert attestation binding (GET /.well-known/c8s/attestation?pq=false): report_data binds this leaf's SPKI. Re-read per request to follow get-cert rotation.")
-	f.StringVar(&cfg.meshIdentityCertFile, "mesh-identity-cert-file", "", "TEE-held mesh leaf PEM for the identity-bound PQ binding (re-read per request)")
-	f.StringVar(&cfg.meshIdentityKeyFile, "mesh-identity-key-file", "", "TEE-held mesh leaf private key for the identity-bound PQ binding (re-read per request)")
+	f.StringVar(&cfg.frontDoorMode, "front-door-mode", "", "REQUIRED: which credential terminates public TLS in front of this sidecar: cds (TEE-held mesh-issued serving key; attest-lb served) or webpki (host-visible Secret; attest-lb refused with unsupported_front_door)")
+	f.StringVar(&cfg.servingCertFile, "serving-cert-file", "", "path to the LB serving-leaf PEM (the cert nginx presents). In cds front-door mode, GET /.well-known/c8s/attest-lb binds report_data to this exact leaf DER. Re-read per request to follow get-cert rotation.")
+	f.StringVar(&cfg.meshIdentityCertFile, "mesh-identity-cert-file", "", "TEE-held mesh leaf PEM whose possession both attestation endpoints prove (re-read per request)")
+	f.StringVar(&cfg.meshIdentityKeyFile, "mesh-identity-key-file", "", "TEE-held mesh leaf private key matching --mesh-identity-cert-file (re-read per request)")
 	f.StringVar(&cfg.meshIdentityCAFile, "mesh-identity-ca-file", "", "mesh CA bundle that issued the identity leaf (re-read per request)")
+	f.StringVar(&cfg.expectedWorkload, "expected-workload", "", "gate /readyz on the mesh identity leaf carrying a matched-workload stamp with this exact name; empty keeps /readyz unconditionally 200")
 	f.StringVar(&cfg.evidenceFixture, "evidence-fixture", "", "DEV ONLY: serve recorded TEE evidence from this file instead of the attestation-api")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
 	f.StringVar(&cfg.platform, "platform", "snp", "TEE platform: snp|az-snp|az-tdx|tdx")
@@ -78,6 +82,12 @@ func NewCmd() *cobra.Command {
 
 func run(cfg config) error {
 	logger := newLogger(cfg.logLevel)
+
+	// No default: serving attest-lb is a trust decision about where the
+	// serving key lives, so the deployer must state it.
+	if cfg.frontDoorMode != FrontDoorModeCDS && cfg.frontDoorMode != FrontDoorModeWebPKI {
+		return fmt.Errorf("--front-door-mode must be %q or %q, got %q", FrontDoorModeCDS, FrontDoorModeWebPKI, cfg.frontDoorMode)
+	}
 
 	var provider EvidenceProvider
 	switch {
@@ -120,10 +130,12 @@ func run(cfg config) error {
 	srv := NewServer(Config{
 		Logger:               logger,
 		Evidence:             provider,
+		FrontDoorMode:        cfg.frontDoorMode,
 		ServingCertFile:      cfg.servingCertFile,
 		MeshIdentityCertFile: cfg.meshIdentityCertFile,
 		MeshIdentityKeyFile:  cfg.meshIdentityKeyFile,
 		MeshIdentityCAFile:   cfg.meshIdentityCAFile,
+		ExpectedWorkload:     cfg.expectedWorkload,
 		Backend:              backend,
 		SessionTTL:           cfg.sessionTTL,
 	})

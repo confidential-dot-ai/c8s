@@ -1,0 +1,26 @@
+[
+  {
+    "description": "repeated single-byte fields",
+    "nonce_b64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "serving_leaf_der_b64": "oKCgoKCgoKA=",
+    "mesh_leaf_der_b64": "sbGxsbGxsbE=",
+    "mesh_ca_der_b64": "wsLCwsLCwsI=",
+    "report_data_b64": "c7jCsDEm+eu6BEGEm7GMIkzfG2K1e68kjEuhiXDZQDcKfQ8dgjlBZj+qn+OhhLIe"
+  },
+  {
+    "description": "ascii DER placeholders, distinct lengths",
+    "nonce_b64": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    "serving_leaf_der_b64": "c2VydmluZy1sZWFmLWRlcg==",
+    "mesh_leaf_der_b64": "bWVzaC1sZWFmLWRlcg==",
+    "mesh_ca_der_b64": "bWVzaC1jYS1kZXI=",
+    "report_data_b64": "LTuGpmM9qbEUCqWy1qGCYcMof8Yu+iI2ISbyspGrtRVOmP5fr8J4wFQmI3uAUnhF"
+  },
+  {
+    "description": "identical serving and mesh leaf bytes still hash distinct positions",
+    "nonce_b64": "//////////////////////////////////////////8=",
+    "serving_leaf_der_b64": "c2FtZS1kZXI=",
+    "mesh_leaf_der_b64": "c2FtZS1kZXI=",
+    "mesh_ca_der_b64": "aXNzdWVyLWRlcg==",
+    "report_data_b64": "ef1AXTZcVYVpvHcr92+B03bYfPQ/Y1tsdcGQ59repycHoeY3zNVIAch0BK3yIZQz"
+  }
+]
