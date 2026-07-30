@@ -1758,11 +1758,13 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 }
 
 // componentEnabledPredicate reports the effective enabled value at a component's
-// enabledPath, given the chart defaults and the --set overrides assembled so
-// far. attestationApi.enabled / nriImagePolicy.enabled are plain values fields
-// (default true) that the --cvm-mode=node/pod args flip to false via --set, so
-// the base values overlaid with those --set flags is the authoritative answer.
-// The merged tree is built once and shared across the per-component calls.
+// enabledPath, given the chart defaults, the operator's -f values files, and the
+// --set overrides assembled so far — in helm's precedence order (defaults < -f
+// files in order < --set). Getting the -f files right matters for a component
+// that defaults to disabled and is turned on only through -f (e.g.
+// volumed.enabled): without them the resolver would treat it as off and skip
+// pinning its digest, and the render then fails with no image ref. The merged
+// tree is built once and shared across the per-component calls.
 func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []string) (func(valuePath string) (bool, error), error) {
 	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
 	if err != nil {
@@ -1772,12 +1774,45 @@ func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []
 	if err := yaml.Unmarshal(out, &tree); err != nil {
 		return nil, fmt.Errorf("parse chart values: %w", err)
 	}
+	// Operator -f files, lowest precedence after the chart defaults. A "-"
+	// (stdin) entry is skipped: stdin is already consumed by the caller and a
+	// component enabled only there stays invisible to the resolver — a narrow
+	// edge next to a real file, which is the documented path.
+	for _, vf := range installValues {
+		if vf == "-" {
+			continue
+		}
+		raw, err := os.ReadFile(vf)
+		if err != nil {
+			return nil, fmt.Errorf("read values file %q: %w", vf, err)
+		}
+		var overlay map[string]any
+		if err := yaml.Unmarshal(raw, &overlay); err != nil {
+			return nil, fmt.Errorf("parse values file %q: %w", vf, err)
+		}
+		mergeValues(tree, overlay)
+	}
 	if err := overlaySetArgs(tree, setArgs); err != nil {
 		return nil, err
 	}
 	return func(valuePath string) (bool, error) {
 		return boolAtPath(tree, valuePath), nil
 	}, nil
+}
+
+// mergeValues deep-merges src onto dst the way helm coalesces a -f file: a map
+// value merges recursively, anything else (scalar, list) replaces. dst is
+// mutated in place.
+func mergeValues(dst, src map[string]any) {
+	for k, sv := range src {
+		if sm, ok := sv.(map[string]any); ok {
+			if dm, ok := dst[k].(map[string]any); ok {
+				mergeValues(dm, sm)
+				continue
+			}
+		}
+		dst[k] = sv
+	}
 }
 
 // overlaySetArgs applies the scalar --set/--set-string overrides in setArgs onto
