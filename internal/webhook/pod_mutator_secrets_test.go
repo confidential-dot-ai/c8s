@@ -177,9 +177,9 @@ func TestReservedSecretsVolumeMustBeMemoryBacked(t *testing.T) {
 	}
 }
 
-// The injected volume is memory-backed and bounded: it is charged to the pod's
-// memory, so an unbounded tmpfs would let writes pressure the pod.
-func TestInjectedSecretsVolumeIsBoundedTmpfs(t *testing.T) {
+// The injected volume is memory-backed: a released value must never reach the
+// node's disk.
+func TestInjectedSecretsVolumeIsTmpfs(t *testing.T) {
 	pod := podWithApp()
 	mutateWithSecrets(t, pod, []string{"DB=/api/db"}, "")
 
@@ -194,9 +194,6 @@ func TestInjectedSecretsVolumeIsBoundedTmpfs(t *testing.T) {
 	}
 	if found.EmptyDir == nil || found.EmptyDir.Medium != corev1.StorageMediumMemory {
 		t.Fatalf("volume = %+v, want a memory-backed emptyDir", found.VolumeSource)
-	}
-	if found.EmptyDir.SizeLimit == nil || found.EmptyDir.SizeLimit.IsZero() {
-		t.Fatal("the tmpfs is unbounded")
 	}
 }
 

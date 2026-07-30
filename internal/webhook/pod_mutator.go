@@ -31,7 +31,6 @@ import (
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -123,22 +122,12 @@ const secretsVolumeName = "c8s-secrets"
 // defaultSecretDir is where the fetcher writes, matching its own default.
 const defaultSecretDir = "/run/c8s/secrets"
 
-// secretsVolumeSizeLimit bounds the tmpfs. It is charged to the pod's memory
-// (the guest's, under kata), so an unbounded one would let a workload's own
-// writes into the shared directory pressure the pod rather than fail.
-const secretsVolumeSizeLimit = "1Mi"
-
 // reservedVolumeContainerName is the injected volume fetcher. Reserved like the
 // cert containers.
 const reservedVolumeContainerName = "c8s-volume"
 
 // defaultVolumeDir is where opened volumes are mounted, one directory each.
 const defaultVolumeDir = "/run/c8s/volumes"
-
-// volumeMountSizeLimit bounds the emptyDir the node agent mounts the decrypted
-// device over. It holds nothing itself; the bound stops a workload filling node
-// memory through a mount that has not landed yet.
-const volumeMountSizeLimit = "1Mi"
 
 // reservedCertContainerName is the injected mesh-cert sidecar's name. It is
 // operator-reserved: a pod may not declare its own container under it. The
@@ -1213,16 +1202,12 @@ func int64Ptr(v int64) *int64 {
 }
 
 // secretsVolume is the memory-backed volume released values are written to.
-// Bounded: it is charged to the pod's memory, so an unbounded tmpfs would let
-// writes into the shared directory pressure the pod instead of failing.
 func secretsVolume() corev1.Volume {
-	limit := resource.MustParse(secretsVolumeSizeLimit)
 	return corev1.Volume{
 		Name: secretsVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &limit,
+				Medium: corev1.StorageMediumMemory,
 			},
 		},
 	}
@@ -1331,13 +1316,10 @@ func volumeNames(specs []string) []string {
 // resolves the target with RESOLVE_NO_XDEV, so a memory-backed (tmpfs)
 // placeholder is unreachable by construction.
 func openedVolume(name string) corev1.Volume {
-	limit := resource.MustParse(volumeMountSizeLimit)
 	return corev1.Volume{
 		Name: volumed.KubeVolumeName(name),
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				SizeLimit: &limit,
-			},
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	}
 }
