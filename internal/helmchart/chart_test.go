@@ -5318,6 +5318,43 @@ func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
 	})
 }
 
+// The volumed image entrypoint is ["/app/c8s", "volumed"], so the DaemonSet's
+// args must NOT repeat the subcommand. Shipping it once produced
+// `unknown command "volumed" for "c8s volumed"` and a CrashLoopBackOff daemon
+// that no chart test caught, because nothing asserted on the invocation. cds
+// has the same shape (its image entrypoint carries "cds") and its args start at
+// a flag, so this checks the convention rather than one literal.
+func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.image.tag=dev",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		forbid string
+	}{
+		{"volumed", renderedDaemonSetContainer(t, out, "c8s-volumed", "volumed").Args, "volumed"},
+		{"cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "cds"},
+	} {
+		if len(tc.args) == 0 {
+			t.Errorf("%s: no args rendered", tc.name)
+			continue
+		}
+		if tc.args[0] == tc.forbid {
+			t.Errorf("%s: args start with %q, but the image entrypoint already supplies it; the container would run `c8s %s %s ...` and exit",
+				tc.name, tc.forbid, tc.forbid, tc.forbid)
+		}
+		if !strings.HasPrefix(tc.args[0], "-") {
+			t.Errorf("%s: first arg %q is not a flag; args must begin where the entrypoint leaves off", tc.name, tc.args[0])
+		}
+	}
+}
+
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live

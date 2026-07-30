@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
@@ -16,6 +18,11 @@ import (
 
 // config represents the plugin configuration.
 type config struct {
+	// Platform types the RA-TLS identity the sandbox-digests endpoint serves
+	// to CDS, as an attestation-api platform string; empty means snp. It must
+	// name the node's actual CPU TEE — CDS fails closed when the certificate's
+	// TEE type and the evidence envelope's platform disagree.
+	Platform       string               `yaml:"platform"`
 	Plugin         pluginConfig         `yaml:"plugin"`
 	Allowlist      allowlistConfig      `yaml:"allowlist"`
 	Containerd     containerdConfig     `yaml:"containerd"`
@@ -165,6 +172,18 @@ func loadConfig(path string) (*config, error) {
 	return cfg, nil
 }
 
+// NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
+// RA-TLS extension records, matching what CDS does with its own
+// --ratls-platform. Defaulting here rather than in loadConfig keeps every
+// construction path on the same value, including callers that build a config
+// literal and validate it directly.
+func (c *config) NormalizedPlatform() string {
+	if strings.TrimSpace(c.Platform) == "" {
+		return ratls.NormalizePlatform(string(types.PlatformSnp))
+	}
+	return ratls.NormalizePlatform(c.Platform)
+}
+
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
@@ -175,6 +194,13 @@ func (c *config) AllowlistEnabled() bool {
 
 // Validate checks the configuration for errors.
 func (c *config) Validate() error {
+	// Reject at load rather than at the first CDS handshake: a wrong platform
+	// produces a peer-attestation failure on the CDS side that names the
+	// evidence platform, not this setting, so the cause is several hops from
+	// the symptom.
+	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
+		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
+	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
 		return fmt.Errorf("allowlist.always_allow must be non-empty when pull is configured (cold-boot baseline)")
 	}

@@ -179,6 +179,8 @@ install image + CDS digest so chart upgrades can roll.
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
 {{- $attestationNodePort := int $root.Values.attestationApi.service.nodePort -}}
+{{/* Must stay the value CDS runs with: the two ends of one mutually-attested connection. */}}
+platform: {{ $root.Values.cds.ratlsPlatform | quote }}
 plugin:
   health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" $root) | quote }}
 workload_claims:

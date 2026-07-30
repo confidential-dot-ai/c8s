@@ -379,6 +379,15 @@ func TestParseTEEType(t *testing.T) {
 	}{
 		{"sev-snp", TEETypeSEVSNP, false},
 		{"tdx", TEETypeTDX, false},
+		// Aliases resolve here, so a caller can pass the platform string its
+		// own config carries without pre-normalizing.
+		{"snp", TEETypeSEVSNP, false},
+		{"az-snp", TEETypeSEVSNP, false},
+		{"gcp-snp", TEETypeSEVSNP, false},
+		{"az-tdx", TEETypeTDX, false},
+		{"gcp-tdx", TEETypeTDX, false},
+		{"SEV-SNP", TEETypeSEVSNP, false},
+		{"", 0, true},
 		{"unknown", 0, true},
 	}
 	for _, tt := range tests {

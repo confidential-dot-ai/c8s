@@ -3,6 +3,7 @@ package nriimagepolicy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -416,4 +417,64 @@ policy:
 	if len(cfg.Policy.LabelRules) != 1 {
 		t.Fatalf("expected 1 label rule, got %d", len(cfg.Policy.LabelRules))
 	}
+}
+
+// The sandbox-digests endpoint types its RA-TLS identity with this platform and
+// CDS refuses a peer whose type disagrees with the evidence envelope the
+// attestation-api returns. Hardcoding it to snp denied every sandbox token on a
+// TDX node, and the resulting error names the evidence platform rather than this
+// setting, so the cause sits several hops from the symptom.
+func TestConfigPlatform(t *testing.T) {
+	const floor = `
+allowlist:
+  always_allow:
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000": "example.com/img@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+`
+	t.Run("defaults to snp so existing SNP deployments are unchanged", func(t *testing.T) {
+		cfg := writeAndLoad(t, floor)
+		if got := cfg.NormalizedPlatform(); got != "sev-snp" {
+			t.Errorf("NormalizedPlatform() = %q, want sev-snp", got)
+		}
+	})
+
+	t.Run("tdx is carried through", func(t *testing.T) {
+		cfg := writeAndLoad(t, "platform: tdx\n"+floor)
+		if got := cfg.NormalizedPlatform(); got != "tdx" {
+			t.Errorf("NormalizedPlatform() = %q, want tdx", got)
+		}
+	})
+
+	t.Run("az-tdx normalizes onto tdx, matching CDS", func(t *testing.T) {
+		cfg := writeAndLoad(t, "platform: az-tdx\n"+floor)
+		if got := cfg.NormalizedPlatform(); got != "tdx" {
+			t.Errorf("NormalizedPlatform() = %q, want tdx", got)
+		}
+	})
+
+	t.Run("an unknown platform is refused at load", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(path, []byte("platform: nitro\n"+floor), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadConfig(path)
+		if err == nil {
+			t.Fatal("loadConfig accepted an unsupported platform")
+		}
+		if !strings.Contains(err.Error(), "not a supported CPU TEE") {
+			t.Errorf("error %q does not name the cause", err)
+		}
+	})
+}
+
+func writeAndLoad(t *testing.T, body string) *config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	return cfg
 }

@@ -423,7 +423,7 @@ func NewServerTLSConfig(cfg *ServerConfig) (*tls.Config, *CertManager, error) {
 		if cfg.Platform == "" {
 			return nil, nil, fmt.Errorf("ratls: Platform is required")
 		}
-		if err := validatePlatform(cfg.Platform); err != nil {
+		if err := ValidatePlatform(cfg.Platform); err != nil {
 			return nil, nil, err
 		}
 		if cfg.AttestFunc == nil {
@@ -519,7 +519,7 @@ func NewClientTLSConfig(cfg *ClientConfig) (*tls.Config, *CertManager, error) {
 			return nil, nil, fmt.Errorf("ratls: Platform and AttestFunc must both be set or both unset")
 		}
 		if cfg.Platform != "" {
-			if err := validatePlatform(cfg.Platform); err != nil {
+			if err := ValidatePlatform(cfg.Platform); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -680,8 +680,9 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 // NormalizePlatform maps the platform aliases used across the stack (cloud
 // prefixes like az-/gcp-, and "snp") to the two canonical values the RA-TLS
 // package understands: "sev-snp" and "tdx". Unknown values pass through
-// lowercased/trimmed so validatePlatform can reject them with a clear error.
-// Callers normalize before NewServerTLSConfig/NewClientTLSConfig.
+// lowercased/trimmed so ValidatePlatform can reject them with a clear error.
+// Call it to canonicalize a value for display or comparison; the package
+// entry points normalize their own input.
 func NormalizePlatform(platform string) string {
 	switch p := strings.ToLower(strings.TrimSpace(platform)); p {
 	case "snp", "sev-snp", "az-snp", "gcp-snp":
@@ -693,20 +694,18 @@ func NormalizePlatform(platform string) string {
 	}
 }
 
-// validatePlatform checks that the platform string refers to an implemented
+// ValidatePlatform checks that the platform string refers to an implemented
 // TEE type. Call at config creation time to fail fast instead of at first
 // handshake.
-func validatePlatform(platform string) error {
-	switch platform {
-	case "sev-snp", "tdx":
-		return nil
-	default:
-		return fmt.Errorf("%w: %q", ErrUnsupportedTEE, platform)
-	}
+func ValidatePlatform(platform string) error {
+	_, err := parseTEEType(platform)
+	return err
 }
 
+// parseTEEType resolves any alias NormalizePlatform accepts, so callers can
+// pass the platform string their own config carries.
 func parseTEEType(platform string) (TEEType, error) {
-	switch platform {
+	switch NormalizePlatform(platform) {
 	case "sev-snp":
 		return TEETypeSEVSNP, nil
 	case "tdx":
