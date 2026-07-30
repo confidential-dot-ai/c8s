@@ -152,15 +152,16 @@ func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 		t.Error("a pre-declared unpropagated mount survived")
 	}
 
-	// And the volume itself is the webhook's, bounded.
+	// And the volume itself is the webhook's: a default-medium emptyDir, the
+	// only shape volumed can mount the opened device over.
 	var found *corev1.Volume
 	for i := range pod.Spec.Volumes {
 		if pod.Spec.Volumes[i].Name == name {
 			found = &pod.Spec.Volumes[i]
 		}
 	}
-	if found == nil || found.EmptyDir == nil || found.EmptyDir.SizeLimit == nil {
-		t.Fatalf("volume = %+v, want the webhook's bounded emptyDir", found)
+	if found == nil || found.EmptyDir == nil || found.EmptyDir.Medium != corev1.StorageMediumDefault {
+		t.Fatalf("volume = %+v, want the webhook's default-medium emptyDir", found)
 	}
 }
 
