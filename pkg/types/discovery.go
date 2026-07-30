@@ -30,8 +30,12 @@ type DiscoveryDocument struct {
 // so a client can complete the attest-once step without reaching CDS — CDS is
 // typically cluster-internal and not routable from a browser. Republishing is
 // safe because the certificate is self-authenticating: it carries hardware
-// evidence binding its own public key and claims, so a tampered or substituted
-// copy fails verification at the client.
+// evidence binding its own public key and claims, so a tampered or forged
+// copy fails verification at the client. It does NOT prove freshness: the
+// certificate carries no client challenge, so an older genuine one substituted
+// here still verifies until it expires. Clients must enforce the validity
+// window (and refuse notBefore rollback where they cache) to bound that
+// staleness — hardware evidence alone gives no replay immunity.
 type CDSIdentityDiscovery struct {
 	// CertificatePEM is CDS's self-signed RA-TLS certificate.
 	CertificatePEM string `json:"certificate_pem"`
@@ -40,6 +44,9 @@ type CDSIdentityDiscovery struct {
 	// fingerprint is precisely the signal to re-attest.
 	CertificateSHA256 string `json:"certificate_sha256"`
 	// ObservedAt is when the publishing workload verified it (RFC3339).
+	// Informational only — it travels outside the certificate and outside any
+	// signature, so it is trivially forgeable and MUST NOT be a trust input.
+	// Freshness judgements come from the certificate's signed validity window.
 	ObservedAt string `json:"observed_at,omitempty"`
 }
 

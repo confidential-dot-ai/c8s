@@ -312,6 +312,7 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 	oc := newOutcome(cfg, ev, result, verr, policy)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
+	applyCertificatePolicy(&oc, ev)
 	applyClaimsPolicy(&oc, ev, policy, opKeys)
 	applySandboxPolicy(&oc, cfg, ev)
 	render(cfg, oc, out)
@@ -890,6 +891,55 @@ func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, op
 	}
 	if ev.configClaims != nil && len(opKeys.digest) > 0 && !bytes.Equal(opKeys.digest, ev.configClaims.OperatorKeysDigest) {
 		fail("served /operator-keys digest %x does not match the attested config-claims digest %x", opKeys.digest, ev.configClaims.OperatorKeysDigest)
+	}
+}
+
+// notBeforeSkew is how far in the future a certificate's NotBefore may lie
+// before the verdict fails: enough for ordinary clock drift between the issuer
+// and this machine, without materially extending what a replayed certificate
+// can claim.
+const notBeforeSkew = time.Minute
+
+// applyCertificatePolicy authenticates the BODY of certificate-sourced
+// evidence and enforces its validity window. REPORTDATA covers the public key
+// and the config-claims bytes and nothing else — the validity window, serial
+// and subject live outside it. For a self-signed certificate (CDS's identity)
+// the self-signature by the attested key is what upgrades those fields from
+// attacker-chosen to TEE-asserted, so it is required before the window is
+// worth reading; skipping it would let anyone holding a genuine certificate
+// rewrite its notAfter and replay the pair forever. The window is then the
+// ONLY bound on replaying an old-but-internally-consistent certificate, so it
+// is enforced for every certificate-sourced verdict. Mirrors the JS
+// verifier's attestCDSIdentity. It only ever demotes Verified.
+func applyCertificatePolicy(oc *Outcome, ev *evidence) {
+	if ev.leaf == nil || !oc.Verified {
+		return
+	}
+	fail := func(format string, args ...any) {
+		oc.Verified = false
+		if oc.Error == "" {
+			oc.Error = fmt.Sprintf(format, args...)
+		}
+	}
+	cert := ev.leaf
+	if bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+		if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+			fail("certificate is not self-signed by the attested key — the hardware evidence vouches for the key and claims, but the certificate body around them (validity window, serial, subject) has been altered: %v", err)
+			return
+		}
+	}
+	// A mesh-signed leaf's body is authenticated by its chain instead
+	// (applySandboxPolicy's --mesh-ca check); its window is still enforced
+	// here so an expired leaf cannot verify.
+	now := time.Now()
+	if now.Add(notBeforeSkew).Before(cert.NotBefore) {
+		fail("certificate is not yet valid: notBefore %s is after the current time %s (beyond clock skew)",
+			cert.NotBefore.Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+		return
+	}
+	if now.After(cert.NotAfter) {
+		fail("certificate expired at %s: the issuer re-issues on policy change and renewal, so an expired certificate is a stale snapshot being replayed, not the state in force",
+			cert.NotAfter.Format(time.RFC3339))
 	}
 }
 

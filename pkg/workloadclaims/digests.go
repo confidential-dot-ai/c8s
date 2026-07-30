@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // DigestsPort is the port every inventory serves its digests endpoint on, and
@@ -374,7 +375,16 @@ func (c *DigestsClient) FetchSandbox(ctx context.Context, host, sandboxID string
 }
 
 // RequireContainers returns the per-container detail, refusing an answer that
-// cannot support a (digest, argv) decision.
+// cannot support a (digest, argv) decision — and one whose two views of the
+// sandbox disagree.
+//
+// Digests and Containers are rendered from the same admission record, so on an
+// honest inventory their deduplicated digest sets are identical. A response
+// where they diverge is malformed or tampered — one consumer gates on Digests
+// while another stamps from Containers, so a difference would slip past
+// whichever check only saw its half. Both sides are parsed with
+// types.ParseDigest so a malformed entry in either is refused rather than
+// excluded from the comparison.
 func (r SandboxDigestsResponse) RequireContainers() ([]SandboxContainer, error) {
 	if len(r.Containers) == 0 {
 		if len(r.Digests) == 0 {
@@ -382,9 +392,30 @@ func (r SandboxDigestsResponse) RequireContainers() ([]SandboxContainer, error) 
 		}
 		return nil, ErrSandboxContainersUnsupported
 	}
+	flat := make(map[string]bool, len(r.Digests))
+	for _, d := range r.Digests {
+		digest, err := types.ParseDigest(d)
+		if err != nil {
+			return nil, fmt.Errorf("workloadclaims: inventory digest %q: %w", d, err)
+		}
+		flat[digest.String()] = true
+	}
+	detailed := make(map[string]bool, len(r.Containers))
 	for _, c := range r.Containers {
-		if c.Digest == "" {
-			return nil, fmt.Errorf("workloadclaims: inventory reported a container with no digest")
+		digest, err := types.ParseDigest(c.Digest)
+		if err != nil {
+			return nil, fmt.Errorf("workloadclaims: inventory container digest %q: %w", c.Digest, err)
+		}
+		detailed[digest.String()] = true
+	}
+	for d := range detailed {
+		if !flat[d] {
+			return nil, fmt.Errorf("workloadclaims: inventory reports container %s outside its digest set — the response's two views of the sandbox disagree", d)
+		}
+	}
+	for d := range flat {
+		if !detailed[d] {
+			return nil, fmt.Errorf("workloadclaims: inventory digest %s has no per-container detail — the response's two views of the sandbox disagree", d)
 		}
 	}
 	return r.Containers, nil
