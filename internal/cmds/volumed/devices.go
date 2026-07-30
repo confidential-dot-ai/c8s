@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 )
 
 // SerialPrefix precedes the volume name in a device's virtio-block serial.
 // VIRTIO_BLK_ID_BYTES is 20, so this leaves 12 characters for the name — which
 // is why `c8s volume create` caps it there.
-const SerialPrefix = "c8s-vol-"
+const SerialPrefix = volume.SerialPrefix
 
 // SysBlock is the sysfs directory listing block devices.
 const SysBlock = "/sys/block"
@@ -70,21 +72,12 @@ func (d SerialDevices) Device(name string) (string, error) {
 	}
 }
 
-// maxSerialNameLen is what remains of VIRTIO_BLK_ID_BYTES after SerialPrefix.
-// A longer name is silently truncated by the transport, so two volumes would
-// present the same serial with nothing able to tell them apart.
-const maxSerialNameLen = 20 - len(SerialPrefix)
-
 // ValidVolumeName reports whether name can be both a Kubernetes volume and a
 // virtio serial. The webhook, the sidecar and this daemon all apply it, so a
 // name accepted at admission is one the node can resolve to a device.
 func ValidVolumeName(name string) error {
-	if !volumeNameRE.MatchString(name) {
-		return fmt.Errorf("volumed: volume name %q is not a dns-1123 label", name)
-	}
-	if len(name) > maxSerialNameLen {
-		return fmt.Errorf("volumed: volume name %q is %d characters; a device serial holds %d",
-			name, len(name), maxSerialNameLen)
+	if err := volume.ValidVolumeName(name); err != nil {
+		return fmt.Errorf("volumed: %w", err)
 	}
 	return nil
 }

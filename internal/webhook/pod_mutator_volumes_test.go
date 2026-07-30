@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +30,7 @@ func TestNoVolumesRequestedInjectsNothing(t *testing.T) {
 		t.Fatal("the fetcher was injected without a volumes annotation")
 	}
 	for _, v := range pod.Spec.Volumes {
-		if strings.HasPrefix(v.Name, volumed.KubeVolumePrefix) {
+		if strings.HasPrefix(v.Name, volume.KubeVolumePrefix) {
 			t.Fatalf("volume %q was injected without a volumes annotation", v.Name)
 		}
 	}
@@ -72,7 +72,7 @@ func TestVolumeMountIsReadOnlyAndPropagated(t *testing.T) {
 	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "")
 
 	app := workloadContainer(t, pod, "app")
-	m := mountNamed(app, volumed.KubeVolumeName("weights"))
+	m := mountNamed(app, volume.KubeVolumeName("weights"))
 	if m == nil {
 		t.Fatalf("app has no volume mount; mounts = %v", mountNames(app))
 	}
@@ -92,7 +92,7 @@ func TestVolumeDirOverride(t *testing.T) {
 	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "/models")
 
 	app := workloadContainer(t, pod, "app")
-	if m := mountNamed(app, volumed.KubeVolumeName("weights")); m == nil || m.MountPath != "/models/weights" {
+	if m := mountNamed(app, volume.KubeVolumeName("weights")); m == nil || m.MountPath != "/models/weights" {
 		t.Errorf("mount path = %v, want /models/weights", m)
 	}
 }
@@ -106,7 +106,7 @@ func TestVolumeDirOverride(t *testing.T) {
 func TestInjectedVolumePlaceholderSharesPodFilesystem(t *testing.T) {
 	pod := podWithApp()
 	mutateWithVolumes(t, pod, []string{"weights=/tenant-a/volumes/weights"}, "")
-	name := volumed.KubeVolumeName("weights")
+	name := volume.KubeVolumeName("weights")
 	for _, v := range pod.Spec.Volumes {
 		if v.Name != name {
 			continue
@@ -124,7 +124,7 @@ func TestInjectedVolumePlaceholderSharesPodFilesystem(t *testing.T) {
 
 func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 	pod := podWithApp()
-	name := volumed.KubeVolumeName("weights")
+	name := volume.KubeVolumeName("weights")
 	pod.Spec.Volumes = []corev1.Volume{{
 		Name:         name,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -170,8 +170,8 @@ func TestPreDeclaredVolumeAndMountAreOverwritten(t *testing.T) {
 // it is meant to protect.
 func TestReservedVolumePrefixMustBeMemoryBacked(t *testing.T) {
 	for _, name := range []string{
-		volumed.KubeVolumeName("weights"),
-		volumed.KubeVolumePrefix + "not-even-requested",
+		volume.KubeVolumeName("weights"),
+		volume.KubeVolumePrefix + "not-even-requested",
 	} {
 		pod := podWithApp()
 		pod.Spec.Volumes = []corev1.Volume{{
@@ -204,7 +204,7 @@ func TestEphemeralContainerMayNotMountAnOpenedVolume(t *testing.T) {
 	pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{
 		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
 			Name:         "debug",
-			VolumeMounts: []corev1.VolumeMount{{Name: volumed.KubeVolumeName("weights")}},
+			VolumeMounts: []corev1.VolumeMount{{Name: volume.KubeVolumeName("weights")}},
 		},
 	}}
 	if err := rejectEphemeralReservedMounts(pod); err == nil {
