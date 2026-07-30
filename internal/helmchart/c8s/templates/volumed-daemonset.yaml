@@ -62,8 +62,9 @@ spec:
             # effective caps to a non-root process; the daemon must be root.
             runAsUser: 0
             runAsGroup: 0
+          # The image entrypoint is ["/app/c8s", "volumed"], so args start at
+          # the first flag — same as cds.yaml.
           args:
-            - volumed
             - --socket-dir
             - {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
             - --kubelet-root
