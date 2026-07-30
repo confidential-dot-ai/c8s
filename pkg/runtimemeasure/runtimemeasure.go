@@ -31,7 +31,12 @@
 // "Per-workload RTMR[3] measurement".
 package runtimemeasure
 
-import "crypto/sha512"
+import (
+	"crypto/sha512"
+	"errors"
+	"regexp"
+	"strings"
+)
 
 // Size is the byte length of the register and of every event (SHA-384).
 const Size = 48
@@ -97,4 +102,29 @@ func FromDigestsSeeded(seed [Size]byte, canonicalDigests []string) [Size]byte {
 // than round-tripping through a PEM parser.
 func ForOperatorKey(pubkey []byte) [Size]byte {
 	return Extend(Zero, sha512.Sum384(pubkey))
+}
+
+// hex64 matches the lowercase hex body of a sha256 digest.
+var hex64 = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// CanonicalDigest normalizes an image reference to the exact "sha256:<64-hex>"
+// string Event hashes. It accepts a bare digest, a "sha256:"-prefixed one, or
+// any "<ref>@sha256:<hex>", and folds case.
+//
+// A reference carrying no digest — a bare tag — is refused: a tag is not
+// content-bound, so it cannot name what was measured, and silently accepting
+// one would produce a register value for an image nobody can identify. Every
+// side that turns references into extends MUST go through this, so the
+// measurer and its verifiers cannot disagree about what was hashed.
+func CanonicalDigest(reference string) (string, error) {
+	s := strings.TrimSpace(reference)
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.ToLower(s)
+	s = strings.TrimPrefix(s, "sha256:")
+	if !hex64.MatchString(s) {
+		return "", errors.New("not a sha256:<64hex> digest (images must be pinned by digest; a tag is not content-bound)")
+	}
+	return "sha256:" + s, nil
 }

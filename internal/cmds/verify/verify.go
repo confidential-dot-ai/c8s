@@ -22,6 +22,8 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/internal/imagemanifest"
+
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -413,16 +415,6 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 	}, nil
 }
 
-// confosManifest is the subset of a confos build manifest.json this CLI reads:
-// the reference registers computed by the image build.
-type confosManifest struct {
-	TDX struct {
-		MRTD  string `json:"mrtd"`
-		RTMR1 string `json:"rtmr1"`
-		RTMR2 string `json:"rtmr2"`
-	} `json:"tdx"`
-}
-
 // expectedRTMRPins resolves the runtime-register pins. Returns the register
 // array and, when --image-manifest was used, the MRTD from that same manifest
 // so the caller can pin all three together.
@@ -430,52 +422,26 @@ type confosManifest struct {
 // On TDX, MRTD covers only the TDVF firmware's measured regions — the kernel
 // and rootfs are in RTMR[1] and RTMR[2]. A --measurements pin alone therefore
 // says nothing about which guest image booted, which is why --image-manifest
-// exists: it pins all three from one provenanced source.
+// exists: it pins all three from one provenanced source (internal/imagemanifest,
+// shared with get-kubeconfig so the two cannot read a manifest differently).
 func expectedRTMRPins(cfg config) (pins [4][]byte, manifestMRTD []byte, err error) {
-	parse := func(flag, s string) ([]byte, error) {
-		b, err := hex.DecodeString(strings.TrimSpace(s))
-		if err != nil {
-			return nil, fmt.Errorf("%s: not hex: %w", flag, err)
-		}
-		if len(b) != runtimemeasure.Size {
-			return nil, fmt.Errorf("%s is %d bytes (%d hex chars), want %d (%d hex chars)",
-				flag, len(b), len(strings.TrimSpace(s)), runtimemeasure.Size, runtimemeasure.Size*2)
-		}
-		return b, nil
-	}
-
 	if cfg.imageManifest != "" {
 		if cfg.expectedRTMR1Hex != "" || cfg.expectedRTMR2Hex != "" {
 			return pins, nil, fmt.Errorf("--image-manifest already pins RTMR[1] and RTMR[2]; drop --expected-rtmr1/--expected-rtmr2")
 		}
-		data, rerr := os.ReadFile(cfg.imageManifest)
-		if rerr != nil {
-			return pins, nil, fmt.Errorf("read --image-manifest: %w", rerr)
+		image, ierr := imagemanifest.Load("--image-manifest", cfg.imageManifest)
+		if ierr != nil {
+			return pins, nil, ierr
 		}
-		var m confosManifest
-		if jerr := json.Unmarshal(data, &m); jerr != nil {
-			return pins, nil, fmt.Errorf("--image-manifest: not a confos manifest.json: %w", jerr)
-		}
-		if m.TDX.MRTD == "" || m.TDX.RTMR1 == "" || m.TDX.RTMR2 == "" {
-			return pins, nil, fmt.Errorf("--image-manifest: missing tdx.mrtd/tdx.rtmr1/tdx.rtmr2 (is this a TDX image manifest?)")
-		}
-		if manifestMRTD, err = parse("--image-manifest tdx.mrtd", m.TDX.MRTD); err != nil {
-			return pins, nil, err
-		}
-		if pins[1], err = parse("--image-manifest tdx.rtmr1", m.TDX.RTMR1); err != nil {
-			return pins, nil, err
-		}
-		if pins[2], err = parse("--image-manifest tdx.rtmr2", m.TDX.RTMR2); err != nil {
-			return pins, nil, err
-		}
+		manifestMRTD, pins[1], pins[2] = image.MRTD, image.RTMR1, image.RTMR2
 	} else {
 		if cfg.expectedRTMR1Hex != "" {
-			if pins[1], err = parse("--expected-rtmr1", cfg.expectedRTMR1Hex); err != nil {
+			if pins[1], err = imagemanifest.ParseRegister("--expected-rtmr1", cfg.expectedRTMR1Hex); err != nil {
 				return pins, nil, err
 			}
 		}
 		if cfg.expectedRTMR2Hex != "" {
-			if pins[2], err = parse("--expected-rtmr2", cfg.expectedRTMR2Hex); err != nil {
+			if pins[2], err = imagemanifest.ParseRegister("--expected-rtmr2", cfg.expectedRTMR2Hex); err != nil {
 				return pins, nil, err
 			}
 		}
@@ -486,30 +452,39 @@ func expectedRTMRPins(cfg config) (pins [4][]byte, manifestMRTD []byte, err erro
 		return pins, nil, fmt.Errorf("--expected-rtmr3 and --operator-key are mutually exclusive")
 
 	case cfg.expectedRTMR3Hex != "":
-		if pins[3], err = parse("--expected-rtmr3", cfg.expectedRTMR3Hex); err != nil {
+		if pins[3], err = imagemanifest.ParseRegister("--expected-rtmr3", cfg.expectedRTMR3Hex); err != nil {
 			return pins, nil, err
 		}
 
 	case cfg.operatorKeyFile != "":
-		// The initrd hashes the pubkey FILE verbatim, so these bytes go in
-		// unmodified — parsing and re-encoding the PEM would change the digest
-		// and silently fail every comparison.
-		pub, rerr := os.ReadFile(cfg.operatorKeyFile)
+		reg, rerr := operatorKeySeed("--operator-key", cfg.operatorKeyFile)
 		if rerr != nil {
-			return pins, nil, fmt.Errorf("read --operator-key: %w", rerr)
+			return pins, nil, rerr
 		}
-		if len(pub) == 0 {
-			return pins, nil, fmt.Errorf("--operator-key: %s is empty", cfg.operatorKeyFile)
-		}
-		// Catch a private key handed over by mistake: it would derive a pin that
-		// can never match, and the failure would look like a compromised node.
-		if bytes.Contains(pub, []byte("PRIVATE KEY")) {
-			return pins, nil, fmt.Errorf("--operator-key: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", cfg.operatorKeyFile)
-		}
-		reg := runtimemeasure.ForOperatorKey(pub)
-		pins[3] = reg[:]
+		pins[3] = reg
 	}
 	return pins, manifestMRTD, nil
+}
+
+// operatorKeySeed reads an operator PUBLIC key file and returns the RTMR[3]
+// value a node launched to trust it reports. The initrd hashes the pubkey FILE
+// verbatim, so these bytes go in unmodified — parsing and re-encoding the PEM
+// would change the digest and silently fail every comparison.
+func operatorKeySeed(flag, path string) ([]byte, error) {
+	pub, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", flag, err)
+	}
+	if len(pub) == 0 {
+		return nil, fmt.Errorf("%s: %s is empty", flag, path)
+	}
+	// Catch a private key handed over by mistake: it would derive a pin that
+	// can never match, and the failure would look like a compromised node.
+	if bytes.Contains(pub, []byte("PRIVATE KEY")) {
+		return nil, fmt.Errorf("%s: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", flag, path)
+	}
+	reg := runtimemeasure.ForOperatorKey(pub)
+	return reg[:], nil
 }
 
 // expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON

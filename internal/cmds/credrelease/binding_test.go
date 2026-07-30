@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // overrideBindingPaths points the package's sysfs/staging paths at files under
@@ -127,5 +130,32 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 				t.Fatal("expected error, got nil")
 			}
 		})
+	}
+}
+
+// The anchor check compares against the BARE operator-key seed, so a register
+// that has been extended past it cannot pass — cred-release must load the key
+// before any runtime measurer starts. The refusal is correct; what this pins
+// is that the message names that cause too, instead of asserting a host
+// substitution the operator would then go hunting for. From a single hash the
+// two are indistinguishable.
+func TestVerifyKeyMeasuredRejectsExtendedRegisterWithHonestMessage(t *testing.T) {
+	pubPath, rtmrPath := overrideBindingPaths(t)
+	pub := []byte("operator public key bytes")
+	writeFileT(t, pubPath, pub)
+
+	// The register after the measurer chained one workload onto the seed.
+	const dig = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	extended := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig})
+	writeFileT(t, rtmrPath, extended[:])
+
+	_, err := LoadMeasuredOperatorKey()
+	if err == nil {
+		t.Fatal("a register extended past the seed must not satisfy the anchor check")
+	}
+	for _, want := range []string{"substituted after boot", "extended past the operator-key seed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q as a possible cause; got %v", want, err)
+		}
 	}
 }

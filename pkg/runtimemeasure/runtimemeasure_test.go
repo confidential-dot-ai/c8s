@@ -3,6 +3,7 @@ package runtimemeasure
 import (
 	"crypto/sha512"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +111,42 @@ func TestFromDigestsSeededChainsOntoOperatorKey(t *testing.T) {
 	}
 	if got == FromDigests([]string{digestA}) {
 		t.Error("seeded and unseeded results must differ, else the seed is being ignored")
+	}
+}
+
+// CanonicalDigest is the single normalization every side runs before hashing,
+// so what the measurer extends and what a verifier recomputes cannot differ.
+func TestCanonicalDigest(t *testing.T) {
+	const hexBody = "81a9c00654b3e4c75374280a5b3c6e2f094aae65b8ca23a15d84eb3c1c1810aa"
+	for _, in := range []string{
+		"sha256:" + hexBody,
+		hexBody,
+		"SHA256:" + strings.ToUpper(hexBody),
+		"ghcr.io/org/app:v1@sha256:" + hexBody,
+		"  sha256:" + hexBody + "  ",
+	} {
+		got, err := CanonicalDigest(in)
+		if err != nil {
+			t.Errorf("CanonicalDigest(%q): %v", in, err)
+			continue
+		}
+		if got != "sha256:"+hexBody {
+			t.Errorf("CanonicalDigest(%q) = %q", in, got)
+		}
+	}
+}
+
+// A tag names no content, so it cannot name what was measured.
+func TestCanonicalDigestRejects(t *testing.T) {
+	for _, in := range []string{
+		"",
+		"ghcr.io/org/app:v1",
+		"sha256:abcd",
+		"sha512:" + strings.Repeat("a", 128),
+		"sha256:" + strings.Repeat("g", 64),
+	} {
+		if got, err := CanonicalDigest(in); err == nil {
+			t.Errorf("CanonicalDigest(%q) = %q, want error", in, got)
+		}
 	}
 }
