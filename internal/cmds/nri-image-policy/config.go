@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
@@ -16,6 +18,20 @@ import (
 
 // config represents the plugin configuration.
 type config struct {
+	// Platform is the CPU TEE this node runs on, as an attestation-api
+	// platform string ("snp" or "tdx"; the az-/gcp- variants normalize onto
+	// those two). It types the RA-TLS identity the sandbox-digests endpoint
+	// serves to CDS.
+	//
+	// It is not cosmetic. CDS verifies that peer, and pkg/ratls fails closed
+	// when the certificate's TEE type and the evidence envelope's platform
+	// disagree rather than approving one platform's evidence under another's
+	// rules. Getting this wrong denies every sandbox token on the node, which
+	// denies every adopted workload a certificate.
+	//
+	// Defaults to snp, which is what this endpoint was hardcoded to before
+	// the field existed, so an SNP deployment that never sets it is unchanged.
+	Platform       string               `yaml:"platform"`
 	Plugin         pluginConfig         `yaml:"plugin"`
 	Allowlist      allowlistConfig      `yaml:"allowlist"`
 	Containerd     containerdConfig     `yaml:"containerd"`
@@ -165,6 +181,20 @@ func loadConfig(path string) (*config, error) {
 	return cfg, nil
 }
 
+// NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
+// RA-TLS extension records, matching what CDS does with its own --ratls-platform.
+//
+// Unset means SNP, which is what this endpoint was hardcoded to before the
+// field existed. Defaulting here rather than in loadConfig keeps every
+// construction path on the same value, including callers that build a config
+// literal and validate it directly.
+func (c *config) NormalizedPlatform() string {
+	if strings.TrimSpace(c.Platform) == "" {
+		return ratls.NormalizePlatform(string(types.PlatformSnp))
+	}
+	return ratls.NormalizePlatform(c.Platform)
+}
+
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
@@ -175,6 +205,18 @@ func (c *config) AllowlistEnabled() bool {
 
 // Validate checks the configuration for errors.
 func (c *config) Validate() error {
+	// Reject at load rather than at the first CDS handshake: a wrong platform
+	// produces a peer-attestation failure on the CDS side that names the
+	// evidence platform, not this setting, so the cause is several hops from
+	// the symptom.
+	// Compare the NORMALIZED form: NormalizePlatform folds "snp" onto
+	// "sev-snp", which is what ratls.parseTEEType accepts downstream, so
+	// checking against types.PlatformSnp here would reject the default.
+	switch c.NormalizedPlatform() {
+	case "sev-snp", string(types.PlatformTdx):
+	default:
+		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
+	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
 		return fmt.Errorf("allowlist.always_allow must be non-empty when pull is configured (cold-boot baseline)")
 	}

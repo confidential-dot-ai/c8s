@@ -30,7 +30,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -542,8 +541,13 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
+	// The platform comes from config, not a constant: it types the RA-TLS
+	// identity CDS verifies, and CDS fails closed when that type disagrees
+	// with the evidence envelope the attestation-api actually returns. The
+	// attest func is platform-agnostic despite its name (see its doc comment),
+	// so this string is the only thing that has to follow the hardware.
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
-		string(types.PlatformSnp),
+		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
 		attestationApiURL, measurements)
 }

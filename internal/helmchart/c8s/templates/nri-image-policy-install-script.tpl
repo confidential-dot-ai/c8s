@@ -179,6 +179,13 @@ install image + CDS digest so chart upgrades can roll.
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
 {{- $attestationNodePort := int $root.Values.attestationApi.service.nodePort -}}
+{{/*
+Same value CDS runs with (cds.ratlsPlatform). The two are the endpoints of one
+mutually-attested connection: the inventory types its RA-TLS identity with this
+and CDS refuses a peer whose type disagrees with the evidence envelope, so a
+split between them denies every sandbox token on the node.
+*/}}
+platform: {{ $root.Values.cds.ratlsPlatform | quote }}
 plugin:
   health_addr: {{ printf "unix://%s" (include "nri-image-policy.hostHealthSocket" $root) | quote }}
 workload_claims:
