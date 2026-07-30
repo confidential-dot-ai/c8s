@@ -23,8 +23,12 @@ import (
 // passed RA-TLS verification here (ratls.ClientConfig.OnVerifiedPeer fires only
 // after that succeeds). It is also safe to republish over an untrusted path:
 // the certificate is self-authenticating, carrying hardware evidence over its
-// own public key and claims, so substituting it just makes the client's
-// verification fail.
+// own public key and claims, so a tampered or forged copy fails the client's
+// verification. What republishing does NOT prevent is substituting an OLDER
+// genuine certificate: nothing in the certificate is bound to a client
+// challenge, so a replayed one verifies until its validity window closes.
+// Clients get bounded staleness — the window plus any newest-seen floor they
+// keep — not replay immunity.
 type cdsIdentityRecorder struct {
 	mu         sync.Mutex
 	cert       *x509.Certificate
