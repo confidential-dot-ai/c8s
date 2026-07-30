@@ -1,6 +1,7 @@
 package getkubeconfig
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -11,18 +12,18 @@ import (
 )
 
 // newRATLSClient builds an HTTP client whose :8443 dial is verified with the
-// operator's OWN in-process verifier (attestation-go), with no trust in the
-// guest's attestation-api and not TOFU. The cred-release serving cert embeds a
-// fresh TDX quote bound to the cert's public key (ratls.ReportDataForKey);
+// operator's OWN in-process verifier, with no trust in the guest's
+// attestation-api and not TOFU. The cred-release serving cert embeds a fresh
+// TDX quote bound to the cert's public key (ratls.ReportDataForKey);
 // verifyServerCert extracts it, asserts the quote covers this exact cert key,
-// and asserts rtmr_3 == H(op_pub). A host MITM can't forge that quote, so a
-// successful handshake proves the channel terminates inside the measured,
-// operator-key-bound guest.
+// and enforces the same image + operator-key policy as the attest gate. A host
+// MITM can't forge that quote, so a successful handshake proves the channel
+// terminates inside the expected, operator-key-bound guest image.
 //
 // Go's own chain/hostname verification is disabled (InsecureSkipVerify): the
 // serving cert is self-signed and carries no SAN for the per-launch IP. RA-TLS
 // replaces it — the quote binding is strictly stronger than a CA chain here.
-func newRATLSClient(cfg Config, operatorPubPEM []byte) *http.Client {
+func newRATLSClient(ctx context.Context, cfg Config, policy pins) *http.Client {
 	return &http.Client{
 		Timeout: cfg.Timeout,
 		Transport: &http.Transport{
@@ -32,7 +33,7 @@ func newRATLSClient(cfg Config, operatorPubPEM []byte) *http.Client {
 					if len(cs.PeerCertificates) == 0 {
 						return fmt.Errorf("ratls: server presented no certificate")
 					}
-					return verifyServerCert(cs.PeerCertificates[0], operatorPubPEM)
+					return verifyServerCert(ctx, cs.PeerCertificates[0], policy)
 				},
 			},
 		},
@@ -40,10 +41,10 @@ func newRATLSClient(cfg Config, operatorPubPEM []byte) *http.Client {
 }
 
 // verifyServerCert runs the RA-TLS check on the :8443 leaf cert: it pulls the
-// embedded TDX quote, binds it to the cert's own public key, verifies it
-// in-process with attestation-go (HW chain + report_data binding), and asserts
-// rtmr_3 equals expectedRTMR3(op_pub). Fails closed on any missing piece.
-func verifyServerCert(leaf *x509.Certificate, operatorPubPEM []byte) error {
+// embedded TDX quote, binds it to the cert's own public key, and verifies it
+// in-process against the full policy (HW chain, report_data binding, guest
+// image registers, operator-key RTMR[3]). Fails closed on any missing piece.
+func verifyServerCert(ctx context.Context, leaf *x509.Certificate, policy pins) error {
 	att, err := ratls.ExtractAttestation(leaf)
 	if err != nil {
 		return fmt.Errorf("ratls: %w", err)
@@ -69,12 +70,8 @@ func verifyServerCert(leaf *x509.Certificate, operatorPubPEM []byte) error {
 		return fmt.Errorf("ratls: marshal embedded evidence: %w", err)
 	}
 
-	// Reuse the same in-process verifier the RTMR[3] gate uses.
-	res, err := verifyEvidence(envJSON, rd[:])
-	if err != nil {
-		return fmt.Errorf("ratls: %w", err)
-	}
-	if err := checkRTMR3(res, operatorPubPEM); err != nil {
+	// Reuse the same in-process verifier and policy the attest gate uses.
+	if _, err := verifyEvidence(ctx, envJSON, rd[:], policy); err != nil {
 		return fmt.Errorf("ratls: %w", err)
 	}
 	return nil

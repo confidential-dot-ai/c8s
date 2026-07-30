@@ -336,17 +336,16 @@ func extractDigest(ann map[string]string) (string, bool) {
 	return "", false
 }
 
+// normalizeDigest returns the bare hex body of an image reference's digest.
+// The normalization itself lives in pkg/runtimemeasure alongside the extend
+// convention, so what this measurer hashes and what a verifier recomputes
+// cannot drift apart.
 func normalizeDigest(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
+	canonical, err := runtimemeasure.CanonicalDigest(s)
+	if err != nil {
+		return "", err
 	}
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "sha256:")
-	if !hex64Re.MatchString(s) {
-		return "", errors.New("not a sha256:<64hex> digest")
-	}
-	return s, nil
+	return strings.TrimPrefix(canonical, "sha256:"), nil
 }
 
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
