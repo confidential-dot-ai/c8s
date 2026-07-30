@@ -173,13 +173,20 @@ Three independent points enforce, at different strengths:
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
    container. It reads the digest and `process.args` and applies the same index.
 
-3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
+3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
-   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
-   where the running set is a strict subset of the declared one, so requiring a
-   whole entry would deny ordinary states
+   allowlisted (floor or workload), checked against one atomic allowlist
+   snapshot. Membership only: issuance lands mid-lifecycle, where the running
+   set is a strict subset of the declared one, so requiring a whole entry would
+   deny ordinary states
    ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
+   Additionally — and without changing the membership contract — when the
+   high-water `(digest, argv)` inventory uniquely matches one workload entry,
+   the leaf is stamped with that entry's name and the snapshot's version and
+   canonical digest (OID `…1.5`, `docs/ratls.md` "Matched workload"), which is
+   what `c8s verify --workload/--allowlist` and
+   `ratls.VerifyPolicy.WorkloadName` enforce against the mesh-CA chain.
 
 ### What each layer can and cannot promise
 

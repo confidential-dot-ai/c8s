@@ -49,6 +49,14 @@ type VerifyPolicy struct {
 	// [VerifyAttestation] fails closed when it is set.
 	SandboxID string
 
+	// WorkloadName, when set, is the allowlist entry name the certificate's
+	// matched-workload extension must carry (docs/ratls.md, "Matched
+	// workload"). Like SandboxID it is CA-vouched: it is enforced only on the
+	// chain-verified branch of the dual peer verifier, and VerifyAttestation /
+	// VerifyCert fail closed when it is set — neither checks a CA chain, so
+	// neither can authenticate the stamp.
+	WorkloadName string
+
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
 	// binding, debug policy, and minimum TCB. Required: there is no
@@ -118,6 +126,9 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 		// The ID rides the certificate, which this path never sees.
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
+	if policy.WorkloadName != "" {
+		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
 	if err != nil {
@@ -155,6 +166,9 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	}
 	if policy.SandboxID != "" {
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
+	if policy.WorkloadName != "" {
+		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)

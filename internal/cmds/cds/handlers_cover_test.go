@@ -153,12 +153,12 @@ func (errStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
 	return nil, "", errors.New("store unavailable")
 }
 
-func TestVerifySandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
+func TestResolveSandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
 	h := AttestHandler{
 		AllowlistStore: errStore{},
 		SandboxDigests: fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}},
 	}
-	err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
+	_, err := h.resolveSandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
 		SandboxID:     testSandboxID,
 		InventoryHost: testInventoryHost,
 	})

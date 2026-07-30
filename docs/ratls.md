@@ -103,6 +103,7 @@ The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 | `…1.1` | RA-TLS attestation (`TEEAttestation`, above) — `extension.go` | the attesting component, on its own certificate and on its CSR |
 | `…1.2` | SHA-256 audit digest of the issuance evidence — `pkg/certutil` | CDS, on every issued leaf |
 | `…1.4` | pod sandbox ID — `sandbox.go`, see [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key) | CDS, on a leaf whose requester presented a sandbox token |
+| `…1.5` | matched workload — `matchedworkload.go`, see [Matched workload](#matched-workload-which-allowlist-entry-is-behind-a-key) | CDS, on a leaf whose sandbox's high-water inventory uniquely matches one allowlist entry |
 
 `…1.3` was the config-claims extension; it is retired and not reusable.
 
@@ -574,6 +575,117 @@ IA5String at OID `1.3.6.1.4.1.66378.1.4` plus a mesh-CA chain check — the ID i
 not part of any hash preimage, so there are no canonical-serialization traps.
 The token and digests formats above are internal to the inventory↔CDS path and
 are never presented to a relying party.
+
+## Matched workload: which allowlist entry is behind a key
+
+The sandbox ID names a pod; it does not say *which workload* that pod is. A
+CDS-issued leaf additionally names the single allowlist entry the pod's
+attested container inventory uniquely matched at issuance:
+
+```text
+OID 1.3.6.1.4.1.66378.1.5  (matched-workload extension, non-critical)
+MatchedWorkload ::= SEQUENCE {
+    formatVersion    INTEGER,           -- exactly 1
+    name             IA5String,         -- 1..63 bytes; allowlist workload-name grammar
+    allowlistVersion IA5String,         -- 1..20 ASCII decimal digits, no leading zero
+    allowlistDigest  OCTET STRING (32)  -- SHA-256(Allowlist.Canonical()) of that document
+}
+```
+
+Parsers are strict (`pkg/ratls/matchedworkload.go`): minimal DER only, no
+trailing bytes or fields, exactly one extension with this OID, format version
+1, and the same name grammar and 63-byte bound `pkg/allowlist` enforces on
+entry names — so the `confidential.ai/cw` selector, an allowlist entry, and
+this stamp admit exactly the same values. Anything else fails closed; a
+verifier must never read damage as absence.
+
+### How CDS decides
+
+In `/attest`, after the sandbox token, evidence, measurement, and CSR policy
+verify, CDS makes one unified inventory decision
+(`resolveSandboxWorkload`, `internal/cmds/cds/attest.go`):
+
+1. fetch the sandbox's inventory answer **exactly once** (both the
+   deduplicated digests view and the per-container `(digest, argv)` view);
+2. load **one immutable policy snapshot** from a single `Store.LoadAll()` —
+   the parsed allowlist, its version, its canonical bytes, and their SHA-256.
+   The version is never read separately from the document, and an unavailable
+   store fails issuance rather than stamping from stale cached state;
+3. run the existing membership gate against the digests view and that
+   snapshot; failure refuses issuance (unchanged contract — see
+   [Sandbox identity](#sandbox-identity-which-workload-is-behind-a-key));
+4. require the containers view, canonicalize its digests, and cross-check the
+   two views against each other; a disagreement is logged loudly (bounded to
+   the sandbox and inventory identities), suppresses the stamp, and preserves
+   the membership-only decision from the independent digests view;
+5. drop the platform's injected containers using the same
+   `secrets.WorkloadContainers` implementation secrets release uses;
+6. run `allowlist.MatchWorkload` — argv-aware, "nothing foreign, every main
+   present" — once against the snapshot.
+
+A unique match stamps `(name, snapshot version, snapshot digest)`. Everything
+else — an old inventory with no containers view, a malformed answer, no match
+mid-lifecycle, an ambiguous match — issues the existing **membership-only
+(unnamed) leaf**: incomplete pods need a mesh certificate to bootstrap, so the
+stamp is purely additive, and a verifier configured with a workload or
+allowlist pin fails closed on its absence. The digest pins *which policy* the
+match was decided under, so a client holding the same canonical bytes detects
+skew between the policy it pinned and the one CDS enforced.
+
+### Identity lifecycle
+
+A sandbox's workload identity is `Unnamed → Named` (first renewal after the
+pod completes) or `→ Removed` (teardown). There is no invalidated state and no
+component that kills a named pod: the high-water inventory is the only
+authority. A foreign admission makes the sandbox permanently unmatchable, so
+every later renewal issues unnamed and the **named-leaf TTL** bounds how long
+the last named leaf survives (`--named-cert-ttl`, default
+`issuer.MaxNamedLeafTTL` = 6h, chart value `cds.namedCertTTL`). The stale
+bound for a named identity is therefore the shorter of the remaining leaf
+lifetime and the time until the serving process reloads a replacement unnamed
+leaf.
+
+get-cert discovers `Unnamed → Named` through renewal: with
+`--workload-claims` and a renewal loop it fast-polls (`--unnamed-renew-interval`,
+default 30s plus jitter) while the installed leaf is unnamed and settles to
+`--renew-interval` once named. Poll timing never changes the match decision.
+
+### What vouches for the name
+
+Exactly the sandbox-ID posture: the stamp rides the leaf's **signed area**, is
+vouched by the mesh CA signature, and is *not* part of any hardware
+transcript.
+
+- `ratls.VerifyCert` and `ratls.VerifyAttestation` **fail closed** when
+  `VerifyPolicy.WorkloadName` is set — neither checks CA provenance.
+- The pin is enforced only on the chain-verified branch of
+  `dualVerifyPeerCallback` (`CheckWorkloadPin`), and is cleared before the
+  `RequireCAEvidence` re-verification. A self-signed RA-TLS peer can never
+  satisfy it.
+- `ratls.PeerMatchedWorkload(tls.ConnectionState)` reads a verified peer's
+  stamp off a live connection for relying parties that route or authorize by
+  name; it refuses a connection whose chain was not verified.
+
+A compromised mesh CA can mint any name — the stamp is CA-vouched, not
+hardware-bound.
+
+### Verifying from outside
+
+`c8s verify --workload <name>` pins the name; `c8s verify --allowlist <file>`
+hashes the file's exact canonical bytes (as served by `GET /allowlist` — no
+reserialization), checks the stamped digest, then resolves the stamped name in
+the document. Both **require `--mesh-ca`**, exactly like `--sandbox-id`, and
+the chain check runs before the stamp is reported. The verdict distinguishes
+`workload_absent`, `workload_malformed`, `workload_name_mismatch`,
+`allowlist_digest_mismatch`, `workload_unresolved`, and `workload_verified`;
+exit codes are unchanged.
+
+### Cross-implementation note
+
+A non-Go verifier needs the strict DER parse above plus a mesh-CA chain check.
+The one canonical encoding of `{v1, "api", "7", 0x11×32}` is pinned as a
+golden vector in `pkg/ratls/matchedworkload_test.go` and shared with the other
+parsers so they cannot drift.
 
 ## Operation under the two confidential shapes
 

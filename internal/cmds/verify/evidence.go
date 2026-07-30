@@ -76,6 +76,13 @@ type evidence struct {
 	// sandboxErr records a carried sandbox-ID extension this build cannot
 	// interpret. The verdict fails closed on it.
 	sandboxErr error
+	// workload is the leaf's matched-workload stamp (cert modes only; nil when
+	// the cert carries none). CA-vouched like the sandbox ID — see
+	// applyWorkloadPolicy.
+	workload *ratls.MatchedWorkload
+	// workloadErr records a carried matched-workload extension this build
+	// cannot interpret (or a duplicate). The verdict fails closed on it.
+	workloadErr error
 }
 
 // platformOrDefault returns p, or "snp" when p is empty (the historical default
@@ -136,6 +143,7 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 	}
 	binding := "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)"
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
 		platform:    platform,
@@ -148,6 +156,8 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 		leaf:        cert,
 		sandboxID:   sandboxID,
 		sandboxErr:  sandboxErr,
+		workload:    workload,
+		workloadErr: workloadErr,
 	}, nil
 }
 

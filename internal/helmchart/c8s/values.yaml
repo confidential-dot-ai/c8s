@@ -208,6 +208,11 @@ cds:
   expectedIssuer: ""
   jwtClockSkew: 30
   certTTL: 24h
+  # -- Upper bound on the TTL of a leaf carrying a matched-workload stamp
+  # (OID …1.5). A named leaf can outlive its match by at most its remaining
+  # lifetime, so this is the documented stale-identity bound; it never applies
+  # to membership-only (unnamed) leaves. See docs/ratls.md, "Matched workload".
+  namedCertTTL: 6h
   maxTTL: 24h
   challengeTTL: 60s
   requestTimeout: 5s

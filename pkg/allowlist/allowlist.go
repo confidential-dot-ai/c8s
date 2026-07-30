@@ -20,6 +20,7 @@ package allowlist
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -164,6 +165,17 @@ func (a *Allowlist) Canonical() ([]byte, error) {
 	return json.Marshal(a)
 }
 
+// CanonicalDigest returns SHA-256 over Canonical() — the policy digest clients
+// pin and the matched-workload stamp carries (docs/ratls.md).
+func (a *Allowlist) CanonicalDigest() ([]byte, error) {
+	canonical, err := a.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return sum[:], nil
+}
+
 func (a *Allowlist) normalize() error {
 	if a.Schema != Schema {
 		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
@@ -184,7 +196,7 @@ func (a *Allowlist) normalize() error {
 	}
 	for name, w := range a.Workloads {
 		if !validWorkloadName(name) {
-			return fmt.Errorf("workload name %q must match [A-Za-z0-9][A-Za-z0-9._-]* (it is a URL path segment)", name)
+			return fmt.Errorf("workload name %q must match [A-Za-z0-9][A-Za-z0-9._-]* and be at most %d bytes (it is a URL path segment and a label value)", name, MaxWorkloadNameLen)
 		}
 		if err := normalizeContainers(name, "initContainers", w.InitContainers); err != nil {
 			return err
@@ -330,10 +342,16 @@ func policyKey(c Container) string {
 	return string(b)
 }
 
+// MaxWorkloadNameLen bounds an entry name to the Kubernetes label-value length,
+// so the confidential.ai/cw selector, an allowlist entry name, and the
+// matched-workload leaf stamp (pkg/ratls) all admit exactly the same names.
+const MaxWorkloadNameLen = 63
+
 // validWorkloadName restricts entry names to a URL-safe segment so a name can be
-// used verbatim as a path parameter without escaping ambiguity.
+// used verbatim as a path parameter without escaping ambiguity, bounded to
+// MaxWorkloadNameLen bytes.
 func validWorkloadName(name string) bool {
-	if name == "" {
+	if name == "" || len(name) > MaxWorkloadNameLen {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
@@ -346,4 +364,12 @@ func validWorkloadName(name string) bool {
 		}
 	}
 	return true
+}
+
+// ValidWorkloadName reports whether name is a legal workload entry name. One
+// grammar backs allowlist parsing, the admission selector, and the
+// matched-workload certificate stamp — no entry can exist that the others
+// cannot represent.
+func ValidWorkloadName(name string) bool {
+	return validWorkloadName(name)
 }

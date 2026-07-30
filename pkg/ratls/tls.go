@@ -636,11 +636,14 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 		})
 		if chainErr == nil {
 			// The chain is verified here and only here, so this is the one place
-			// a sandbox-ID pin can be enforced: CDS's signature over the leaf is
-			// what authenticates the ID. No-op when no pin is set.
+			// a sandbox-ID or workload pin can be enforced: CDS's signature over
+			// the leaf is what authenticates both. No-ops when no pin is set.
 			if policy != nil {
 				if err := CheckSandboxPin(cert, policy.SandboxID); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed the sandbox-ID pin: %w", err)
+				}
+				if err := CheckWorkloadPin(cert, policy.WorkloadName); err != nil {
+					return fmt.Errorf("ratls: CA-signed peer failed the workload pin: %w", err)
 				}
 			}
 			// A valid CA chain authenticates the issuer; what else must hold
@@ -655,10 +658,12 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				// binding via the attestation-api. The embedded evidence is
 				// nonce-free by construction, so verify with a nil nonce; TLS 1.3
 				// supplies connection liveness. A leaf with no (or stale/forged)
-				// evidence fails closed. The sandbox pin is already enforced above
-				// and is not evidence-bound, so clear it for this call.
+				// evidence fails closed. The sandbox and workload pins are already
+				// enforced above and are not evidence-bound, so clear them for
+				// this call.
 				evidencePolicy := *policy
 				evidencePolicy.SandboxID = ""
+				evidencePolicy.WorkloadName = ""
 				if _, err := VerifyCert(cert, &evidencePolicy, nil); err != nil {
 					return fmt.Errorf("ratls: CA-signed peer failed embedded-evidence re-verification: %w", err)
 				}

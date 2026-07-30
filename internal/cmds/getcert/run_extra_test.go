@@ -174,7 +174,7 @@ func TestObtainCertAttestationExtensionError(t *testing.T) {
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}
-	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cds.URL))
+	_, err := obtainCert(context.Background(), cfg, plaintextCDSClient(cds.URL))
 	if err == nil {
 		t.Fatal("obtainCert succeeded, want attestation extension error")
 	}

@@ -317,8 +317,23 @@ subset of an allowlisted set is still allowlisted — so it holds throughout.
 What this gives up: CDS no longer refuses a pod that mixes containers from two
 different workload entries, since each image is individually admitted. That
 check wants a *complete* pod and a high-stakes decision to hang off, which is
-secrets release, not cert issuance. Until it lands there, a leaf's sandbox ID
-means *this key belongs to pod X*, not *pod X runs exactly workload Y*.
+secrets release, not cert issuance. A leaf's sandbox ID therefore means *this
+key belongs to pod X*, not *pod X runs exactly workload Y*.
+
+The **matched-workload stamp** (OID `…1.5`, docs/ratls.md "Matched workload")
+is layered on top of this without changing it: when the sandbox's high-water
+`(digest, argv)` inventory uniquely matches one allowlist entry, CDS
+additionally stamps that entry's name and the policy snapshot's version and
+canonical digest onto the leaf. The membership-only issuance contract is
+untouched — every state above still gets its (unnamed) certificate, and the
+unstamped leaf issued mid-lifecycle *is* the admission cert; the first renewal
+after the pod completes resolves the match and *is* the completion cert
+(get-cert fast-polls while unnamed, `--unnamed-renew-interval`). A verifier
+that pins a workload or allowlist rejects the unnamed leaf; nothing else
+changes behavior. A pod that ever ran a foreign container never gets a name —
+the high-water inventory carries the same fail-closed semantics as secrets
+release, and the named-leaf TTL (`cds.namedCertTTL`) bounds how long an
+already-issued name can outlive its match.
 
 Two inventory behaviours that still matter here:
 

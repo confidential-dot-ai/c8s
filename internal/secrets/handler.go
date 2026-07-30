@@ -43,7 +43,7 @@ const (
 // c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
 // get-secret for the fetcher, and get-volume for the volume fetcher. A
 // container must be running one of these, on an injected digest, to be excluded
-// from workload matching — see Handler.InjectedDigests.
+// from workload matching — see WorkloadContainers.
 //
 // An entrypoint added here widens the assumption in docs/secrets.md that no
 // floor image other than c8s's carries an executable at one of these names.
@@ -398,6 +398,21 @@ func (h Handler) workloadContainers(ctx context.Context, al *pkgallowlist.Allowl
 	if err != nil {
 		return nil, err
 	}
+	out := WorkloadContainers(al, reported)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("sandbox %s reports no workload containers", sandboxID)
+	}
+	return out, nil
+}
+
+// WorkloadContainers converts an inventory's reported container set to the
+// candidate set workload matching runs on, dropping the platform's own injected
+// containers so a workload entry never has to enumerate c8s's sidecars. It is a
+// pure function of the allowlist and the report — the one drop-set
+// implementation shared by secrets release, the release diagnostic, and CDS
+// certificate issuance. pkg/allowlist stays ignorant of injection by design
+// (its doc: "the caller converts").
+func WorkloadContainers(al *pkgallowlist.Allowlist, reported []workloadclaims.SandboxContainer) []pkgallowlist.RunningContainer {
 	out := make([]pkgallowlist.RunningContainer, 0, len(reported))
 	for _, c := range reported {
 		if isInjected(al, c) {
@@ -405,10 +420,7 @@ func (h Handler) workloadContainers(ctx context.Context, al *pkgallowlist.Allowl
 		}
 		out = append(out, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("sandbox %s reports no workload containers", sandboxID)
-	}
-	return out, nil
+	return out
 }
 
 // isInjected reports whether a reported container is one c8s injected.

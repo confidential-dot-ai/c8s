@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -87,6 +89,8 @@ type config struct {
 	measurementsFile string
 	operatorKeys     string
 	sandboxID        string
+	workload         string
+	allowlistFile    string
 	meshCA           string
 	allowDebug       bool
 	minTCBBootloader uint
@@ -168,6 +172,8 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
+	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
+	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component")
@@ -285,6 +291,7 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
 	applySandboxPolicy(&oc, cfg, ev, opKeys)
+	applyWorkloadPolicy(&oc, cfg, ev)
 	render(cfg, oc, out)
 	if !oc.Verified {
 		return exitFailed
@@ -345,6 +352,25 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		}
 	}
 
+	// The matched-workload stamp is CA-vouched exactly like the sandbox ID, so
+	// both workload-policy flags demand the chain check that authenticates it.
+	if cfg.workload != "" {
+		if !pkgallowlist.ValidWorkloadName(cfg.workload) {
+			return nil, fmt.Errorf("--workload: %q is not a valid workload entry name (1..%d bytes, [A-Za-z0-9][A-Za-z0-9._-]*)", cfg.workload, pkgallowlist.MaxWorkloadNameLen)
+		}
+		if cfg.meshCA == "" {
+			return nil, fmt.Errorf("--workload requires --mesh-ca: the matched workload is vouched by CDS's signature on the leaf, not by the hardware evidence")
+		}
+	}
+	if cfg.allowlistFile != "" {
+		if cfg.meshCA == "" {
+			return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
+		}
+		if _, _, err := heldAllowlist(cfg.allowlistFile); err != nil {
+			return nil, err
+		}
+	}
+
 	return &ratls.VerifyPolicy{
 		Measurements: measurements,
 		AllowDebug:   cfg.allowDebug,
@@ -366,6 +392,21 @@ func expectedOperatorKeysDigest(cfg config) ([]byte, error) {
 		return nil, fmt.Errorf("--operator-keys: %w", err)
 	}
 	return operatorauth.KeySetDigest(keys)
+}
+
+// heldAllowlist loads the --allowlist file: the exact bytes (which are what
+// gets hashed — no reserialization, per the canonical-bytes rule) and the
+// parsed document the stamped name resolves against.
+func heldAllowlist(path string) ([]byte, *pkgallowlist.Allowlist, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read --allowlist: %w", err)
+	}
+	doc, err := pkgallowlist.ParseServedJSON(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--allowlist: %w", err)
+	}
+	return data, doc, nil
 }
 
 // meshCAPool loads the mesh CA bundle used to authenticate a leaf's sandbox ID.
@@ -505,6 +546,17 @@ type Outcome struct {
 	// Without --mesh-ca it is reported unverified.
 	SandboxID     string `json:"sandbox_id,omitempty"`
 	SandboxIDNote string `json:"sandbox_id_note,omitempty"`
+
+	// Workload is the allowlist entry the leaf's matched-workload stamp names,
+	// with the allowlist version and policy digest it was decided under.
+	// CA-vouched like the sandbox ID; WorkloadNote carries the §8 verdict
+	// (workload_verified, or why it is only reported). Failures land in Error
+	// with the same taxonomy (workload_absent, workload_malformed,
+	// workload_name_mismatch, allowlist_digest_mismatch, workload_unresolved).
+	Workload                 string `json:"workload,omitempty"`
+	WorkloadAllowlistVersion string `json:"workload_allowlist_version,omitempty"`
+	WorkloadAllowlistDigest  string `json:"workload_allowlist_digest,omitempty"`
+	WorkloadNote             string `json:"workload_note,omitempty"`
 }
 
 // applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
@@ -592,6 +644,72 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	}
 	if !bytes.Equal(opKeys.digest, expected) {
 		fail("served /operator-keys digest %x does not match the --operator-keys set (%x)", opKeys.digest, expected)
+	}
+}
+
+// applyWorkloadPolicy surfaces the leaf's matched-workload stamp and enforces
+// --workload / --allowlist, mirroring applySandboxPolicy's ordering: an
+// unparseable stamp fails closed; the mesh-CA chain check (applySandboxPolicy,
+// which always runs first) authenticates the stamp before anything from it is
+// reported or compared; the pins only ever demote Verified.
+func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence) {
+	fail := func(format string, args ...any) {
+		oc.Verified = false
+		if oc.Error == "" {
+			oc.Error = fmt.Sprintf(format, args...)
+		}
+	}
+	if ev.workloadErr != nil {
+		fail("workload_malformed: matched-workload extension unparseable or duplicated (newer target than this CLI?): %v", ev.workloadErr)
+		return
+	}
+
+	// Report the stamp only once the hardware evidence (and, with --mesh-ca,
+	// the chain) verified, and always say what stands behind it.
+	if oc.Verified && ev.workload != nil {
+		oc.Workload = ev.workload.Name
+		oc.WorkloadAllowlistVersion = ev.workload.AllowlistVersion
+		oc.WorkloadAllowlistDigest = hex.EncodeToString(ev.workload.AllowlistDigest)
+		if cfg.meshCA == "" {
+			oc.WorkloadNote = "not verified: CDS's signature on the leaf vouches for this name; pass --mesh-ca to check it"
+		} else {
+			oc.WorkloadNote = "ca-vouched: the leaf chains to the supplied mesh CA"
+		}
+	}
+
+	if cfg.workload == "" && cfg.allowlistFile == "" {
+		return
+	}
+	if ev.leaf == nil {
+		fail("--workload/--allowlist need the target's leaf certificate (use a cert mode, not --mode attestation-endpoint)")
+		return
+	}
+	if ev.workload == nil {
+		fail("workload_absent: a workload policy is pinned but the leaf carries no matched-workload extension")
+		return
+	}
+	if cfg.workload != "" && ev.workload.Name != cfg.workload {
+		fail("workload_name_mismatch: leaf matched workload %q does not match pinned %q", ev.workload.Name, cfg.workload)
+		return
+	}
+	if cfg.allowlistFile != "" {
+		held, doc, err := heldAllowlist(cfg.allowlistFile)
+		if err != nil {
+			fail("%v", err)
+			return
+		}
+		digest := sha256.Sum256(held)
+		if !bytes.Equal(digest[:], ev.workload.AllowlistDigest) {
+			fail("allowlist_digest_mismatch: stamped policy digest %x does not match SHA-256 %x of the held --allowlist bytes", ev.workload.AllowlistDigest, digest[:])
+			return
+		}
+		if _, ok := doc.Workloads[ev.workload.Name]; !ok {
+			fail("workload_unresolved: stamped name %q does not resolve in the held allowlist document", ev.workload.Name)
+			return
+		}
+	}
+	if oc.Verified {
+		oc.WorkloadNote = "workload_verified: the leaf chains to the supplied mesh CA and the stamp satisfies the pinned policy"
 	}
 }
 
@@ -708,6 +826,10 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	if oc.SandboxID != "" {
 		fmt.Fprintf(out, "  sandbox id:   %s\n", oc.SandboxID)
 		fmt.Fprintf(out, "                %s\n", oc.SandboxIDNote)
+	}
+	if oc.Workload != "" {
+		fmt.Fprintf(out, "  workload:     %s  (allowlist version %s, digest %s)\n", oc.Workload, oc.WorkloadAllowlistVersion, oc.WorkloadAllowlistDigest)
+		fmt.Fprintf(out, "                %s\n", oc.WorkloadNote)
 	}
 	if len(oc.OperatorKeys) > 0 {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"

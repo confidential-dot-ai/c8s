@@ -48,6 +48,7 @@ func NewCmd() *cobra.Command {
 	flags.Int64Var(&cfg.jwtClockSkew, "jwt-clock-skew", 30, "EAR JWT exp/nbf/iat clock skew tolerance in seconds")
 	flags.DurationVar(&cfg.maxTTL, "max-ttl", 24*time.Hour, "upper bound on /sign-csr leaf TTL")
 	flags.DurationVar(&cfg.certTTL, "cert-ttl", 24*time.Hour, "")
+	flags.DurationVar(&cfg.namedCertTTL, "named-cert-ttl", issuer.MaxNamedLeafTTL, "upper bound on the TTL of a leaf carrying a matched-workload stamp — the documented stale-identity bound for a named leaf (never applied to membership-only leaves)")
 	flags.DurationVar(&cfg.challengeTTL, "challenge-ttl", 60*time.Second, "")
 	flags.DurationVar(&cfg.requestTimeout, "request-timeout", 5*time.Second, "per-request /attest timeout (0 disables)")
 	flags.Int64Var(&cfg.maxRequestSize, "max-request-size", 65536, "max request body bytes on write endpoints")
@@ -126,6 +127,7 @@ type config struct {
 	jwtClockSkew        int64
 	maxTTL              time.Duration
 	certTTL             time.Duration
+	namedCertTTL        time.Duration
 	challengeTTL        time.Duration
 	requestTimeout      time.Duration
 	maxRequestSize      int64

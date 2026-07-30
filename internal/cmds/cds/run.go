@@ -309,6 +309,7 @@ func run(cfg config) error {
 			CA:                mesh,
 			CAChainPEM:        caChainPEM,
 			CertTTL:           cfg.certTTL,
+			NamedCertTTL:      cfg.namedCertTTL,
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
 			SANValidation:     cfg.sanValidation,
