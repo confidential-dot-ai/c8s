@@ -41,10 +41,37 @@ const (
 
 // InjectedEntrypoints are the argv[0] values the admission webhook injects the
 // c8s image with: get-cert for the cert sidecar, /c8s for the probe-file gate,
-// and get-secret for the fetcher. A container must be running one of these, on
-// an injected digest, to be excluded from workload matching — see
-// Handler.InjectedDigests.
-var InjectedEntrypoints = []string{"get-cert", "get-secret", "/c8s"}
+// get-secret for the fetcher, and get-volume for the volume fetcher. A
+// container must be running one of these, on an injected digest, to be excluded
+// from workload matching — see Handler.InjectedDigests.
+//
+// An entrypoint added here widens the assumption in docs/secrets.md that no
+// floor image other than c8s's carries an executable at one of these names.
+var InjectedEntrypoints = []string{"get-cert", "get-secret", "get-volume", "/c8s"}
+
+// RateKey charges a request to the sandbox its client certificate names, so a
+// rate limit bounds one workload rather than one address.
+//
+// Pods reach CDS through a NodePort and the host-network mesh proxy, so every
+// pod on a node arrives from the same address: keyed on that, one hostile pod
+// exhausts the bucket its co-tenants share and wedges their fetchers into a
+// CrashLoop. The sandbox ID is stamped by CDS into a leaf that crypto/tls has
+// verified against the mesh CA, so a caller can only ever name its own.
+//
+// An unverified or absent certificate returns "", charging the request to the
+// source address. Such a request is refused by the handler regardless, and a
+// caller cannot escape limiting by withholding a certificate.
+func RateKey(r *http.Request) string {
+	leaf, err := verifiedLeaf(r)
+	if err != nil {
+		return ""
+	}
+	id, err := ratls.SandboxIDFromCert(leaf)
+	if err != nil || id == "" {
+		return ""
+	}
+	return "sandbox:" + id
+}
 
 // challengeSource issues and consumes the single-use nonces that make a request
 // fresh. The secrets listener holds its own, so a nonce minted for issuance
@@ -182,13 +209,13 @@ func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, grant *pk
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	_, created, err := h.Store.PutIfAbsent(ctx, path, candidate)
+	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, OriginWorkload)
 	if err != nil {
 		h.logger().Error("secret create failed", "path", path, "error", err)
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	if !created {
+	if held.Exists {
 		// The existing value is withheld: returning it here would make a write
 		// grant a read grant. A caller that also holds read re-reads with GET,
 		// which is how the replica that loses this race recovers.

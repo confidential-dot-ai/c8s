@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -323,7 +324,7 @@ func TestAddRejectsWildcardImage(t *testing.T) {
 func TestWriteRequiresOperatorCredential(t *testing.T) {
 	url, _ := recordingCDS(t)
 	// No key and no env: a real (non-dry-run) add must fail before writing.
-	t.Setenv(envOperatorKey, "")
+	t.Setenv(cdsconn.EnvOperatorKey, "")
 	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure")
 	if err == nil {
 		t.Fatal("expected add without an operator key to fail")
@@ -333,9 +334,9 @@ func TestWriteRequiresOperatorCredential(t *testing.T) {
 func TestSignerPrefersFlagOverEnv(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	t.Setenv(envOperatorKey, filepath.Join(dir, "nonexistent.key"))
+	t.Setenv(cdsconn.EnvOperatorKey, filepath.Join(dir, "nonexistent.key"))
 
-	o := &options{operatorKey: keyPath}
+	o := &options{Options: cdsconn.Options{OperatorKey: keyPath}}
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("flag should take precedence over (broken) env, got %v", err)
 	}
@@ -344,7 +345,7 @@ func TestSignerPrefersFlagOverEnv(t *testing.T) {
 func TestSignerFallsBackToEnv(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	t.Setenv(envOperatorKey, keyPath)
+	t.Setenv(cdsconn.EnvOperatorKey, keyPath)
 
 	o := &options{} // no flags
 	if _, err := o.signer(); err != nil {

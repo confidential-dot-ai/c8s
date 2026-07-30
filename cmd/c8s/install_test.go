@@ -1396,9 +1396,84 @@ func TestChartComponentsFromValues(t *testing.T) {
 		"cds.image":            "ghcr.io/confidential-dot-ai/cds",
 		"ratlsMesh.image":      "ghcr.io/confidential-dot-ai/ratls-mesh",
 		"nriImagePolicy.image": "ghcr.io/confidential-dot-ai/nri-image-policy",
+		"volumed.image":        "ghcr.io/confidential-dot-ai/volumed",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chart components = %v, want %v", got, want)
+	}
+}
+
+// componentEnabledPredicate must honor a -f values file, not just chart
+// defaults and --set. volumed defaults to disabled; a -f file that enables it
+// has to make the resolver see it as enabled, or its digest is never pinned and
+// the render fails with no image ref.
+func TestComponentEnabledPredicateHonorsValuesFile(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not on PATH")
+	}
+	dir, err := extractChart()
+	if err != nil {
+		t.Fatalf("extractChart: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	chartPath := filepath.Join(dir, helmchart.ChartRoot)
+
+	vf := filepath.Join(t.TempDir(), "enable-volumed.yaml")
+	if err := os.WriteFile(vf, []byte("volumed:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default (no -f): volumed reads as disabled.
+	installValues = nil
+	pred, err := componentEnabledPredicate(context.Background(), chartPath, nil)
+	if err != nil {
+		t.Fatalf("predicate (defaults): %v", err)
+	}
+	if on, _ := pred("volumed.enabled"); on {
+		t.Fatal("volumed.enabled true with no -f; expected the chart default false")
+	}
+
+	// With the -f file: volumed reads as enabled.
+	installValues = []string{vf}
+	defer func() { installValues = nil }()
+	pred, err = componentEnabledPredicate(context.Background(), chartPath, nil)
+	if err != nil {
+		t.Fatalf("predicate (-f): %v", err)
+	}
+	if on, _ := pred("volumed.enabled"); !on {
+		t.Fatal("volumed.enabled false despite a -f file enabling it; the resolver would skip pinning its digest")
+	}
+}
+
+// mergeValues must deep-merge a -f overlay the way helm coalesces it: a nested
+// map merges key-by-key (so enabling volumed via -f does not wipe its sibling
+// image/hostPaths defaults), while a scalar replaces. This is the fix for the
+// resolver treating a -f-enabled, default-disabled component as still off.
+func TestMergeValuesDeepMergesOverlay(t *testing.T) {
+	base := map[string]any{
+		"volumed": map[string]any{
+			"enabled": false,
+			"image":   map[string]any{"repository": "ghcr.io/confidential-dot-ai/volumed", "tag": ""},
+		},
+		"tlsLb": map[string]any{"enabled": true},
+	}
+	overlay := map[string]any{
+		"volumed": map[string]any{"enabled": true},
+	}
+	mergeValues(base, overlay)
+
+	if !boolAtPath(base, "volumed.enabled") {
+		t.Error("volumed.enabled not flipped to true by the overlay")
+	}
+	// The sibling image map must survive the merge — a shallow replace would
+	// drop it and break digest resolution.
+	vol := base["volumed"].(map[string]any)
+	img, ok := vol["image"].(map[string]any)
+	if !ok || img["repository"] != "ghcr.io/confidential-dot-ai/volumed" {
+		t.Errorf("overlay wiped volumed.image; got %v", vol["image"])
+	}
+	if !boolAtPath(base, "tlsLb.enabled") {
+		t.Error("unrelated tlsLb.enabled was disturbed by the overlay")
 	}
 }
 

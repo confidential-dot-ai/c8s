@@ -70,24 +70,50 @@ func (a *Allowlist) MatchWorkload(running []RunningContainer) (string, Workload,
 	return foundName, found, nil
 }
 
-// describes reports whether the entry admits everything running and has all its
-// main containers present.
-func (w Workload) describes(running []RunningContainer) bool {
+// EntryDiff is the distance between an entry and a running set: what is running
+// that the entry does not name, and what it declares as a main that nothing
+// running satisfies. Both empty means the entry describes the set.
+type EntryDiff struct {
+	// Foreign is running containers no declared container admits — the ⊆ half.
+	Foreign []RunningContainer
+	// MissingMains is declared main containers nothing running satisfies — the
+	// ⊇ half. An init container is absent from this by design: a declared init
+	// may have exited.
+	MissingMains []Container
+}
+
+// Describes reports whether the entry matches.
+func (d EntryDiff) Describes() bool { return len(d.Foreign) == 0 && len(d.MissingMains) == 0 }
+
+// Diff evaluates an entry against a running set without short-circuiting, so a
+// near miss can be reported in full.
+//
+// This is the release decision itself, not a reconstruction of it: describes is
+// Diff().Describes(), so a diagnostic built on this cannot disagree with what
+// CDS actually did.
+func (w Workload) Diff(running []RunningContainer) EntryDiff {
 	declared := make([]Container, 0, len(w.Containers)+len(w.InitContainers))
 	declared = append(declared, w.Containers...)
 	declared = append(declared, w.InitContainers...)
 
+	var d EntryDiff
 	for _, r := range running {
 		if !admittedBy(declared, r) {
-			return false
+			d.Foreign = append(d.Foreign, r)
 		}
 	}
 	for _, c := range w.Containers {
 		if !anyRunning(running, c) {
-			return false
+			d.MissingMains = append(d.MissingMains, c)
 		}
 	}
-	return true
+	return d
+}
+
+// describes reports whether the entry admits everything running and has all its
+// main containers present.
+func (w Workload) describes(running []RunningContainer) bool {
+	return w.Diff(running).Describes()
 }
 
 // admittedBy reports whether some declared container permits this running

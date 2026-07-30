@@ -449,6 +449,7 @@ per-role image names remain stable, but each image copies the same multi-mode
 | `ghcr.io/confidential-dot-ai/get-cert` | distroless | |
 | `ghcr.io/confidential-dot-ai/ratls-mesh` | debian-slim | Needs iptables |
 | `ghcr.io/confidential-dot-ai/nri-image-policy` | debian-slim | |
+| `ghcr.io/confidential-dot-ai/volumed` | debian-slim | Needs cryptsetup/veritysetup |
 
 The chart also deploys `ghcr.io/confidential-dot-ai/attestation-api`, the TEE
 evidence verification service, which is built and published from

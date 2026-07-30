@@ -30,6 +30,8 @@ type dependencies struct {
 	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
 	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
 	SecretsChallenges *attestation.ChallengeStore
+	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
+	SecretsExplain    *secrets.ExplainHandler  // release diagnostic; routed with SecretsHandler
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -70,10 +72,18 @@ func newRouter(deps dependencies) http.Handler {
 	r.Method(http.MethodPut, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandlePutWorkload)))
 	r.Method(http.MethodDelete, "/allowlist/workloads/{name}", deps.allowlistWrite(http.HandlerFunc(deps.AllowlistHandler.HandleDeleteWorkload)))
 
+	// GET and POST are the workload's, authenticated by mesh leaf and sandbox
+	// token. PUT is the operator's, on allowlistWrite so it carries the same
+	// body-bound operator token an allowlist mutation does.
 	if deps.SecretsHandler != nil {
-		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.protected(attestation.HandleAuthenticate(deps.SecretsChallenges)))
-		r.Method(http.MethodGet, secrets.Route, deps.protected(deps.SecretsHandler))
-		r.Method(http.MethodPost, secrets.Route, deps.protected(deps.SecretsHandler))
+		if deps.SecretsOperator == nil || deps.SecretsExplain == nil {
+			panic("cds: dependencies.SecretsOperator and SecretsExplain must be set alongside SecretsHandler")
+		}
+		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.perSandbox(attestation.HandleAuthenticate(deps.SecretsChallenges)))
+		r.Method(http.MethodGet, secrets.Route, deps.perSandbox(deps.SecretsHandler))
+		r.Method(http.MethodPost, secrets.Route, deps.perSandbox(deps.SecretsHandler))
+		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
+		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
 	}
 
 	r.Get("/ca", handleCA(deps.CACertPEM))
@@ -94,9 +104,18 @@ func (deps dependencies) protected(next http.Handler) http.Handler {
 	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(deps.MaxRequestSize, next))
 }
 
-// allowlistWrite is protected with the larger allowlist body cap.
+// allowlistWrite is protected with the larger allowlist body cap. Its callers
+// are operators reaching CDS directly, so the source address is the caller.
 func (deps dependencies) allowlistWrite(next http.Handler) http.Handler {
 	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(allowlistWriteBodyCap, next))
+}
+
+// perSandbox rate-limits by the caller's attested sandbox instead of its
+// address. The workload secret routes are the ones pods reach through a
+// NodePort and the mesh proxy, where the address is the node's rather than the
+// pod's — see secrets.RateKey.
+func (deps dependencies) perSandbox(next http.Handler) http.Handler {
+	return issuer.RateLimitBy(deps.RateLimiter, secrets.RateKey, capBody(deps.MaxRequestSize, next))
 }
 
 func capBody(max int64, next http.Handler) http.Handler {

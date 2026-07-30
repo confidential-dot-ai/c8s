@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      c8s_ref:
+        description: "Bake c8s components from this published commit (short SHA) instead of the triggering commit. Rebuilds a release against the current CONFOS_REF; pushes only the :<variant>[-cdi]-<ref> tags, leaving the floating tags alone."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -33,7 +38,7 @@ env:
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main.
-  CONFOS_REF: "f7cbadcf179f580d465fa28753a9821655dd60f3" # confos main (#68)
+  CONFOS_REF: "fae2178766a2bb315a6a9c620765437bbae5a256" # confos main (#74)
 
 jobs:
   build-and-push:
@@ -195,21 +200,28 @@ jobs:
           ATTEST_GPU_BIN: ${{ github.workspace }}/attestation-rs/target/release/attestation-api
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
         run: |
           set -euo pipefail
           # Short SHA matches docker.yml's component tags. build-c8s hands
           # C8S_REF to mkosi.sync via a file (can't cross mkosi's sandbox).
-          export C8S_REF="${HEAD_SHA::7}"
+          # The c8s_ref input overrides it to rebuild a published release.
+          export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
           C8S_NAME="$VARIANT" bin/build-c8s
 
       - name: Check whether the rootfs changed
         # Skip the multi-GB push when the roothash matches what's published.
         id: changed
         working-directory: confidential-os-builder
+        env:
+          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
         run: |
           set -uo pipefail
+          # A c8s_ref rebuild compares against that release's own tag, not the
+          # floating one it never repoints.
+          tag="${VARIANT}${C8S_REF_INPUT:+-$C8S_REF_INPUT}"
           new=$(cat "output/${VARIANT}/roothash" 2>/dev/null || echo new)
-          digest=$(oras manifest fetch "${IMAGE}:${VARIANT}" 2>/dev/null \
+          digest=$(oras manifest fetch "${IMAGE}:${tag}" 2>/dev/null \
                      | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "roothash") | .digest' \
                      || true)
           pub=none
@@ -229,23 +241,34 @@ jobs:
         working-directory: confidential-os-builder
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
         run: |
           set -eux
-          SHORT_SHA="${HEAD_SHA::7}"
+          SHORT_SHA="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
+          # A c8s_ref rebuild repoints only that release's suffixed tags; the
+          # floating tags keep tracking main builds.
+          CDI_TAGS="${VARIANT}-cdi,${VARIANT}-cdi-${SHORT_SHA}"
+          ORAS_TAGS="${VARIANT},${VARIANT}-${SHORT_SHA}"
+          if [ -n "$C8S_REF_INPUT" ]; then
+            CDI_TAGS="${VARIANT}-cdi-${SHORT_SHA}"
+            ORAS_TAGS="${VARIANT}-${SHORT_SHA}"
+          fi
           # CDI first, oras artifact last: the change-check reads the oras tag,
           # so a partial failure re-publishes everything next run.
           bin/confos push "output/${VARIANT}" --cdi \
             --registry "$IMAGE" \
-            --tag "${VARIANT}-cdi,${VARIANT}-cdi-${SHORT_SHA}"
+            --tag "$CDI_TAGS"
           bin/confos push "output/${VARIANT}" \
             --registry "$IMAGE" \
-            --tag "${VARIANT},${VARIANT}-${SHORT_SHA}"
+            --tag "$ORAS_TAGS"
 
       - name: Summary
+        env:
+          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
         run: |
           {
             echo "### ${VARIANT} confidential node image"
-            echo "- CDI image: \`${IMAGE}:${VARIANT}-cdi\`"
-            echo "- artifact: \`${IMAGE}:${VARIANT}\`"
+            echo "- CDI image: \`${IMAGE}:${VARIANT}-cdi${C8S_REF_INPUT:+-$C8S_REF_INPUT}\`"
+            echo "- artifact: \`${IMAGE}:${VARIANT}${C8S_REF_INPUT:+-$C8S_REF_INPUT}\`"
             echo "- confos ref: \`${CONFOS_REF}\`"
           } >> "$GITHUB_STEP_SUMMARY"

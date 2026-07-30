@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 
@@ -60,11 +61,11 @@ func BootstrapServingCert(ca *issuer.CA, hostnames []string, certDir string) err
 	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", certDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(certDir, "tls.crt"), res.CertPEM, 0o644); err != nil {
-		return fmt.Errorf("write tls.crt: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(certDir, "tls.key"), res.KeyPEM, 0o600); err != nil {
+	if err := fileutil.WriteAtomic(filepath.Join(certDir, "tls.key"), res.KeyPEM, 0o600); err != nil {
 		return fmt.Errorf("write tls.key: %w", err)
+	}
+	if err := fileutil.WriteAtomic(filepath.Join(certDir, "tls.crt"), res.CertPEM, 0o644); err != nil {
+		return fmt.Errorf("write tls.crt: %w", err)
 	}
 	return nil
 }

@@ -194,6 +194,8 @@ readBurst — the numeric args arrive pre-validated by the configmap prologue.
 location{{ if .exact }} ={{ end }} {{ .path }} {
     {{- if default false $root.Values.tlsLb.cors.enabled }}
     {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
+    {{- else if eq (include "tls-lb.protocolCorsEnabled" $root) "true" }}
+    {{- include "tls-lb.protocolCorsLocationDirectives" $root | nindent 4 }}
     {{- end }}
     # These run before nginx collapses callers onto the loopback proxy source.
     # Each zone's map key is empty for the methods it does not cover, so
@@ -219,6 +221,11 @@ Validate the global CORS configuration. Skips when disabled.
 {{- if hasKey $cors "enabled" -}}
 {{- if not (kindIs "bool" $cors.enabled) -}}
 {{- fail (printf "tlsLb.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $cors.enabled) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $cors "protocolEndpoints" -}}
+{{- if not (kindIs "bool" $cors.protocolEndpoints) -}}
+{{- fail (printf "tlsLb.cors.protocolEndpoints must be a boolean; do not set it via --set-string, got: %v" $cors.protocolEndpoints) -}}
 {{- end -}}
 {{- end -}}
 {{- if default false $cors.enabled -}}
@@ -382,6 +389,52 @@ add_header Access-Control-Allow-Methods     $cors_out_methods always;
 add_header Access-Control-Allow-Headers     $cors_out_headers always;
 add_header Access-Control-Allow-Credentials $cors_out_credentials always;
 add_header Access-Control-Expose-Headers    $cors_out_expose always;
+{{- end -}}
+
+{{/*
+Whether the c8s protocol-owned locations get the built-in wide-open CORS
+block: tlsLb.cors.protocolEndpoints (default true), unless the operator's
+global CORS block is enabled — an explicit policy already covers every
+location, so the built-in one steps aside. hasKey instead of `default`
+because sprig's default treats an explicit false as unset.
+*/}}
+{{- define "tls-lb.protocolCorsEnabled" -}}
+{{- $cors := default dict .Values.tlsLb.cors -}}
+{{- $pe := true -}}
+{{- if hasKey $cors "protocolEndpoints" -}}{{- $pe = $cors.protocolEndpoints -}}{{- end -}}
+{{- and $pe (not (default false $cors.enabled)) -}}
+{{- end -}}
+
+{{/*
+Render wide-open CORS directives for a c8s protocol-owned location (the
+attestation/handshake/tunnel namespace, the discovery document and
+certificate endpoints, the built-in allowlist route). These endpoints exist
+to be verified by any browser anywhere: every response is either
+self-authenticating (hardware evidence, CDS-signed certificates, sealed
+tunnel records) or public by design, and no request relies on ambient
+browser credentials (allowlist mutations are operator-signed over method,
+path, and body). An origin allowlist here cannot protect anything and only
+breaks third-party verifiers, so the policy is a constant: any origin, no
+credentials. Self-contained on purpose — no http-level maps and no
+upstream pass-through; these endpoints are c8s-owned end to end, so tls-lb
+states their CORS policy itself. Caller nindents into a `location {}`
+block.
+*/}}
+{{- define "tls-lb.protocolCorsLocationDirectives" -}}
+proxy_hide_header Access-Control-Allow-Origin;
+proxy_hide_header Access-Control-Allow-Methods;
+proxy_hide_header Access-Control-Allow-Headers;
+proxy_hide_header Access-Control-Allow-Credentials;
+proxy_hide_header Access-Control-Expose-Headers;
+if ($request_method = 'OPTIONS') {
+    add_header Access-Control-Allow-Origin  "*" always;
+    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+    add_header Access-Control-Max-Age       "600" always;
+    add_header Content-Length 0;
+    return 204;
+}
+add_header Access-Control-Allow-Origin "*" always;
 {{- end -}}
 
 {{/*

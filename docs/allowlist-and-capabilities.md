@@ -149,7 +149,9 @@ for what the admission inventory contributes to a release decision.
 
 CDS enforces this grant at `GET`/`POST /secrets/*`. Writing a grant is what
 turns release on: an entry without one releases nothing
-([`secrets.md`](secrets.md#when-it-is-served)).
+([`secrets.md`](secrets.md#when-it-is-served)). An operator supplying a value at
+`PUT /secrets/*` is authorized by the operator key instead
+([`secrets.md`](secrets.md#operator-supplied-values)).
 
 Filesystem location is not an authorization boundary — a workload owns its own
 filesystem once a value is inside it — so a grant names store paths only. An
@@ -306,8 +308,8 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
   `remove` takes `sha256:` digests; a mixup fails validation instead of partially
   applying.
 - **Signed writes are diff-first and lint-first.** `upload`/`apply` run the
-  offline lint (errors block, warnings need `--force`) and print the diff before
-  the write.
+  offline lint and print the diff before the write. A lint error blocks the
+  write; `--strict` makes warnings block it too.
 
 ### lint
 
@@ -319,6 +321,17 @@ digest alone, so the argv policy is silently not enforced — tag-form labels
 (which can move under the operator), and a summary of how many `any` policies a
 document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
+
+Two entries declaring the same containers with the same argv policy are an
+**error**, not a warning: release requires exactly one entry to describe a
+sandbox, so entries of the same shape either both match or neither does, and
+every pod resolving to them is refused whichever grant was meant. Nothing a
+workload can do resolves it. The shape compared is digests and argv policies per
+container list — the image label and the secret grant are excluded, since two
+entries alike but for their grants are exactly the case worth catching.
+
+`workload apply` runs that check against the served allowlist as well as the
+file, because the entry a new one collides with is usually one already there.
 
 ## Operator credentials
 

@@ -2246,6 +2246,84 @@ func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	}
 }
 
+// protocolCORSLocations are the c8s protocol-owned nginx locations that serve
+// wide-open CORS by default: their responses are self-authenticating or
+// public by design, and browser verifiers on any origin must be able to
+// reach them.
+var protocolCORSLocations = []struct{ match, path string }{
+	{"exact", "/allowlist"},
+	{"prefix", "/allowlist/"},
+	{"exact", "/v1/discovery"},
+	{"exact", "/.well-known/cds-cert.pem"},
+	{"exact", "/.well-known/mesh-ca.pem"},
+	{"prefix", "/.well-known/c8s/"},
+}
+
+func TestTLSLBProtocolEndpointsCORSByDefault(t *testing.T) {
+	// With no CORS configuration at all, the protocol-owned endpoints must be
+	// callable from a browser on any origin — that is the whole point of
+	// in-browser attestation — while workload locations stay untouched.
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", `"*"`, "always")
+	}
+	// The workload catch-all inherits nothing from the protocol default.
+	cfg.location(t, "prefix", "/").assertNoDirective(t, "add_header")
+	// The built-in policy is self-contained: none of the global CORS
+	// http-level maps are rendered.
+	if _, ok := cfg.maps[nginxMapKey{source: "$http_origin", target: "$cors_origin"}]; ok {
+		t.Fatal("global CORS maps rendered without tlsLb.cors.enabled")
+	}
+}
+
+func TestTLSLBProtocolEndpointsCORSOptOut(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "cors.protocolEndpoints=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	conf := renderedTLSLBNginxConf(t, out)
+	if strings.Contains(conf, "Access-Control") {
+		t.Fatalf("CORS directives rendered with cors.protocolEndpoints=false:\n%s", conf)
+	}
+}
+
+func TestTLSLBGlobalCORSCoversProtocolEndpoints(t *testing.T) {
+	// An enabled global CORS block is an explicit operator policy; it covers
+	// the protocol endpoints too (as it always has), and the built-in
+	// wide-open block steps aside rather than double-emitting headers.
+	out, err := helmTemplateTLSLB(t,
+		"--set", "cors.enabled=true",
+		"--set", "cors.allowOrigins={https://example.github.io}",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", "$cors_out_origin", "always")
+	}
+	if conf := renderedTLSLBNginxConf(t, out); strings.Contains(conf, `Access-Control-Allow-Origin  "*"`) ||
+		strings.Contains(conf, `Access-Control-Allow-Origin "*"`) {
+		t.Fatalf("wide-open protocol CORS rendered alongside an enabled global block:\n%s", conf)
+	}
+}
+
+func TestTLSLBRejectsStringProtocolEndpoints(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set-string", "cors.protocolEndpoints=false")
+	if err == nil {
+		t.Fatal("helm template succeeded with string cors.protocolEndpoints, want error")
+	}
+	if !strings.Contains(out, "tlsLb.cors.protocolEndpoints must be a boolean") {
+		t.Fatalf("unexpected error output:\n%s", out)
+	}
+}
+
 func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 	out, err := helmTemplateTLSLB(t)
 	if err != nil {
@@ -4002,6 +4080,10 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.image.tag=dev",
 		"--set", "nriImagePolicy.image.tag=dev",
+		// volumed is off by default, so its image is unused unless a test
+		// enables it; set the tag here so those tests need not repeat it (its
+		// own image requires a tag or digest, like every component).
+		"--set", "volumed.image.tag=dev",
 		// tls-lb has no default upstream (a silently-plaintext VIP was
 		// removed); a c8s-<id> headless-Service address (what `c8s install
 		// --upstream` derives) is the representative mesh-wrapped baseline, and
@@ -5190,6 +5272,89 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 	})
 }
 
+// volumed runs its own image, so like every other component its digest must be
+// derived into the NRI floor when it is enabled — otherwise the plugin denies
+// the daemon's own container (the failure mode observed in testing). It must be
+// absent when volumed is off (the default), so a plain install neither resolves
+// nor allowlists an image it does not deploy.
+func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
+	const volD = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+
+	t.Run("enabled: digest in the floor", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "volumed.enabled=true",
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		}
+	})
+
+	t.Run("disabled: digest absent", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		}
+	})
+}
+
+// The volumed image entrypoint is ["/app/c8s", "volumed"], so the DaemonSet's
+// args must NOT repeat the subcommand. Shipping it once produced
+// `unknown command "volumed" for "c8s volumed"` and a CrashLoopBackOff daemon
+// that no chart test caught, because nothing asserted on the invocation. cds
+// has the same shape (its image entrypoint carries "cds") and its args start at
+// a flag, so this checks the convention rather than one literal.
+func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.image.tag=dev",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		forbid string
+	}{
+		{"volumed", renderedDaemonSetContainer(t, out, "c8s-volumed", "volumed").Args, "volumed"},
+		{"cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "cds"},
+	} {
+		if len(tc.args) == 0 {
+			t.Errorf("%s: no args rendered", tc.name)
+			continue
+		}
+		if tc.args[0] == tc.forbid {
+			t.Errorf("%s: args start with %q, but the image entrypoint already supplies it; the container would run `c8s %s %s ...` and exit",
+				tc.name, tc.forbid, tc.forbid, tc.forbid)
+		}
+		if !strings.HasPrefix(tc.args[0], "-") {
+			t.Errorf("%s: first arg %q is not a flag; args must begin where the entrypoint leaves off", tc.name, tc.args[0])
+		}
+	}
+}
+
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live
@@ -6113,5 +6278,200 @@ func TestAttestationApiSeccomp(t *testing.T) {
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Fatalf("attestation-api must set seccompProfile.type: RuntimeDefault; got %+v", sc.SeccompProfile)
+	}
+}
+
+// The injected secret fetcher verifies CDS before handing it a sandbox token
+// and taking a value back, so cds.measurements has to reach the operator that
+// renders the fetcher's args. Each hop is unit-tested; this asserts the chart
+// end of the chain, which nothing else covers.
+func TestChartOperatorCarriesCDSMeasurementsForSecretFetcher(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "cds.measurements[0]=aa11",
+		"--set-string", "cds.measurements[1]=bb22",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := strings.Join(renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, " ")
+	for _, want := range []string{"--cds-measurements=aa11", "--cds-measurements=bb22"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("operator args missing %q; the fetcher would pin no measurement and accept any CDS: %s", want, args)
+		}
+	}
+}
+
+// With no measurements configured the flag is absent rather than empty, so the
+// fetcher falls back to its own unpinned warning instead of parsing "".
+func TestChartOperatorOmitsCDSMeasurementsWhenUnset(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := strings.Join(renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, " ")
+	if strings.Contains(args, "--cds-measurements") {
+		t.Errorf("operator carries --cds-measurements with none configured: %s", args)
+	}
+}
+
+// volumed is off by default: it runs privileged with hostPID and a writable
+// bind of the kubelet directory, and nothing needs it until a workload
+// consumes a volume.
+func TestChartVolumedOffByDefault(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-volumed") {
+		t.Error("volumed DaemonSet rendered without volumed.enabled")
+	}
+}
+
+// The privileges the daemon cannot work without: hostPID so SO_PEERCRED
+// resolves a caller in another pod's namespace to a real PID, privileged plus
+// Bidirectional propagation so the mount it makes reaches the workload's pod
+// directory, and the device and cgroup trees it reads.
+func TestChartVolumedDaemonSetShape(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-volumed")
+	spec := ds.Spec.Template.Spec
+
+	if !spec.HostPID {
+		t.Error("hostPID is off; a peer in another pod's PID namespace resolves to PID 0")
+	}
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("volumed mounts an API token it has no use for")
+	}
+
+	c, ok := findContainer(spec.Containers, "volumed")
+	if !ok {
+		t.Fatalf("volumed container missing; have %v", containerNames(spec.Containers))
+	}
+	// volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
+	// NOT the distroless operator image (which has neither, so every open
+	// would fail with "executable file not found").
+	if !strings.Contains(c.Image, "/volumed") {
+		t.Errorf("volumed image = %q, want its own /volumed image (not the operator image)", c.Image)
+	}
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Error("volumed is not privileged; device-mapper and mount(2) need it")
+	}
+	// The image is nonroot (USER 65532) and privileged grants no effective
+	// caps to a non-root process: without runAsUser 0 the daemon cannot even
+	// bind its socket.
+	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
+		t.Error("volumed must set runAsUser: 0; the nonroot image user has no effective capabilities")
+	}
+	// RuntimeDefault seccomp blocks mount(2), so the daemon must not carry one.
+	if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
+		t.Errorf("seccomp profile %v would block mount(2)", c.SecurityContext.SeccompProfile.Type)
+	}
+
+	kubelet, ok := containerVolumeMount(c, "kubelet-root")
+	if !ok {
+		t.Fatal("no kubelet-root mount; there is nowhere to mount a volume")
+	}
+	if kubelet.MountPropagation == nil {
+		t.Error("kubelet-root sets no mount propagation; the mount would not reach the pod")
+	} else if *kubelet.MountPropagation != corev1.MountPropagationBidirectional {
+		t.Errorf("kubelet-root propagation = %s, want Bidirectional; the mount would not reach the pod", *kubelet.MountPropagation)
+	}
+	if kubelet.ReadOnly {
+		t.Error("kubelet-root is read-only; the daemon mounts into it")
+	}
+
+	for _, name := range []string{"dev", "sys", "cgroup", "inventory-socket-dir"} {
+		if _, ok := containerVolumeMount(c, name); !ok {
+			t.Errorf("missing %s mount", name)
+		}
+		if _, ok := podVolume(spec, name); !ok {
+			t.Errorf("missing %s volume", name)
+		}
+	}
+	// /sys whole rather than /sys/block: the block entries are symlinks into
+	// /sys/devices, and the volume's serial is read through them.
+	if v, ok := podVolume(spec, "sys"); ok && (v.HostPath == nil || v.HostPath.Path != "/sys") {
+		t.Errorf("sys volume = %+v, want a hostPath of /sys", v.HostPath)
+	}
+}
+
+// The daemon's socket has to land in the inventory's socket directory: the
+// deny-host-namespaces VAP carves out that exact path by string equality, and
+// it is the directory the webhook mounts into cw pods. A daemon serving
+// anywhere else is a daemon no confidential pod can reach.
+func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
+	const runtimeDir = "/var/run/c8s-inventory-elsewhere"
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "nriImagePolicy.hostPaths.runtimeDir="+runtimeDir,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	c, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	if got := argAfter(c.Args, "--socket-dir"); got != runtimeDir {
+		t.Errorf("--socket-dir = %q, want the inventory socket dir %q", got, runtimeDir)
+	}
+
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var carved bool
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, strconv.Quote(runtimeDir)) {
+			carved = true
+		}
+	}
+	if !carved {
+		t.Errorf("the VAP does not carve out %s, so the socket dir the daemon serves in is denied to cw pods", runtimeDir)
+	}
+}
+
+// argAfter returns the value following flag in an argv, or "" if absent.
+func argAfter(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// The sidecar reaches volumed through the directory the webhook mounts into cw
+// pods, which the operator learns from --workload-claims-host-dir. If the two
+// templates ever disagree the socket is simply not there, and every
+// volume-consuming pod hangs waiting for a mount.
+func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	daemon, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	socketDir := argAfter(daemon.Args, "--socket-dir")
+	if socketDir == "" {
+		t.Fatal("volumed has no --socket-dir")
+	}
+
+	operator := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
+	var hostDir string
+	for _, a := range operator.Args {
+		if v, ok := strings.CutPrefix(a, "--workload-claims-host-dir="); ok {
+			hostDir = v
+		}
+	}
+	if hostDir != socketDir {
+		t.Errorf("the operator mounts %q into cw pods but volumed serves in %q", hostDir, socketDir)
 	}
 }

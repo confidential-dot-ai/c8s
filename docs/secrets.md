@@ -3,10 +3,6 @@
 How a workload is authorized to read a secret, and what the allowlist and the
 admission inventory contribute to that decision.
 
-> **Status.** Nothing fetches from the endpoint yet — the injected fetcher and
-> its webhook wiring are not implemented, so a workload today must call the API
-> itself.
-
 ## When it is served
 
 Release is gated on an allowlist entry carrying a grant, which is operator-signed
@@ -34,16 +30,70 @@ measurement requirement above is unmeetable there. Two other reasons stand
 independently: the kata sandbox ID comes from a host-written CRI annotation, and
 argv enforcement in the guest is watch-and-kill rather than synchronous.
 
+This is enforced, not just documented: the fetcher redeems its sandbox token
+over the mounted nri-image-policy socket and has no guest (loopback) endpoint,
+so an operator without `--workload-claims-host-dir` has nothing to mount. The
+webhook rejects `confidential.ai/c8s-secrets` at admission there rather than
+admitting a pod whose fetcher would CrashLoop while the workload blocked
+forever on a file that never lands.
+
+## Asking for a secret
+
+Annotate the pod alongside `confidential.ai/cw`:
+
+| Annotation | |
+|---|---|
+| `confidential.ai/c8s-secrets` | comma-separated `NAME=/store/path`; `NAME` is the file each value is written to |
+| `confidential.ai/c8s-secret-dir` | where the files land; default `/run/c8s/secrets` |
+
+```yaml
+annotations:
+  confidential.ai/cw: api
+  confidential.ai/c8s-secrets: "DB=/tenant-a/db,HF=/tenant-a/hf-token"
+```
+
+The webhook injects a `c8s-secret` sidecar and a memory-backed volume. Every
+container in the pod mounts that volume **read-only**; only the fetcher may
+write it. The volume and the container name are reserved — a pod declaring
+either is rejected, since a `hostPath` there would write a released secret to
+host-visible storage, and an ephemeral container mounting it would read one out
+of a running pod.
+
+### The file appears after your container starts
+
+This is the part to design around. CDS releases only once **every** main
+container is running, because that is when the sandbox matches a whole workload
+entry. The fetcher therefore starts alongside the workload, is refused while the
+set is incomplete, and writes when it completes. A consumer must wait for its
+file rather than read it at startup:
+
+```sh
+until [ -f /run/c8s/secrets/DB ]; do sleep 1; done
+```
+
+Nothing can remove this. An init container would be asking before its siblings
+exist and would deadlock the pod it gates. The consequence is that a terminal
+fetch failure leaves a `Running` pod with no secret and an
+`Init:CrashLoopBackOff` sub-status — there is no fail-closed delivery gate to be
+had under combination gating.
+
+A workload that finds its path empty creates it, so the first pod of a workload
+to ask defines the value.
+
 ## The API
 
-Every request needs a single-use challenge and a fresh sandbox token, so a
-release is bound to one caller and cannot be replayed.
+The injected fetcher speaks this; a workload does not have to. Every request
+needs a single-use challenge and a fresh sandbox token, so a release is bound to
+one caller and cannot be replayed.
 
 ```
 POST /secrets                      → {"challenge": "<base64>"}
 GET  /secrets/<store path>         → 200 {"value": "<base64>"} | 404 | 403
 POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403
 ```
+
+`PUT` on the same paths is the operator's, authorized by the operator key
+instead — see "Operator-supplied values".
 
 `POST /secrets` is the challenge route; the wildcard can never match it, so no
 store path is shadowed by it — a secret at `/challenge` still resolves.
@@ -70,10 +120,110 @@ A path that is not granted is `404`, indistinguishable from one that does not
 exist — otherwise the API enumerates the store. Denials are opaque to the
 client; the reason goes to the CDS log.
 
+**These routes are rate-limited per sandbox**, keyed on the ID in the verified
+client certificate. Pods reach CDS through a NodePort and the host-network mesh
+proxy, so every pod on a node arrives from the node's address: bounded on that,
+one pod could spend the budget its co-tenants share and hold their fetchers in a
+CrashLoop. A request whose certificate is absent or unverified is bounded by
+address instead — it is refused by the handler regardless, and a caller cannot
+opt out of the limit by withholding an identity.
+
 Paths must arrive already canonical: absolute, clean, no trailing slash, and no
 percent-encoding. They are rejected rather than repaired, so the bytes matched
 against a grant and the bytes used as a store key are the bytes the client
 sent.
+
+## Operator-supplied values
+
+CDS generates a value it is asked for and finds missing, which covers a session
+key but not an API token, a database password, or a wrapped key. Those come from
+an operator:
+
+```sh
+c8s secrets put /tenant-a/hf-token --url "$CDS" --measurements "$M" \
+  --operator-key operator.key < token.txt
+```
+
+The value is read from stdin or `--from-file`, and the bytes are stored exactly
+as read — a trailing newline is part of the value. The byte count is printed to
+confirm which one was sent.
+
+```
+PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
+                            → 201 {"created": true}
+                            → 409 {"existing": "workload"|"operator"}
+                            → 200 {"existing": "workload"|"operator"}
+```
+
+Authorization is the operator key that CDS already pins for allowlist writes
+(`cds --operator-keys`) — the same key the `secrets` grants are rooted in. Its
+token binds the method, path, and body, so a captured one cannot be replayed
+against a different path or a different value. `overwrite` travels in the body
+for that reason: a query parameter is outside what the token covers.
+
+### Replacing a value
+
+A path that already holds a value answers `409` and names what put it there —
+a workload that found the path empty, or an earlier operator write. Nothing is
+written. `--overwrite` replaces it, and the CLI prints what it is replacing
+before it does:
+
+```
+$ c8s secrets put /tenant-a/db --overwrite < db.txt
+~ /tenant-a/db (replaces a workload-generated value)
+wrote 24 bytes to /tenant-a/db
+```
+
+The store has no versioning and no delete, so a displaced value is gone.
+
+**A workload reads its secret into a file once, at startup.** Replacing a value
+reaches a pod when that pod next restarts, so a Deployment holding the old value
+keeps it until it is rolled. Replacing a path a workload created is worth
+pausing over for that reason: the pods that generated the value go on using it.
+
+Revoking a value means restarting CDS, which empties the whole store — see
+"Restarts".
+
+## Diagnosing a refusal
+
+A refused pod is told only that it was refused, and the set that decides the
+matter — what the sandbox is running — is visible only to CDS. `explain` is
+where that is read:
+
+```sh
+c8s secrets explain --sandbox "$ID" --url "$CDS" --measurements "$M" \
+  --operator-key operator.key
+```
+
+```
+sandbox    0123456789abcdef…
+inventory  10.0.0.7
+reported   3 container(s)
+dropped    1 injected by c8s
+candidates 2
+    sha256:1111…  [/serve]
+  - sha256:9999…  [get-secret]
+    sha256:8888…  [sh -c sleep 1]
+
+vllm-llama  NEAR MISS
+  foreign  sha256:8888…  [sh -c sleep 1]
+           no container in this entry declares it
+
+nothing is released: no entry describes the candidate set
+```
+
+The sandbox ID is on the pod's certificate; `c8s verify` prints it. `--json`
+emits the report as it arrives.
+
+It reads the same inventory, binding and allowlist the release path reads, and
+measures entries with the same matcher, so it reports the decision rather than a
+reconstruction of it. It answers to the operator key, since it describes a pod
+the caller may not own. The report carries grant paths; a value never appears in
+it.
+
+`GET /secrets-explain/{sandboxID}` is a sibling of `/secrets`, not a path under
+it: a literal segment beats the wildcard in routing, so mounting it below
+`/secrets` would make every secret stored under that prefix unreachable.
 
 ## What CDS checks
 
@@ -116,8 +266,8 @@ a workload's declared set, so they are removed before matching — an entry neve
 has to enumerate c8s's own sidecars.
 
 A container is dropped when its digest is an allowlist **floor** entry *and* its
-entrypoint is one c8s injects (`get-cert`, `get-secret`, `/c8s`). Both halves
-are load-bearing. Floor membership alone would let a pod add busybox running a
+entrypoint is one c8s injects (`get-cert`, `get-secret`, `get-volume`, `/c8s`).
+Both halves are load-bearing. Floor membership alone would let a pod add busybox running a
 shell — also a floor entry — and have it ignored.
 
 The floor is the source. It already carries the injected image, since it could
@@ -221,7 +371,7 @@ reports this. A partially-rolled Deployment ends up with two different values
 for one path.
 
 So after a CDS restart, restart every secret-consuming workload rather than
-letting them recover piecemeal. Treat a released value as ephemeral for the
+letting them recover piecemeal — a rolling restart of each Deployment. Treat a released value as ephemeral for the
 lifetime of the CDS process; nothing durable may be keyed on one.
 
 The sandbox ledger is process memory too, so a leaf that outlives a restart has

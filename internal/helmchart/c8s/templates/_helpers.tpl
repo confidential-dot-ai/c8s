@@ -23,6 +23,17 @@
 {{- printf "%s-kata-deploy" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "c8s.volumedName" -}}
+{{- printf "%s-volumed" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
+   which the distroless operator image cannot. Same repository/tag/digest
+   contract as the other per-role images. */}}
+{{- define "volumed.image" -}}
+{{ include "c8s-common.image" .Values.volumed.image }}
+{{- end -}}
+
 {{/* int64 (fixes float64 -f values rendering as 7e+06) + reject non-ints so a
    bad -f can't fall open to UID 0. */}}
 {{- define "c8s.int" -}}
@@ -544,8 +555,12 @@ cache_max_entries = 1024
 {{- $out := list -}}
 {{- range $c := .Values.c8sComponents -}}
 {{- $img := include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.valuePath) | fromJson -}}
+{{- /* enabledPath points at a JSON boolean; valueAtPath returns it as the
+   string "true"/"false". Compare the string rather than `| fromJson`, whose
+   Helm variant returns a (truthy) map for a scalar — which silently made this
+   gate a no-op, deriving even disabled components that carry a digest. */ -}}
 {{- $enabled := true -}}
-{{- if $c.enabledPath -}}{{- $enabled = include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath) | fromJson -}}{{- end -}}
+{{- if $c.enabledPath -}}{{- $enabled = eq (include "c8s.valueAtPath" (dict "root" $root.Values "path" $c.enabledPath)) "true" -}}{{- end -}}
 {{- $out = append $out (dict "name" $c.valuePath "image" $img "enabled" $enabled "cdsExempt" $c.cdsExempt) -}}
 {{- end -}}
 {{ $out | toJson }}
