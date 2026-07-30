@@ -18,6 +18,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -92,14 +93,16 @@ type sandboxBinder interface {
 // without standing up an RA-TLS inventory.
 type sandboxDigestSource interface {
 	InventoryKey(ctx context.Context, host string) (*ecdsa.PublicKey, error)
-	Fetch(ctx context.Context, host, sandboxID string) ([]string, error)
+	FetchSandbox(ctx context.Context, host, sandboxID string) (workloadclaims.SandboxDigestsResponse, error)
 }
 
-// allowlistGate answers the one attest-time question: is this digest admitted
-// at all, as a floor entry or as any workload container. Satisfied by
+// allowlistGate answers the attest-time questions: is this digest admitted at
+// all (floor entry or any workload container), and — for the matched-workload
+// stamp — what does the full live allowlist say. Satisfied by
 // *internal/allowlist.Store.
 type allowlistGate interface {
 	Contains(digest types.Digest) (bool, error)
+	LoadAll() (*pkgallowlist.Allowlist, string, error)
 }
 
 func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +203,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// inventory that admitted it. Ask that inventory what the sandbox is
 	// actually running and gate issuance on the allowlist. The requester never
 	// gets a say in the answer.
-	if err := h.verifySandboxWorkload(ctx, sandbox); err != nil {
+	matched, err := h.verifySandboxWorkload(ctx, sandbox)
+	if err != nil {
 		// The detail stays in the log. A requester picks both the sandbox ID and
 		// the address CDS just dialled, so echoing what happened there would
 		// hand it a reachability oracle for CDS's network position.
@@ -229,10 +233,11 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// issuance but is NOT embeddable — its REPORTDATA includes the consumed
 	// challenge, so re-verification against the bare key would always fail.
 	certPEM, _, err := h.CA.SignCSR(issuer.SignCSRParams{
-		CSR:       csr,
-		TTL:       issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
-		Evidence:  evidenceJSON,
-		SandboxID: sandbox.SandboxID,
+		CSR:             csr,
+		TTL:             issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
+		Evidence:        evidenceJSON,
+		SandboxID:       sandbox.SandboxID,
+		MatchedWorkload: matched,
 	})
 	if err != nil {
 		slog.Error("in-process sign failed", "error", err)
@@ -308,61 +313,139 @@ func (h AttestHandler) verifySandboxToken(ctx context.Context, raw json.RawMessa
 }
 
 // verifySandboxWorkload asks the sandbox's own inventory which images it is
-// running and requires every one of them to be allowlisted before issuing
-// (docs/ratls.md, "Sandbox identity").
+// running, requires every one of them to be allowlisted before issuing
+// (docs/ratls.md, "Sandbox identity"), and — when the inventory reports
+// per-container (digest, argv) detail — resolves which workload entry (or
+// entries) the running set is consistent with, for stamping on the leaf.
 //
-// Membership only. It deliberately does NOT require the running set to match a
-// whole workload entry: issuance happens at arbitrary points in the pod
-// lifecycle — while a user init container runs, between main containers coming
-// up, while one restarts, and after completed init containers are reaped — and
-// in every one of those the running set is a strict subset of what the pod
-// declares. Gating on the whole set would deny certificates for ordinary
-// lifecycle states, permanently so for pods with init containers. Membership is
-// subset-safe: any subset of an allowlisted set is still allowlisted.
+// The flat gate is membership only. It deliberately does NOT require the
+// running set to match a whole workload entry: issuance happens at arbitrary
+// points in the pod lifecycle — while a user init container runs, between main
+// containers coming up, while one restarts, and after completed init
+// containers are reaped — and in every one of those the running set is a
+// strict subset of what the pod declares. Gating on the whole set would deny
+// certificates for ordinary lifecycle states, permanently so for pods with
+// init containers. Membership is subset-safe: any subset of an allowlisted set
+// is still allowlisted.
 //
-// Whole-set enforcement belongs where the pod is complete and the stake is
-// high — secrets release — not at cert issuance. Until then a leaf's sandbox ID
-// says "this key belongs to pod X", not "pod X runs exactly workload Y".
+// The entry match layered on top is subset-safe too: every non-floor
+// (digest, argv) pair must be admitted by the entry, but nothing declared has
+// to be running yet. It restores the combination enforcement #168 dropped
+// (containers from different entries cannot be mixed into an unauthorized
+// pod), and is strictly stronger than the pre-#168 digest-set match because
+// argv discriminates entries sharing images: a container whose command does
+// not satisfy an entry's argv policy does not match it, and a pod whose
+// non-floor containers match NO entry is refused outright. An inventory too
+// old to report per-container detail degrades to the flat gate with no stamp —
+// degradation, not failure, so a node-image skew cannot brick issuance.
+//
+// Whole-set enforcement stays where the pod is complete and the stake is
+// high — secrets release. Until then a leaf's sandbox ID says "this key
+// belongs to pod X", and the stamp "pod X runs within entry Y's policy".
 //
 // No sandbox ⇒ nothing to check: a requester that presents no token gets a leaf
 // with no sandbox ID. With a token, an unreachable inventory or a
 // non-allowlisted image is fail-closed — CDS cannot establish what the pod
 // runs, or has established that it should not run.
-func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox workloadclaims.VerifiedSandbox) error {
+func (h AttestHandler) verifySandboxWorkload(ctx context.Context, sandbox workloadclaims.VerifiedSandbox) (*ratls.MatchedWorkload, error) {
 	if sandbox.SandboxID == "" {
-		return nil
+		return nil, nil
 	}
 	if h.AllowlistStore == nil {
-		return fmt.Errorf("sandbox token presented but this CDS has no allowlist to check it against")
+		return nil, fmt.Errorf("sandbox token presented but this CDS has no allowlist to check it against")
 	}
 	if h.SandboxDigests == nil {
-		return fmt.Errorf("sandbox token presented but this CDS cannot reach the inventory for its digests")
+		return nil, fmt.Errorf("sandbox token presented but this CDS cannot reach the inventory for its digests")
 	}
-	digests, err := h.SandboxDigests.Fetch(ctx, sandbox.InventoryHost, sandbox.SandboxID)
+	resp, err := h.SandboxDigests.FetchSandbox(ctx, sandbox.InventoryHost, sandbox.SandboxID)
 	if err != nil {
-		return fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryHost, err)
+		return nil, fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryHost, err)
 	}
-	if len(digests) == 0 {
+	if len(resp.Digests) == 0 {
 		// "No containers" is not "nothing to check" — it is no evidence at all,
 		// and looping over it would pass the gate vacuously. A sandbox always
 		// runs at least the sidecar that is asking, so an empty answer means
 		// the inventory is still syncing (or is lying), both of which must wait.
-		return fmt.Errorf("inventory reports no containers in sandbox %s", sandbox.SandboxID)
+		return nil, fmt.Errorf("inventory reports no containers in sandbox %s", sandbox.SandboxID)
 	}
-	for _, d := range digests {
+	for _, d := range resp.Digests {
 		digest, err := types.ParseDigest(d)
 		if err != nil {
-			return fmt.Errorf("container digest %q: %w", d, err)
+			return nil, fmt.Errorf("container digest %q: %w", d, err)
 		}
 		allowed, err := h.AllowlistStore.Contains(digest)
 		if err != nil {
-			return fmt.Errorf("check allowlist: %w", err)
+			return nil, fmt.Errorf("check allowlist: %w", err)
 		}
 		if !allowed {
-			return fmt.Errorf("container image %s is not allowlisted", digest)
+			return nil, fmt.Errorf("container image %s is not allowlisted", digest)
 		}
 	}
-	return nil
+
+	containers, err := resp.RequireContainers()
+	if errors.Is(err, workloadclaims.ErrSandboxContainersUnsupported) {
+		// An inventory older than the per-container field: the flat gate above
+		// already passed, so issue — with no stamp, since a (digest, argv)
+		// match cannot be established.
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return h.matchWorkloadEntries(containers)
+}
+
+// matchWorkloadEntries resolves the entry (or entries) consistent with every
+// non-floor (digest, argv) container the inventory reported, and returns the
+// stamp for the leaf.
+//
+// Floor digests are excluded: they are admitted alone and carry no combination
+// policy, and c8s's injected sidecars (get-cert) are floor entries, so their
+// digest drops out here. A floor-only pod matches no entry and is stamped with
+// nothing. Ambiguity — more than one surviving entry — is a real outcome (two
+// entries can admit the same commands, e.g. both with an "any" argv policy)
+// and the stamp names the whole set rather than asserting an identity the
+// evidence does not establish. Zero surviving entries with non-floor
+// containers present refuses issuance.
+func (h AttestHandler) matchWorkloadEntries(containers []workloadclaims.SandboxContainer) (*ratls.MatchedWorkload, error) {
+	doc, _, err := h.AllowlistStore.LoadAll()
+	if err != nil {
+		return nil, fmt.Errorf("load allowlist: %w", err)
+	}
+	running := make([]pkgallowlist.RunningContainer, 0, len(containers))
+	for _, c := range containers {
+		running = append(running, pkgallowlist.RunningContainer{Digest: c.Digest, Argv: c.Argv})
+	}
+	// Mixed-version skew: a NON-FLOOR container reported with empty Argv means
+	// the inventory admitted it before argv recording existed — its true argv
+	// is unknown, not empty (OCI requires argv[0]). Matching unknown argv
+	// against exact policies would refuse renewal of a pod whose admission was
+	// accepted, so degrade exactly like a detail-less inventory: the flat gate
+	// already passed, issue with no stamp. Floor containers (the injected
+	// sidecars) are excluded from matching anyway, so their missing argv is
+	// irrelevant.
+	for _, c := range doc.NonFloorContainers(running) {
+		if len(c.Argv) == 0 {
+			slog.Warn("inventory reports a non-floor container without argv detail; issuing without a matched-workload stamp",
+				"digest", c.Digest)
+			return nil, nil
+		}
+	}
+	names := doc.MatchingWorkloadEntries(running)
+	if len(names) == 0 {
+		// Distinguish "nothing to match" (floor-only pod) from "no entry
+		// admits these containers" — the first issues with no stamp, the
+		// second refuses.
+		if !doc.HasNonFloor(running) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("running containers match no workload entry (digest and argv)")
+	}
+	digest, err := doc.WorkloadEntriesDigest(names)
+	if err != nil {
+		return nil, fmt.Errorf("digest matched workload entries: %w", err)
+	}
+	return &ratls.MatchedWorkload{Names: names, EntriesDigest: digest}, nil
 }
 
 // recordSandboxBinding notes which inventory vouched for this sandbox.

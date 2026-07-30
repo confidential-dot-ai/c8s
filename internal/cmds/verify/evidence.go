@@ -76,6 +76,22 @@ type evidence struct {
 	// sandboxErr records a carried sandbox-ID extension this build cannot
 	// interpret. The verdict fails closed on it.
 	sandboxErr error
+	// configClaims is the parsed config-claims extension the evidence binds
+	// (cert modes only; nil when the cert carries none or claimsErr is set).
+	configClaims *ratls.ConfigClaims
+	// claimsErr records a carried claims extension this build cannot interpret.
+	// The binding still folds the raw bytes, but policy against the claims is
+	// impossible — the verdict fails closed on it.
+	claimsErr error
+	// matchedWorkload is the CDS-stamped matched-workload-entry extension
+	// (cert modes only; nil when the leaf carries none). Unlike config-claims
+	// it is NOT covered by the requester's REPORTDATA — it is a statement by
+	// CDS under the mesh-CA signature, checkable against the attested
+	// allowlist (pkg/ratls/matchedworkload.go).
+	matchedWorkload *ratls.MatchedWorkload
+	// matchedErr records a carried matched-workload extension this build
+	// cannot interpret; damage must not read as absence.
+	matchedErr error
 }
 
 // platformOrDefault returns p, or "snp" when p is empty (the historical default
@@ -134,20 +150,32 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 	if err != nil {
 		return nil, err
 	}
+	claimsRaw := ratls.ExtractConfigClaimsBytes(cert)
 	binding := "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)"
+	var claims *ratls.ConfigClaims
+	var claimsErr error
+	if len(claimsRaw) > 0 {
+		binding = "REPORTDATA binds the certificate public key and its config-claims extension (no per-request nonce — not a freshness proof)"
+		claims, claimsErr = ratls.UnmarshalConfigClaims(claimsRaw)
+	}
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
+	matched, matchedErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:    platform,
-		rawEvidence: raw,
-		erd:         erd,
-		fresh:       false,
-		source:      source,
-		certSHA256:  hex.EncodeToString(sum[:]),
-		bindingNote: binding,
-		leaf:        cert,
-		sandboxID:   sandboxID,
-		sandboxErr:  sandboxErr,
+		platform:        platform,
+		rawEvidence:     raw,
+		erd:             erd,
+		fresh:           false,
+		source:          source,
+		certSHA256:      hex.EncodeToString(sum[:]),
+		bindingNote:     binding,
+		leaf:            cert,
+		sandboxID:       sandboxID,
+		sandboxErr:      sandboxErr,
+		configClaims:    claims,
+		claimsErr:       claimsErr,
+		matchedWorkload: matched,
+		matchedErr:      matchedErr,
 	}, nil
 }
 

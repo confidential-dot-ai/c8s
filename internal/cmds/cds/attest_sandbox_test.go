@@ -25,9 +25,12 @@ const testInventoryHost = "10.0.0.7"
 
 // fakeDigests answers the inventory callback from a sandbox -> digests map. A
 // missing sandbox is workloadclaims.ErrSandboxUnknown, like a 404 on the wire.
+// containers, when set, adds the per-container (digest, argv) detail a current
+// inventory reports; leaving it nil models an inventory too old to report it.
 type fakeDigests struct {
-	digests map[string][]string
-	key     *ecdsa.PublicKey
+	digests    map[string][]string
+	containers map[string][]workloadclaims.SandboxContainer
+	key        *ecdsa.PublicKey
 }
 
 func (f fakeDigests) InventoryKey(_ context.Context, host string) (*ecdsa.PublicKey, error) {
@@ -40,15 +43,15 @@ func (f fakeDigests) InventoryKey(_ context.Context, host string) (*ecdsa.Public
 	return f.key, nil
 }
 
-func (f fakeDigests) Fetch(_ context.Context, host, sandboxID string) ([]string, error) {
+func (f fakeDigests) FetchSandbox(_ context.Context, host, sandboxID string) (workloadclaims.SandboxDigestsResponse, error) {
 	if host != testInventoryHost {
-		return nil, fmt.Errorf("unexpected inventory host %q", host)
+		return workloadclaims.SandboxDigestsResponse{}, fmt.Errorf("unexpected inventory host %q", host)
 	}
 	d, ok := f.digests[sandboxID]
 	if !ok {
-		return nil, workloadclaims.ErrSandboxUnknown
+		return workloadclaims.SandboxDigestsResponse{}, workloadclaims.ErrSandboxUnknown
 	}
-	return d, nil
+	return workloadclaims.SandboxDigestsResponse{Digests: d, Containers: f.containers[sandboxID]}, nil
 }
 
 // newSandboxTestEnv wires an AttestHandler that can validate inventory EARs, and

@@ -25,7 +25,7 @@ func TestCDSHTTPClientRejectsPlainHTTP(t *testing.T) {
 	// A non-https --cds-url must be refused, not quietly served over a client
 	// that skips RA-TLS attestation of CDS.
 	for _, scheme := range []string{"http://cds:8443", "cds:8443", "tcp://cds:8443"} {
-		if _, err := cdsHTTPClient(config{CDSURL: scheme, AttestationApiURL: "http://attestation-api:8400"}); err == nil {
+		if _, err := cdsHTTPClient(config{CDSURL: scheme, AttestationApiURL: "http://attestation-api:8400"}, nil); err == nil {
 			t.Fatalf("cdsHTTPClient(%q) succeeded, want error for non-https scheme", scheme)
 		}
 	}
@@ -35,7 +35,7 @@ func TestCDSHTTPClientUsesRATLSForHTTPS(t *testing.T) {
 	client, err := cdsHTTPClient(config{
 		CDSURL:            "https://cds:8443",
 		AttestationApiURL: "http://attestation-api:8400",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("cdsHTTPClient: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestBuildDiscoveryDocumentIncludesCertificateAndEvidence(t *testing.T) {
 		DiscoveryCDSCertURL:    "/.well-known/cds-cert.pem",
 		DiscoveryMeshCAURL:     "/.well-known/mesh-ca.pem",
 		DiscoveryPublicTLSMode: "webpki",
-	}, result)
+	}, result, &cdsIdentityRecorder{})
 	if err != nil {
 		t.Fatalf("buildDiscoveryDocument: %v", err)
 	}

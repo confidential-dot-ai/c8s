@@ -158,7 +158,7 @@ func TestVerifySandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
 		AllowlistStore: errStore{},
 		SandboxDigests: fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}},
 	}
-	err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
+	_, err := h.verifySandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
 		SandboxID:     testSandboxID,
 		InventoryHost: testInventoryHost,
 	})
@@ -335,7 +335,7 @@ func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
 	_ = store.Close()
 
 	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
-	if err := seedStore(&store, path); err == nil {
+	if _, err := seedStore(&store, path); err == nil {
 		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
 	}
 }

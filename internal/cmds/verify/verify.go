@@ -3,9 +3,11 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -20,8 +22,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -83,17 +87,27 @@ type config struct {
 	fromFile      string
 	discoveryPath string
 
-	measurements     []string
-	measurementsFile string
-	operatorKeys     string
-	sandboxID        string
-	meshCA           string
-	allowDebug       bool
-	minTCBBootloader uint
-	minTCBTEE        uint
-	minTCBSNP        uint
-	minTCBMicrocode  uint
-	expectedRDHex    string
+	measurements        []string
+	measurementsFile    string
+	operatorKeys        string
+	sandboxID           string
+	meshCA              string
+	meshCADigestHex     string
+	expectedRTMR1Hex    string
+	expectedRTMR2Hex    string
+	expectedRTMR3Hex    string
+	operatorKeyFile     string
+	imageManifest       string
+	allowlistSeed       string
+	allowlistSeedDigest string
+	allowlistFile       string
+	allowlistDigestHex  string
+	allowDebug          bool
+	minTCBBootloader    uint
+	minTCBTEE           uint
+	minTCBSNP           uint
+	minTCBMicrocode     uint
+	expectedRDHex       string
 
 	output       string
 	showEvidence bool
@@ -166,9 +180,19 @@ unavailable (unreachable / unparseable).`,
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE)")
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
-	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
+	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the target's attested config-claims digest matches this set (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
-	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID")
+	f.StringVar(&cfg.meshCA, "mesh-ca", "", "CDS mesh CA (PEM). For kind=cds targets the attested config-claims must commit SHA-256 of this CA's DER, turning the mesh CA from an anchor you were handed into one the hardware vouches for (claims v2+; mutually exclusive with --mesh-ca-digest). For any other kind the target's leaf must chain to it, which is what authenticates the reported sandbox ID")
+	f.StringVar(&cfg.meshCADigestHex, "mesh-ca-digest", "", "expected hex SHA-256 of the issuing mesh CA's DER, pinned against the attested config-claims; alternative to --mesh-ca (kind=cds targets)")
+	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars; verification fails unless the guest's runtime measurement register matches. Mutually exclusive with --operator-key (TDX only)")
+	f.StringVar(&cfg.operatorKeyFile, "operator-key", "", "operator PUBLIC key file bound into RTMR[3] at launch; pins RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), proving the node was launched to trust only this key. Mutually exclusive with --expected-rtmr3 (TDX only)")
+	f.StringVar(&cfg.expectedRTMR1Hex, "expected-rtmr1", "", "expected TDX RTMR[1] as 96 hex chars — the guest KERNEL (UKI image identity + GPT + boot). --measurements pins MRTD, which on TDX covers only the firmware, so without this the guest image is NOT pinned (TDX only)")
+	f.StringVar(&cfg.expectedRTMR2Hex, "expected-rtmr2", "", "expected TDX RTMR[2] as 96 hex chars — the guest ROOTFS (UKI section measurement chain). See --expected-rtmr1 (TDX only)")
+	f.StringVar(&cfg.imageManifest, "image-manifest", "", "confos build manifest.json for the expected guest image; pins tdx.mrtd, tdx.rtmr1 and tdx.rtmr2 together, so the whole image is verified rather than just the firmware. Fetch it from the published image artifact (oras pull ghcr.io/…/c8s-base:<tag>). Overrides --measurements/--expected-rtmr1/--expected-rtmr2 (TDX only)")
+	f.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "expected allowlist seed JSON file; verification fails unless the target's attested seed digest matches its canonical digest (kind=cds targets)")
+	f.StringVar(&cfg.allowlistSeedDigest, "allowlist-seed-digest", "", "expected hex SHA-256 canonical seed digest; alternative to --allowlist-seed")
+	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the EXACT bytes of a GET /allowlist response, whose SHA-256 the target must attest as its live allowlist. Pins the admission policy actually in force, which --allowlist-seed cannot. NOTE: this must be the served response, not a hand-written or exported allowlist — the store normalizes on load, so a semantically identical file hashes differently and the mismatch looks like an attack. Mutually exclusive with --allowlist-digest (claims v3+)")
+	f.StringVar(&cfg.allowlistDigestHex, "allowlist-digest", "", "expected hex SHA-256 of the live allowlist's canonical bytes; alternative to --allowlist")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component")
 	f.UintVar(&cfg.minTCBTEE, "min-tcb-tee", 0, "minimum TEE TCB component")
@@ -225,8 +249,9 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 }
 
 // operatorKeysReport is the pinned-operator-key section of the verdict. Keys
-// authorize allowlist writes on CDS. The list is CDS-reported config, fetched
-// over the attested serving cert; --operator-keys turns it into a check.
+// authorize allowlist writes on CDS. The served list is informational on its
+// own; when the target's evidence binds config-claims, applyClaimsPolicy
+// requires digest to match the attested value.
 type operatorKeysReport struct {
 	fingerprints []string
 	digest       []byte // KeySetDigest of the served list (nil when not fetched)
@@ -236,12 +261,15 @@ type operatorKeysReport struct {
 
 // gatherOperatorKeys fetches the CDS-pinned operator key fingerprints for
 // kind=cds network targets. For any other kind (including the default auto)
-// the fetch is skipped, and the skip is announced via a note so the rendered
-// verdict never silently omits it. The fetch is bound to the attested serving
-// cert (see fetchOperatorKeyFingerprints). A failed fetch degrades to a note,
-// but records fetchErr so applySandboxPolicy can fail the verdict when
-// --operator-keys asked for a check: an endpoint erroring on /operator-keys
-// must not dodge it.
+// the cross-check is skipped, and the skip is announced via a note so the
+// rendered verdict never silently omits it. The fetch is bound to the attested
+// serving cert (see fetchOperatorKeyFingerprints). A failed fetch degrades to
+// a note for claims-free targets, but records fetchErr so applyClaimsPolicy
+// can fail the verdict when the evidence binds config-claims: the
+// served-vs-attested key cross-check is required for network targets (it
+// cannot run for --from-file / no-URL targets, where the attested digest
+// alone anchors the pin), and an endpoint
+// erroring on /operator-keys must not dodge it.
 func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorKeysReport {
 	if cfg.kind != "cds" {
 		return operatorKeysReport{note: "operator-keys cross-check skipped: target kind is not cds (use --kind cds to enable)"}
@@ -284,7 +312,8 @@ func verifyEvidence(ctx context.Context, cfg config, policy *ratls.VerifyPolicy,
 	oc := newOutcome(cfg, ev, result, verr, policy)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applySandboxPolicy(&oc, cfg, ev, opKeys)
+	applyClaimsPolicy(&oc, ev, policy, opKeys)
+	applySandboxPolicy(&oc, cfg, ev)
 	render(cfg, oc, out)
 	if !oc.Verified {
 		return exitFailed
@@ -323,14 +352,41 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		return nil, err
 	}
 
-	if _, err := expectedOperatorKeysDigest(cfg); err != nil {
+	opKeysDigest, err := expectedOperatorKeysDigest(cfg)
+	if err != nil {
 		return nil, err
 	}
 
-	if cfg.meshCA != "" {
+	rtmrs, manifestMRTD, err := expectedRTMRPins(cfg)
+	if err != nil {
+		return nil, err
+	}
+	// --image-manifest is the one-flag form of the whole image pin: MRTD from
+	// the same manifest as RTMR[1]/[2], so the three cannot drift apart.
+	if manifestMRTD != nil {
+		measurements = [][]byte{manifestMRTD}
+	}
+
+	seedDigest, err := expectedSeedDigest(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	meshCADigest, err := expectedMeshCADigest(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.meshCA != "" && cfg.kind != "cds" {
+		// Chain-check semantics (mesh-CA-signed leaves): validate the bundle up
+		// front so a bad file is a usage error, not a late verdict failure.
 		if _, err := meshCAPool(cfg.meshCA); err != nil {
 			return nil, err
 		}
+	}
+
+	allowlistDigest, err := expectedAllowlistDigest(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	if cfg.sandboxID != "" {
@@ -346,9 +402,226 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 	}
 
 	return &ratls.VerifyPolicy{
-		Measurements: measurements,
-		AllowDebug:   cfg.allowDebug,
+		Measurements:       measurements,
+		AllowDebug:         cfg.allowDebug,
+		OperatorKeysDigest: opKeysDigest,
+		SeedDigest:         seedDigest,
+		MeshCADigest:       meshCADigest,
+		AllowlistDigest:    allowlistDigest,
+		ExpectedRTMRs:      rtmrs,
 	}, nil
+}
+
+// confosManifest is the subset of a confos build manifest.json this CLI reads:
+// the reference registers computed by the image build.
+type confosManifest struct {
+	TDX struct {
+		MRTD  string `json:"mrtd"`
+		RTMR1 string `json:"rtmr1"`
+		RTMR2 string `json:"rtmr2"`
+	} `json:"tdx"`
+}
+
+// expectedRTMRPins resolves the runtime-register pins. Returns the register
+// array and, when --image-manifest was used, the MRTD from that same manifest
+// so the caller can pin all three together.
+//
+// On TDX, MRTD covers only the TDVF firmware's measured regions — the kernel
+// and rootfs are in RTMR[1] and RTMR[2]. A --measurements pin alone therefore
+// says nothing about which guest image booted, which is why --image-manifest
+// exists: it pins all three from one provenanced source.
+func expectedRTMRPins(cfg config) (pins [4][]byte, manifestMRTD []byte, err error) {
+	parse := func(flag, s string) ([]byte, error) {
+		b, err := hex.DecodeString(strings.TrimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("%s: not hex: %w", flag, err)
+		}
+		if len(b) != runtimemeasure.Size {
+			return nil, fmt.Errorf("%s is %d bytes (%d hex chars), want %d (%d hex chars)",
+				flag, len(b), len(strings.TrimSpace(s)), runtimemeasure.Size, runtimemeasure.Size*2)
+		}
+		return b, nil
+	}
+
+	if cfg.imageManifest != "" {
+		if cfg.expectedRTMR1Hex != "" || cfg.expectedRTMR2Hex != "" {
+			return pins, nil, fmt.Errorf("--image-manifest already pins RTMR[1] and RTMR[2]; drop --expected-rtmr1/--expected-rtmr2")
+		}
+		data, rerr := os.ReadFile(cfg.imageManifest)
+		if rerr != nil {
+			return pins, nil, fmt.Errorf("read --image-manifest: %w", rerr)
+		}
+		var m confosManifest
+		if jerr := json.Unmarshal(data, &m); jerr != nil {
+			return pins, nil, fmt.Errorf("--image-manifest: not a confos manifest.json: %w", jerr)
+		}
+		if m.TDX.MRTD == "" || m.TDX.RTMR1 == "" || m.TDX.RTMR2 == "" {
+			return pins, nil, fmt.Errorf("--image-manifest: missing tdx.mrtd/tdx.rtmr1/tdx.rtmr2 (is this a TDX image manifest?)")
+		}
+		if manifestMRTD, err = parse("--image-manifest tdx.mrtd", m.TDX.MRTD); err != nil {
+			return pins, nil, err
+		}
+		if pins[1], err = parse("--image-manifest tdx.rtmr1", m.TDX.RTMR1); err != nil {
+			return pins, nil, err
+		}
+		if pins[2], err = parse("--image-manifest tdx.rtmr2", m.TDX.RTMR2); err != nil {
+			return pins, nil, err
+		}
+	} else {
+		if cfg.expectedRTMR1Hex != "" {
+			if pins[1], err = parse("--expected-rtmr1", cfg.expectedRTMR1Hex); err != nil {
+				return pins, nil, err
+			}
+		}
+		if cfg.expectedRTMR2Hex != "" {
+			if pins[2], err = parse("--expected-rtmr2", cfg.expectedRTMR2Hex); err != nil {
+				return pins, nil, err
+			}
+		}
+	}
+
+	switch {
+	case cfg.expectedRTMR3Hex != "" && cfg.operatorKeyFile != "":
+		return pins, nil, fmt.Errorf("--expected-rtmr3 and --operator-key are mutually exclusive")
+
+	case cfg.expectedRTMR3Hex != "":
+		if pins[3], err = parse("--expected-rtmr3", cfg.expectedRTMR3Hex); err != nil {
+			return pins, nil, err
+		}
+
+	case cfg.operatorKeyFile != "":
+		// The initrd hashes the pubkey FILE verbatim, so these bytes go in
+		// unmodified — parsing and re-encoding the PEM would change the digest
+		// and silently fail every comparison.
+		pub, rerr := os.ReadFile(cfg.operatorKeyFile)
+		if rerr != nil {
+			return pins, nil, fmt.Errorf("read --operator-key: %w", rerr)
+		}
+		if len(pub) == 0 {
+			return pins, nil, fmt.Errorf("--operator-key: %s is empty", cfg.operatorKeyFile)
+		}
+		// Catch a private key handed over by mistake: it would derive a pin that
+		// can never match, and the failure would look like a compromised node.
+		if bytes.Contains(pub, []byte("PRIVATE KEY")) {
+			return pins, nil, fmt.Errorf("--operator-key: %s looks like a PRIVATE key; pass the public half (openssl ec -in op.key -pubout -out op.pub)", cfg.operatorKeyFile)
+		}
+		reg := runtimemeasure.ForOperatorKey(pub)
+		pins[3] = reg[:]
+	}
+	return pins, manifestMRTD, nil
+}
+
+// expectedSeedDigest resolves the seed pin from --allowlist-seed (a seed JSON
+// file, digested canonically) or --allowlist-seed-digest (the hex digest
+// directly). Nil means no seed pin.
+func expectedSeedDigest(cfg config) ([]byte, error) {
+	switch {
+	case cfg.allowlistSeed != "" && cfg.allowlistSeedDigest != "":
+		return nil, fmt.Errorf("--allowlist-seed and --allowlist-seed-digest are mutually exclusive")
+	case cfg.allowlistSeed != "":
+		data, err := os.ReadFile(cfg.allowlistSeed)
+		if err != nil {
+			return nil, fmt.Errorf("read --allowlist-seed: %w", err)
+		}
+		seed, err := pkgallowlist.ParseJSON(data)
+		if err != nil {
+			return nil, fmt.Errorf("--allowlist-seed: %w", err)
+		}
+		return seed.CanonicalDigest()
+	case cfg.allowlistSeedDigest != "":
+		digest, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(cfg.allowlistSeedDigest), "sha256:"))
+		if err != nil {
+			return nil, fmt.Errorf("--allowlist-seed-digest is not valid hex: %w", err)
+		}
+		if len(digest) != ratls.ClaimsDigestSize {
+			return nil, fmt.Errorf("--allowlist-seed-digest decodes to %d bytes, want a SHA-256 digest (%d hex chars, optionally sha256:-prefixed)", len(digest), 2*ratls.ClaimsDigestSize)
+		}
+		return digest, nil
+	default:
+		return nil, nil
+	}
+}
+
+// expectedAllowlistDigest resolves the live-allowlist pin from --allowlist (a
+// file holding the exact GET /allowlist response bytes) or --allowlist-digest
+// (the hex value directly). Nil means no pin.
+//
+// The file is hashed verbatim, with no parsing or re-serialization, because
+// that is precisely what CDS commits: GET /allowlist returns the canonical
+// bytes whose SHA-256 is the attested claim. Re-encoding here would reintroduce
+// the normalization skew this pin exists to detect — a hand-assembled file that
+// is semantically identical hashes differently and fails, which is correct but
+// reads like an attack, hence the warning on the flag.
+func expectedAllowlistDigest(cfg config) ([]byte, error) {
+	switch {
+	case cfg.allowlistFile != "" && cfg.allowlistDigestHex != "":
+		return nil, fmt.Errorf("--allowlist and --allowlist-digest are mutually exclusive")
+
+	case cfg.allowlistDigestHex != "":
+		b, err := hex.DecodeString(strings.TrimSpace(cfg.allowlistDigestHex))
+		if err != nil {
+			return nil, fmt.Errorf("--allowlist-digest: not hex: %w", err)
+		}
+		if len(b) != sha256.Size {
+			return nil, fmt.Errorf("--allowlist-digest is %d bytes, want %d", len(b), sha256.Size)
+		}
+		return b, nil
+
+	case cfg.allowlistFile != "":
+		raw, err := os.ReadFile(cfg.allowlistFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --allowlist: %w", err)
+		}
+		sum := sha256.Sum256(raw)
+		return sum[:], nil
+	}
+	return nil, nil
+}
+
+// expectedMeshCADigest resolves the mesh-CA claims pin from --mesh-ca-digest
+// (the hex value directly) or, for kind=cds targets, --mesh-ca (a PEM whose DER
+// is digested). Nil means no claims pin — for any other kind, --mesh-ca keeps
+// its chain-check meaning (applySandboxPolicy) and pins nothing here, since
+// mesh-CA-signed leaves carry no config-claims.
+//
+// Pinning this is what stops the mesh CA being an out-of-band anchor: CDS's own
+// RA-TLS certificate is self-signed and served without a chain, so attesting
+// CDS says nothing about which CA it issues under unless the claims commit it.
+func expectedMeshCADigest(cfg config) ([]byte, error) {
+	switch {
+	case cfg.meshCA != "" && cfg.meshCADigestHex != "":
+		return nil, fmt.Errorf("--mesh-ca and --mesh-ca-digest are mutually exclusive")
+
+	case cfg.meshCADigestHex != "":
+		b, err := hex.DecodeString(strings.TrimSpace(cfg.meshCADigestHex))
+		if err != nil {
+			return nil, fmt.Errorf("--mesh-ca-digest: not hex: %w", err)
+		}
+		if len(b) != sha256.Size {
+			return nil, fmt.Errorf("--mesh-ca-digest is %d bytes, want %d", len(b), sha256.Size)
+		}
+		return b, nil
+
+	case cfg.meshCA != "" && cfg.kind == "cds":
+		pemBytes, err := os.ReadFile(cfg.meshCA)
+		if err != nil {
+			return nil, fmt.Errorf("read --mesh-ca: %w", err)
+		}
+		block, rest := pem.Decode(pemBytes)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("--mesh-ca: %s is not a PEM CERTIFICATE", cfg.meshCA)
+		}
+		// The claims commit ONE issuing CA (sha256 of mesh.Cert.Raw). A bundle
+		// is ambiguous here: silently digesting the first block would make a
+		// rotation-era two-cert file read as an attack. Refuse instead.
+		if next, _ := pem.Decode(rest); next != nil {
+			return nil, fmt.Errorf("--mesh-ca: %s holds more than one PEM block; the claims pin commits a single issuing CA — pass exactly the one to pin (or use --mesh-ca-digest)", cfg.meshCA)
+		}
+		// Digest the DER, matching what CDS commits (sha256 of mesh.Cert.Raw).
+		sum := sha256.Sum256(block.Bytes)
+		return sum[:], nil
+	}
+	return nil, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
@@ -492,11 +765,39 @@ type Outcome struct {
 	Pinned      bool      `json:"measurement_pinned"`
 	Error       string    `json:"error,omitempty"`
 
+	// RTMRsPinned lists the runtime measurement registers that were enforced,
+	// as "<index>:<hex>". Rendered so a reader can tell what a verdict actually
+	// covers. On TDX the measurement pin is MRTD, which covers only the
+	// firmware — without RTMR[1]/[2] the guest image is unverified, and without
+	// RTMR[3] the deployment is. A verdict that proves neither should not look
+	// the same as one that proves both.
+	RTMRsPinned []string `json:"rtmrs_pinned,omitempty"`
+
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
 	// operator public keys the target pins for allowlist writes (served list,
-	// kind=cds only), fetched over the attested serving cert.
-	OperatorKeys     []string `json:"operator_keys,omitempty"`
-	OperatorKeysNote string   `json:"operator_keys_note,omitempty"`
+	// kind=cds only), fetched over the attested serving cert. The
+	// *AttestedDigest fields carry the digests bound in the evidence's
+	// config-claims (docs/ratls.md); when set, the served key list was required
+	// to match, and --operator-keys / --allowlist-seed pin against them.
+	OperatorKeys               []string `json:"operator_keys,omitempty"`
+	OperatorKeysNote           string   `json:"operator_keys_note,omitempty"`
+	OperatorKeysAttestedDigest string   `json:"operator_keys_attested_digest,omitempty"`
+	SeedAttestedDigest         string   `json:"allowlist_seed_attested_digest,omitempty"`
+	AllowlistAttestedDigest    string   `json:"allowlist_attested_digest,omitempty"`
+	WorkloadAttestedDigest     string   `json:"workload_attested_digest,omitempty"`
+
+	// MatchedWorkloadEntries are the allowlist entry names CDS stamped on the
+	// leaf at issuance: the entry (or entries) the sandbox's admitted
+	// (digest, argv) containers were consistent with. More than one name means
+	// even the argv could not distinguish them and the pod is one of the set —
+	// an honest ambiguity, not an error. The digest is
+	// allowlist.WorkloadEntriesDigest over the named entries, recomputable
+	// from the allowlist in force at issuance. Stamped by CDS under the
+	// mesh-CA signature — trusting it requires trusting the issuing CDS,
+	// which the mesh-CA/allowlist config-claims pins establish.
+	MatchedWorkloadEntries       []string `json:"matched_workload_entries,omitempty"`
+	MatchedWorkloadEntriesDigest string   `json:"matched_workload_entries_digest,omitempty"`
+	MatchedWorkloadAmbiguous     bool     `json:"matched_workload_ambiguous,omitempty"`
 
 	// SandboxID is the CRI pod sandbox the leaf names, and SandboxIDNote says
 	// what authenticates it. CDS stamps the ID into the leaf's signed area
@@ -507,10 +808,95 @@ type Outcome struct {
 	SandboxIDNote string `json:"sandbox_id_note,omitempty"`
 }
 
-// applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id /
-// --operator-keys. It only ever demotes Verified — nothing here can rescue a
-// failed hardware verification (docs/ratls.md).
-func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKeysReport) {
+// applyClaimsPolicy surfaces the attested config-claims digests and fails the
+// verdict when a --operator-keys / --allowlist-seed / --mesh-ca / --allowlist
+// pin or the served-vs-attested key check does not hold. It only ever demotes
+// Verified — the claims are proven by the evidence newOutcome already judged,
+// so nothing here can rescue a failed verification (docs/ratls.md).
+func applyClaimsPolicy(oc *Outcome, ev *evidence, policy *ratls.VerifyPolicy, opKeys operatorKeysReport) {
+	// Surface digests only when the hardware evidence verified: "attested" must
+	// never label extension bytes whose binding was not proven.
+	if oc.Verified && ev.configClaims != nil {
+		oc.OperatorKeysAttestedDigest = hex.EncodeToString(ev.configClaims.OperatorKeysDigest)
+		if ev.configClaims.HasSeed() {
+			oc.SeedAttestedDigest = hex.EncodeToString(ev.configClaims.SeedDigest)
+		} else {
+			oc.SeedAttestedDigest = "none (no seed configured)"
+		}
+		if ev.configClaims.HasAllowlist() {
+			oc.AllowlistAttestedDigest = hex.EncodeToString(ev.configClaims.AllowlistDigest)
+		} else {
+			// v1/v2 claims predate the field. Say so rather than printing
+			// nothing, so a stale target cannot read as "no allowlist served".
+			oc.AllowlistAttestedDigest = "not attested (target predates claims v3)"
+		}
+		if ev.configClaims.HasWorkload() {
+			// Only pre-#168 leaves carry a real value here; surfaced for
+			// completeness, never pinnable.
+			oc.WorkloadAttestedDigest = hex.EncodeToString(ev.configClaims.WorkloadDigest)
+		}
+	}
+	if oc.Verified && ev.matchedWorkload != nil {
+		oc.MatchedWorkloadEntries = ev.matchedWorkload.Names
+		oc.MatchedWorkloadEntriesDigest = hex.EncodeToString(ev.matchedWorkload.EntriesDigest)
+		oc.MatchedWorkloadAmbiguous = ev.matchedWorkload.Ambiguous()
+	}
+	fail := func(format string, args ...any) {
+		oc.Verified = false
+		if oc.Error == "" {
+			oc.Error = fmt.Sprintf(format, args...)
+		}
+	}
+	if ev.claimsErr != nil {
+		fail("config-claims extension unparseable (newer target than this CLI?): %v", ev.claimsErr)
+		return
+	}
+	if ev.matchedErr != nil {
+		// A malformed stamp must not read as "no stamp": that is exactly how a
+		// tampered leaf would try to shed its workload identity.
+		fail("matched-workload extension unparseable: %v", ev.matchedErr)
+		return
+	}
+	// Every claims pin must be listed here AND in the comparisons below. A pin
+	// missing from this disjunction is worse than absent: the caller believes
+	// it is enforcing something and nothing is checked.
+	pinned := len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 ||
+		len(policy.MeshCADigest) > 0 || len(policy.AllowlistDigest) > 0
+	if pinned && ev.configClaims == nil {
+		fail("config-claims pin set but the evidence binds no config-claims (target predates config attestation, or is not a CDS serving cert)")
+		return
+	}
+	if len(policy.OperatorKeysDigest) > 0 && !bytes.Equal(ev.configClaims.OperatorKeysDigest, policy.OperatorKeysDigest) {
+		fail("attested operator-keys digest %x does not match the --operator-keys set (%x)", ev.configClaims.OperatorKeysDigest, policy.OperatorKeysDigest)
+	}
+	if len(policy.SeedDigest) > 0 && !bytes.Equal(ev.configClaims.SeedDigest, policy.SeedDigest) {
+		fail("attested allowlist-seed digest %x does not match the expected seed (%x)", ev.configClaims.SeedDigest, policy.SeedDigest)
+	}
+	if len(policy.MeshCADigest) > 0 && !bytes.Equal(ev.configClaims.MeshCADigest, policy.MeshCADigest) {
+		fail("attested mesh-CA digest %x does not match the --mesh-ca pin (%x) — this component does not issue under the CA you pinned",
+			ev.configClaims.MeshCADigest, policy.MeshCADigest)
+	}
+	if len(policy.AllowlistDigest) > 0 && !bytes.Equal(ev.configClaims.AllowlistDigest, policy.AllowlistDigest) {
+		fail("attested live-allowlist digest %x does not match the --allowlist pin (%x) — the admission policy in force is not the one you pinned",
+			ev.configClaims.AllowlistDigest, policy.AllowlistDigest)
+	}
+	// The served key list must be the set the measured code attested to
+	// loading; a mismatch means MITM on the fetch or a CDS bug. A failed fetch
+	// fails closed too: an endpoint erroring on /operator-keys must not dodge
+	// a required cross-check on network targets (a 404 is not an error — it maps to the
+	// empty-set digest in fetchOperatorKeyFingerprints).
+	if ev.configClaims != nil && opKeys.fetchErr != nil {
+		fail("could not fetch /operator-keys to cross-check the attested operator-key set: %v", opKeys.fetchErr)
+	}
+	if ev.configClaims != nil && len(opKeys.digest) > 0 && !bytes.Equal(opKeys.digest, ev.configClaims.OperatorKeysDigest) {
+		fail("served /operator-keys digest %x does not match the attested config-claims digest %x", opKeys.digest, ev.configClaims.OperatorKeysDigest)
+	}
+}
+
+// applySandboxPolicy surfaces the leaf's sandbox ID and enforces --sandbox-id.
+// It only ever demotes Verified — nothing here can rescue a failed hardware
+// verification (docs/ratls.md).
+func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence) {
 	fail := func(format string, args ...any) {
 		oc.Verified = false
 		if oc.Error == "" {
@@ -523,8 +909,11 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	}
 
 	// The chain check runs before the ID is reported, so the note can never
-	// claim "verified" for a check that then failed.
-	if cfg.meshCA != "" {
+	// claim "verified" for a check that then failed. For kind=cds targets
+	// --mesh-ca is a config-claims pin instead (expectedMeshCADigest): CDS's
+	// serving certificate is self-signed, so demanding a chain there would
+	// always fail.
+	if cfg.meshCA != "" && cfg.kind != "cds" {
 		if ev.leaf == nil {
 			fail("--mesh-ca needs the target's leaf certificate (use a cert mode, not --mode attestation-endpoint or a discovery target)")
 			return
@@ -548,7 +937,7 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	// attested, which it is not.
 	if oc.Verified && ev.sandboxID != "" {
 		oc.SandboxID = ev.sandboxID
-		if cfg.meshCA == "" {
+		if cfg.meshCA == "" || cfg.kind == "cds" {
 			oc.SandboxIDNote = "not verified: CDS's signature on the leaf vouches for this ID; pass --mesh-ca to check it"
 		} else {
 			oc.SandboxIDNote = "verified: the leaf chains to the supplied mesh CA"
@@ -566,33 +955,6 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 			fail("%v", err)
 		}
 	}
-
-	// The served key list is authenticated by being fetched over the attested
-	// serving cert. A failed fetch fails closed when the operator asked for the
-	// check (a 404 is not an error — it maps to the empty-set digest in
-	// fetchOperatorKeyFingerprints).
-	expected, err := expectedOperatorKeysDigest(cfg)
-	if err != nil {
-		fail("%v", err)
-		return
-	}
-	if len(expected) == 0 {
-		return
-	}
-	if opKeys.fetchErr != nil {
-		fail("could not fetch /operator-keys to check it against --operator-keys: %v", opKeys.fetchErr)
-		return
-	}
-	if opKeys.digest == nil {
-		// Never fetched (wrong --kind, or a --from-file target). Say that,
-		// rather than comparing against an empty digest and reporting a
-		// mismatch the operator cannot act on.
-		fail("--operator-keys cannot be checked: %s", opKeys.note)
-		return
-	}
-	if !bytes.Equal(opKeys.digest, expected) {
-		fail("served /operator-keys digest %x does not match the --operator-keys set (%x)", opKeys.digest, expected)
-	}
 }
 
 // newOutcome maps a verifier verdict to the shared Outcome. The verifier proves
@@ -609,6 +971,11 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		Binding:    ev.bindingNote,
 		CertSHA256: ev.certSHA256,
 		Pinned:     pinned,
+	}
+	for i, want := range policy.ExpectedRTMRs {
+		if len(want) > 0 {
+			oc.RTMRsPinned = append(oc.RTMRsPinned, fmt.Sprintf("%d:%s", i, hex.EncodeToString(want)))
+		}
 	}
 	if verr != nil {
 		oc.Error = verr.Error()
@@ -705,12 +1072,48 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 		fmt.Fprintf(out, "  cert sha256:  %s\n", oc.CertSHA256)
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
+	rtmrLabel := [4]string{"firmware events", "guest kernel", "guest rootfs", "operator key / workloads"}
+	for _, p := range oc.RTMRsPinned {
+		idx, hexval, _ := strings.Cut(p, ":")
+		i, _ := strconv.Atoi(idx)
+		fmt.Fprintf(out, "  RTMR[%s]:      %s (matched — %s)\n", idx, hexval, rtmrLabel[i%4])
+	}
+	if len(oc.RTMRsPinned) == 0 && oc.Platform == "tdx" {
+		fmt.Fprintf(out, "  note:         no RTMR pinned — MRTD covers only the TDVF firmware, so the guest image and\n"+
+			"                deployment identity are NOT verified (see --image-manifest and --operator-key)\n")
+	}
 	if oc.SandboxID != "" {
 		fmt.Fprintf(out, "  sandbox id:   %s\n", oc.SandboxID)
 		fmt.Fprintf(out, "                %s\n", oc.SandboxIDNote)
 	}
+	if oc.OperatorKeysAttestedDigest != "" {
+		fmt.Fprintf(out, "  operator-keys digest (attested via config-claims): sha256:%s\n", oc.OperatorKeysAttestedDigest)
+	}
+	if oc.AllowlistAttestedDigest != "" {
+		fmt.Fprintf(out, "  live allowlist digest (attested via config-claims): %s\n", oc.AllowlistAttestedDigest)
+		fmt.Fprintf(out, "                        (compare: sha256 of the exact GET /allowlist response bytes)\n")
+	}
+	if oc.SeedAttestedDigest != "" {
+		fmt.Fprintf(out, "  allowlist-seed digest (attested via config-claims): %s\n", oc.SeedAttestedDigest)
+	}
+	if oc.WorkloadAttestedDigest != "" {
+		fmt.Fprintf(out, "  workload digest (attested via config-claims): sha256:%s\n", oc.WorkloadAttestedDigest)
+	}
+	if len(oc.MatchedWorkloadEntries) > 0 {
+		if oc.MatchedWorkloadAmbiguous {
+			fmt.Fprintf(out, "  matched workload entries (stamped by CDS): %s\n", strings.Join(oc.MatchedWorkloadEntries, ", "))
+			fmt.Fprintf(out, "                (AMBIGUOUS — these entries all admit the observed containers,\n"+
+				"                argv included; the pod is ONE of them, the evidence cannot say which)\n")
+		} else {
+			fmt.Fprintf(out, "  matched workload entry (stamped by CDS): %s\n", oc.MatchedWorkloadEntries[0])
+		}
+		fmt.Fprintf(out, "                entries digest: sha256:%s (recompute from the attested allowlist)\n", oc.MatchedWorkloadEntriesDigest)
+	}
 	if len(oc.OperatorKeys) > 0 {
 		label := "operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):"
+		if oc.OperatorKeysAttestedDigest != "" {
+			label = "operator keys (allowlist writes; served list matches the attested digest):"
+		}
 		fmt.Fprintf(out, "  %s\n", label)
 		for _, fp := range oc.OperatorKeys {
 			fmt.Fprintf(out, "    sha256:%s\n", fp)

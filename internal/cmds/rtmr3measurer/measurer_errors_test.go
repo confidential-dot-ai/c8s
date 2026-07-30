@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // Malformed and duplicate log lines are tolerated: skipped/deduped, never
@@ -26,7 +26,7 @@ func TestLoadStateSkipsMalformedAndDuplicateLines(t *testing.T) {
 	if err := os.WriteFile(state, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tdx := &fakeTDX{reg: rtmr3.FromDigests([]string{"sha256:" + hexA})}
+	tdx := &fakeTDX{reg: runtimemeasure.FromDigests([]string{"sha256:" + hexA})}
 
 	m := newTestMeasurer(t, watch, state, tdx)
 	if len(m.measuredOrder) != 1 || m.measuredOrder[0] != "sha256:"+hexA {
@@ -50,8 +50,8 @@ func TestLoadStateRegisterReadFailureKeepsLogAsTruth(t *testing.T) {
 	m.watchDir = watch
 	m.statePath = state
 	m.extend = tdx.extend
-	m.readRegister = func() ([rtmr3.Size]byte, error) {
-		return [rtmr3.Size]byte{}, errors.New("sysfs read failed")
+	m.readRegister = func() ([runtimemeasure.Size]byte, error) {
+		return [runtimemeasure.Size]byte{}, errors.New("sysfs read failed")
 	}
 	if err := m.loadState(); err != nil {
 		t.Fatalf("loadState: %v (register read failure must not be fatal)", err)
@@ -223,12 +223,12 @@ func TestSysfsExtendAndReadRegister(t *testing.T) {
 	t.Cleanup(func() { rtmr3Sysfs = orig })
 
 	node := filepath.Join(t.TempDir(), "rtmr3:sha384")
-	if err := os.WriteFile(node, make([]byte, rtmr3.Size), 0o600); err != nil {
+	if err := os.WriteFile(node, make([]byte, runtimemeasure.Size), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rtmr3Sysfs = node
 
-	event := rtmr3.Event("sha256:" + hexA)
+	event := runtimemeasure.Event("sha256:" + hexA)
 	if err := extendSysfs(event); err != nil {
 		t.Fatalf("extendSysfs: %v", err)
 	}

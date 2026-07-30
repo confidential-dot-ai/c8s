@@ -493,7 +493,7 @@ func TestWriteOutputsAllArtifacts(t *testing.T) {
 		Evidence:    json.RawMessage(`{"q":"e"}`),
 	}
 
-	if err := writeOutputs(cfg, []byte("KEYPEM"), result); err != nil {
+	if err := writeOutputs(cfg, []byte("KEYPEM"), result, &cdsIdentityRecorder{}); err != nil {
 		t.Fatalf("writeOutputs: %v", err)
 	}
 
@@ -529,7 +529,7 @@ func TestWriteOutputsAllArtifacts(t *testing.T) {
 }
 
 func TestWriteOutputsBadKeyMode(t *testing.T) {
-	err := writeOutputs(config{KeyOutPath: filepath.Join(t.TempDir(), "k"), KeyMode: "abc"}, []byte("k"), attestclient.CertificateResult{})
+	err := writeOutputs(config{KeyOutPath: filepath.Join(t.TempDir(), "k"), KeyMode: "abc"}, []byte("k"), attestclient.CertificateResult{}, &cdsIdentityRecorder{})
 	if err == nil {
 		t.Fatal("writeOutputs succeeded, want error for bad key mode")
 	}
@@ -538,14 +538,14 @@ func TestWriteOutputsBadKeyMode(t *testing.T) {
 func TestWriteOutputsCAOutWithoutIssuerFails(t *testing.T) {
 	// A chain with only a leaf has no CA bundle to extract.
 	leafOnly := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("leaf")}))
-	err := writeOutputs(config{CAOutPath: filepath.Join(t.TempDir(), "ca.pem")}, nil, attestclient.CertificateResult{Certificate: leafOnly})
+	err := writeOutputs(config{CAOutPath: filepath.Join(t.TempDir(), "ca.pem")}, nil, attestclient.CertificateResult{Certificate: leafOnly}, &cdsIdentityRecorder{})
 	if err == nil {
 		t.Fatal("writeOutputs succeeded, want error extracting CA bundle from leaf-only chain")
 	}
 }
 
 func TestNewCDSClientInvalidURL(t *testing.T) {
-	if _, err := newCDSClient(config{CDSURL: "://bad"}); err == nil {
+	if _, err := newCDSClient(config{CDSURL: "://bad"}, nil); err == nil {
 		t.Fatal("newCDSClient succeeded, want error for invalid URL")
 	}
 }
@@ -606,7 +606,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 		OutPath:           filepath.Join(dir, "cert.pem"),
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err != nil {
+	if err := obtainCert(context.Background(), cfg, client, &cdsIdentityRecorder{}); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
 	got, err := os.ReadFile(cfg.OutPath)
@@ -630,7 +630,7 @@ func TestObtainCertCDSError(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com"}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err == nil {
+	if err := obtainCert(context.Background(), cfg, client, &cdsIdentityRecorder{}); err == nil {
 		t.Fatal("obtainCert succeeded, want error when CDS fails")
 	}
 }
@@ -673,7 +673,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 		InitialRetryInterval: time.Millisecond,
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
+	if err := obtainCertWithRetry(context.Background(), cfg, client, &cdsIdentityRecorder{}); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if calls < 2 {
@@ -695,7 +695,7 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com", InitialRetryTimeout: 0}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
+	if err := obtainCertWithRetry(context.Background(), cfg, client, &cdsIdentityRecorder{}); err == nil {
 		t.Fatal("obtainCertWithRetry succeeded, want error")
 	}
 	if calls != 1 {
@@ -718,7 +718,7 @@ func TestRunOnceWritesCert(t *testing.T) {
 	// run() builds an https-only RA-TLS client via newCDSClient; drive the
 	// run-once path (obtainCertWithRetry then return) against the plaintext
 	// fake CDS with an injected client instead.
-	if err := obtainCertWithRetry(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
+	if err := obtainCertWithRetry(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL), &cdsIdentityRecorder{}); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if _, err := os.Stat(cfg.OutPath); err != nil {
