@@ -62,8 +62,13 @@ spec:
             # effective caps to a non-root process; the daemon must be root.
             runAsUser: 0
             runAsGroup: 0
+          # No leading "volumed": cmd/volumed/Dockerfile already sets
+          # ENTRYPOINT ["/app/c8s", "volumed"], so repeating it here appends a
+          # second subcommand and the daemon exits with
+          # `unknown command "volumed" for "c8s volumed"`. Same convention as
+          # cds.yaml, whose args start at --port because that image entrypoint
+          # carries its own subcommand too.
           args:
-            - volumed
             - --socket-dir
             - {{ .Values.nriImagePolicy.hostPaths.runtimeDir | quote }}
             - --kubelet-root
