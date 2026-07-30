@@ -1,6 +1,7 @@
 package getcert
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,11 +10,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -359,4 +363,81 @@ func TestCABundleFromChain(t *testing.T) {
 			t.Fatal("expected error for a leaf-only chain, got nil")
 		}
 	})
+}
+
+func TestAcquireIntervalPrefersInitialRetryTimeout(t *testing.T) {
+	got := acquireInterval(config{InitialRetryTimeout: 2 * time.Minute, RenewInterval: time.Hour})
+	if got != 2*time.Minute {
+		t.Fatalf("acquireInterval = %v, want the initial-retry budget 2m", got)
+	}
+}
+
+func TestAcquireIntervalFallsBackToRenewInterval(t *testing.T) {
+	got := acquireInterval(config{InitialRetryTimeout: 0, RenewInterval: time.Hour})
+	if got != time.Hour {
+		t.Fatalf("acquireInterval = %v, want RenewInterval when no initial-retry budget", got)
+	}
+}
+
+// A pod whose first issuance failed is acquiring, not renewing: it must enter
+// the loop on the acquisition cadence. Ticking at RenewInterval leaves it down
+// for a whole interval while the paired probe-file init container times out
+// against a file nothing is writing (c8s#200).
+func TestRunEntersLoopOnAcquisitionCadenceBeforeFirstCert(t *testing.T) {
+	overrideProcRoot(t, t.TempDir())
+
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg := config{
+		CDSURL:                 "https://127.0.0.1:1",
+		AttestationApiURL:      "http://127.0.0.1:1",
+		SAN:                    "host.example.com",
+		InitialRetryTimeout:    20 * time.Millisecond,
+		InitialRetryInterval:   5 * time.Millisecond,
+		ContinueOnInitialError: true,
+		RenewInterval:          time.Hour,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+	time.Sleep(200 * time.Millisecond)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "entering renewal loop") {
+		t.Fatalf("run never entered the loop; logs:\n%s", out)
+	}
+	if strings.Contains(out, "interval=1h0m0s") {
+		t.Fatalf("entered the loop on RenewInterval without holding a cert; logs:\n%s", out)
+	}
+	if !strings.Contains(out, "interval=20ms") {
+		t.Fatalf("want the acquisition cadence 20ms; logs:\n%s", out)
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

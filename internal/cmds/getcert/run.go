@@ -213,18 +213,27 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	haveCert := true
 	if err := obtainCertWithRetry(ctx, cfg, client); err != nil {
 		if cfg.RenewInterval <= 0 || !cfg.ContinueOnInitialError {
 			return err
 		}
-		slog.Error("initial certificate request failed, will retry next interval", "error", err)
+		haveCert = false
+		slog.Error("initial certificate request failed, retrying on the acquisition cadence", "error", err)
 	} else if cfg.RenewInterval <= 0 {
 		return nil
 	}
 
+	// A pod that has never held a certificate is acquiring, not renewing.
+	// Ticking at RenewInterval here would leave it down for a full interval.
+	interval := cfg.RenewInterval
+	if !haveCert {
+		interval = acquireInterval(cfg)
+	}
+
 	// Daemon mode: renew certificate periodically with graceful shutdown.
-	slog.Info("entering renewal loop", "interval", cfg.RenewInterval)
-	ticker := time.NewTicker(cfg.RenewInterval)
+	slog.Info("entering renewal loop", "interval", interval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var watchC <-chan time.Time
@@ -252,6 +261,11 @@ func run(cfg config) error {
 				slog.Error("certificate renewal failed, will retry next interval", "error", err)
 				continue
 			}
+			if !haveCert {
+				haveCert = true
+				ticker.Reset(cfg.RenewInterval)
+				slog.Info("first certificate obtained, switching to renewal interval", "interval", cfg.RenewInterval)
+			}
 			if cfg.ReloadNginx {
 				if err := reloadNginx(); err != nil {
 					slog.Warn("certificate renewed but nginx reload failed", "error", err)
@@ -273,6 +287,17 @@ func run(cfg config) error {
 			}
 		}
 	}
+}
+
+// acquireInterval is the retry cadence before the first certificate lands.
+// RenewInterval is a renewal cadence, so using it to reach a first issuance
+// leaves the pod down for a whole interval while the paired probe-file init
+// container times out every few minutes against a file nothing is writing.
+func acquireInterval(cfg config) time.Duration {
+	if cfg.InitialRetryTimeout > 0 {
+		return cfg.InitialRetryTimeout
+	}
+	return cfg.RenewInterval
 }
 
 // obtainCertWithRetry runs the first certificate request, retrying in-process
