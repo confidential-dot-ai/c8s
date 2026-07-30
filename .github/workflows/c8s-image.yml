@@ -38,7 +38,7 @@ env:
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main.
-  CONFOS_REF: "0532e1b8d9bf6456f5ae01c8ba17cf372b3d83e0" # confos main (#75)
+  CONFOS_REF: "f9a332691004b16329af4d9c19095e055feda798" # confos main (#76)
 
 jobs:
   build-and-push:
