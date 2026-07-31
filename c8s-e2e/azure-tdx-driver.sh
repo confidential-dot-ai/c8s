@@ -49,6 +49,7 @@ fail() {
   # emit the not-ready pods AS markers so they survive the poll's tail window
   # (the plain `get pods` dump below scrolls off before the job reads it).
   kubectl -n c8s-system get pods --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") print "@@NOTREADY "$1" "$2" "$3"@@"}'
+  diag_pods
   kubectl -n c8s-system get pods -o wide 2>/dev/null
   exit 0
 }
@@ -75,6 +76,27 @@ PLUGIN_BIN=/opt/nri/plugins/10-nri-image-policy
 NRI_REV=""; NRI_BEHIND=""     # set by the provenance block; referenced under set -u
 
 m180() { mark "$1 $(printf '%.180s' "${2//@/}")"; }
+
+# ── generic pod diagnostics ──────────────────────────────────────────────────
+# diag_nri only covers NRI, so a tls-lb failure left us with a pod name and a
+# 1/4. Markers are the only thing that survives the poller's window.
+diag_pods() {
+  set +x
+  local P C l
+  for P in $(kubectl -n c8s-system get pods --no-headers 2>/dev/null \
+               | awk '{split($2,a,"/"); if (a[1]!=a[2] || $3!="Running") print $1}' | head -3); do
+    m180 D_PS "$P $(kubectl -n c8s-system get pod "$P" -o jsonpath='{range .status.initContainerStatuses[*]}i/{.name}={.state.waiting.reason}{.state.terminated.reason}:rc={.state.terminated.exitCode} {end}{range .status.containerStatuses[*]}c/{.name}={.state.waiting.reason}{.state.terminated.reason} {end}' 2>/dev/null)"
+    for C in $(kubectl -n c8s-system get pod "$P" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' 2>/dev/null); do
+      while IFS= read -r l; do m180 "D_LOG_$C" "$l"; done \
+        < <(kubectl -n c8s-system logs "$P" -c "$C" --tail=8 2>&1 | tail -8)
+      while IFS= read -r l; do m180 "D_PRV_$C" "$l"; done \
+        < <(kubectl -n c8s-system logs "$P" -c "$C" --previous --tail=6 2>/dev/null | tail -6)
+    done
+    while IFS= read -r l; do m180 D_EV "$l"; done \
+      < <(kubectl -n c8s-system describe pod "$P" 2>/dev/null | sed -n '/^Events:/,$p' | tail -8)
+  done
+  set -x
+}
 diag_nri() {
   set +x
   PLINE=$(kubectl -n c8s-system get pods --no-headers 2>/dev/null | grep '^c8s-nri-image-policy' | head -1)

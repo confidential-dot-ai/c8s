@@ -18,6 +18,9 @@
 # same substrate the metal lane installs on.
 #
 # DISPATCH-ONLY for v1 (no schedule/merge trigger until it has a green history).
+# Dispatch from main only: the Azure federated credential is ref-scoped, so
+# azure/login fails on any other ref (AADSTS700213) before provisioning. Changes
+# here cannot be proven pre-merge. Runs 29979047075 and 30570135409 both hit it.
 name: azure-tdx-e2e
 on:
   # workflow_call so this lane can be a ROW of the c8s platform matrix via
