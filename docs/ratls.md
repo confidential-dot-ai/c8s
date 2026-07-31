@@ -89,7 +89,7 @@ can sign a report, and only code inside the TEE ever holds the private key.
    evidence embedded as a custom extension:
 
    ```text
-   OID 1.3.6.1.4.1.59888.1.1  (RA-TLS attestation extension)
+   OID 1.3.6.1.4.1.66378.1.1  (RA-TLS attestation extension)
    TEEAttestation ::= SEQUENCE {
        teeType     INTEGER,      -- 1 = SEV-SNP, 2 = TDX
        report      OCTET STRING, -- evidence, two shapes (below)
@@ -97,7 +97,7 @@ can sign a report, and only code inside the TEE ever holds the private key.
    }
    ```
 
-The full `1.3.6.1.4.1.59888.1` arc a c8s certificate may carry:
+The full `1.3.6.1.4.1.66378.1` arc a c8s certificate may carry:
 
 | OID | Extension | Stamped by |
 |---|---|---|
@@ -136,7 +136,7 @@ instance — never one across the network (see Guarantees).
    ──────────                                ────────────
 1. TCP connect ────────────────────────────▶
 2.             ◀───────────────────────────  TLS 1.3 ServerHello + leaf cert
-                                             [ext 1.3.6.1.4.1.59888.1.1:
+                                             [ext 1.3.6.1.4.1.66378.1.1:
                                               report with REPORTDATA =
                                               SHA-384(B's pubkey)]
 3. parse cert, extract extension
@@ -344,7 +344,7 @@ when the TEE holds more than one. A CDS-issued leaf names the **CRI pod
 sandbox** it was issued to:
 
 ```text
-OID 1.3.6.1.4.1.59888.1.4  (pod sandbox ID extension)
+OID 1.3.6.1.4.1.66378.1.4  (pod sandbox ID extension)
 SandboxID ::= IA5String     -- e.g. containerd's 64-hex sandbox ID
 ```
 
@@ -572,7 +572,7 @@ degrades issuance — CDS refuses the tokens it cannot check.
 ### Cross-implementation note
 
 A non-Go verifier (e.g. `c8s-verify-js`) reading a sandbox ID needs only the DER
-IA5String at OID `1.3.6.1.4.1.59888.1.4` plus a mesh-CA chain check — the ID is
+IA5String at OID `1.3.6.1.4.1.66378.1.4` plus a mesh-CA chain check — the ID is
 not part of any hash preimage, so there are no canonical-serialization traps.
 The token and digests formats above are internal to the inventory↔CDS path and
 are never presented to a relying party.
