@@ -29,7 +29,19 @@ permissions:
 
 concurrency:
   # Per triggering commit, not per ref (workflow_run's ref is always main).
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha }}
+  #
+  # The inputs are part of the identity, not decoration. A workflow_dispatch has
+  # no workflow_run event, so the commit term falls through to github.sha —
+  # main's head — which is the SAME value for every dispatch between two pushes.
+  # Without the inputs, two c8s_ref rebuilds, or a dev and a non-dev build, share
+  # a group and queue behind each other (cancel-in-progress is false) despite
+  # producing different images. Nothing about them needs serializing: a c8s_ref
+  # rebuild pushes only :<variant>[-cdi]-<ref>, which is distinct per ref, and
+  # dev builds carry their own -dev tags. They are empty on the workflow_run
+  # path, so the auto path groups exactly as before.
+  group: >-
+    ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
+    }}-${{ github.event.inputs.c8s_ref }}-${{ github.event.inputs.dev }}
   cancel-in-progress: false
 
 env:
