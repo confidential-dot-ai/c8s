@@ -7,6 +7,8 @@ import (
 	"regexp"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 )
 
 // emptyDirSubdir is where kubelet materializes an emptyDir volume under a pod's
@@ -17,10 +19,10 @@ const emptyDirSubdir = "volumes/kubernetes.io~empty-dir"
 // KubeVolumePrefix precedes a volume's name in the Kubernetes volume the
 // webhook injects, and so in the kubelet directory this mounts into. The
 // webhook reserves the whole prefix; both sides must spell it the same.
-const KubeVolumePrefix = "c8s-volume-"
+const KubeVolumePrefix = volume.KubeVolumePrefix
 
 // KubeVolumeName is the Kubernetes volume carrying the named volume.
-func KubeVolumeName(name string) string { return KubeVolumePrefix + name }
+func KubeVolumeName(name string) string { return volume.KubeVolumeName(name) }
 
 var (
 	podUIDRE     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

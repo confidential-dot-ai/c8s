@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
@@ -517,7 +517,7 @@ func (v volumesSpec) validate() error {
 				errInvalidInjectionAnnotation, AnnotationVolumes, spec)
 		}
 		name = strings.TrimSpace(name)
-		if err := volumed.ValidVolumeName(name); err != nil {
+		if err := volume.ValidVolumeName(name); err != nil {
 			return fmt.Errorf("%w: %s: %s", errInvalidInjectionAnnotation, AnnotationVolumes, err)
 		}
 		if seen[name] {
@@ -927,7 +927,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		for _, name := range volumeNames(effective.Volumes.Specs) {
 			replaceVolume(pod, openedVolume(name))
 			remountAll(pod, corev1.VolumeMount{
-				Name:      volumed.KubeVolumeName(name),
+				Name:      volume.KubeVolumeName(name),
 				MountPath: filepath.Join(effective.Volumes.Dir, name),
 				ReadOnly:  true,
 				// The node agent makes the mount outside this pod; without
@@ -1234,7 +1234,7 @@ func rejectEphemeralReservedMounts(pod *corev1.Pod) error {
 		for _, m := range c.VolumeMounts {
 			// By prefix as well as by set: an opened volume is reserved
 			// whatever the host-written annotation says its name is.
-			if reserved[m.Name] || strings.HasPrefix(m.Name, volumed.KubeVolumePrefix) {
+			if reserved[m.Name] || strings.HasPrefix(m.Name, volume.KubeVolumePrefix) {
 				return fmt.Errorf("%w: ephemeral container %q may not mount %q, which holds c8s-released material",
 					errInvalidInjectionAnnotation, c.Name, m.Name)
 			}
@@ -1317,7 +1317,7 @@ func volumeNames(specs []string) []string {
 // placeholder is unreachable by construction.
 func openedVolume(name string) corev1.Volume {
 	return corev1.Volume{
-		Name: volumed.KubeVolumeName(name),
+		Name: volume.KubeVolumeName(name),
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
@@ -1362,7 +1362,7 @@ func remountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 func rejectReservedVolumeVolume(pod *corev1.Pod) error {
 	for i := range pod.Spec.Volumes {
 		v := &pod.Spec.Volumes[i]
-		if !strings.HasPrefix(v.Name, volumed.KubeVolumePrefix) {
+		if !strings.HasPrefix(v.Name, volume.KubeVolumePrefix) {
 			continue
 		}
 		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumDefault {

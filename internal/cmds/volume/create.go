@@ -6,24 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 
 	"github.com/spf13/cobra"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
-
-// maxNameLen bounds the volume name at 12 characters.
-//
-// The node selects the device by its virtio-block serial, and
-// VIRTIO_BLK_ID_BYTES is 20. With the "c8s-vol-" prefix that leaves 12; a
-// thirteenth character is silently dropped, so two volumes would present
-// identically to the node with no way to tell them apart.
-const maxNameLen = 12
-
-const serialPrefix = "c8s-vol-"
-
-var nameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 type createConfig struct {
 	name      string
@@ -139,12 +126,8 @@ func validateCreate(cfg *createConfig) (string, error) {
 	case cfg.escrowOut == "":
 		return "", fmt.Errorf("--escrow-out is required: it is the only copy of the key outside CDS")
 	}
-	if len(cfg.name) > maxNameLen {
-		return "", fmt.Errorf("--name %q is %d characters; the device serial holds %d",
-			cfg.name, len(cfg.name), maxNameLen)
-	}
-	if !nameRE.MatchString(cfg.name) {
-		return "", fmt.Errorf("--name %q must be lowercase alphanumeric, may contain '-', and must start and end alphanumeric", cfg.name)
+	if err := ValidVolumeName(cfg.name); err != nil {
+		return "", fmt.Errorf("--name: %w", err)
 	}
 	path, err := pkgallowlist.CanonicalSecretPath(cfg.path)
 	if err != nil {
@@ -176,7 +159,7 @@ func printResult(w io.Writer, cfg createConfig, path string, v Verity) {
 	fmt.Fprintf(w, "+ key stored at %s\n", path)
 	fmt.Fprintf(w, "+ key escrowed to %s — keep it; a CDS restart needs it\n\n", cfg.escrowOut)
 
-	fmt.Fprintf(w, "Attach %s to the node as a raw block device with serial %s%s.\n\n", cfg.out, serialPrefix, cfg.name)
+	fmt.Fprintf(w, "Attach %s to the node as a raw block device with serial %s%s.\n\n", cfg.out, SerialPrefix, cfg.name)
 
 	fmt.Fprintf(w, "Pod annotations:\n")
 	fmt.Fprintf(w, "  confidential.ai/cw: <workload-id>\n")

@@ -68,6 +68,9 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Build macOS CLI
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /tmp/c8s-darwin ./cmd/c8s
+
       - name: Test
         run: make test
 

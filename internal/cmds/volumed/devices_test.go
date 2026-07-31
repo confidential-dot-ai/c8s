@@ -89,9 +89,6 @@ func TestDeviceRefusesANameTooLongForASerial(t *testing.T) {
 	if _, err := d.Device("thirteenchars"); err == nil {
 		t.Fatal("accepted a name longer than the serial holds")
 	}
-	if maxSerialNameLen != 12 {
-		t.Fatalf("maxSerialNameLen = %d, want 12", maxSerialNameLen)
-	}
 }
 
 func TestDeviceRefusesAMalformedName(t *testing.T) {
