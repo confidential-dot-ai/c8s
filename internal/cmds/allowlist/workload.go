@@ -30,6 +30,7 @@ by name or image ref.`,
 		newWorkloadListCmd(o),
 		newWorkloadGetCmd(o),
 		newWorkloadApplyCmd(o),
+		newWorkloadDeriveCmd(o),
 		newWorkloadEditCmd(o),
 		newWorkloadDeleteCmd(o),
 	)
