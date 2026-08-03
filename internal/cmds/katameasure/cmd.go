@@ -168,7 +168,7 @@ func run(cfg config, stdout, stderr io.Writer) error {
 		return err
 	}
 	ld, err := snpmeasure.LaunchDigest(snpmeasure.Config{
-		Firmware:      firmware,
+		FirmwarePath:  cfg.firmware,
 		KernelHashes:  hashes,
 		VCPUs:         vcpus,
 		VCPUSig:       sig,

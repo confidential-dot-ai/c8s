@@ -24,6 +24,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	github.com/virtee/sev-snp-measure-go v0.0.0-20260408174629-fd0cc4c95d62
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sys v0.47.0
