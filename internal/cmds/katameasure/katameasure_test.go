@@ -291,11 +291,14 @@ func TestLoadGuest(t *testing.T) {
 	}
 }
 
+// snpFixtureDigest is the SNP launch digest of the synthetic guest over the
+// OVMF fixture at 1 vCPU, produced independently by sev-snp-measure (v0.0.13).
+const snpFixtureDigest = "203430d272b5becce47feb25ffd8e2cb00fda84e563e6b2dc48e2c07ebf0aadaaa2a5168fe77c589ac7e06ec29dd65d7"
+
 // TestRunEndToEnd drives the command over a synthetic guest and the OVMF
-// fixture. The expected digest was produced independently by sev-snp-measure
-// (v0.0.13) over the same inputs.
+// fixture.
 func TestRunEndToEnd(t *testing.T) {
-	const want = "203430d272b5becce47feb25ffd8e2cb00fda84e563e6b2dc48e2c07ebf0aadaaa2a5168fe77c589ac7e06ec29dd65d7"
+	const want = snpFixtureDigest
 	base := config{
 		guestDir:      writeGuest(t, "c8s", SupportedKataVersion, bootModelDirectKernel),
 		firmware:      filepath.Join("testdata", "ovmf_AmdSev_suffix.bin"),
@@ -435,13 +438,18 @@ func TestNewCmdWiring(t *testing.T) {
 	if err != nil || sub.Use != "measure" {
 		t.Fatalf("measure subcommand not registered: %v", err)
 	}
-	for _, name := range []string{"guest-dir", "firmware", "vcpus", "pod-cpu-limit", "vcpu-type", "cmdline", "json", "platform"} {
+	for _, name := range []string{"guest-dir", "firmware", "vcpus", "pod-cpu-limit", "vcpu-type", "cmdline", "json", "platform", "kata-config-dir"} {
 		if sub.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag --%s", name)
 		}
 	}
-	if got := sub.Flags().Lookup("platform").DefValue; got != platformSNP {
-		t.Errorf("--platform default = %q, want %q", got, platformSNP)
+	// An empty default is what defers the choice to detection; a literal "snp"
+	// here would measure SNP on a TDX node.
+	if got := sub.Flags().Lookup("platform").DefValue; got != "" {
+		t.Errorf("--platform default = %q, want it unset so the node decides", got)
+	}
+	if got := sub.Flags().Lookup("kata-config-dir").DefValue; got != DefaultKataConfigDir {
+		t.Errorf("--kata-config-dir default = %q, want %q", got, DefaultKataConfigDir)
 	}
 }
 
@@ -599,5 +607,222 @@ func TestRunRejectsUnknownPlatform(t *testing.T) {
 	err := run(config{platform: "sev-snp"}, &out, &errOut)
 	if err == nil || !strings.Contains(err.Error(), "--platform") {
 		t.Fatalf("want a --platform error, got %v", err)
+	}
+}
+
+// writeKataConfig fakes kata-deploy's config root with the c8s puller drop-in
+// in one shim's config.d, which is what marks the shim as a configured one. An
+// empty shim writes the tree kata-static lays down before c8s configures it.
+func writeKataConfig(t *testing.T, shim string) string {
+	t.Helper()
+	dir := t.TempDir()
+	// Every shim's TOML ships on every node; only the drop-in is selective.
+	for _, s := range []string{"clh", "qemu", "qemu-snp", "qemu-tdx", "qemu-nvidia-gpu-snp", "qemu-nvidia-gpu-tdx"} {
+		if err := os.MkdirAll(filepath.Join(dir, "runtimes", s, "config.d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if shim == "" {
+		return dir
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runtimes", shim, "config.d", dropInName), []byte("# c8s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// isolateKVMTDXParam points the pre-install TDX signal at a path this test
+// owns, so the machine running the suite cannot decide the outcome. An empty
+// value leaves the file absent.
+func isolateKVMTDXParam(t *testing.T, value string) {
+	t.Helper()
+	saved := kvmTDXParam
+	t.Cleanup(func() { kvmTDXParam = saved })
+	kvmTDXParam = filepath.Join(t.TempDir(), "tdx")
+	if value == "" {
+		return
+	}
+	if err := os.WriteFile(kvmTDXParam, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolvePlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flag     string
+		shim     string // shim whose config.d carries the c8s drop-in
+		kvmTDX   string // contents of /sys/module/kvm_intel/parameters/tdx
+		noKata   bool   // config root of a machine with no kata install
+		noDir    bool   // --kata-config-dir ""
+		want     string
+		wantFrom string // substring the evidence must name; "" means none
+	}{
+		{name: "snp shim", shim: "qemu-snp", want: platformSNP, wantFrom: "qemu-snp"},
+		{name: "snp gpu shim", shim: "qemu-nvidia-gpu-snp", want: platformSNP, wantFrom: "qemu-nvidia-gpu-snp"},
+		{name: "tdx shim", shim: "qemu-tdx", want: platformTDX, wantFrom: "qemu-tdx"},
+		{name: "tdx gpu shim", shim: "qemu-nvidia-gpu-tdx", want: platformTDX, wantFrom: "qemu-nvidia-gpu-tdx"},
+		// A shim c8s has no mapping for decides nothing; the kvm module still can.
+		{name: "unrecognised shim", shim: "qemu", want: platformSNP},
+		{name: "unrecognised shim on a tdx host", shim: "qemu", kvmTDX: "Y\n", want: platformTDX, wantFrom: "/tdx=Y"},
+		{name: "kata installed, c8s not", want: platformSNP},
+		{name: "tdx host before install", kvmTDX: "Y\n", want: platformTDX, wantFrom: "/tdx=Y"},
+		{name: "kvm_intel without tdx", kvmTDX: "N\n", want: platformSNP},
+		{name: "no kata install", noKata: true, want: platformSNP},
+		{name: "no kata install on a tdx host", noKata: true, kvmTDX: "Y\n", want: platformTDX, wantFrom: "/tdx=Y"},
+		// The escape hatch: measuring another fleet from a machine that is not
+		// one of its nodes must not read this machine at all.
+		{name: "detection disabled", noDir: true, kvmTDX: "Y\n", want: platformSNP},
+		{name: "flag beats a tdx node", flag: platformSNP, shim: "qemu-tdx", want: platformSNP},
+		{name: "flag beats an snp node", flag: platformTDX, shim: "qemu-snp", want: platformTDX},
+		// A bad flag must survive to run()'s error, not be detected away.
+		{name: "bad flag on a tdx node", flag: "sev-snp", shim: "qemu-tdx", want: "sev-snp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateKVMTDXParam(t, tc.kvmTDX)
+			cfg := config{platform: tc.flag, kataConfigDir: writeKataConfig(t, tc.shim)}
+			switch {
+			case tc.noDir:
+				cfg.kataConfigDir = ""
+			case tc.noKata:
+				cfg.kataConfigDir = filepath.Join(t.TempDir(), "absent")
+			}
+			got, from := resolvePlatform(cfg)
+			if got != tc.want {
+				t.Errorf("platform = %q, want %q (evidence %q)", got, tc.want, from)
+			}
+			if tc.wantFrom == "" && from != "" {
+				t.Errorf("evidence = %q, want none", from)
+			}
+			if tc.wantFrom != "" && !strings.Contains(from, tc.wantFrom) {
+				t.Errorf("evidence = %q, want it to name %q", from, tc.wantFrom)
+			}
+		})
+	}
+}
+
+func runJSON(t *testing.T, cfg config) Result {
+	t.Helper()
+	cfg.asJSON = true
+	var out, errOut bytes.Buffer
+	if err := run(cfg, &out, &errOut); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("parse --json output: %v", err)
+	}
+	return res
+}
+
+// TestRunMeasuresDetectedPlatform is why detection exists: kata-static installs
+// AMDSEV.fd on TDX nodes too, so an unnoticed snp default there produces a
+// well-formed digest that matches no guest.
+func TestRunMeasuresDetectedPlatform(t *testing.T) {
+	isolateKVMTDXParam(t, "")
+	snpNode := config{
+		guestDir:      writeGuest(t, "c8s", SupportedKataVersion, bootModelDirectKernel),
+		firmware:      filepath.Join("testdata", "ovmf_AmdSev_suffix.bin"),
+		kataConfigDir: writeKataConfig(t, "qemu-snp"),
+		vcpus:         1,
+		vcpuType:      DefaultVCPUType,
+		kernelParams:  DefaultKernelParams,
+		launchTimeout: DefaultLaunchProcessTimeout,
+		guestFeatures: 1,
+		defaultVCPUs:  1,
+	}
+	tdxConfigDir := writeKataConfig(t, "qemu-tdx")
+	tdvf := writeTDVF(t)
+
+	res := runJSON(t, snpNode)
+	if res.Platform != platformSNP || res.Measurement != snpFixtureDigest {
+		t.Errorf("snp node: platform %q digest %s", res.Platform, res.Measurement)
+	}
+	if !strings.Contains(res.PlatformFrom, "qemu-snp") {
+		t.Errorf("snp node: platformDetectedFrom = %q, want the shim that decided", res.PlatformFrom)
+	}
+
+	// The same SNP inputs on a TDX node take the MRTD path, and the pod-shape
+	// flags that only mean something under SNP are refused by name.
+	tdxNode := snpNode
+	tdxNode.kataConfigDir = tdxConfigDir
+	var out, errOut bytes.Buffer
+	err := run(tdxNode, &out, &errOut)
+	if err == nil {
+		t.Fatalf("tdx node measured SNP inputs anyway: %q", out.String())
+	}
+	for _, want := range []string{"--vcpus", "tdx", "qemu-tdx"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("tdx node: error %q does not mention %q", err, want)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("tdx node: refused but still emitted %q", out.String())
+	}
+
+	// Given TDX-shaped inputs the same node measures MRTD, and says so.
+	tdxNode.vcpus = 0
+	tdxNode.firmware = tdvf
+	tdxNode.firmwareSet = true
+	res = runJSON(t, tdxNode)
+	if res.Platform != platformTDX || len(res.Measurement) != 96 {
+		t.Errorf("tdx node: platform %q digest %q", res.Platform, res.Measurement)
+	}
+	if !strings.Contains(res.PlatformFrom, "qemu-tdx") {
+		t.Errorf("tdx node: platformDetectedFrom = %q, want the shim that decided", res.PlatformFrom)
+	}
+
+	// An explicit --platform wins in both directions, and reports no detection.
+	forcedSNP := snpNode
+	forcedSNP.kataConfigDir = tdxConfigDir
+	forcedSNP.platform = platformSNP
+	res = runJSON(t, forcedSNP)
+	if res.Platform != platformSNP || res.Measurement != snpFixtureDigest || res.PlatformFrom != "" {
+		t.Errorf("--platform snp on a tdx node: %+v", res)
+	}
+
+	forcedTDX := tdxNode
+	forcedTDX.kataConfigDir = snpNode.kataConfigDir
+	forcedTDX.platform = platformTDX
+	res = runJSON(t, forcedTDX)
+	if res.Platform != platformTDX || res.PlatformFrom != "" {
+		t.Errorf("--platform tdx on an snp node: %+v", res)
+	}
+}
+
+func TestVerboseNamesTheDetectedPlatform(t *testing.T) {
+	isolateKVMTDXParam(t, "")
+	cfg := config{
+		guestDir:      writeGuest(t, "c8s", SupportedKataVersion, bootModelDirectKernel),
+		firmware:      filepath.Join("testdata", "ovmf_AmdSev_suffix.bin"),
+		kataConfigDir: writeKataConfig(t, "qemu-snp"),
+		vcpus:         1,
+		vcpuType:      DefaultVCPUType,
+		kernelParams:  DefaultKernelParams,
+		launchTimeout: DefaultLaunchProcessTimeout,
+		guestFeatures: 1,
+		defaultVCPUs:  1,
+		verbose:       true,
+	}
+	var out, errOut bytes.Buffer
+	if err := run(cfg, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"platform: snp", "detected from", "qemu-snp"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("-v output %q does not mention %q", errOut.String(), want)
+		}
+	}
+
+	// An explicit flag names the platform without claiming it was detected.
+	explicit := cfg
+	explicit.platform = platformSNP
+	out.Reset()
+	errOut.Reset()
+	if err := run(explicit, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(errOut.String(), "detected from") {
+		t.Errorf("-v claims detection for an explicit --platform: %q", errOut.String())
 	}
 }

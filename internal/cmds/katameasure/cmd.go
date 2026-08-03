@@ -27,9 +27,11 @@ import (
 
 type config struct {
 	platform        string
+	platformFrom    string
 	firmwareSet     bool
 	guestDir        string
 	firmware        string
+	kataConfigDir   string
 	vcpus           int
 	podCPULimit     string
 	defaultVCPUs    float64
@@ -48,7 +50,10 @@ type config struct {
 // Result is the --json document. The SNP-only fields are omitted on TDX, whose
 // MRTD is a function of the firmware alone.
 type Result struct {
-	Platform      string `json:"platform"`
+	Platform string `json:"platform"`
+	// PlatformFrom is the node evidence that chose Platform; empty when
+	// --platform did.
+	PlatformFrom  string `json:"platformDetectedFrom,omitempty"`
 	Measurement   string `json:"measurement"`
 	VCPUs         int    `json:"vcpus,omitempty"`
 	VCPUType      string `json:"vcpuType,omitempty"`
@@ -77,6 +82,7 @@ func newMeasureCmd() *cobra.Command {
 	cfg := config{
 		guestDir:      DefaultGuestDir,
 		firmware:      DefaultFirmware,
+		kataConfigDir: DefaultKataConfigDir,
 		defaultVCPUs:  1,
 		vcpuType:      DefaultVCPUType,
 		kernelParams:  DefaultKernelParams,
@@ -89,7 +95,12 @@ func newMeasureCmd() *cobra.Command {
 		Long: `measure predicts a kata confidential guest's launch measurement from the
 guest image artifacts, without booting the pod.
 
---platform snp (default) computes the SEV-SNP launch digest of a
+--platform defaults to the TEE this node reports — the kata shim carrying
+c8s's config.d drop-in, else /sys/module/kvm_intel/parameters/tdx — and to
+snp when the node reports neither. An explicit --platform always wins; -v
+and --json name the platform measured and what chose it.
+
+--platform snp computes the SEV-SNP launch digest of a
 kata-qemu-snp guest. Under --cvm-mode=pod each pod is its own CVM. The
 digest covers the OVMF image, the kernel/initrd/cmdline hash table QEMU
 builds for kernel-hashes=on, and one VMSA page per vCPU — so pods that
@@ -117,9 +128,10 @@ Output is the bare hex digest, one per line, ready for
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&cfg.platform, "platform", platformSNP, "TEE platform to measure: snp (SEV-SNP launch digest) or tdx (MRTD)")
+	f.StringVar(&cfg.platform, "platform", "", "TEE platform to measure: snp (SEV-SNP launch digest) or tdx (MRTD) (default: this node's detected TEE, else snp)")
 	f.StringVar(&cfg.guestDir, "guest-dir", cfg.guestDir, "kata-guest-base artifact directory (manifest.json + vmlinuz)")
 	f.StringVar(&cfg.firmware, "firmware", cfg.firmware, "firmware image kata boots the guest with (default "+DefaultTDXFirmware+" under --platform tdx)")
+	f.StringVar(&cfg.kataConfigDir, "kata-config-dir", cfg.kataConfigDir, "kata-deploy config root, read to detect this node's TEE; empty skips detection")
 	f.IntVar(&cfg.vcpus, "vcpus", 0, "guest vCPU count; required unless --pod-cpu-limit is given")
 	f.StringVar(&cfg.podCPULimit, "pod-cpu-limit", "", "derive --vcpus from a pod's total CPU limit (e.g. 500m); unset means the pod has no CPU limit")
 	f.Float64Var(&cfg.defaultVCPUs, "default-vcpus", cfg.defaultVCPUs, "hypervisor default_vcpus, the base kata adds --pod-cpu-limit to")
@@ -143,15 +155,37 @@ const (
 )
 
 func run(cfg config, stdout, stderr io.Writer) error {
+	cfg.platform, cfg.platformFrom = resolvePlatform(cfg)
 	switch cfg.platform {
-	// "" only reaches here from a directly-built config; the flag defaults to snp.
-	case platformSNP, "":
+	case platformSNP:
 		return runSNP(cfg, stdout, stderr)
 	case platformTDX:
 		return runTDX(cfg, stdout, stderr)
 	default:
 		return fmt.Errorf("--platform must be %q or %q, got %q", platformSNP, platformTDX, cfg.platform)
 	}
+}
+
+// resolvePlatform picks what to measure. An unset --platform hands the choice
+// to the node, because kata-static installs AMDSEV.fd on TDX nodes too and an
+// unnoticed SNP default there measures firmware nothing will ever boot. A node
+// that reports nothing keeps the historical snp default.
+func resolvePlatform(cfg config) (platform, from string) {
+	if cfg.platform != "" {
+		return cfg.platform, ""
+	}
+	if p, ev := detectPlatform(cfg.kataConfigDir); p != "" {
+		return p, ev
+	}
+	return platformSNP, ""
+}
+
+// detectedNote annotates a platform the node chose rather than the flag.
+func detectedNote(from string) string {
+	if from == "" {
+		return ""
+	}
+	return " (detected from " + from + ")"
 }
 
 // runTDX computes MRTD. It deliberately reads no guest artifacts: MRTD covers
@@ -175,6 +209,7 @@ func runTDX(cfg config, stdout, stderr io.Writer) error {
 	}
 	res := Result{
 		Platform:     platformTDX,
+		PlatformFrom: cfg.platformFrom,
 		Measurement:  hex.EncodeToString(mrtd),
 		FirmwarePath: path,
 		FirmwareSHA:  hex.EncodeToString(sha256sum(firmware)),
@@ -185,7 +220,7 @@ func runTDX(cfg config, stdout, stderr io.Writer) error {
 		return enc.Encode(res)
 	}
 	if cfg.verbose {
-		fmt.Fprintf(stderr, "platform: tdx (MRTD)\n")
+		fmt.Fprintf(stderr, "platform: %s (MRTD)%s\n", res.Platform, detectedNote(res.PlatformFrom))
 		fmt.Fprintf(stderr, "firmware: %s sha256=%s\n", res.FirmwarePath, res.FirmwareSHA)
 		fmt.Fprintf(stderr, "note:     covers TDVF only; kernel/cmdline/vCPUs measure into RTMRs\n")
 	}
@@ -211,9 +246,9 @@ func rejectSNPOnlyFlags(cfg config) error {
 	if len(set) == 0 {
 		return nil
 	}
-	return fmt.Errorf("not valid with --platform tdx: %s. Those shape the SNP launch digest only; "+
+	return fmt.Errorf("not valid when measuring tdx%s: %s. Those shape the SNP launch digest only; "+
 		"TDX MRTD covers the TDVF image alone (vCPUs, kernel and command line measure into RTMRs, "+
-		"which c8s does not pin)", strings.Join(set, ", "))
+		"which c8s does not pin)", detectedNote(cfg.platformFrom), strings.Join(set, ", "))
 }
 
 func runSNP(cfg config, stdout, stderr io.Writer) error {
@@ -278,6 +313,7 @@ func runSNP(cfg config, stdout, stderr io.Writer) error {
 
 	res := Result{
 		Platform:      platformSNP,
+		PlatformFrom:  cfg.platformFrom,
 		Measurement:   hex.EncodeToString(ld),
 		VCPUs:         vcpus,
 		VCPUType:      cfg.vcpuType,
@@ -297,6 +333,7 @@ func runSNP(cfg config, stdout, stderr io.Writer) error {
 		return enc.Encode(res)
 	}
 	if cfg.verbose {
+		fmt.Fprintf(stderr, "platform: %s (launch digest)%s\n", res.Platform, detectedNote(res.PlatformFrom))
 		fmt.Fprintf(stderr, "kata:     %s (%s)\n", res.KataVersion, res.BuildVariant)
 		fmt.Fprintf(stderr, "firmware: %s sha256=%s\n", res.FirmwarePath, res.FirmwareSHA)
 		fmt.Fprintf(stderr, "kernel:   %s sha256=%s\n", res.KernelPath, res.KernelSHA)
