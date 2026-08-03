@@ -295,6 +295,24 @@ boundary cds runs in. It is harmless on a fresh install but sharp on a running
 one. Pick kata vs non-kata at install time and keep it fixed; to switch, plan it
 as a deliberate migration (drain, reinstall), not a `helm upgrade --set`.
 
+## `default_vcpus = 1` does NOT give pod-mode a single fleet-wide launch measurement
+
+`internal/helmchart/c8s/files/scripts/pull-and-configure.sh`, `internal/cmds/katameasure/`
+
+Under `--cvm-mode=pod` every pod is its own SEV-SNP CVM, and the launch digest
+covers one VMSA page per vCPU plus `nr_cpus=N` in the measured kernel cmdline.
+The puller drop-in pins `default_vcpus = 1`, but the qemu-snp config also sets
+`static_sandbox_resource_mgmt = true`, so kata adds each pod's CPU limit on top:
+`vCPUs = ceil(default_vcpus + Σ container CPU limits)`. A pod with
+`limits.cpu: 500m` boots 2 vCPUs and measures differently from an unlimited one.
+Observed simultaneously on one live cluster: `e246273c…46f0fb` (every
+default-resource pod, 1 vCPU) and `ff0bfd88…dba9a` (CDS, `500m` → 2 vCPUs).
+
+`cds.measurements` is a single list, so it needs one entry per distinct vCPU
+count — or give every confidential pod the same CPU limit (or none) so the fleet
+shares one digest. Predict the values with `c8s kata measure --vcpus N`; see
+[`kata-launch-measurement.md`](kata-launch-measurement.md).
+
 ## The bootstrap allowlist binds to floating `:main` digests — operators MUST pin by digest
 
 `kata-guest-base/scripts/fetch.sh`, `internal/helmchart/c8s/values.yaml`

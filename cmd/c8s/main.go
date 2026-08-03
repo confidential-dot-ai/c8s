@@ -5,6 +5,7 @@
 //   - c8s install     — client-side: helm install c8s + CRDs
 //   - c8s uninstall   — client-side: helm uninstall + kata host sweep
 //   - c8s get-cert    — certificate bootstrap and renewal
+//   - c8s kata measure — offline SNP launch measurement of a kata guest
 package main
 
 import (
