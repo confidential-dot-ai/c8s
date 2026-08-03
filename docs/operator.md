@@ -207,7 +207,10 @@ Guardrails:
 - Uninstall **refuses to run while pods with a kata RuntimeClass are still
   scheduled** — pulling the runtime out from under a confidential workload kills
   it without cleanup. Delete those workloads first, or pass `--force` (the kata
-  VMs keep running unmanaged but cannot restart).
+  VMs keep running unmanaged but cannot restart). The release's own
+  chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) are excluded by
+  release namespace + `app.kubernetes.io/instance`, and the refusal reports how
+  many it skipped; see [`docs/kata.md`](kata.md#uninstalling).
 - `--host-sweep-only` runs only the kata sweep, for a cluster whose release a
   bare `helm uninstall` already removed but whose nodes still carry artifacts;
   it uses the chart defaults and the distro detected from the cluster.

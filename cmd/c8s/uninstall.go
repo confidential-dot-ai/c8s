@@ -58,6 +58,17 @@ var kataRuntimeClassNames = []string{"kata-qemu", "kata-clh", "kata-qemu-snp", "
 // deletes it); --delete-crds removes it by name.
 const confidentialWorkloadCRD = "confidentialworkloads.confidential.ai"
 
+// chartInstanceLabel is on every pod template the chart renders (c8s.commonLabels
+// and tls-lb.selectorLabels) and on nothing the operator creates. With the
+// release namespace it identifies the release's own kata pods — see
+// docs/kata.md "Uninstalling".
+const chartInstanceLabel = "app.kubernetes.io/instance"
+
+// kataPodJSONPath dumps one "namespace\tname\truntimeClass\tinstance" line per
+// pod; jsonpath needs the dots in a label key escaped.
+var kataPodJSONPath = `{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.runtimeClassName}{"\t"}{.metadata.labels.` +
+	strings.ReplaceAll(chartInstanceLabel, ".", `\.`) + `}{"\n"}{end}`
+
 // kataRuntimeNodeLabel is the label kata-deploy stamps on each node once the
 // runtime is installed (and removes again in its cleanup, when that runs to
 // completion).
@@ -133,7 +144,10 @@ distro detected from the cluster.
 
 The uninstall refuses to proceed while pods with a kata RuntimeClass are
 still running — removing the runtime under a running confidential workload
-kills it without cleanup. Delete those workloads first, or pass --force.
+kills it without cleanup. Delete those workloads first, or pass --force. The
+release's own chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) do
+not count: they are matched by the release namespace plus the chart's
+app.kubernetes.io/instance label and are torn down by this uninstall.
 
 Left in place by default: the ConfidentialWorkload CRD (helm never deletes
 crds/; --delete-crds removes it ALONG WITH EVERY ConfidentialWorkload object)
@@ -183,12 +197,12 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 		// regardless of the sweep), so the guard applies whenever kata is
 		// being uninstalled, not only when the sweep runs.
 		if (cfg.Enabled || uninstallHostSweepOnly) && !uninstallForce {
-			pods, err := listKataPods(ctx)
+			pods, chartManaged, err := listKataPods(ctx, uninstallNamespace, uninstallRelease)
 			if err != nil {
 				return err
 			}
 			if len(pods) > 0 {
-				return fmt.Errorf("pods with a kata RuntimeClass are still running and would lose their runtime:\n  %s\ndelete them first, or pass --force to uninstall anyway", strings.Join(pods, "\n  "))
+				return kataPodsRunningError(pods, chartManaged, uninstallNamespace, uninstallRelease)
 			}
 		}
 
@@ -421,32 +435,57 @@ func sweepImageRef(tree map[string]any) (string, error) {
 	return "", fmt.Errorf("kata.containerdPrep.image has neither digest nor tag")
 }
 
-// listKataPods returns "namespace/name (runtimeClass)" for every pod whose
-// runtimeClassName is one of the chart's kata RuntimeClasses. runtimeClassName
-// is not a server-side field selector, so the filter runs client-side over a
-// one-line-per-pod jsonpath dump.
-func listKataPods(ctx context.Context) ([]string, error) {
+// listKataPods returns "namespace/name (runtimeClass)" for every pod the guard
+// protects, plus the count of the release's own pods it skipped.
+// runtimeClassName is not a server-side field selector, so the filter runs
+// client-side over a one-line-per-pod jsonpath dump.
+func listKataPods(ctx context.Context, namespace, release string) ([]string, int, error) {
 	out, err := exec.CommandContext(ctx, "kubectl", "get", "pods", "--all-namespaces",
-		"-o", `jsonpath={range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.runtimeClassName}{"\n"}{end}`).Output()
+		"-o", "jsonpath="+kataPodJSONPath).Output()
 	if err != nil {
-		return nil, fmt.Errorf("kubectl get pods --all-namespaces: %w", err)
+		return nil, 0, fmt.Errorf("kubectl get pods --all-namespaces: %w", err)
 	}
-	return filterKataPods(strings.Split(strings.TrimSpace(string(out)), "\n")), nil
+	pods, chartManaged := filterKataPods(strings.Split(strings.TrimSpace(string(out)), "\n"), namespace, release)
+	return pods, chartManaged, nil
 }
 
-// filterKataPods keeps the "namespace\tname\truntimeClass" lines whose class
-// is a kata RuntimeClass. Pods without a runtimeClassName emit an empty third
-// field and are skipped, as is anything malformed.
-func filterKataPods(lines []string) []string {
+// filterKataPods keeps the "namespace\tname\truntimeClass\tinstanceLabel" lines
+// whose class is a kata RuntimeClass, dropping the release's own chart-managed
+// pods (release namespace AND chartInstanceLabel == release) and counting them
+// separately: the chart pins kata on CDS and tls-lb, so counting them would
+// refuse every clean uninstall. Pods without a runtimeClassName emit an empty
+// third field and are skipped, as is anything malformed.
+func filterKataPods(lines []string, namespace, release string) ([]string, int) {
 	var pods []string
+	chartManaged := 0
 	for _, l := range lines {
 		fields := strings.Split(l, "\t")
-		if len(fields) != 3 || !slices.Contains(kataRuntimeClassNames, fields[2]) {
+		if len(fields) != 4 || !slices.Contains(kataRuntimeClassNames, fields[2]) {
+			continue
+		}
+		if fields[0] == namespace && fields[3] == release {
+			chartManaged++
 			continue
 		}
 		pods = append(pods, fmt.Sprintf("%s/%s (%s)", fields[0], fields[1], fields[2]))
 	}
-	return pods
+	return pods, chartManaged
+}
+
+// kataPodsRunningError is the guard's refusal. It reports the chart-managed
+// pods it skipped so the operator sees the guard is scoped, not blanket, and
+// does not reach for --force reflexively.
+func kataPodsRunningError(pods []string, chartManaged int, namespace, release string) error {
+	skipped := ""
+	if chartManaged > 0 {
+		plural := "s"
+		if chartManaged == 1 {
+			plural = ""
+		}
+		skipped = fmt.Sprintf("\n(skipped %d chart-managed pod%s of release %q in namespace %q)", chartManaged, plural, release, namespace)
+	}
+	return fmt.Errorf("pods with a kata RuntimeClass are still running and would lose their runtime:\n  %s%s\ndelete them first, or pass --force to uninstall anyway",
+		strings.Join(pods, "\n  "), skipped)
 }
 
 // runKataSweep removes the kata host artifacts from every node kata-deploy
