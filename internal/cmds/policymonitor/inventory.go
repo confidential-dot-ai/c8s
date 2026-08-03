@@ -37,6 +37,9 @@ type admissionInventory struct {
 	containers map[string]string                          // live container id -> image digest
 	admitted   map[string]workloadclaims.SandboxContainer // key -> everything ever admitted
 	sandboxID  string                                     // the guest's single pod sandbox
+	// refresh renders the allowlist-refresh posture. Set by runMonitor; nil
+	// leaves the field off the wire rather than reporting a false "disabled".
+	refresh func() workloadclaims.AllowlistRefresh
 }
 
 func newAdmissionInventory() *admissionInventory {
@@ -118,6 +121,17 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		return strings.Compare(strings.Join(x.Argv, "\x1f"), strings.Join(y.Argv, "\x1f"))
 	})
 	return slices.Compact(digests), containers, true, nil
+}
+
+// AllowlistRefresh satisfies workloadclaims.AllowlistRefreshReporter: it puts
+// "this guest is enforcing a frozen allowlist" on the CDS-facing digests
+// endpoint, the one authenticated channel out of a guest whose journal the
+// operator cannot read. Diagnostic only — CDS makes no issuance decision on it.
+func (b *admissionInventory) AllowlistRefresh() (workloadclaims.AllowlistRefresh, bool) {
+	if b.refresh == nil {
+		return workloadclaims.AllowlistRefresh{}, false
+	}
+	return b.refresh(), true
 }
 
 // sandboxIDFromAnnotations extracts the pod sandbox ID from a container's OCI

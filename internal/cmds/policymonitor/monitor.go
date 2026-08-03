@@ -53,6 +53,7 @@ import (
 
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // runMonitor is the long-running entry. It's package-private rather
@@ -85,6 +86,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		logger:    logger,
 		allowlist: a,
 		overlay:   &policyOverlay{},
+		refresh:   &refreshState{reason: reasonNotYetStarted},
 		killer:    newCgroupKiller(cfg.CgroupRoot),
 		// configReadDeadline is the budget for re-reading config.json
 		// after the initial CREATE event. kata-agent's setup_bundle
@@ -101,6 +103,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// host switch it off.
 	{
 		m.inventory = newAdmissionInventory()
+		m.inventory.refresh = func() workloadclaims.AllowlistRefresh { return m.refresh.report(a.Size()) }
 		signer := sandboxTokenSigner(cfg, logger)
 		if err := startAdmissionInventory(ctx, logger, m.inventory, signer); err != nil {
 			return fmt.Errorf("start admission inventory: %w", err)
@@ -123,8 +126,12 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// *allowlist with m, whose merge is mutex-guarded. No CDS URL →
 	// baked-seed-only and the network is never touched.
 	if cfg.CDSURL != "" {
-		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay)
+		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
 	} else {
+		// Info, not Error: seed-only is the configured intent here, unlike the
+		// failure paths in runAllowlistRefresh. Still recorded, so denies and
+		// the digests endpoint report the frozen set either way.
+		m.refresh.disable(reasonNoCDSURL)
 		logger.Info("allowlist refresh disabled (no CDS URL); enforcing baked seed only", "entries", a.Size())
 	}
 
@@ -140,6 +147,7 @@ type monitor struct {
 	logger             *slog.Logger
 	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
 	overlay            *policyOverlay // latest CDS pull's workload argv policy
+	refresh            *refreshState  // whether the allowlist still tracks CDS
 	killer             containerKiller
 	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
 	configReadDeadline time.Duration
@@ -478,8 +486,21 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		}
 		return
 	}
-	m.logger.Warn("deny container: digest/argv not allowlisted", "cid", cid, "digest", digest, "argv", argv)
+	m.logger.Warn("deny container: digest/argv not allowlisted",
+		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
 	m.kill(cid)
+}
+
+// frozenAttrs annotates a deny with the fact that the allowlist never left the
+// baked seed, when that is why the deny happened. Without it a frozen guest and
+// a genuinely-unlisted image produce identical lines — and once the kill lands
+// a frozen guest denies everything at once.
+func (m *monitor) frozenAttrs() []any {
+	reason := m.refresh.frozenReason()
+	if reason == "" {
+		return nil
+	}
+	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
 }
 
 // kill resolves the container's cgroup and terminates it as a unit.

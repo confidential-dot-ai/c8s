@@ -15,6 +15,9 @@ package policymonitor
 //
 // Gated on a configured CDS URL: with C8S_CDS_URL unset the monitor
 // stays baked-seed-only and never opens the network.
+//
+// It does not run until a CDS measurement is pinned, which --cvm-mode=pod
+// does not yet deliver.
 
 import (
 	"context"
@@ -32,25 +35,26 @@ import (
 // until ctx is cancelled. Construction failures (bad measurements, RA-TLS
 // setup) disable refresh but never crash the monitor — the baked seed
 // still enforces.
-func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist, overlay *policyOverlay) {
+func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, a *allowlist, overlay *policyOverlay, state *refreshState) {
 	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
-		logger.Error("allowlist refresh disabled: invalid C8S_CDS_MEASUREMENTS", "error", err)
+		disableRefresh(logger, state, reasonBadMeasurements, a, "error", err)
 		return
 	}
 	if len(measurements) == 0 {
 		// Fail closed: with C8S_CDS_URL set but no measurements pinned, the
 		// RA-TLS handshake would accept any CDS measurement. Disable refresh
 		// rather than open that hole — the baked seed keeps enforcing.
-		logger.Error("allowlist refresh disabled: C8S_CDS_URL set but C8S_CDS_MEASUREMENTS empty (refusing to accept any CDS measurement)")
+		disableRefresh(logger, state, reasonNoMeasurements, a)
 		return
 	}
 	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
 	if err != nil {
-		logger.Error("allowlist refresh disabled: build RA-TLS client failed", "error", err)
+		disableRefresh(logger, state, reasonClientFailed, a, "error", err)
 		return
 	}
 	client := allowlistclient.NewClientWithHTTP(cfg.CDSURL, httpClient)
+	state.enable()
 
 	// Per-call deadline so a hung CDS can't wedge this goroutine. Capped at
 	// half the refresh interval (and never above refreshCallTimeoutMax) so
@@ -77,6 +81,15 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 // further clamps to half the configured interval so the call can never
 // outlive the next tick.
 const refreshCallTimeoutMax = 15 * time.Second
+
+// disableRefresh records why the refresh will not run and says so at ERROR,
+// naming the frozen entry count so the line states the blast radius rather than
+// only the cause.
+func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *allowlist, args ...any) {
+	state.disable(reason)
+	logger.Error("allowlist refresh disabled; enforcement frozen at the baked seed",
+		append([]any{"reason", reason, "entries", a.Size()}, args...)...)
+}
 
 // refreshOnce pulls the current CDS allowlist. Two layers update: the baked
 // floor grows additively with the pulled floor digests (never shrinks — a CDS

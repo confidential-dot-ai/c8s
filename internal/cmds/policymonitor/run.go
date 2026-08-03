@@ -5,7 +5,8 @@
 // guest-policy-agent (a Rego renderer that fetched a allowlist from CDS
 // over RA-TLS and rendered it informationally without enforcing).
 // policy-monitor instead enforces directly, off a baked seed allowlist it
-// refreshes from CDS at runtime; see docs/kata-image-policy.md.
+// refreshes from CDS at runtime; see docs/kata-image-policy.md. Under
+// --cvm-mode=pod it does not start until a CDS measurement is pinned.
 //
 // # What it does
 //

@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -382,6 +384,75 @@ func TestSandboxDigestsRoute(t *testing.T) {
 
 	if status, _ := inventoryGetRaw(t, sock, SandboxDigestsPrefix+"nope"); status != http.StatusNotFound {
 		t.Fatalf("unknown sandbox status = %d, want 404", status)
+	}
+}
+
+// refreshResolver is a fakeResolver that also reports a refresh posture.
+type refreshResolver struct {
+	fakeResolver
+	refresh  AllowlistRefresh
+	reported bool
+}
+
+func (r *refreshResolver) AllowlistRefresh() (AllowlistRefresh, bool) {
+	return r.refresh, r.reported
+}
+
+// A guest enforcing a frozen allowlist must say so on the one channel that
+// leaves it: its journal is unreadable, so without this the state is invisible.
+func TestSandboxDigestsReportsFrozenAllowlist(t *testing.T) {
+	resolver := &refreshResolver{
+		fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
+		refresh:      AllowlistRefresh{Enabled: false, Reason: "no measurement pinned", Entries: 3},
+		reported:     true,
+	}
+	status, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var out SandboxDigestsResponse
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AllowlistRefresh == nil {
+		t.Fatal("allowlist_refresh absent; the frozen state never leaves the guest")
+	}
+	if out.AllowlistRefresh.Enabled || out.AllowlistRefresh.Reason != "no measurement pinned" || out.AllowlistRefresh.Entries != 3 {
+		t.Fatalf("allowlist_refresh = %+v", *out.AllowlistRefresh)
+	}
+}
+
+// An inventory with nothing to report must leave the field off the wire, so
+// "cannot say" never serializes as "refresh disabled".
+func TestSandboxDigestsOmitsUnreportedRefresh(t *testing.T) {
+	for name, resolver := range map[string]SandboxResolver{
+		"no reporter":    &fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
+		"reports absent": &refreshResolver{fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
+			if strings.Contains(body, "allowlist_refresh") {
+				t.Fatalf("body = %q, want no allowlist_refresh field", body)
+			}
+		})
+	}
+}
+
+// The reason crosses a trust boundary from an inventory the client may not pin,
+// so it must not be able to forge log lines or blow up a record.
+func TestSafeReasonBoundsRemoteString(t *testing.T) {
+	if got := safeReason("clean reason"); got != "clean reason" {
+		t.Fatalf("safeReason mangled a clean string: %q", got)
+	}
+	if got := safeReason("a\nlevel=ERROR msg=forged\rb\x00c"); strings.ContainsAny(got, "\n\r\x00") {
+		t.Fatalf("control characters survived: %q", got)
+	}
+	long := safeReason(strings.Repeat("é", 5000))
+	if n := len([]rune(long)); n != maxReasonLen+1 {
+		t.Fatalf("truncated to %d runes, want %d plus ellipsis", n, maxReasonLen)
+	}
+	if !utf8.ValidString(long) {
+		t.Fatalf("truncation split a rune: %q", long)
 	}
 }
 
