@@ -489,6 +489,17 @@ the cluster converges fine underneath, and a second `c8s install` run (helm
 upgrade) flips it to `deployed`. Don't start debugging from the helm status —
 check the pods first.
 
+## A tenant pod labelled `app.kubernetes.io/instance: <release>` evades the uninstall guard
+
+`cmd/c8s/uninstall.go` (`filterKataPods`)
+
+The running-kata-pod guard skips pods in the release namespace that carry the
+chart's `app.kubernetes.io/instance: <release>` label, so `c8s uninstall` is not
+blocked by its own CDS and tls-lb pods. Nothing stops an operator from putting
+that label on a real workload in `c8s-system`; such a pod is silently not
+protected and loses its runtime. Keep tenant workloads out of the release
+namespace, or off that label.
+
 ## `c8s uninstall` sweeps the TEE node labels — relabel before reinstalling
 
 `cmd/c8s/uninstall.go`, `cmd/c8s/tee_label.go`

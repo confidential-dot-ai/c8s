@@ -3773,6 +3773,42 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 	}, args...)...)
 }
 
+// Contract with the `c8s uninstall` running-pod guard (cmd/c8s/uninstall.go,
+// filterKataPods): it skips the release's own kata pods by release namespace +
+// app.kubernetes.io/instance, so every kata-pinned pod template must carry that
+// label or a clean uninstall is refused again.
+func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var pinned []string
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		rc := obj.Spec.Template.Spec.RuntimeClassName
+		if rc == nil || !strings.HasPrefix(*rc, "kata-") {
+			return false
+		}
+		pinned = append(pinned, obj.Metadata.Name)
+		if got := obj.Spec.Template.Labels["app.kubernetes.io/instance"]; got != "c8s" {
+			t.Errorf("%s pod template: app.kubernetes.io/instance = %q, want the release name", obj.Metadata.Name, got)
+		}
+		return false
+	})
+	slices.Sort(pinned)
+	if want := []string{"c8s-cds", "c8s-tls-lb"}; !reflect.DeepEqual(pinned, want) {
+		t.Errorf("kata-pinned workloads = %v, want %v", pinned, want)
+	}
+}
+
 func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
 	out, err := helmTemplateKata(t)
 	if err != nil {
