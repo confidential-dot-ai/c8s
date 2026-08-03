@@ -736,3 +736,19 @@ are not regular files), so the RO mount still prevents a socket-file swap
 without blocking the connect. The same-process inventory unit tests cannot catch
 this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
 `TestWorkloadClaims_InjectsInventorySupplementalGroup` guard the two halves.
+
+## `pkg/snpmeasure` must bound the OVMF image before upstream parses it
+
+`pkg/snpmeasure/snpmeasure.go` (`openFirmware`)
+
+`virtee/sev-snp-measure-go`'s `ovmf.New` indexes the image without bounds checks
+— `data[size-32-18:]`, `data[start-tableSize:start]`, `data[len-offsetFromEnd:]`
+— so a truncated or corrupt firmware panics instead of returning an error. Worse,
+it returns **no error** when the footer table carries no `OVMF_SEV_META_DATA`
+entry: `MetadataItems()` comes back empty, the metadata loop measures nothing,
+and the tool emits a well-formed 48-byte digest that matches no guest — the worst
+possible failure mode for a measurement tool, because a pinned wrong digest
+refuses every pod with nothing to diagnose. `openFirmware` therefore stats the
+file for a positive page-multiple size, rejects an image with zero metadata
+sections, and recovers any panic out of the parser into an error. Keep all three
+guards across a dependency bump; upstream has no tests for malformed input.

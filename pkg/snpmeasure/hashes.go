@@ -1,6 +1,13 @@
 package snpmeasure
 
-import "crypto/sha256"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"strings"
+
+	"github.com/virtee/sev-snp-measure-go/ovmf"
+)
 
 // GUIDs of QEMU's kernel-hashes table, which OVMF looks up to verify the
 // directly-loaded kernel, initrd and command line.
@@ -26,7 +33,7 @@ const (
 func (k *KernelHashes) table() []byte {
 	b := make([]byte, hashTablePadded)
 	copy(b, guidHashTable[:])
-	putU16(b[16:], hashTableSize)
+	binary.LittleEndian.PutUint16(b[16:], hashTableSize)
 	at := 18
 	for _, e := range []struct {
 		guid [16]byte
@@ -37,7 +44,7 @@ func (k *KernelHashes) table() []byte {
 		{guidHashKernel, k.Kernel},
 	} {
 		copy(b[at:], e.guid[:])
-		putU16(b[at+16:], hashEntrySize)
+		binary.LittleEndian.PutUint16(b[at+16:], hashEntrySize)
 		copy(b[at+18:], e.hash[:])
 		at += hashEntrySize
 	}
@@ -51,4 +58,14 @@ func (k *KernelHashes) page(offset uint64) []byte {
 	p := make([]byte, PageSize)
 	copy(p[offset:], k.table())
 	return p
+}
+
+// mustGUID converts a canonical GUID string to the mixed-endian byte order UEFI
+// stores it in: the first three fields little-endian, the last two big-endian.
+func mustGUID(s string) [16]byte {
+	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
+	if err != nil || len(b) != 16 {
+		panic("snpmeasure: malformed GUID " + s)
+	}
+	return ovmf.LittleEndianBytes([16]byte(b))
 }

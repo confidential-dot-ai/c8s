@@ -10,27 +10,33 @@
 // "nr_cpus=N" in the measured kernel command line, guests that differ only in
 // vCPU count have different launch digests.
 //
-// Algorithm and page layout follow AMD SEV-SNP ABI §8.17.2 (Table 67, PAGE_INFO)
-// and the reference implementation at https://github.com/virtee/sev-snp-measure.
-// See docs/kata-launch-measurement.md.
+// OVMF parsing, the digest accumulator and the VMSA pages come from
+// github.com/virtee/sev-snp-measure-go. What this package adds is the sev_hashes
+// page QEMU's kernel-hashes=on contributes, which that library has no entry
+// point for. See docs/kata-launch-measurement.md.
 package snpmeasure
 
 import (
 	"crypto/sha256"
-	"crypto/sha512"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/virtee/sev-snp-measure-go/gctx"
+	"github.com/virtee/sev-snp-measure-go/ovmf"
+	"github.com/virtee/sev-snp-measure-go/vmmtypes"
+	"github.com/virtee/sev-snp-measure-go/vmsa"
 )
 
 // PageSize is the guest page granularity the launch digest is computed over.
-const PageSize = 4096
+const PageSize = gctx.PAGE_SIZE
 
 // Config is the complete set of inputs to a SEV-SNP launch measurement.
 type Config struct {
-	// Firmware is the raw OVMF image the VMM maps below 4 GiB (qemu -bios).
-	Firmware []byte
+	// FirmwarePath is the OVMF image the VMM maps below 4 GiB (qemu -bios).
+	FirmwarePath string
 
 	// KernelHashes, when non-nil, measures QEMU's kernel/initrd/cmdline hash
 	// table into the digest. Set it iff the guest boots with
@@ -53,92 +59,162 @@ func LaunchDigest(cfg Config) ([]byte, error) {
 	if cfg.VCPUs < 1 {
 		return nil, fmt.Errorf("vcpus must be >= 1, got %d", cfg.VCPUs)
 	}
-	if len(cfg.Firmware)%PageSize != 0 {
-		return nil, fmt.Errorf("firmware size %d is not a multiple of %d", len(cfg.Firmware), PageSize)
-	}
-	fw, err := ParseFirmware(cfg.Firmware)
+	fw, err := openFirmware(cfg.FirmwarePath)
 	if err != nil {
 		return nil, err
 	}
 
-	ld := newDigest()
-	ld.normalPages(fw.GPA, cfg.Firmware)
-
+	ld := gctx.New(nil)
+	if err := ld.UpdateNormalPages(uint64(fw.GPA()), fw.Data()); err != nil {
+		return nil, fmt.Errorf("measure firmware: %w", err)
+	}
 	if err := measureMetadata(ld, fw, cfg.KernelHashes); err != nil {
 		return nil, err
 	}
 
-	bsp := vmsaPage(bspResetEIP, cfg.GuestFeatures, cfg.VCPUSig)
-	ap := vmsaPage(fw.ResetEIP, cfg.GuestFeatures, cfg.VCPUSig)
-	for i := range cfg.VCPUs {
-		if i == 0 {
-			ld.vmsaPage(bsp)
-		} else {
-			ld.vmsaPage(ap)
+	resetEIP, err := fw.SevESResetEIP()
+	if err != nil {
+		return nil, fmt.Errorf("OVMF SEV-ES reset block: %w", err)
+	}
+	pages, err := vmsaPages(resetEIP, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pages {
+		if err := ld.UpdateVmsaPage(p); err != nil {
+			return nil, fmt.Errorf("measure VMSA page: %w", err)
 		}
 	}
-	return ld.value(), nil
+	return ld.LD(), nil
 }
 
 // FirmwareDigest returns the launch digest after only the OVMF image has been
 // measured. It is the expensive, guest-independent prefix of LaunchDigest:
 // callers measuring many pod shapes against one firmware can compute it once.
-func FirmwareDigest(firmware []byte) ([]byte, error) {
-	if len(firmware)%PageSize != 0 {
-		return nil, fmt.Errorf("firmware size %d is not a multiple of %d", len(firmware), PageSize)
-	}
-	fw, err := ParseFirmware(firmware)
+func FirmwareDigest(firmwarePath string) ([]byte, error) {
+	fw, err := openFirmware(firmwarePath)
 	if err != nil {
 		return nil, err
 	}
-	ld := newDigest()
-	ld.normalPages(fw.GPA, firmware)
-	return ld.value(), nil
+	ld := gctx.New(nil)
+	if err := ld.UpdateNormalPages(uint64(fw.GPA()), fw.Data()); err != nil {
+		return nil, fmt.Errorf("measure firmware: %w", err)
+	}
+	return ld.LD(), nil
+}
+
+// openFirmware parses an OVMF image, applying the bounds and metadata checks
+// upstream's parser skips. See docs/pitfalls.md.
+func openFirmware(path string) (fw *ovmf.OVMF, err error) {
+	if path == "" {
+		return nil, errors.New("firmware path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read firmware: %w", err)
+	}
+	if info.Size() == 0 || info.Size()%PageSize != 0 {
+		return nil, fmt.Errorf("firmware size %d is not a positive multiple of %d", info.Size(), PageSize)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fw, err = nil, fmt.Errorf("malformed OVMF image %s: %v", path, r)
+		}
+	}()
+
+	img, err := ovmf.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("parse firmware: %w", err)
+	}
+	// Upstream returns no error for an image without an ASEV table; measuring
+	// one anyway yields a well-formed digest that matches nothing.
+	if len(img.MetadataItems()) == 0 {
+		return nil, errors.New("OVMF image has no SEV metadata sections")
+	}
+	return &img, nil
 }
 
 // measureMetadata walks OVMF's SEV metadata sections in file order, which is the
-// order the VMM populates them in.
-func measureMetadata(ld *digest, fw *Firmware, kh *KernelHashes) error {
+// order the VMM populates them in. It is upstream's guest.snpUpdateMetadataPages
+// plus the SNP_KERNEL_HASHES case, which upstream rejects.
+func measureMetadata(ld *gctx.GCTX, fw *ovmf.OVMF, kh *KernelHashes) error {
 	sawKernelHashes := false
-	for _, s := range fw.Sections {
-		switch s.Type {
-		case SectionSecMem:
-			if err := ld.zeroPages(s.GPA, s.Size); err != nil {
+	for _, s := range fw.MetadataItems() {
+		st, err := s.SectionType()
+		if err != nil {
+			return err
+		}
+		gpa := uint64(s.GPA)
+		switch st {
+		case ovmf.SNPSECMEM, ovmf.SVSM_CAA:
+			if err := ld.UpdateZeroPages(gpa, int(s.Size)); err != nil {
+				return fmt.Errorf("section at %#x size %d: %w", gpa, s.Size, err)
+			}
+		case ovmf.SNPSecrets:
+			if err := ld.UpdateSecretsPage(gpa); err != nil {
 				return err
 			}
-		case SectionSecrets:
-			ld.singlePage(pageTypeSecrets, s.GPA)
-		case SectionCPUID:
-			ld.singlePage(pageTypeCPUID, s.GPA)
-		case SectionSVSMCAA:
-			if err := ld.zeroPages(s.GPA, s.Size); err != nil {
+		case ovmf.CPUID:
+			if err := ld.UpdateCpuidPage(gpa); err != nil {
 				return err
 			}
-		case SectionKernelHashes:
+		case ovmf.SNPKernelHashes:
 			sawKernelHashes = true
 			if kh == nil {
-				if err := ld.zeroPages(s.GPA, s.Size); err != nil {
-					return err
+				if err := ld.UpdateZeroPages(gpa, int(s.Size)); err != nil {
+					return fmt.Errorf("section at %#x size %d: %w", gpa, s.Size, err)
 				}
 				continue
 			}
 			if s.Size != PageSize {
 				return fmt.Errorf("kernel-hashes section is %d bytes, want %d", s.Size, PageSize)
 			}
-			// Without SEV_HASH_TABLE_RV the table's offset in the page is
-			// unknown, and offset 0 would be a plausible-looking wrong answer.
-			if fw.HashTableGPA == 0 {
-				return errors.New("OVMF has no SEV_HASH_TABLE_RV entry to place the kernel hashes table")
+			off, err := hashTableOffset(fw)
+			if err != nil {
+				return err
 			}
-			ld.normalPages(s.GPA, kh.page(fw.HashTableGPA%PageSize))
+			if err := ld.UpdateNormalPages(gpa, kh.page(off)); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("unknown OVMF metadata section type %d", s.Type)
+			return fmt.Errorf("unhandled OVMF metadata section type %d", st)
 		}
 	}
 	if kh != nil && !sawKernelHashes {
 		return errors.New("kernel hashes requested but OVMF has no SNP_KERNEL_HASHES metadata section")
 	}
 	return nil
+}
+
+// hashTableOffset is where inside its page OVMF expects QEMU's hash table. Only
+// the offset reaches the measurement; the page comes from the metadata section.
+// Without SEV_HASH_TABLE_RV the offset is unknown, and 0 would be a
+// plausible-looking wrong answer.
+func hashTableOffset(fw *ovmf.OVMF) (uint64, error) {
+	errNoRV := errors.New("OVMF has no SEV_HASH_TABLE_RV entry to place the kernel hashes table")
+	item, err := fw.TableItem(ovmf.SEV_HASH_TABLE_RV_GUID)
+	if err != nil || len(item) < 4 {
+		return 0, errNoRV
+	}
+	tableGPA := binary.LittleEndian.Uint32(item[:4])
+	if tableGPA == 0 {
+		return 0, errNoRV
+	}
+	return uint64(tableGPA) % PageSize, nil
+}
+
+// vmsaPages builds one VMSA page per vCPU: the BSP starts at the architectural
+// reset vector, the APs at OVMF's SEV-ES reset block.
+func vmsaPages(resetEIP uint32, cfg Config) ([][]byte, error) {
+	v, err := vmsa.New(resetEIP, cfg.GuestFeatures, uint64(cfg.VCPUSig), vmmtypes.QEMU)
+	if err != nil {
+		return nil, fmt.Errorf("build VMSA: %w", err)
+	}
+	pages, err := v.Pages(cfg.VCPUs)
+	if err != nil {
+		return nil, fmt.Errorf("serialise VMSA: %w", err)
+	}
+	return pages, nil
 }
 
 // KernelHashes holds the SHA-256 digests QEMU publishes to OVMF when
@@ -191,83 +267,4 @@ func sha256File(path string) ([sha256.Size]byte, error) {
 		return out, fmt.Errorf("read %s: %w", path, err)
 	}
 	return [sha256.Size]byte(h.Sum(nil)), nil
-}
-
-// digest is the running launch measurement.
-type digest struct{ ld [sha512.Size384]byte }
-
-const (
-	pageTypeNormal  = 0x01
-	pageTypeVMSA    = 0x02
-	pageTypeZero    = 0x03
-	pageTypeSecrets = 0x05
-	pageTypeCPUID   = 0x06
-
-	// pageInfoSize is the PAGE_INFO length the AMD-SP hashes (ABI Table 67).
-	pageInfoSize = 0x70
-
-	// vmsaGPA is the fixed GPA the RMP records for every VMSA page.
-	vmsaGPA = 0xFFFFFFFFF000
-
-	// bspResetEIP is the x86 architectural reset vector, used for vCPU 0. APs
-	// start at the EIP in OVMF's SEV-ES reset block instead.
-	bspResetEIP = 0xFFFFFFF0
-)
-
-func newDigest() *digest { return &digest{} }
-
-func (d *digest) value() []byte { return d.ld[:] }
-
-// update folds one measured page into the digest.
-func (d *digest) update(pageType byte, gpa uint64, contents [sha512.Size384]byte) {
-	var pi [pageInfoSize]byte
-	copy(pi[0:48], d.ld[:])
-	copy(pi[48:96], contents[:])
-	pi[0x60] = byte(pageInfoSize) // LENGTH, u16 LE
-	pi[0x62] = pageType
-	// 0x63 IMI_PAGE, 0x64-0x66 VMPL{3,2,1}_PERMS, 0x67 reserved: all zero.
-	putU64(pi[0x68:], gpa)
-	d.ld = sha512.Sum384(pi[:])
-}
-
-func (d *digest) normalPages(startGPA uint64, data []byte) {
-	for off := 0; off < len(data); off += PageSize {
-		d.update(pageTypeNormal, startGPA+uint64(off), sha512.Sum384(data[off:off+PageSize]))
-	}
-}
-
-func (d *digest) vmsaPage(page []byte) {
-	d.update(pageTypeVMSA, vmsaGPA, sha512.Sum384(page))
-}
-
-// zeroPages measures a span as unencrypted-but-zeroed. CONTENTS is 48 zero
-// bytes, not the hash of a zero page.
-func (d *digest) zeroPages(gpa uint64, length uint32) error {
-	if length%PageSize != 0 {
-		return fmt.Errorf("section at %#x has size %d, not a multiple of %d", gpa, length, PageSize)
-	}
-	var zero [sha512.Size384]byte
-	for off := uint32(0); off < length; off += PageSize {
-		d.update(pageTypeZero, gpa+uint64(off), zero)
-	}
-	return nil
-}
-
-func (d *digest) singlePage(pageType byte, gpa uint64) {
-	var zero [sha512.Size384]byte
-	d.update(pageType, gpa, zero)
-}
-
-func putU16(b []byte, v uint16) { b[0] = byte(v); b[1] = byte(v >> 8) }
-
-func putU32(b []byte, v uint32) {
-	for i := range 4 {
-		b[i] = byte(v >> (8 * i))
-	}
-}
-
-func putU64(b []byte, v uint64) {
-	for i := range 8 {
-		b[i] = byte(v >> (8 * i))
-	}
 }
