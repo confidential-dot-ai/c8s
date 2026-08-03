@@ -381,30 +381,20 @@ func preflightTDXNodes(ctx context.Context) error {
 // (kata.snpNodeSelector / kata.tdxNodeSelector), and the chart-managed CDS
 // and tls-lb both pin the platform's CPU class — with no labelled
 // node the whole release sits Pending and `helm --wait` blocks for the full
-// timeout before failing opaquely. It runs right after autoLabelTEENodes,
-// which labels every kata-targeted node from --hardware-platform, so "no
-// labelled node" means no node matched the kata node selector at all. (Why a
-// wrong-TEE node cannot run these pods: docs/pitfalls.md "kata-qemu-snp on a
-// non-SNP host is a QEMU crash-loop".)
+// timeout before failing opaquely. (Why a wrong-TEE node cannot run these
+// pods: docs/pitfalls.md "kata-qemu-snp on a non-SNP host is a QEMU
+// crash-loop".)
 //
-// Like preflightCDSNode it reads the chart's default values, so it guards the
-// default path only; an operator who customizes via -f owns node labels (the
-// caller skips this when -f is supplied).
-func preflightTEENodes(ctx context.Context, chartPath, hardwarePlatform string) error {
-	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
-	if err != nil {
-		return fmt.Errorf("helm show values %q: %w", chartPath, err)
-	}
-	var tree map[string]any
-	if err := yaml.Unmarshal(out, &tree); err != nil {
-		return fmt.Errorf("parse chart values: %w", err)
-	}
-
-	selKey, otherPlatform := "snpNodeSelector", "tdx"
+// Read-only, and it reads the EFFECTIVE selector (chart defaults + -f +
+// computed --set), so it runs on every --cvm-mode=pod install including -f
+// ones: whoever owns the label, an unlabelled cluster is broken the same way.
+// autoLabelled only picks the remedy the error names.
+func preflightTEENodes(ctx context.Context, values map[string]any, hardwarePlatform string, autoLabelled bool) error {
+	selKey, otherPlatform := teeSelectorKey(hardwarePlatform), "tdx"
 	if hardwarePlatform == "tdx" {
-		selKey, otherPlatform = "tdxNodeSelector", "sev-snp"
+		otherPlatform = "sev-snp"
 	}
-	sel, _ := nestedMap(tree, "kata", selKey)
+	sel, _ := nestedMap(values, "kata", selKey)
 	selector, ok := labelSelector(sel)
 	if !ok {
 		// Empty/cleared selector means unrestricted confidential scheduling —
@@ -418,7 +408,11 @@ func preflightTEENodes(ctx context.Context, chartPath, hardwarePlatform string) 
 		return fmt.Errorf("kubectl get nodes -l %s: %w", selector, err)
 	}
 	if strings.TrimSpace(string(labeled)) == "" {
-		return fmt.Errorf("no node is labelled %s: the install labels every kata-targeted node from --hardware-platform=%s, so no node matched the kata node selector — without a labelled node no confidential pod can schedule, including the chart's own CDS and tls-lb. Check the cluster has schedulable Linux nodes; on a %s cluster pass --hardware-platform=%s instead. To label a host yourself: kubectl label node <node> %s", selector, hardwarePlatform, otherPlatform, otherPlatform, strings.ReplaceAll(selector, ",", " "))
+		why := fmt.Sprintf("the install labels every kata-targeted node from --hardware-platform=%s, so no node matched the kata node selector — check the cluster has schedulable Linux nodes, and on a %s cluster pass --hardware-platform=%s instead", hardwarePlatform, otherPlatform, otherPlatform)
+		if !autoLabelled {
+			why = fmt.Sprintf("a -f values file sets kata.%s, so the install left node labelling to you", selKey)
+		}
+		return fmt.Errorf("no node is labelled %s: %s. Without a labelled node no confidential pod can schedule, including the chart's own CDS and tls-lb, and `helm --wait` blocks until it times out. To label a host: kubectl label node <node> %s", selector, why, strings.ReplaceAll(selector, ",", " "))
 	}
 	return nil
 }
@@ -777,33 +771,40 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 
 		// --cvm-mode=pod: label every kata-targeted node for the declared
-		// --hardware-platform (refusing if the other platform's label is
-		// still present — a platform switch must be the operator's explicit
-		// act), then fail fast if the platform's confidential pods still
-		// have nowhere to schedule. Declarative — the flag is trusted, no
-		// hardware probe (see autoLabelTEENodes). Runs after the read-only
-		// preflights above — it mutates the cluster (node labels). Skipped
-		// with -f, whose owner owns node labels; NOT skipped under
-		// --single-node — even a one-node cluster needs its platform label
-		// for confidential pods to schedule.
-		kataDefaultPath := cvmModeIsPod(installCvmMode) && len(installValues) == 0
-		if kataDefaultPath {
-			if err := autoLabelTEENodes(cmd.Context(), chartPath, installHardwarePlatform); err != nil {
+		// --hardware-platform (see autoLabelTEENodes), then fail fast if
+		// confidential pods still have nowhere to schedule. Labelling mutates
+		// the cluster, so it runs after the read-only preflights above, and
+		// stands aside — loudly — only when a -f file sets the platform's own
+		// selector; the preflight runs either way. NOT skipped under
+		// --single-node: a one-node cluster needs the label too. See
+		// docs/pitfalls.md "A `-f` values file no longer disables TEE node
+		// labelling".
+		if cvmModeIsPod(installCvmMode) {
+			values, err := effectiveValues(cmd.Context(), chartPath, setArgs)
+			if err != nil {
 				return err
 			}
-			if err := preflightTEENodes(cmd.Context(), chartPath, installHardwarePlatform); err != nil {
+			selectorInValues, err := valuesFilesSetTEESelector(installValues, installHardwarePlatform)
+			if err != nil {
+				return err
+			}
+			if selectorInValues {
+				reportTEELabelSkip(os.Stdout, values, installHardwarePlatform)
+			} else if err := autoLabelTEENodes(cmd.Context(), values, installHardwarePlatform); err != nil {
+				return err
+			}
+			if err := preflightTEENodes(cmd.Context(), values, installHardwarePlatform, !selectorInValues); err != nil {
 				return err
 			}
 		}
 
 		// Fail fast when --hardware-platform=tdx but no node carries the TDX
-		// label. Under --cvm-mode=pod the TDX RuntimeClasses have a nodeSelector on
-		// it; under --cvm-mode=node the attestationApi DaemonSet needs at
+		// label. Under --cvm-mode=node the attestationApi DaemonSet needs at
 		// least one TDX-capable node. Checks a fact about the cluster, not
-		// the values, so it runs with -f too — but the default pod (kata) path
-		// above already checked the chart's actual tdxNodeSelector (which
+		// the values, so it runs with -f too — but under --cvm-mode=pod the
+		// block above already checked the effective tdxNodeSelector (which
 		// may be customized or cleared), so skip the fixed-key check there.
-		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !kataDefaultPath {
+		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !cvmModeIsPod(installCvmMode) {
 			if err := preflightTDXNodes(cmd.Context()); err != nil {
 				return err
 			}
@@ -1766,6 +1767,20 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 // pinning its digest, and the render then fails with no image ref. The merged
 // tree is built once and shared across the per-component calls.
 func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []string) (func(valuePath string) (bool, error), error) {
+	tree, err := effectiveValues(ctx, chartPath, setArgs)
+	if err != nil {
+		return nil, err
+	}
+	return func(valuePath string) (bool, error) {
+		return boolAtPath(tree, valuePath), nil
+	}, nil
+}
+
+// effectiveValues resolves the values tree the release will actually render
+// with, in helm's precedence order: chart defaults < -f files in order <
+// --set. Callers that decide on a value the operator may have overridden (the
+// digest resolver, the TEE-node preflight) must read this, not the defaults.
+func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (map[string]any, error) {
 	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
 	if err != nil {
 		return nil, fmt.Errorf("helm show values %q: %w", chartPath, err)
@@ -1774,10 +1789,9 @@ func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []
 	if err := yaml.Unmarshal(out, &tree); err != nil {
 		return nil, fmt.Errorf("parse chart values: %w", err)
 	}
-	// Operator -f files, lowest precedence after the chart defaults. A "-"
-	// (stdin) entry is skipped: stdin is already consumed by the caller and a
-	// component enabled only there stays invisible to the resolver — a narrow
-	// edge next to a real file, which is the documented path.
+	// A "-" (stdin) entry is skipped: stdin is already consumed by the caller,
+	// so a value set only there stays invisible here — a narrow edge next to a
+	// real file, which is the documented path.
 	for _, vf := range installValues {
 		if vf == "-" {
 			continue
@@ -1795,9 +1809,7 @@ func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []
 	if err := overlaySetArgs(tree, setArgs); err != nil {
 		return nil, err
 	}
-	return func(valuePath string) (bool, error) {
-		return boolAtPath(tree, valuePath), nil
-	}, nil
+	return tree, nil
 }
 
 // mergeValues deep-merges src onto dst the way helm coalesces a -f file: a map

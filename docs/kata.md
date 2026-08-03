@@ -81,9 +81,18 @@ attestation remains the real boundary). If any node still carries the
 `--hardware-platform` — the install refuses and prints the exact
 `kubectl label nodes ... <key>-` command to clear it: a platform switch must
 be the operator's explicit act, not a side effect of a mistyped flag.
-Installs that bypass the CLI — a GitOps `HelmRelease`, or `c8s install -f` —
-get no auto-labelling and must label out-of-band (provisioning, NFD, or
-`kubectl label node <node> <platform-label>=true` after checking the host).
+
+A `-f` values file does **not** by itself turn labelling off. Only a file that
+sets the platform's own `kata.snpNodeSelector` / `kata.tdxNodeSelector` hands
+labelling back to you (NFD, provisioning, GitOps) — and when it does, the
+install says so and prints the `kubectl label node ...` command rather than
+labelling silently. Installs that bypass the CLI entirely (a GitOps
+`HelmRelease`) get no auto-labelling and must label out-of-band.
+
+Either way the read-only check runs on every `--cvm-mode=pod` install: if the
+**effective** selector (chart defaults + your `-f` + the CLI's computed
+values) matches no node, the install fails immediately naming the label,
+instead of leaving CDS `Pending` until `helm --wait` times out.
 
 `--debug` switches the guest image to the `<tag>-debug` variant published in
 lockstep with every locked tag: the same build except the baked kata-agent

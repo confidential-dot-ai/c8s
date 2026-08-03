@@ -1477,6 +1477,65 @@ func TestMergeValuesDeepMergesOverlay(t *testing.T) {
 	}
 }
 
+// The TEE-node preflight reads effectiveValues, so a -f file must move the
+// selector it actually sets and nothing else. The RKE2 case: the tls-lb
+// host-port workaround the install itself recommends must leave the chart's
+// snpNodeSelector standing, or the preflight would stop catching the
+// unlabelled cluster it exists to catch.
+func TestEffectiveValuesResolvesTEESelector(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not on PATH")
+	}
+	dir, err := extractChart()
+	if err != nil {
+		t.Fatalf("extractChart: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	chartPath := filepath.Join(dir, helmchart.ChartRoot)
+
+	tmp := t.TempDir()
+	tlsLB := filepath.Join(tmp, "tlslb.yaml")
+	if err := os.WriteFile(tlsLB, []byte("tlsLb:\n  hostPort:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nfd := filepath.Join(tmp, "nfd.yaml")
+	if err := os.WriteFile(nfd, []byte("kata:\n  snpNodeSelector:\n    nfd/snp: \"true\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := installValues
+	defer func() { installValues = prev }()
+
+	selectorFor := func(t *testing.T, files []string) string {
+		t.Helper()
+		installValues = files
+		tree, err := effectiveValues(context.Background(), chartPath, nil)
+		if err != nil {
+			t.Fatalf("effectiveValues(%v): %v", files, err)
+		}
+		sel, _ := nestedMap(tree, "kata", "snpNodeSelector")
+		got, ok := labelSelector(sel)
+		if !ok {
+			return ""
+		}
+		return got
+	}
+
+	if got := selectorFor(t, nil); got != "confidential.ai/sev-snp=true" {
+		t.Errorf("chart default selector = %q, want confidential.ai/sev-snp=true", got)
+	}
+	if got := selectorFor(t, []string{tlsLB}); got != "confidential.ai/sev-snp=true" {
+		t.Errorf("with an unrelated -f, selector = %q, want the chart default confidential.ai/sev-snp=true", got)
+	}
+	// helm coalesces nested maps key-by-key, so repointing the selector at NFD
+	// without nulling the default leaves BOTH labels required — the preflight
+	// must demand what the chart will actually render, not what was written.
+	// See docs/pitfalls.md "Repointing kata.snpNodeSelector at NFD".
+	if got := selectorFor(t, []string{nfd}); got != "confidential.ai/sev-snp=true,nfd/snp=true" {
+		t.Errorf("with a -f repointing the selector, selector = %q, want the coalesced pair confidential.ai/sev-snp=true,nfd/snp=true", got)
+	}
+}
+
 func assertArgsEqual(t *testing.T, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

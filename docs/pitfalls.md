@@ -494,9 +494,62 @@ check the pods first.
 `cmd/c8s/uninstall.go`, `cmd/c8s/tee_label.go`
 
 The kata sweep removes `confidential.ai/sev-snp` / `confidential.ai/tdx`
-along with the kata artifacts. A subsequent
-`c8s install --cvm-mode=pod -f <values>` can fail fast at the TDX/SNP node check (the
-auto-label path doesn't cover every `-f` shape). Relabel by hand and rerun.
+along with the kata artifacts. A subsequent `c8s install --cvm-mode=pod`
+relabels automatically, but one whose `-f` owns the selector (see the next
+entry) fails fast at the TEE node check instead. Relabel by hand and rerun.
+
+## A `-f` values file no longer disables TEE node labelling — only one that owns the selector does
+
+`cmd/c8s/install.go:782` (the `--cvm-mode=pod` block), `cmd/c8s/tee_label.go:90`
+(`valuesFilesSetTEESelector`)
+
+Any `-f` used to disable **both** the `confidential.ai/sev-snp` /
+`confidential.ai/tdx` auto-labelling **and** the preflight that catches the
+result — silently. That collided with the first thing a stock RKE2 cluster
+forces: `rke2-ingress-nginx` owns host port 443, so the tls-lb preflight
+(`cmd/c8s/install.go:249`) tells you to `install with -f setting
+tlsLb.hostPort.enabled=false` — and taking the tool's own advice dropped the
+labelling. CDS then sat `Pending` with `didn't match Pod's node
+affinity/selector`, `helm --wait` burned its full 10-minute timeout, and the
+surfaced error was an unrelated `Progress deadline exceeded`. Nothing named
+the missing label.
+
+Now:
+
+- Auto-labelling stands aside only when a `-f` file **sets the platform's own
+  `kata.snpNodeSelector` / `kata.tdxNodeSelector`** — the values-driven
+  install that really does own its labels. Everything else (`tlsLb.*`,
+  `kata.nodeSelector`, digests, …) still gets labelled.
+- When it does stand aside it **says so on stdout** and prints the exact
+  `kubectl label node <node> <k>=<v>` command.
+- The read-only preflight (`preflightTEENodes`, `cmd/c8s/install.go:392`) runs
+  on **every** `--cvm-mode=pod` install, against the *effective* selector
+  (`effectiveValues`, `cmd/c8s/install.go:1783`) rather than the chart
+  defaults. An unlabelled cluster fails in seconds naming the label.
+
+If you genuinely manage labels out of band and the nodes are not labelled yet,
+label them before installing — the preflight is a hard failure, not a warning.
+
+## Repointing `kata.snpNodeSelector` at NFD does not remove the c8s default key
+
+`internal/helmchart/c8s/values.yaml:466`, `cmd/c8s/install.go:1818`
+(`mergeValues`)
+
+helm coalesces nested maps **key-by-key**, so a `-f` file with
+
+```yaml
+kata:
+  snpNodeSelector:
+    feature.node.kubernetes.io/cpu-security.sev.snp.enabled: "true"
+```
+
+renders a selector requiring **both** that key and the chart's
+`confidential.ai/sev-snp: "true"`. The values.yaml comment's "set `{}` for
+unrestricted scheduling" is wrong for the same reason: an empty map coalesces
+to the default and the label is still required. Only `snpNodeSelector: null`
+actually clears it. `c8s install`'s preflight reports the coalesced selector,
+which is what the RuntimeClasses will really schedule on — label for every
+pair it prints, or use `null`.
 
 ## `cds.node.selector: null` in a values file does not survive helm's multi-file merge
 
