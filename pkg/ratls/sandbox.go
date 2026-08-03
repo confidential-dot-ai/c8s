@@ -14,10 +14,10 @@ import (
 )
 
 // OIDSandboxID identifies the pod-sandbox-ID extension (see extension.go for
-// the 1.3.6.1.4.1.59888 arc):
+// the 1.3.6.1.4.1.66378 arc):
 //
-//	1.3.6.1.4.1.59888.1.4 - pod sandbox ID extension
-var OIDSandboxID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 4}
+//	1.3.6.1.4.1.66378.1.4 - pod sandbox ID extension
+var OIDSandboxID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 4}
 
 // sandboxIDPattern bounds a sandbox ID to what CRI runtimes emit (containerd:
 // 64 hex chars), with headroom for other runtimes.

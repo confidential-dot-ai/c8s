@@ -41,18 +41,17 @@ const (
 	SNPMeasurementSize = 48
 )
 
-// OID arc: 1.3.6.1.4.1.59888 is a placeholder PEN (Private Enterprise Number).
-// Replace with an IANA-registered PEN when available.
+// OID arc: 1.3.6.1.4.1.66378 is our official PEN (Private Enterprise Number).
 //
-//	1.3.6.1.4.1.59888.1   - Confidential TEE attestation arc
-//	1.3.6.1.4.1.59888.1.1 - RA-TLS attestation extension
-//	1.3.6.1.4.1.59888.1.2 - attestation-evidence audit digest (certutil)
-//	1.3.6.1.4.1.59888.1.4 - pod sandbox ID extension (sandbox.go)
+//	1.3.6.1.4.1.66378.1   - Confidential TEE attestation arc
+//	1.3.6.1.4.1.66378.1.1 - RA-TLS attestation extension
+//	1.3.6.1.4.1.66378.1.2 - attestation-evidence audit digest (certutil)
+//	1.3.6.1.4.1.66378.1.4 - pod sandbox ID extension (sandbox.go)
 //
 // .1.3 was the RA-TLS config-claims extension; it is retired, not reusable.
 var (
-	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1}
-	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 1}
+	OIDConfidentialTEE  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1}
+	OIDRATLSAttestation = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 1}
 )
 
 // TEEType identifies the confidential computing platform.
