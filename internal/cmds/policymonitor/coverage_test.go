@@ -204,9 +204,13 @@ func TestRunAllowlistRefresh_InvalidMeasurements(t *testing.T) {
 		RefreshInterval: time.Second,
 	}
 	// Returns promptly (refresh disabled) and never touches the network.
-	runAllowlistRefresh(context.Background(), testLogger(t), cfg, a, &policyOverlay{})
+	state := &refreshState{reason: reasonNotYetStarted}
+	runAllowlistRefresh(context.Background(), testLogger(t), cfg, a, &policyOverlay{}, state)
 	if a.Size() != 1 {
 		t.Fatalf("size = %d, want 1 (seed unchanged)", a.Size())
+	}
+	if got := state.frozenReason(); got != reasonBadMeasurements {
+		t.Fatalf("frozenReason = %q, want %q", got, reasonBadMeasurements)
 	}
 }
 
@@ -218,9 +222,17 @@ func TestRunAllowlistRefresh_EmptyMeasurementsFailsClosed(t *testing.T) {
 		CDSMeasurements: "",
 		RefreshInterval: time.Second,
 	}
-	runAllowlistRefresh(context.Background(), testLogger(t), cfg, a, &policyOverlay{})
+	state := &refreshState{reason: reasonNotYetStarted}
+	runAllowlistRefresh(context.Background(), testLogger(t), cfg, a, &policyOverlay{}, state)
 	if a.Size() != 1 {
 		t.Fatalf("size = %d, want 1", a.Size())
+	}
+	// The fail-closed must also be reportable, not just logged and forgotten.
+	if got := state.frozenReason(); got != reasonNoMeasurements {
+		t.Fatalf("frozenReason = %q, want %q", got, reasonNoMeasurements)
+	}
+	if rep := state.report(a.Size()); rep.Enabled || rep.Entries != 1 {
+		t.Fatalf("report = %+v, want disabled with 1 entry", rep)
 	}
 }
 

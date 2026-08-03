@@ -158,6 +158,32 @@ type SandboxTokenRequest struct {
 type SandboxDigestsResponse struct {
 	Digests    []string           `json:"digests"`
 	Containers []SandboxContainer `json:"containers,omitempty"`
+	// AllowlistRefresh is the inventory's enforcement posture. Absent from an
+	// inventory that predates the field, and from one with nothing to report.
+	AllowlistRefresh *AllowlistRefresh `json:"allowlist_refresh,omitempty"`
+}
+
+// AllowlistRefresh reports whether an inventory's image allowlist still tracks
+// CDS, or has fallen back to whatever it started with. It is the one channel
+// carrying that state out of a kata guest, whose journal the operator cannot
+// read (docs/pitfalls.md — "kubectl logs on locked-guest pods is empty").
+//
+// Diagnostic only: no issuance or release decision reads it, so a guest cannot
+// widen its own admission by lying here.
+type AllowlistRefresh struct {
+	Enabled bool `json:"enabled"`
+	// Reason explains a disabled refresh.
+	Reason string `json:"reason,omitempty"`
+	// Entries is the allowlist size actually being enforced.
+	Entries int `json:"entries"`
+}
+
+// AllowlistRefreshReporter is the optional half of SandboxResolver: an
+// inventory that can describe its refresh posture. ok=false means it has
+// nothing to report, which stays off the wire rather than serializing as a
+// disabled refresh.
+type AllowlistRefreshReporter interface {
+	AllowlistRefresh() (AllowlistRefresh, bool)
 }
 
 // SandboxContainer is one admitted container: the bytes, and what they were
@@ -287,8 +313,14 @@ func ServeDigests(ctx context.Context, l net.Listener, resolver SandboxResolver,
 		if digests == nil {
 			digests = []string{}
 		}
+		resp := SandboxDigestsResponse{Digests: digests, Containers: containers}
+		if rr, ok := resolver.(AllowlistRefreshReporter); ok {
+			if refresh, reported := rr.AllowlistRefresh(); reported {
+				resp.AllowlistRefresh = &refresh
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(SandboxDigestsResponse{Digests: digests, Containers: containers})
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	return serveUntil(ctx, l, mux)
 }
