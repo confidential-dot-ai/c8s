@@ -745,3 +745,31 @@ imagePullSecrets:
     - {{ . }}
     {{- end }}
 {{- end }}
+
+{{/*
+c8s.kataGuestReadyGate — "true" when the kata-image-puller whose readiness the
+label mirrors is deployed. Gating without it leaves every confidential pod
+Pending forever.
+*/}}
+{{- define "c8s.kataGuestReadyGate" -}}
+{{- if and .Values.kata.enabled .Values.kata.guestImage.enabled -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+c8s.kataGuestReadyAffinity — the gate for chart-managed pods that pin a kata
+RuntimeClass themselves and so bypass the injecting webhook.
+*/}}
+{{- define "c8s.kataGuestReadyAffinity" -}}
+{{- if include "c8s.kataGuestReadyGate" . }}
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: confidential.ai/kata-guest-ready
+              operator: In
+              values: ["true"]
+{{- end }}
+{{- end -}}

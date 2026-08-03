@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +174,11 @@ const (
 // webhook matches the prefix rather than a fixed resource name.
 const nvidiaGpuResourcePrefix = "nvidia.com/"
 
+// GuestReadyNodeLabel marks a node whose kata-image-puller has reconciled the
+// c8s guest. Without it kata-runtime still resolves the stock guest — see
+// docs/pitfalls.md, "A kata pod placed before the guest drop-in exists".
+const GuestReadyNodeLabel = "confidential.ai/kata-guest-ready"
+
 // Config tunes the injector.
 type Config struct {
 	// GetCertImage is the c8s multi-mode binary image used for the
@@ -231,6 +237,11 @@ type Config struct {
 	// --workload-claims so get-cert redeems a sandbox token over that socket
 	// (docs/ratls.md).
 	WorkloadClaimsHostDir string
+
+	// KataGuestReadyGate makes kata runtimeClass injection also require
+	// GuestReadyNodeLabel. Only valid where the image-puller is deployed:
+	// nothing else sets the label, so pods would stay Pending forever.
+	KataGuestReadyGate bool
 
 	// WorkloadClaimsGuest selects the kata shape: the inventory is
 	// policy-monitor inside the guest, reached on the guest's loopback address
@@ -710,6 +721,9 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	if kataClass != "" {
 		l.Info("injecting kata runtimeClassName", "runtimeClass", kataClass)
 		pod.Spec.RuntimeClassName = &kataClass
+		if m.cfg.KataGuestReadyGate {
+			requireGuestReadyNode(pod)
+		}
 		// Stamp AnnotationInjected here too — mutatePod only runs when
 		// get-cert is needed, but a kata-only mutation is still a mutation
 		// and the alreadyInjected short-circuit above must see it on
@@ -843,6 +857,41 @@ func kataRuntimeClassFor(pod *corev1.Pod, cfg Config) string {
 		return kataSnpRuntimeClass
 	}
 	return kataRuntimeClass
+}
+
+// requireGuestReadyNode pins a confidential pod to a node carrying
+// GuestReadyNodeLabel.
+//
+// INVARIANT: the requirement lands in every nodeSelectorTerm. Terms are OR-ed,
+// so a term of its own would leave the affinity satisfiable without it.
+func requireGuestReadyNode(pod *corev1.Pod) {
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &corev1.Affinity{}
+	}
+	if pod.Spec.Affinity.NodeAffinity == nil {
+		pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	na := pod.Spec.Affinity.NodeAffinity
+	if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		na.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{}
+	}
+	terms := na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) == 0 {
+		terms = []corev1.NodeSelectorTerm{{}}
+	}
+	for i := range terms {
+		if slices.ContainsFunc(terms[i].MatchExpressions, func(e corev1.NodeSelectorRequirement) bool {
+			return e.Key == GuestReadyNodeLabel
+		}) {
+			continue
+		}
+		terms[i].MatchExpressions = append(terms[i].MatchExpressions, corev1.NodeSelectorRequirement{
+			Key:      GuestReadyNodeLabel,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"true"},
+		})
+	}
+	na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms = terms
 }
 
 // podRequestsNvidiaGpu reports whether any container (regular or init) asks

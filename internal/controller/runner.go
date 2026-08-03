@@ -90,6 +90,11 @@ type Options struct {
 	// (webhook.HardwarePlatformSNP or ...TDX; the operator command validates).
 	HardwarePlatform string
 
+	// KataGuestReadyGate runs the kata-guest-ready node-label controller and
+	// makes the webhook require that label. Only valid where the
+	// kata-image-puller is deployed — see webhook.Config.
+	KataGuestReadyGate bool
+
 	// WorkloadClaimsHostDir, when set (node-CVM), is the nri-image-policy inventory
 	// socket directory: the webhook mounts it into c8s-cert and injects the
 	// get-cert workload-digest claim (docs/ratls.md). See webhook.Config.
@@ -227,6 +232,18 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 		}
 	}
 
+	// Must run wherever the webhook injects the matching nodeAffinity, or
+	// nothing ever sets the label and confidential pods never schedule.
+	if opts.KataGuestReadyGate {
+		if err := (&KataGuestReadyReconciler{
+			Client:    mgr.GetClient(),
+			Namespace: opts.LeaderElectionNS,
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("setup kata-guest-ready reconciler: %w", err)
+		}
+		logger.Info("kata guest-readiness scheduling gate enabled", "label", webhook.GuestReadyNodeLabel)
+	}
+
 	// Admission webhook — injects get-cert containers into annotated pods, and
 	// (when kata enforcement is on) a kata runtimeClassName into workload
 	// pods. Registers when either job is wanted.
@@ -247,6 +264,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			GetCertRunAsNonRoot:   boolPtr(opts.GetCertRunAsNonRoot),
 			KataEnforce:           opts.KataEnforce,
 			HardwarePlatform:      opts.HardwarePlatform,
+			KataGuestReadyGate:    opts.KataGuestReadyGate,
 			WorkloadClaimsHostDir: opts.WorkloadClaimsHostDir,
 			WorkloadClaimsGuest:   opts.WorkloadClaimsGuest,
 		}); err != nil {

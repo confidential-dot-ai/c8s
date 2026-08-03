@@ -53,6 +53,7 @@ by this command.`,
 			GetCertRunAsGroup:       getCertRunAsGroup,
 			GetCertRunAsNonRoot:     getCertRunAsNonRoot,
 			KataEnforce:             kataEnforce,
+			KataGuestReadyGate:      kataGuestReadyGate,
 			HardwarePlatform:        operatorHardwarePlatform,
 			WorkloadClaimsHostDir:   workloadClaimsHostDir,
 			WorkloadClaimsGuest:     workloadClaimsGuest,
@@ -82,6 +83,7 @@ var (
 	getCertRunAsNonRoot     bool
 
 	kataEnforce              bool
+	kataGuestReadyGate       bool
 	operatorHardwarePlatform string
 	workloadClaimsHostDir    string
 	workloadClaimsGuest      bool
@@ -107,6 +109,7 @@ func init() {
 	operatorCmd.Flags().Int64Var(&getCertRunAsUser, "get-cert-run-as-user", 65532, "runAsUser for injected get-cert containers")
 	operatorCmd.Flags().Int64Var(&getCertRunAsGroup, "get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	operatorCmd.Flags().BoolVar(&getCertRunAsNonRoot, "get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
+	operatorCmd.Flags().BoolVar(&kataGuestReadyGate, "kata-guest-ready-gate", false, "maintain the "+webhook.GuestReadyNodeLabel+" node label from kata-image-puller readiness and require it on confidential pods (set by the chart when the puller is deployed)")
 	operatorCmd.Flags().BoolVar(&kataEnforce, "kata-enforce", false, "inject a kata runtimeClassName into workload pods that don't request one and enforce kata RuntimeClasses (set by the chart under kata.enabled)")
 	operatorCmd.Flags().StringVar(&operatorHardwarePlatform, "hardware-platform", webhook.HardwarePlatformSNP, "CPU TEE the injected confidential kata classes target: sev-snp or tdx (set by the chart to match the RuntimeClasses it renders)")
 	operatorCmd.Flags().StringVar(&workloadClaimsHostDir, "workload-claims-host-dir", "", "host directory holding the nri-image-policy inventory socket (node-CVM); when set, the webhook mounts it into c8s-cert and injects --workload-claims so get-cert redeems a sandbox token (docs/ratls.md)")

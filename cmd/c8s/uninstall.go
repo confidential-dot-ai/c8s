@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
 // kataSweepScript reverses the kata host install on a single node. Kept as a
@@ -567,7 +568,9 @@ func runKataSweep(ctx context.Context, namespace, release string, cfg kataUninst
 	// cosmetic and must not abort the nuke mid-flight. The pre-check avoids
 	// handing `kubectl label` an empty node set, whose exit status varies
 	// across kubectl versions.
-	for _, label := range []string{kataRuntimeNodeLabel, snpCapabilityNodeLabel, tdxHostLabelKey} {
+	// GuestReadyNodeLabel joins them: its controller goes with the release, so
+	// the node would keep asserting a readiness nothing maintains.
+	for _, label := range []string{kataRuntimeNodeLabel, snpCapabilityNodeLabel, tdxHostLabelKey, webhook.GuestReadyNodeLabel} {
 		labelled, err := exec.CommandContext(ctx, "kubectl", "get", "nodes",
 			"-l", label, "-o", "name").Output()
 		if err != nil {

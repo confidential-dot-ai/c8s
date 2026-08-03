@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
@@ -6509,5 +6510,83 @@ func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
 	}
 	if hostDir != socketDir {
 		t.Errorf("the operator mounts %q into cw pods but volumed serves in %q", hostDir, socketDir)
+	}
+}
+
+// The one install shape granting the operator node RBAC. Asserted exactly
+// here: TestChartOperatorRBACIsScoped's ban never renders this branch.
+func TestChartOperatorNodeRBACOnlyUnderKataGuestReadyGate(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var role rbacv1.ClusterRole
+	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
+		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	got := operatorVerbsFor(role, "", "nodes")
+	want := []string{"get", "list", "watch", "patch"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("operator nodes verbs under kata = %v, want %v", got, want)
+	}
+
+	// No puller, no controller: the grant and the gate must both go with it.
+	out, err = helmTemplateKata(t, "--set", "kata.guestImage.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
+		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	if got := operatorVerbsFor(role, "", "nodes"); got != nil {
+		t.Fatalf("operator keeps nodes verbs %v with the puller disabled", got)
+	}
+	if strings.Contains(out, "kata-guest-ready-gate=true") {
+		t.Fatal("operator still told to enforce the guest-ready gate with no puller to set the label")
+	}
+}
+
+// Pods pinning a kata RuntimeClass bypass the injecting webhook.
+func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	seen := map[string]bool{}
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		spec := obj.Spec.Template.Spec
+		if spec.RuntimeClassName == nil || !strings.HasPrefix(*spec.RuntimeClassName, "kata-") {
+			return false
+		}
+		if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil ||
+			spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			t.Errorf("%s %s pins %s but has no required node affinity", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
+			return false
+		}
+		for _, term := range spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+			for _, e := range term.MatchExpressions {
+				if e.Key == webhook.GuestReadyNodeLabel {
+					seen[obj.Metadata.Name] = true
+				}
+			}
+		}
+		if !seen[obj.Metadata.Name] {
+			t.Errorf("%s %s pins %s without the guest-ready gate", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
+		}
+		return false
+	})
+	for _, name := range []string{"c8s-cds", "c8s-tls-lb"} {
+		if !seen[name] {
+			t.Errorf("%s missing the guest-ready node affinity", name)
+		}
 	}
 }

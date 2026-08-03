@@ -53,6 +53,8 @@ spec:
       # must stay inside the TEE boundary.
       runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
+      {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
+      {{- include "c8s.kataGuestReadyAffinity" . | nindent 6 }}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
       initContainers:
