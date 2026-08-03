@@ -12,6 +12,9 @@
 //
 // Algorithm and page layout follow AMD SEV-SNP ABI §8.17.2 (Table 67, PAGE_INFO)
 // and the reference implementation at https://github.com/virtee/sev-snp-measure.
+// virtee/sev-snp-measure-go is not a substitute: its README scopes it to "only
+// measures the initial firmware", i.e. the firmware-only prefix FirmwareDigest
+// computes, not the kernel-hashes page or the per-vCPU VMSA pages.
 // See docs/kata-launch-measurement.md.
 package snpmeasure
 

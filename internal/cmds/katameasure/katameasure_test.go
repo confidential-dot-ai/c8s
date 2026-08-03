@@ -425,6 +425,94 @@ func TestRunRejectsMissingVCPUs(t *testing.T) {
 	}
 }
 
+// writeKataConfig fakes kata-deploy's config root with the c8s puller drop-in
+// in one shim's config.d, which is what marks the shim as the configured one.
+func writeKataConfig(t *testing.T, shim string) string {
+	t.Helper()
+	dir := t.TempDir()
+	// Every shim's TOML ships on every node; only the drop-in is selective.
+	for _, s := range []string{"qemu", "qemu-snp", "qemu-tdx", "qemu-nvidia-gpu-snp", "qemu-nvidia-gpu-tdx"} {
+		if err := os.MkdirAll(filepath.Join(dir, "runtimes", s, "config.d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runtimes", shim, "config.d", dropInName), []byte("# c8s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestRunRefusesNonSNPPlatform is the reason the gate exists: kata-static drops
+// AMDSEV.fd on TDX nodes too, so without a platform check the command would
+// measure it and print a digest that corresponds to nothing bootable.
+func TestRunRefusesNonSNPPlatform(t *testing.T) {
+	base := config{
+		guestDir:      writeGuest(t, "c8s", SupportedKataVersion, bootModelDirectKernel),
+		firmware:      filepath.Join("testdata", "ovmf_AmdSev_suffix.bin"),
+		vcpus:         1,
+		vcpuType:      DefaultVCPUType,
+		kernelParams:  DefaultKernelParams,
+		launchTimeout: DefaultLaunchProcessTimeout,
+		guestFeatures: 1,
+		defaultVCPUs:  1,
+	}
+	// Nothing on the machine running the test may leak into the check.
+	realKVMTDXParam := kvmTDXParam
+	t.Cleanup(func() { kvmTDXParam = realKVMTDXParam })
+	kvmTDXParam = filepath.Join(t.TempDir(), "absent")
+
+	for _, shim := range []string{"qemu-tdx", "qemu-nvidia-gpu-tdx"} {
+		cfg := base
+		cfg.kataConfigDir = writeKataConfig(t, shim)
+		var out, errOut bytes.Buffer
+		err := run(cfg, &out, &errOut)
+		if err == nil {
+			t.Fatalf("%s: measured a TDX node instead of refusing: %q", shim, out.String())
+		}
+		for _, want := range []string{"Intel TDX", shim, "not supported yet", "MRTD"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error %q does not mention %q", shim, err, want)
+			}
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: refused but still emitted %q", shim, out.String())
+		}
+	}
+
+	// A shim c8s has no platform mapping for is refused rather than assumed SNP.
+	unknown := base
+	unknown.kataConfigDir = writeKataConfig(t, "qemu")
+	var out, errOut bytes.Buffer
+	if err := run(unknown, &out, &errOut); err == nil {
+		t.Error("an unrecognised configured shim must be refused")
+	}
+
+	// The host TDX module is the pre-install signal, before any drop-in exists.
+	tdxHost := filepath.Join(t.TempDir(), "tdx")
+	if err := os.WriteFile(tdxHost, []byte("Y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kvmTDXParam = tdxHost
+	bare := base
+	bare.kataConfigDir = t.TempDir() // no kata install
+	out.Reset()
+	if err := run(bare, &out, &errOut); err == nil {
+		t.Errorf("a TDX host must be refused even with no kata config: %q", out.String())
+	}
+
+	// An SNP node still measures.
+	kvmTDXParam = filepath.Join(t.TempDir(), "absent")
+	snp := base
+	snp.kataConfigDir = writeKataConfig(t, "qemu-snp")
+	out.Reset()
+	if err := run(snp, &out, &errOut); err != nil {
+		t.Fatalf("SNP node must measure: %v", err)
+	}
+	if strings.TrimSpace(out.String()) == "" {
+		t.Error("SNP node produced no digest")
+	}
+}
+
 func TestNewCmdWiring(t *testing.T) {
 	kata := NewCmd()
 	if kata.Use != "kata" {

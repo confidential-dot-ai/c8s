@@ -313,6 +313,18 @@ count — or give every confidential pod the same CPU limit (or none) so the fle
 shares one digest. Predict the values with `c8s kata measure --vcpus N`; see
 [`kata-launch-measurement.md`](kata-launch-measurement.md).
 
+## `AMDSEV.fd` is present on TDX nodes too — an SNP measurement tool will happily "work" there
+
+`/opt/kata/share/ovmf/`, `internal/cmds/katameasure/platform.go`
+
+kata-static installs `AMDSEV.fd`, `OVMF.fd` and `OVMF.inteltdx.fd` on every
+node whatever the platform, and all three carry both an `ASEV` and a `TDVF`
+metadata table — so the firmware file does not identify the node's TEE. An SNP
+launch-digest computation pointed at a TDX node's default firmware returns a
+well-formed 48-byte value that no guest will ever report. `c8s kata measure`
+gates on the shim carrying the puller's `config.d/50-c8s.toml` instead; see
+[`kata-launch-measurement.md`](kata-launch-measurement.md), "SEV-SNP only".
+
 ## The bootstrap allowlist binds to floating `:main` digests — operators MUST pin by digest
 
 `kata-guest-base/scripts/fetch.sh`, `internal/helmchart/c8s/values.yaml`

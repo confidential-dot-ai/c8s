@@ -25,6 +25,7 @@ import (
 type config struct {
 	guestDir        string
 	firmware        string
+	kataConfigDir   string
 	vcpus           int
 	podCPULimit     string
 	defaultVCPUs    float64
@@ -70,6 +71,7 @@ func newMeasureCmd() *cobra.Command {
 	cfg := config{
 		guestDir:      DefaultGuestDir,
 		firmware:      DefaultFirmware,
+		kataConfigDir: DefaultKataConfigDir,
 		defaultVCPUs:  1,
 		vcpuType:      DefaultVCPUType,
 		kernelParams:  DefaultKernelParams,
@@ -103,6 +105,7 @@ hex digest, one per line, ready for 'c8s verify --measurements-file'.
 	f := cmd.Flags()
 	f.StringVar(&cfg.guestDir, "guest-dir", cfg.guestDir, "kata-guest-base artifact directory (manifest.json + vmlinuz)")
 	f.StringVar(&cfg.firmware, "firmware", cfg.firmware, "OVMF image kata boots the guest with")
+	f.StringVar(&cfg.kataConfigDir, "kata-config-dir", cfg.kataConfigDir, "kata-deploy config root, read to confirm this node's TEE is SEV-SNP; empty skips that check")
 	f.IntVar(&cfg.vcpus, "vcpus", 0, "guest vCPU count; required unless --pod-cpu-limit is given")
 	f.StringVar(&cfg.podCPULimit, "pod-cpu-limit", "", "derive --vcpus from a pod's total CPU limit (e.g. 500m); unset means the pod has no CPU limit")
 	f.Float64Var(&cfg.defaultVCPUs, "default-vcpus", cfg.defaultVCPUs, "hypervisor default_vcpus, the base kata adds --pod-cpu-limit to")
@@ -119,6 +122,9 @@ hex digest, one per line, ready for 'c8s verify --measurements-file'.
 }
 
 func run(cfg config, stdout, stderr io.Writer) error {
+	if err := checkSNPPlatform(cfg.kataConfigDir); err != nil {
+		return err
+	}
 	guest, err := LoadGuest(cfg.guestDir)
 	if err != nil {
 		return err

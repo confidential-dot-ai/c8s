@@ -144,8 +144,72 @@ $ c8s kata measure --vcpus 1 -v          # on a node with the puller's artifacts
 
 and compare with the digest a pod actually reports.
 
+## Why the computation is hand-rolled
+
+`pkg/snpmeasure` implements the ABI directly instead of taking a dependency.
+`virtee/sev-snp-measure` is Python. `virtee/sev-snp-measure-go` is Go, but its
+README scopes it to *"only supports SNP"* and *"only measures the initial
+firmware"* — that is the firmware-only prefix `FirmwareDigest` computes, and
+kata's direct-kernel boot with `kernel-hashes=on` needs everything after it:
+the kernel/initrd/cmdline hash page and one VMSA page per vCPU. Its OVMF
+metadata parser does accept `SNP_KERNEL_HASHES` (`0x10`); that was never the
+obstacle.
+
+## SEV-SNP only
+
+`c8s kata measure` refuses to run on a node whose TEE is not SEV-SNP, because
+the failure is otherwise silent: kata-static installs `AMDSEV.fd` into
+`/opt/kata/share/ovmf/` on **every** node, next to `OVMF.inteltdx.fd`. On a TDX
+node the default `--firmware` therefore still parses and still yields a
+well-formed 48-byte digest — one that matches nothing, and that refuses every
+pod once pinned.
+
+The gate reads the node, not the flags:
+
+1. the shim carrying the puller's drop-in (`runtimes/qemu-snp/config.d/50-c8s.toml`
+   vs `runtimes/qemu-tdx/…`, rooted at `--kata-config-dir`) — the config that
+   will actually boot this guest;
+2. failing that, `/sys/module/kvm_intel/parameters/tdx`, for a node where c8s is
+   not installed yet.
+
+The firmware image itself is **not** a usable signal: every OVMF build kata
+ships — `AMDSEV.fd`, `OVMF.fd`, `OVMF.inteltdx.fd` — carries both an `ASEV`
+metadata table and a `TDVF` one. What marks the SNP build is a populated
+`SNP_KERNEL_HASHES` section and a non-zero `SEV_HASH_TABLE_RV`, which
+`pkg/snpmeasure` already requires — but that only catches an explicit
+`--firmware`, never the dangerous default. `--kata-config-dir ""` skips the
+gate, for measuring an SNP fleet from a machine that is not one of its nodes.
+
+### Why TDX is not a flag
+
+The SNP digest is an iterative SHA-384 over page-type-tagged `PAGE_INFO`
+entries, ending in one VMSA page per vCPU. TDX's analogue, **MRTD**, is built by
+the TDX module from `TDH.MEM.PAGE.ADD` / `TDH.MR.EXTEND` over TDVF and the TD's
+initial memory. Different firmware, different measured objects, different
+extension rule: none of `pkg/snpmeasure` carries over.
+
+### What c8s pins on TDX
+
+One value. `VerifyPolicy.Measurements` is MRTD on the TDX path
+(`pkg/ratls/verify.go`), and `attestation-go`'s TDX verifier maps
+`ExpectedLaunchDigest` onto `TdQuoteBodyOptions.MrTd` (48 bytes). RTMRs are not
+pinned at all — c8s strips the CC event log out of TDX evidence
+(`pkg/attestclient/tdx.go`). So TDX parity for this tool means computing MRTD,
+and only MRTD.
+
+### Open: does MRTD vary with pod shape?
+
+On TDX the kernel, initrd and cmdline land in RTMRs measured by TDVF, not in
+MRTD, and the puller drop-in already assumes vCPU init (`TDH.VP.INIT`) and guest
+RAM size stay out of MRTD (`pull-and-configure.sh`, the `default_vcpus` block —
+which is why the `default_vcpus = 1` pin is SNP-only). If that holds, a TDX
+fleet needs **one** MRTD for every pod shape and the per-shape enumeration above
+disappears, making TDX simpler than SNP rather than harder. It has not been
+confirmed on hardware. Settle it there before scoping the work.
+
 ## Limitations
 
+- **SEV-SNP only**, and refused on other platforms — see above.
 - **QEMU only.** The VMSA reset state is QEMU's. A different VMM produces a
   different page and a different digest.
 - **Direct kernel boot only.** A guest whose `manifest.json` reports a boot
