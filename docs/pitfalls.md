@@ -788,3 +788,28 @@ help; the shim ignores it.
 the webhook-injected `c8s-certs` volume is fine. The CDS `data` volume
 (`cds.yaml`, when `cds.persistence.enabled` is false) is the one that hits this.
 Workaround on such a node: enable `cds.persistence`.
+
+## A kata pod placed before the guest drop-in exists is stuck on the stock guest
+
+`kata-runtime` resolves the c8s guest through a `config.d/50-c8s.toml` drop-in
+that the kata-image-puller writes per node. Until it lands, the same
+`kata-qemu-snp` RuntimeClass resolves the **stock** kata guest, which carries
+none of the c8s in-guest stack — no attestation-service on `127.0.0.1:8400`, no
+policy-monitor, no mesh.
+
+Nothing about the pod says so. `kubectl get pod` shows the confidential
+RuntimeClass either way; the only tell is the QEMU cmdline
+(`/proc/<pid>/cmdline`: `kata-ubuntu-noble-confidential.image` and the base
+config's verity root hash, instead of `/var/lib/c8s/kata-images/base/…`).
+
+**A kata sandbox is created once and reused across container restarts**, so a
+pod that lands in that window cannot recover: CrashLoopBackOff retries forever
+against a VM that will never gain the missing services. Deleting the *pod* is
+the only fix — deleting the container is not.
+
+`confidential.ai/kata-guest-ready` (webhook.GuestReadyNodeLabel) is the gate
+that prevents this: the operator's kata-guest-ready controller mirrors the
+puller's readiness onto the node, and both the webhook and the chart-pinned
+pods (cds, tls-lb) require it. If confidential pods sit `Pending` with
+`didn't match Pod's node affinity/selector`, check the puller on that node
+before touching the affinity — the gate is reporting a real condition.

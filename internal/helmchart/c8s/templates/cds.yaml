@@ -161,6 +161,8 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
+      {{- include "c8s.kataGuestReadyAffinity" . | nindent 6 }}
       securityContext:
       {{- if .Values.kata.enabled }}
         # In a kata-qemu-snp guest with shared_fs="none", the kubelet fsGroup

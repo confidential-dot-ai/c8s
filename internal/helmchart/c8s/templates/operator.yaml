@@ -70,6 +70,9 @@ spec:
             - --kata-enforce=true
             - --hardware-platform={{ include "c8s.hardwarePlatform" . }}
             {{- end }}
+            {{- if include "c8s.kataGuestReadyGate" . }}
+            - --kata-guest-ready-gate=true
+            {{- end }}
             {{- /* Workload-digest claims (docs/ratls.md): get-cert
                    redeems a sandbox token from the node's inventory over a
                    compiled endpoint: the nri-image-policy socket mounted into
