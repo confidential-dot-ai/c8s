@@ -20,6 +20,10 @@ const DefaultGuestDir = "/var/lib/c8s/kata-images/base"
 // configuration-qemu-snp.toml).
 const DefaultFirmware = "/opt/kata/share/ovmf/AMDSEV.fd"
 
+// DefaultTDXFirmware is the TDVF build kata-qemu-tdx boots (the `firmware` key
+// of configuration-qemu-tdx.toml).
+const DefaultTDXFirmware = "/opt/kata/share/ovmf/OVMF.inteltdx.fd"
+
 // DefaultVCPUType is the QEMU CPU model kata launches SNP guests with.
 const DefaultVCPUType = "EPYC-v4"
 

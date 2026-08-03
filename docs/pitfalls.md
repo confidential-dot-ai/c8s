@@ -752,3 +752,39 @@ refuses every pod with nothing to diagnose. `openFirmware` therefore stats the
 file for a positive page-multiple size, rejects an image with zero metadata
 sections, and recovers any panic out of the parser into an error. Keep all three
 guards across a dependency bump; upstream has no tests for malformed input.
+
+## TDX MRTD: only the *default* `LaunchOptions` is correct for kata
+
+`pkg/tdxmeasure/tdxmeasure.go` (`launchOptions`)
+
+`c8s kata measure --platform tdx` computes MRTD via
+`github.com/google/gce-tcb-verifier/tdx`, whose `LaunchOptions` API is shaped for
+GCE. Two of its three presets produce a digest that **no kata pod will ever
+report**: `LaunchOptionsDefaultTDHOBBug` models a Google hypervisor bug that
+measures all TDVF metadata regions, and `DisableUnacceptedMemory` changes the TD
+HOB. Both give `2815d6db…` on the TDVF kata boots, against the real `c78e2b8b…`.
+
+Pinning a wrong MRTD is worse than pinning nothing: CDS refuses every pod a
+certificate and the only symptom is `measurement not in allowlist`. Do not
+"tune" these options to fix an unrelated problem. `TestMRTDMatchesHardware`
+asserts the hardware-captured digest and `TestOtherLaunchOptionsAreWrong` asserts
+the rejected presets still differ — both skip without the real TDVF, so run them
+on a TDX node (or with `C8S_TDVF=`) before trusting a dependency bump.
+
+## kata + `shared_fs="none"`: a disk-backed `emptyDir` breaks on a large host FS
+
+Observed on a TDX node with a 28 TB ext4 root; affects any platform.
+
+With `shared_fs = "none"` the kata shim converts a **disk-backed** `emptyDir`
+(`emptyDir: {}`, i.e. `medium` unset) into a `disk.img` block device, and sizes
+that file from the *filesystem*, not the volume. On a filesystem larger than
+ext4's 16 TiB max file size the shim fails at
+`truncate …/disk.img: file too large` and the pod never starts, with the cause
+only visible in the kata shim log — the kubelet event just says
+`failed to create shim task`. Setting `sizeLimit` on the volume does **not**
+help; the shim ignores it.
+
+`emptyDir: {medium: Memory}` is unaffected (it stays a guest tmpfs), which is why
+the webhook-injected `c8s-certs` volume is fine. The CDS `data` volume
+(`cds.yaml`, when `cds.persistence.enabled` is false) is the one that hits this.
+Workaround on such a node: enable `cds.persistence`.

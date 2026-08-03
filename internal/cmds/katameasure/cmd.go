@@ -1,11 +1,12 @@
 // Package katameasure implements `c8s kata measure`: the offline predictor for
-// the SEV-SNP launch measurement of a kata-qemu-snp guest.
+// a kata confidential guest's launch measurement, on SEV-SNP and on TDX.
 //
-// Under --cvm-mode=pod every pod is its own CVM, and pods that differ in vCPU
-// count have different launch digests, so there is no single fleet-wide value
-// to pin. This command computes the digest for a given guest artifact and pod
-// shape without booting anything, so per-workload measurement sets can be
-// derived ahead of the install. See docs/kata-launch-measurement.md.
+// On SNP, under --cvm-mode=pod every pod is its own CVM and pods that differ in
+// vCPU count have different launch digests, so there is no single fleet-wide
+// value to pin; this command computes the digest for a given guest artifact and
+// pod shape without booting anything. On TDX the pinned value is MRTD, which
+// covers the TDVF image alone — one value covers the fleet.
+// See docs/kata-launch-measurement.md.
 package katameasure
 
 import (
@@ -15,14 +16,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/confidential-dot-ai/c8s/pkg/snpmeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/tdxmeasure"
 )
 
 type config struct {
+	platform        string
+	firmwareSet     bool
 	guestDir        string
 	firmware        string
 	vcpus           int
@@ -40,20 +45,22 @@ type config struct {
 	skipVersion     bool
 }
 
-// Result is the --json document.
+// Result is the --json document. The SNP-only fields are omitted on TDX, whose
+// MRTD is a function of the firmware alone.
 type Result struct {
+	Platform      string `json:"platform"`
 	Measurement   string `json:"measurement"`
-	VCPUs         int    `json:"vcpus"`
-	VCPUType      string `json:"vcpuType"`
-	VCPUSignature string `json:"vcpuSignature"`
-	GuestFeatures uint64 `json:"guestFeatures"`
-	Cmdline       string `json:"cmdline"`
+	VCPUs         int    `json:"vcpus,omitempty"`
+	VCPUType      string `json:"vcpuType,omitempty"`
+	VCPUSignature string `json:"vcpuSignature,omitempty"`
+	GuestFeatures uint64 `json:"guestFeatures,omitempty"`
+	Cmdline       string `json:"cmdline,omitempty"`
 	FirmwarePath  string `json:"firmwarePath"`
 	FirmwareSHA   string `json:"firmwareSha256"`
-	KernelPath    string `json:"kernelPath"`
-	KernelSHA     string `json:"kernelSha256"`
-	KataVersion   string `json:"kataVersion"`
-	BuildVariant  string `json:"buildVariant"`
+	KernelPath    string `json:"kernelPath,omitempty"`
+	KernelSHA     string `json:"kernelSha256,omitempty"`
+	KataVersion   string `json:"kataVersion,omitempty"`
+	BuildVariant  string `json:"buildVariant,omitempty"`
 }
 
 // NewCmd returns the `kata` command group with its `measure` subcommand.
@@ -78,31 +85,41 @@ func newMeasureCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "measure",
-		Short: "Compute the expected SEV-SNP launch measurement of a kata guest",
-		Long: `measure predicts the SEV-SNP launch digest of a kata-qemu-snp guest from
-the guest image artifacts and a pod's vCPU count, without booting the pod.
+		Short: "Compute the expected launch measurement of a kata guest",
+		Long: `measure predicts a kata confidential guest's launch measurement from the
+guest image artifacts, without booting the pod.
 
-Under --cvm-mode=pod each pod is its own CVM. The launch digest covers the
-OVMF image, the kernel/initrd/cmdline hash table QEMU builds for
-kernel-hashes=on, and one VMSA page per vCPU — so pods that differ in vCPU
-count measure differently and need separate values in cds.measurements.
+--platform snp (default) computes the SEV-SNP launch digest of a
+kata-qemu-snp guest. Under --cvm-mode=pod each pod is its own CVM. The
+digest covers the OVMF image, the kernel/initrd/cmdline hash table QEMU
+builds for kernel-hashes=on, and one VMSA page per vCPU — so pods that
+differ in vCPU count measure differently and need separate values in
+cds.measurements. The kernel command line is reassembled the way kata ` + SupportedKataVersion + `
+builds it; pass --cmdline to measure an exact captured line instead.
 
-The kernel command line is reassembled the way kata ` + SupportedKataVersion + ` builds it;
-pass --cmdline to measure an exact captured line instead. Output is the bare
-hex digest, one per line, ready for 'c8s verify --measurements-file'.
+--platform tdx computes the Intel TDX MRTD of a kata-qemu-tdx guest. MRTD
+covers the TDVF image alone: the guest kernel, command line, vCPU count and
+RAM size are measured into RTMR[0..2], which c8s does not pin. One MRTD
+therefore covers every pod shape, and the pod-shape flags are rejected.
+
+Output is the bare hex digest, one per line, ready for
+'c8s verify --measurements-file'.
 
     c8s kata measure --vcpus 1
-    c8s kata measure --guest-dir ./output --pod-cpu-limit 500m --json`,
+    c8s kata measure --guest-dir ./output --pod-cpu-limit 500m --json
+    c8s kata measure --platform tdx`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg.debugConsoleSet = cmd.Flags().Changed("debug-console")
+			cfg.firmwareSet = cmd.Flags().Changed("firmware")
 			return run(cfg, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	f := cmd.Flags()
+	f.StringVar(&cfg.platform, "platform", platformSNP, "TEE platform to measure: snp (SEV-SNP launch digest) or tdx (MRTD)")
 	f.StringVar(&cfg.guestDir, "guest-dir", cfg.guestDir, "kata-guest-base artifact directory (manifest.json + vmlinuz)")
-	f.StringVar(&cfg.firmware, "firmware", cfg.firmware, "OVMF image kata boots the guest with")
+	f.StringVar(&cfg.firmware, "firmware", cfg.firmware, "firmware image kata boots the guest with (default "+DefaultTDXFirmware+" under --platform tdx)")
 	f.IntVar(&cfg.vcpus, "vcpus", 0, "guest vCPU count; required unless --pod-cpu-limit is given")
 	f.StringVar(&cfg.podCPULimit, "pod-cpu-limit", "", "derive --vcpus from a pod's total CPU limit (e.g. 500m); unset means the pod has no CPU limit")
 	f.Float64Var(&cfg.defaultVCPUs, "default-vcpus", cfg.defaultVCPUs, "hypervisor default_vcpus, the base kata adds --pod-cpu-limit to")
@@ -118,7 +135,88 @@ hex digest, one per line, ready for 'c8s verify --measurements-file'.
 	return cmd
 }
 
+// Platforms `measure` can compute a launch measurement for. These match the
+// pkg/types.Platform spellings the CDS allow-list and RA-TLS policy use.
+const (
+	platformSNP = "snp"
+	platformTDX = "tdx"
+)
+
 func run(cfg config, stdout, stderr io.Writer) error {
+	switch cfg.platform {
+	// "" only reaches here from a directly-built config; the flag defaults to snp.
+	case platformSNP, "":
+		return runSNP(cfg, stdout, stderr)
+	case platformTDX:
+		return runTDX(cfg, stdout, stderr)
+	default:
+		return fmt.Errorf("--platform must be %q or %q, got %q", platformSNP, platformTDX, cfg.platform)
+	}
+}
+
+// runTDX computes MRTD. It deliberately reads no guest artifacts: MRTD covers
+// the TDVF image only. Flags that shape a pod are rejected rather than ignored,
+// so a caller who thinks they are pinning a per-shape value finds out here.
+func runTDX(cfg config, stdout, stderr io.Writer) error {
+	if err := rejectSNPOnlyFlags(cfg); err != nil {
+		return err
+	}
+	path := cfg.firmware
+	if !cfg.firmwareSet {
+		path = DefaultTDXFirmware
+	}
+	firmware, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read firmware: %w", err)
+	}
+	mrtd, err := tdxmeasure.MRTD(firmware)
+	if err != nil {
+		return err
+	}
+	res := Result{
+		Platform:     platformTDX,
+		Measurement:  hex.EncodeToString(mrtd),
+		FirmwarePath: path,
+		FirmwareSHA:  hex.EncodeToString(sha256sum(firmware)),
+	}
+	if cfg.asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+	if cfg.verbose {
+		fmt.Fprintf(stderr, "platform: tdx (MRTD)\n")
+		fmt.Fprintf(stderr, "firmware: %s sha256=%s\n", res.FirmwarePath, res.FirmwareSHA)
+		fmt.Fprintf(stderr, "note:     covers TDVF only; kernel/cmdline/vCPUs measure into RTMRs\n")
+	}
+	fmt.Fprintln(stdout, res.Measurement)
+	return nil
+}
+
+// rejectSNPOnlyFlags fails on inputs that only shape an SNP digest.
+func rejectSNPOnlyFlags(cfg config) error {
+	var set []string
+	if cfg.vcpus != 0 {
+		set = append(set, "--vcpus")
+	}
+	if cfg.podCPULimit != "" {
+		set = append(set, "--pod-cpu-limit")
+	}
+	if cfg.cmdline != "" {
+		set = append(set, "--cmdline")
+	}
+	if cfg.debugConsoleSet {
+		set = append(set, "--debug-console")
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf("not valid with --platform tdx: %s. Those shape the SNP launch digest only; "+
+		"TDX MRTD covers the TDVF image alone (vCPUs, kernel and command line measure into RTMRs, "+
+		"which c8s does not pin)", strings.Join(set, ", "))
+}
+
+func runSNP(cfg config, stdout, stderr io.Writer) error {
 	guest, err := LoadGuest(cfg.guestDir)
 	if err != nil {
 		return err
@@ -179,6 +277,7 @@ func run(cfg config, stdout, stderr io.Writer) error {
 	}
 
 	res := Result{
+		Platform:      platformSNP,
 		Measurement:   hex.EncodeToString(ld),
 		VCPUs:         vcpus,
 		VCPUType:      cfg.vcpuType,
