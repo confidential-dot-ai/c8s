@@ -144,17 +144,6 @@ $ c8s kata measure --vcpus 1 -v          # on a node with the puller's artifacts
 
 and compare with the digest a pod actually reports.
 
-## Why the computation is hand-rolled
-
-`pkg/snpmeasure` implements the ABI directly instead of taking a dependency.
-`virtee/sev-snp-measure` is Python. `virtee/sev-snp-measure-go` is Go, but its
-README scopes it to *"only supports SNP"* and *"only measures the initial
-firmware"* — that is the firmware-only prefix `FirmwareDigest` computes, and
-kata's direct-kernel boot with `kernel-hashes=on` needs everything after it:
-the kernel/initrd/cmdline hash page and one VMSA page per vCPU. Its OVMF
-metadata parser does accept `SNP_KERNEL_HASHES` (`0x10`); that was never the
-obstacle.
-
 ## SEV-SNP only
 
 `c8s kata measure` refuses to run on a node whose TEE is not SEV-SNP, because
