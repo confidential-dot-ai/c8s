@@ -1111,18 +1111,25 @@ func TestAppendCvmModeInstallArgsRejectsBadMeasurement(t *testing.T) {
 	}
 }
 
-// --measurements pins the node CVM's measurement, which is meaningless in pod
-// mode (per-pod kata guests are measured separately) — reject it.
-func TestAppendCvmModeInstallArgsRejectsMeasurementsInPodMode(t *testing.T) {
+// Pod mode used to refuse --measurements because the per-pod kata guest digest
+// was not computable. `c8s kata measure` computes it, so the pin is now
+// accepted and emitted in every mode — same value, different provenance.
+func TestAppendCvmModeInstallArgsAcceptsMeasurementsInPodMode(t *testing.T) {
 	prev := installMeasurements
 	defer func() { installMeasurements = prev }()
-	installMeasurements = []string{strings.Repeat("aa", 48)}
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", "tdx"); err == nil {
-		t.Fatal("appendCvmModeInstallArgs accepted --measurements in pod mode, want error")
-	}
-	// Same value in node mode is fine.
-	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "tdx"); err != nil {
-		t.Fatalf("node mode should accept --measurements: %v", err)
+	m := strings.Repeat("aa", 48)
+	installMeasurements = []string{m}
+	for _, mode := range []string{"pod", "node"} {
+		args, err := appendCvmModeInstallArgs([]string{"upgrade"}, mode, "tdx")
+		if err != nil {
+			t.Fatalf("%s mode should accept --measurements: %v", mode, err)
+		}
+		joined := strings.Join(args, " ")
+		for _, want := range []string{"cds.measurements[0]=" + m, "ratlsMesh.measurements[0]=" + m} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("%s mode: missing %q in %v", mode, want, args)
+			}
+		}
 	}
 }
 
