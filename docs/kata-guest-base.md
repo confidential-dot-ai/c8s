@@ -122,7 +122,7 @@ chart aligned with it.
 
 | Layer | Measurement | Verifier |
 |---|---|---|
-| Kata guest image | SNP launch digest over OVMF + `vmlinuz` + the kata cmdline (which embeds the dm-verity `root_hash`), at 1 vCPU; predicted separately with `sev-snp-measure`. `manifest.json` contains the artifact hashes and prediction inputs, not the launch digest. | The operator supplies the predicted digest to the relevant measurement allowlists. `kata.guestImage.tag` selects the artifact but is not a cryptographic measurement pin. |
+| Kata guest image | SNP launch digest over OVMF + `vmlinuz` + the kata cmdline (which embeds the dm-verity `root_hash`) + one VMSA page per vCPU; predicted offline by [`c8s kata measure`](kata-launch-measurement.md). `manifest.json` contains the artifact hashes and prediction inputs, not the launch digest. | The operator supplies the predicted digest to the relevant measurement allowlists. `kata.guestImage.tag` selects the artifact but is not a cryptographic measurement pin. |
 | Container image inside the VM (CDS / workload) | OCI image digest | Operator attests post-install via the existing `confidential.ai/cw` flow. The pod webhook injects `c8s-cert`, which obtains a leaf cert from CDS — CDS verifies the container's measurement and signs in one process. |
 | Workload identity (leaf cert) | RA-TLS cert with attestation evidence as a SAN extension | Peer pods in the mesh verify on the mTLS handshake. |
 
@@ -305,10 +305,12 @@ see "How it's consumed in-cluster" in
 This is separate from measurement pinning. The build manifest records the
 kernel/rootfs hashes and verity parameters needed to reproduce the launch
 inputs, but it does not contain a launch digest, and the workflow currently
-publishes the ORAS artifact without a cosign signature. After predicting the
-digest from the exact OVMF, kernel, command line, and VM shape, operators must
-supply it to `cds.measurements`, `ratlsMesh.measurements`, or client-side
-`--measurements` policies as appropriate. Those policies default to empty.
+publishes the ORAS artifact without a cosign signature. `c8s kata measure`
+derives the digest from those inputs plus a pod's vCPU count; operators supply
+the result to `cds.measurements`, `ratlsMesh.measurements`, or client-side
+`--measurements` policies as appropriate. Those policies default to empty, and
+they need one entry per distinct pod vCPU count — see
+[`kata-launch-measurement.md`](kata-launch-measurement.md).
 
 Every tag has a `-debug` sibling published from the same build whose guest
 policy allows the host log/exec stream RPCs (`kubectl logs`/`exec` work;
@@ -365,6 +367,7 @@ launch-digest mismatch at attestation time and clients refuse the pod.
 ## See also
 
 - [`kata-guest-base/README.md`](../kata-guest-base/README.md) — the recipe: boot model, what's baked in, build, consume, measure.
+- [`kata-launch-measurement.md`](kata-launch-measurement.md) — predicting the per-pod launch digest offline (`c8s kata measure`).
 - [`kata-image-policy.md`](kata-image-policy.md) — in-guest per-image enforcement (`policy-monitor`).
 - [`kata.md`](kata.md) — installing and enforcing the kata runtime (`c8s install --cvm-mode=pod`).
 - [`install-flows.md`](install-flows.md) — how the two install modes assemble the platform.
