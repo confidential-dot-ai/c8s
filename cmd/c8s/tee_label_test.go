@@ -3,6 +3,10 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -121,4 +125,98 @@ func TestPlanTEELabels(t *testing.T) {
 			t.Fatal("planTEELabels accepted a non-string kata.nodeSelector value, want error")
 		}
 	})
+}
+
+// valuesFilesSetTEESelector decides whether -f owns the TEE node label. Any -f
+// used to disable auto-labelling wholesale, which broke the flow the tls-lb
+// host-port preflight itself recommends on RKE2 (`-f` setting
+// tlsLb.hostPort.enabled=false): confidential pods then sat Pending with no
+// message naming the missing label. Only the platform's own selector counts.
+func TestValuesFilesSetTEESelector(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	tlsLB := write("tlslb.yaml", "tlsLb:\n  hostPort:\n    enabled: false\n")
+	kataNodes := write("kata-nodes.yaml", "kata:\n  nodeSelector:\n    pool: kata\n")
+	snp := write("snp.yaml", "kata:\n  snpNodeSelector:\n    feature.node.kubernetes.io/cpu-security.sev.snp.enabled: \"true\"\n")
+	snpCleared := write("snp-cleared.yaml", "kata:\n  snpNodeSelector: {}\n")
+	snpNull := write("snp-null.yaml", "kata:\n  snpNodeSelector:\n")
+	tdx := write("tdx.yaml", "kata:\n  tdxNodeSelector:\n    nfd/tdx: \"true\"\n")
+	empty := write("empty.yaml", "")
+
+	tests := []struct {
+		name     string
+		files    []string
+		platform string
+		want     bool
+	}{
+		{name: "no values files", platform: "sev-snp"},
+		{name: "RKE2 tls-lb host-port opt-out does not disown the label", files: []string{tlsLB}, platform: "sev-snp"},
+		{name: "kata.nodeSelector only narrows the labelled set", files: []string{kataNodes}, platform: "sev-snp"},
+		{name: "empty file", files: []string{empty}, platform: "sev-snp"},
+		{name: "custom snpNodeSelector is operator-owned", files: []string{snp}, platform: "sev-snp", want: true},
+		{name: "cleared snpNodeSelector is operator-owned", files: []string{snpCleared}, platform: "sev-snp", want: true},
+		{name: "explicit null snpNodeSelector is operator-owned", files: []string{snpNull}, platform: "sev-snp", want: true},
+		{name: "later file in the list still counts", files: []string{tlsLB, snp}, platform: "sev-snp", want: true},
+		{name: "snpNodeSelector says nothing about tdx", files: []string{snp}, platform: "tdx"},
+		{name: "tdxNodeSelector is operator-owned on tdx", files: []string{tdx}, platform: "tdx", want: true},
+		{name: "tdxNodeSelector says nothing about sev-snp", files: []string{tdx}, platform: "sev-snp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := valuesFilesSetTEESelector(tt.files, tt.platform)
+			if err != nil {
+				t.Fatalf("valuesFilesSetTEESelector: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("valuesFilesSetTEESelector(%v, %q) = %t, want %t", tt.files, tt.platform, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing file errors", func(t *testing.T) {
+		if _, err := valuesFilesSetTEESelector([]string{filepath.Join(dir, "nope.yaml")}, "sev-snp"); err == nil {
+			t.Fatal("missing values file accepted, want error")
+		}
+	})
+	t.Run("malformed yaml errors", func(t *testing.T) {
+		bad := write("bad.yaml", "kata: [oops\n")
+		if _, err := valuesFilesSetTEESelector([]string{bad}, "sev-snp"); err == nil {
+			t.Fatal("malformed values file accepted, want error")
+		}
+	})
+}
+
+// Skipping auto-labelling must be LOUD and actionable: the silent skip is what
+// forced an operator to read the source to find the missing label.
+func TestReportTEELabelSkipNamesTheKubectlCommand(t *testing.T) {
+	var buf bytes.Buffer
+	reportTEELabelSkip(&buf, map[string]any{
+		"kata": map[string]any{
+			"snpNodeSelector": map[string]any{"feature.node.kubernetes.io/cpu-security.sev.snp.enabled": "true"},
+		},
+	}, "sev-snp")
+	got := buf.String()
+	for _, want := range []string{
+		"kata.snpNodeSelector is set by -f",
+		"kubectl label node <node> feature.node.kubernetes.io/cpu-security.sev.snp.enabled=true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("skip notice missing %q:\n%s", want, got)
+		}
+	}
+
+	// A cleared selector has no label to name — say that, don't print a
+	// kubectl command with an empty selector.
+	buf.Reset()
+	reportTEELabelSkip(&buf, map[string]any{"kata": map[string]any{"tdxNodeSelector": map[string]any{}}}, "tdx")
+	if got := buf.String(); !strings.Contains(got, "unrestricted") || strings.Contains(got, "kubectl label node") {
+		t.Fatalf("cleared selector notice = %q, want the unrestricted-scheduling wording and no kubectl command", got)
+	}
 }

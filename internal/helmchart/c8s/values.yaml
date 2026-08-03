@@ -463,9 +463,12 @@ kata:
   ## a security boundary — attestation is. `c8s install --cvm-mode=pod` applies it to
   ## every kata-targeted node (declarative, no probe); -f/GitOps installs
   ## label out-of-band. Swept by `c8s uninstall` — keep in lockstep with
-  ## snpCapabilityNodeLabel in cmd/c8s/uninstall.go. Set {} for unrestricted
-  ## scheduling, or point at an existing capability label (e.g. NFD's
-  ## feature.node.kubernetes.io/cpu-security.sev.snp.enabled: "true").
+  ## snpCapabilityNodeLabel in cmd/c8s/uninstall.go.
+  ## Overriding: helm coalesces nested maps, so `{}` keeps the default and an
+  ## added key ANDs with it. Use `null` to drop the selector entirely; to swap
+  ## in a capability label (e.g. NFD's
+  ## feature.node.kubernetes.io/cpu-security.sev.snp.enabled) set `null` and
+  ## re-add. See docs/pitfalls.md — "Repointing `kata.snpNodeSelector` at NFD".
   snpNodeSelector:
     confidential.ai/sev-snp: "true"
   ## TDX twin of snpNodeSelector: rendered as scheduling.nodeSelector on the
