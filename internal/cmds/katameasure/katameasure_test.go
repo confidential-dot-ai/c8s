@@ -3,6 +3,7 @@ package katameasure
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -434,9 +435,169 @@ func TestNewCmdWiring(t *testing.T) {
 	if err != nil || sub.Use != "measure" {
 		t.Fatalf("measure subcommand not registered: %v", err)
 	}
-	for _, name := range []string{"guest-dir", "firmware", "vcpus", "pod-cpu-limit", "vcpu-type", "cmdline", "json"} {
+	for _, name := range []string{"guest-dir", "firmware", "vcpus", "pod-cpu-limit", "vcpu-type", "cmdline", "json", "platform"} {
 		if sub.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag --%s", name)
 		}
+	}
+	if got := sub.Flags().Lookup("platform").DefValue; got != platformSNP {
+		t.Errorf("--platform default = %q, want %q", got, platformSNP)
+	}
+}
+
+// writeTDVF builds a minimal well-formed TDVF image so the CLI path can be
+// exercised without the 4 MiB real firmware. The digest it produces is pinned
+// in pkg/tdxmeasure; here only the wiring matters.
+func writeTDVF(t *testing.T) string {
+	t.Helper()
+	const (
+		page  = 4096
+		pages = 3
+		size  = pages * page
+		// Trailer: 32 bytes padding, the footer entry, the metadata entry's
+		// header and its 4-byte payload.
+		trailer = 32 + 18 + 18 + 4
+	)
+	img := make([]byte, size)
+	for i := range img {
+		img[i] = byte(i * 5)
+	}
+	// The FVs must tile the whole image, as they do in a real TDVF: CFV first,
+	// BFV covering the rest — including the metadata and footer at the end.
+	// dataOffset, rawSize, gpa, memSize, sectionType, attributes.
+	sections := [][6]uint64{
+		{0, page, 0xffc00000, page, 1 /*CFV*/, 0},
+		{page, 2 * page, 0xffc01000, 2 * page, 0 /*BFV*/, 1 /*MR_EXTEND*/},
+		{0, 0, 0x809000, page, 2 /*TD HOB*/, 0},
+		{0, 0, 0x800000, page, 3 /*TempMem*/, 0},
+	}
+	desc := make([]byte, 16)
+	copy(desc, "TDVF")
+	binary.LittleEndian.PutUint32(desc[4:], uint32(16+32*len(sections)))
+	binary.LittleEndian.PutUint32(desc[8:], 1)
+	binary.LittleEndian.PutUint32(desc[12:], uint32(len(sections)))
+	for _, s := range sections {
+		b := make([]byte, 32)
+		binary.LittleEndian.PutUint32(b[0:], uint32(s[0]))
+		binary.LittleEndian.PutUint32(b[4:], uint32(s[1]))
+		binary.LittleEndian.PutUint64(b[8:], s[2])
+		binary.LittleEndian.PutUint64(b[16:], s[3])
+		binary.LittleEndian.PutUint32(b[24:], uint32(s[4]))
+		binary.LittleEndian.PutUint32(b[28:], uint32(s[5]))
+		desc = append(desc, b...)
+	}
+
+	guid := func(s string) []byte {
+		f := strings.Split(s, "-")
+		b, err := hex.DecodeString(strings.Join(f, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]byte, 16)
+		copy(out, b)
+		binary.LittleEndian.PutUint32(out[0:4], binary.BigEndian.Uint32(b[0:4]))
+		binary.LittleEndian.PutUint16(out[4:6], binary.BigEndian.Uint16(b[4:6]))
+		binary.LittleEndian.PutUint16(out[6:8], binary.BigEndian.Uint16(b[6:8]))
+		return out
+	}
+	// Metadata and footer live at the end of the image, inside the BFV, the way
+	// a real TDVF lays them out. The descriptor is preceded by the TDX metadata
+	// GUID; the footer entry records the descriptor's offset back from the end.
+	descAt := size - trailer - len(desc)
+	copy(img[descAt-16:], guid("e9eaf9f3-168e-44d5-a8eb-7f4d8738f6ae"))
+	copy(img[descAt:], desc)
+
+	payloadAt := size - trailer
+	binary.LittleEndian.PutUint32(img[payloadAt:], uint32(size-descAt))
+	entryHdr := img[payloadAt+4:]
+	binary.LittleEndian.PutUint16(entryHdr, 22)
+	copy(entryHdr[2:], guid("e47a6535-984a-4798-865e-4685a7bf8ec2"))
+
+	footer := img[payloadAt+22:]
+	binary.LittleEndian.PutUint16(footer, 40)
+	copy(footer[2:], guid("96b582de-1fb2-45f7-baea-a366c55a082d"))
+	clear(img[payloadAt+40:])
+
+	path := filepath.Join(t.TempDir(), "tdvf.fd")
+	if err := os.WriteFile(path, img, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRunTDX(t *testing.T) {
+	cfg := config{platform: platformTDX, firmware: writeTDVF(t), firmwareSet: true}
+
+	var out, errOut bytes.Buffer
+	if err := run(cfg, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.TrimSpace(out.String())
+	if len(digest) != 96 {
+		t.Fatalf("MRTD hex length = %d, want 96: %q", len(digest), digest)
+	}
+
+	// No guest artifacts are read: MRTD covers the firmware alone, so a bogus
+	// --guest-dir must not affect the result.
+	withGuest := cfg
+	withGuest.guestDir = filepath.Join(t.TempDir(), "does-not-exist")
+	out.Reset()
+	if err := run(withGuest, &out, &errOut); err != nil {
+		t.Fatalf("TDX path read guest artifacts: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != digest {
+		t.Errorf("digest changed with --guest-dir: %s vs %s", got, digest)
+	}
+
+	jsonCfg := cfg
+	jsonCfg.asJSON = true
+	out.Reset()
+	if err := run(jsonCfg, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Platform != platformTDX || res.Measurement != digest {
+		t.Errorf("json = %+v, want platform tdx and measurement %s", res, digest)
+	}
+	// SNP-shaped fields must be absent, not zero-valued noise.
+	if res.VCPUs != 0 || res.Cmdline != "" || res.KernelPath != "" {
+		t.Errorf("TDX result carries SNP fields: %+v", res)
+	}
+}
+
+func TestRunTDXRejectsPodShapeFlags(t *testing.T) {
+	base := config{platform: platformTDX, firmware: writeTDVF(t), firmwareSet: true}
+	for _, tc := range []struct {
+		name string
+		mut  func(*config)
+	}{
+		{"vcpus", func(c *config) { c.vcpus = 2 }},
+		{"pod-cpu-limit", func(c *config) { c.podCPULimit = "500m" }},
+		{"cmdline", func(c *config) { c.cmdline = "root=/dev/dm-0" }},
+		{"debug-console", func(c *config) { c.debugConsoleSet = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.mut(&cfg)
+			var out, errOut bytes.Buffer
+			err := run(cfg, &out, &errOut)
+			if err == nil {
+				t.Fatalf("--%s accepted on the TDX path", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Errorf("error %q does not name --%s", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestRunRejectsUnknownPlatform(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run(config{platform: "sev-snp"}, &out, &errOut)
+	if err == nil || !strings.Contains(err.Error(), "--platform") {
+		t.Fatalf("want a --platform error, got %v", err)
 	}
 }
