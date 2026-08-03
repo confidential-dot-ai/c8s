@@ -159,6 +159,21 @@ not-found, so the SIGKILL never fires and the denied image runs **unenforced**
 systemd-scope naming — see `internal/cmds/policymonitor/kill.go`
 (`cgroupDirMatchesCID`).
 
+The other way the kill silently misses is the write itself. The unit's
+`ProtectControlGroups=yes` remounted `/sys/fs/cgroup` read-only *inside
+policy-monitor's own mount namespace*, so every `cgroup.kill` write returned
+`EROFS` while the hierarchy looked `rw` to everything else in the guest — a
+non-allowlisted image ran unenforced for its full lifetime. Because that class
+of failure is invisible from outside the unit, policy-monitor now runs a
+**boot-time kill-path self-test** (`cgroupKiller.selfTest`): it creates a
+scratch cgroup under the configured cgroup root, writes its `cgroup.kill`, and
+removes it. On failure the process exits non-zero before installing the inotify
+watch, so `c8s-ready.target` never activates and no workload container is
+admitted. A policy-monitor that cannot kill must not look healthy.
+Correspondingly, a denied container whose kill errors — or which is never
+confirmed dead — is logged at **error**, not warning: it is a total bypass of
+the image policy, not a hiccup.
+
 ## Why the OPA policy is permissive
 
 kata-agent's bootstrap OPA policy in this image is
@@ -358,9 +373,11 @@ SIGKILL it.
 
 **Flow.** policy-monitor reads cgroup.procs and either gets ESRCH
 on the kill (process already gone) or doesn't find a PID at all
-(cgroup empty). The monitor logs the case at info level and moves
+(cgroup empty). The monitor logs the case at **error** level and moves
 on. The container is effectively "killed" — by itself — before any
-useful work.
+useful work. The severity is deliberate even though this case is benign:
+"denied, and not confirmed dead" is indistinguishable from a kill that
+silently missed (the two field bugs above), so an operator has to see it.
 
 **Outcome.** Denied container exits, just as if policy-monitor had
 killed it. No false-positive enforcement; no leakage.
