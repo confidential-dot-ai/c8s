@@ -52,7 +52,9 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - **Hardware-attested workload identity.** The Certificate Distribution
   Service (CDS) verifies TEE attestation evidence (AMD SEV-SNP, Intel TDX) and
   signs workload certificates with a mesh CA whose key never leaves the TEE.
-  No verified measurement, no certificate.
+  No verified measurement, no certificate. Issued leaves carry the evidence
+  CDS accepted and the pod's sandbox ID, so a relying party can ask *which*
+  workload is behind a key, not just whether it is a genuine TEE.
 
 - **RA-TLS mesh.** A transparent L4 proxy wraps traffic between workloads in
   mutual TLS rooted in hardware attestation. Plaintext never crosses the pod
@@ -66,26 +68,41 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   confidential pods boot a sealed guest image whose launch digest covers the
   entire in-guest security stack.
 
-- **Container image allowlisting.** Every image is enforced against a
-  CDS-served digest allowlist: an NRI plugin on the host in base mode, an
-  in-guest `policy-monitor` under Kata, where the host cannot tamper with it.
+- **Container image and command-line allowlisting.** Every container is
+  enforced against a CDS-served allowlist with two layers: a floor of image
+  digests admitted by digest alone, and named workload entries that
+  additionally pin the command line each image may run with. Enforced by an
+  NRI plugin on the host under node-as-CVM, and by an in-guest
+  `policy-monitor` under pod-as-CVM, where the host cannot tamper with it.
+
+- **Attestation-gated secrets.** CDS releases an application secret only once
+  a pod's running containers resolve to a single allowlist entry carrying a
+  grant for that path. An injected sidecar writes the values to a
+  memory-backed volume every container mounts read-only. Node-as-CVM only.
+
+- **Encrypted volumes.** Data too large to be a secret — model weights, in
+  practice — encrypted at rest on host-visible storage (erofs, dm-verity,
+  dm-crypt) and opened only inside the TEE. The key travels as a secret
+  through the release path above, so possession of the volume implies nothing
+  without attestation. Node-as-CVM only; `volumed` ships disabled.
 
 - **Fail-closed admission.** A mutating webhook injects certificate sidecars
   and Kata RuntimeClasses; a ValidatingAdmissionPolicy rejects anything that
   escapes injection. The bootstrap ordering fails closed, never open.
 
 - **Confidential GPUs.** NVIDIA GPU passthrough into confidential pods on
-  SEV-SNP and TDX hosts, with GPU CC mode. The attestation service already
-  verifies NVIDIA GPU and NVSwitch evidence; wiring it into the c8s
-  certificate flow end to end is still open, see
-  [Known gaps](#known-gaps-and-open-items).
+  SEV-SNP and TDX hosts, with GPU CC mode. The attestation service verifies
+  NVIDIA GPU and NVSwitch evidence; it is not wired into the c8s certificate
+  flow end to end, see [Known gaps](#known-gaps-and-open-items).
 
 - **Verifiable from a browser.** A challenge-response protocol and a
   post-quantum over-encrypted channel let end users verify the cluster with
   no special client, via [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js).
 
-- **One-command install.** `c8s install` brings all of this to an existing
-  cluster (vanilla Kubernetes or RKE2, including AKS confidential node pools).
+- **One-command install.** `c8s install --cvm-mode=<shape>` brings all of this
+  to an existing cluster (vanilla Kubernetes or RKE2, including AKS
+  confidential node pools, where both SEV-SNP and Intel TDX attest through the
+  Azure vTPM).
 
 ## Architecture
 
@@ -196,12 +213,16 @@ make install
 # Label the node that will run CDS
 kubectl label node <cds-node> role=cds
 
-# Install the platform (base mode) and point the bundled TLS load balancer
+# Install the platform (node-as-CVM) and point the bundled TLS load balancer
 # at your workload
-c8s install --namespace c8s-system \
+c8s install --cvm-mode=node --namespace c8s-system \
   --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 \
   --upstream vllm
 ```
+
+`--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
+node-as-CVM shapes, `pod` is pod-as-CVM. An unstated shape would silently
+mismatch the cluster it lands on, so the install refuses to guess.
 
 `--workload-ref` adopts an existing workload as a confidential workload and
 resolves its images into the bootstrap allowlist (see
@@ -262,7 +283,7 @@ See [docs/kata.md](docs/kata.md) for the runtime details and
 
 - **Node-as-CVM needs QEMU 10.1 or newer, built with `--enable-igvm`.**
   Booting a measured node image via IGVM requires upstream QEMU's IGVM
-  support, which most distributions do not ship yet. Check for it with
+  support, which most distributions do not ship. Check for it with
   `qemu-system-x86_64 -object igvm-cfg,help`.
 
 ## Verifying a cluster from outside
@@ -287,11 +308,13 @@ attestation and reports the operator keys it pins.
 
 | Component | Description | Docs |
 |---|---|---|
-| [`cmd/cds`](cmd/cds/) | Certificate Distribution Service - verifies TEE attestation evidence, issues EAR tokens, and signs workload CSRs with an in-process mesh CA | [operator docs](docs/operator.md) |
+| [`cmd/cds`](cmd/cds/) | Certificate Distribution Service - verifies TEE attestation evidence, issues EAR tokens, signs workload CSRs with an in-process mesh CA, and serves the allowlist and secret-release APIs | [operator docs](docs/operator.md) |
 | [`cmd/c8s`](cmd/c8s/) | Operator and install CLI for CRDs, status mirroring, webhook injection, and the embedded Helm chart | [operator docs](docs/operator.md) |
 | [`cmd/get-cert`](cmd/get-cert/) | CLI tool and init-container for TEE-attested certificate provisioning | [README](cmd/get-cert/README.md) |
 | [`cmd/ratls-mesh`](cmd/ratls-mesh/) | Transparent L4 proxy wrapping inter-node K8s traffic in RA-TLS | [README](cmd/ratls-mesh/README.md) |
-| [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing container image digest allowlists | - |
+| [`cmd/nri-image-policy`](cmd/nri-image-policy/) | NRI plugin enforcing the image and argv allowlist on the host; also the node's admission inventory | [allowlist](docs/allowlist-and-capabilities.md) |
+| [`cmd/policy-monitor`](cmd/policy-monitor/) | The same enforcement and inventory in-guest, baked into the pod-as-CVM image | [image policy](docs/kata-image-policy.md) |
+| [`cmd/volumed`](cmd/volumed/) | Node agent that opens encrypted volumes into a pod's mount namespace | [volumes](docs/volumes.md) |
 
 ## Libraries
 
@@ -302,10 +325,15 @@ attestation and reports the operator keys it pins.
 | [`pkg/attestclient`](pkg/attestclient/) | High-level client for the CDS attestation flow |
 | [`pkg/attestationclient`](pkg/attestationclient/) | Low-level HTTP client for the attestation-api |
 | [`pkg/allowlistclient`](pkg/allowlistclient/) | CRUD client for the CDS allowlist API |
-| [`pkg/allowlist`](pkg/allowlist/) | Allowlist types and JSON parsing |
+| [`pkg/allowlist`](pkg/allowlist/) | Allowlist types, argv policy, and secret grants |
+| [`pkg/workloadclaims`](pkg/workloadclaims/) | Sandbox-token fetch and the admission-inventory socket contract |
+| [`pkg/overenc`](pkg/overenc/) | Post-quantum over-encryption channel and its identity transcript |
+| [`pkg/operatorauth`](pkg/operatorauth/) | Operator-key signing and verification for allowlist and secret writes |
 | [`pkg/types`](pkg/types/) | Shared request/response types |
 | [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
 | [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
+| [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
+| [`pkg/rtmr3`](pkg/rtmr3/) | TDX RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Repository layout
@@ -313,12 +341,14 @@ attestation and reports the operator keys it pins.
 ```text
 api/               CRD types
 cmd/               Binaries: c8s, get-cert, ratls-mesh, nri-image-policy,
-                   policy-monitor, rtmr3-measurer (cmd/cds is only the
-                   Dockerfile for the `c8s cds` subcommand, internal/cmds/cds)
-internal/          Operator, webhook, attestation, mesh CA, embedded Helm chart
+                   policy-monitor, volumed, rtmr3-measurer (cmd/cds is only
+                   the Dockerfile for the `c8s cds` subcommand,
+                   internal/cmds/cds)
+internal/          Operator, webhook, attestation, mesh CA, secret store,
+                   embedded Helm chart
 pkg/               Public Go libraries (see Libraries above)
 kata-guest-base/   Confidential guest image recipe for pod-as-CVM
-docs/              Design docs, threat model, pitfalls, gaps
+docs/              Design docs, threat model, pitfalls
 samples/           Example manifests
 scripts/           Dev and CI helpers
 test/              Docker-compose integration tests
@@ -381,7 +411,7 @@ Direct CDS URLs remain supported, in which case pin the CDS launch digest.
 
 Do not point this CLI at tls-lb when `tlsLb.publicTLS.secretName` is set. That
 front door uses WebPKI (`public_tls.mode=webpki`), and its public certificate is
-not yet cryptographically bound to the discovery attestation, so the CLI
+not cryptographically bound to the discovery attestation, so the CLI
 deliberately refuses it. Use a direct CDS RA-TLS URL and the CDS launch digest;
 if CDS is not otherwise routable, use a local port-forward:
 
@@ -470,12 +500,51 @@ what the platform does and does not prove; hard-won operational lessons are in
   memory; a restart mints a new CA and workloads re-bootstrap. Active/active
   handoff exists behind `cds.handoff.enabled`.
 
-- **Mesh peers are verified by CA chain, not per-peer measurement.** Leaf
-  certificates do not embed the verified measurement, there are no
-  SPIFFE-style URI SANs, and per-workload peer policy is not enforced yet.
+- **Mesh peers are verified by CA chain, not per-peer measurement.** Leaves
+  carry the evidence CDS verified at issuance, and `VerifyPolicy` has a
+  `RequireCAEvidence` mode that re-checks it — measurement included — on every
+  connection, but no shipped profile enables it. There are no SPIFFE-style URI
+  SANs, and per-workload peer policy is not enforced.
 
-- **The image allowlist gates digests only.** Args, env, mounts, and
-  capabilities are not yet part of the enforced policy.
+- **A workload's sandbox identity is CA-vouched, not hardware-bound.** The
+  sandbox ID in a leaf is signed in by the mesh CA on the word of an on-node
+  admission inventory; it is not folded into the TEE report. Any process that
+  can bind the node's privileged inventory port can vouch for a sandbox it
+  does not run.
+
+- **The image allowlist gates digest and command line, not the rest of the
+  pod spec.** Each container's `command` prefix and `args` remainder are
+  enforced against the effective argv; env, mounts, capabilities, and the
+  remaining pod-spec fields are not. Nothing enforces which images run
+  *together* — every running image must be allowlisted, but no gate requires
+  the set in one pod to match a single workload entry.
+
+- **Secrets and encrypted volumes are node-as-CVM only.** Both injected
+  fetchers redeem their sandbox token over the node's admission-inventory
+  socket, which a Kata guest does not have, so the webhook rejects
+  `confidential.ai/c8s-secrets` and `confidential.ai/c8s-volumes` at admission
+  under pod-as-CVM rather than admitting a pod that would block forever.
+
+- **Init containers cannot consume a released secret.** The secret volume is
+  mounted into every container in the pod, but CDS releases only once *every*
+  main container is running — that is when the sandbox matches a whole
+  workload entry. An ordinary init container runs to completion before that
+  point, so it sees an empty directory, and one that blocks waiting for its
+  file deadlocks the pod it gates. Secrets are consumable from main
+  containers, which must wait for the file rather than read it at startup. The
+  injected fetcher is a native sidecar for this reason: it is the one entry in
+  `initContainers` that keeps running alongside the workload.
+
+- **`c8s allowlist` writes do not reach running confidential pods.** In-guest
+  `policy-monitor` refuses to refresh from CDS unless `C8S_CDS_MEASUREMENTS`
+  pins the CDS launch digest, and no shipping path delivers that pin — baking
+  it is self-referential under pod-as-CVM, and per-pod cloud-init is
+  host-controlled. Refresh is therefore disabled on every default install:
+  each guest enforces only the seed baked into its measured image, so
+  admitting a new workload image inside a confidential pod means rebuilding
+  the guest image. Deliberately fail-closed — "any attested TEE" is not good
+  enough here, because the host can boot its own CVM from the same guest image
+  and serve an allowlist of its choosing.
 
 - **Root workloads can bypass the in-guest mesh.** UID-0 egress is exempted
   so the attestation service can reach AMD KDS. Run workloads as non-root.
@@ -488,12 +557,12 @@ what the platform does and does not prove; hard-won operational lessons are in
 - **GPU attestation is not wired end to end.** GPU passthrough into
   confidential pods works, and a locked guest fails closed on a non-CC GPU.
   [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
-  already verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS,
-  nonce-bound to the CPU TEE evidence), but c8s does not yet collect GPU
-  evidence in the guest or require it at certificate issuance, so no
-  positive GPU attestation reaches the relying party.
+  verifies NVIDIA GPU and NVSwitch evidence (SPDM via NRAS, nonce-bound to the
+  CPU TEE evidence), but c8s does not collect GPU evidence in the guest or
+  require it at certificate issuance, so no positive GPU attestation reaches
+  the relying party.
 
-- **The browser over-encryption channel is not streaming yet.** Requests and
+- **The browser over-encryption channel does not stream.** Requests and
   responses are buffered per envelope; responses over 32 MiB fail rather than
   stream.
 
@@ -502,13 +571,22 @@ what the platform does and does not prove; hard-won operational lessons are in
 
 ## Roadmap
 
-The direction of travel, beyond closing the gaps above:
+The direction of travel:
 
-- **Encrypted volumes.** Persistent storage encrypted with keys that release
-  only to attested workloads.
+- **GPU attestation end to end.** Collect GPU evidence in the guest and
+  require it at certificate issuance, so a positive GPU attestation reaches
+  the relying party rather than stopping at the attestation service.
 
-- **Key management system.** Attestation-gated secret release, so application
-  secrets are brokered to workloads only after their measurement verifies.
+- **Secrets and encrypted volumes under pod-as-CVM.** Give the in-guest
+  fetchers a path to the admission inventory, so attestation-gated release
+  works in the shape with the strongest boundary rather than only the
+  node-as-CVM one.
+
+- **In-TEE volume encryption.** Stream plaintext into a CVM that generates the
+  key, writes the encrypted volume, and commits the key straight to the secret
+  store, so the party supplying the data never holds the key that opens it.
+  `c8s volume create` encrypts on the operator's machine, which means the key
+  is generated outside the TEE and escrowed to a local file.
 
 - **IGVM support for Kata.** Move the per-pod runtime's measured boot to
   IGVM, unifying pod-as-CVM and node-as-CVM on one measured-boot format.
