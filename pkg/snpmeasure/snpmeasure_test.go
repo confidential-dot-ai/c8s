@@ -253,41 +253,199 @@ func TestKernelHashesTable(t *testing.T) {
 }
 
 func TestKernelHashesFromFiles(t *testing.T) {
+	const cmdline = "console=ttyS0 loglevel=7"
 	dir := t.TempDir()
 	kernel := dir + "/vmlinuz"
-	if err := os.WriteFile(kernel, []byte("FAKEKERNEL"), 0o600); err != nil {
-		t.Fatal(err)
+	initrd := dir + "/initrd.img"
+	for path, content := range map[string]string{kernel: "FAKEKERNEL", initrd: "FAKEINITRD"} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	got, err := KernelHashesFromFiles(kernel, "", "console=ttyS0 loglevel=7")
+	got, err := KernelHashesFromFiles(kernel, "", cmdline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := NewKernelHashes([]byte("FAKEKERNEL"), nil, "console=ttyS0 loglevel=7")
+	want := NewKernelHashes([]byte("FAKEKERNEL"), nil, cmdline)
 	if *got != want {
 		t.Error("KernelHashesFromFiles disagrees with NewKernelHashes")
 	}
-	if _, err := KernelHashesFromFiles(dir+"/absent", "", ""); err == nil {
-		t.Error("missing kernel must fail")
+	got, err = KernelHashesFromFiles(kernel, initrd, cmdline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An initrd that hashed as absent would measure the same as the no-initrd
+	// guest, so a swapped initrd would pass an allowlist built without one.
+	want = NewKernelHashes([]byte("FAKEKERNEL"), []byte("FAKEINITRD"), cmdline)
+	if *got != want {
+		t.Error("KernelHashesFromFiles ignored the initrd")
+	}
+
+	// An unreadable artifact must not hash as the empty string.
+	unreadable := map[string][2]string{
+		"missing kernel":        {dir + "/absent", ""},
+		"missing initrd":        {kernel, dir + "/absent"},
+		"kernel is a directory": {dir, ""},
+		"initrd is a directory": {kernel, dir},
+	}
+	for name, paths := range unreadable {
+		t.Run(name, func(t *testing.T) {
+			kh, err := KernelHashesFromFiles(paths[0], paths[1], cmdline)
+			if err == nil {
+				t.Fatalf("want error, got %+v", kh)
+			}
+			if kh != nil {
+				t.Errorf("hashes %+v returned alongside error %v", kh, err)
+			}
+		})
 	}
 }
 
-// TestLaunchDigestRejectsBadInput covers the malformed images upstream's parser
-// indexes into without bounds checks, so a panic there surfaces as an error.
+// TestLaunchDigestRejectsBadInput is the fail-closed contract: malformed input
+// must yield an error and no digest, never a well-formed 48 bytes that matches
+// no guest — pinned into an allowlist, that rejects every pod with nothing to
+// diagnose. Some cases panic upstream's unchecked indexing; that must surface
+// as an error too. wantErr keeps the causes distinguishable.
 func TestLaunchDigestRejectsBadInput(t *testing.T) {
 	fw := readFixture(t)
-	cases := map[string]Config{
-		"zero vcpus":             {FirmwarePath: fixture, VCPUs: 0},
-		"missing file":           {FirmwarePath: filepath.Join(t.TempDir(), "absent.fd"), VCPUs: 1},
-		"empty path":             {VCPUs: 1},
-		"unaligned firmware":     {FirmwarePath: writeFirmware(t, fw[:len(fw)-1]), VCPUs: 1},
-		"truncated firmware":     {FirmwarePath: writeFirmware(t, nil), VCPUs: 1},
-		"firmware without table": {FirmwarePath: writeFirmware(t, make([]byte, PageSize)), VCPUs: 1},
-		"firmware without ASEV":  {FirmwarePath: writeFirmware(t, stripSEVMetadataEntry(t, fw)), VCPUs: 1},
+	sig, _ := VCPUSignatureByName("EPYC-v4")
+	kh := NewKernelHashes(nil, nil, "")
+	plain := func(path string) Config {
+		return Config{FirmwarePath: path, VCPUs: 1, VCPUSig: sig, GuestFeatures: 1}
 	}
-	for name, cfg := range cases {
-		if _, err := LaunchDigest(cfg); err == nil {
-			t.Errorf("%s: want error", name)
-		}
+	hashed := func(path string) Config {
+		c := plain(path)
+		c.KernelHashes = &kh
+		return c
+	}
+	patched := func(st ovmf.SectionType, edit func(*ovmf.MetadataSection)) string {
+		return writeFirmware(t, patchMetadataSection(t, fw, st, edit))
+	}
+
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{"zero vcpus", Config{FirmwarePath: fixture, VCPUs: 0}, "vcpus must be >= 1"},
+		{"empty path", plain(""), "firmware path is required"},
+		{"missing file", plain(filepath.Join(t.TempDir(), "absent.fd")), "read firmware"},
+		{"empty image", plain(writeFirmware(t, nil)), "not a positive multiple"},
+		{"unaligned image", plain(writeFirmware(t, fw[:len(fw)-1])), "not a positive multiple"},
+		{"no footer table", plain(writeFirmware(t, make([]byte, PageSize))), "parse firmware"},
+		{"no ASEV entry", plain(writeFirmware(t, stripSEVMetadataEntry(t, fw))), "no SEV metadata sections"},
+		{
+			"ASEV header starts before the image",
+			plain(writeFirmware(t, patchFooterEntryData(t, fw, ovmf.OVMF_SEV_META_DATA_GUID, le32(2*PageSize)))),
+			"malformed OVMF image",
+		},
+		{
+			"footer table longer than the image",
+			plain(writeFirmware(t, patchFooterEntrySize(t, fw, ovmf.OVMF_TABLE_FOOTER_GUID, 0xFFFF))),
+			"malformed OVMF image",
+		},
+		{
+			"no SEV-ES reset block",
+			plain(writeFirmware(t, stripFooterEntry(t, fw, ovmf.SEV_ES_RESET_BLOCK_GUID))),
+			"SEV-ES reset block",
+		},
+		{
+			"unknown section type",
+			plain(patched(ovmf.CPUID, func(s *ovmf.MetadataSection) { s.SectionTypeInt = 0x99 })),
+			"unknown OVMF metadata section type",
+		},
+		{
+			"memory section size not a page multiple",
+			plain(patched(ovmf.SNPSECMEM, func(s *ovmf.MetadataSection) { s.Size++ })),
+			"section at 0x800000",
+		},
+		{
+			"unmeasured hashes section size not a page multiple",
+			plain(patched(ovmf.SNPKernelHashes, func(s *ovmf.MetadataSection) { s.Size++ })),
+			"section at 0x810000",
+		},
+		{
+			"hashes section spans two pages",
+			hashed(patched(ovmf.SNPKernelHashes, func(s *ovmf.MetadataSection) { s.Size = 2 * PageSize })),
+			"kernel-hashes section is 8192 bytes",
+		},
+		{
+			"no SEV_HASH_TABLE_RV entry",
+			hashed(writeFirmware(t, stripFooterEntry(t, fw, ovmf.SEV_HASH_TABLE_RV_GUID))),
+			"SEV_HASH_TABLE_RV",
+		},
+		{
+			"SEV_HASH_TABLE_RV is zero",
+			hashed(writeFirmware(t, patchFooterEntryData(t, fw, ovmf.SEV_HASH_TABLE_RV_GUID, le32(0)))),
+			"SEV_HASH_TABLE_RV",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ld, err := LaunchDigest(tc.cfg)
+			if err == nil {
+				t.Fatalf("want error, got digest %x", ld)
+			}
+			if ld != nil {
+				t.Errorf("digest %x returned alongside error %v", ld, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestFirmwareDigestRejectsBadInput holds the cached, guest-independent prefix
+// to the same fail-closed contract: a digest returned for an image that never
+// parsed would seed every launch measurement built on top of it.
+func TestFirmwareDigestRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		wantErr string
+	}{
+		{"empty path", "", "firmware path is required"},
+		{"missing file", filepath.Join(t.TempDir(), "absent.fd"), "read firmware"},
+		{"empty image", writeFirmware(t, nil), "not a positive multiple"},
+		{"no footer table", writeFirmware(t, make([]byte, PageSize)), "parse firmware"},
+		{"no ASEV entry", writeFirmware(t, stripSEVMetadataEntry(t, readFixture(t))), "no SEV metadata sections"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ld, err := FirmwareDigest(tc.path)
+			if err == nil {
+				t.Fatalf("want error, got digest %x", ld)
+			}
+			if ld != nil {
+				t.Errorf("digest %x returned alongside error %v", ld, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestMustGUIDRejectsMalformed: a GUID that decoded to zeros instead of
+// panicking would put the wrong header into the hash table page, moving every
+// digest computed with kernel-hashes on.
+func TestMustGUIDRejectsMalformed(t *testing.T) {
+	cases := map[string]string{
+		"empty":     "",
+		"not hex":   "9438d6zz-4f22-4cc9-b479-a793d411fd21",
+		"odd chars": "9438d606-4f22-4cc9-b479-a793d411fd2",
+		"too long":  "9438d606-4f22-4cc9-b479-a793d411fd2100",
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("mustGUID(%q) returned a GUID instead of panicking", s)
+				}
+			}()
+			_ = mustGUID(s)
+		})
 	}
 }
 
@@ -304,47 +462,109 @@ func TestKernelHashesNeedSection(t *testing.T) {
 	}
 }
 
-// stripKernelHashesSection rewrites the SNP_KERNEL_HASHES descriptor into a
-// plain memory section.
-func stripKernelHashesSection(t *testing.T, fw []byte) []byte {
+// descriptorBytes is the on-disk form of an OVMF metadata descriptor.
+func descriptorBytes(s ovmf.MetadataSection) []byte {
+	var b [12]byte
+	binary.LittleEndian.PutUint32(b[0:], s.GPA)
+	binary.LittleEndian.PutUint32(b[4:], s.Size)
+	binary.LittleEndian.PutUint32(b[8:], s.SectionTypeInt)
+	return b[:]
+}
+
+// patchMetadataSection rewrites the first metadata descriptor of type st,
+// producing an image that parses but describes something the real firmware
+// never would.
+func patchMetadataSection(t *testing.T, fw []byte, st ovmf.SectionType, edit func(*ovmf.MetadataSection)) []byte {
 	t.Helper()
 	parsed, err := openFirmware(writeFirmware(t, fw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := bytes.Clone(fw)
 	for _, s := range parsed.MetadataItems() {
-		if ovmf.SectionType(s.SectionTypeInt) != ovmf.SNPKernelHashes {
+		if ovmf.SectionType(s.SectionTypeInt) != st {
 			continue
 		}
-		// Locate the descriptor by scanning for its gpa/size/type triple.
-		var want [12]byte
-		binary.LittleEndian.PutUint32(want[0:], s.GPA)
-		binary.LittleEndian.PutUint32(want[4:], s.Size)
-		binary.LittleEndian.PutUint32(want[8:], s.SectionTypeInt)
-		idx := bytes.Index(out, want[:])
+		idx := bytes.Index(fw, descriptorBytes(s))
 		if idx < 0 {
-			t.Fatal("SNP_KERNEL_HASHES descriptor not found")
+			t.Fatalf("descriptor for section type %d not found", st)
 		}
-		binary.LittleEndian.PutUint32(out[idx+8:], uint32(ovmf.SNPSECMEM))
+		edit(&s)
+		out := bytes.Clone(fw)
+		copy(out[idx:], descriptorBytes(s))
 		return out
 	}
-	t.Fatal("fixture has no SNP_KERNEL_HASHES section")
+	t.Fatalf("fixture has no section of type %d", st)
 	return nil
 }
 
-// stripSEVMetadataEntry blanks the OVMF_SEV_META_DATA GUID in the footer table,
-// leaving an image the upstream parser accepts with zero metadata sections.
-func stripSEVMetadataEntry(t *testing.T, fw []byte) []byte {
+// stripKernelHashesSection rewrites the SNP_KERNEL_HASHES descriptor into a
+// plain memory section.
+func stripKernelHashesSection(t *testing.T, fw []byte) []byte {
 	t.Helper()
-	guid := mustGUID(ovmf.OVMF_SEV_META_DATA_GUID)
-	idx := bytes.Index(fw, guid[:])
+	return patchMetadataSection(t, fw, ovmf.SNPKernelHashes, func(s *ovmf.MetadataSection) {
+		s.SectionTypeInt = uint32(ovmf.SNPSECMEM)
+	})
+}
+
+// footerEntryHeaderSize is sizeof(struct { uint16 size; guid[16]; }).
+const footerEntryHeaderSize = 18
+
+// footerEntryGUID locates a footer table entry by GUID. Entries are stored
+// backwards: payload, then a uint16 total size, then the GUID.
+func footerEntryGUID(t *testing.T, fw []byte, guid string) int {
+	t.Helper()
+	g := mustGUID(guid)
+	idx := bytes.Index(fw, g[:])
 	if idx < 0 {
-		t.Fatal("fixture has no OVMF_SEV_META_DATA entry")
+		t.Fatalf("fixture has no %s footer entry", guid)
 	}
+	return idx
+}
+
+// stripFooterEntry blanks a footer table GUID, leaving an image the upstream
+// parser accepts but which no longer publishes that entry.
+func stripFooterEntry(t *testing.T, fw []byte, guid string) []byte {
+	t.Helper()
+	idx := footerEntryGUID(t, fw, guid)
 	out := bytes.Clone(fw)
 	copy(out[idx:idx+16], make([]byte, 16))
 	return out
+}
+
+// stripSEVMetadataEntry leaves an image the upstream parser accepts with zero
+// metadata sections.
+func stripSEVMetadataEntry(t *testing.T, fw []byte) []byte {
+	t.Helper()
+	return stripFooterEntry(t, fw, ovmf.OVMF_SEV_META_DATA_GUID)
+}
+
+// patchFooterEntryData overwrites the head of a footer entry's payload.
+func patchFooterEntryData(t *testing.T, fw []byte, guid string, data []byte) []byte {
+	t.Helper()
+	idx := footerEntryGUID(t, fw, guid)
+	size := int(binary.LittleEndian.Uint16(fw[idx-2:]))
+	payload := idx - 2 - (size - footerEntryHeaderSize)
+	if len(data) > size-footerEntryHeaderSize {
+		t.Fatalf("%s payload is %d bytes, cannot write %d", guid, size-footerEntryHeaderSize, len(data))
+	}
+	out := bytes.Clone(fw)
+	copy(out[payload:], data)
+	return out
+}
+
+// patchFooterEntrySize overwrites a footer entry's declared total size.
+func patchFooterEntrySize(t *testing.T, fw []byte, guid string, size uint16) []byte {
+	t.Helper()
+	idx := footerEntryGUID(t, fw, guid)
+	out := bytes.Clone(fw)
+	binary.LittleEndian.PutUint16(out[idx-2:], size)
+	return out
+}
+
+func le32(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, v)
+	return b
 }
 
 func sha256sumOf(b []byte) []byte {
