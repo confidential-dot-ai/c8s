@@ -185,6 +185,36 @@ func TestTDXMRTDOnlyWarns(t *testing.T) {
 	}
 }
 
+// On the endpoint mode without a --mesh-ca pin the verdict is deployment-class
+// — the measurement pins are the entire trust anchor — so an MRTD-only TDX
+// policy is rejected outright rather than warned about. A --mesh-ca pin (or a
+// cert mode) downgrades the same condition to the warning above.
+func TestTDXMRTDOnlyRejectedDeploymentClass(t *testing.T) {
+	cfg := config{mode: "attest-pq", measurements: []string{testMRTD}}
+	policy, err := buildPolicy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oc := newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(testMRTD, matchingRTMRs()), nil, policy)
+	if oc.Verified {
+		t.Fatal("deployment-class TDX verdict with an MRTD-only pin must fail")
+	}
+	if !strings.Contains(oc.Error, "UNMEASURED") || !strings.Contains(oc.Error, "deployment-class") {
+		t.Fatalf("Error = %q, want the MRTD-only rejection", oc.Error)
+	}
+
+	// The same endpoint mode with a --mesh-ca pin is specific-cluster: the CA
+	// anchor stands next to the measurement pins, so it degrades to a warning.
+	cfg.meshCA = "testdata/mesh-ca.pem" // presence is what newOutcome keys on
+	oc = newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(testMRTD, matchingRTMRs()), nil, policy)
+	if !oc.Verified {
+		t.Fatalf("specific-cluster verdict failed: %s", oc.Error)
+	}
+	if len(oc.Warnings) != 1 || !strings.Contains(oc.Warnings[0], "UNMEASURED") {
+		t.Fatalf("Warnings = %v, want the MRTD-only warning", oc.Warnings)
+	}
+}
+
 func TestRTMRPinFlagErrors(t *testing.T) {
 	badManifest := filepath.Join(t.TempDir(), "artifacts.json")
 	if err := os.WriteFile(badManifest, []byte(`{"files":{"disk.img":"sha256:ab"}}`), 0o600); err != nil {

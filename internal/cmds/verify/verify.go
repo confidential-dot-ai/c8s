@@ -843,10 +843,20 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	oc.Verified = true
 
 	// A passing TDX verdict with a launch-measurement pin but no image tuple
-	// says less than it looks like: MRTD covers only the TDVF firmware.
+	// says less than it looks like: MRTD covers only the TDVF firmware. On the
+	// endpoint mode without a --mesh-ca pin the verdict is deployment-class —
+	// the measurement pins are the entire anchor — so an incomplete image
+	// policy is a hard failure there, not a warning; everywhere else (a CA pin
+	// in play, or a cert mode where the CA chain vouches) it degrades to a
+	// prominent warning.
 	if oc.Platform == string(teetypes.PlatformTDX) && pinned && cfg.imageManifest == "" {
-		oc.Warnings = append(oc.Warnings,
-			"TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple")
+		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
+		if cfg.mode == "attest-pq" && cfg.meshCA == "" {
+			oc.Verified = false
+			oc.Error = mrtdOnly + " (a deployment-class verdict rejects an incomplete measurement policy; pin --mesh-ca to downgrade this to a warning)"
+			return oc
+		}
+		oc.Warnings = append(oc.Warnings, mrtdOnly)
 	}
 	return oc
 }
