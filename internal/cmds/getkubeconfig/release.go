@@ -14,19 +14,18 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
 
-// releaseRequest / releaseResponse mirror the cred-release handler's shapes.
-type releaseRequest struct {
-	CSRPEM string `json:"csr"`
-}
-type releaseResponse struct {
-	CertPEM string `json:"cert"`
-	CAPEM   string `json:"ca"`
-}
+// The wire contract is owned by the server package (credrelease); aliases
+// keep this client marshaling the exact same shapes.
+type (
+	releaseRequest  = credrelease.ReleaseRequest
+	releaseResponse = credrelease.ReleaseResponse
+)
 
-const releasePath = "/release-credential"
+const releasePath = credrelease.ReleasePath
 
 // clientIdentity is the kube-client keypair the operator generates locally.
 // The private key never leaves the operator; the cert binds to its public key.

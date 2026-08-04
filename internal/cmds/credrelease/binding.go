@@ -8,10 +8,11 @@ package credrelease
 
 import (
 	"bytes"
-	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"os"
+
+	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -28,17 +29,13 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 // Var (not const) so tests can point it at a temp file.
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
-// expectedRTMR3ForKey computes the RTMR[3] value a guest reports after the
-// initrd extends the zeroed register once with SHA-384(pubkey):
-//
-//	RTMR[3] = SHA384( 0x00*48 || SHA384(pubkey) )
-//
-// This is the same value the operator computes offline from their own key, so
-// matching it proves the guest was launched to trust exactly this key.
+// expectedRTMR3ForKey is rtmr3.ForOperatorKey — the value a guest reports
+// after the initrd extends the zeroed register with SHA-384(pubkey). The
+// operator computes the same value offline (getkubeconfig), so matching it
+// proves the guest was launched to trust exactly this key.
 func expectedRTMR3ForKey(pubkey []byte) []byte {
-	keyDigest := sha512.Sum384(pubkey)
-	rtmr3 := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	return rtmr3[:]
+	v := rtmr3.ForOperatorKey(pubkey)
+	return v[:]
 }
 
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.

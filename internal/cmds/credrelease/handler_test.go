@@ -67,7 +67,7 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEM)})
+	body, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEM)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 		t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
 	}
 
-	var resp releaseResponse
+	var resp ReleaseResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -223,25 +223,25 @@ func TestServeHTTPErrorPaths(t *testing.T) {
 		},
 		{
 			name:       "CSR not PEM",
-			req:        authorized(mustJSON(releaseRequest{CSRPEM: "garbage"})),
+			req:        authorized(mustJSON(ReleaseRequest{CSRPEM: "garbage"})),
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name: "CSR PEM with garbage DER",
-			req: authorized(mustJSON(releaseRequest{CSRPEM: string(pem.EncodeToMemory(
+			req: authorized(mustJSON(ReleaseRequest{CSRPEM: string(pem.EncodeToMemory(
 				&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: []byte("junk")}))})),
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "CSR with RSA key",
-			req:        authorized(mustJSON(releaseRequest{CSRPEM: string(csrPEMFromKey(t, rsaKey))})),
+			req:        authorized(mustJSON(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, rsaKey))})),
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			// Client fault: a tampered CSR is the caller's garbage, not a
 			// server-side signing failure.
 			name:       "CSR with tampered self-signature is a client fault",
-			req:        authorized(mustJSON(releaseRequest{CSRPEM: string(tamperedCSR)})),
+			req:        authorized(mustJSON(ReleaseRequest{CSRPEM: string(tamperedCSR)})),
 			wantStatus: http.StatusBadRequest,
 		},
 	}
