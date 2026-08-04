@@ -382,8 +382,7 @@ func preflightTDXNodes(ctx context.Context) error {
 // and tls-lb both pin the platform's CPU class — with no labelled
 // node the whole release sits Pending and `helm --wait` blocks for the full
 // timeout before failing opaquely. (Why a wrong-TEE node cannot run these
-// pods: docs/pitfalls.md "kata-qemu-snp on a non-SNP host is a QEMU
-// crash-loop".)
+// pods: kata-qemu-snp on a non-SNP host is a QEMU crash-loop.)
 //
 // Read-only, and it reads the EFFECTIVE selector (chart defaults + -f +
 // computed --set), so it runs on every --cvm-mode=pod install including -f
@@ -776,9 +775,8 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		// the cluster, so it runs after the read-only preflights above, and
 		// stands aside — loudly — only when a -f file sets the platform's own
 		// selector; the preflight runs either way. NOT skipped under
-		// --single-node: a one-node cluster needs the label too. See
-		// docs/pitfalls.md "A `-f` values file no longer disables TEE node
-		// labelling".
+		// --single-node: a one-node cluster needs the label too. A `-f` values
+		// file no longer disables TEE node labelling.
 		if cvmModeIsPod(installCvmMode) {
 			values, err := effectiveValues(cmd.Context(), chartPath, setArgs)
 			if err != nil {
@@ -1312,12 +1310,11 @@ func checkImagePullSecret(sec *corev1.Secret, namespace, name string) error {
 // already fails fast for every component; without it a missing tag surfaces
 // only as ImagePullBackOff after a successful-looking install — and the
 // tempting fallback (an older tag like :main) is worse: an operator that
-// predates the chart's webhook features silently mis-injects
-// (docs/pitfalls.md). The operator is the one component checked: this path
-// deliberately opted out of full resolution, and the operator is the image
-// whose chart coupling bites hardest. Best-effort beyond that: crane absent
-// or an auth/network failure warns and continues; only a confirmed missing
-// tag aborts.
+// predates the chart's webhook features silently mis-injects. The operator is
+// the one component checked: this path deliberately opted out of full
+// resolution, and the operator is the image whose chart coupling bites
+// hardest. Best-effort beyond that: crane absent or an auth/network failure
+// warns and continues; only a confirmed missing tag aborts.
 func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag string) error {
 	// The operator's valuePath in c8sComponents is the top-level "image".
 	var repo string
@@ -1706,7 +1703,7 @@ func isImageNotFound(err error) bool {
 // for some other artifact — e.g. a kata-guest-base guest-image tag like
 // branch-<name> — is not an install tag, and falling back to a mismatched
 // component tag is worse than failing (an operator predating the chart's
-// webhook features silently mis-injects; docs/pitfalls.md).
+// webhook features silently mis-injects).
 func tagCouplingHint(repo, tag string) string {
 	return fmt.Sprintf("every c8s component image must be published at the install tag (they publish in lockstep; a mismatched older operator would silently lack webhook features the chart expects). If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. Verify with: crane ls %s", tag, tag, repo)
 }

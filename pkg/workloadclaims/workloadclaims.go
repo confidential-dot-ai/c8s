@@ -101,7 +101,7 @@ func GuestInventoryEndpoint() string {
 // (RunAsGroup 65532) also reaches it via its primary group. Connecting to a
 // socket is exempt from the read-only-mount write block (sockets are not
 // regular files), so the RO mount still prevents a socket-file swap without
-// blocking the connect. See docs/pitfalls.md.
+// blocking the connect.
 const InventorySocketGID = 65532
 
 // ListenUnix binds an inventory's Unix socket at socketPath: it removes a stale
@@ -166,7 +166,7 @@ type SandboxDigestsResponse struct {
 // AllowlistRefresh reports whether an inventory's image allowlist still tracks
 // CDS, or has fallen back to whatever it started with. It is the one channel
 // carrying that state out of a kata guest, whose journal the operator cannot
-// read (docs/pitfalls.md — "kubectl logs on locked-guest pods is empty").
+// read — kubectl logs on locked-guest pods is empty.
 //
 // Diagnostic only: no issuance or release decision reads it, so a guest cannot
 // widen its own admission by lying here.

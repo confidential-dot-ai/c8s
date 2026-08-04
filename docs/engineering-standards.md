@@ -94,7 +94,6 @@ Rules below apply to both tiers unless marked. Appendix A summarizes what change
 ## 5. Documentation
 
 - Important concepts MUST have a dedicated doc under `/docs` in the owning repo.
-  Decision records and pitfall logs belong there too (see `c8s/docs` for the pattern).
 - Prefer markdown. Diagrams are ASCII: ASCII travels anywhere text does — terminals,
   code comments, chat, whitepapers — with no renderer required.
 - A PR that changes behavior MUST update the affected docs in the same PR.

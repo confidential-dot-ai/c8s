@@ -12,12 +12,11 @@ deeper docs together:
 - [`kata-image-policy.md`](kata-image-policy.md) — in-guest per-image
   enforcement (`policy-monitor`).
 - [`operator.md`](operator.md) — the operator, webhook, and controllers.
-- [`THREAT_MODEL.md`](THREAT_MODEL.md) — the adversary and trust boundary.
 
 **Reading order (start here).** This doc is the map; read it first, then
 [`kata-guest-base.md`](kata-guest-base.md) (the guest-image concept) →
 [`kata-image-policy.md`](kata-image-policy.md) (in-guest enforcement) →
-[`kata.md`](kata.md) (install/ops reference) → [`pitfalls.md`](pitfalls.md).
+[`kata.md`](kata.md) (install/ops reference).
 
 The source of truth for the mode→helm-args mapping is `cmd/c8s/install.go`
 (`appendKataInstallArgs` / `appendDistroInstallArgs`); for the rendered
