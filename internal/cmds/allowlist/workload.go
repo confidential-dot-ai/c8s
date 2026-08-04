@@ -30,6 +30,7 @@ by name or image ref.`,
 		newWorkloadListCmd(o),
 		newWorkloadGetCmd(o),
 		newWorkloadApplyCmd(o),
+		newWorkloadDeriveCmd(o),
 		newWorkloadEditCmd(o),
 		newWorkloadDeleteCmd(o),
 	)
@@ -103,9 +104,7 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "note: %d floor digest(s) in the file are ignored by 'workload apply'; use 'upload' or 'add'\n", ignoredFloor)
 			}
 
-			for _, wmsg := range lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries}) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "lint: %s\n", wmsg)
-			}
+			findings := lintOffline(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: entries})
 
 			c, err := o.client(ctx(cmd))
 			if err != nil {
@@ -114,6 +113,18 @@ digests in the file are ignored; use 'upload' or 'add'.`,
 			live, _, err := c.List(ctx(cmd))
 			if err != nil {
 				return err
+			}
+
+			// The ambiguity check is the one finding that cannot be made from
+			// the file alone: the entry it collides with is usually one already
+			// served. Only pairs that span both are added here, since a
+			// collision inside the file is already reported above.
+			findings = append(findings, collisionsWithLive(entries, live)...)
+			for _, f := range findings {
+				fmt.Fprintf(cmd.ErrOrStderr(), "lint: %s\n", f)
+			}
+			if errs := countErrors(findings); errs > 0 {
+				return fmt.Errorf("refusing to apply: %d lint error(s)", errs)
 			}
 
 			names := sortedWorkloadNames(entries)
@@ -233,6 +244,39 @@ func newWorkloadDeleteCmd(o *options) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// collisionsWithLive reports entries being applied that no running set could
+// tell apart from an entry already served, which would refuse both. Groups
+// entirely inside the applied set are left out: lintOffline over the file has
+// already named those.
+func collisionsWithLive(entries map[string]pkgallowlist.Workload, live *pkgallowlist.Allowlist) []finding {
+	merged := make(map[string]pkgallowlist.Workload, len(live.Workloads)+len(entries))
+	for name, w := range live.Workloads {
+		merged[name] = w
+	}
+	for name, w := range entries {
+		merged[name] = w
+	}
+	groups, err := indistinguishableGroups(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema, Workloads: merged})
+	if err != nil {
+		return []finding{errorf("workload entries could not be compared with the served allowlist: %v", err)}
+	}
+	var out []finding
+	for _, names := range groups {
+		applied, served := 0, 0
+		for _, n := range names {
+			if _, ok := entries[n]; ok {
+				applied++
+			} else {
+				served++
+			}
+		}
+		if applied > 0 && served > 0 {
+			out = append(out, ambiguousGroupFinding(names))
+		}
+	}
+	return out
 }
 
 // --- shared helpers ---

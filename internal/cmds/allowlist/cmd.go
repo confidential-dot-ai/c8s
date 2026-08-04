@@ -13,29 +13,19 @@ package allowlist
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
-
-// envOperatorKey supplies the operator private key when --operator-key is unset.
-// The flag takes precedence.
-const envOperatorKey = "C8S_OPERATOR_KEY"
 
 // defaultRequiredComponents are the core c8s components an allowlist is expected
 // to cover. `upload` warns (and requires --force) when an uploaded file names
@@ -58,18 +48,9 @@ var defaultRequiredComponents = []string{
 
 // options holds the flags shared by every subcommand.
 type options struct {
-	url              string
-	measurements     []string
-	measurementsFile string
-	timeout          time.Duration
+	cdsconn.Options
 
-	operatorKey string
-
-	output   string // "text" | "json"
-	insecure bool
-
-	// verify is the evidence verifier; a stub in tests.
-	verify localverify.VerifyFunc
+	output string // "text" | "json"
 }
 
 // NewCmd returns the `c8s allowlist` command tree.
@@ -79,7 +60,7 @@ func NewCmd() *cobra.Command {
 
 // newCmd is the injectable constructor behind NewCmd.
 func newCmd(verify localverify.VerifyFunc) *cobra.Command {
-	o := &options{verify: verify}
+	o := &options{Options: cdsconn.Options{Verify: verify}}
 	cmd := &cobra.Command{
 		Use:   "allowlist",
 		Short: "Manage the CDS image allowlist",
@@ -96,20 +77,20 @@ short-lived token that CDS verifies against the operator public keys it was
 configured to pin separately (cds --operator-keys, set by 'c8s install
 --operator-keys').
 
-CDS has no public ingress; reach it over a port-forward or the tls-lb (see the
---url flag). To generate an operator key and pin its public half, see the c8s
-README ("Operator allowlist credentials").`,
+The default chart publishes /allowlist through tls-lb. Point --url at that
+front door only when it uses CDS-issued public TLS (discovery reports
+public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
+WebPKI front door cannot yet bind its public certificate to the attestation
+evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
+example through a port-forward) and pin the CDS launch digest. To generate an
+operator key and pin its public half, see the c8s README ("Managing the image
+allowlist").`,
 		SilenceUsage: true,
 	}
 
 	pf := cmd.PersistentFlags()
-	pf.StringVar(&o.url, "url", "", "CDS base URL (required). CDS has no public ingress: reach it via 'kubectl port-forward svc/c8s-cds 8443:8443' then --url https://localhost:8443, or via the tls-lb")
-	pf.StringSliceVar(&o.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) of the attested endpoint — CDS directly, or the tls-lb's discovery evidence when fronted (repeatable/comma-separated); empty = no pinning (UNSAFE)")
-	pf.StringVar(&o.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
-	pf.DurationVar(&o.timeout, "timeout", 15*time.Second, "per-request timeout")
-	pf.StringVar(&o.operatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+envOperatorKey+"); required for writes")
+	cdsconn.BindFlags(pf, &o.Options)
 	pf.StringVarP(&o.output, "output", "o", "text", "output format: text or json")
-	pf.BoolVar(&o.insecure, "insecure", false, "dev/test only: allow a plaintext http:// CDS URL, skipping RA-TLS attestation of CDS")
 
 	cmd.AddCommand(
 		newListCmd(o),
@@ -127,8 +108,8 @@ README ("Operator allowlist credentials").`,
 
 // validate checks the flags every subcommand needs.
 func (o *options) validate() error {
-	if strings.TrimSpace(o.url) == "" {
-		return fmt.Errorf("--url is required")
+	if err := o.Validate(); err != nil {
+		return err
 	}
 	if o.output != "text" && o.output != "json" {
 		return fmt.Errorf("--output must be text or json, got %q", o.output)
@@ -136,95 +117,17 @@ func (o *options) validate() error {
 	return nil
 }
 
-// client builds an HTTP client for CDS. An https URL is verified via RA-TLS
-// (CDS proves its TEE attestation). Plaintext http is refused unless --insecure
-// is set, so a typo'd or downgraded URL never silently writes the allowlist to
-// an unauthenticated endpoint.
+// client builds the allowlist API client over the attested channel to CDS.
 func (o *options) client(ctx context.Context) (allowlistclient.Client, error) {
-	u, err := url.Parse(o.url)
-	if err != nil || u.Host == "" {
-		return allowlistclient.Client{}, fmt.Errorf("invalid --url %q", o.url)
-	}
-
-	switch u.Scheme {
-	case "http":
-		if !o.insecure {
-			return allowlistclient.Client{}, fmt.Errorf("refusing plaintext http:// for CDS (no attestation): use https:// (RA-TLS), or pass --insecure for a dev/test endpoint")
-		}
-		fmt.Fprintln(os.Stderr, "warning: --url is http:// with --insecure; CDS attestation is NOT verified (dev/test only)")
-		return allowlistclient.NewClientWithHTTP(o.url, &http.Client{Timeout: o.timeout}), nil
-	case "https":
-		measurements, err := o.loadMeasurements()
-		if err != nil {
-			return allowlistclient.Client{}, err
-		}
-		if len(measurements) == 0 {
-			fmt.Fprintln(os.Stderr, "warning: no --measurements set; accepting any RA-TLS-attested CDS (UNSAFE)")
-		}
-		hc, err := o.httpsClient(ctx, measurements)
-		if err != nil {
-			return allowlistclient.Client{}, err
-		}
-		hc.Timeout = o.timeout
-		return allowlistclient.NewClientWithHTTP(o.url, hc), nil
-	default:
-		return allowlistclient.Client{}, fmt.Errorf("--url scheme must be http or https, got %q", u.Scheme)
-	}
-}
-
-// httpsClient builds the attestation-verifying HTTP client. A tls-lb front
-// door serves a CDS-issued cert with no RA-TLS extension; its trust path is
-// the discovery document, so probe for that first and fall back to direct
-// RA-TLS serving-cert verification (a port-forwarded CDS) when the target
-// serves none — the same routing `c8s verify` uses in auto mode. A
-// discovery document that fails verification is a hard error, never a
-// fallback.
-func (o *options) httpsClient(ctx context.Context, measurements [][]byte) (*http.Client, error) {
-	probeCtx, cancel := context.WithTimeout(ctx, o.timeout)
-	defer cancel()
-	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.url, measurements, o.verify)
-	switch {
-	case err == nil:
-		fmt.Fprintln(os.Stderr, "note: target is a tls-lb front door; verified its discovery attestation and bound this session to the attested connection")
-		return hc, nil
-	case errors.Is(err, lbdiscovery.ErrNoDiscovery):
-		return localverify.NewRATLSHTTPClient(measurements, o.verify, o.timeout), nil
-	default:
-		return nil, err
-	}
-}
-
-// loadMeasurements combines --measurements and --measurements-file into the raw
-// digest byte form RA-TLS verification expects.
-func (o *options) loadMeasurements() ([][]byte, error) {
-	hexes := append([]string{}, o.measurements...)
-	if o.measurementsFile != "" {
-		data, err := os.ReadFile(o.measurementsFile)
-		if err != nil {
-			return nil, fmt.Errorf("read --measurements-file: %w", err)
-		}
-		hexes = append(hexes, strings.Split(string(data), "\n")...)
-	}
-	return ratls.ParseHexMeasurementsList(hexes)
-}
-
-// signer builds the operator credential from the flags or environment. Required
-// only for write subcommands.
-func (o *options) signer() (*operatorauth.Signer, error) {
-	keyPath := coalesce(o.operatorKey, os.Getenv(envOperatorKey))
-	if keyPath == "" {
-		return nil, fmt.Errorf("operator key required: set --operator-key or %s", envOperatorKey)
-	}
-	keyPEM, err := os.ReadFile(keyPath)
+	hc, err := o.HTTPClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read operator key: %w", err)
+		return allowlistclient.Client{}, err
 	}
-	signer, err := operatorauth.NewSignerFromKeyPEM(keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("load operator key: %w", err)
-	}
-	return signer, nil
+	return allowlistclient.NewClientWithHTTP(o.URL, hc), nil
 }
+
+// signer builds the operator credential. Required only for write subcommands.
+func (o *options) signer() (*operatorauth.Signer, error) { return o.Signer() }
 
 // matchedComponents returns the required component identifiers that appear as a
 // (case-insensitive) substring of image — the same name-based signal the upload
@@ -285,14 +188,6 @@ func missingComponents(images map[string]string, required []string) []string {
 		}
 	}
 	return missing
-}
-
-// coalesce returns a if non-empty, else b (which may itself be empty).
-func coalesce(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // sortedKeys returns the map keys sorted, for stable output.

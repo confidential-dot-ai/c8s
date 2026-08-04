@@ -402,9 +402,9 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	}))
 	defer attestationApi.Close()
 
-	ext, err := attestclient.NewClient("").AttestationExtensionForClaims(context.Background(), attestationApi.URL, &key.PublicKey, nil)
+	ext, err := attestclient.NewClient("").AttestationExtension(context.Background(), attestationApi.URL, &key.PublicKey)
 	if err != nil {
-		t.Fatalf("AttestationExtensionForClaims: %v", err)
+		t.Fatalf("AttestationExtension: %v", err)
 	}
 
 	want, err := ratls.ReportDataForKey(&key.PublicKey, nil)
@@ -446,27 +446,31 @@ func TestReloadWatchChangedPropagatesError(t *testing.T) {
 	}
 }
 
-// The broker endpoint get-cert dials is a compiled Unix socket path, not a
+// The inventory endpoint get-cert dials is a compiled Unix socket path, not a
 // control-plane-supplied value, so the fetch can't be redirected.
-func TestBrokerEndpointIsCompiledUnixPath(t *testing.T) {
-	got := workloadclaims.BrokerEndpoint()
+func TestInventoryEndpointIsCompiledUnixPath(t *testing.T) {
+	got := workloadclaims.InventoryEndpoint()
 	if !strings.HasPrefix(got, "unix://") {
-		t.Fatalf("broker endpoint %q is not a unix socket", got)
+		t.Fatalf("inventory endpoint %q is not a unix socket", got)
 	}
 	if !strings.HasSuffix(got, "/"+workloadclaims.SocketName) {
-		t.Fatalf("broker endpoint %q does not end in the compiled socket name %q", got, workloadclaims.SocketName)
+		t.Fatalf("inventory endpoint %q does not end in the compiled socket name %q", got, workloadclaims.SocketName)
 	}
 }
 
-// Without --workload-claims-broker, workloadClaims is a no-op: it returns the
-// empty (claims-free) result without contacting any broker.
-func TestWorkloadClaimsWithoutFlagIsClaimFree(t *testing.T) {
-	res, err := workloadClaims(context.Background(), config{WorkloadClaimsBroker: false})
+// Without --workload-claims, fetchSandboxToken is a no-op: no token, and no
+// inventory is contacted.
+func TestFetchSandboxTokenWithoutFlagIsTokenFree(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.claimsDER != nil || res.initDigests != nil || res.mainDigests != nil {
-		t.Fatalf("no --workload-claims-broker but a claim was produced: %+v", res)
+	raw, err := fetchSandboxToken(context.Background(), config{WorkloadClaims: false}, &key.PublicKey, []byte("test-nonce"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw != nil {
+		t.Fatalf("no --workload-claims but a token was produced: %s", raw)
 	}
 }
 

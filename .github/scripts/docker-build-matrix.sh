@@ -23,7 +23,7 @@
 #
 # Inputs (env), each "true"/"false" from the dorny/paths-filter step:
 #   SHARED             shared-core || shared-cmdsutil || shared-root
-#   C8S, CDS, GET_CERT, RATLS_MESH, NRI_IMAGE_POLICY
+#   C8S, CDS, GET_CERT, RATLS_MESH, NRI_IMAGE_POLICY, VOLUMED
 #   GITHUB_REF         the triggering ref (for the tag-push fan-out)
 #   GITHUB_EVENT_NAME  the triggering event; "workflow_dispatch" fans out to all
 #                      (paths-filter is skipped on dispatch, so the flags above
@@ -55,6 +55,7 @@ maybe_add "$CDS" cds ghcr.io/confidential-dot-ai/cds cmd/cds/Dockerfile
 maybe_add "$GET_CERT" get-cert ghcr.io/confidential-dot-ai/get-cert cmd/get-cert/Dockerfile
 maybe_add "$RATLS_MESH" ratls-mesh ghcr.io/confidential-dot-ai/ratls-mesh cmd/ratls-mesh/Dockerfile
 maybe_add "$NRI_IMAGE_POLICY" nri-image-policy ghcr.io/confidential-dot-ai/nri-image-policy cmd/nri-image-policy/Dockerfile
+maybe_add "$VOLUMED" volumed ghcr.io/confidential-dot-ai/volumed cmd/volumed/Dockerfile
 
 if [[ ${#include[@]} -eq 0 ]]; then
   echo 'has_images=false' >> "$GITHUB_OUTPUT"

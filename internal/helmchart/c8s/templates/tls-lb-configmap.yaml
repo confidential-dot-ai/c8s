@@ -6,6 +6,34 @@
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
+{{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
+{{- $allowlistProxyPort := 0 -}}
+{{- $allowlistWriteRate := 0 -}}
+{{- $allowlistWriteBurst := 0 -}}
+{{- $allowlistWriteTotalRate := 0 -}}
+{{- $allowlistWriteTotalBurst := 0 -}}
+{{- $allowlistReadRate := 0 -}}
+{{- $allowlistReadBurst := 0 -}}
+{{- if $renderAllowlistRoute -}}
+{{- $allowlistProxyPort = include "c8s.int" .Values.tlsLb.allowlist.proxyPort | int -}}
+{{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if and .Values.tlsLb.attest.enabled (eq $allowlistProxyPort (int .Values.tlsLb.attest.port)) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- if eq $allowlistProxyPort (int .Values.tlsLb.nginx.httpsPort) -}}
+{{- fail (printf "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: %d" $allowlistProxyPort) -}}
+{{- end -}}
+{{- $allowlistWriteRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.requestsPerSecond "label" "tlsLb.allowlist.rateLimit.requestsPerSecond")) -}}
+{{- $allowlistWriteBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.burst "label" "tlsLb.allowlist.rateLimit.burst")) -}}
+{{- $allowlistWriteTotalRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalRequestsPerSecond "label" "tlsLb.allowlist.rateLimit.totalRequestsPerSecond")) -}}
+{{- $allowlistWriteTotalBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.rateLimit.totalBurst "label" "tlsLb.allowlist.rateLimit.totalBurst")) -}}
+{{- $allowlistReadRate = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.requestsPerSecond "label" "tlsLb.allowlist.readRateLimit.requestsPerSecond")) -}}
+{{- $allowlistReadBurst = int (include "c8s.positiveInt" (dict "value" .Values.tlsLb.allowlist.readRateLimit.burst "label" "tlsLb.allowlist.readRateLimit.burst")) -}}
+{{- /* Cross-value budget invariants (per-client <= total < cds bucket) live
+   in validations.yaml, kind=tlslb_allowlist_rate_budget. */ -}}
+{{- end -}}
 {{- /*
   No upstream is a legal state: tls-lb serves its cert and explicit routes with
   no catch-all until one is wired (an install-then-attach-inference flow). The
@@ -55,6 +83,33 @@ data:
 {{- if default false .Values.tlsLb.cors.enabled }}
         {{- include "tls-lb.corsMap" . | nindent 8 }}
 {{- end }}
+{{- if $renderAllowlistRoute }}
+
+        # Rate-limit /allowlist while nginx still has the public client IP;
+        # empty map keys are not accounted by limit_req. Mutations count per
+        # client and in aggregate (the constant-key zone guards the shared
+        # per-pod-IP CDS bucket; see docs/operator.md), reads per client;
+        # OPTIONS (CORS preflight) is exempt. The total key chains off the
+        # write key so the exempt-method list exists once.
+        map $request_method $allowlist_write_rate_key {
+            default $binary_remote_addr;
+            GET "";
+            HEAD "";
+            OPTIONS "";
+        }
+        map $allowlist_write_rate_key $allowlist_write_total_key {
+            "" "";
+            default "all";
+        }
+        map $request_method $allowlist_read_rate_key {
+            default "";
+            GET $binary_remote_addr;
+            HEAD $binary_remote_addr;
+        }
+        limit_req_zone $allowlist_write_rate_key zone=allowlist_write_per_client:10m rate={{ $allowlistWriteRate }}r/s;
+        limit_req_zone $allowlist_write_total_key zone=allowlist_write_total:1m rate={{ $allowlistWriteTotalRate }}r/s;
+        limit_req_zone $allowlist_read_rate_key zone=allowlist_read_per_client:10m rate={{ $allowlistReadRate }}r/s;
+{{- end }}
 
         # The catch-all upstream is dialed via a variable (see location /), so
         # nginx re-resolves it here at request time per record TTL. A static
@@ -93,6 +148,14 @@ data:
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
+            {{- if $renderAllowlistRoute }}
+            # Built-in control-plane route. The exact + slash-prefix pair
+            # exposes only /allowlist and its API subtree, not lookalike paths.
+            {{- $allowlistLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
+
+            {{- end }}
             {{- range $i, $route := .Values.tlsLb.routes }}
             {{- $path := required (printf "tlsLb.routes[%d].path is required" $i) $route.path }}
             {{- $match := default "prefix" $route.match }}
@@ -148,6 +211,8 @@ data:
             location = {{ .Values.tlsLb.discovery.path }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/json;
@@ -158,6 +223,8 @@ data:
             location = {{ .Values.tlsLb.discovery.cdsCertPath }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
@@ -169,6 +236,8 @@ data:
             location = {{ .Values.tlsLb.discovery.meshCAPath }} {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 access_log off;
                 default_type application/x-pem-file;
@@ -186,6 +255,8 @@ data:
             location /.well-known/c8s/ {
                 {{- if default false .Values.tlsLb.cors.enabled }}
                 {{- include "tls-lb.corsLocationDirectives" .Values.tlsLb.cors | nindent 16 }}
+                {{- else if eq (include "tls-lb.protocolCorsEnabled" .) "true" }}
+                {{- include "tls-lb.protocolCorsLocationDirectives" . | nindent 16 }}
                 {{- end }}
                 proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
                 proxy_set_header Host $host;

@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +23,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
+	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
+	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -29,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	"golang.org/x/time/rate"
 )
 
@@ -63,9 +68,8 @@ func run(cfg config) error {
 	// canonical hash is committed to REPORTDATA by both replicas and compared
 	// before any CA or allowlist state is released.
 	var writeAuthorizer allowlist.WriteAuthorizer = func(*http.Request, []byte) error {
-		return fmt.Errorf("allowlist writes are disabled: set --operator-keys")
+		return fmt.Errorf("operator writes are disabled: set --operator-keys")
 	}
-	var operatorKeys []*ecdsa.PublicKey
 	var operatorKeysPEM []byte
 	var operatorKeysHash string
 	if cfg.operatorKeys != "" {
@@ -77,15 +81,14 @@ func run(cfg config) error {
 		if err != nil {
 			return fmt.Errorf("hash --operator-keys %q: %w", cfg.operatorKeys, err)
 		}
-		operatorKeys = keys
 		operatorKeysPEM = pemBytes
 		writeAuthorizer = operatorauth.Verifier{
 			Keys:      keys,
 			ClockSkew: time.Duration(cfg.jwtClockSkew) * time.Second,
 		}.Authorize
-		slog.Info("allowlist write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
+		slog.Info("operator write authorization enabled (pinned operator keys)", "operator_keys", cfg.operatorKeys, "count", len(keys), "key_set_hash", operatorKeysHash)
 	} else {
-		slog.Warn("--operator-keys empty: allowlist writes are disabled (reads still served)")
+		slog.Warn("--operator-keys empty: allowlist and secret writes are disabled (reads still served)")
 	}
 
 	allowlistStore, err := allowlist.OpenStore(cfg.allowlistDB)
@@ -162,16 +165,17 @@ func run(cfg config) error {
 
 	asClient := attestationclient.NewClient(cfg.attestationApiURL)
 	challengeStore := attestation.NewChallengeStore(cfg.challengeTTL)
+	// A separate pool for /secrets: sharing one would make a nonce minted for
+	// issuance redeemable against a secret, and vice versa.
+	secretsChallenges := attestation.NewChallengeStore(cfg.challengeTTL)
 	checker := readiness.NewChecker(asClient, cfg.readinessInterval)
 
 	// Seed before serving so the first GET /allowlist returns the bootstrap
 	// allowlist (CDS, attestation-api, system images) rather than an empty
 	// set; an unseeded store would deny every worker pull until an operator
 	// populated it. Fail closed on any seed error.
-	seedDigest := ratls.UnsetDigest()
 	if cfg.allowlistSeed != "" {
-		var err error
-		if seedDigest, err = seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
+		if err := seedStore(&allowlistStore, cfg.allowlistSeed); err != nil {
 			return fmt.Errorf("seed allowlist: %w", err)
 		}
 	}
@@ -203,25 +207,99 @@ func run(cfg config) error {
 		OperatorKeysHash:  attestKeyOperatorPolicy,
 	}
 
-	// Config claims (docs/ratls.md): digests of the loaded
-	// operator-key set (empty set included, so "writes disabled" is
-	// attestable) and of the applied allowlist seed. Bound into the RA-TLS
-	// serving-cert evidence — verifiers pin them via `c8s cds verify`. The
-	// /handoff path commits the operator-key set separately via its
-	// REPORTDATA-bound hash (operatorKeysHash).
-	opKeysDigest, err := operatorauth.KeySetDigest(operatorKeys)
+	// The sandbox-digests callback: at issuance CDS asks the inventory that
+	// admitted a pod what the pod is running (docs/ratls.md, "Sandbox
+	// identity"). Pins the same measurement allowlist as /attest, so the
+	// inventory answering is held to the standard its EAR already met.
+	//
+	// Needs an RA-TLS identity of its own, since inventories require a client
+	// certificate; without --ratls-platform there is none, and a request
+	// carrying a sandbox token is refused rather than issued unchecked. An
+	// empty --measurements does NOT disable the callback: it tracks the same
+	// posture /attest already takes above, so a dev cluster still issues
+	// sandbox-bound leaves (and can still receive secrets) instead of failing
+	// every workload.
+	inventoryHosts, err := workloadclaims.ParseInventoryHosts(cfg.inventoryCIDRs)
 	if err != nil {
-		return fmt.Errorf("digest operator keys: %w", err)
+		return err
 	}
-	configClaims := &ratls.ConfigClaims{
-		OperatorKeysDigest: opKeysDigest,
-		SeedDigest:         seedDigest,
-		WorkloadDigest:     ratls.UnsetDigest(),
+	if len(inventoryHosts) == 0 {
+		slog.Warn("--sandbox-inventory-cidr not set: CDS will refuse any request carrying a sandbox token, since it has no node CIDRs to bound the inventory callback to")
+	}
+
+	var sandboxDigests *workloadclaims.DigestsClient
+	if cfg.ratlsPlatform == "" {
+		slog.Warn("no --ratls-platform: CDS cannot call inventories back for sandbox digests, so requests carrying a sandbox token will be refused")
+	} else {
+		if len(measurements) == 0 {
+			slog.Warn("--measurements empty: CDS accepts ANY RA-TLS-attested inventory as the source of a sandbox's container digests, so the issuance-time allowlist gate rests on an unpinned peer. UNSAFE outside development.")
+		}
+		measurementBytes, mErr := measurementDigests(measurements)
+		if mErr != nil {
+			return mErr
+		}
+		sandboxDigests, err = workloadclaims.NewDigestsClient(
+			ctx,
+			cfg.ratlsPlatform,
+			attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL),
+			cfg.attestationApiURL,
+			measurementBytes,
+			cfg.requestTimeout,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
 	if err != nil {
 		return err
+	}
+
+	// The ledger is written on every issuance, not only when secrets are on:
+	// enabling the feature later would otherwise start with an empty ledger and
+	// fail closed for every pod until its certificate next renews.
+	sandboxBindings := sandboxledger.New(issuer.CapTTL(cfg.certTTL, issuer.MaxLeafTTL), cfg.sandboxLedgerMax)
+	go sandboxBindings.EvictionLoop(ctx.Done(), cfg.rateLimiterEvictInterval)
+
+	var (
+		secretsHandler  *secrets.Handler
+		secretsOperator *secrets.OperatorHandler
+		secretsExplain  *secrets.ExplainHandler
+	)
+	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
+		// One store behind both handlers: an operator write and a workload read
+		// are two doors onto the same paths.
+		store := secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes)
+		policy := secrets.NewCachedPolicy(&allowlistStore)
+		secretsHandler = &secrets.Handler{
+			Store:          store,
+			Challenges:     &secretsChallenges,
+			Inventory:      sandboxDigests,
+			Bindings:       sandboxBindings,
+			Policy:         policy,
+			InventoryHosts: inventoryHosts,
+			Logger:         slog.Default(),
+		}
+		secretsOperator = &secrets.OperatorHandler{
+			Store:        store,
+			Authorize:    writeAuthorizer,
+			MaxBodyBytes: allowlistWriteBodyCap,
+			Logger:       slog.Default(),
+		}
+		// The same inventory, binding and policy the release path reads, so the
+		// diagnostic answers about the decision rather than about a copy of it.
+		secretsExplain = &secrets.ExplainHandler{
+			Inventory:      sandboxDigests,
+			Bindings:       sandboxBindings,
+			Policy:         policy,
+			InventoryHosts: inventoryHosts,
+			Authorize:      writeAuthorizer,
+			Logger:         slog.Default(),
+		}
+		slog.Info("serving /secrets; release is gated on an allowlist entry carrying a secrets grant")
+	} else {
+		slog.Warn("NOT serving /secrets: any workload depending on a secret will fail to start", "reason", why)
 	}
 
 	deps := dependencies{
@@ -236,6 +314,9 @@ func run(cfg config) error {
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
+			SandboxDigests:    sandboxDigests,
+			InventoryHosts:    inventoryHosts,
+			SandboxBindings:   sandboxBindings,
 		},
 		SignCSRHandler: SignCSRHandler{
 			CA:             mesh,
@@ -253,15 +334,19 @@ func run(cfg config) error {
 			WriteAuthorizer:   writeAuthorizer,
 			MaxWriteBodyBytes: allowlistWriteBodyCap,
 		},
-		AttestKeyHandler: attestKeyHandler,
-		HandoffHandler:   handoffHandler,
-		ReadyFn:          readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
-		EarIssuer:        earIssuer,
-		JWKSFunc:         rotator.JWKSetJSON,
-		CACertPEM:        caChainPEM,
-		OperatorKeysPEM:  operatorKeysPEM,
-		RateLimiter:      rateLimiter,
-		MaxRequestSize:   cfg.maxRequestSize,
+		AttestKeyHandler:  attestKeyHandler,
+		HandoffHandler:    handoffHandler,
+		ReadyFn:           readinessFn(checker.Ready, mesh.Cert, cfg.minCAValidity),
+		EarIssuer:         earIssuer,
+		JWKSFunc:          rotator.JWKSetJSON,
+		CACertPEM:         caChainPEM,
+		OperatorKeysPEM:   operatorKeysPEM,
+		RateLimiter:       rateLimiter,
+		MaxRequestSize:    cfg.maxRequestSize,
+		SecretsHandler:    secretsHandler,
+		SecretsChallenges: &secretsChallenges,
+		SecretsOperator:   secretsOperator,
+		SecretsExplain:    secretsExplain,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)
@@ -277,13 +362,20 @@ func run(cfg config) error {
 
 	if cfg.ratlsPlatform != "" {
 		attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.attestationApiURL)
-		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
-			Platform:     cfg.ratlsPlatform,
-			AttestFunc:   attestFunc,
-			CertTTL:      cfg.ratlsCertTTL,
-			ConfigClaims: configClaims,
-			Logger:       slog.Default(),
-		})
+		serverCfg := &ratls.ServerConfig{
+			Platform:   cfg.ratlsPlatform,
+			AttestFunc: attestFunc,
+			CertTTL:    cfg.ratlsCertTTL,
+			Logger:     slog.Default(),
+		}
+		// /secrets reads a CDS-stamped field out of the caller's leaf, so the
+		// chain has to be verified by crypto/tls against the mesh CA: the
+		// RA-TLS path would admit a self-signed peer whose sandbox-ID extension
+		// is whatever it chose. VerifyClientCertIfGiven keeps every other route
+		// reachable by a caller with no certificate.
+		serverCfg.ClientCAs = []*x509.Certificate{mesh.Cert}
+		serverCfg.ClientAuth = tls.VerifyClientCertIfGiven
+		tlsCfg, certMgr, err := ratls.NewServerTLSConfig(serverCfg)
 		if err != nil {
 			return fmt.Errorf("ratls server config: %w", err)
 		}
@@ -415,6 +507,42 @@ func normalizeHTTPServerConfig(cfg config) config {
 	return cfg
 }
 
+// validateSecretsConfig checks the bounds on secret storage. What secrets are
+// released to is policy, not configuration — see secretsEnabled.
+func validateSecretsConfig(cfg config) error {
+	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxValueBytes <= 0 || cfg.sandboxLedgerMax <= 0 {
+		return fmt.Errorf("--secrets-max-paths, --secrets-max-value-bytes and --sandbox-ledger-max-entries must be positive")
+	}
+	return nil
+}
+
+// secretsEnabled reports whether CDS serves /secrets, and why not when it does
+// not.
+//
+// Release is gated on an allowlist entry carrying a grant, so an entry without
+// one releases nothing and mounting the endpoint is inert until an operator
+// writes a grant. What this decides is narrower: whether CDS can answer at all,
+// which is what sandbox identity already needs.
+//
+// Handoff is the exception: a roll puts two CDS pods behind the Service at
+// once, and the surge replica serves an empty store — so a workload landing on
+// it mints a value diverging from the one its siblings already hold, with no
+// error anywhere. Refusing to serve is better than that divergence, and better
+// than failing startup, which would strand every existing handoff install.
+func secretsEnabled(cfg config, sandboxDigests *workloadclaims.DigestsClient, inventoryHosts workloadclaims.InventoryHosts) (bool, string) {
+	switch {
+	case cfg.handoffPeerURL != "" || len(cfg.handoffMeasurements) > 0:
+		return false, "handoff is configured: a surge replica would serve an empty secret store and mint values diverging from those already delivered"
+	case sandboxDigests == nil:
+		return false, "no --ratls-platform, so CDS has no attested channel to an inventory"
+	case len(inventoryHosts) == 0:
+		return false, "no --sandbox-inventory-cidr to bound which addresses the inventory callback may dial"
+	case len(cfg.measurements) == 0:
+		return false, "no --measurements, so any TEE could answer as a sandbox's inventory"
+	}
+	return true, ""
+}
+
 func validateConfig(cfg config) error {
 	for _, timeout := range []struct {
 		name  string
@@ -443,6 +571,9 @@ func validateConfig(cfg config) error {
 	}
 	if len(cfg.handoffMeasurements) > 0 && cfg.operatorKeys == "" {
 		return fmt.Errorf("--handoff-measurements requires --operator-keys so the operator policy is bound into handoff attestation")
+	}
+	if err := validateSecretsConfig(cfg); err != nil {
+		return err
 	}
 	if cfg.handoffPeerURL != "" {
 		if !strings.HasPrefix(cfg.handoffPeerURL, "https://") {
@@ -500,6 +631,24 @@ func loadOperatorKeys(path string) ([]*ecdsa.PublicKey, []byte, error) {
 		return nil, nil, fmt.Errorf("--operator-keys %q: %w", path, err)
 	}
 	return keys, pemBytes, nil
+}
+
+// measurementDigests renders the /attest measurement allowlist as the raw
+// digests ratls.VerifyPolicy pins, so the sandbox-digests callback accepts
+// exactly the platforms /attest does.
+func measurementDigests(allowed map[string]bool) ([][]byte, error) {
+	out := make([][]byte, 0, len(allowed))
+	for m := range allowed {
+		d, err := hex.DecodeString(m)
+		if err != nil {
+			// Dropping it would silently unpin the callback while /attest still
+			// enforces the same entry as a string — two derivations of one
+			// allowlist must not be able to disagree.
+			return nil, fmt.Errorf("--measurements entry %q is not hex", m)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 func parseMeasurementAllowlist(raw []string) map[string]bool {

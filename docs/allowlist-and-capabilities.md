@@ -26,7 +26,8 @@ The allowlist has two layers.
 
 - **Workloads** — `workloads`: named entries, each pinning an init/main
   container set. Every container binds a **digest** to the process policy
-  (`command`, `args`) and path policy (`paths`) permitted for those bytes. The
+  (`command`, `args`) permitted for those bytes, and the entry as a whole may
+  carry a secret-store grant (`secrets`). The
   entry name is operator-chosen; the entry `label` and per-container `image` are
   informational. Policy is always resolved by container digest.
 
@@ -53,8 +54,7 @@ semantics](#a-digest-may-run-many-ways).
           "digest": "sha256:<vllm>",
           "image":  "docker.io/vllm/vllm-openai:v0.6.3",
           "command": { "policy": "exact", "argv": ["python3"] },
-          "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] },
-          "paths":   { "policy": "deny" }
+          "args":    { "policy": "exact", "argv": ["-m", "vllm.entrypoints.openai.api_server", "--model", "/models/llama-3.1-8b"] }
         }
       ]
     }
@@ -63,10 +63,10 @@ semantics](#a-digest-may-run-many-ways).
 ```
 
 `schema` is the format identity. It is the first field of the canonical
-serialization, so it is covered by the attested seed digest (below) and a
-verifier pins the exact format. It also makes a malformed or foreign body fail
-loud instead of parsing as an empty (and therefore deny-all or, worse,
-allow-nothing-changed) allowlist.
+serialization (`allowlist.Canonical`), so any holder of an equivalent document
+reproduces the same bytes and pins the exact format. It also makes a malformed
+or foreign body fail loud instead of parsing as an empty (and therefore deny-all
+or, worse, allow-nothing-changed) allowlist.
 
 ## Process policy: command and args
 
@@ -130,30 +130,33 @@ entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
 guarantee is recovered at [cert issuance](#where-its-enforced).
 
-## Path policy (`paths`)
+## Secret grants (`secrets`)
 
-`paths` grants filesystem access for a coming key-management integration: a
-workload attests, and a secret broker releases material into paths the workload
-is entitled to.
+An entry may grant secret-store paths to the workload it names. The subject is
+the **entry**, not a container — see [`secrets.md`](secrets.md) for the model and
+for what the admission inventory contributes to a release decision.
 
 ```json
-"paths": { "policy": "allow", "read": ["/secrets/model/**"], "write": ["/secrets/session"] }
+"secrets": { "policy": "allow", "read": ["/tenant-a/**"], "write": ["/tenant-a/session"] }
 ```
 
-- `deny` (default) grants nothing; `any` is unconstrained; `allow` lists `read`
-  and `write` globs.
-- A `write` grant implies create and update.
+- `allow` or `deny` only; there is deliberately no `any`.
+- `write` requires `read`.
 - Paths are absolute and clean (no `.`/`..`); the only wildcard is a trailing
-  `/**` (subtree). These rules exist so a grant cannot be widened by path
-  trickery once an enforcer consumes it.
+  `/**` (subtree), which matches strictly beneath its base.
+- A grant that releases nothing is omitted from the canonical document, so an
+  entry without one serializes exactly as it did before the field existed.
 
-**No enforcer consumes `paths` yet.** It is carried, validated, canonicalized,
-and attested (it is part of the seed digest), so the schema and the operator
-tooling are ready — but it grants nothing until the secret-release component
-exists. When that component lands, a grant's subject must be bound to the
-**attested workload digest**, never to a self-asserted image reference, or any
-allowlisted workload could claim another's grant. The field is inert-with-a-spec
-by design; it is not a live capability.
+CDS enforces this grant at `GET`/`POST /secrets/*`. Writing a grant is what
+turns release on: an entry without one releases nothing
+([`secrets.md`](secrets.md#when-it-is-served)). An operator supplying a value at
+`PUT /secrets/*` is authorized by the operator key instead
+([`secrets.md`](secrets.md#operator-supplied-values)).
+
+Filesystem location is not an authorization boundary — a workload owns its own
+filesystem once a value is inside it — so a grant names store paths only. An
+install still setting the per-container `paths` field needs
+[`secrets.md`](secrets.md#upgrading).
 
 ## Where it's enforced
 
@@ -170,48 +173,55 @@ Three independent points enforce, at different strengths:
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
    container. It reads the digest and `process.args` and applies the same index.
 
-3. **CDS at cert issuance**, in `verifyWorkloadClaims`. A pod's identity binds
-   its role-partitioned init/main digest set. CDS requires every claimed digest
-   to be allowlisted (floor or workload) and, when the set includes workload
-   digests, requires it to **match a single workload entry's set exactly** — the
-   combination gate — after excluding the c8s-injected containers.
+3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
+   for a pod, CDS asks that pod's own inventory which images its sandbox is
+   running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
+   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
+   where the running set is a strict subset of the declared one, so requiring a
+   whole entry would deny ordinary states
+   ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
 
 ### What each layer can and cannot promise
 
 Per-container digest+argv admission holds at all three points. **Combinations**
-("only this init+main set may run together") can only be checked where the whole
-set is visible atomically, which is issuance — and there the set is the one the
-workload *claims*. NRI and policy-monitor see containers one at a time and cannot
-detect a *missing* container, so they cannot enforce a combination. The honest
-guarantee is therefore: **per-container digest + argv everywhere; combination
-gating at identity issuance.** Making a combination itself attested (so it gates
-container start, not just issuance) is the RTMR3 per-workload-measurement path
-tracked in [`THREAT_MODEL.md`](THREAT_MODEL.md); it is out of scope here.
+("only this image set may run together") are **not enforced anywhere today**.
+NRI and policy-monitor see containers one at a time and cannot detect a
+*missing* container, so they cannot enforce a combination; CDS sees the whole
+reported set but only at issuance, which lands mid-lifecycle when that set is
+still a subset of the declared one, so it checks membership rather than
+composition ([getcert-workload-binding.md](getcert-workload-binding.md),
+Corner 4). The honest guarantee is therefore: **per-container digest + argv
+everywhere; no combination gating.**
+
+Combination gating wants a point where the pod is complete and the decision is
+worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
+it happens once every main container is up, so it can require a whole entry
+rather than membership. That gates a secret, not container start — making a
+combination itself *attested* is the RTMR3 per-workload-measurement path tracked
+in [`THREAT_MODEL.md`](THREAT_MODEL.md), and is out of scope here.
 
 ### The injected-container carve-out
 
 c8s injects two init containers into every confidential pod — `c8s-cert`
-(get-cert) and `c8s-cert-wait`. The combination gate must exclude them, or every
-workload's expected set would have to enumerate c8s's own sidecars. The exclusion
-pins the injected container by **name and its measured get-cert digest**: a
-container named `c8s-cert` whose digest is not the measured get-cert digest is
-treated as a workload container, not skipped. Name alone is not identity — the
-host writes the container-name annotation — so the digest pin is what makes the
-carve-out sound. get-cert itself is a floor digest (in the measured seed) and
-runs with per-pod dynamic arguments, which is exactly why standalone/injected
-images are digest-only: their argv is not fixed and must not be argv-policed.
+(get-cert) and `c8s-cert-wait`. They pass the issuance gate by **digest**, not
+by name: injected component images are allowlist floor entries, so a workload
+entry never has to enumerate c8s's own sidecars. Nothing rests on the container
+*name*, which the host writes. get-cert runs with per-pod dynamic arguments,
+which is exactly why standalone/injected images are digest-only floor entries:
+their argv is not fixed and must not be argv-policed.
 
 ## Distribution and trust
 
 CDS serves the allowlist over an RA-TLS channel that consumers pin to CDS's
 launch measurement. The document body is not itself signed; its integrity in
-transit is the attested channel, and its provenance is the **seed digest** and
-the **operator-key-set digest** that CDS binds into its serving certificate's
-config-claims (`ratls.ConfigClaims`, see [`ratls.md`](ratls.md)). A verifier
-pins those with `c8s cds verify`. The canonical serialization
+transit is the attested channel. Provenance of the *write policy* is checkable:
+`c8s cds verify --operator-keys` cross-checks the key set CDS serves at
+`/operator-keys` — fetched over the attested serving cert — against the
+operator's own bundle. The serving certificate itself commits neither the key
+set nor the seed (see [`ratls.md`](ratls.md)). The canonical serialization
 (`allowlist.Canonical`) is deterministic — fixed field order, sorted map keys,
 sorted container and path lists — so any holder of an equivalent document
-reproduces the same digest.
+reproduces the same bytes.
 
 Writes are authorized by an operator EC key. The `c8s allowlist` CLI mints a
 short-lived token bound to the exact method, path, and body (so a captured token
@@ -233,7 +243,7 @@ failure modes:
 - The **workload policy overlay swaps wholesale, gated by a monotonic epoch**
   (the version counter). A consumer applies a pulled overlay only if its version
   is greater than the last applied, and ignores a regression. This matters
-  because workload policy can *tighten* (narrow `args`, revoke a `paths` grant);
+  because workload policy can *tighten* (narrow `args`, revoke a `secrets` grant);
   a plain additive merge would let a host that withholds an update keep a laxer
   policy live forever. Epoch-gated replacement makes a withheld or rolled-back
   update fail toward the last-known-good policy, not toward the laxest one. The
@@ -298,8 +308,8 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
   `remove` takes `sha256:` digests; a mixup fails validation instead of partially
   applying.
 - **Signed writes are diff-first and lint-first.** `upload`/`apply` run the
-  offline lint (errors block, warnings need `--force`) and print the diff before
-  the write.
+  offline lint and print the diff before the write. A lint error blocks the
+  write; `--strict` makes warnings block it too.
 
 ### lint
 
@@ -307,15 +317,26 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 (both lists empty), a `command: deny` container that can never start, a
 shared digest whose union is widened to `any` by some entry, a digest that is
 floor-listed while also carrying a workload policy — the floor admits it by
-digest alone, so the argv/paths policy is silently not enforced — tag-form labels
+digest alone, so the argv policy is silently not enforced — tag-form labels
 (which can move under the operator), and a summary of how many `any` policies a
 document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
+
+Two entries declaring the same containers with the same argv policy are an
+**error**, not a warning: release requires exactly one entry to describe a
+sandbox, so entries of the same shape either both match or neither does, and
+every pod resolving to them is refused whichever grant was meant. Nothing a
+workload can do resolves it. The shape compared is digests and argv policies per
+container list — the image label and the secret grant are excluded, since two
+entries alike but for their grants are exactly the case worth catching.
+
+`workload apply` runs that check against the served allowlist as well as the
+file, because the entry a new one collides with is usually one already there.
 
 ## Operator credentials
 
 Generating an operator key and pinning its public half is unchanged; see the
 README and [`operator.md`](operator.md). Rotating the pinned set rolls CDS, and
-the pinned set's digest is attested, so a verifier detects a changed write policy.
-The path grants (`paths`) will, when their enforcer lands, be managed with the
-same `workload edit`/`apply` flow and bound to the attested workload digest.
+a verifier detects a changed write policy by comparing the served
+`/operator-keys` list against its own bundle. Secret grants (`secrets`) are
+managed with the same `workload edit`/`apply` flow.

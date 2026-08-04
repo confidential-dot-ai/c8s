@@ -97,6 +97,57 @@ func makeCtr(podSandboxID, name string) *api.Container {
 	}
 }
 
+// The pod-sandbox lifecycle feeds the inventory's sandbox set: Synchronize seeds
+// it even while the container check is deferred, RunPodSandbox adds,
+// RemovePodSandbox evicts.
+func TestPodSandboxEventsFeedInventory(t *testing.T) {
+	p := newTestPlugin(&config{Policy: policyConfig{EnforceExisting: true}})
+	p.inventory = newAdmissionInventory(t.TempDir())
+
+	pods := []*api.PodSandbox{makePod("default", "pod1")}
+	if _, err := p.Synchronize(context.Background(), pods, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod1-id"); !known {
+		t.Fatal("Synchronize did not seed the inventory sandbox set while deferring")
+	}
+
+	if err := p.RunPodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); !known {
+		t.Fatal("RunPodSandbox did not record the sandbox")
+	}
+
+	if err := p.RemovePodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); known {
+		t.Fatal("RemovePodSandbox did not evict the sandbox")
+	}
+}
+
+// Pod-sandbox events are subscribed exactly when the inventory is enabled.
+func TestConfigureSubscribesPodSandboxEventsWithInventory(t *testing.T) {
+	p := newTestPlugin(&config{})
+	mask, err := p.Configure(context.Background(), "", "containerd", "2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mask.IsSet(api.Event_RUN_POD_SANDBOX) || mask.IsSet(api.Event_REMOVE_POD_SANDBOX) {
+		t.Fatal("pod-sandbox events subscribed without an inventory")
+	}
+
+	p.inventory = newAdmissionInventory(t.TempDir())
+	mask, err = p.Configure(context.Background(), "", "containerd", "2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mask.IsSet(api.Event_RUN_POD_SANDBOX) || !mask.IsSet(api.Event_REMOVE_POD_SANDBOX) {
+		t.Fatal("pod-sandbox events not subscribed with the inventory enabled")
+	}
+}
+
 func TestCreateContainer_NotReady_DenyNonExempt(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{

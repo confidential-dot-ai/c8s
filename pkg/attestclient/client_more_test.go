@@ -264,6 +264,39 @@ func TestObtainCertificateSuccess(t *testing.T) {
 	}
 }
 
+// The sandbox token is forwarded to CDS verbatim when set and omitted from
+// the wire entirely when empty (the pre-sandbox request shape).
+func TestObtainCertificateForwardsSandboxToken(t *testing.T) {
+	const challenge = "dGVzdC1jaGFsbGVuZ2U="
+	const certPEM = "-----BEGIN CERTIFICATE-----\nflow\n-----END CERTIFICATE-----\n"
+	sandboxToken := json.RawMessage(`{"token":"dG9r","signature":"c2ln","ear":"e.a.r"}`)
+	csrPEM := testCSRPEM(t)
+
+	var sawBody map[string]json.RawMessage
+	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawBody = nil
+		if err := json.NewDecoder(r.Body).Decode(&sawBody); err != nil {
+			t.Errorf("decode attest body: %v", err)
+		}
+		_, _ = w.Write([]byte(certPEM))
+	}))
+
+	c := NewClient(cdsURL)
+	if _, err := c.ObtainCertificateWithSandboxContext(context.Background(), apiURL, csrPEM, challenge, sandboxToken); err != nil {
+		t.Fatalf("ObtainCertificateWithSandboxContext: %v", err)
+	}
+	if got := string(sawBody["sandbox_token"]); got != string(sandboxToken) {
+		t.Fatalf("sandbox_token on the wire = %s, want %s", got, sandboxToken)
+	}
+
+	if _, err := c.ObtainCertificateWithEvidenceContext(context.Background(), apiURL, csrPEM); err != nil {
+		t.Fatalf("ObtainCertificateWithEvidenceContext: %v", err)
+	}
+	if _, present := sawBody["sandbox_token"]; present {
+		t.Fatal("empty sandbox token serialized into the attest request")
+	}
+}
+
 func TestObtainCertificateWithContextError(t *testing.T) {
 	// CDS returns a non-base64 challenge so the flow fails at decode.
 	cdsURL, apiURL := fullFlowServers(t, "!!!not-base64!!!", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -318,12 +351,12 @@ func TestAttestBadRequestURL(t *testing.T) {
 }
 
 func TestReportDataForCSRBadPEM(t *testing.T) {
-	if _, err := reportDataForCSR("garbage", nil, nil); err == nil {
+	if _, err := reportDataForCSR("garbage", nil); err == nil {
 		t.Fatal("expected error for non-PEM input")
 	}
 	// Wrong PEM type.
 	wrongType := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-	if _, err := reportDataForCSR(wrongType, nil, nil); err == nil {
+	if _, err := reportDataForCSR(wrongType, nil); err == nil {
 		t.Fatal("expected error for wrong PEM type")
 	}
 }

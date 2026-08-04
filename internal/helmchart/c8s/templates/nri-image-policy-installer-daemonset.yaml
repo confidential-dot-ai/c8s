@@ -87,6 +87,16 @@ spec:
           imagePullPolicy: {{ .Values.nriImagePolicy.image.pullPolicy }}
           securityContext:
             privileged: true
+          env:
+            # The address CDS dials for this node's sandbox-digests endpoint.
+            # The plugin is a host process with no downward API of its own, so
+            # the install script hands it down through a file. Inferring it
+            # from the route to CDS does not work: the chart points the plugin
+            # at the CDS NodePort on loopback.
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           command: ["/bin/sh", "-c"]
           args:
             - |

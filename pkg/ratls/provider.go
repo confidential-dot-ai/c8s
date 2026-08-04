@@ -42,19 +42,7 @@ func (p *SelfSignedProvider) Provision(ctx context.Context) (*tls.Certificate, t
 		return nil, 0, err
 	}
 
-	// The evidence must bind the exact claims bytes the certificate carries;
-	// asn1.Marshal is deterministic, so this value is byte-identical to the
-	// extension CreateAttestedCert embeds from the same struct.
-	var claimsValue []byte
-	if p.Opts != nil && p.Opts.ConfigClaims != nil {
-		claimsExt, err := p.Opts.ConfigClaims.MarshalExtension()
-		if err != nil {
-			return nil, 0, err
-		}
-		claimsValue = claimsExt.Value
-	}
-
-	reportData, err := ReportDataForKeyAndClaims(&key.PublicKey, claimsValue, nil)
+	reportData, err := ReportDataForKey(&key.PublicKey, nil)
 	if err != nil {
 		return nil, 0, err
 	}

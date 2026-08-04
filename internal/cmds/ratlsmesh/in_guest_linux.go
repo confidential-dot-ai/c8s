@@ -287,7 +287,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return err
 	}
 	// Normalise c.platform so downstream `ratls.NewServerTLSConfig` /
-	// `NewClientTLSConfig` see a string `validatePlatform` accepts. When
+	// `NewClientTLSConfig` see a string `ratls.ValidatePlatform` accepts. When
 	// the operator (or the baked cloudinit.env default) passes
 	// --platform=auto we've now resolved it to a concrete TEE via
 	// /dev/{tdx_guest,sev-guest} probing above; keep the ServerConfig

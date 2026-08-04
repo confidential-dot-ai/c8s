@@ -81,9 +81,18 @@ attestation remains the real boundary). If any node still carries the
 `--hardware-platform` — the install refuses and prints the exact
 `kubectl label nodes ... <key>-` command to clear it: a platform switch must
 be the operator's explicit act, not a side effect of a mistyped flag.
-Installs that bypass the CLI — a GitOps `HelmRelease`, or `c8s install -f` —
-get no auto-labelling and must label out-of-band (provisioning, NFD, or
-`kubectl label node <node> <platform-label>=true` after checking the host).
+
+A `-f` values file does **not** by itself turn labelling off. Only a file that
+sets the platform's own `kata.snpNodeSelector` / `kata.tdxNodeSelector` hands
+labelling back to you (NFD, provisioning, GitOps) — and when it does, the
+install says so and prints the `kubectl label node ...` command rather than
+labelling silently. Installs that bypass the CLI entirely (a GitOps
+`HelmRelease`) get no auto-labelling and must label out-of-band.
+
+Either way the read-only check runs on every `--cvm-mode=pod` install: if the
+**effective** selector (chart defaults + your `-f` + the CLI's computed
+values) matches no node, the install fails immediately naming the label,
+instead of leaving CDS `Pending` until `helm --wait` times out.
 
 `--debug` switches the guest image to the `<tag>-debug` variant published in
 lockstep with every locked tag: the same build except the baked kata-agent
@@ -591,9 +600,23 @@ containerd-prep initContainer) on the nodes kata-deploy targeted, removing:
 
 The RuntimeClass objects and the enforcement policy are deleted with the
 release. The uninstall refuses to run while pods with a kata RuntimeClass
-are still running (`--force` overrides). If the release is already gone but
-the hosts are dirty — e.g. a previous bare `helm uninstall` — run
-`c8s uninstall --host-sweep-only`.
+are still running (`--force` overrides).
+
+The release's own pods do not count. CDS and tls-lb pin a kata RuntimeClass
+themselves (see "Chart-managed mesh components pin their own RuntimeClass"),
+so counting them would refuse every uninstall on a cluster with zero tenant
+workloads and leave `--force` as the only route — which trains operators to
+pass it reflexively and defeats the guard the next time it fires for real.
+The exclusion is the release namespace **and** the chart's
+`app.kubernetes.io/instance: <release>` label, both of which the uninstall
+already knows: a tenant workload an operator has deliberately placed in the
+release namespace still trips the guard, as does a kata pod carrying the same
+label in another namespace. When the guard does fire it reports how many
+chart-managed pods it skipped, so the scoping is visible. The label contract
+is pinned by `TestChartKataPinnedPodsCarryInstanceLabel`.
+
+If the release is already gone but the hosts are dirty — e.g. a previous bare
+`helm uninstall` — run `c8s uninstall --host-sweep-only`.
 
 A bare `helm uninstall` (or removing `kata.enabled`) still works: you keep
 the preStop-hook cleanup, but none of the sweep guarantees above.

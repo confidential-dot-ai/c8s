@@ -50,7 +50,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
-          version: latest
+          # A full major.minor.patch is resolved in-process; anything less is
+          # looked up over the network before the linter runs.
+          version: v2.12.2
 
   test:
     name: Build & Test
@@ -66,6 +68,9 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      - name: Build macOS CLI
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /tmp/c8s-darwin ./cmd/c8s
 
       - name: Test
         run: make test

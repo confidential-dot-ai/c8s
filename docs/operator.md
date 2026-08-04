@@ -87,6 +87,22 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
 - allowlist admin is EAR-authorized through CDS; the chart does not render a
   CDS allowlist password or attestation-api API key into Kubernetes
   Secrets.
+- Sandbox identity needs the node addresses CDS may dial for a pod's admission
+  inventory (`cds.sandboxInventoryCIDRs`). `c8s install` reads them from the
+  cluster and emits **one host route per node** — a `/32`, not a covering range,
+  because on a CNI that assigns pod IPs from the node subnet (AWS VPC CNI, Azure
+  CNI) any range covering the nodes covers the pods too, and the bound would be
+  absent while looking configured. The install fails rather than proceeding if it
+  cannot determine them; without them CDS refuses every sandbox token and
+  workload pods get mesh certificates carrying no sandbox ID and no
+  issuance-time image gate.
+
+  **Host routes are a snapshot.** A node added afterwards is not covered, and
+  workloads scheduled onto it get certificates with no sandbox ID until the
+  value is refreshed (`helm upgrade` with a new `cds.sandboxInventoryCIDRs`, or
+  re-running `c8s install`). On a cluster whose node network is separate from the
+  pod network, pass `--node-cidr <range>` instead — a range survives scale-up.
+  (docs/ratls.md, "Sandbox identity".)
 - `image.tag` or `image.digest`, `attestationApi.image.tag` or
   `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
@@ -191,7 +207,10 @@ Guardrails:
 - Uninstall **refuses to run while pods with a kata RuntimeClass are still
   scheduled** — pulling the runtime out from under a confidential workload kills
   it without cleanup. Delete those workloads first, or pass `--force` (the kata
-  VMs keep running unmanaged but cannot restart).
+  VMs keep running unmanaged but cannot restart). The release's own
+  chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) are excluded by
+  release namespace + `app.kubernetes.io/instance`, and the refusal reports how
+  many it skipped; see [`docs/kata.md`](kata.md#uninstalling).
 - `--host-sweep-only` runs only the kata sweep, for a cluster whose release a
   bare `helm uninstall` already removed but whose nodes still carry artifacts;
   it uses the chart defaults and the distro detected from the cluster.
@@ -216,7 +235,7 @@ operator injects pods with the chart-managed CDS Service URL. Allowlist
 writes (`POST`, `PUT`, `DELETE /allowlist`) are authorized by an operator key:
 the caller presents a short-lived token signed by an operator EC private key
 whose public half is pinned in `cds.operatorKeys`. The `c8s allowlist` CLI mints
-that token (see the README, "Operator allowlist credentials"). Without
+that token (see the README, "Managing the image allowlist"). Without
 `cds.operatorKeys` set, allowlist writes are rejected while reads keep serving.
 
 CA-bundle refresh traffic uses the chart-managed cluster Service. Trust for
@@ -525,6 +544,53 @@ admission instead of admitting a pod that cannot serve its configured
 certificate/discovery path.
 
 ## tls-lb upstream
+
+### Built-in allowlist route
+
+The chart publishes CDS's complete `/allowlist` API through tls-lb by default.
+It renders exact `/allowlist` and `/allowlist/` prefix locations backed by the
+release's chart-managed CDS Service, so lookalike paths such as `/allowlisted`
+are not exposed. The tls-lb-to-CDS hop verifies CDS's RA-TLS attestation using
+`cds.measurements`; `c8s install --measurements` populates that pin in node-CVM
+mode. An empty pin still verifies that the peer is a TEE but accepts any launch
+measurement, which is unsafe outside development.
+
+Before nginx collapses requests onto the loopback proxy connection, it
+rate-limits the route while it still has the public client address. Mutation
+methods are limited per client (`tlsLb.allowlist.rateLimit.requestsPerSecond`/
+`burst`, default 1 r/s, burst 5) and in aggregate across all clients
+(`totalRequestsPerSecond`/`totalBurst`, default 8 r/s, burst 15). The
+aggregate bound matters because CDS rate-limits per source IP and sees every
+front-door request as the one tls-lb pod IP: without it, many distinct public
+clients each inside their per-client budget could drain the single CDS bucket
+that signed operator writes share. The chart requires the per-client values
+not to exceed the totals and the totals to stay below `cds.rateLimit`/
+`rateBurst`. Reads (GET/HEAD) are limited per client under
+`tlsLb.allowlist.readRateLimit` (default 20 r/s, burst 40) so unauthenticated
+read pressure on CDS — which also serves attestation issuance and node
+allowlist fetches — stays bounded; CORS preflights are exempt. If a flood
+saturates the front-door buckets, signed writes still work over a direct CDS
+URL or port-forward, which CDS accounts under the caller's own source IP.
+LoadBalancer and NodePort Services default to `externalTrafficPolicy: Local`
+while this route renders so nginx receives the public source address the
+per-client keys need; `tlsLb.service.externalTrafficPolicy` overrides (Local
+delivers traffic only through nodes that run the tls-lb pod).
+
+The proxy preserves the request method, original URI and query, body, and
+`Authorization` header. Reads remain unauthenticated at CDS. Writes still
+require the short-lived, body-bound operator token generated by
+`c8s allowlist --operator-key`; the operator private key is never mounted in
+tls-lb or CDS.
+Use the tls-lb URL with `c8s allowlist --url` and pin tls-lb's launch digest
+with `--measurements` only when `tlsLb.publicTLS.secretName` is empty
+(`public_tls.mode=cds`). With a configured WebPKI secret, the public certificate
+is not yet bound to the discovery attestation and the CLI refuses that front
+door. Use a direct CDS RA-TLS URL (or a CDS port-forward) and pin the CDS launch
+digest instead.
+
+Set `tlsLb.allowlist.enabled=false` to remove this route. For compatibility,
+an explicit `tlsLb.routes` entry whose path is `/allowlist` or `/allowlist/`
+takes precedence and suppresses the built-in route.
 
 tls-lb proxies its catch-all route to one upstream, `tlsLb.upstream.address`,
 an opaque `host:port` the chart never interprets. For a workload run as the
