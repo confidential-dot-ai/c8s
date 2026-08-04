@@ -38,9 +38,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // allowlist holds the parsed, normalised set of permitted digests. The
@@ -64,8 +65,6 @@ type allowlist struct {
 type bootstrapAllowlistFile struct {
 	Sha256Digests []string `json:"sha256_digests"`
 }
-
-var hex64Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // loadAllowlist parses the on-disk JSON allowlist and returns a ready-
 // to-use *allowlist. Returns a non-nil error when:
@@ -161,43 +160,16 @@ func (a *allowlist) Size() int {
 	return len(a.digests)
 }
 
-// extractDigest tries every annotation key that may carry a digest, in
-// priority order, returning the first one that normalises to a valid
-// sha256:<64hex>. Keys checked, in order:
-//
-//   - "io.kubernetes.cri.image-name" — the canonical key set by
-//     containerd's CRI plugin (containerd v1.7.21
-//     pkg/cri/annotations/annotations.go:78). Format is usually
-//     "<registry>/<image>@sha256:<hex>" when the image was pulled by
-//     digest; for tag-only pulls the digest may be absent here and
-//     present on the next key.
-//   - "io.kubernetes.cri.image-id" — set by some CRI implementations
-//     when the image-name only carries the tag; usually a bare
-//     "sha256:<hex>".
-//   - "org.opencontainers.image.ref.name" — image-spec standard, set
-//     by some buildkit-produced images that carry their own digest as
-//     an annotation.
-//
-// If none of the keys yield a parseable digest, returns ("", false).
-// The caller treats that as "no digest available", which is denied.
+// extractDigest returns the container's image digest from its OCI
+// annotations, in canonical "sha256:<64hex>" form. Key priority and
+// normalisation live in types.DigestFromAnnotations; a miss means "no
+// digest available", which the caller denies.
 func extractDigest(annotations map[string]string) (string, bool) {
-	if annotations == nil {
+	d, ok := types.DigestFromAnnotations(annotations)
+	if !ok {
 		return "", false
 	}
-	for _, key := range []string{
-		"io.kubernetes.cri.image-name",
-		"io.kubernetes.cri.image-id",
-		"org.opencontainers.image.ref.name",
-	} {
-		v, ok := annotations[key]
-		if !ok || v == "" {
-			continue
-		}
-		if norm, err := normalizeDigest(v); err == nil {
-			return "sha256:" + norm, true
-		}
-	}
-	return "", false
+	return d.String(), true
 }
 
 // k8sContainerTypeKeys mirrors kata-agent's K8S_CONTAINER_TYPE_KEYS
@@ -234,30 +206,13 @@ func isSandbox(annotations map[string]string) bool {
 	return false
 }
 
-// normalizeDigest takes any of the forms we see in the wild and returns
-// the bare 64-hex string. Recognised inputs:
-//
-//   - "sha256:<64hex>" — strip the "sha256:" prefix.
-//   - "<anything>@sha256:<64hex>" — split on "@", take the suffix, strip
-//     the prefix.
-//   - "<64hex>" — return as-is (after a lowercase + length+charset check).
-//
-// Anything else returns an error; the caller treats that as "no digest".
+// normalizeDigest takes any of the forms we see in the wild
+// (types.NormalizeDigest) and returns the bare 64-hex string — this
+// package's allowlist map keys carry no "sha256:" prefix.
 func normalizeDigest(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", errors.New("empty")
+	d, err := types.NormalizeDigest(s)
+	if err != nil {
+		return "", err
 	}
-	// Strip "<image-ref>@sha256:..." down to "sha256:...".
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
-	}
-	// Lowercase first so the prefix-strip handles "SHA256:" too. Yes,
-	// upstream tooling sometimes uppercases the algorithm prefix.
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "sha256:")
-	if !hex64Re.MatchString(s) {
-		return "", fmt.Errorf("not a sha256:<64hex> digest")
-	}
-	return s, nil
+	return strings.TrimPrefix(d.String(), "sha256:"), nil
 }

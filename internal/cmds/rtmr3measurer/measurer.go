@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // rtmr3Sysfs is the kernel TSM node backing extendSysfs/readRegisterSysfs.
@@ -317,36 +318,24 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 	}
 }
 
-// extractDigest mirrors policy-monitor: normalize `<ref>@sha256:<hex>` (or a
-// bare `sha256:<hex>`) to canonical `sha256:<hex>`.
+// extractDigest returns the container's image digest from its OCI
+// annotations in canonical "sha256:<hex>" form. Shared with policy-monitor
+// via types.DigestFromAnnotations so the two enforcers cannot drift.
 func extractDigest(ann map[string]string) (string, bool) {
-	for _, key := range []string{
-		"io.kubernetes.cri.image-name",
-		"io.kubernetes.cri.image-id",
-		"org.opencontainers.image.ref.name",
-	} {
-		v := ann[key]
-		if v == "" {
-			continue
-		}
-		if norm, err := normalizeDigest(v); err == nil {
-			return "sha256:" + norm, true
-		}
+	d, ok := types.DigestFromAnnotations(ann)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	return d.String(), true
 }
 
+// normalizeDigest is types.NormalizeDigest returning the bare 64-hex form.
 func normalizeDigest(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
+	d, err := types.NormalizeDigest(s)
+	if err != nil {
+		return "", err
 	}
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "sha256:")
-	if !hex64Re.MatchString(s) {
-		return "", errors.New("not a sha256:<64hex> digest")
-	}
-	return s, nil
+	return strings.TrimPrefix(d.String(), "sha256:"), nil
 }
 
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
