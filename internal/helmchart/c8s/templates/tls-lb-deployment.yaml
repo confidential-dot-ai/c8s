@@ -318,9 +318,26 @@ spec:
         - name: nginx-config
           configMap:
             name: {{ include "tls-lb.fullname" . }}-nginx
+        {{- if and .Values.tlsLb.attest.expectedWorkload (not .Values.kata.enabled) }}
+        # The readiness gate needs a stamped mesh leaf, so get-cert redeems a
+        # sandbox token over the node inventory's Unix socket (see
+        # tls-lb.getCertContainers). Read-only: the sidecar only connects.
+        - name: workload-claims
+          hostPath:
+            path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+            type: Directory
+        {{- end }}
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
         fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
+        {{- if .Values.tlsLb.attest.expectedWorkload }}
+        # workloadclaims.InventorySocketGID: the inventory chgrps its socket to
+        # this group so the non-root get-cert sidecar can connect. get-cert
+        # itself must stay on the nginx uid — it SIGHUPs nginx on renewal, and
+        # a different uid gets "operation not permitted", after which nginx
+        # serves a stale leaf that every exact-DER client correctly refuses.
+        supplementalGroups: [65532]
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
 {{- end }}

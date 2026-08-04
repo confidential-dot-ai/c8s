@@ -502,6 +502,22 @@ list.
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
+{{- if .Values.tlsLb.attest.expectedWorkload -}}
+{{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
+       stamp on the mesh leaf, which only exists when get-cert redeems a
+       sandbox token from the inventory — so wire the claims flow whenever
+       the gate is enabled. Node-CVM mounts the inventory socket directory
+       at get-cert's compiled path (workloadclaims.SidecarSocketDir); the
+       kata guest serves it on loopback instead, nothing to mount. The
+       deployment adds the hostPath volume and the socket's supplemental
+       group (workloadclaims.InventorySocketGID). */ -}}
+{{- $extraArgs = append $extraArgs "--workload-claims" -}}
+{{- if .Values.kata.enabled -}}
+{{- $extraArgs = append $extraArgs "--workload-claims-guest" -}}
+{{- else -}}
+{{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.tlsLb.publicTLS.secretName -}}
 {{- $mounts = append $mounts (printf "- name: public-tls\n  mountPath: %s\n  readOnly: true" .Values.tlsLb.publicTLS.mountPath) -}}
 {{- $extraArgs = append $extraArgs (printf "--reload-watch=%s" (include "tls-lb.publicCertPath" .)) -}}

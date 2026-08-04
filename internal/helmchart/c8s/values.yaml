@@ -1311,7 +1311,12 @@ tlsLb:
     # leaf carries a matched-workload stamp with exactly this name, and the
     # chart wires a readinessProbe on the cds-attest container (binding it on
     # the pod IP so kubelet can probe it), so ingress withholds traffic while
-    # the front door's committed mesh identity is unnamed. Empty keeps today's
+    # the front door's committed mesh identity is unnamed. Setting it also
+    # switches the tls-lb get-cert onto the workload-claims flow (inventory
+    # socket mount + supplemental group on node-CVM, guest loopback under
+    # kata) — without that no stamp could ever arrive and the gate would hold
+    # the front door at 503 forever. The named entry must match the tls-lb
+    # pod's own non-injected container set (nginx). Empty keeps today's
     # always-ready behavior.
     expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.

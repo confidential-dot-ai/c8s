@@ -1923,6 +1923,62 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 	if rp == nil || rp.HTTPGet == nil || rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.IntValue() != 8800 {
 		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe on the attest port, got %+v", rp)
 	}
+
+	// The gate is satisfiable only if get-cert can earn the stamp: the
+	// claims flow must be wired on the same condition. Node-CVM shape:
+	// --workload-claims, the inventory socket mounted read-only at the
+	// compiled path, and the socket's supplemental group on the pod.
+	cert, ok := findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
+	if !ok {
+		t.Fatal("c8s-cert init container missing")
+	}
+	assertContainerArgs(t, cert, "--workload-claims")
+	for _, a := range cert.Args {
+		if a == "--workload-claims-guest" {
+			t.Fatal("node-CVM get-cert must use the socket, not the guest loopback")
+		}
+	}
+	var mount *corev1.VolumeMount
+	for i, m := range cert.VolumeMounts {
+		if m.Name == "workload-claims" {
+			mount = &cert.VolumeMounts[i]
+		}
+	}
+	if mount == nil || mount.MountPath != "/run/c8s/workload-claims" || !mount.ReadOnly {
+		t.Fatalf("get-cert must mount the inventory socket read-only at the compiled path, got %+v", cert.VolumeMounts)
+	}
+	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	sc := dep.Spec.Template.Spec.SecurityContext
+	if sc == nil || len(sc.SupplementalGroups) != 1 || sc.SupplementalGroups[0] != 65532 {
+		t.Fatalf("pod must carry the inventory socket's supplemental group 65532, got %+v", sc)
+	}
+	var vol *corev1.Volume
+	for i, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "workload-claims" {
+			vol = &dep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if vol == nil || vol.HostPath == nil || vol.HostPath.Path != "/var/run/nri-image-policy" {
+		t.Fatalf("workload-claims hostPath volume missing or wrong, got %+v", dep.Spec.Template.Spec.Volumes)
+	}
+
+	// Kata: the guest serves the inventory on loopback — guest flag, no mount.
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "kata.enabled=true",
+		"--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false", "--set", "nriImagePolicy.enabled=false",
+		"--set-string", "image.digest=sha256:"+strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("helm template with expectedWorkload under kata: %v\n%s", err, out)
+	}
+	cert, ok = findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
+	if !ok {
+		t.Fatal("c8s-cert init container missing under kata")
+	}
+	assertContainerArgs(t, cert, "--workload-claims", "--workload-claims-guest")
+	for _, m := range cert.VolumeMounts {
+		if m.Name == "workload-claims" {
+			t.Fatal("kata get-cert must not mount the node socket")
+		}
+	}
 }
 
 // TestChartTLSLBServiceType pins that the Service type is exactly what the
