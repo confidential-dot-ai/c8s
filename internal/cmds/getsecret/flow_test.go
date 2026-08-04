@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -50,9 +51,9 @@ func startInventory(t *testing.T) {
 	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	prev := inventoryEndpoint
-	inventoryEndpoint = func() string { return "unix://" + sock }
-	t.Cleanup(func() { inventoryEndpoint = prev })
+	prev := sidecar.InventoryEndpoint
+	sidecar.InventoryEndpoint = func() string { return "unix://" + sock }
+	t.Cleanup(func() { sidecar.InventoryEndpoint = prev })
 }
 
 // fakeCDS records what it was asked and answers from a scripted sequence.
@@ -246,7 +247,7 @@ func TestFetchWithRetryRecoversOnceReleased(t *testing.T) {
 	cfg.RetryInterval = time.Millisecond
 	cfg.Attempts = 5
 	pub := testKey(t)
-	values, err := fetchWithRetry(context.Background(), cfg, func(ctx context.Context) (map[string][]byte, error) {
+	values, err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) (map[string][]byte, error) {
 		return fetchAllWith(ctx, cfg, http.DefaultClient, pub)
 	})
 	if err != nil {
@@ -272,7 +273,7 @@ func TestFetchWithRetryGivesUp(t *testing.T) {
 	cfg.Attempts = 2
 	pub := testKey(t)
 	attempts := 0
-	_, err := fetchWithRetry(context.Background(), cfg, func(ctx context.Context) (map[string][]byte, error) {
+	_, err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) (map[string][]byte, error) {
 		attempts++
 		return fetchAllWith(ctx, cfg, http.DefaultClient, pub)
 	})

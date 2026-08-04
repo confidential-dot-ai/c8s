@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -301,11 +300,11 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	case ratls.TEETypeSEVSNP:
 		c.platform = "sev-snp"
 	}
-	cdsMeasurements, err := parseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("%s: %w", envCDSMeasurements, err)
 	}
-	meshPolicyMeasurements, err := parseHexMeasurements(c.meshMeasurements)
+	meshPolicyMeasurements, err := ratls.ParseHexMeasurements(c.meshMeasurements)
 	if err != nil {
 		return fmt.Errorf("%s: %w", envMeshMeasurements, err)
 	}
@@ -435,7 +434,10 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 	}
-	go runInGuestCDSUpgrade(ctx, logger, c, cdsCfg, serverCertMgr, clientCertMgr, m)
+	go runCDSUpgrade(ctx, logger, "in-guest cds",
+		func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(cdsCfg, logger) },
+		c.cdsRetryBackoff, c.cdsRetryMaxBackoff, c.cdsOpTimeout,
+		serverCertMgr, clientCertMgr, m)
 	go runInGuestCABundleRefresh(ctx, logger, c, cdsCfg, serverCertMgr, clientCertMgr)
 
 	logger.Info("ratls-mesh in-guest listening",
@@ -447,52 +449,6 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return fmt.Errorf("in-guest proxy: %w", err)
 	}
 	return nil
-}
-
-func runInGuestCDSUpgrade(
-	ctx context.Context,
-	logger *slog.Logger,
-	c *inGuestConfig,
-	cdsCfg *cdsclient.Config,
-	serverCertMgr, clientCertMgr *ratls.CertManager,
-	m *metrics,
-) {
-	provider, err := cdsclient.NewProvider(cdsCfg, logger)
-	if err != nil {
-		logger.Error("in-guest cds provider creation failed", "error", err)
-		return
-	}
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = c.cdsRetryBackoff
-	bo.MaxInterval = c.cdsRetryMaxBackoff
-
-	_, err = backoff.Retry(ctx, func() (struct{}, error) {
-		upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-		defer cancel()
-		if err := serverCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
-			return struct{}{}, err
-		}
-		return struct{}{}, nil
-	},
-		backoff.WithBackOff(bo),
-		backoff.WithNotify(func(err error, d time.Duration) {
-			logger.Warn("in-guest cds cert upgrade attempt failed (will retry)", "error", err, "backoff", d)
-		}),
-	)
-	if err != nil {
-		return
-	}
-	logger.Info("in-guest certificate upgraded from self-signed to cds-issued (server)")
-	if clientCertMgr != nil {
-		upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-		if err := clientCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
-			logger.Warn("in-guest cds client cert upgrade failed", "error", err)
-		} else {
-			logger.Info("in-guest certificate upgraded from self-signed to cds-issued (client)")
-		}
-		cancel()
-	}
-	m.certMode.Store(1)
 }
 
 func runInGuestCABundleRefresh(

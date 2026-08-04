@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/kubernetes"
@@ -246,7 +245,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		return err
 	}
 	effectiveCAURL := effectiveCDSCAURL(c.certMode, c.cdsURL)
-	cdsMeasurements, err := parseHexMeasurements(c.cdsMeasurements)
+	cdsMeasurements, err := ratls.ParseHexMeasurements(c.cdsMeasurements)
 	if err != nil {
 		return fmt.Errorf("--cds-measurements: %w", err)
 	}
@@ -439,51 +438,10 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			CDSMeasurements:   cdsMeasurements,
 		}
 		cdsClient = cdsclient.NewClient(cdsCfg)
-		go func() {
-			cdsProvider, err := cdsclient.NewProviderWithClient(cdsClient, logger)
-			if err != nil {
-				logger.Error("cds provider creation failed", "error", err)
-				return
-			}
-
-			bo := backoff.NewExponentialBackOff()
-			bo.InitialInterval = c.cdsRetryBackoff
-			bo.MaxInterval = c.cdsRetryMaxBackoff
-			// MaxElapsedTime defaults to 0 (unlimited); ctx cancellation is
-			// the only exit.
-
-			_, err = backoff.Retry(ctx, func() (struct{}, error) {
-				upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-				defer cancel()
-				if err := serverCertMgr.SwapProvider(upgradeCtx, cdsProvider); err != nil {
-					return struct{}{}, err
-				}
-				return struct{}{}, nil
-			},
-				backoff.WithBackOff(bo),
-				backoff.WithNotify(func(err error, d time.Duration) {
-					logger.Warn("cds certificate upgrade attempt failed (will retry)", "error", err, "backoff", d)
-				}),
-			)
-			if err != nil {
-				// ctx cancelled or unrecoverable error from the operation.
-				return
-			}
-			logger.Info("certificate upgraded from self-signed to cds-issued (server)")
-
-			// Upgrade client cert too.
-			if clientCertMgr != nil {
-				upgradeCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-				if err := clientCertMgr.SwapProvider(upgradeCtx, cdsProvider); err != nil {
-					logger.Warn("cds client certificate upgrade failed", "error", err)
-				} else {
-					logger.Info("certificate upgraded from self-signed to cds-issued (client)")
-				}
-				cancel()
-			}
-
-			m.certMode.Store(1)
-		}()
+		go runCDSUpgrade(ctx, logger, "cds",
+			func() (*cdsclient.Provider, error) { return cdsclient.NewProviderWithClient(cdsClient, logger) },
+			c.cdsRetryBackoff, c.cdsRetryMaxBackoff, c.cdsOpTimeout,
+			serverCertMgr, clientCertMgr, m)
 	}
 
 	// CA bundle refresh: periodically poll CDS /ca for updated CA bundle. Uses
@@ -744,28 +702,4 @@ func ratlsTEEType(platform string) (ratls.TEEType, error) {
 	default:
 		return 0, fmt.Errorf("ratls-mesh: unsupported --platform %q", platform)
 	}
-}
-
-func parseHexMeasurements(raw string) ([][]byte, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([][]byte, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		decoded, err := hex.DecodeString(p)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hex measurement %q: %w", p, err)
-		}
-		if len(decoded) != ratls.SNPMeasurementSize {
-			return nil, fmt.Errorf("measurement %q is %d bytes, want %d", p, len(decoded), ratls.SNPMeasurementSize)
-		}
-		out = append(out, decoded)
-	}
-	return out, nil
 }

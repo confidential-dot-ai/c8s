@@ -1,10 +1,9 @@
 package getvolume
 
 import (
-	"time"
-
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -43,16 +42,8 @@ Nothing here creates one.`,
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
-	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
-	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
-	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
-	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
+	sidecar.BindFlags(f, &cfg.Config, "per-request timeout against CDS and the node agent")
 	f.StringSliceVar(&specs, "volume", nil, "NAME=/store/path to open; NAME selects the device by serial (repeatable)")
 	f.StringVar(&cfg.SocketDir, "socket-dir", workloadclaims.SidecarSocketDir, "directory holding the node agent's socket, as this pod sees it")
-	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
-	f.DurationVar(&cfg.RetryInterval, "retry-interval", 5*time.Second, "wait between attempts")
-	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, "per-request timeout against CDS and the node agent")
-	f.DurationVar(&cfg.InventoryTimeout, "inventory-timeout", 5*time.Second, "timeout for redeeming a sandbox token from the node's admission inventory")
 	return cmd
 }

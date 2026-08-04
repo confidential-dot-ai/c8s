@@ -341,7 +341,7 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 	})
 }
 
-func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
+func TestRunCDSUpgradeProviderError(t *testing.T) {
 	// A config missing NodeIP makes provider creation fail; the goroutine
 	// must log and return rather than panic or retry.
 	c := defaultInGuestConfig()
@@ -353,12 +353,15 @@ func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		runInGuestCDSUpgrade(context.Background(), testLogger(), &c, badCfg, nil, nil, testMetrics())
+		runCDSUpgrade(context.Background(), testLogger(), "in-guest cds",
+			func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(badCfg, testLogger()) },
+			c.cdsRetryBackoff, c.cdsRetryMaxBackoff, c.cdsOpTimeout,
+			nil, nil, testMetrics())
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("runInGuestCDSUpgrade did not return on provider error")
+		t.Fatal("runCDSUpgrade did not return on provider error")
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -42,14 +44,16 @@ func TestParseVolumeSpecAcceptsTheLongestServableName(t *testing.T) {
 
 func validConfig() config {
 	return config{
-		CDSURL:            "https://cds.example",
-		AttestationApiURL: "http://127.0.0.1:8400",
-		SocketDir:         "/run/c8s/workload-claims",
-		Volumes:           []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
-		Attempts:          60,
-		RetryInterval:     5 * time.Second,
-		RequestTimeout:    10 * time.Second,
-		InventoryTimeout:  5 * time.Second,
+		Config: sidecar.Config{
+			CDSURL:            "https://cds.example",
+			AttestationApiURL: "http://127.0.0.1:8400",
+			Attempts:          60,
+			RetryInterval:     5 * time.Second,
+			RequestTimeout:    10 * time.Second,
+			InventoryTimeout:  5 * time.Second,
+		},
+		SocketDir: "/run/c8s/workload-claims",
+		Volumes:   []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
 	}
 }
 

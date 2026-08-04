@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 )
 
 func TestParseSecretSpec(t *testing.T) {
@@ -51,15 +53,17 @@ func TestParseSecretSpec(t *testing.T) {
 func validConfig(t *testing.T) config {
 	t.Helper()
 	return config{
-		CDSURL:            "https://cds.example",
-		AttestationApiURL: "http://127.0.0.1:8080",
-		Secrets:           []secretRequest{{Name: "DB", Path: "/api/db"}},
-		OutDir:            t.TempDir(),
-		FileMode:          "0640",
-		Attempts:          3,
-		RetryInterval:     time.Second,
-		RequestTimeout:    time.Second,
-		InventoryTimeout:  time.Second,
+		Config: sidecar.Config{
+			CDSURL:            "https://cds.example",
+			AttestationApiURL: "http://127.0.0.1:8080",
+			Attempts:          3,
+			RetryInterval:     time.Second,
+			RequestTimeout:    time.Second,
+			InventoryTimeout:  time.Second,
+		},
+		Secrets:  []secretRequest{{Name: "DB", Path: "/api/db"}},
+		OutDir:   t.TempDir(),
+		FileMode: "0640",
 	}
 }
 
