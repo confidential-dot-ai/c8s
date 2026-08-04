@@ -44,7 +44,6 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
 - [Setting up a confidential VM](https://confidential.ai/docs/c8s/tutorials/azure-e2e), an end-to-end tutorial from bare cloud account to verified confidential workload
 - [c8s-verify](https://github.com/confidential-dot-ai/c8s-verify-js), verify a c8s cluster from a browser
 - [attestation-rs](https://github.com/confidential-dot-ai/attestation-rs), the TEE evidence verification service c8s uses
-- [Threat model](docs/THREAT_MODEL.md), what c8s defends against and what it assumes
 - [RA-TLS](docs/ratls.md), how attested TLS works in c8s — the handshake step by step, the guarantees, and which certificate is used where
 
 ## Features
@@ -266,8 +265,7 @@ See [docs/kata.md](docs/kata.md) for the runtime details and
 
 - **Pin measurements.** The chart's RA-TLS handshakes accept any TEE-attested
   peer until you pin `cds.measurements` and `ratlsMesh.measurements` to the
-  expected launch digests. Leave them empty only on a trusted network. See
-  [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+  expected launch digests. Leave them empty only on a trusted network.
 
 - **Pin operator keys.** Pass `--operator-keys` at install time or allowlist
   writes stay disabled. Leaving writes disabled and re-deploying CDS on every
@@ -348,7 +346,7 @@ internal/          Operator, webhook, attestation, mesh CA, secret store,
                    embedded Helm chart
 pkg/               Public Go libraries (see Libraries above)
 kata-guest-base/   Confidential guest image recipe for pod-as-CVM
-docs/              Design docs, threat model, pitfalls
+docs/              Design and operator docs
 samples/           Example manifests
 scripts/           Dev and CI helpers
 test/              Docker-compose integration tests
@@ -463,8 +461,7 @@ it, so run it continuously (CI), not only at bootstrap.
 
 Two caveats worth knowing before production: revocation is currently coarse
 (remove the key from `cds.operatorKeys` and re-install), and this check protects
-only verifiers that run it. See
-[docs/pitfalls.md](docs/pitfalls.md). For
+only verifiers that run it. For
 GitOps consumers, `c8s render-values --operator-keys operator.pub` embeds the
 PEM content (the chart value takes content, never a file path); the chart
 wiring is described in [docs/operator.md](docs/operator.md).
@@ -491,9 +488,7 @@ evidence verification service, which is built and published from
 ## Known gaps and open items
 
 c8s is built around a strong threat model, and we would rather list the holes
-than let you discover them. [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) covers
-what the platform does and does not prove; hard-won operational lessons are in
-[docs/pitfalls.md](docs/pitfalls.md). Highlights:
+than let you discover them:
 
 - **Measurements are not pinned by default.** Until `cds.measurements` and
   `ratlsMesh.measurements` are set, the mesh accepts any attested peer. Fine

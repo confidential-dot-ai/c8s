@@ -240,8 +240,8 @@ a modified data block surfaces as an I/O error when it is read, not at open.
   RBAC boundary, not an attested one.
 - **Volume integrity is rooted in the operator keys CDS pins**, and CDS's
   arguments are host-supplied. A host that restarts CDS under its own operator
-  key can write a matching grant and blob. `THREAT_MODEL.md` records this as
-  detection rather than prevention; the detection is
+  key can write a matching grant and blob. This is detection rather than
+  prevention; the detection is
   `c8s cds verify --operator-keys`, and running it continuously is a
   precondition for trusting a volume.
 - **Access patterns are visible.** Which sectors are read, and when, leaks

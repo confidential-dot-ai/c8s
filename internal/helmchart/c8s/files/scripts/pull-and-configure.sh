@@ -107,8 +107,8 @@ dropin="${dropin_dir}/50-c8s.toml"
 # (values change, kata-deploy bumped the base kernel_params) or the artifact
 # went missing; exit early otherwise so the steady-state tick stays free of
 # writes (no clobber races) and network pulls. A re-published artifact under
-# the SAME tag is deliberately not detected — see docs/pitfalls.md "Running
-# clusters do NOT pick up new kata-guest-base artifacts".
+# the SAME tag is deliberately not detected: running clusters do NOT pick up
+# new kata-guest-base artifacts.
 # gen= versions the generator itself: bump it whenever the emitted TOML
 # changes shape, so nodes with unchanged inputs still rewrite.
 config_fingerprint="gen=2|registry=${REGISTRY}|tag=${TAG}|dir=${HOST_IMG_DIR}|shim=${SHIM_NAME}|debug=${KATA_DEBUG}|pcie=${GPU_PCIE_ROOT_PORT}|mem=${GPU_DEFAULT_MEMORY}|base_params=${base_kernel_params}"
@@ -273,9 +273,9 @@ tmp="${dropin}.c8s-tmp"
     # pci=realloc pci=nocrs pci=assign-busses nvrc.smi.srs=1 — dropping
     # cgroup_no_v1 kills the NVRC-exec'd kata-agent at startup). Re-emit the
     # base value verbatim. A live session once saw drop-in kernel_params edits
-    # not reach the qemu -append line — unexplained; see docs/pitfalls.md
-    # "Guest kernel params" — but the config semantics make this preservation
-    # load-bearing whenever the drop-in IS honored, so it stays.
+    # not reach the qemu -append line — unexplained — but the config semantics
+    # make this preservation load-bearing whenever the drop-in IS honored, so
+    # it stays.
     if [ -n "${base_kernel_params}" ]; then
         printf 'kernel_params = "%s"\n' "${base_kernel_params}"
     fi

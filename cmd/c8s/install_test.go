@@ -192,7 +192,7 @@ func TestBuildInstallHelmArgsOrdering(t *testing.T) {
 	})
 
 	// --kata raises the wait ceiling: kata-deploy's first-install payload
-	// download routinely exceeds 5m (docs/pitfalls.md).
+	// download routinely exceeds 5m.
 	assertArgsEqual(t, buildInstallHelmArgs("/chart", "/tmp/computed.yaml", nil, true, true, true), []string{
 		"upgrade", "--install", "c8s", "/chart", "--namespace", "c8s-system",
 		"-f", "/tmp/computed.yaml",
@@ -1534,10 +1534,10 @@ func TestEffectiveValuesResolvesTEESelector(t *testing.T) {
 	if got := selectorFor(t, []string{tlsLB}); got != "confidential.ai/sev-snp=true" {
 		t.Errorf("with an unrelated -f, selector = %q, want the chart default confidential.ai/sev-snp=true", got)
 	}
-	// helm coalesces nested maps key-by-key, so repointing the selector at NFD
-	// without nulling the default leaves BOTH labels required — the preflight
-	// must demand what the chart will actually render, not what was written.
-	// See docs/pitfalls.md "Repointing kata.snpNodeSelector at NFD".
+	// helm coalesces nested maps key-by-key, so repointing kata.snpNodeSelector
+	// at NFD without nulling the default leaves BOTH labels required — the
+	// preflight must demand what the chart will actually render, not what was
+	// written.
 	if got := selectorFor(t, []string{nfd}); got != "confidential.ai/sev-snp=true,nfd/snp=true" {
 		t.Errorf("with a -f repointing the selector, selector = %q, want the coalesced pair confidential.ai/sev-snp=true,nfd/snp=true", got)
 	}

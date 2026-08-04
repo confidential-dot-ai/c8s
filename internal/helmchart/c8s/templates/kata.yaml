@@ -265,10 +265,10 @@ spec:
 
   The confidential classes carry a scheduling.nodeSelector on their platform
   label (kata.snpNodeSelector / kata.tdxNodeSelector) so a wrong-TEE node
-  leaves pods Pending instead of crash-looping QEMU — docs/pitfalls.md
-  "kata-qemu-snp on a non-SNP host". The selector reaches webhook-injected
-  pods because the apiserver re-invokes in-tree mutating plugins after a
-  webhook mutates (apiserver/pkg/admission/reinvocation.go).
+  leaves pods Pending instead of crash-looping QEMU (kata-qemu-snp on a
+  non-SNP host). The selector reaches webhook-injected pods because the
+  apiserver re-invokes in-tree mutating plugins after a webhook mutates
+  (apiserver/pkg/admission/reinvocation.go).
 */}}
 ---
 apiVersion: node.k8s.io/v1

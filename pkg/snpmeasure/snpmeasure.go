@@ -104,7 +104,7 @@ func FirmwareDigest(firmwarePath string) ([]byte, error) {
 }
 
 // openFirmware parses an OVMF image, applying the bounds and metadata checks
-// upstream's parser skips. See docs/pitfalls.md.
+// upstream's parser skips.
 func openFirmware(path string) (fw *ovmf.OVMF, err error) {
 	if path == "" {
 		return nil, errors.New("firmware path is required")

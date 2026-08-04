@@ -40,8 +40,7 @@ const (
 type Params struct {
 	// ExpectedReportData is the binding anchor, unpadded (48-byte SHA-384 for
 	// c8s bindings): hardware verifiers zero-pad it per platform, and the
-	// Azure vTPM verifiers compare it raw (see docs/pitfalls.md — "pass it
-	// unpadded").
+	// Azure vTPM verifiers compare it raw — pass it unpadded.
 	ExpectedReportData []byte
 	// AllowDebug accepts debug-enabled guests. Default false (reject).
 	AllowDebug bool
