@@ -106,14 +106,29 @@ jobs:
       - name: tools (kubectl, go, crane, helm)
         run: |
           set -euo pipefail
+          # Each fetch below crosses the public internet from an ephemeral ARC
+          # pod; one hiccup killed the lane twice in six days (30529875545,
+          # 30895640537), both before it reached a CVM.
+          retry() {
+            local i
+            for i in 1 2 3; do
+              if eval "$1"; then return 0; fi
+              echo "attempt $i failed, retrying in $((i * 5))s: $1" >&2
+              sleep $((i * 5))
+            done
+            echo "::error::gave up after 3 attempts: $1" >&2
+            return 1
+          }
           mkdir -p "$PWD/bin"
-          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl
+          retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
           chmod +x bin/kubectl
           echo "$PWD/bin" >> "$GITHUB_PATH"
           if ! command -v go >/dev/null; then
-            GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//')"
+            # `|| true`: under `set -e` a failed substitution exits before the
+            # pinned fallback on the next line can be reached.
+            GOVER="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//' || true)"
             [ -n "$GOVER" ] || GOVER=1.26.3
-            curl -fsSL "https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xz
+            retry "curl -fsSL 'https://go.dev/dl/go${GOVER}.linux-amd64.tar.gz' | sudo tar -C /usr/local -xz"
           fi
           # $GITHUB_PATH only affects LATER steps, so `go` is still not on PATH
           # inside THIS one. `go install crane` below needs it here and now.
@@ -123,12 +138,11 @@ jobs:
           # crane: `c8s install --resolve-digests=true` below shells out to it.
           # Pinned rather than fetched through the GitHub releases API, which
           # rate-limits by IP on a shared self-hosted host.
-          command -v crane >/dev/null || go install github.com/google/go-containerregistry/cmd/crane@v0.21.6
+          command -v crane >/dev/null || retry 'go install github.com/google/go-containerregistry/cmd/crane@v0.21.6'
           # helm: c8s install shells out to it too. The ephemeral ARC pod has
           # neither binary, unlike the host, so install rather than assume.
           if ! command -v helm >/dev/null; then
-            curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz \
-              | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm
+            retry 'curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz | tar -xz -C "$PWD/bin" --strip-components=1 linux-amd64/helm'
           fi
 
       # reap-before-provision: a killed run leaks a CVM (and its scratch PVC).
