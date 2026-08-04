@@ -28,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // defaultTestProxyConfig returns a proxyConfig populated with the flag
@@ -193,6 +195,32 @@ func TestRunProxyClientsetError(t *testing.T) {
 
 // The default clientset factory must fail cleanly when not running in a
 // cluster instead of proceeding with a nil rest config.
+func TestNewKubeClientsetConfigOutcomes(t *testing.T) {
+	orig := inClusterConfig
+	t.Cleanup(func() { inClusterConfig = orig })
+
+	// Exec and auth providers are mutually exclusive, so clientset
+	// construction itself fails.
+	inClusterConfig = func() (*rest.Config, error) {
+		return &rest.Config{
+			Host:         "https://127.0.0.1:1",
+			ExecProvider: &clientcmdapi.ExecConfig{Command: "true", APIVersion: "client.authentication.k8s.io/v1"},
+			AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "azure"},
+		}, nil
+	}
+	if cs, err := newKubeClientset(); err == nil || !strings.Contains(err.Error(), "k8s clientset") {
+		t.Fatalf("newKubeClientset() = %v, %v, want wrapped clientset error", cs, err)
+	}
+
+	inClusterConfig = func() (*rest.Config, error) {
+		return &rest.Config{Host: "https://127.0.0.1:1"}, nil
+	}
+	cs, err := newKubeClientset()
+	if err != nil || cs == nil {
+		t.Fatalf("newKubeClientset() = %v, %v, want a clientset from a valid config", cs, err)
+	}
+}
+
 func TestNewKubeClientsetDefaultOutsideCluster(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")

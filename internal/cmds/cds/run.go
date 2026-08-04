@@ -25,6 +25,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/readiness"
 	"github.com/confidential-dot-ai/c8s/internal/sandboxledger"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -435,27 +436,7 @@ func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allow
 		Signer:              boot.Signer(),
 		EARSource:           boot.EARSource(),
 		Snapshot: func() (issuer.CASnapshot, bool) {
-			doc, version, err := allowlistStore.LoadAll()
-			if err != nil {
-				slog.Error("snapshot allowlist for handoff", "error", err)
-				return issuer.CASnapshot{}, false
-			}
-			floor := make(map[types.Digest]string, len(doc.Digests))
-			for d, img := range doc.Digests {
-				pd, err := types.ParseDigest(d)
-				if err != nil {
-					slog.Error("snapshot allowlist digest parse", "digest", d, "error", err)
-					return issuer.CASnapshot{}, false
-				}
-				floor[pd] = img
-			}
-			return issuer.CASnapshot{
-				Cert:             mesh.Cert,
-				Key:              mesh.Key,
-				AllowlistVersion: version,
-				Allowlist:        floor,
-				Workloads:        doc.Workloads,
-			}, true
+			return snapshotAllowlist(allowlistStore.LoadAll, mesh)
 		},
 	})
 	if err != nil {
@@ -466,6 +447,32 @@ func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allow
 	go issuer.RunHandoffEARExpiryUpdater(ctx, hh.IssuerEARSource(), time.Minute, slog.Default())
 	slog.Info("attested CA handoff enabled (bootstrap runs in background)", "measurements", len(handoffMeasurements))
 	return hh, nil
+}
+
+// snapshotAllowlist builds the handoff CA snapshot from the live allowlist
+// store; any load or digest-parse failure withholds the snapshot.
+func snapshotAllowlist(load func() (*pkgallowlist.Allowlist, string, error), mesh *issuer.CA) (issuer.CASnapshot, bool) {
+	doc, version, err := load()
+	if err != nil {
+		slog.Error("snapshot allowlist for handoff", "error", err)
+		return issuer.CASnapshot{}, false
+	}
+	floor := make(map[types.Digest]string, len(doc.Digests))
+	for d, img := range doc.Digests {
+		pd, err := types.ParseDigest(d)
+		if err != nil {
+			slog.Error("snapshot allowlist digest parse", "digest", d, "error", err)
+			return issuer.CASnapshot{}, false
+		}
+		floor[pd] = img
+	}
+	return issuer.CASnapshot{
+		Cert:             mesh.Cert,
+		Key:              mesh.Key,
+		AllowlistVersion: version,
+		Allowlist:        floor,
+		Workloads:        doc.Workloads,
+	}, true
 }
 
 func newHTTPServer(addr string, handler http.Handler, cfg config) *http.Server {

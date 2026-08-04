@@ -368,6 +368,9 @@ make install
 # Run tests
 make test
 
+# Mutation-test the changes vs origin/main (BASE=<ref> to override)
+make mutation-check
+
 # Lint (format check + vet)
 make lint
 
