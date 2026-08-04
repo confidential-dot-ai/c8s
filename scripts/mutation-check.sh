@@ -6,7 +6,7 @@
 #                                                    write <out>.json and <out>.log
 #   scripts/mutation-check.sh full [out]             mutate every covered mutant (slow)
 #   scripts/mutation-check.sh summary [out]          print markdown summary from <out>.json
-#   scripts/mutation-check.sh selftest               check summary against scripts/testdata fixtures
+#   scripts/mutation-check.sh selftest               check summary against generated fixtures
 #   scripts/mutation-check.sh ci <base-ref>          run + summary >> GITHUB_STEP_SUMMARY,
 #                                                    always exit 0 (advisory)
 #
@@ -62,7 +62,46 @@ summary() { # $1=out-prefix
 
 selftest() { # summary must handle survivors, zero mutants, and a missing report
   local dir out
-  dir="$(dirname "$0")/testdata"
+  dir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand now: $dir is local and gone at EXIT
+  trap "rm -rf '$dir'" EXIT
+  # Gremlins-report-shaped fixtures, generated here so no report dumps are
+  # committed to the repo.
+  cat > "$dir/summary-sample.json" <<'JSON'
+{
+  "go_module": "github.com/confidential-dot-ai/c8s",
+  "files": [
+    {
+      "file_name": "calc.go",
+      "mutations": [
+        {"type": "CONDITIONALS_NEGATION", "status": "LIVED", "line": 6, "column": 7},
+        {"type": "ARITHMETIC_BASE", "status": "KILLED", "line": 3, "column": 35},
+        {"type": "CONDITIONALS_BOUNDARY", "status": "LIVED", "line": 6, "column": 7}
+      ]
+    }
+  ],
+  "test_efficacy": 33.33333333333333,
+  "mutations_coverage": 100,
+  "mutants_total": 3,
+  "mutants_killed": 1,
+  "mutants_lived": 2,
+  "mutants_not_viable": 0,
+  "mutants_not_covered": 0
+}
+JSON
+  cat > "$dir/summary-zero.json" <<'JSON'
+{
+  "go_module": "probe",
+  "files": [],
+  "test_efficacy": 0,
+  "mutations_coverage": 0,
+  "mutants_total": 0,
+  "mutants_killed": 0,
+  "mutants_lived": 0,
+  "mutants_not_viable": 0,
+  "mutants_not_covered": 0
+}
+JSON
   out="$(summary "$dir/summary-sample")"
   echo "$out" | grep -q -- "- Test efficacy: 33.3%" || { echo "selftest: efficacy line wrong" >&2; return 1; }
   echo "$out" | grep -q "LIVED" || { echo "selftest: survivor list missing" >&2; return 1; }
