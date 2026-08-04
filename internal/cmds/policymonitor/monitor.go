@@ -126,6 +126,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// *allowlist with m, whose merge is mutex-guarded. No CDS URL →
 	// baked-seed-only and the network is never touched.
 	if cfg.CDSURL != "" {
+		applyInitDataMeasurements(ctx, logger, cfg)
 		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
 	} else {
 		// Info, not Error: seed-only is the configured intent here, unlike the
