@@ -19,10 +19,11 @@ func requireCrane() error {
 	return nil
 }
 
-// craneDigest resolves an image reference to its registry digest via
+// CraneDigest resolves an image reference to its registry digest via
 // `crane digest <ref>`. crane handles registry auth, manifest lists, and the
 // registry HTTP protocol. The returned value is a bare "sha256:<hex>".
-func craneDigest(ctx context.Context, ref string) (string, error) {
+// Exported for the installer, which resolves chart images the same way.
+func CraneDigest(ctx context.Context, ref string) (string, error) {
 	out, err := exec.CommandContext(ctx, "crane", "digest", ref).Output()
 	if err != nil {
 		return "", craneError("digest", ref, err)

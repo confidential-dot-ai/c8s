@@ -81,7 +81,7 @@ policy. This reads the registry only; it never contacts CDS.`,
 				return err
 			}
 			ref := args[0]
-			digest, err := craneDigest(ctx(cmd), ref)
+			digest, err := CraneDigest(ctx(cmd), ref)
 			if err != nil {
 				return err
 			}

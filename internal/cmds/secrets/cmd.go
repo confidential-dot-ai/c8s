@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
@@ -61,20 +62,5 @@ func (o *options) client(ctx context.Context) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	return client{baseURL: trimSlash(o.URL), http: hc}, nil
-}
-
-func trimSlash(u string) string {
-	for len(u) > 0 && u[len(u)-1] == '/' {
-		u = u[:len(u)-1]
-	}
-	return u
-}
-
-// cmdCtx returns the command context or a background context as a fallback.
-func cmdCtx(cmd *cobra.Command) context.Context {
-	if c := cmd.Context(); c != nil {
-		return c
-	}
-	return context.Background()
+	return client{baseURL: cmdsutil.TrimSlash(o.URL), http: hc}, nil
 }

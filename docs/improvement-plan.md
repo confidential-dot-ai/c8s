@@ -1,6 +1,8 @@
 # Improvement plan: shrink the codebase, build the harness
 
-**Date:** 2026-08-04. **Status:** proposed — audit findings, not yet executed.
+**Date:** 2026-08-04. **Status:** §B executed on branch `cleanup/dedupe-and-shrink`
+(this branch); §A, §C, §D, §E remain proposed. Scope corrections found while
+executing §B are noted inline as *[executed]* remarks.
 
 Guiding idea (from [OpenAI's harness-engineering post](https://openai.com/index/harness-engineering/)):
 optimize the repo for agent legibility, encode taste as mechanical rules, keep the repo the
@@ -35,7 +37,31 @@ has ~590 lines of verified duplication, and several docs that have silently beco
    fact the tracked docs lack (the `assam`/`cert-issuer` → `cds` merge, #76).
    → Fold useful facts into tracked docs; retire the rest.
 
-## B. Delete code (~590 lines of verified duplication)
+## B. Delete code (~590 lines of verified duplication) — *executed on this branch*
+
+All ten items landed (see the `refactor(...)` commits on this branch); the repo's non-test
+source shrank by ~370 lines net while gaining direct tests for the new shared helpers.
+Scope corrections discovered while executing, recorded so the next pass doesn't redo them:
+
+- **#3**: a generic cross-package `httpjson` helper was rejected — `allowlistclient` and the
+  secrets client encode endpoint-specific semantics (ETag/304 handling, tri-state 200/201/409
+  results) that a shared helper would obscure. Only `attestclient`'s four genuinely identical
+  loops were collapsed (package-local `do`/`ok`). The triplicated `StatusError` types stay:
+  two are exported pkg API and 12 lines each.
+- **#5**: the `PublicTLS.Mode` divergence is **intentional, not drift** — `c8s verify`
+  gathers evidence for offline verification and never binds a connection, so the mode check
+  doesn't apply. The shared helper (`ratls.AttestedCertFromDiscovery`) covers the common
+  parsing; mode policy stays with lbdiscovery.
+- **#6**: the two enforcers' `sandboxTokenSigner`/`startAdmissionInventory` differ in failure
+  posture on purpose (nri fails closed; policy-monitor degrades open, with load-bearing
+  comments) — only the mechanically identical atoms moved (`SandboxContainer.Key/Compare`,
+  `ResolveAdvertiseHostForCDS`, `VersionFromETag`).
+- **#7**: the release wire types went to the server package (`credrelease`, exported) with
+  client-side aliases, not `pkg/issuerapi` — that package documents itself as the CDS
+  signing/handoff contract, which this is not.
+- **#10**: the JSON error-envelope and logger unifications were dropped — `cdsattest`'s text
+  logger and `certutil`'s JSON logger differ in format and failure posture (not duplicates),
+  and unifying the envelope would add a cross-server import for four lines.
 
 Ordered by deletable lines; items marked ⚠ are on attestation trust paths (correctness-class —
 do these carefully, keep the existing tests).

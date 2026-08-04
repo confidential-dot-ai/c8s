@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 )
 
@@ -247,14 +248,14 @@ func TestTrimSlash(t *testing.T) {
 		"https://cds///": "https://cds",
 		"":               "",
 	} {
-		if got := trimSlash(in); got != want {
-			t.Errorf("trimSlash(%q) = %q, want %q", in, got, want)
+		if got := cmdsutil.TrimSlash(in); got != want {
+			t.Errorf("cmdsutil.TrimSlash(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
 func TestCmdCtxFallsBackToBackground(t *testing.T) {
-	if cmdCtx(&cobra.Command{}) == nil {
+	if cmdsutil.CmdCtx(&cobra.Command{}) == nil {
 		t.Fatal("nil context for a command with none set")
 	}
 }

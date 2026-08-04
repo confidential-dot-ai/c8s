@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/allowlist"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -1334,7 +1335,7 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 		fmt.Fprintf(os.Stderr, "warning: cannot verify operator image %s:%s exists (crane not on PATH); a missing tag surfaces only as ImagePullBackOff after install\n", repo, tag)
 		return nil
 	}
-	if _, err := craneDigest(ctx, repo+":"+tag); err != nil {
+	if _, err := allowlist.CraneDigest(ctx, repo+":"+tag); err != nil {
 		if isImageNotFound(err) {
 			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
 		}
@@ -1633,7 +1634,7 @@ func podTemplateImages(template corev1.PodTemplateSpec) []string {
 
 func appendResolvedWorkloadImageArgs(ctx context.Context, helmArgs []string, images []string) ([]string, error) {
 	return buildWorkloadImageArgs(helmArgs, images, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := allowlist.CraneDigest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1711,27 +1712,6 @@ func tagCouplingHint(repo, tag string) string {
 	return fmt.Sprintf("every c8s component image must be published at the install tag (they publish in lockstep; a mismatched older operator would silently lack webhook features the chart expects). If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. Verify with: crane ls %s", tag, tag, repo)
 }
 
-// craneDigest resolves an image reference to its registry digest by shelling
-// out to `crane digest <ref>`. crane handles registry auth (docker config),
-// manifest lists, and the v2 protocol — reimplementing that in-process would
-// pull a heavyweight registry client for one lookup. The returned value is a
-// bare "sha256:<hex>".
-func craneDigest(ctx context.Context, ref string) (string, error) {
-	out, err := exec.CommandContext(ctx, "crane", "digest", ref).Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("crane digest %q: %w: %s", ref, err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", fmt.Errorf("crane digest %q: %w", ref, err)
-	}
-	digest := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(digest, "sha256:") {
-		return "", fmt.Errorf("crane digest %q returned unexpected value %q", ref, digest)
-	}
-	return digest, nil
-}
-
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
 // registry digest (via crane) and appends the helm --set flags that pin it.
 func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
@@ -1743,7 +1723,7 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 		return nil, err
 	}
 	return buildDigestArgs(helmArgs, tag, components, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := allowlist.CraneDigest(ctx, ref)
 		if err != nil {
 			return "", err
 		}

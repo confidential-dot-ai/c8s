@@ -7,6 +7,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/ptr"
 
 	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
 )
@@ -89,18 +90,18 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 
 func TestBoolPtr(t *testing.T) {
 	for _, v := range []bool{true, false} {
-		p := boolPtr(v)
+		p := ptr.To(v)
 		if p == nil || *p != v {
-			t.Fatalf("boolPtr(%v) = %v", v, p)
+			t.Fatalf("ptr.To(%v) = %v", v, p)
 		}
 	}
 }
 
 func TestInt64Ptr(t *testing.T) {
 	for _, v := range []int64{0, -1, 1000} {
-		p := int64Ptr(v)
+		p := ptr.To(v)
 		if p == nil || *p != v {
-			t.Fatalf("int64Ptr(%d) = %v", v, p)
+			t.Fatalf("ptr.To(%d) = %v", v, p)
 		}
 	}
 }

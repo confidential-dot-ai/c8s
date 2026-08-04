@@ -176,7 +176,7 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 	if len(measurement) != launchMeasurementSize {
 		return fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidLaunchDigest, len(measurement), launchMeasurementSize)
 	}
-	if len(allowed) > 0 && !measurementAllowed(measurement, allowed) {
+	if len(allowed) > 0 && !MeasurementAllowed(measurement, allowed) {
 		return fmt.Errorf("%w: launch measurement not in allowed set", ErrMeasurementNotAllowed)
 	}
 	return nil
@@ -193,8 +193,10 @@ func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowD
 	}, false)
 }
 
-// measurementAllowed reports whether measurement byte-equals one of allowed.
-func measurementAllowed(measurement []byte, allowed [][]byte) bool {
+// MeasurementAllowed reports whether measurement byte-equals one of the
+// allowed launch digests (an empty allowed set means "no pin" and is handled
+// by callers). Re-exported as ratls.MeasurementAllowed.
+func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
 	for _, m := range allowed {
 		if bytes.Equal(measurement, m) {
 			return true

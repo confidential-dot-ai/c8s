@@ -65,14 +65,14 @@ func TestLintOnlineRequiresCrane(t *testing.T) {
 
 func TestCraneDigest(t *testing.T) {
 	fakeCrane(t)
-	got, err := craneDigest(context.Background(), "registry.example.com/app:v1")
+	got, err := CraneDigest(context.Background(), "registry.example.com/app:v1")
 	if err != nil {
 		t.Fatalf("craneDigest: %v", err)
 	}
 	if got != digA {
 		t.Fatalf("craneDigest = %q, want %q", got, digA)
 	}
-	if _, err := craneDigest(context.Background(), "registry.example.com/unresolvable:v1"); err == nil {
+	if _, err := CraneDigest(context.Background(), "registry.example.com/unresolvable:v1"); err == nil {
 		t.Fatal("expected a resolve failure")
 	}
 }
