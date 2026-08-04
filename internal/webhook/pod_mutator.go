@@ -176,8 +176,8 @@ const (
 const nvidiaGpuResourcePrefix = "nvidia.com/"
 
 // GuestReadyNodeLabel marks a node whose kata-image-puller has reconciled the
-// c8s guest. Without it kata-runtime still resolves the stock guest — see
-// docs/pitfalls.md, "A kata pod placed before the guest drop-in exists".
+// c8s guest. Without it kata-runtime still resolves the stock guest for a
+// kata pod placed before the guest drop-in exists.
 const GuestReadyNodeLabel = "confidential.ai/kata-guest-ready"
 
 // Config tunes the injector.
@@ -691,8 +691,8 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 
 	// Only the webhook may place a container under the reserved c8s-cert name.
 	// The init sidecar is rebuilt below (injectInitContainers), but a
-	// regular/ephemeral collision cannot be, so reject it. See docs/pitfalls.md —
-	// "get-cert injection integrity is name-based".
+	// regular/ephemeral collision cannot be, so reject it: get-cert injection
+	// integrity is name-based.
 	if inj != nil {
 		if err := rejectReservedCertContainer(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
@@ -947,8 +947,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		ensureVolume(pod, vol)
 		// The inventory socket is group-owned by InventorySocketGID and the non-root
 		// get-cert sidecar connects to it; without this supplemental group the
-		// connect fails closed and the pod hangs on its initial cert
-		// (docs/pitfalls.md).
+		// connect fails closed and the pod hangs on its initial cert.
 		ensureSupplementalGroup(pod, workloadclaims.InventorySocketGID)
 	}
 

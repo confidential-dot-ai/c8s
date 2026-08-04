@@ -197,8 +197,8 @@ Combination gating wants a point where the pod is complete and the decision is
 worth blocking on. **Secret release is that point** ([`secrets.md`](secrets.md)):
 it happens once every main container is up, so it can require a whole entry
 rather than membership. That gates a secret, not container start — making a
-combination itself *attested* is the RTMR3 per-workload-measurement path tracked
-in [`THREAT_MODEL.md`](THREAT_MODEL.md), and is out of scope here.
+combination itself *attested* is the RTMR3 per-workload-measurement path, which
+is not implemented and is out of scope here.
 
 ### The injected-container carve-out
 

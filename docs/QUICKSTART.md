@@ -134,7 +134,6 @@ On kata clusters, also raise kubelet's `runtime-request-timeout` (default
 kata timeout)`, and a slow path — cold registry, a multi-GB model image
 guest-pulled inside the VM — hits the 2 m wall with the cause hidden. RKE2:
 `kubelet-arg: runtime-request-timeout=20m` in `/etc/rancher/rke2/config.yaml`.
-Details: docs/pitfalls.md "kubelet's runtime-request-timeout".
 
 ## Certificate path
 
@@ -149,8 +148,7 @@ URL values.
 
 The chart's RA-TLS handshakes accept any TEE-attested peer unless the
 operator pins `cds.measurements` and `ratlsMesh.measurements` to the
-expected launch digests. Leave these empty only on a trusted Pod network;
-see docs/THREAT_MODEL.md for the threat surface.
+expected launch digests. Leave these empty only on a trusted Pod network.
 
 ## Workload opt-in
 
@@ -168,4 +166,3 @@ They write `tls.crt` and `tls.key` into `/etc/c8s/certs`.
 See:
 
 - `docs/DEMO.md` for a minimal demo flow.
-- `docs/THREAT_MODEL.md` for what the chart does and does not prove.

@@ -33,8 +33,8 @@ package policymonitor
 // inode revalidation as backstop for dropped events) ends the
 // generation, and the next one re-creates the dir if needed, re-Adds,
 // and re-runs the seed pass so bundles created in the gap still get a
-// decision. See docs/pitfalls.md — "kata-agent replaces
-// /run/kata-containers at sandbox creation".
+// decision. kata-agent replaces /run/kata-containers at sandbox
+// creation.
 
 import (
 	"context"

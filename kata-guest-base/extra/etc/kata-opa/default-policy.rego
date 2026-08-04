@@ -100,7 +100,7 @@ default WriteStreamRequest := false
 # inject files into the guest fs, but Exec/ReadStream/WriteStream (live
 # host access to a running container) stay denied and SetPolicy stays
 # denied. Follow-up: a path-scoped rule limiting dest to /run/kata-
-# containers/ (tracked in docs/pitfalls.md).
+# containers/.
 default CopyFileRequest := true
 
 default SignalProcessRequest := true

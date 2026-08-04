@@ -230,9 +230,7 @@ be captured by the in-guest mesh's inbound mTLS redirect and be unreachable
 to external clients. The baked guest env exempts the front-door port
 (`C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443`) so external TLS clients reach
 tls-lb, and `kubectl port-forward` / the host-side CLI reach CDS's RA-TLS
-listener. The trade-off (8443 is unmeshed inbound in every guest) is
-documented in [`docs/pitfalls.md`](pitfalls.md) — "kata guests: inbound TCP
-port 8443 bypasses the mesh".
+listener. The trade-off is that 8443 is unmeshed inbound in every guest.
 
 ### Host-namespace pods are exempt
 
@@ -392,8 +390,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   On a non-SNP host, `kata-qemu` and `kata-clh` work but `kata-qemu-snp` pods
   **cannot start — and the failure is not a clean rejection**: kata
   auto-detects the host TEE, and on a host with a *different* TEE (e.g. Intel
-  TDX) QEMU aborts in an unbounded crash-loop (forensic detail in
-  [`docs/pitfalls.md`](pitfalls.md) "kata-qemu-snp on a non-SNP host"). That
+  TDX) QEMU aborts in an unbounded crash-loop. That
   is why the confidential RuntimeClasses schedule only to labelled nodes
   (next bullet): a mis-scheduled confidential pod stays `Pending` with a
   clear message instead of crash-looping QEMU.
@@ -634,16 +631,13 @@ the preStop-hook cleanup, but none of the sweep guarantees above.
   platform against host facts) would keep labels current on growing clusters
   and cover GitOps installs that never run the CLI.
 - An operator↔chart capability handshake so a chart that renders the GPU stack
-  refuses to pair with an operator image that predates the GPU webhook — see
-  docs/pitfalls.md "GPU webhook injection needs an operator image that has the
-  GPU code".
+  refuses to pair with an operator image that predates the GPU webhook.
 - Tested support for k3s and k0s.
 
 ## See also
 
 - [`docs/kata-gpu.md`](kata-gpu.md) — GPU usage with kata (confidential GPU passthrough).
 - [`docs/operator.md`](operator.md) — the c8s operator and embedded chart.
-- [`docs/THREAT_MODEL.md`](THREAT_MODEL.md) — what c8s enforces today.
 - `bare-metal-infra-management/docs/kata.md` and `docs/kata-cc-mode.md` — the
   Ansible-provisioned Kata stack this feature is consistent with.
 - `base-images/rke2-kata` — the node-as-host image that bakes the same Kata

@@ -148,8 +148,8 @@ cds:
   ## bootstrap allowlist binds to the cds digest that was `:main` at the
   ## moment of the kata-guest-base build (floating tag); pinning the deployed
   ## cds by digest decouples the deployment from `:main`'s movement. Same
-  ## pattern applies to every c8s image with a `.image.digest` field — see
-  ## docs/pitfalls.md ("Bootstrap allowlist binds to floating :main digests").
+  ## pattern applies to every c8s image with a `.image.digest` field — the
+  ## bootstrap allowlist binds to floating :main digests.
   image:
     repository: ghcr.io/confidential-dot-ai/cds
     tag: ""
@@ -198,7 +198,7 @@ cds:
   ## disruptions so a drain cannot silently take CDS down — the operator must
   ## delete the pod deliberately (a planned re-bootstrap). Set maxUnavailable: 1
   ## to allow drains if you accept the re-bootstrap, or enabled: false to remove
-  ## the PDB. See docs/THREAT_MODEL.md.
+  ## the PDB.
   podDisruptionBudget:
     enabled: true
     maxUnavailable: 0
@@ -458,9 +458,9 @@ kata:
   nodeSelector: {}
   ## Node label marking a host SEV-SNP capable, rendered as
   ## scheduling.nodeSelector on the confidential SNP RuntimeClasses so a
-  ## wrong-TEE node leaves pods Pending instead of crash-looping QEMU (see
-  ## docs/pitfalls.md "kata-qemu-snp on a non-SNP host"). Scheduling aid, not
-  ## a security boundary — attestation is. `c8s install --cvm-mode=pod` applies it to
+  ## wrong-TEE node leaves pods Pending instead of crash-looping QEMU
+  ## (kata-qemu-snp on a non-SNP host). Scheduling aid, not a security
+  ## boundary — attestation is. `c8s install --cvm-mode=pod` applies it to
   ## every kata-targeted node (declarative, no probe); -f/GitOps installs
   ## label out-of-band. Swept by `c8s uninstall` — keep in lockstep with
   ## snpCapabilityNodeLabel in cmd/c8s/uninstall.go.
@@ -468,7 +468,7 @@ kata:
   ## added key ANDs with it. Use `null` to drop the selector entirely; to swap
   ## in a capability label (e.g. NFD's
   ## feature.node.kubernetes.io/cpu-security.sev.snp.enabled) set `null` and
-  ## re-add. See docs/pitfalls.md — "Repointing `kata.snpNodeSelector` at NFD".
+  ## re-add — repointing `kata.snpNodeSelector` at NFD needs both steps.
   snpNodeSelector:
     confidential.ai/sev-snp: "true"
   ## TDX twin of snpNodeSelector: rendered as scheduling.nodeSelector on the
@@ -500,9 +500,9 @@ kata:
     repository: ghcr.io/confidential-dot-ai
     ## Default tracks the same floating tag c8s itself falls back to for
     ## non-release builds (see cmd/c8s/install.go fallbackImageTag). Release
-    ## installs SHOULD override this to a specific `<short-sha>` digest-stand-in
-    ## per docs/pitfalls.md "The bootstrap allowlist binds to floating :main
-    ## digests" — the puller has no `digest:` field yet (tracked there).
+    ## installs SHOULD override this to a specific `<short-sha>`
+    ## digest-stand-in: the bootstrap allowlist binds to floating :main
+    ## digests, and the puller has no `digest:` field yet.
     tag: main
     ## Use the `<tag>-debug` guest image variant, published in lockstep with
     ## every locked tag (.github/workflows/kata-guest-base.yml). Same build,
@@ -528,8 +528,7 @@ kata:
     ## `c8s install --image-pull-secret` covers both. Set this to use a
     ## different credential (must be type kubernetes.io/dockerconfigjson — the
     ## projection reads the `.dockerconfigjson` key). With both unset the pull
-    ## is anonymous — the default, and correct for the public artifact. See
-    ## docs/pitfalls.md "kata-guest-base puller credentials".
+    ## is anonymous — the default, and correct for the public artifact.
     ##
     ## NOTE: this is a HOST-SIDE operator credential — NOT in the TCB / SNP
     ## launch measurement. Rotating this Secret is a plain DS restart.
