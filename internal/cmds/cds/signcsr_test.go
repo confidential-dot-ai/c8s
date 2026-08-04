@@ -6,7 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -335,8 +334,6 @@ func TestSignCSR_EnforcesMeasurementAllowlist(t *testing.T) {
 	h.Measurements = map[string]bool{strings.ToLower(approved): true}
 	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
 
-	digest := sha256.Sum256([]byte("evidence"))
-	_ = digest
 	ear := signEAR(t, earKey, earClaimsLite{
 		Issuer:    "cds",
 		IssuedAt:  time.Now().Unix(),

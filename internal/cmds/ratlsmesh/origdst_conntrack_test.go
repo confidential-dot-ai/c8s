@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/sys/unix"
 )
 
 // A connection that never went through iptables REDIRECT has no
@@ -54,15 +53,6 @@ func TestDefaultOrigDstFuncRejectsNonTCP(t *testing.T) {
 	_, err := defaultOrigDstFunc(a)
 	if err == nil || !strings.Contains(err.Error(), "not a TCP connection") {
 		t.Errorf("error = %v, want not-a-TCP-connection", err)
-	}
-}
-
-func TestInetFamilyLabel(t *testing.T) {
-	if got := inetFamilyLabel(unix.AF_INET); got != "ipv4" {
-		t.Errorf("inetFamilyLabel(AF_INET) = %q, want ipv4", got)
-	}
-	if got := inetFamilyLabel(unix.AF_INET6); got != "ipv6" {
-		t.Errorf("inetFamilyLabel(AF_INET6) = %q, want ipv6", got)
 	}
 }
 

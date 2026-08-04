@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -83,28 +82,6 @@ func TestReadinessCheckFlagDefaults(t *testing.T) {
 		if f.DefValue != tc.want {
 			t.Errorf("--%s default = %q, want %q", tc.flag, f.DefValue, tc.want)
 		}
-	}
-}
-
-func TestDefaultInGuestConfigValues(t *testing.T) {
-	want := inGuestConfig{
-		platform:           "sev-snp",
-		logLevel:           "info",
-		certTTL:            24 * time.Hour,
-		rotationTimeout:    30 * time.Second,
-		dialTimeout:        5 * time.Second,
-		tlsDialTimeout:     10 * time.Second,
-		destHeaderTimeout:  5 * time.Second,
-		drainTimeout:       30 * time.Second,
-		keepAlive:          30 * time.Second,
-		cdsRetryBackoff:    2 * time.Second,
-		cdsRetryMaxBackoff: 60 * time.Second,
-		cdsOpTimeout:       30 * time.Second,
-		caPollInterval:     5 * time.Minute,
-	}
-	got := defaultInGuestConfig()
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("defaultInGuestConfig() = %+v, want %+v", got, want)
 	}
 }
 

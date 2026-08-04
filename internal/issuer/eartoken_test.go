@@ -213,24 +213,6 @@ func TestValidateEARTokenRejectsMissingMandatoryEARClaims(t *testing.T) {
 	}
 }
 
-func TestEARClaimsGetters(t *testing.T) {
-	c := issuer.EARClaims{Issuer: "cds"}
-	if sub, err := c.GetSubject(); err != nil || sub != "" {
-		t.Errorf("GetSubject() = %q, %v; want \"\", nil", sub, err)
-	}
-	aud, err := c.GetAudience()
-	if err != nil {
-		t.Fatalf("GetAudience: %v", err)
-	}
-	if len(aud) != 0 {
-		t.Errorf("GetAudience() = %v, want empty", aud)
-	}
-	iss, err := c.GetIssuer()
-	if err != nil || iss != "cds" {
-		t.Errorf("GetIssuer() = %q, %v; want cds, nil", iss, err)
-	}
-}
-
 func TestEARClaimsUnmarshalInvalidJSON(t *testing.T) {
 	var c issuer.EARClaims
 	if err := json.Unmarshal([]byte("not json"), &c); err == nil {

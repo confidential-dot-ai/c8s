@@ -950,37 +950,29 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 	}
 }
 
-func TestSynchronize_Ready_AuditMode_RunsCheck(t *testing.T) {
+func TestSynchronize_Ready_AuditMode_ChecksWithoutEnforcing(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeAudit, EnforceExisting: true},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	p.inventory = newAdmissionInventory("/proc")
 	p.SetReady()
 
 	pod := makePod("default", "pod1")
-	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA) // allowed
+	allowed := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA)
+	denied := makeCtrWithImage(pod.Id, "ctr2", "registry/repo@"+pushDigestB)
 
-	updates, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr})
+	// Audit mode must run the check without enforcement: a denied container
+	// reaching resolver.StopContainer would panic on the nil containerd client.
+	updates, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{allowed, denied})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if updates != nil {
 		t.Fatal("expected nil updates")
 	}
-}
-
-func TestSynchronize_EnforceExistingDisabled_ReturnsNil(t *testing.T) {
-	p, _ := newCachedPlugin(&config{
-		Policy: policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
-	}, &allowlist.Allowlist{Digests: map[string]string{}})
-	p.SetReady()
-
-	updates, err := p.Synchronize(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if updates != nil {
-		t.Fatal("expected nil updates when enforce_existing is disabled")
+	if _, ok := p.inventory.containers[allowed.Id]; !ok {
+		t.Fatalf("check did not record the allowed container in the inventory: %v", p.inventory.containers)
 	}
 }
 

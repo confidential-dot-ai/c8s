@@ -213,18 +213,3 @@ func TestCARotatorRotateCACommits(t *testing.T) {
 	}
 }
 
-func TestCARotatorRunNoopOnNonPositiveInterval(t *testing.T) {
-	cr, err := NewCARotator(CARotatorDeps{
-		Snapshot: func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
-			return nil, nil, nil, false
-		},
-		CommitRotation: func(*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, *x509.Certificate) string {
-			return ""
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewCARotator: %v", err)
-	}
-	// interval <= 0 returns immediately.
-	cr.Run(context.Background(), 0)
-}

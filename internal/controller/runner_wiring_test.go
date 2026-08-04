@@ -201,41 +201,52 @@ func TestWebhookCertRotatorLogsOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		certDir := t.TempDir()
 		rec := newLogRecorder()
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			_ = webhookCertRotator(ca, []string{"svc.ns.svc"}, t.TempDir(), leafTTL, rec.logger())(ctx)
+			_ = webhookCertRotator(ca, []string{"svc.ns.svc"}, certDir, leafTTL, rec.logger())(ctx)
 			close(done)
 		}()
 		e := waitLogEntry(t, rec)
 		stopRotator(t, cancel, done)
 
-		if e.msg != "rotated webhook serving cert" || e.err != nil {
-			t.Fatalf("entry = %+v, want the rotation success message", e)
+		if e.err != nil {
+			t.Fatalf("entry = %+v, want a success entry", e)
+		}
+		// The rotation's observable outcome: a serving pair on disk.
+		for _, f := range []string{"tls.crt", "tls.key"} {
+			if _, err := os.Stat(filepath.Join(certDir, f)); err != nil {
+				t.Fatalf("rotated %s not written: %v", f, err)
+			}
 		}
 		if next, ok := e.kv["next"].(time.Duration); !ok || next != wantInterval {
-			t.Fatalf("next = %v, want %v", e.kv["next"], wantInterval)
+			t.Fatalf("next = %v, want %v (leafTTL*2/3)", e.kv["next"], wantInterval)
 		}
 	})
 
 	t.Run("failure retries sooner", func(t *testing.T) {
+		certDir := t.TempDir()
 		rec := newLogRecorder()
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
 			// No hostnames: every rotation attempt fails.
-			_ = webhookCertRotator(nil, nil, t.TempDir(), leafTTL, rec.logger())(ctx)
+			_ = webhookCertRotator(nil, nil, certDir, leafTTL, rec.logger())(ctx)
 			close(done)
 		}()
 		e := waitLogEntry(t, rec)
 		stopRotator(t, cancel, done)
 
-		if e.msg != "webhook serving-cert rotation failed; retrying soon" || e.err == nil {
-			t.Fatalf("entry = %+v, want the rotation failure message with its error", e)
+		if e.err == nil {
+			t.Fatalf("entry = %+v, want a failure entry carrying its error", e)
+		}
+		if _, err := os.Stat(filepath.Join(certDir, "tls.crt")); err == nil {
+			t.Fatal("failed rotation still wrote a serving cert")
 		}
 		if retry, ok := e.kv["retry"].(time.Duration); !ok || retry != wantRetry {
-			t.Fatalf("retry = %v, want %v", e.kv["retry"], wantRetry)
+			t.Fatalf("retry = %v, want %v (fast retry, not the full interval)", e.kv["retry"], wantRetry)
 		}
 	})
 }

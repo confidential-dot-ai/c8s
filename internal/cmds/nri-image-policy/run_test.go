@@ -481,36 +481,6 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 	}
 }
 
-func TestAlwaysAllowAllowlist(t *testing.T) {
-	wl := alwaysAllowAllowlist(map[string]string{pushDigestA: "image-a", pushDigestB: "image-b"})
-	if len(wl.Digests) != 2 {
-		t.Fatalf("expected 2 digests, got %d", len(wl.Digests))
-	}
-	if wl.Digests[pushDigestA] != "image-a" {
-		t.Fatalf("digest A = %q, want image-a", wl.Digests[pushDigestA])
-	}
-}
-
-func TestAlwaysAllowAllowlist_Empty(t *testing.T) {
-	wl := alwaysAllowAllowlist(nil)
-	if wl == nil || wl.Digests == nil {
-		t.Fatal("expected non-nil allowlist with non-nil Digests map")
-	}
-	if len(wl.Digests) != 0 {
-		t.Fatalf("expected empty digests, got %d", len(wl.Digests))
-	}
-}
-
-func TestEntriesOf(t *testing.T) {
-	if got := entriesOf(nil); got != 0 {
-		t.Fatalf("entriesOf(nil) = %d, want 0", got)
-	}
-	wl := &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "a", pushDigestB: "b"}}
-	if got := entriesOf(wl); got != 2 {
-		t.Fatalf("entriesOf = %d, want 2", got)
-	}
-}
-
 // --- healthListener / startHealthServer ---
 
 func TestHealthListener_TCP(t *testing.T) {

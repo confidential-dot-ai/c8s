@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"errors"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -85,8 +87,8 @@ func TestReadinessCheckConnectionErrorMessage(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error against a closed port")
 		}
-		if !strings.Contains(err.Error(), "failed") || !strings.Contains(err.Error(), "connect") {
-			t.Fatalf("error = %v, want the wrapped connection error", err)
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Fatalf("error = %v, want a wrapped ECONNREFUSED", err)
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("readiness-check did not return promptly on connection error")
