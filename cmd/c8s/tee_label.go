@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,20 +34,11 @@ import (
 // or stripped by this path.
 //
 // Labelling is idempotent (kubectl --overwrite; a node already carrying the
-// pair is a server-side no-op). Like the preflights, this reads the chart's
-// default values and only runs on the default install path; -f installs own
-// their node labels (caller skips).
-func autoLabelTEENodes(ctx context.Context, chartPath, hardwarePlatform string) error {
-	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
-	if err != nil {
-		return fmt.Errorf("helm show values %q: %w", chartPath, err)
-	}
-	var tree map[string]any
-	if err := yaml.Unmarshal(out, &tree); err != nil {
-		return fmt.Errorf("parse chart values: %w", err)
-	}
-
-	plan, ok, err := planTEELabels(tree, hardwarePlatform)
+// pair is a server-side no-op). values is the effective tree (chart defaults
+// + -f + computed --set); the caller skips this only when a -f file sets the
+// platform's own selector — see docs/kata.md "Installing".
+func autoLabelTEENodes(ctx context.Context, values map[string]any, hardwarePlatform string) error {
+	plan, ok, err := planTEELabels(values, hardwarePlatform)
 	if err != nil {
 		return err
 	}
@@ -80,6 +72,56 @@ func autoLabelTEENodes(ctx context.Context, chartPath, hardwarePlatform string) 
 		return fmt.Errorf("labelling %s nodes: %w", hardwarePlatform, err)
 	}
 	return nil
+}
+
+// teeSelectorKey names the kata.* values key holding a platform's node
+// selector — the label the confidential RuntimeClasses schedule on.
+func teeSelectorKey(hardwarePlatform string) string {
+	if hardwarePlatform == "tdx" {
+		return "tdxNodeSelector"
+	}
+	return "snpNodeSelector"
+}
+
+// valuesFilesSetTEESelector reports whether any -f values file explicitly sets
+// the platform's kata.*NodeSelector. When one does, that file owns the TEE node
+// label (NFD, provisioning, GitOps) and auto-labelling stands aside; merely
+// supplying some -f does not. Mirrors valuesFilesSetDistro.
+func valuesFilesSetTEESelector(files []string, hardwarePlatform string) (bool, error) {
+	key := teeSelectorKey(hardwarePlatform)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return false, fmt.Errorf("read values file %q: %w", f, err)
+		}
+		var tree map[string]any
+		if err := yaml.Unmarshal(data, &tree); err != nil {
+			return false, fmt.Errorf("parse values file %q: %w", f, err)
+		}
+		kata, ok := tree["kata"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, set := kata[key]; set {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// reportTEELabelSkip says auto-labelling stood aside and names the label the
+// operator must apply. Silence here is what left confidential pods Pending
+// until `helm --wait` timed out (docs/pitfalls.md).
+func reportTEELabelSkip(w io.Writer, values map[string]any, hardwarePlatform string) {
+	key := teeSelectorKey(hardwarePlatform)
+	sel, _ := nestedMap(values, "kata", key)
+	selector, ok := labelSelector(sel)
+	if !ok {
+		fmt.Fprintf(w, "+ kata.%s is set by -f and selects no label: confidential scheduling is unrestricted, nothing to label\n", key)
+		return
+	}
+	fmt.Fprintf(w, "+ kata.%s is set by -f: skipping automatic %s node labelling — label the nodes yourself:\n", key, hardwarePlatform)
+	fmt.Fprintf(w, "    kubectl label node <node> %s\n", strings.ReplaceAll(selector, ",", " "))
 }
 
 // teeLabelPlan is the label work a given --hardware-platform implies:

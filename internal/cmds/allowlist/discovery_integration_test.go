@@ -125,7 +125,7 @@ func runCmdWith(verify localverify.VerifyFunc, args ...string) (string, string, 
 
 // TestListThroughTLSLB is the regression test for `c8s allowlist list` against
 // a tls-lb front door: the serving cert has no RA-TLS extension (OID
-// 1.3.6.1.4.1.59888.1.1), so the CLI must verify the LB's discovery document
+// 1.3.6.1.4.1.66378.1.1), so the CLI must verify the LB's discovery document
 // instead of failing the handshake, then read the allowlist over the pinned
 // cert.
 func TestListThroughTLSLB(t *testing.T) {

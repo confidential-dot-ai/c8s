@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -331,7 +332,7 @@ func TestAddRejectsWildcardImage(t *testing.T) {
 func TestWriteRequiresOperatorCredential(t *testing.T) {
 	url, _ := recordingCDS(t)
 	// No key and no env: a real (non-dry-run) add must fail before writing.
-	t.Setenv(envOperatorKey, "")
+	t.Setenv(cdsconn.EnvOperatorKey, "")
 	_, _, err := runCmd("add", digA, "registry/app@"+digA, "--url", url, "--insecure")
 	if err == nil {
 		t.Fatal("expected add without an operator key to fail")
@@ -341,9 +342,9 @@ func TestWriteRequiresOperatorCredential(t *testing.T) {
 func TestSignerPrefersFlagOverEnv(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	t.Setenv(envOperatorKey, filepath.Join(dir, "nonexistent.key"))
+	t.Setenv(cdsconn.EnvOperatorKey, filepath.Join(dir, "nonexistent.key"))
 
-	o := &options{operatorKey: keyPath}
+	o := &options{Options: cdsconn.Options{OperatorKey: keyPath}}
 	if _, err := o.signer(); err != nil {
 		t.Fatalf("flag should take precedence over (broken) env, got %v", err)
 	}
@@ -352,7 +353,7 @@ func TestSignerPrefersFlagOverEnv(t *testing.T) {
 func TestSignerFallsBackToEnv(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeOperatorKey(t, dir)
-	t.Setenv(envOperatorKey, keyPath)
+	t.Setenv(cdsconn.EnvOperatorKey, keyPath)
 
 	o := &options{} // no flags
 	if _, err := o.signer(); err != nil {
@@ -393,22 +394,9 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-// A target serving no discovery document falls back to direct RA-TLS
-// verification with a usable client, not an error and not a nil client.
-func TestHTTPSClientFallsBackWithoutDiscovery(t *testing.T) {
-	o := &options{url: "https://127.0.0.1:1", timeout: 2 * time.Second, verify: stubVerify}
-	hc, err := o.httpsClient(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("httpsClient: %v", err)
-	}
-	if hc == nil {
-		t.Fatal("fallback RA-TLS client is nil")
-	}
-}
-
 func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	const warning = "no --measurements set"
-	base := options{url: "https://127.0.0.1:1", timeout: 2 * time.Second, verify: stubVerify, output: "text"}
+	base := options{Options: cdsconn.Options{URL: "https://127.0.0.1:1", Timeout: 2 * time.Second, Verify: stubVerify}, output: "text"}
 
 	t.Run("unpinned warns", func(t *testing.T) {
 		o := base
@@ -424,7 +412,7 @@ func TestClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 
 	t.Run("pinned does not warn", func(t *testing.T) {
 		o := base
-		o.measurements = []string{strings.Repeat("ab", 48)}
+		o.Measurements = []string{strings.Repeat("ab", 48)}
 		out := captureStderr(t, func() {
 			if _, err := o.client(context.Background()); err != nil {
 				t.Errorf("client: %v", err)
@@ -483,6 +471,48 @@ func TestNewCmdWiring(t *testing.T) {
 		}
 	}
 	_ = fmt.Sprint(cmd.Use)
+}
+
+func TestHelpDistinguishesCDSIssuedAndWebPKITLSLB(t *testing.T) {
+	cmd := NewCmd()
+	wantLong := `Read and mutate the image allowlist that CDS serves and nri-image-policy
+enforces on every node. The allowlist has two layers: a digest floor (images
+admitted by digest alone) and named workload entries under 'allowlist workload'
+(each pins an init/main container set with per-container argv and path policy).
+
+Reads (list, export, diff, workload list/get, lint, inspect-image) are
+unauthenticated. Writes (add, remove, upload, workload apply/edit/delete) are
+signed with an operator EC private key you supply to THIS CLI via --operator-key
+(or C8S_OPERATOR_KEY). The private key never leaves the CLI — it signs a
+short-lived token that CDS verifies against the operator public keys it was
+configured to pin separately (cds --operator-keys, set by 'c8s install
+--operator-keys').
+
+The default chart publishes /allowlist through tls-lb. Point --url at that
+front door only when it uses CDS-issued public TLS (discovery reports
+public_tls.mode=cds), and use the tls-lb launch digest with --measurements. A
+WebPKI front door cannot yet bind its public certificate to the attestation
+evidence, so this CLI refuses it; use a direct CDS RA-TLS URL instead (for
+example through a port-forward) and pin the CDS launch digest. To generate an
+operator key and pin its public half, see the c8s README ("Managing the image
+allowlist").`
+	if cmd.Long != wantLong {
+		t.Fatalf("allowlist long help mismatch\n--- got ---\n%s\n--- want ---\n%s", cmd.Long, wantLong)
+	}
+
+	wantFlags := map[string]string{
+		"url":          "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound",
+		"measurements": "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)",
+	}
+	for name, want := range wantFlags {
+		flag := cmd.PersistentFlags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("persistent flag %q missing", name)
+		}
+		if flag.Usage != want {
+			t.Errorf("--%s help = %q, want %q", name, flag.Usage, want)
+		}
+	}
 }
 
 // TestWorkloadCmdWiring pins the workload subcommand tree.

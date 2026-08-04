@@ -95,7 +95,7 @@ func (c Client) fetch(ctx context.Context, ifNoneMatch string) (*allowlist.Allow
 	if err != nil {
 		return nil, "", false, err
 	}
-	al, err := allowlist.ParseJSON(body)
+	al, err := allowlist.ParseServedJSON(body)
 	if err != nil {
 		return nil, "", false, err
 	}

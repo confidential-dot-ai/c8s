@@ -14,7 +14,6 @@ func TestDiffAllowlistsWorkloads(t *testing.T) {
 			Digest:  mustDigest(t, digB),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{argv}},
 			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyDeny},
 		}
 	}
 	live := &pkgallowlist.Allowlist{
@@ -88,7 +87,6 @@ func TestPrintDiffTextSectionPlaceholders(t *testing.T) {
 			Digest:  mustDigest(t, digB),
 			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{argv}},
 			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			Paths:   pkgallowlist.PathPolicy{Policy: pkgallowlist.PolicyDeny},
 		}
 	}
 	base := func(ctr pkgallowlist.Container, digests map[string]string) *pkgallowlist.Allowlist {

@@ -43,19 +43,11 @@ type VerifyPolicy struct {
 	// check is performed (TLS 1.3 already provides replay protection).
 	Nonce []byte
 
-	// Config-claims pins (docs/ratls.md). When set, the
-	// certificate must carry a config-claims extension whose corresponding
-	// digest byte-equals the pinned value:
-	//   OperatorKeysDigest — operatorauth.KeySetDigest of the expected set
-	//   SeedDigest         — allowlist.CanonicalDigest of the expected seed
-	//   WorkloadDigest     — canonical workload image-digest hash (docs/ratls.md)
-	// ratls.UnsetDigest() pins "not applicable". Empty = claims are folded
-	// into the REPORTDATA check when present but that field is not enforced.
-	// Only [VerifyCert] can enforce these (claims ride the certificate);
-	// [VerifyAttestation] fails closed when any is set.
-	OperatorKeysDigest []byte
-	SeedDigest         []byte
-	WorkloadDigest     []byte
+	// SandboxID, when set, is the CRI pod sandbox ID the certificate's
+	// sandbox-ID extension must carry (docs/ratls.md, "Sandbox identity").
+	// Only [VerifyCert] can enforce it (the ID rides the certificate);
+	// [VerifyAttestation] fails closed when it is set.
+	SandboxID string
 
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
@@ -76,7 +68,7 @@ type VerifyPolicy struct {
 	// RequireCAEvidence selects the production trust mode for the dual CA /
 	// RA-TLS peer verifier (dualVerifyPeerCallback). When false (default), a
 	// peer whose leaf chains to a configured CA is accepted on the CA chain
-	// alone (config-claims pins are still enforced) — the legacy/dev mode that
+	// alone (a sandbox-ID pin is still enforced) — the legacy/dev mode that
 	// eases rolling upgrades and CA rotation. When true, a valid CA chain is no
 	// longer sufficient: the leaf must ALSO carry re-verifiable RA-TLS evidence
 	// (issuer.SignCSR copies the requester's nonce-free .1.1 extension onto the
@@ -122,9 +114,9 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 	if policy.AttestationApiURL == "" {
 		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
-	if len(policy.OperatorKeysDigest) > 0 || len(policy.SeedDigest) > 0 || len(policy.WorkloadDigest) > 0 {
-		// Claims ride the certificate, which this path never sees.
-		return nil, fmt.Errorf("%w: config-claims pins require VerifyCert", ErrPolicyViolation)
+	if policy.SandboxID != "" {
+		// The ID rides the certificate, which this path never sees.
+		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
@@ -136,14 +128,13 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 }
 
 // VerifyCert verifies an RA-TLS certificate: it extracts the TEE attestation
-// extension and verifies it against the cert's public key. A config-claims
-// extension, when carried, is folded into the expected REPORTDATA (the
-// evidence binds it) and checked against the policy's config-claims pins
-// (docs/ratls.md).
+// extension and verifies it against the cert's public key.
 //
 // Trust comes from the hardware attestation chain (AMD ARK → ASK → VCEK, or
 // Intel equivalent for TDX) as verified by the same-TCB attestation-api, not
-// from any certificate authority signature.
+// from any certificate authority signature. A sandbox-ID pin therefore cannot
+// be enforced here: the ID rests on CDS's signature over the leaf, which this
+// path does not check (docs/ratls.md, "Sandbox identity").
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
@@ -162,18 +153,11 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	if policy.AttestationApiURL == "" {
 		return nil, fmt.Errorf("%w: attestation-api URL is required", ErrInvalidReport)
 	}
-
-	claimsBytes, claimsPresent := configClaimsExtension(cert)
-	if claimsPresent && len(claimsBytes) == 0 {
-		// An empty value would fall through to the claims-free binding while
-		// still looking claims-bearing to anyone gating on extension presence.
-		return nil, fmt.Errorf("%w: config-claims extension present but empty", ErrInvalidReport)
-	}
-	if err := checkClaimsPins(claimsBytes, policy); err != nil {
-		return nil, err
+	if policy.SandboxID != "" {
+		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
-	expectedReportData, err := ReportDataForKeyAndClaims(pub, claimsBytes, nonce)
+	expectedReportData, err := ReportDataForKey(pub, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("ratls: compute expected REPORTDATA: %w", err)
 	}
@@ -181,37 +165,26 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	return verifyReport(att, policy, expectedReportData)
 }
 
-// checkClaimsPins enforces the policy's config-claims pins against the raw
-// claims extension bytes. INVARIANT: a pin can only reject; acceptance still
-// requires the evidence to bind claimsBytes (the REPORTDATA check downstream).
-func checkClaimsPins(claimsBytes []byte, policy *VerifyPolicy) error {
-	pins := []struct {
-		name     string
-		expected []byte
-		attested func(*ConfigClaims) []byte
-	}{
-		{"operator-keys", policy.OperatorKeysDigest, func(c *ConfigClaims) []byte { return c.OperatorKeysDigest }},
-		{"allowlist-seed", policy.SeedDigest, func(c *ConfigClaims) []byte { return c.SeedDigest }},
-		{"workload", policy.WorkloadDigest, func(c *ConfigClaims) []byte { return c.WorkloadDigest }},
-	}
-	anyPinned := false
-	for _, p := range pins {
-		anyPinned = anyPinned || len(p.expected) > 0
-	}
-	if !anyPinned {
+// CheckSandboxPin enforces expectedID against a leaf whose CA chain the caller
+// has ALREADY verified. The ID is stamped by CDS into the signed area after it
+// verifies the inventory-signed sandbox token, so the mesh CA signature — not
+// the hardware evidence — is what authenticates it. Calling this on an
+// unverified (e.g. self-signed) leaf would pin an attacker-chosen string.
+//
+// Empty expectedID is a no-op, so callers can invoke it unconditionally.
+func CheckSandboxPin(cert *x509.Certificate, expectedID string) error {
+	if expectedID == "" {
 		return nil
 	}
-	if len(claimsBytes) == 0 {
-		return fmt.Errorf("%w: config-claims pin set but certificate carries no config-claims extension", ErrPolicyViolation)
-	}
-	claims, err := UnmarshalConfigClaims(claimsBytes)
+	id, err := SandboxIDFromCert(cert)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	}
-	for _, p := range pins {
-		if len(p.expected) > 0 && !bytes.Equal(p.attested(claims), p.expected) {
-			return fmt.Errorf("%w: attested %s digest %x does not match pinned %x", ErrPolicyViolation, p.name, p.attested(claims), p.expected)
-		}
+	if id == "" {
+		return fmt.Errorf("%w: sandbox-ID pin set but certificate carries no sandbox-ID extension", ErrPolicyViolation)
+	}
+	if id != expectedID {
+		return fmt.Errorf("%w: certificate sandbox ID %q does not match pinned %q", ErrPolicyViolation, id, expectedID)
 	}
 	return nil
 }

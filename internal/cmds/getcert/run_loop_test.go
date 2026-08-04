@@ -157,9 +157,9 @@ func TestCDSHTTPClientWarnsOnlyWithoutMeasurements(t *testing.T) {
 	})
 }
 
-// The request log reports whether a workload claim is bound; the claims-free
+// The request log reports whether a sandbox token is bound; the token-free
 // flow must report false.
-func TestObtainCertLogsClaimsFreeRequest(t *testing.T) {
+func TestObtainCertLogsTokenFreeRequest(t *testing.T) {
 	c := captureDefaultLogger(t)
 	chain := testIssuedChainPEM(t)
 	cdsURL, attURL := startFakeServers(t, chain)
@@ -178,12 +178,12 @@ func TestObtainCertLogsClaimsFreeRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("request log record missing")
 	}
-	v, ok := rec.attrs["workload_claims"]
+	v, ok := rec.attrs["sandbox_token"]
 	if !ok || v.Kind() != slog.KindBool {
-		t.Fatalf("workload_claims attr = %v, want a bool", v)
+		t.Fatalf("sandbox_token attr = %v, want a bool", v)
 	}
 	if v.Bool() {
-		t.Fatal("workload_claims = true for a claims-free request, want false")
+		t.Fatal("sandbox_token = true for a token-free request, want false")
 	}
 }
 

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 
@@ -16,6 +18,11 @@ import (
 
 // config represents the plugin configuration.
 type config struct {
+	// Platform types the RA-TLS identity the sandbox-digests endpoint serves
+	// to CDS, as an attestation-api platform string; empty means snp. It must
+	// name the node's actual CPU TEE — CDS fails closed when the certificate's
+	// TEE type and the evidence envelope's platform disagree.
+	Platform       string               `yaml:"platform"`
 	Plugin         pluginConfig         `yaml:"plugin"`
 	Allowlist      allowlistConfig      `yaml:"allowlist"`
 	Containerd     containerdConfig     `yaml:"containerd"`
@@ -32,17 +39,22 @@ type pluginConfig struct {
 	HealthAddr string `yaml:"health_addr"`
 }
 
-// workloadClaimsConfig configures the node-CVM workload-claims broker
+// workloadClaimsConfig configures the node-CVM admission inventory
 // (docs/ratls.md).
 type workloadClaimsConfig struct {
-	// SocketDir is the host directory the broker creates its socket in (as the
+	// SocketDir is the host directory the inventory creates its socket in (as the
 	// compiled workloadclaims.SocketName); the webhook mounts it into c8s-cert
 	// sidecars so get-cert can fetch its pod's digests. The filename is fixed
-	// so get-cert can bake the dial path — see workloadclaims.BrokerEndpoint.
+	// so get-cert can bake the dial path — see workloadclaims.InventoryEndpoint.
 	SocketDir string `yaml:"socket_dir"`
 	// ProcRoot is the /proc mount used to resolve a caller PID to its
 	// container cgroup. Defaults to "/proc".
 	ProcRoot string `yaml:"proc_root"`
+	// AdvertiseHost is the node address CDS dials to reach this inventory's
+	// digests endpoint. Empty reads it from NodeIPFile, which the installer
+	// writes from its own status.hostIP — the plugin is a host process and has
+	// no downward API of its own.
+	AdvertiseHost string `yaml:"advertise_host"`
 }
 
 // allowlistConfig groups the digest-source mechanisms.
@@ -117,6 +129,10 @@ type loggingConfig struct {
 const defaultPullInterval = 30 * time.Second
 const defaultPullTimeout = 30 * time.Second
 
+// NodeIPFile is the filename, inside SocketDir, the installer writes this
+// node's address to. Read only when advertise_host is unset.
+const NodeIPFile = "node-ip"
+
 // loadConfig loads configuration from a YAML file.
 func loadConfig(path string) (*config, error) {
 	data, err := os.ReadFile(path)
@@ -156,6 +172,18 @@ func loadConfig(path string) (*config, error) {
 	return cfg, nil
 }
 
+// NormalizedPlatform folds the az-/gcp- variants onto the two TEE families the
+// RA-TLS extension records, matching what CDS does with its own
+// --ratls-platform. Defaulting here rather than in loadConfig keeps every
+// construction path on the same value, including callers that build a config
+// literal and validate it directly.
+func (c *config) NormalizedPlatform() string {
+	if strings.TrimSpace(c.Platform) == "" {
+		return ratls.NormalizePlatform(string(types.PlatformSnp))
+	}
+	return ratls.NormalizePlatform(c.Platform)
+}
+
 // PullEnabled reports whether the plugin should poll a remote CDS.
 func (c *config) PullEnabled() bool { return c.Allowlist.Pull.URL != "" }
 
@@ -166,6 +194,13 @@ func (c *config) AllowlistEnabled() bool {
 
 // Validate checks the configuration for errors.
 func (c *config) Validate() error {
+	// Reject at load rather than at the first CDS handshake: a wrong platform
+	// produces a peer-attestation failure on the CDS side that names the
+	// evidence platform, not this setting, so the cause is several hops from
+	// the symptom.
+	if err := ratls.ValidatePlatform(c.NormalizedPlatform()); err != nil {
+		return fmt.Errorf("platform %q is not a supported CPU TEE (want snp or tdx)", c.Platform)
+	}
 	if c.PullEnabled() && len(c.Allowlist.AlwaysAllow) == 0 {
 		return fmt.Errorf("allowlist.always_allow must be non-empty when pull is configured (cold-boot baseline)")
 	}
@@ -203,10 +238,10 @@ func (c *config) Validate() error {
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
 	}
-	// Both broker record sites sit under AllowlistEnabled, so without one the
-	// broker answers every get-cert fetch empty-handed, forever.
+	// Both inventory record sites sit under AllowlistEnabled, so without one the
+	// inventory answers every get-cert fetch empty-handed, forever.
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
-		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the broker only records digest-checked containers")
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the inventory only records digest-checked containers")
 	}
 	return validateLabelRules(c.Policy.LabelRules)
 }

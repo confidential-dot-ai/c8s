@@ -39,7 +39,7 @@ func decodeErr(t *testing.T, resp *http.Response) types.ErrorResponse {
 }
 
 func TestAttestationRejectsBadNonces(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	tests := []struct {
@@ -66,12 +66,21 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 	}
 }
 
-// TestAttestationAcceptsMinimumNonce: a nonce of exactly minNonceBytes is the
-// smallest accepted freshness input.
+// TestAttestationAcceptsMinimumNonce: on the tls-cert binding (pq=false), a
+// nonce of exactly minNonceBytes is the smallest accepted freshness input; the
+// default identity-bound PQ binding requires exactly 32 bytes instead.
 func TestAttestationAcceptsMinimumNonce(t *testing.T) {
-	ts := newTestServer()
+	certPath, _ := writeTestLeaf(t)
+	srv := NewServer(Config{
+		Evidence: FixtureEvidenceProvider{
+			Raw:      json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
+			Platform: "snp",
+		},
+		ServingCertFile: certPath,
+	})
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?nonce=" + b64url(make([]byte, minNonceBytes)))
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?pq=false&nonce=" + b64url(make([]byte, minNonceBytes)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,17 +109,6 @@ func TestCDSCertRouteAbsentWithoutCert(t *testing.T) {
 // TestReportDataBindings pins the exact report_data constructions, including
 // nonces larger than the key material they are hashed with.
 func TestReportDataBindings(t *testing.T) {
-	t.Run("session key binding", func(t *testing.T) {
-		pub := overenc.PublicKey{
-			X25519:   bytes.Repeat([]byte{1}, overenc.X25519PubBytes),
-			MLKEM768: bytes.Repeat([]byte{2}, overenc.MLKEM768EKBytes),
-		}
-		nonce := bytes.Repeat([]byte{3}, 4096)
-		want := sha512.Sum384(append(append(append([]byte{}, pub.X25519...), pub.MLKEM768...), nonce...))
-		if got := reportDataFor(pub, nonce); !bytes.Equal(got, want[:]) {
-			t.Fatalf("reportDataFor = %x, want %x", got, want)
-		}
-	})
 	t.Run("tls cert binding", func(t *testing.T) {
 		spki := bytes.Repeat([]byte{4}, 16)
 		nonce := bytes.Repeat([]byte{5}, 64)
@@ -123,7 +121,14 @@ func TestReportDataBindings(t *testing.T) {
 
 func TestAttestationEvidenceUnavailable(t *testing.T) {
 	certPath, _ := writeTestLeaf(t)
-	srv := NewServer(Config{Evidence: failingProvider{}, ServingCertFile: certPath})
+	identity := writeTestMeshIdentity(t)
+	srv := NewServer(Config{
+		Evidence:             failingProvider{},
+		ServingCertFile:      certPath,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -188,7 +193,7 @@ func TestServingLeafSPKIErrors(t *testing.T) {
 }
 
 func TestHandshakeRejectsInvalidJSON(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 	resp, err := http.Post(ts.URL+"/.well-known/c8s/handshake", "application/json", strings.NewReader("{nope"))
 	if err != nil {
@@ -203,7 +208,7 @@ func TestHandshakeRejectsInvalidJSON(t *testing.T) {
 }
 
 func TestHandshakeRejectsBadFieldEncoding(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	nonce := make([]byte, 32)
@@ -228,7 +233,7 @@ func TestHandshakeRejectsBadFieldEncoding(t *testing.T) {
 }
 
 func TestHandshakeRejectsBadKeyMaterial(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	nonce := make([]byte, 32)
@@ -254,7 +259,7 @@ func TestHandshakeRejectsBadKeyMaterial(t *testing.T) {
 }
 
 func TestTunnelRejectsMalformedRecords(t *testing.T) {
-	ts := newTestServer()
+	ts := newTestServer(t)
 	defer ts.Close()
 
 	post := func(t *testing.T, sessionID string, body []byte) *http.Response {
@@ -327,9 +332,13 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
-		Evidence: FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
-		Backend:  hb,
+		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA"}`), Platform: "snp", Generation: "genoa"},
+		Backend:              hb,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

@@ -167,7 +167,7 @@ func TestCertEnvelope(t *testing.T) {
 		if !bytes.Contains(evidence, []byte("attestation_report")) {
 			t.Errorf("evidence object missing the report: %s", evidence)
 		}
-		rd, err := ratls.ReportDataForKeyAndClaims(cert.PublicKey, nil, nil)
+		rd, err := ratls.ReportDataForKey(cert.PublicKey, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

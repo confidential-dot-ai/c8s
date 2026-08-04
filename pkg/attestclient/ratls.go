@@ -53,17 +53,16 @@ func TEETypeForPlatform(platform string) (ratls.TEEType, error) {
 	}
 }
 
-// AttestationExtensionForClaims builds a nonce-free RA-TLS attestation
-// extension binding pub and the config-claims DER via the local
-// attestation-api, for embedding in a CSR (docs/ratls.md). CDS copies the
-// extension onto the issued leaf, which is how a workload leaf carries hardware
-// evidence a verifier can check against the leaf's config-claims — the same
-// embed the mesh client uses for its own leaf (cdsclient.attestationExtension),
-// with the claims folded in. It is nonce-free by design: the serving cert
-// carries no per-request nonce, so [ratls.VerifyCert] recomputes the anchor
-// with nonce=nil. claimsDER nil binds the key alone.
-func (c Client) AttestationExtensionForClaims(ctx context.Context, attestationApiURL string, pub crypto.PublicKey, claimsDER []byte) (pkix.Extension, error) {
-	reportData, err := ratls.ReportDataForKeyAndClaims(pub, claimsDER, nil)
+// AttestationExtension builds a nonce-free RA-TLS attestation extension
+// binding pub via the local attestation-api, for embedding in a CSR
+// (docs/ratls.md). CDS copies the extension onto the issued leaf, which is how
+// a workload leaf carries hardware evidence a verifier can re-check — the same
+// embed the mesh client uses for its own leaf
+// (cdsclient.attestationExtension). It is nonce-free by design: the serving
+// cert carries no per-request nonce, so [ratls.VerifyCert] recomputes the
+// anchor with nonce=nil.
+func (c Client) AttestationExtension(ctx context.Context, attestationApiURL string, pub crypto.PublicKey) (pkix.Extension, error) {
+	reportData, err := ratls.ReportDataForKey(pub, nil)
 	if err != nil {
 		return pkix.Extension{}, err
 	}

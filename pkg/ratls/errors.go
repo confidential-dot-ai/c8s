@@ -12,7 +12,7 @@ var (
 	ErrKeyBinding = errors.New("ratls: REPORTDATA does not match key")
 
 	// ErrNotAttested indicates that a certificate does not contain
-	// the RA-TLS attestation extension (OID 1.3.6.1.4.1.59888.1.1).
+	// the RA-TLS attestation extension (OID 1.3.6.1.4.1.66378.1.1).
 	ErrNotAttested = errors.New("ratls: certificate missing RA-TLS extension")
 
 	// ErrSignatureInvalid indicates that the hardware attestation report's

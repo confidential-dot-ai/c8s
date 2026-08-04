@@ -4,22 +4,22 @@
 // The allowlist has two layers. Digests is the floor: a digest -> image-label
 // map whose images are admitted by digest alone. The measured guest seed and
 // standalone/injected component images live here. Workloads carries policy:
-// each named entry pins an init/main container set, and every container carries
-// entrypoint/cmd (argv) and path policy. Policy is always looked up by container
-// digest — the entry name and image labels are informational, never a
-// trust-bearing key, because the image reference a pod presents is chosen by the
-// untrusted host while the digest is bound to the bytes that run.
+// each named entry pins an init/main container set, every container carries
+// entrypoint/cmd (argv) policy, and the entry as a whole carries a secret-store
+// grant. Policy is always looked up by container digest — the entry name and
+// image labels are informational, never a trust-bearing key, because the image
+// reference a pod presents is chosen by the untrusted host while the digest is
+// bound to the bytes that run.
 //
 // Canonical is Go's json.Marshal of the normalized struct: fixed field order,
 // map keys sorted by encoding/json, container and path lists sorted by
-// normalize. CanonicalDigest (SHA-256 of that) is what CDS binds into its
-// attestation config-claims, so any nondeterminism would break the verifier
-// pin — normalize exists to remove it.
+// normalize. Workers compare it byte-for-byte across pulls, so any
+// nondeterminism would show up as spurious churn — normalize exists to remove
+// it.
 package allowlist
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -30,11 +30,11 @@ import (
 )
 
 // Schema identifies the allowlist document format. It is the first field of the
-// canonical form, so it is covered by CanonicalDigest and pinned by verifiers.
+// canonical form.
 const Schema = "c8s.allowlist/v1"
 
-// Policy values. Argv policies use Deny/Any/Exact; path policies use
-// Deny/Any/Allow.
+// Policy values. Argv policies use Deny/Any/Exact; secrets grants use
+// Deny/Allow — never Any (normalizeSecrets).
 const (
 	PolicyDeny  = "deny"
 	PolicyAny   = "any"
@@ -50,19 +50,22 @@ type Allowlist struct {
 }
 
 // Workload is a named policy entry. Label is an informational image reference.
+// Secrets is nil when the entry grants nothing, which is what a "deny" grant
+// normalizes to: an entry that releases nothing carries no "secrets" key at
+// all, so a consumer that does not know the field never sees it.
 type Workload struct {
-	Label          string      `json:"label,omitempty"`
-	InitContainers []Container `json:"initContainers"`
-	Containers     []Container `json:"containers"`
+	Label          string         `json:"label,omitempty"`
+	InitContainers []Container    `json:"initContainers"`
+	Containers     []Container    `json:"containers"`
+	Secrets        *SecretsPolicy `json:"secrets,omitempty"`
 }
 
-// Container binds a digest to the process and path policy permitted for it.
+// Container binds a digest to the process policy permitted for it.
 type Container struct {
 	Digest  types.Digest `json:"digest"`
 	Image   string       `json:"image,omitempty"`
 	Command ArgvPolicy   `json:"command"`
 	Args    ArgvPolicy   `json:"args"`
-	Paths   PathPolicy   `json:"paths"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -75,22 +78,39 @@ type ArgvPolicy struct {
 	Argv   []string `json:"argv,omitempty"`
 }
 
-// PathPolicy grants filesystem read/write globs for key-management integration.
-// A write grant implies create and update. Carried and attested; no enforcer
-// consumes it yet. See docs/allowlist-and-capabilities.md.
-type PathPolicy struct {
+// SecretsPolicy grants secret-store read/write globs to a whole workload entry.
+// The subject is the entry, not a container: the value is delivered on a volume
+// every container in the pod can read, so a per-container grant would not
+// describe what is actually released. See docs/secrets.md.
+type SecretsPolicy struct {
 	Policy string   `json:"policy"`
 	Read   []string `json:"read,omitempty"`
 	Write  []string `json:"write,omitempty"`
 }
 
-// ParseJSON decodes and validates an allowlist, rejecting unknown fields so a
-// malformed or foreign document fails loud instead of parsing as empty. The
-// result is normalized (digests lowercased and deduplicated, container and path
-// lists sorted) so Canonical is a function of content alone.
+// ParseJSON decodes and validates an operator-authored allowlist, rejecting
+// unknown fields so a typo or a foreign document fails loud instead of parsing
+// as empty. The result is normalized (digests lowercased and deduplicated,
+// container and path lists sorted) so Canonical is a function of content alone.
+//
+// Use ParseServedJSON for a document pulled from CDS.
 func ParseJSON(data []byte) (*Allowlist, error) {
+	return parseJSON(data, true)
+}
+
+// ParseServedJSON decodes a document served by CDS, ignoring fields it does not
+// know. Its consumers pin a schema version in a launch measurement, so a strict
+// parse would make any newer field freeze their policy until a node-image
+// rebuild. See docs/secrets.md — "Upgrading".
+func ParseServedJSON(data []byte) (*Allowlist, error) {
+	return parseJSON(data, false)
+}
+
+func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	var a Allowlist
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
@@ -117,6 +137,9 @@ func ParseWorkloadJSON(data []byte) (*Workload, error) {
 	if err := normalizeContainers("entry", "containers", w.Containers); err != nil {
 		return nil, err
 	}
+	if err := normalizeSecrets(&w.Secrets); err != nil {
+		return nil, fmt.Errorf("entry secrets: %w", err)
+	}
 	sortContainers(w.InitContainers)
 	sortContainers(w.Containers)
 	return &w, nil
@@ -139,17 +162,6 @@ func (w Workload) Digests() []types.Digest {
 // normalized struct.
 func (a *Allowlist) Canonical() ([]byte, error) {
 	return json.Marshal(a)
-}
-
-// CanonicalDigest returns SHA-256 of Canonical — the value CDS binds into its
-// attestation config-claims (docs/ratls.md) and verifiers pin against.
-func (a *Allowlist) CanonicalDigest() ([]byte, error) {
-	canonical, err := a.Canonical()
-	if err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256(canonical)
-	return sum[:], nil
 }
 
 func (a *Allowlist) normalize() error {
@@ -180,6 +192,9 @@ func (a *Allowlist) normalize() error {
 		if err := normalizeContainers(name, "containers", w.Containers); err != nil {
 			return err
 		}
+		if err := normalizeSecrets(&w.Secrets); err != nil {
+			return fmt.Errorf("workload %q secrets: %w", name, err)
+		}
 		sortContainers(w.InitContainers)
 		sortContainers(w.Containers)
 		a.Workloads[name] = w
@@ -198,9 +213,6 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		}
 		if err := normalizeArgv(&c.Args); err != nil {
 			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
-		}
-		if err := normalizePaths(&c.Paths); err != nil {
-			return fmt.Errorf("workload %q %s %s paths: %w", workload, field, c.Digest, err)
 		}
 	}
 	return nil
@@ -228,16 +240,23 @@ func normalizeArgv(p *ArgvPolicy) error {
 	return nil
 }
 
-func normalizePaths(p *PathPolicy) error {
+// normalizeSecrets validates an entry's secrets grant, canonicalizing "grants
+// nothing" to a nil grant so it does not appear on the wire at all.
+//
+// Unlike argv policy there is no "any": an unbounded secret grant is never what
+// an operator means, and the same three characters that are inert today would
+// otherwise become "every secret in the cluster".
+func normalizeSecrets(pp **SecretsPolicy) error {
+	p := *pp
+	if p == nil {
+		return nil
+	}
 	switch p.Policy {
 	case PolicyDeny, "":
 		if len(p.Read) != 0 || len(p.Write) != 0 {
 			return fmt.Errorf("deny policy grants no paths")
 		}
-		p.Policy = PolicyDeny
-		p.Read, p.Write = nil, nil
-	case PolicyAny:
-		p.Read, p.Write = nil, nil
+		*pp = nil
 	case PolicyAllow:
 		read, err := normalizeGlobs(p.Read)
 		if err != nil {
@@ -247,12 +266,15 @@ func normalizePaths(p *PathPolicy) error {
 		if err != nil {
 			return fmt.Errorf("write: %w", err)
 		}
-		if len(read) == 0 && len(write) == 0 {
-			return fmt.Errorf("allow policy requires at least one read or write path")
+		if len(read) == 0 {
+			// The only client creates with POST and then re-reads: a write-only
+			// grant leaves every replica that loses the create race permanently
+			// without the value.
+			return fmt.Errorf("allow policy requires at least one read path")
 		}
 		p.Read, p.Write = read, write
 	default:
-		return fmt.Errorf("unknown paths policy %q (want deny, any, or allow)", p.Policy)
+		return fmt.Errorf("unknown secrets policy %q (want deny or allow)", p.Policy)
 	}
 	return nil
 }
@@ -304,7 +326,7 @@ func sortContainers(cs []Container) {
 }
 
 func policyKey(c Container) string {
-	b, _ := json.Marshal([]any{c.Command, c.Args, c.Paths})
+	b, _ := json.Marshal([]any{c.Command, c.Args})
 	return string(b)
 }
 

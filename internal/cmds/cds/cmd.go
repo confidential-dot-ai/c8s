@@ -64,6 +64,7 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.minCAValidity, "min-ca-validity", time.Hour, "/readyz fails when the loaded mesh CA has less than this remaining lifetime")
 	flags.StringVar(&cfg.allowlistDB, "allowlist-db", "", "Path to the allowlist SQLite database")
 	flags.BoolVar(&cfg.allowlistPersistent, "allowlist-persistent", false, "whether --allowlist-db is on durable storage; false makes CDS warn at startup that operator-added digests and the mesh CA do not survive a restart")
+	flags.StringSliceVar(&cfg.inventoryCIDRs, "sandbox-inventory-cidr", nil, "CIDR(s) holding the node addresses CDS may dial for a sandbox's admission inventory (repeatable). Required to accept sandbox tokens: it is what stops a workload pointing the callback at its own pod IP and answering as the inventory (docs/ratls.md)")
 	flags.StringVar(&cfg.allowlistSeed, "allowlist-seed", "", "Path to a JSON allowlist (version + digests map) seeded into the store at startup before serving; missing digests are added, existing entries are left untouched (empty disables seeding)")
 	flags.StringVar(&cfg.operatorKeys, "operator-keys", "", "Path to a PEM bundle of pinned operator EC public keys; /allowlist writes (POST/PUT/DELETE) require an operator token signed by one of them (empty = writes disabled, reads still served)")
 	flags.StringSliceVar(&cfg.handoffMeasurements, "handoff-measurements", nil, "SHA-384 hex launch measurements allowed to pull the mesh CA and allowlist via /handoff; requires --operator-keys so both replicas attest the same policy (empty = /handoff disabled)")
@@ -75,6 +76,10 @@ func NewCmd() *cobra.Command {
 	flags.IntVar(&cfg.rateLimiterMax, "rate-limiter-max-entries", 10000, "max entries in the per-IP rate limiter")
 	flags.DurationVar(&cfg.rateLimiterEvictInterval, "rate-limiter-evict-interval", time.Minute, "interval for per-IP rate limiter eviction sweep")
 	flags.DurationVar(&cfg.rateLimiterIdleTimeout, "rate-limiter-idle-timeout", 5*time.Minute, "idle duration before a per-IP rate limiter entry is evicted")
+
+	flags.IntVar(&cfg.secretsMaxPaths, "secrets-max-paths", 1024, "max distinct secret paths held in memory")
+	flags.IntVar(&cfg.secretsMaxValueBytes, "secrets-max-value-bytes", 4096, "max bytes in one secret value")
+	flags.IntVar(&cfg.sandboxLedgerMax, "sandbox-ledger-max-entries", 10000, "max sandbox-to-inventory bindings held in memory")
 
 	flags.DurationVar(&cfg.rotationInterval, "token-signer-rotation-interval", 720*time.Hour, "EAR signing key rotation interval (0 disables)")
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
@@ -137,6 +142,7 @@ type config struct {
 	allowlistDB         string
 	allowlistPersistent bool
 	allowlistSeed       string
+	inventoryCIDRs      []string
 	operatorKeys        string
 	handoffMeasurements []string
 	handoffPeerURL      string
@@ -152,4 +158,8 @@ type config struct {
 	rateLimiterMax           int
 	rateLimiterEvictInterval time.Duration
 	rateLimiterIdleTimeout   time.Duration
+
+	secretsMaxPaths      int
+	secretsMaxValueBytes int
+	sandboxLedgerMax     int
 }

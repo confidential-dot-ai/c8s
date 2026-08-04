@@ -132,12 +132,19 @@ dm-verity `image=` above.
 
 Because kata uses kernel-hashes, the SNP launch digest is a function of
 OVMF + `vmlinuz` + the kata-generated cmdline (which embeds the verity
-`root_hash`) at a fixed vCPU count. It's predicted with `sev-snp-measure`
-from a captured cmdline; `c8s install` pins the kata version + config, and
-we pin `default_vcpus`/`default_maxvcpus` to 1 so the digest is stable
-across pods. See [`../docs/kata-guest-base.md`](../docs/kata-guest-base.md)
-for the full attestation chain; the kata version pin (below) is what
-keeps the predicted digest valid across a kata bump.
+`root_hash`) + one VMSA page per vCPU. Predict it offline with
+`c8s kata measure --vcpus N`.
+
+The `default_vcpus = 1` pin does **not** make the digest uniform across
+pods: `static_sandbox_resource_mgmt` adds each pod's CPU limit on top, so a
+pod with `limits.cpu: 500m` boots 2 vCPUs and measures differently from an
+unlimited one. Every distinct vCPU count is a distinct measurement that has
+to be pinned. See
+[`../docs/kata-launch-measurement.md`](../docs/kata-launch-measurement.md)
+for the inputs and the pod-shape mapping, and
+[`../docs/kata-guest-base.md`](../docs/kata-guest-base.md) for the full
+attestation chain; the kata version pin (below) is what keeps the derived
+cmdline — and so the predicted digest — valid across a kata bump.
 
 ## Debug variant
 

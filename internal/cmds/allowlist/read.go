@@ -176,27 +176,15 @@ func printWorkloadTable(w io.Writer, workloads map[string]pkgallowlist.Workload)
 	tw.Flush()
 }
 
-// summarizeWorkload aggregates the command policies, args policies, and path
-// grant/deny counts across every container (init and main) in an entry.
-func summarizeWorkload(w pkgallowlist.Workload) (command, args, paths string) {
+// summarizeWorkload aggregates the command and args policies across every
+// container (init and main) in an entry, alongside the entry's secret grant.
+func summarizeWorkload(w pkgallowlist.Workload) (command, args, secrets string) {
 	commandSet, argsSet := map[string]bool{}, map[string]bool{}
-	var readN, writeN, anyN int
 	for _, c := range allContainers(w) {
 		commandSet[argvPolicyName(c.Command)] = true
 		argsSet[argvPolicyName(c.Args)] = true
-		switch c.Paths.Policy {
-		case pkgallowlist.PolicyAllow:
-			readN += len(c.Paths.Read)
-			writeN += len(c.Paths.Write)
-		case pkgallowlist.PolicyAny:
-			anyN++
-		}
 	}
-	pathStr := fmt.Sprintf("R=%d W=%d", readN, writeN)
-	if anyN > 0 {
-		pathStr += fmt.Sprintf(" any=%d", anyN)
-	}
-	return joinSet(commandSet), joinSet(argsSet), pathStr
+	return joinSet(commandSet), joinSet(argsSet), secretsSummary(w.Secrets)
 }
 
 // allContainers returns the init containers followed by the main containers.
@@ -242,21 +230,17 @@ func argvSummary(p pkgallowlist.ArgvPolicy) string {
 	}
 }
 
-func pathSummary(p pkgallowlist.PathPolicy) string {
-	switch p.Policy {
-	case pkgallowlist.PolicyAny:
-		return "any"
-	case pkgallowlist.PolicyAllow:
-		return fmt.Sprintf("allow(r=%d,w=%d)", len(p.Read), len(p.Write))
-	default:
+func secretsSummary(p *pkgallowlist.SecretsPolicy) string {
+	if p == nil || p.Policy != pkgallowlist.PolicyAllow {
 		return "deny"
 	}
+	return fmt.Sprintf("allow(r=%d,w=%d)", len(p.Read), len(p.Write))
 }
 
-// containerSummary renders one container's policy triple, e.g.
-// "command=exact[/bin/sh -c] args=any paths=deny".
+// containerSummary renders one container's argv policy pair, e.g.
+// "command=exact[/bin/sh -c] args=any".
 func containerSummary(c pkgallowlist.Container) string {
-	return fmt.Sprintf("command=%s args=%s paths=%s", argvSummary(c.Command), argvSummary(c.Args), pathSummary(c.Paths))
+	return fmt.Sprintf("command=%s args=%s", argvSummary(c.Command), argvSummary(c.Args))
 }
 
 func shellJoin(argv []string) string {

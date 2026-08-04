@@ -149,41 +149,38 @@ func TestCASignCSR_CopiesRATLSExtension(t *testing.T) {
 	t.Fatalf("RA-TLS extension not propagated to leaf")
 }
 
-func TestCASignCSR_ConfigClaimsExtension(t *testing.T) {
+func TestCASignCSR_StampsSandboxID(t *testing.T) {
 	ca, err := issuer.NewCA("test ca", time.Hour)
 	if err != nil {
 		t.Fatalf("new ca: %v", err)
 	}
-	claimsValue := []byte{0x30, 0x03, 0x02, 0x01, 0x07}
-
-	findConfigClaims := func(leaf *x509.Certificate) ([]byte, bool) {
-		for _, ext := range leaf.Extensions {
-			if ext.Id.Equal(ratls.OIDRATLSConfigClaims) {
-				return ext.Value, true
-			}
-		}
-		return nil, false
-	}
-
 	csr, _ := mustCSR(t, "node", nil, nil, nil)
-	certPEM, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, ConfigClaimsExt: claimsValue})
+	const sandboxID = "8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f6c2b1a0e8d9f"
+
+	certPEM, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, SandboxID: sandboxID})
 	if err != nil {
-		t.Fatalf("SignCSR with config claims: %v", err)
+		t.Fatalf("SignCSR: %v", err)
 	}
-	got, ok := findConfigClaims(mustParseCert(t, certPEM))
-	if !ok {
-		t.Fatal("config-claims extension not stamped on leaf")
+	got, err := ratls.SandboxIDFromCert(mustParseCert(t, certPEM))
+	if err != nil {
+		t.Fatalf("SandboxIDFromCert: %v", err)
 	}
-	if string(got) != string(claimsValue) {
-		t.Fatalf("config-claims value = %x, want %x", got, claimsValue)
+	if got != sandboxID {
+		t.Fatalf("sandbox = %q, want %q", got, sandboxID)
 	}
 
+	// No SandboxID param ⇒ no extension.
 	certPEM, _, err = ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour})
 	if err != nil {
-		t.Fatalf("SignCSR without config claims: %v", err)
+		t.Fatalf("SignCSR: %v", err)
 	}
-	if _, ok := findConfigClaims(mustParseCert(t, certPEM)); ok {
-		t.Fatal("config-claims extension stamped on leaf without claims")
+	if got, err := ratls.SandboxIDFromCert(mustParseCert(t, certPEM)); err != nil || got != "" {
+		t.Fatalf("sandbox without param = %q, %v; want empty", got, err)
+	}
+
+	// An invalid sandbox ID fails the signing, not silently drops.
+	if _, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, SandboxID: "not valid!"}); err == nil {
+		t.Fatal("invalid sandbox ID signed")
 	}
 }
 

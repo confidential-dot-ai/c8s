@@ -733,21 +733,19 @@ func TestRenderTextSections(t *testing.T) {
 
 	t.Run("all sections present", func(t *testing.T) {
 		got := renderOut(Outcome{
-			Verified:                   true,
-			Fresh:                      true,
-			Pinned:                     true,
-			CertSHA256:                 "cert-digest-hex",
-			OperatorKeysAttestedDigest: "opkeys-digest-hex",
-			SeedAttestedDigest:         "seed-digest-hex",
-			WorkloadAttestedDigest:     "workload-digest-hex",
-			OperatorKeys:               []string{"fp-one"},
+			Verified:      true,
+			Fresh:         true,
+			Pinned:        true,
+			CertSHA256:    "cert-digest-hex",
+			SandboxID:     "sandbox-1",
+			SandboxIDNote: "vouched by the mesh CA",
+			OperatorKeys:  []string{"fp-one"},
 		})
 		for _, want := range []string{
 			"cert sha256:  cert-digest-hex",
-			"operator-keys digest (attested via config-claims): sha256:opkeys-digest-hex",
-			"allowlist-seed digest (attested via config-claims): seed-digest-hex",
-			"workload digest (attested via config-claims): sha256:workload-digest-hex",
-			"operator keys (allowlist writes; served list matches the attested digest):",
+			"sandbox id:   sandbox-1",
+			"vouched by the mesh CA",
+			"operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):",
 			"    sha256:fp-one",
 		} {
 			if !strings.Contains(got, want) {
@@ -763,21 +761,12 @@ func TestRenderTextSections(t *testing.T) {
 		}
 		for _, absent := range []string{
 			"cert sha256",
-			"operator-keys digest",
-			"allowlist-seed digest",
-			"workload digest",
+			"sandbox id",
 			"allowlist writes",
 		} {
 			if strings.Contains(got, absent) {
 				t.Errorf("output has %q without the datum:\n%s", absent, got)
 			}
-		}
-	})
-
-	t.Run("keys without attested digest use the unattested label", func(t *testing.T) {
-		got := renderOut(Outcome{Verified: true, Fresh: true, Pinned: true, OperatorKeys: []string{"fp-one"}})
-		if !strings.Contains(got, "CDS-reported config, NOT covered by the measurement") {
-			t.Errorf("expected the unattested key-list label:\n%s", got)
 		}
 	})
 }

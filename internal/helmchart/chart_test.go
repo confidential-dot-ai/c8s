@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"gopkg.in/yaml.v3"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -163,17 +165,17 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	if !renderedManifestHasKind(t, out, "MutatingWebhookConfiguration") {
 		t.Fatalf("default chart missing MutatingWebhookConfiguration\n%s", out)
 	}
-	for _, want := range []string{
-		"app.kubernetes.io/component: cds",
-		"app.kubernetes.io/name: ratls-mesh",
-		"app.kubernetes.io/name: nri-image-policy",
-		"app.kubernetes.io/name: tls-lb",
-		"server_name c8s-tls-lb.c8s-system.svc;",
+	for _, label := range [][2]string{
+		{"app.kubernetes.io/component", "cds"},
+		{"app.kubernetes.io/name", "ratls-mesh"},
+		{"app.kubernetes.io/name", "nri-image-policy"},
+		{"app.kubernetes.io/name", "tls-lb"},
 	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("default chart missing %q\n%s", want, out)
+		if !renderedManifestHasLabel(t, out, label[0], label[1]) {
+			t.Fatalf("default chart missing a manifest labelled %s: %s", label[0], label[1])
 		}
 	}
+	renderedTLSLBNginxConfig(t, out).server(t).assertDirective(t, "server_name", "c8s-tls-lb.c8s-system.svc")
 	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert,
 		"get-cert",
@@ -594,6 +596,63 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 	if got, want := worker.Spec.Template.Labels["app.kubernetes.io/component"], "nri-installer-worker"; got != want {
 		t.Errorf("worker installer pod component label = %q, want %q", got, want)
 	}
+	// The install script writes ${NODE_IP:?} to the node-ip file the plugin
+	// reads, so the env var must sit on the install container itself, not on
+	// the rke2-only containerd-prep sibling.
+	install, ok := findContainer(worker.Spec.Template.Spec.InitContainers, "install")
+	if !ok {
+		t.Fatalf("install init container missing; have %v", containerNames(worker.Spec.Template.Spec.InitContainers))
+	}
+	if !hasNodeIPEnv(install) {
+		t.Errorf("install init container missing NODE_IP downward-API env; have %+v", install.Env)
+	}
+}
+
+// The webhook injects a read-only hostPath mount of the inventory socket dir
+// (nriImagePolicy.hostPaths.runtimeDir) into every CW pod, so the
+// deny-host-namespaces VAP must carve out exactly that dir — a blanket
+// hostPath deny rejects every confidential workload the platform itself
+// mutates.
+func TestChartHostNamespacePolicyCarvesOutClaimsDir(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var hostPathExpr string
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, "hostPath") {
+			hostPathExpr = v.Expression
+		}
+	}
+	if hostPathExpr == "" {
+		t.Fatal("no hostPath validation in c8s-deny-host-namespaces")
+	}
+	for _, want := range []string{
+		`"/var/run/nri-image-policy"`, // the claims dir, and nothing wider
+		`'Directory'`,                 // the exact type the webhook injects
+		"m.readOnly",                  // every referencing mount must be read-only
+	} {
+		if !strings.Contains(hostPathExpr, want) {
+			t.Errorf("hostPath validation missing %s; expression=%q", want, hostPathExpr)
+		}
+	}
+}
+
+// hasNodeIPEnv reports whether the container carries a NODE_IP env var sourced
+// from the status.hostIP downward-API field — the sandbox-digests callback
+// address the installer writes down for the host-process plugin.
+func hasNodeIPEnv(c corev1.Container) bool {
+	for _, e := range c.Env {
+		if e.Name == "NODE_IP" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
+			e.ValueFrom.FieldRef.FieldPath == "status.hostIP" {
+			return true
+		}
+	}
+	return false
 }
 
 // Single-node (empty cds.node.selector) renders the installer identically to
@@ -841,8 +900,9 @@ func TestChartRendersOperatorKeysPEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "operator-keys") || !strings.Contains(out, "BEGIN PUBLIC KEY") {
-		t.Fatalf("rendered output missing the operator-keys ConfigMap with PEM content")
+	cm := renderedConfigMap(t, out, "c8s-cds-operator-keys")
+	if got := cm.Data["keys.pem"]; got != pemText {
+		t.Fatalf("operator-keys ConfigMap keys.pem = %q, want the PEM content %q", got, pemText)
 	}
 }
 
@@ -960,11 +1020,22 @@ func TestChartRendersRATLSCustomOutboundPortConsistently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if got := strings.Count(out, "- --outbound-port\n            - \"16001\""); got != 2 {
-		t.Fatalf("expected iptables-sync and ratls-mesh to use outbound port 16001, got %d occurrences\n%s", got, out)
+	ds := findRATLSMeshDaemonSet(t, out)
+	sync, ok := findContainer(ds.Spec.Template.Spec.InitContainers, "iptables-sync")
+	if !ok {
+		t.Fatalf("iptables-sync init container missing; have %v", containerNames(ds.Spec.Template.Spec.InitContainers))
 	}
-	if strings.Contains(out, "- --outbound-port\n            - \"15001\"") {
-		t.Fatalf("ratls-mesh rendered the default outbound port despite override\n%s", out)
+	if !argvContainsFlagValue(sync.Command, "--outbound-port", "16001") {
+		t.Fatalf("iptables-sync missing --outbound-port 16001; command=%q", sync.Command)
+	}
+	meshArgs := containerArgs(t, ds, "ratls-mesh")
+	if got, ok := containerArgValue(meshArgs, "--outbound-port"); !ok || got != "16001" {
+		t.Fatalf("ratls-mesh --outbound-port = (%q, %v), want (\"16001\", true)", got, ok)
+	}
+	for _, c := range allContainers(ds) {
+		if argvContainsFlagValue(c.Command, "--outbound-port", "15001") || argvContainsFlagValue(c.Args, "--outbound-port", "15001") {
+			t.Fatalf("container %q rendered the default outbound port despite override", c.Name)
+		}
 	}
 }
 
@@ -973,17 +1044,13 @@ func TestChartCanDisableStatusMirror(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "--status-mirror-enabled=true") {
-		t.Fatalf("default chart should enable status mirror\n%s", out)
-	}
+	assertContainerHasArg(t, "operator", renderedOperatorArgs(t, out), "--status-mirror-enabled=true")
 
 	out, err = helmTemplate(t, "--set", "statusMirror.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "--status-mirror-enabled=false") {
-		t.Fatalf("statusMirror.enabled=false should disable status mirror\n%s", out)
-	}
+	assertContainerHasArg(t, "operator", renderedOperatorArgs(t, out), "--status-mirror-enabled=false")
 }
 
 func TestChartWebhookInjectsWorkloadsAndExcludesSystemNamespaces(t *testing.T) {
@@ -1218,7 +1285,7 @@ func TestChartAttestationApiNodePortEnabledWithNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q by default, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
@@ -1237,7 +1304,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeNodePort {
 		t.Fatalf("attestation-api Service type = %q, want NodePort", svc.Spec.Type)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
 		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
 	}
 	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
@@ -1253,7 +1320,7 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 // On a cluster that is neither kata nor node-baked, host nri-image-policy is the
 // only image-admission enforcement, so disabling it must be rejected — otherwise
 // confidential workloads run with no attested allowlist gate. cvmMode=gke is the
-// representative such cluster (aks/bare behave the same). kata and cvmMode=node
+// representative such cluster (pod/aks behave the same). kata and cvmMode=node
 // carry their own admission and are exempt (enforce_host_components requires nri
 // off under kata; the node image bakes the plugin — TestChartServesAllowlistSeedInNodeMode).
 func TestChartRejectsImagePolicyOffOnNonKata(t *testing.T) {
@@ -1332,6 +1399,114 @@ func assertContainerNoArgPrefix(t *testing.T, container string, args []string, p
 	}
 }
 
+func assertContainerHasArgPrefix(t *testing.T, container string, args []string, prefix string) {
+	t.Helper()
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return
+		}
+	}
+	t.Fatalf("%s container missing arg with prefix %q\nargs: %v", container, prefix, args)
+}
+
+// renderedManifestHasLabel reports whether any rendered doc carries the label,
+// on its own metadata or its pod template.
+func renderedManifestHasLabel(t *testing.T, manifest, key, value string) bool {
+	t.Helper()
+	found := false
+	iterateManifests(t, manifest, func(doc []byte) bool {
+		var obj struct {
+			Metadata struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				Template struct {
+					Metadata struct {
+						Labels map[string]string `json:"labels"`
+					} `json:"metadata"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		if obj.Metadata.Labels[key] == value || obj.Spec.Template.Metadata.Labels[key] == value {
+			found = true
+			return true
+		}
+		return false
+	})
+	return found
+}
+
+// renderedWorkload is a pod-bearing manifest (Deployment, DaemonSet,
+// StatefulSet, Job) with its decoded pod spec.
+type renderedWorkload struct {
+	kind, name string
+	spec       corev1.PodSpec
+}
+
+func renderedPodSpecs(t *testing.T, manifest string) []renderedWorkload {
+	t.Helper()
+	var out []renderedWorkload
+	iterateManifests(t, manifest, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		switch obj.Kind {
+		case "Deployment", "DaemonSet", "StatefulSet", "Job":
+			out = append(out, renderedWorkload{obj.Kind, obj.Metadata.Name, obj.Spec.Template.Spec})
+		}
+		return false
+	})
+	return out
+}
+
+// kataEnforcementExpressions returns the joined CEL validation expressions of
+// the c8s-kata-enforcement policy; the runtime-class allowlist lives there.
+func kataEnforcementExpressions(t *testing.T, manifest string) string {
+	t.Helper()
+	var policy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, manifest, "ValidatingAdmissionPolicy", "c8s-kata-enforcement", &policy) {
+		t.Fatalf("missing c8s-kata-enforcement ValidatingAdmissionPolicy\n%s", manifest)
+	}
+	var sb strings.Builder
+	for _, v := range policy.Spec.Validations {
+		sb.WriteString(v.Expression)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// findKey returns a dotted path to the first occurrence of key anywhere in a
+// decoded YAML tree, or "" if absent.
+func findKey(node any, key string) string {
+	switch v := node.(type) {
+	case map[string]any:
+		for k, child := range v {
+			if k == key {
+				return k
+			}
+			if p := findKey(child, key); p != "" {
+				return k + "." + p
+			}
+		}
+	case []any:
+		for i, child := range v {
+			if p := findKey(child, key); p != "" {
+				return fmt.Sprintf("[%d].%s", i, p)
+			}
+		}
+	}
+	return ""
+}
+
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "webhook.certVolume.fsGroup=4242",
@@ -1384,25 +1559,32 @@ func TestChartIntValuesFromValuesFileRenderPlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template -f: %v\n%s", err, out)
 	}
-	// No value anywhere may render in scientific notation.
-	if strings.Contains(out, "e+0") {
-		for _, line := range strings.Split(out, "\n") {
-			if strings.Contains(line, "e+0") {
-				t.Errorf("scientific-notation int leaked: %q", strings.TrimSpace(line))
-			}
-		}
+	// Each affected field is asserted through its decoded typed value; a
+	// scientific-notation render (7e+06) fails the int decode loudly.
+	args := renderedOperatorArgs(t, out)
+	assertContainerHasArg(t, "operator", args, "--cert-fs-group=1500000")
+	assertContainerHasArg(t, "operator", args, "--get-cert-run-as-user=2000000000")
+	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	if got := nginx.SecurityContext.RunAsUser; got == nil || *got != 7000000 {
+		t.Errorf("nginx runAsUser = %v, want 7000000", got)
 	}
-	// Spot-check the plain-integer renders, including the CEL admission policy
-	// (where int != double would be an uninstallable compile error).
-	for _, want := range []string{
-		"--cert-fs-group=1500000",
-		"--get-cert-run-as-user=2000000000",
-		"runAsUser: 7000000",
-		"runAsUser != 7000000",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("render missing %q", want)
-		}
+	if got := nginx.SecurityContext.RunAsGroup; got == nil || *got != 7000000 {
+		t.Errorf("nginx runAsGroup = %v, want 7000000", got)
+	}
+	mesh := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh")
+	if got := mesh.SecurityContext.RunAsUser; got == nil || *got != 7000000 {
+		t.Errorf("ratls-mesh runAsUser = %v, want 7000000", got)
+	}
+	// The CEL admission policy, where int != double would be an uninstallable
+	// compile error.
+	var policy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "deny-ratls-mesh-uid", &policy) {
+		t.Fatalf("missing deny-ratls-mesh-uid ValidatingAdmissionPolicy\n%s", out)
+	}
+	if !slices.ContainsFunc(policy.Spec.Validations, func(v admissionregv1.Validation) bool {
+		return strings.Contains(v.Expression, "runAsUser != 7000000")
+	}) {
+		t.Errorf("uid policy expression missing the plain-integer comparison: %+v", policy.Spec.Validations)
 	}
 }
 
@@ -1470,11 +1652,15 @@ func TestChartAttestationApiPrivileged(t *testing.T) {
 // the render loudly rather than silently falling through to least-privilege
 // (which would fail closed at runtime on an AKS CVM).
 func TestChartAttestationApiInvalidCvmMode(t *testing.T) {
-	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=bogus")
-	if err == nil {
-		t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+	for _, mode := range []string{"bogus", "baremetal"} {
+		t.Run(mode, func(t *testing.T) {
+			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode)
+			if err == nil {
+				t.Fatalf("expected render to fail on invalid cvmMode; got success\n%s", out)
+			}
+			assertHelmFailMessage(t, out, fmt.Sprintf(`attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)`, mode))
+		})
 	}
-	assertHelmFailMessage(t, out, `attestationApi.cvmMode must be one of pod, node, gke, aks (got "bogus")`)
 }
 
 // hasHostIPEnv reports whether the container carries a HOST_IP env var sourced
@@ -1526,6 +1712,14 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 		t.Errorf("tls-lb cds-attest missing HOST_IP downward-API env; have %+v", attest.Env)
 	}
 
+	// tls-lb allowlist proxy: pod-netns, uses the same verifier endpoint for
+	// the RA-TLS hop to CDS.
+	allowlistProxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerArgs(t, allowlistProxy, hostIPURL)
+	if !hasHostIPEnv(allowlistProxy) {
+		t.Errorf("tls-lb allowlist-proxy missing HOST_IP downward-API env; have %+v", allowlistProxy.Env)
+	}
+
 	// ratls-mesh: hostNetwork, so $(HOST_IP) is its own node IP. Two-arg form.
 	mesh := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh")
 	if !slices.Contains(mesh.Args, "http://$(HOST_IP):8400") {
@@ -1558,8 +1752,14 @@ func TestChartNonNodeModeKeepsServiceDNS(t *testing.T) {
 			}
 			cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 			assertContainerArgs(t, cds, "--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400")
-			if strings.Contains(out, "name: HOST_IP") {
-				t.Errorf("cvmMode=%s must not render any HOST_IP env\n%s", mode, out)
+			for _, w := range renderedPodSpecs(t, out) {
+				for _, c := range append(append([]corev1.Container{}, w.spec.InitContainers...), w.spec.Containers...) {
+					for _, e := range c.Env {
+						if e.Name == "HOST_IP" {
+							t.Errorf("cvmMode=%s must not render any HOST_IP env; %s %s container %s carries it", mode, w.kind, w.name, c.Name)
+						}
+					}
+				}
 			}
 		})
 	}
@@ -1573,15 +1773,20 @@ func TestChartRendersManagedClusterKnobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "imagePullSecrets:\n- name: ghcr-secret") {
-		t.Fatalf("render missing chart-wide imagePullSecrets\n%s", out)
+	var sa corev1.ServiceAccount
+	if !findDoc(t, out, "ServiceAccount", "c8s-operator", &sa) {
+		t.Fatalf("render missing ServiceAccount c8s-operator\n%s", out)
 	}
-	// aks → privileged attestation-api (assert the two fields without pinning
-	// the exact line spacing, which carries explanatory comments).
-	for _, want := range []string{"privileged: true", "readOnlyRootFilesystem: true"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
+	if !hasPullSecret(sa.ImagePullSecrets, "ghcr-secret") {
+		t.Fatalf("operator ServiceAccount missing chart-wide pull secret ghcr-secret: %v", sa.ImagePullSecrets)
+	}
+	// aks → privileged attestation-api with a read-only root filesystem.
+	sc := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api").SecurityContext
+	if sc == nil || sc.Privileged == nil || !*sc.Privileged {
+		t.Fatalf("attestation-api must be privileged under aks; got %+v", sc)
+	}
+	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		t.Fatalf("attestation-api must set readOnlyRootFilesystem: true; got %+v", sc)
 	}
 }
 
@@ -1631,33 +1836,47 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"ssl_certificate     /edge-tls/public.crt;",
-		"ssl_certificate_key /edge-tls/public.key;",
-		"ECDHE-RSA-AES128-GCM-SHA256",
-		"location = /v1/discovery",
-		"alias /discovery/discovery.json;",
-		"location = /.well-known/cds-cert.pem",
-		"alias /tls/cert.pem;",
-		"location = /.well-known/mesh-ca.pem",
-		"alias /tls/ca.pem;",
-		"proxy_ssl_certificate /tls/cert.pem;",
-		"proxy_ssl_certificate_key /tls/key.pem;",
-		"proxy_ssl_name my-backend.other-ns.svc.cluster.local;",
-		"proxy_ssl_verify on;",
-		"proxy_ssl_trusted_certificate /tls/cert.pem;",
-		"proxy_pass https://$backend_addr;",
-		"name: tls-certs",
-		"name: public-tls",
-		"mountPath: /edge-tls",
-		"secretName: tls-lb-public-tls",
-		"key: public.crt",
-		"path: public.key",
-		"name: discovery",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	server := cfg.server(t)
+	server.assertDirective(t, "ssl_certificate", "/edge-tls/public.crt")
+	server.assertDirective(t, "ssl_certificate_key", "/edge-tls/public.key")
+	ciphers := server.directives["ssl_ciphers"]
+	if len(ciphers) != 1 || len(ciphers[0]) != 1 ||
+		!slices.Contains(strings.Split(ciphers[0][0], ":"), "ECDHE-RSA-AES128-GCM-SHA256") {
+		t.Fatalf("ssl_ciphers missing ECDHE-RSA-AES128-GCM-SHA256; got %v", ciphers)
+	}
+	cfg.location(t, "exact", "/v1/discovery").assertDirective(t, "alias", "/discovery/discovery.json")
+	cfg.location(t, "exact", "/.well-known/cds-cert.pem").assertDirective(t, "alias", "/tls/cert.pem")
+	cfg.location(t, "exact", "/.well-known/mesh-ca.pem").assertDirective(t, "alias", "/tls/ca.pem")
+	defaultRoute := cfg.location(t, "prefix", "/")
+	defaultRoute.assertDirective(t, "proxy_ssl_certificate", "/tls/cert.pem")
+	defaultRoute.assertDirective(t, "proxy_ssl_certificate_key", "/tls/key.pem")
+	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
+	defaultRoute.assertDirective(t, "proxy_ssl_verify", "on")
+	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/cert.pem")
+	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
+
+	spec := renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec
+	if _, ok := podVolume(spec, "tls-certs"); !ok {
+		t.Fatalf("tls-lb missing tls-certs volume; volumes=%v", spec.Volumes)
+	}
+	pub, ok := podVolume(spec, "public-tls")
+	if !ok || pub.Secret == nil || pub.Secret.SecretName != "tls-lb-public-tls" {
+		t.Fatalf("tls-lb public-tls volume must source Secret tls-lb-public-tls; got %+v", pub)
+	}
+	wantItems := []corev1.KeyToPath{
+		{Key: "public.crt", Path: "public.crt"},
+		{Key: "public.key", Path: "public.key"},
+	}
+	if !reflect.DeepEqual(pub.Secret.Items, wantItems) {
+		t.Fatalf("public-tls secret items = %v, want %v", pub.Secret.Items, wantItems)
+	}
+	if _, ok := podVolume(spec, "discovery"); !ok {
+		t.Fatalf("tls-lb missing discovery volume; volumes=%v", spec.Volumes)
+	}
+	nginx := renderedDeploymentContainer(t, out, "c8s-tls-lb", "nginx")
+	if m, ok := containerVolumeMount(nginx, "public-tls"); !ok || m.MountPath != "/edge-tls" {
+		t.Fatalf("nginx public-tls mount = (%+v, %v), want mountPath /edge-tls", m, ok)
 	}
 	cert := tlsLBGetCertContainer(t, out, "c8s-cert")
 	assertContainerArgs(t, cert,
@@ -1679,24 +1898,45 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 // Public exposure is an explicit type=LoadBalancer, not inferred.
 func TestChartTLSLBServiceType(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want corev1.ServiceType
+		name       string
+		args       []string
+		wantType   corev1.ServiceType
+		wantPolicy corev1.ServiceExternalTrafficPolicy
 	}{
-		{"default is ClusterIP", nil, corev1.ServiceTypeClusterIP},
-		{"explicit LoadBalancer", []string{"--set", "tlsLb.service.type=LoadBalancer"}, corev1.ServiceTypeLoadBalancer},
-		{"explicit NodePort", []string{"--set", "tlsLb.service.type=NodePort"}, corev1.ServiceTypeNodePort},
+		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
+		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		// Without the built-in allowlist route there is no source-IP-keyed
+		// limiter, so the default policy must not regress reachability
+		// through nodes that do not run the tls-lb pod.
+		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			if got := renderedService(t, out, "c8s-tls-lb").Spec.Type; got != tc.want {
-				t.Fatalf("service type = %q, want %q", got, tc.want)
+			svc := renderedService(t, out, "c8s-tls-lb")
+			if svc.Spec.Type != tc.wantType {
+				t.Fatalf("service type = %q, want %q", svc.Spec.Type, tc.wantType)
+			}
+			if svc.Spec.ExternalTrafficPolicy != tc.wantPolicy {
+				t.Fatalf("externalTrafficPolicy = %q, want %q", svc.Spec.ExternalTrafficPolicy, tc.wantPolicy)
 			}
 		})
 	}
+}
+
+func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "tlsLb.service.type=LoadBalancer",
+		"--set-string", "tlsLb.service.externalTrafficPolicy=bogus",
+	)
+	if err == nil {
+		t.Fatalf("expected render to fail on invalid externalTrafficPolicy; got success\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: bogus")
 }
 
 // With no adopted workload the upstream address is empty; the sidecar must
@@ -1735,47 +1975,33 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	if len(sidecar.Args) == 0 || sidecar.Args[0] != "cds-attest" {
 		t.Fatalf("cds-attest args = %v, want first arg 'cds-attest'", sidecar.Args)
 	}
-	joined := strings.Join(sidecar.Args, " ")
-	for _, want := range []string{
+	assertContainerArgs(t, sidecar,
 		"--host=127.0.0.1",
 		"--port=8800",
 		"--generation=milan",
-		"--attestation-api-url=http://",
+		"--mesh-identity-cert-file=/tls/cert.pem",
+		"--mesh-identity-key-file=/tls/key.pem",
+		"--mesh-identity-ca-file=/tls/ca.pem",
 		// The baseline mesh-wrapped upstream is a plain-HTTP workload upstream;
 		// the mTLS args render only for an https upstream.
 		"--upstream=http://c8s-infer.c8s-system.svc.cluster.local:8000",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("cds-attest args missing %q: %v", want, sidecar.Args)
-		}
-	}
+	)
+	assertContainerHasArgPrefix(t, "cds-attest", sidecar.Args, "--attestation-api-url=http://")
 	for _, banned := range []string{"--upstream-ca", "--upstream-cert", "--upstream-key", "--upstream-server-name"} {
-		if strings.Contains(joined, banned) {
-			t.Fatalf("cds-attest must not set %s for the default http upstream: %v", banned, sidecar.Args)
-		}
-	}
-	// --cds-cert-file must NOT be set: nginx serves /.well-known/c8s/cds-cert.pem
-	// statically (hot-reloaded), while the sidecar would embed a stale copy.
-	if strings.Contains(joined, "--cds-cert-file") {
-		t.Fatalf("cds-attest must not set --cds-cert-file (nginx serves it statically): %v", sidecar.Args)
+		assertContainerNoArgPrefix(t, "cds-attest", sidecar.Args, banned)
 	}
 	// The sidecar must not mount the mesh-CA for the default cert.pem trust path.
 	if _, ok := containerVolumeMount(sidecar, "mesh-ca"); ok {
 		t.Fatalf("cds-attest should not mount mesh-ca with the default /tls/cert.pem trust; mounts=%v", sidecar.VolumeMounts)
 	}
-	if got := len(deployment.Spec.Template.Spec.Containers); got != 2 {
-		t.Fatalf("tls-lb should have nginx + cds-attest, got %d containers", got)
+	if got := len(deployment.Spec.Template.Spec.Containers); got != 3 {
+		t.Fatalf("tls-lb should have nginx + cds-attest + allowlist-proxy, got %d containers", got)
 	}
 
 	// nginx reverse-proxies the dynamic well-known prefix to the sidecar.
-	for _, want := range []string{
-		"location /.well-known/c8s/ {",
-		"proxy_pass http://127.0.0.1:8800;",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("nginx config missing %q\n%s", want, out)
-		}
-	}
+	renderedTLSLBNginxConfig(t, out).
+		location(t, "prefix", "/.well-known/c8s/").
+		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
 
 	// An https upstream: the sidecar presents the CDS client cert and
 	// verifies the upstream against the CA chain get-cert writes to
@@ -1789,18 +2015,13 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		t.Fatalf("helm template (https upstream): %v\n%s", err, httpsOut)
 	}
 	httpsSidecar := renderedDeploymentContainer(t, httpsOut, "c8s-tls-lb", "cds-attest")
-	httpsJoined := strings.Join(httpsSidecar.Args, " ")
-	for _, want := range []string{
+	assertContainerArgs(t, httpsSidecar,
 		"--upstream=https://my-backend.other-ns.svc:8443",
 		"--upstream-ca=/tls/cert.pem",
 		"--upstream-cert=/tls/cert.pem",
 		"--upstream-key=/tls/key.pem",
 		"--upstream-server-name=my-backend.other-ns.svc",
-	} {
-		if !strings.Contains(httpsJoined, want) {
-			t.Fatalf("cds-attest args missing %q: %v", want, httpsSidecar.Args)
-		}
-	}
+	)
 
 	// Default on: the sidecar and its well-known proxy render without any
 	// attest override.
@@ -1808,8 +2029,13 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template (defaults): %v\n%s", err, defOut)
 	}
-	if !strings.Contains(defOut, "name: cds-attest") || !strings.Contains(defOut, "location /.well-known/c8s/ {") {
+	wellKnown := nginxLocationKey{match: "prefix", path: "/.well-known/c8s/"}
+	defContainers := renderedDeployment(t, defOut, "c8s-tls-lb").Spec.Template.Spec.Containers
+	if _, ok := findContainer(defContainers, "cds-attest"); !ok {
 		t.Fatal("cds-attest sidecar should render by default (tlsLb.attest.enabled defaults true)")
+	}
+	if _, ok := renderedTLSLBNginxConfig(t, defOut).locations[wellKnown]; !ok {
+		t.Fatal("well-known proxy location should render by default (tlsLb.attest.enabled defaults true)")
 	}
 
 	// Explicit opt-out: no sidecar, no well-known proxy.
@@ -1817,8 +2043,12 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template (attest disabled): %v\n%s", err, offOut)
 	}
-	if strings.Contains(offOut, "name: cds-attest") || strings.Contains(offOut, "location /.well-known/c8s/ {") {
+	offContainers := renderedDeployment(t, offOut, "c8s-tls-lb").Spec.Template.Spec.Containers
+	if _, ok := findContainer(offContainers, "cds-attest"); ok {
 		t.Fatal("cds-attest sidecar should not render when tlsLb.attest.enabled=false")
+	}
+	if _, ok := renderedTLSLBNginxConfig(t, offOut).locations[wellKnown]; ok {
+		t.Fatal("well-known proxy location should not render when tlsLb.attest.enabled=false")
 	}
 }
 
@@ -1929,24 +2159,17 @@ func TestChartTLSLBMeshWrappedUpstreamIsWorkloadDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	cfg := renderedTLSLBNginxConf(t, out)
-	for _, want := range []string{
-		"resolver kube-dns.kube-system.svc.cluster.local;",
-		// The baseline mesh-wrapped upstream is the operator-managed headless
-		// Service, so the pod-IP hop is mesh-wrapped.
-		"set $backend_addr c8s-infer.c8s-system.svc.cluster.local:8000;",
-		"proxy_pass http://$backend_addr;",
-	} {
-		if !strings.Contains(cfg, want) {
-			t.Fatalf("tls-lb nginx config missing %q\n%s", want, cfg)
-		}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.http.assertDirective(t, "resolver", "kube-dns.kube-system.svc.cluster.local")
+	defaultRoute := cfg.location(t, "prefix", "/")
+	// The baseline mesh-wrapped upstream is the operator-managed headless
+	// Service, so the pod-IP hop is mesh-wrapped.
+	defaultRoute.assertDirective(t, "set", "$backend_addr", "c8s-infer.c8s-system.svc.cluster.local:8000")
+	defaultRoute.assertDirective(t, "proxy_pass", "http://$backend_addr")
+	if len(cfg.upstreams) != 0 {
+		t.Fatalf("catch-all upstream must be a variable dial, not a static upstream block (it would pin headless pod IPs at startup); got %v", cfg.upstreams)
 	}
-	if strings.Contains(cfg, "upstream backend {") {
-		t.Fatalf("catch-all upstream must be a variable dial, not a static upstream block (it would pin headless pod IPs at startup)\n%s", cfg)
-	}
-	if strings.Contains(cfg, "proxy_ssl_") {
-		t.Fatalf("default http upstream must not render proxy_ssl_ directives\n%s", cfg)
-	}
+	cfg.assertNoDirectivePrefix(t, "proxy_ssl_")
 }
 
 // nginx exits at startup on a resolver name that does not resolve, and RKE2
@@ -1963,12 +2186,12 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 		{
 			name: "rke2 via kata.distro",
 			args: []string{"--set-string", "kata.distro=rke2"},
-			want: "resolver rke2-coredns-rke2-coredns.kube-system.svc.cluster.local;",
+			want: "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local",
 		},
 		{
 			name: "rke2 via nriImagePolicy.distro",
 			args: []string{"--set-string", "nriImagePolicy.distro=rke2"},
-			want: "resolver rke2-coredns-rke2-coredns.kube-system.svc.cluster.local;",
+			want: "rke2-coredns-rke2-coredns.kube-system.svc.cluster.local",
 		},
 		{
 			name: "explicit resolver wins over distro",
@@ -1976,7 +2199,7 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 				"--set-string", "kata.distro=rke2",
 				"--set-string", "tlsLb.nginx.resolver=my-dns.dns-ns.svc.cluster.local",
 			},
-			want: "resolver my-dns.dns-ns.svc.cluster.local;",
+			want: "my-dns.dns-ns.svc.cluster.local",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1984,10 +2207,11 @@ func TestChartTLSLBResolverDerivesFromDistro(t *testing.T) {
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
-			cfg := renderedTLSLBNginxConf(t, out)
-			if !strings.Contains(cfg, tc.want) {
-				t.Fatalf("tls-lb nginx config missing %q\n%s", tc.want, cfg)
+			cfg := renderedTLSLBNginxConfig(t, out)
+			if cfg.http == nil {
+				t.Fatal("nginx config missing http block")
 			}
+			cfg.http.assertDirective(t, "resolver", tc.want)
 		})
 	}
 }
@@ -2017,8 +2241,242 @@ func TestTLSLBCORSAllowsSessionHeaderByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "X-C8s-Session") {
-		t.Fatalf("CORS Access-Control-Allow-Headers missing X-C8s-Session:\n%s", out)
+	conf := renderedTLSLBNginxConf(t, out)
+	if !strings.Contains(conf, "X-C8s-Session") {
+		t.Fatalf("CORS Access-Control-Allow-Headers missing X-C8s-Session:\n%s", conf)
+	}
+}
+
+// protocolCORSLocations are the c8s protocol-owned nginx locations that serve
+// wide-open CORS by default: their responses are self-authenticating or
+// public by design, and browser verifiers on any origin must be able to
+// reach them.
+var protocolCORSLocations = []struct{ match, path string }{
+	{"exact", "/allowlist"},
+	{"prefix", "/allowlist/"},
+	{"exact", "/v1/discovery"},
+	{"exact", "/.well-known/cds-cert.pem"},
+	{"exact", "/.well-known/mesh-ca.pem"},
+	{"prefix", "/.well-known/c8s/"},
+}
+
+func TestTLSLBProtocolEndpointsCORSByDefault(t *testing.T) {
+	// With no CORS configuration at all, the protocol-owned endpoints must be
+	// callable from a browser on any origin — that is the whole point of
+	// in-browser attestation — while workload locations stay untouched.
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", `"*"`, "always")
+	}
+	// The workload catch-all inherits nothing from the protocol default.
+	cfg.location(t, "prefix", "/").assertNoDirective(t, "add_header")
+	// The built-in policy is self-contained: none of the global CORS
+	// http-level maps are rendered.
+	if _, ok := cfg.maps[nginxMapKey{source: "$http_origin", target: "$cors_origin"}]; ok {
+		t.Fatal("global CORS maps rendered without tlsLb.cors.enabled")
+	}
+}
+
+func TestTLSLBProtocolEndpointsCORSOptOut(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "cors.protocolEndpoints=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	conf := renderedTLSLBNginxConf(t, out)
+	if strings.Contains(conf, "Access-Control") {
+		t.Fatalf("CORS directives rendered with cors.protocolEndpoints=false:\n%s", conf)
+	}
+}
+
+func TestTLSLBGlobalCORSCoversProtocolEndpoints(t *testing.T) {
+	// An enabled global CORS block is an explicit operator policy; it covers
+	// the protocol endpoints too (as it always has), and the built-in
+	// wide-open block steps aside rather than double-emitting headers.
+	out, err := helmTemplateTLSLB(t,
+		"--set", "cors.enabled=true",
+		"--set", "cors.allowOrigins={https://example.github.io}",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, loc := range protocolCORSLocations {
+		block := cfg.location(t, loc.match, loc.path)
+		block.assertDirective(t, "add_header", "Access-Control-Allow-Origin", "$cors_out_origin", "always")
+	}
+	if conf := renderedTLSLBNginxConf(t, out); strings.Contains(conf, `Access-Control-Allow-Origin  "*"`) ||
+		strings.Contains(conf, `Access-Control-Allow-Origin "*"`) {
+		t.Fatalf("wide-open protocol CORS rendered alongside an enabled global block:\n%s", conf)
+	}
+}
+
+func TestTLSLBRejectsStringProtocolEndpoints(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set-string", "cors.protocolEndpoints=false")
+	if err == nil {
+		t.Fatal("helm template succeeded with string cors.protocolEndpoints, want error")
+	}
+	if !strings.Contains(out, "tlsLb.cors.protocolEndpoints must be a boolean") {
+		t.Fatalf("unexpected error output:\n%s", out)
+	}
+}
+
+func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
+	out, err := helmTemplateTLSLB(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=1r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=8r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=20r/s")
+	rateMap := cfg.mapBlock(t, "$request_method", "$allowlist_write_rate_key")
+	rateMap.assertDirective(t, "default", "$binary_remote_addr")
+	rateMap.assertDirective(t, "GET", `""`)
+	rateMap.assertDirective(t, "HEAD", `""`)
+	rateMap.assertDirective(t, "OPTIONS", `""`)
+	// The total key chains off the write key: exempt methods stay exempt, any
+	// counted method collapses onto the single "all" bucket.
+	totalMap := cfg.mapBlock(t, "$allowlist_write_rate_key", "$allowlist_write_total_key")
+	totalMap.assertDirective(t, `""`, `""`)
+	totalMap.assertDirective(t, "default", `"all"`)
+	readMap := cfg.mapBlock(t, "$request_method", "$allowlist_read_rate_key")
+	readMap.assertDirective(t, "default", `""`)
+	readMap.assertDirective(t, "GET", "$binary_remote_addr")
+	readMap.assertDirective(t, "HEAD", "$binary_remote_addr")
+
+	for _, route := range []struct {
+		match string
+		path  string
+	}{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		location := cfg.location(t, route.match, route.path)
+		location.assertDirective(t, "proxy_pass", "http://127.0.0.1:8801$request_uri")
+		location.assertDirective(t, "proxy_set_header", "Host", "$host")
+		location.assertDirective(t, "proxy_set_header", "Authorization", "$http_authorization")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=5", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=15", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=40", "nodelay")
+		location.assertDirective(t, "limit_req_status", "429")
+		location.assertNoDirective(t, "proxy_ssl_verify")
+	}
+
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	for _, want := range []string{
+		"allowlist-proxy",
+		"--host=127.0.0.1",
+		"--port=8801",
+		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
+		"--attestation-api-url=http://$(HOST_IP):8400",
+	} {
+		assertContainerHasArg(t, "allowlist-proxy", proxy.Args, want)
+	}
+	if len(proxy.VolumeMounts) != 0 {
+		t.Fatalf("allowlist-proxy must not receive TLS or operator private keys: mounts=%v", proxy.VolumeMounts)
+	}
+	if !hasHostIPEnv(proxy) {
+		t.Fatalf("allowlist-proxy missing HOST_IP downward-API env: env=%v", proxy.Env)
+	}
+}
+
+func TestTLSLBAllowlistRateLimitsAreConfigurable(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set", "allowlist.rateLimit.requestsPerSecond=2",
+		"--set", "allowlist.rateLimit.burst=7",
+		"--set", "allowlist.rateLimit.totalRequestsPerSecond=9",
+		"--set", "allowlist.rateLimit.totalBurst=19",
+		"--set", "allowlist.readRateLimit.requestsPerSecond=50",
+		"--set", "allowlist.readRateLimit.burst=100",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	if cfg.http == nil {
+		t.Fatal("nginx config missing http block")
+	}
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_rate_key", "zone=allowlist_write_per_client:10m", "rate=2r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_write_total_key", "zone=allowlist_write_total:1m", "rate=9r/s")
+	cfg.http.assertDirective(t, "limit_req_zone", "$allowlist_read_rate_key", "zone=allowlist_read_per_client:10m", "rate=50r/s")
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		location := cfg.location(t, key.match, key.path)
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_per_client", "burst=7", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_write_total", "burst=19", "nodelay")
+		location.assertDirective(t, "limit_req", "zone=allowlist_read_per_client", "burst=100", "nodelay")
+	}
+}
+
+func TestTLSLBAllowlistProxyPinsCDSMeasurements(t *testing.T) {
+	measurement := strings.Repeat("ab", ratls.SNPMeasurementSize)
+	out, err := helmTemplate(t,
+		"--set-string", "cds.measurements[0]="+measurement,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--cds-measurements="+measurement)
+}
+
+func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
+	out, err := helmTemplateTLSLB(t, "--set", "allowlist.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	for _, key := range []nginxLocationKey{
+		{match: "exact", path: "/allowlist"},
+		{match: "prefix", path: "/allowlist/"},
+	} {
+		if _, ok := cfg.locations[key]; ok {
+			t.Fatalf("nginx config contains disabled built-in allowlist location %#v", key)
+		}
+	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("disabled built-in allowlist route still renders its rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("disabled built-in allowlist route still renders allowlist-proxy")
+	}
+}
+
+func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
+	out, err := helmTemplateTLSLB(t,
+		"--set-string", "routes[0].path=/allowlist",
+		"--set-string", "routes[0].match=exact",
+		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
+		"--set-string", "routes[0].backend.protocol=https",
+		"--set", "routes[0].backend.tls.verify=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "exact", "/allowlist").assertDirective(t, "proxy_pass", "https://route_0")
+	if _, ok := cfg.locations[nginxLocationKey{match: "prefix", path: "/allowlist/"}]; ok {
+		t.Fatal("built-in /allowlist/ route rendered alongside explicit allowlist route")
+	}
+	if _, ok := cfg.maps[nginxMapKey{source: "$request_method", target: "$allowlist_write_rate_key"}]; ok {
+		t.Fatal("explicit allowlist route still renders the built-in rate-limit map")
+	}
+	cfg.http.assertNoDirective(t, "limit_req_zone")
+	deployment := renderedDeployment(t, out, "c8s-tls-lb")
+	if _, ok := findContainer(deployment.Spec.Template.Spec.Containers, "allowlist-proxy"); ok {
+		t.Fatal("explicit allowlist route still renders the built-in allowlist-proxy")
 	}
 }
 
@@ -2166,7 +2624,16 @@ func renderedTLSLBNginxConf(t *testing.T, manifest string) string {
 
 type nginxConfig struct {
 	upstreams map[string]*nginxBlock
+	maps      map[nginxMapKey]*nginxBlock
 	locations map[nginxLocationKey]*nginxBlock
+	http      *nginxBlock
+	servers   []*nginxBlock
+	all       []*nginxBlock
+}
+
+type nginxMapKey struct {
+	source string
+	target string
 }
 
 type nginxLocationKey struct {
@@ -2187,10 +2654,11 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 	t.Helper()
 	cfg := nginxConfig{
 		upstreams: make(map[string]*nginxBlock),
+		maps:      make(map[nginxMapKey]*nginxBlock),
 		locations: make(map[nginxLocationKey]*nginxBlock),
 	}
 
-	var current *nginxBlock
+	var stack []*nginxBlock
 	for _, line := range strings.Split(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -2198,37 +2666,49 @@ func parseNginxConfig(t *testing.T, conf string) nginxConfig {
 		}
 		if strings.HasSuffix(trimmed, "{") {
 			fields := strings.Fields(strings.TrimSpace(strings.TrimSuffix(trimmed, "{")))
+			block := &nginxBlock{directives: make(map[string][][]string)}
+			cfg.all = append(cfg.all, block)
+			if len(fields) == 1 && fields[0] == "http" {
+				cfg.http = block
+			}
+			if len(fields) == 1 && fields[0] == "server" {
+				cfg.servers = append(cfg.servers, block)
+			}
 			if len(fields) == 2 && fields[0] == "upstream" {
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.upstreams[fields[1]] = block
-				current = block
-				continue
+			}
+			if len(fields) == 3 && fields[0] == "map" {
+				cfg.maps[nginxMapKey{source: fields[1], target: fields[2]}] = block
 			}
 			if len(fields) >= 2 && fields[0] == "location" {
 				key := nginxLocationKey{match: "prefix", path: fields[1]}
 				if len(fields) == 3 && fields[1] == "=" {
 					key = nginxLocationKey{match: "exact", path: fields[2]}
 				}
-				block := &nginxBlock{directives: make(map[string][][]string)}
 				cfg.locations[key] = block
-				current = block
-				continue
 			}
-			current = nil
+			stack = append(stack, block)
 			continue
 		}
 		if trimmed == "}" {
-			current = nil
+			if len(stack) == 0 {
+				t.Fatalf("nginx config has unmatched closing brace")
+			}
+			stack = stack[:len(stack)-1]
 			continue
 		}
-		if current == nil || !strings.HasSuffix(trimmed, ";") {
+		if len(stack) == 0 || !strings.HasSuffix(trimmed, ";") {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
 		if len(fields) == 0 {
 			continue
 		}
+		current := stack[len(stack)-1]
 		current.directives[fields[0]] = append(current.directives[fields[0]], fields[1:])
+	}
+	if len(stack) != 0 {
+		t.Fatalf("nginx config has %d unclosed block(s)", len(stack))
 	}
 	return cfg
 }
@@ -2250,6 +2730,37 @@ func (cfg nginxConfig) location(t *testing.T, match, path string) *nginxBlock {
 		t.Fatalf("nginx config missing location %#v; got %v", key, cfg.locations)
 	}
 	return location
+}
+
+func (cfg nginxConfig) server(t *testing.T) *nginxBlock {
+	t.Helper()
+	if len(cfg.servers) != 1 {
+		t.Fatalf("nginx config has %d server blocks, want 1", len(cfg.servers))
+	}
+	return cfg.servers[0]
+}
+
+// assertNoDirectivePrefix fails if any block in the config carries a directive
+// whose name starts with prefix.
+func (cfg nginxConfig) assertNoDirectivePrefix(t *testing.T, prefix string) {
+	t.Helper()
+	for _, block := range cfg.all {
+		for name, args := range block.directives {
+			if strings.HasPrefix(name, prefix) {
+				t.Fatalf("nginx directive %s %v present, want no %s* directives", name, args, prefix)
+			}
+		}
+	}
+}
+
+func (cfg nginxConfig) mapBlock(t *testing.T, source, target string) *nginxBlock {
+	t.Helper()
+	key := nginxMapKey{source: source, target: target}
+	block, ok := cfg.maps[key]
+	if !ok {
+		t.Fatalf("nginx config missing map %#v; got %v", key, cfg.maps)
+	}
+	return block
 }
 
 func (block *nginxBlock) assertServer(t *testing.T, server string) {
@@ -2290,6 +2801,90 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		args []string
 		want string
 	}{
+		{
+			name: "allowlist-enabled-not-bool",
+			args: []string{
+				"--set-string", "allowlist.enabled=false",
+			},
+			want: "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: false",
+		},
+		{
+			name: "allowlist-proxy-port-out-of-range",
+			args: []string{
+				"--set", "allowlist.proxyPort=0",
+			},
+			want: "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: 0",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-attestation",
+			args: []string{
+				"--set", "allowlist.proxyPort=8800",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.attest.port, got: 8800",
+		},
+		{
+			name: "allowlist-proxy-port-collides-with-nginx",
+			args: []string{
+				"--set", "allowlist.proxyPort=8443",
+			},
+			want: "tlsLb.allowlist.proxyPort must differ from tlsLb.nginx.httpsPort, got: 8443",
+		},
+		{
+			name: "allowlist-write-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-rate-exceeds-total",
+			args: []string{
+				"--set", "allowlist.rateLimit.requestsPerSecond=9",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.requestsPerSecond must not exceed rateLimit.totalRequestsPerSecond (8), got: 9",
+		},
+		{
+			name: "allowlist-write-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.rateLimit.burst must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-write-burst-exceeds-total",
+			args: []string{
+				"--set", "allowlist.rateLimit.burst=16",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.burst must not exceed rateLimit.totalBurst (15), got: 16",
+		},
+		{
+			name: "allowlist-write-total-rate-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalRequestsPerSecond=10",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalRequestsPerSecond must be less than cds.rateLimit (10), got: 10",
+		},
+		{
+			name: "allowlist-write-total-burst-consumes-cds-capacity",
+			args: []string{
+				"--set", "allowlist.rateLimit.totalBurst=20",
+			},
+			want: "VALIDATION_ERROR kind=tlslb_allowlist_rate_budget: tlsLb.allowlist.rateLimit.totalBurst must be less than cds.rateBurst (20), got: 20",
+		},
+		{
+			name: "allowlist-read-rate-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.requestsPerSecond=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.requestsPerSecond must be a positive integer, got: 0",
+		},
+		{
+			name: "allowlist-read-burst-not-positive",
+			args: []string{
+				"--set", "allowlist.readRateLimit.burst=0",
+			},
+			want: "tlsLb.allowlist.readRateLimit.burst must be a positive integer, got: 0",
+		},
 		{
 			name: "route-verifyDepth-injection",
 			args: []string{
@@ -2600,7 +3195,7 @@ func TestTLSLBRollsOnNginxConfigChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template default config: %v\n%s", err, defaultOut)
 	}
-	defaultChecksum := renderedValue(t, defaultOut, "checksum/nginx-config")
+	defaultChecksum := renderedDeployment(t, defaultOut, "c8s-tls-lb").Spec.Template.Annotations["checksum/nginx-config"]
 	if defaultChecksum == "" {
 		t.Fatalf("default checksum/nginx-config is empty\n%s", defaultOut)
 	}
@@ -2611,7 +3206,7 @@ func TestTLSLBRollsOnNginxConfigChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
 	}
-	changedChecksum := renderedValue(t, changedOut, "checksum/nginx-config")
+	changedChecksum := renderedDeployment(t, changedOut, "c8s-tls-lb").Spec.Template.Annotations["checksum/nginx-config"]
 	if changedChecksum == defaultChecksum {
 		t.Fatalf("checksum/nginx-config did not change after changing upstream: %s", defaultChecksum)
 	}
@@ -2622,25 +3217,26 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"resources: [confidentialworkloads]",
-		"verbs: [get, list, watch]",
-		"resources: [confidentialworkloads/status]",
-		"verbs: [get, update, patch]",
-		"resources: [pods]",
-		"resources: [leases]",
-		"resources: [mutatingwebhookconfigurations]",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
-	}
-	// The event recorder needs events, but only create/patch (recorder
-	// aggregation), never read or delete across the cluster. Decode the
-	// ClusterRole and assert the verbs exactly so a broadened grant fails.
+	// Decode the ClusterRole and assert the verbs exactly so a broadened
+	// grant fails. The event recorder needs events, but only create/patch
+	// (recorder aggregation), never read or delete across the cluster.
 	var role rbacv1.ClusterRole
 	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
 		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	for _, tc := range []struct {
+		apiGroup, resource string
+		verbs              []string
+	}{
+		{"confidential.ai", "confidentialworkloads", []string{"get", "list", "watch"}},
+		{"confidential.ai", "confidentialworkloads/status", []string{"get", "update", "patch"}},
+		{"", "pods", []string{"get", "list", "watch", "delete"}},
+		{"coordination.k8s.io", "leases", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{"admissionregistration.k8s.io", "mutatingwebhookconfigurations", []string{"get", "update", "patch"}},
+	} {
+		if got := operatorVerbsFor(role, tc.apiGroup, tc.resource); !slices.Equal(got, tc.verbs) {
+			t.Fatalf("operator %s verbs = %v, want %v", tc.resource, got, tc.verbs)
+		}
 	}
 	if got := operatorVerbsFor(role, "", "events"); !slices.Equal(got, []string{"create", "patch"}) {
 		t.Fatalf("operator events verbs = %v, want [create patch]", got)
@@ -2655,17 +3251,28 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 	if got := operatorVerbsFor(role, "", "services"); !slices.Equal(got, []string{"get", "list", "watch", "create", "update", "delete"}) {
 		t.Fatalf("operator services verbs = %v", got)
 	}
-	for _, unexpected := range []string{
-		"resources: [confidentialworkloads/finalizers]",
-		"resources: [replicasets]",
-		"resources: [secrets, configmaps]",
-		"resources: [nodes]",
-		"resources: [rolebindings]",
-	} {
-		if strings.Contains(out, unexpected) {
-			t.Fatalf("render contained broad RBAC rule %q\n%s", unexpected, out)
+	// No rendered Role/ClusterRole may grant any of these resources at all.
+	banned := []string{"confidentialworkloads/finalizers", "replicasets", "secrets", "configmaps", "nodes", "rolebindings"}
+	iterateManifests(t, out, func(doc []byte) bool {
+		var head docMeta
+		if err := sigsyaml.Unmarshal(doc, &head); err != nil || (head.Kind != "ClusterRole" && head.Kind != "Role") {
+			return false
 		}
-	}
+		var r struct {
+			Rules []rbacv1.PolicyRule `json:"rules"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &r); err != nil {
+			t.Fatalf("decode %s %s rules: %v", head.Kind, head.Metadata.Name, err)
+		}
+		for _, rule := range r.Rules {
+			for _, resource := range banned {
+				if slices.Contains(rule.Resources, resource) {
+					t.Errorf("%s %s grants broad RBAC resource %q", head.Kind, head.Metadata.Name, resource)
+				}
+			}
+		}
+		return false
+	})
 }
 
 // operatorVerbsFor returns the verbs the ClusterRole grants on (apiGroup,
@@ -2686,13 +3293,12 @@ func TestChartWebhookAddsCABundleRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	for _, want := range []string{
-		"resources: [mutatingwebhookconfigurations]",
-		"verbs: [get, update, patch]",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("render missing %q\n%s", want, out)
-		}
+	var role rbacv1.ClusterRole
+	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
+		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	if got := operatorVerbsFor(role, "admissionregistration.k8s.io", "mutatingwebhookconfigurations"); !slices.Equal(got, []string{"get", "update", "patch"}) {
+		t.Fatalf("operator mutatingwebhookconfigurations verbs = %v, want [get update patch]", got)
 	}
 }
 
@@ -2701,7 +3307,7 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template default config: %v\n%s", err, defaultOut)
 	}
-	defaultChecksum := renderedValue(t, defaultOut, "checksum/config")
+	defaultChecksum := renderedDaemonSet(t, defaultOut, "c8s-attestation-api").Spec.Template.Annotations["checksum/config"]
 	if defaultChecksum == "" {
 		t.Fatalf("default checksum/config is empty\n%s", defaultOut)
 	}
@@ -2712,7 +3318,7 @@ func TestChartRollsAttestationApiOnConfigChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template changed config: %v\n%s", err, changedOut)
 	}
-	changedChecksum := renderedValue(t, changedOut, "checksum/config")
+	changedChecksum := renderedDaemonSet(t, changedOut, "c8s-attestation-api").Spec.Template.Annotations["checksum/config"]
 	if changedChecksum == defaultChecksum {
 		t.Fatalf("checksum/config did not change after changing platforms: %s", defaultChecksum)
 	}
@@ -2785,8 +3391,9 @@ func TestChartKataEnabledRendersDeployStack(t *testing.T) {
 	}
 	// The enforcement allowlist is platform-scoped too: a TDX class name must
 	// not be admissible on an SNP install.
-	if strings.Contains(out, "'kata-qemu-tdx'") || strings.Contains(out, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept TDX classes on an SNP install\n%s", out)
+	expr := kataEnforcementExpressions(t, out)
+	if strings.Contains(expr, "'kata-qemu-tdx'") || strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
+		t.Errorf("kata-enforcement allowlist must not accept TDX classes on an SNP install\n%s", expr)
 	}
 }
 
@@ -2897,8 +3504,8 @@ func TestChartKataRendersGpuStack(t *testing.T) {
 	}
 
 	// Enforcement allowlist accepts the class.
-	if !strings.Contains(out, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-snp-nvidia\n%s", out)
+	if expr := kataEnforcementExpressions(t, out); !strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
+		t.Errorf("kata-enforcement allowlist must accept kata-qemu-snp-nvidia\n%s", expr)
 	}
 
 	// GPU image puller: pulls the -nvidia tag and patches the GPU config.
@@ -2971,8 +3578,9 @@ func TestChartKataRendersGpuStackTdx(t *testing.T) {
 		t.Errorf("SNAPSHOTTER_HANDLER_MAPPING_X86_64 = %q must route qemu-nvidia-gpu-tdx through nydus", v)
 	}
 
-	if !strings.Contains(out, "'kata-qemu-tdx-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx-nvidia\n%s", out)
+	expr := kataEnforcementExpressions(t, out)
+	if !strings.Contains(expr, "'kata-qemu-tdx-nvidia'") {
+		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx-nvidia\n%s", expr)
 	}
 
 	puller := renderedDaemonSet(t, out, "c8s-kata-deploy-image-puller-nvidia")
@@ -2994,11 +3602,11 @@ func TestChartKataRendersGpuStackTdx(t *testing.T) {
 	if v := envValue(kube.Env, "SHIMS_X86_64"); strings.Contains(v, "-snp") {
 		t.Errorf("SHIMS_X86_64 = %q must not register SNP shims on a TDX install", v)
 	}
-	if strings.Contains(out, "'kata-qemu-snp'") || strings.Contains(out, "'kata-qemu-snp-nvidia'") {
-		t.Errorf("kata-enforcement allowlist must not accept SNP classes on a TDX install\n%s", out)
+	if strings.Contains(expr, "'kata-qemu-snp'") || strings.Contains(expr, "'kata-qemu-snp-nvidia'") {
+		t.Errorf("kata-enforcement allowlist must not accept SNP classes on a TDX install\n%s", expr)
 	}
-	if !strings.Contains(out, "'kata-qemu-tdx'") {
-		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx on a TDX install\n%s", out)
+	if !strings.Contains(expr, "'kata-qemu-tdx'") {
+		t.Errorf("kata-enforcement allowlist must accept kata-qemu-tdx on a TDX install\n%s", expr)
 	}
 
 	// Webhook injection follows the platform.
@@ -3166,6 +3774,54 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 	}, args...)...)
 }
 
+// Contract with the `c8s uninstall` running-pod guard (cmd/c8s/uninstall.go,
+// filterKataPods): it skips the release's own kata pods by release namespace +
+// app.kubernetes.io/instance, so every kata-pinned pod template must carry that
+// label or a clean uninstall is refused again.
+func TestChartKataPinnedPodsCarryInstanceLabel(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var pinned []string
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		rc := obj.Spec.Template.Spec.RuntimeClassName
+		if rc == nil || !strings.HasPrefix(*rc, "kata-") {
+			return false
+		}
+		pinned = append(pinned, obj.Metadata.Name)
+		if got := obj.Spec.Template.Labels["app.kubernetes.io/instance"]; got != "c8s" {
+			t.Errorf("%s pod template: app.kubernetes.io/instance = %q, want the release name", obj.Metadata.Name, got)
+		}
+		return false
+	})
+	slices.Sort(pinned)
+	if want := []string{"c8s-cds", "c8s-tls-lb"}; !reflect.DeepEqual(pinned, want) {
+		t.Errorf("kata-pinned workloads = %v, want %v", pinned, want)
+	}
+}
+
+func TestChartKataTLSLBAllowlistProxyUsesGuestAttestationAPI(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	proxy := renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy")
+	assertContainerHasArg(t, "allowlist-proxy", proxy.Args, "--attestation-api-url=http://127.0.0.1:8400")
+	if hasHostIPEnv(proxy) {
+		t.Fatalf("kata allowlist-proxy must use guest loopback, not HOST_IP: env=%v", proxy.Env)
+	}
+}
+
 // TestChartKataRendersPolicyAndOperatorFlag: kata.enabled renders the
 // ValidatingAdmissionPolicy + binding and flips the operator's --kata-enforce
 // flag — the two halves of enforcement must move together, and kata is
@@ -3250,7 +3906,7 @@ func TestChartKataShapeDropsHostSideComponents(t *testing.T) {
 		t.Errorf("kata shape still renders the host attestation-api DaemonSet")
 	}
 	for _, component := range []string{"ratls-mesh", "nri-image-policy"} {
-		if strings.Contains(out, "app.kubernetes.io/name: "+component) {
+		if renderedManifestHasLabel(t, out, "app.kubernetes.io/name", component) {
 			t.Errorf("kata shape still renders %s manifests", component)
 		}
 	}
@@ -3461,6 +4117,10 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 		"--set", "cds.image.tag=dev",
 		"--set", "ratlsMesh.image.tag=dev",
 		"--set", "nriImagePolicy.image.tag=dev",
+		// volumed is off by default, so its image is unused unless a test
+		// enables it; set the tag here so those tests need not repeat it (its
+		// own image requires a tag or digest, like every component).
+		"--set", "volumed.image.tag=dev",
 		// tls-lb has no default upstream (a silently-plaintext VIP was
 		// removed); a c8s-<id> headless-Service address (what `c8s install
 		// --upstream` derives) is the representative mesh-wrapped baseline, and
@@ -3488,19 +4148,6 @@ func helmTemplate(t *testing.T, args ...string) (string, error) {
 // default, for tests exercising the manual tlsLb.upstream paths.
 func noUpstreamArgs(args ...string) []string {
 	return append([]string{"--set-string", "tlsLb.upstream.address="}, args...)
-}
-
-func renderedValue(t *testing.T, manifest, key string) string {
-	t.Helper()
-	prefix := key + ": "
-	for _, line := range strings.Split(manifest, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
-		}
-	}
-	t.Fatalf("rendered manifest missing %q\n%s", key, manifest)
-	return ""
 }
 
 // docMeta is the minimum we decode from each YAML doc to dispatch by kind+name.
@@ -4662,6 +5309,89 @@ func TestChartAllowlistsTlsLbNginxSelfEntry(t *testing.T) {
 	})
 }
 
+// volumed runs its own image, so like every other component its digest must be
+// derived into the NRI floor when it is enabled — otherwise the plugin denies
+// the daemon's own container (the failure mode observed in testing). It must be
+// absent when volumed is off (the default), so a plain install neither resolves
+// nor allowlists an image it does not deploy.
+func TestChartDerivesVolumedImageIntoFloor(t *testing.T) {
+	const volD = "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+
+	t.Run("enabled: digest in the floor", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "volumed.enabled=true",
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; !ok {
+			t.Errorf("volumed digest not derived into the floor; the plugin would deny volumed's own image\nseed: %v", seed.Digests)
+		}
+	})
+
+	t.Run("disabled: digest absent", func(t *testing.T) {
+		out, err := helmTemplate(t,
+			"--set", "nriImagePolicy.bootstrapAllowlist.deriveComponents=true",
+			"--set-string", "volumed.image.digest="+volD,
+		)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, out)
+		}
+		cm := renderedConfigMap(t, out, "c8s-cds-allowlist-seed")
+		seed, err := pkgallowlist.ParseJSON([]byte(cm.Data["allowlist-seed.json"]))
+		if err != nil {
+			t.Fatalf("seed JSON does not parse: %v", err)
+		}
+		if _, ok := seed.Digests[volD]; ok {
+			t.Errorf("volumed digest derived into the floor while volumed is disabled: %v", seed.Digests)
+		}
+	})
+}
+
+// The volumed image entrypoint is ["/app/c8s", "volumed"], so the DaemonSet's
+// args must NOT repeat the subcommand. Shipping it once produced
+// `unknown command "volumed" for "c8s volumed"` and a CrashLoopBackOff daemon
+// that no chart test caught, because nothing asserted on the invocation. cds
+// has the same shape (its image entrypoint carries "cds") and its args start at
+// a flag, so this checks the convention rather than one literal.
+func TestChartComponentArgsDoNotRepeatTheEntrypointSubcommand(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.image.tag=dev",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		forbid string
+	}{
+		{"volumed", renderedDaemonSetContainer(t, out, "c8s-volumed", "volumed").Args, "volumed"},
+		{"cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "cds"},
+	} {
+		if len(tc.args) == 0 {
+			t.Errorf("%s: no args rendered", tc.name)
+			continue
+		}
+		if tc.args[0] == tc.forbid {
+			t.Errorf("%s: args start with %q, but the image entrypoint already supplies it; the container would run `c8s %s %s ...` and exit",
+				tc.name, tc.forbid, tc.forbid, tc.forbid)
+		}
+		if !strings.HasPrefix(tc.args[0], "-") {
+			t.Errorf("%s: first arg %q is not a flag; args must begin where the entrypoint leaves off", tc.name, tc.args[0])
+		}
+	}
+}
+
 // TestChartServesAllowlistSeedInNodeMode guards the node-as-CVM seed path: with
 // --cvm-mode=node the chart's nriImagePolicy is disabled (the node image bakes
 // the plugin) and kata is off, yet the baked plugin still pulls the live
@@ -4704,8 +5434,9 @@ func TestChartServesAllowlistSeedInNodeMode(t *testing.T) {
 		t.Errorf("node-mode seed missing tls-lb nginx self-entry\nseed: %v", seed.Digests)
 	}
 	// The flag/mount must be present so CDS actually loads the seed.
-	if !strings.Contains(out, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
-		t.Errorf("node-mode CDS missing --allowlist-seed flag; seed rendered but not loaded")
+	cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
+	if !slices.Contains(cds.Args, "--allowlist-seed=/etc/cds/allowlist-seed.json") {
+		t.Errorf("node-mode CDS missing --allowlist-seed flag; seed rendered but not loaded\nargs: %v", cds.Args)
 	}
 }
 
@@ -5197,9 +5928,18 @@ func TestChartDefaultRendersNoPullSecretRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	if strings.Contains(out, "imagePullSecrets") {
-		t.Errorf("default render carries an imagePullSecrets block\n%s", out)
-	}
+	iterateManifests(t, out, func(doc []byte) bool {
+		var raw map[string]any
+		if err := yaml.Unmarshal(doc, &raw); err != nil {
+			t.Fatalf("decode manifest: %v", err)
+		}
+		if path := findKey(raw, "imagePullSecrets"); path != "" {
+			var meta docMeta
+			_ = sigsyaml.Unmarshal(doc, &meta)
+			t.Errorf("default render carries an imagePullSecrets block: %s %s at %s", meta.Kind, meta.Metadata.Name, path)
+		}
+		return false
+	})
 }
 
 // pullerDockercfgSecret returns the Secret name the kata-image-puller's
@@ -5575,5 +6315,278 @@ func TestAttestationApiSeccomp(t *testing.T) {
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Fatalf("attestation-api must set seccompProfile.type: RuntimeDefault; got %+v", sc.SeccompProfile)
+	}
+}
+
+// The injected secret fetcher verifies CDS before handing it a sandbox token
+// and taking a value back, so cds.measurements has to reach the operator that
+// renders the fetcher's args. Each hop is unit-tested; this asserts the chart
+// end of the chain, which nothing else covers.
+func TestChartOperatorCarriesCDSMeasurementsForSecretFetcher(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "cds.measurements[0]=aa11",
+		"--set-string", "cds.measurements[1]=bb22",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := strings.Join(renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, " ")
+	for _, want := range []string{"--cds-measurements=aa11", "--cds-measurements=bb22"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("operator args missing %q; the fetcher would pin no measurement and accept any CDS: %s", want, args)
+		}
+	}
+}
+
+// With no measurements configured the flag is absent rather than empty, so the
+// fetcher falls back to its own unpinned warning instead of parsing "".
+func TestChartOperatorOmitsCDSMeasurementsWhenUnset(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	args := strings.Join(renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, " ")
+	if strings.Contains(args, "--cds-measurements") {
+		t.Errorf("operator carries --cds-measurements with none configured: %s", args)
+	}
+}
+
+// volumed is off by default: it runs privileged with hostPID and a writable
+// bind of the kubelet directory, and nothing needs it until a workload
+// consumes a volume.
+func TestChartVolumedOffByDefault(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-volumed") {
+		t.Error("volumed DaemonSet rendered without volumed.enabled")
+	}
+}
+
+// The privileges the daemon cannot work without: hostPID so SO_PEERCRED
+// resolves a caller in another pod's namespace to a real PID, privileged plus
+// Bidirectional propagation so the mount it makes reaches the workload's pod
+// directory, and the device and cgroup trees it reads.
+func TestChartVolumedDaemonSetShape(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-volumed")
+	spec := ds.Spec.Template.Spec
+
+	if !spec.HostPID {
+		t.Error("hostPID is off; a peer in another pod's PID namespace resolves to PID 0")
+	}
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("volumed mounts an API token it has no use for")
+	}
+
+	c, ok := findContainer(spec.Containers, "volumed")
+	if !ok {
+		t.Fatalf("volumed container missing; have %v", containerNames(spec.Containers))
+	}
+	// volumed runs its own debian-slim image carrying cryptsetup/veritysetup,
+	// NOT the distroless operator image (which has neither, so every open
+	// would fail with "executable file not found").
+	if !strings.Contains(c.Image, "/volumed") {
+		t.Errorf("volumed image = %q, want its own /volumed image (not the operator image)", c.Image)
+	}
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Error("volumed is not privileged; device-mapper and mount(2) need it")
+	}
+	// The image is nonroot (USER 65532) and privileged grants no effective
+	// caps to a non-root process: without runAsUser 0 the daemon cannot even
+	// bind its socket.
+	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
+		t.Error("volumed must set runAsUser: 0; the nonroot image user has no effective capabilities")
+	}
+	// RuntimeDefault seccomp blocks mount(2), so the daemon must not carry one.
+	if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
+		t.Errorf("seccomp profile %v would block mount(2)", c.SecurityContext.SeccompProfile.Type)
+	}
+
+	kubelet, ok := containerVolumeMount(c, "kubelet-root")
+	if !ok {
+		t.Fatal("no kubelet-root mount; there is nowhere to mount a volume")
+	}
+	if kubelet.MountPropagation == nil {
+		t.Error("kubelet-root sets no mount propagation; the mount would not reach the pod")
+	} else if *kubelet.MountPropagation != corev1.MountPropagationBidirectional {
+		t.Errorf("kubelet-root propagation = %s, want Bidirectional; the mount would not reach the pod", *kubelet.MountPropagation)
+	}
+	if kubelet.ReadOnly {
+		t.Error("kubelet-root is read-only; the daemon mounts into it")
+	}
+
+	for _, name := range []string{"dev", "sys", "cgroup", "inventory-socket-dir"} {
+		if _, ok := containerVolumeMount(c, name); !ok {
+			t.Errorf("missing %s mount", name)
+		}
+		if _, ok := podVolume(spec, name); !ok {
+			t.Errorf("missing %s volume", name)
+		}
+	}
+	// /sys whole rather than /sys/block: the block entries are symlinks into
+	// /sys/devices, and the volume's serial is read through them.
+	if v, ok := podVolume(spec, "sys"); ok && (v.HostPath == nil || v.HostPath.Path != "/sys") {
+		t.Errorf("sys volume = %+v, want a hostPath of /sys", v.HostPath)
+	}
+}
+
+// The daemon's socket has to land in the inventory's socket directory: the
+// deny-host-namespaces VAP carves out that exact path by string equality, and
+// it is the directory the webhook mounts into cw pods. A daemon serving
+// anywhere else is a daemon no confidential pod can reach.
+func TestChartVolumedSocketDirTracksTheVAPCarveOut(t *testing.T) {
+	const runtimeDir = "/var/run/c8s-inventory-elsewhere"
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "nriImagePolicy.hostPaths.runtimeDir="+runtimeDir,
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	c, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	if got := argAfter(c.Args, "--socket-dir"); got != runtimeDir {
+		t.Errorf("--socket-dir = %q, want the inventory socket dir %q", got, runtimeDir)
+	}
+
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var carved bool
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, strconv.Quote(runtimeDir)) {
+			carved = true
+		}
+	}
+	if !carved {
+		t.Errorf("the VAP does not carve out %s, so the socket dir the daemon serves in is denied to cw pods", runtimeDir)
+	}
+}
+
+// argAfter returns the value following flag in an argv, or "" if absent.
+func argAfter(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// The sidecar reaches volumed through the directory the webhook mounts into cw
+// pods, which the operator learns from --workload-claims-host-dir. If the two
+// templates ever disagree the socket is simply not there, and every
+// volume-consuming pod hangs waiting for a mount.
+func TestChartVolumedAndWebhookAgreeOnTheSocketDir(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	daemon, ok := findContainer(renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec.Containers, "volumed")
+	if !ok {
+		t.Fatal("volumed container missing")
+	}
+	socketDir := argAfter(daemon.Args, "--socket-dir")
+	if socketDir == "" {
+		t.Fatal("volumed has no --socket-dir")
+	}
+
+	operator := renderedDeploymentContainer(t, out, "c8s-operator", "operator")
+	var hostDir string
+	for _, a := range operator.Args {
+		if v, ok := strings.CutPrefix(a, "--workload-claims-host-dir="); ok {
+			hostDir = v
+		}
+	}
+	if hostDir != socketDir {
+		t.Errorf("the operator mounts %q into cw pods but volumed serves in %q", hostDir, socketDir)
+	}
+}
+
+// The one install shape granting the operator node RBAC. Asserted exactly
+// here: TestChartOperatorRBACIsScoped's ban never renders this branch.
+func TestChartOperatorNodeRBACOnlyUnderKataGuestReadyGate(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var role rbacv1.ClusterRole
+	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
+		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	got := operatorVerbsFor(role, "", "nodes")
+	want := []string{"get", "list", "watch", "patch"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("operator nodes verbs under kata = %v, want %v", got, want)
+	}
+
+	// No puller, no controller: the grant and the gate must both go with it.
+	out, err = helmTemplateKata(t, "--set", "kata.guestImage.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if !findDoc(t, out, "ClusterRole", "c8s-operator", &role) {
+		t.Fatalf("render missing ClusterRole c8s-operator\n%s", out)
+	}
+	if got := operatorVerbsFor(role, "", "nodes"); got != nil {
+		t.Fatalf("operator keeps nodes verbs %v with the puller disabled", got)
+	}
+	if strings.Contains(out, "kata-guest-ready-gate=true") {
+		t.Fatal("operator still told to enforce the guest-ready gate with no puller to set the label")
+	}
+}
+
+// Pods pinning a kata RuntimeClass bypass the injecting webhook.
+func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
+	out, err := helmTemplateKata(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	seen := map[string]bool{}
+	iterateManifests(t, out, func(doc []byte) bool {
+		var obj struct {
+			docMeta
+			Spec struct {
+				Template corev1.PodTemplateSpec `json:"template"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(doc, &obj); err != nil {
+			return false
+		}
+		spec := obj.Spec.Template.Spec
+		if spec.RuntimeClassName == nil || !strings.HasPrefix(*spec.RuntimeClassName, "kata-") {
+			return false
+		}
+		if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil ||
+			spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			t.Errorf("%s %s pins %s but has no required node affinity", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
+			return false
+		}
+		for _, term := range spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+			for _, e := range term.MatchExpressions {
+				if e.Key == webhook.GuestReadyNodeLabel {
+					seen[obj.Metadata.Name] = true
+				}
+			}
+		}
+		if !seen[obj.Metadata.Name] {
+			t.Errorf("%s %s pins %s without the guest-ready gate", obj.Kind, obj.Metadata.Name, *spec.RuntimeClassName)
+		}
+		return false
+	})
+	for _, name := range []string{"c8s-cds", "c8s-tls-lb"} {
+		if !seen[name] {
+			t.Errorf("%s missing the guest-ready node affinity", name)
+		}
 	}
 }

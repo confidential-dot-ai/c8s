@@ -63,6 +63,7 @@ var (
 	installResolveDigests bool
 	installAttestEnabled  bool
 	installMeasurements   []string
+	installInventoryCIDRs []string
 )
 
 // Flag names referenced in more than one place (registration plus a Changed()
@@ -380,30 +381,20 @@ func preflightTDXNodes(ctx context.Context) error {
 // (kata.snpNodeSelector / kata.tdxNodeSelector), and the chart-managed CDS
 // and tls-lb both pin the platform's CPU class — with no labelled
 // node the whole release sits Pending and `helm --wait` blocks for the full
-// timeout before failing opaquely. It runs right after autoLabelTEENodes,
-// which labels every kata-targeted node from --hardware-platform, so "no
-// labelled node" means no node matched the kata node selector at all. (Why a
-// wrong-TEE node cannot run these pods: docs/pitfalls.md "kata-qemu-snp on a
-// non-SNP host is a QEMU crash-loop".)
+// timeout before failing opaquely. (Why a wrong-TEE node cannot run these
+// pods: docs/pitfalls.md "kata-qemu-snp on a non-SNP host is a QEMU
+// crash-loop".)
 //
-// Like preflightCDSNode it reads the chart's default values, so it guards the
-// default path only; an operator who customizes via -f owns node labels (the
-// caller skips this when -f is supplied).
-func preflightTEENodes(ctx context.Context, chartPath, hardwarePlatform string) error {
-	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
-	if err != nil {
-		return fmt.Errorf("helm show values %q: %w", chartPath, err)
-	}
-	var tree map[string]any
-	if err := yaml.Unmarshal(out, &tree); err != nil {
-		return fmt.Errorf("parse chart values: %w", err)
-	}
-
-	selKey, otherPlatform := "snpNodeSelector", "tdx"
+// Read-only, and it reads the EFFECTIVE selector (chart defaults + -f +
+// computed --set), so it runs on every --cvm-mode=pod install including -f
+// ones: whoever owns the label, an unlabelled cluster is broken the same way.
+// autoLabelled only picks the remedy the error names.
+func preflightTEENodes(ctx context.Context, values map[string]any, hardwarePlatform string, autoLabelled bool) error {
+	selKey, otherPlatform := teeSelectorKey(hardwarePlatform), "tdx"
 	if hardwarePlatform == "tdx" {
-		selKey, otherPlatform = "tdxNodeSelector", "sev-snp"
+		otherPlatform = "sev-snp"
 	}
-	sel, _ := nestedMap(tree, "kata", selKey)
+	sel, _ := nestedMap(values, "kata", selKey)
 	selector, ok := labelSelector(sel)
 	if !ok {
 		// Empty/cleared selector means unrestricted confidential scheduling —
@@ -417,7 +408,11 @@ func preflightTEENodes(ctx context.Context, chartPath, hardwarePlatform string) 
 		return fmt.Errorf("kubectl get nodes -l %s: %w", selector, err)
 	}
 	if strings.TrimSpace(string(labeled)) == "" {
-		return fmt.Errorf("no node is labelled %s: the install labels every kata-targeted node from --hardware-platform=%s, so no node matched the kata node selector — without a labelled node no confidential pod can schedule, including the chart's own CDS and tls-lb. Check the cluster has schedulable Linux nodes; on a %s cluster pass --hardware-platform=%s instead. To label a host yourself: kubectl label node <node> %s", selector, hardwarePlatform, otherPlatform, otherPlatform, strings.ReplaceAll(selector, ",", " "))
+		why := fmt.Sprintf("the install labels every kata-targeted node from --hardware-platform=%s, so no node matched the kata node selector — check the cluster has schedulable Linux nodes, and on a %s cluster pass --hardware-platform=%s instead", hardwarePlatform, otherPlatform, otherPlatform)
+		if !autoLabelled {
+			why = fmt.Sprintf("a -f values file sets kata.%s, so the install left node labelling to you", selKey)
+		}
+		return fmt.Errorf("no node is labelled %s: %s. Without a labelled node no confidential pod can schedule, including the chart's own CDS and tls-lb, and `helm --wait` blocks until it times out. To label a host: kubectl label node <node> %s", selector, why, strings.ReplaceAll(selector, ",", " "))
 	}
 	return nil
 }
@@ -706,6 +701,17 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		if installKataDebug {
 			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
 		}
+		// The sandbox-digests callback dials node addresses and nothing else.
+		// Resolve them here, where the cluster is reachable, so a default
+		// install does not quietly ship with sandbox identity disabled. Must
+		// run before buildValueArgs, which folds the resolved CIDRs into the
+		// computed values.
+		resolved, err := resolveInventoryCIDRs(cmd.Context(), installInventoryCIDRs)
+		if err != nil {
+			return err
+		}
+		installInventoryCIDRs = resolved
+
 		// The computed values are shared with `c8s render-values` via
 		// buildValueArgs, then written to one values file rather than passed as a
 		// pile of --set flags. The contract that the CLI's flag-derived values
@@ -765,33 +771,40 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 
 		// --cvm-mode=pod: label every kata-targeted node for the declared
-		// --hardware-platform (refusing if the other platform's label is
-		// still present — a platform switch must be the operator's explicit
-		// act), then fail fast if the platform's confidential pods still
-		// have nowhere to schedule. Declarative — the flag is trusted, no
-		// hardware probe (see autoLabelTEENodes). Runs after the read-only
-		// preflights above — it mutates the cluster (node labels). Skipped
-		// with -f, whose owner owns node labels; NOT skipped under
-		// --single-node — even a one-node cluster needs its platform label
-		// for confidential pods to schedule.
-		kataDefaultPath := cvmModeIsPod(installCvmMode) && len(installValues) == 0
-		if kataDefaultPath {
-			if err := autoLabelTEENodes(cmd.Context(), chartPath, installHardwarePlatform); err != nil {
+		// --hardware-platform (see autoLabelTEENodes), then fail fast if
+		// confidential pods still have nowhere to schedule. Labelling mutates
+		// the cluster, so it runs after the read-only preflights above, and
+		// stands aside — loudly — only when a -f file sets the platform's own
+		// selector; the preflight runs either way. NOT skipped under
+		// --single-node: a one-node cluster needs the label too. See
+		// docs/pitfalls.md "A `-f` values file no longer disables TEE node
+		// labelling".
+		if cvmModeIsPod(installCvmMode) {
+			values, err := effectiveValues(cmd.Context(), chartPath, setArgs)
+			if err != nil {
 				return err
 			}
-			if err := preflightTEENodes(cmd.Context(), chartPath, installHardwarePlatform); err != nil {
+			selectorInValues, err := valuesFilesSetTEESelector(installValues, installHardwarePlatform)
+			if err != nil {
+				return err
+			}
+			if selectorInValues {
+				reportTEELabelSkip(os.Stdout, values, installHardwarePlatform)
+			} else if err := autoLabelTEENodes(cmd.Context(), values, installHardwarePlatform); err != nil {
+				return err
+			}
+			if err := preflightTEENodes(cmd.Context(), values, installHardwarePlatform, !selectorInValues); err != nil {
 				return err
 			}
 		}
 
 		// Fail fast when --hardware-platform=tdx but no node carries the TDX
-		// label. Under --cvm-mode=pod the TDX RuntimeClasses have a nodeSelector on
-		// it; under --cvm-mode=node the attestationApi DaemonSet needs at
+		// label. Under --cvm-mode=node the attestationApi DaemonSet needs at
 		// least one TDX-capable node. Checks a fact about the cluster, not
-		// the values, so it runs with -f too — but the default pod (kata) path
-		// above already checked the chart's actual tdxNodeSelector (which
+		// the values, so it runs with -f too — but under --cvm-mode=pod the
+		// block above already checked the effective tdxNodeSelector (which
 		// may be customized or cleared), so skip the fixed-key check there.
-		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !kataDefaultPath {
+		if installHardwarePlatform == "tdx" && installCvmMode != "aks" && !cvmModeIsPod(installCvmMode) {
 			if err := preflightTDXNodes(cmd.Context()); err != nil {
 				return err
 			}
@@ -1170,19 +1183,20 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	}
 	// cds.measurements / ratlsMesh.measurements pin the launch measurement of the
 	// components that speak to CDS. In node/gke/aks the node IS the CVM, so that
-	// is the node image's M — what --measurements takes. In pod mode those
-	// components are the per-pod kata guests (host-side mesh/attestation-api/NRI
-	// are disabled), whose kata-guest-base measurement is a different value; a
-	// node M pinned there would only reject every real peer. Refuse rather than
-	// mis-pin.
-	if len(measurements) > 0 && cvmMode == "pod" {
-		return nil, fmt.Errorf("--measurements pins the node CVM's launch measurement; it does not apply to --cvm-mode=pod (per-pod kata guests are measured separately)")
-	}
+	// is the node image's M. In pod mode those components are per-pod kata
+	// guests, so the value is instead the kata-guest-base launch digest for the
+	// pod shape CDS runs in — compute it with `c8s kata measure`, not from the
+	// node image's manifest.json.
 	for i, m := range measurements {
 		hexM := hex.EncodeToString(m)
 		helmArgs = append(helmArgs,
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
 			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
+		)
+	}
+	for i, c := range installInventoryCIDRs {
+		helmArgs = append(helmArgs,
+			"--set-string", fmt.Sprintf("cds.sandboxInventoryCIDRs[%d]=%s", i, c),
 		)
 	}
 	return helmArgs, nil
@@ -1741,12 +1755,28 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 }
 
 // componentEnabledPredicate reports the effective enabled value at a component's
-// enabledPath, given the chart defaults and the --set overrides assembled so
-// far. attestationApi.enabled / nriImagePolicy.enabled are plain values fields
-// (default true) that the --cvm-mode=node/pod args flip to false via --set, so
-// the base values overlaid with those --set flags is the authoritative answer.
-// The merged tree is built once and shared across the per-component calls.
+// enabledPath, given the chart defaults, the operator's -f values files, and the
+// --set overrides assembled so far — in helm's precedence order (defaults < -f
+// files in order < --set). Getting the -f files right matters for a component
+// that defaults to disabled and is turned on only through -f (e.g.
+// volumed.enabled): without them the resolver would treat it as off and skip
+// pinning its digest, and the render then fails with no image ref. The merged
+// tree is built once and shared across the per-component calls.
 func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []string) (func(valuePath string) (bool, error), error) {
+	tree, err := effectiveValues(ctx, chartPath, setArgs)
+	if err != nil {
+		return nil, err
+	}
+	return func(valuePath string) (bool, error) {
+		return boolAtPath(tree, valuePath), nil
+	}, nil
+}
+
+// effectiveValues resolves the values tree the release will actually render
+// with, in helm's precedence order: chart defaults < -f files in order <
+// --set. Callers that decide on a value the operator may have overridden (the
+// digest resolver, the TEE-node preflight) must read this, not the defaults.
+func effectiveValues(ctx context.Context, chartPath string, setArgs []string) (map[string]any, error) {
 	out, err := exec.CommandContext(ctx, "helm", "show", "values", chartPath).Output()
 	if err != nil {
 		return nil, fmt.Errorf("helm show values %q: %w", chartPath, err)
@@ -1755,12 +1785,42 @@ func componentEnabledPredicate(ctx context.Context, chartPath string, setArgs []
 	if err := yaml.Unmarshal(out, &tree); err != nil {
 		return nil, fmt.Errorf("parse chart values: %w", err)
 	}
+	// A "-" (stdin) entry is skipped: stdin is already consumed by the caller,
+	// so a value set only there stays invisible here — a narrow edge next to a
+	// real file, which is the documented path.
+	for _, vf := range installValues {
+		if vf == "-" {
+			continue
+		}
+		raw, err := os.ReadFile(vf)
+		if err != nil {
+			return nil, fmt.Errorf("read values file %q: %w", vf, err)
+		}
+		var overlay map[string]any
+		if err := yaml.Unmarshal(raw, &overlay); err != nil {
+			return nil, fmt.Errorf("parse values file %q: %w", vf, err)
+		}
+		mergeValues(tree, overlay)
+	}
 	if err := overlaySetArgs(tree, setArgs); err != nil {
 		return nil, err
 	}
-	return func(valuePath string) (bool, error) {
-		return boolAtPath(tree, valuePath), nil
-	}, nil
+	return tree, nil
+}
+
+// mergeValues deep-merges src onto dst the way helm coalesces a -f file: a map
+// value merges recursively, anything else (scalar, list) replaces. dst is
+// mutated in place.
+func mergeValues(dst, src map[string]any) {
+	for k, sv := range src {
+		if sm, ok := sv.(map[string]any); ok {
+			if dm, ok := dst[k].(map[string]any); ok {
+				mergeValues(dm, sm)
+				continue
+			}
+		}
+		dst[k] = sv
+	}
 }
 
 // overlaySetArgs applies the scalar --set/--set-string overrides in setArgs onto
@@ -1853,7 +1913,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installKataDebug, "debug", false, "use the kata-guest-base DEBUG guest variant (<tag>-debug): kubectl logs/exec work on kata pods, but container I/O becomes readable by the untrusted host and the launch measurement differs from the locked image. Requires --cvm-mode=pod; development only")
 	installCmd.Flags().BoolVar(&installResolveDigests, "resolve-digests", true, "resolve each c8s component image tag to its registry digest (via crane), pin it, and add the resolved images to the NRI allowlist (enables deriveComponents). On by default; pass --resolve-digests=false when supplying digests via -f")
 	installCmd.Flags().BoolVar(&installAttestEnabled, "attest", true, "deploy the tls-lb attestation sidecar serving /.well-known/c8s/ (browser/CLI verification via c8s-verify). On by default; pass --attest=false to omit it")
-	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of this cluster's CVM (repeatable/comma-separated), from the node image's manifest.json. Pins the internal mesh (cds.measurements + ratlsMesh.measurements) on this install; empty = no pinning (UNSAFE). Not valid with --cvm-mode=pod")
+	installCmd.Flags().StringSliceVar(&installInventoryCIDRs, "node-cidr", nil, "CIDR(s) holding this cluster's node addresses (repeatable/comma-separated). CDS dials a node's admission inventory inside them and nowhere else, which is what stops a workload pointing the sandbox-digests callback at its own pod IP. Defaults to one host route per node, read from the cluster; set this to a range when the node network is separate, so nodes added later stay covered")
+	installCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Pins the internal mesh (cds.measurements + ratlsMesh.measurements); empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")

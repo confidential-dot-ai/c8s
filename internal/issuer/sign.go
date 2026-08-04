@@ -20,12 +20,11 @@ type SignCSRParams struct {
 	TTL      time.Duration // pre-capped by caller; not clamped here
 	Evidence []byte        // raw attestation evidence; SHA-256 embedded as audit extension
 
-	// ConfigClaimsExt, when set, is the DER value of the RA-TLS config-claims
-	// extension (ratls.OIDRATLSConfigClaims) to stamp on the leaf. The caller
-	// MUST have verified the claims against the requester's evidence and (for
-	// workload digests) the allowlist before passing them — SignCSR does not
-	// re-verify (docs/ratls.md).
-	ConfigClaimsExt []byte
+	// SandboxID, when set, is stamped as the pod-sandbox-ID extension
+	// (ratls.OIDSandboxID). The caller MUST have verified the inventory-signed
+	// sandbox token it came from — SignCSR does not re-verify (docs/ratls.md,
+	// "Sandbox identity").
+	SandboxID string
 }
 
 // SignCSR signs csr against this CA, returning the leaf certificate PEM and
@@ -63,11 +62,12 @@ func (c *CA) SignCSR(p SignCSRParams) (certPEM []byte, serial *big.Int, err erro
 	// here — verifiers check it against the leaf's key via the attestation-api,
 	// so a forged or stale extension fails closed at the consumer.
 	copyRATLSExtension(template, p.CSR)
-	if len(p.ConfigClaimsExt) > 0 {
-		template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
-			Id:    ratls.OIDRATLSConfigClaims,
-			Value: p.ConfigClaimsExt,
-		})
+	if p.SandboxID != "" {
+		sandboxExt, err := ratls.MarshalSandboxIDExtension(p.SandboxID)
+		if err != nil {
+			return nil, nil, err
+		}
+		template.ExtraExtensions = append(template.ExtraExtensions, sandboxExt)
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, c.Cert, p.CSR.PublicKey, c.Key)

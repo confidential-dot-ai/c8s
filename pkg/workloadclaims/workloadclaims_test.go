@@ -3,16 +3,25 @@ package workloadclaims
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/asn1"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"unicode/utf8"
 )
 
 const (
@@ -20,290 +29,562 @@ const (
 	digestB = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 )
 
-func mustDigest(t *testing.T, init, main []string) []byte {
-	t.Helper()
-	d, err := Digest(init, main)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return d
-}
+// testHost is a syntactically valid advertise host; the tests never dial it.
+const testHost = "10.0.0.7"
 
-// Order-independent WITHIN a role, duplicate- and case-insensitive.
-func TestDigestCanonicalWithinRole(t *testing.T) {
-	ab := mustDigest(t, nil, []string{digestA, digestB})
-	ba := mustDigest(t, nil, []string{digestB, digestA})
-	if !bytes.Equal(ab, ba) {
-		t.Fatal("main digest depends on order")
-	}
-	dup := mustDigest(t, nil, []string{digestA, digestB, digestA})
-	if !bytes.Equal(ab, dup) {
-		t.Fatal("digest depends on duplicates")
-	}
-	upper := mustDigest(t, nil, []string{"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", digestB})
-	if !bytes.Equal(ab, upper) {
-		t.Fatal("digest depends on hex case")
-	}
-	if bytes.Equal(ab, mustDigest(t, nil, []string{digestA})) {
-		t.Fatal("different sets digest identically")
-	}
-}
-
-// The whole point of the split: init vs main roles are distinguished, so
-// {init:A, main:B} and {init:B, main:A} differ even though the image *set* is
-// equal. Restart churn within a role is still absorbed (tested above).
-func TestDigestRoleDistinguishing(t *testing.T) {
-	ab := mustDigest(t, []string{digestA}, []string{digestB})
-	ba := mustDigest(t, []string{digestB}, []string{digestA})
-	if bytes.Equal(ab, ba) {
-		t.Fatal("swapping init/main roles did not change the digest")
-	}
-	// Same images, all main vs split, must also differ.
-	allMain := mustDigest(t, nil, []string{digestA, digestB})
-	if bytes.Equal(ab, allMain) {
-		t.Fatal("init:A/main:B collides with main:{A,B}")
-	}
-}
-
-func TestDigestFailsClosed(t *testing.T) {
-	if _, err := Digest(nil, nil); err == nil {
-		t.Fatal("both-empty accepted")
-	}
-	if _, err := Digest(nil, []string{"sha256:bad"}); err == nil {
-		t.Fatal("malformed digest accepted")
-	}
-	// One role empty is fine (a pod may have no init containers).
-	if _, err := Digest(nil, []string{digestA}); err != nil {
-		t.Fatalf("main-only rejected: %v", err)
-	}
-}
-
-func TestIsInjectedContainer(t *testing.T) {
-	for name, want := range map[string]bool{
-		"c8s-cert":      true,
-		"c8s-cert-wait": true,
-		"app":           false,
-		"":              false,
-	} {
-		if got := IsInjectedContainer(name); got != want {
-			t.Errorf("IsInjectedContainer(%q) = %t, want %t", name, got, want)
-		}
-	}
-}
-
-// The broker endpoint is a compiled constant, not control-plane input.
-func TestBrokerEndpointBakedPath(t *testing.T) {
-	if got := BrokerEndpoint(); got != "unix:///run/c8s/workload-claims/workload-claims.sock" {
-		t.Fatalf("BrokerEndpoint = %q", got)
-	}
-}
-
-func TestBuildConfigClaims(t *testing.T) {
-	claims, err := BuildConfigClaims([]string{digestA}, []string{digestB})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(claims.OperatorKeysDigest, ratls.UnsetDigest()) || !bytes.Equal(claims.SeedDigest, ratls.UnsetDigest()) {
-		t.Fatal("workload claims must carry the unset sentinel for operator-keys and seed")
-	}
-	if !bytes.Equal(claims.WorkloadDigest, mustDigest(t, []string{digestA}, []string{digestB})) {
-		t.Fatal("workload digest does not match Digest(init, main)")
-	}
-	if _, err := BuildConfigClaims(nil, nil); err == nil {
-		t.Fatal("both-empty image sets accepted")
-	}
-}
-
-func TestVerifyWorkloadDigest(t *testing.T) {
-	claimsDER := func(t *testing.T, c *ratls.ConfigClaims) []byte {
-		t.Helper()
-		ext, err := c.MarshalExtension()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ext.Value
-	}
-	claims, err := BuildConfigClaims([]string{digestA}, []string{digestB})
-	if err != nil {
-		t.Fatal(err)
-	}
-	der := claimsDER(t, claims)
-
-	t.Run("matching lists verify and round-trip the claims", func(t *testing.T) {
-		got, err := VerifyWorkloadDigest(der, []string{digestA}, []string{digestB})
-		if err != nil {
-			t.Fatalf("VerifyWorkloadDigest: %v", err)
-		}
-		if !bytes.Equal(got.WorkloadDigest, claims.WorkloadDigest) {
-			t.Fatal("returned claims do not carry the attested workload digest")
-		}
-	})
-
-	t.Run("swapped roles rejected", func(t *testing.T) {
-		if _, err := VerifyWorkloadDigest(der, []string{digestB}, []string{digestA}); err == nil {
-			t.Fatal("role-swapped lists matched the attested digest")
-		}
-	})
-
-	t.Run("different images rejected", func(t *testing.T) {
-		if _, err := VerifyWorkloadDigest(der, []string{digestA}, []string{digestA}); err == nil {
-			t.Fatal("different image set matched the attested digest")
-		}
-	})
-
-	t.Run("unparseable claims rejected", func(t *testing.T) {
-		if _, err := VerifyWorkloadDigest([]byte("not-der"), []string{digestA}, nil); err == nil {
-			t.Fatal("garbage DER accepted")
-		}
-	})
-
-	t.Run("claims without workload digest rejected", func(t *testing.T) {
-		none := &ratls.ConfigClaims{
-			OperatorKeysDigest: ratls.UnsetDigest(),
-			SeedDigest:         ratls.UnsetDigest(),
-			WorkloadDigest:     ratls.UnsetDigest(),
-		}
-		if _, err := VerifyWorkloadDigest(claimsDER(t, none), []string{digestA}, nil); err == nil {
-			t.Fatal("workload-less claims accepted")
-		}
-	})
-
-	t.Run("governance claims rejected", func(t *testing.T) {
-		governed := &ratls.ConfigClaims{
-			OperatorKeysDigest: bytes.Repeat([]byte{0xEE}, ratls.ClaimsDigestSize),
-			SeedDigest:         ratls.UnsetDigest(),
-			WorkloadDigest:     claims.WorkloadDigest,
-		}
-		if _, err := VerifyWorkloadDigest(claimsDER(t, governed), []string{digestA}, []string{digestB}); err == nil {
-			t.Fatal("operator-keys digest on a workload claim accepted")
-		}
-		seeded := &ratls.ConfigClaims{
-			OperatorKeysDigest: ratls.UnsetDigest(),
-			SeedDigest:         bytes.Repeat([]byte{0xEE}, ratls.ClaimsDigestSize),
-			WorkloadDigest:     claims.WorkloadDigest,
-		}
-		if _, err := VerifyWorkloadDigest(claimsDER(t, seeded), []string{digestA}, []string{digestB}); err == nil {
-			t.Fatal("seed digest on a workload claim accepted")
-		}
-	})
-}
-
-func TestPartition(t *testing.T) {
-	containers := []Container{
-		{Name: "setup", Digest: digestA},
-		{Name: "app", Digest: digestB},
-	}
-	init, main := Partition(containers, map[string]struct{}{"setup": {}})
-	if len(init) != 1 || init[0] != digestA || len(main) != 1 || main[0] != digestB {
-		t.Fatalf("partition = init %v main %v", init, main)
-	}
-	// No init names ⇒ everything is main.
-	init, main = Partition(containers, nil)
-	if len(init) != 0 || len(main) != 2 {
-		t.Fatalf("no-init partition = init %v main %v", init, main)
-	}
-}
-
-// pidRecordingResolver records the peer PID the broker resolved and returns
-// fixed containers.
-type pidRecordingResolver struct {
+// fakeResolver is a SandboxResolver test double that records the peer PID the
+// inventory resolved.
+type fakeResolver struct {
 	pid        int
-	containers []Container
-	err        error
+	sandboxID  string
+	sandboxErr error
+	digests    map[string][]string // sandboxID -> digests
 }
 
-func (r *pidRecordingResolver) ContainersForPeer(peerPID int) ([]Container, error) {
-	r.pid = peerPID
-	return r.containers, r.err
+func (r *fakeResolver) SandboxForPeer(peer Peer) (string, error) {
+	r.pid = peer.PID()
+	return r.sandboxID, r.sandboxErr
 }
 
-// TestBrokerUnixSocketBindsCaller proves the identity path: over a unix
-// socket the broker sees the kernel-reported PID of the caller (this test
-// process), never a caller-supplied identity.
-func TestBrokerUnixSocketBindsCaller(t *testing.T) {
+func (r *fakeResolver) DigestsForSandbox(sandboxID string) ([]string, []SandboxContainer, bool, error) {
+	d, ok := r.digests[sandboxID]
+	cs := make([]SandboxContainer, 0, len(d))
+	for _, dg := range d {
+		cs = append(cs, SandboxContainer{Digest: dg})
+	}
+	return d, cs, ok, nil
+}
+
+// serveTokens runs the token socket and returns its path.
+func serveTokens(t *testing.T, resolver SandboxResolver, signer *SandboxTokenSigner) string {
+	t.Helper()
 	sock := filepath.Join(t.TempDir(), "wc.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := &pidRecordingResolver{containers: []Container{{Name: "app", Digest: digestA}}}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, l, resolver) }()
+	t.Cleanup(cancel)
+	go func() { _ = ServeTokens(ctx, l, resolver, signer) }()
+	return sock
+}
 
-	got, err := Fetch(context.Background(), "unix://"+sock, 5*time.Second)
+// serveDigestsOnUnix runs the digests endpoint over a unix socket so the tests
+// can exercise the handler without standing up RA-TLS. In production the
+// listener is a mutually-attested TLS listener (see ServeDigests).
+func serveDigestsOnUnix(t *testing.T, resolver SandboxResolver) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "digests.sock")
+	l, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatalf("fetch: %v", err)
+		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Digest != digestA {
-		t.Fatalf("containers = %v", got)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeDigests(ctx, l, resolver, []byte("test-identity")) }()
+	return sock
+}
+
+func testSigner(t *testing.T) *SandboxTokenSigner {
+	t.Helper()
+	signer, err := NewSandboxTokenSigner(testHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+func testRequesterKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// inventoryGetRaw GETs an inventory route over a unix socket and returns status
+// and body — for routes the typed fetch helpers don't wrap (the /digests listing).
+func inventoryGetRaw(t *testing.T, sock, route string) (int, string) {
+	t.Helper()
+	resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodGet, route, nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// testNonce stands in for the single-use CDS challenge get-cert would pass to
+// the inventory and CDS would re-check.
+var testNonce = []byte("c8s-test-challenge-nonce")
+
+// TestSandboxTokenRoute: POST /sandbox binds the kernel-reported caller to a
+// signed token carrying the resolver's sandbox ID, the inventory address, the
+// requester-key digest, the request nonce, and the inventory's EAR — verifiable
+// against the signer's key and that nonce.
+func TestSandboxTokenRoute(t *testing.T) {
+	resolver := &fakeResolver{sandboxID: "sandbox-1"}
+	signer := testSigner(t)
+	sock := serveTokens(t, resolver, signer)
+	requester := testRequesterKey(t)
+
+	token, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
+	if err != nil {
+		t.Fatalf("fetch sandbox token: %v", err)
 	}
 	if resolver.pid != os.Getpid() {
-		t.Fatalf("broker saw peer pid %d, want caller pid %d", resolver.pid, os.Getpid())
+		t.Fatalf("inventory saw peer pid %d, want caller pid %d", resolver.pid, os.Getpid())
+	}
+	sandbox, err := token.Verify(signer.PublicKey(), &requester.PublicKey, testNonce)
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if sandbox.SandboxID != "sandbox-1" {
+		t.Fatalf("sandbox = %q, want sandbox-1", sandbox.SandboxID)
+	}
+	// CDS reaches the inventory back at the address inside the signature, so a
+	// hostile host cannot redirect the callback.
+	if sandbox.InventoryHost != testHost {
+		t.Fatalf("inventory addr = %q, want %q", sandbox.InventoryHost, testHost)
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("serve: %v", err)
+	// The token is bound to the requester key: any other key must fail.
+	other := testRequesterKey(t)
+	if _, err := token.Verify(signer.PublicKey(), &other.PublicKey, testNonce); err == nil {
+		t.Fatal("token verified for a different requester key")
+	}
+	// And to the inventory key: any other signer must fail.
+	if _, err := token.Verify(testSigner(t).PublicKey(), &requester.PublicKey, testNonce); err == nil {
+		t.Fatal("token verified against a different inventory key")
+	}
+	// And to the request nonce: a token minted for one challenge must not
+	// verify against another (freshness / anti-replay).
+	if _, err := token.Verify(signer.PublicKey(), &requester.PublicKey, []byte("some-other-challenge")); err == nil {
+		t.Fatal("token verified against a different challenge nonce")
+	}
+	// A missing challenge fails closed rather than skipping the freshness check.
+	if _, err := token.Verify(signer.PublicKey(), &requester.PublicKey, nil); err == nil {
+		t.Fatal("token verified with no challenge")
 	}
 }
 
 // A TCP conn carries no peer credentials, so the resolver is called with pid 0
-// and the node-CVM broker rejects it. Driven with a plain GET, not Fetch: Fetch
-// is unix-only by construction, and this is a server-side property.
-func TestBrokerLoopbackHasNoPeerPID(t *testing.T) {
+// and the node-CVM inventory rejects it. This is why the token socket must stay
+// unix-only.
+func TestTokenRouteLoopbackHasNoPeerPID(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := &pidRecordingResolver{pid: -1, containers: []Container{{Name: "app", Digest: digestB}}}
+	resolver := &fakeResolver{pid: -1, sandboxID: "sandbox-1"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = Serve(ctx, l, resolver) }()
+	go func() { _ = ServeTokens(ctx, l, resolver, testSigner(t)) }()
 
-	resp, err := http.Get("http://" + l.Addr().String() + DigestsPath)
+	requester := testRequesterKey(t)
+	pubDER, err := x509.MarshalPKIXPublicKey(&requester.PublicKey)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(SandboxTokenRequest{PublicKey: pubDER, Nonce: testNonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+l.Addr().String()+SandboxPath, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
 	if resolver.pid != 0 {
 		t.Fatalf("loopback peer pid = %d, want 0 (no binding available)", resolver.pid)
 	}
 }
 
-// Fetch must be unable to reach anything but the baked unix socket — that is
-// what keeps the broker un-redirectable (docs/getcert-workload-binding.md,
-// Corner 5).
+// A tampered token body fails the signature; a correctly-signed token whose
+// embedded nonce differs from the request's challenge fails the freshness
+// check even with a valid signature.
+func TestSandboxTokenVerifyFailsClosed(t *testing.T) {
+	signer := testSigner(t)
+	requester := testRequesterKey(t)
+	keyDigest, err := RequesterKeyDigest(&requester.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := signer.Sign("sandbox-1", keyDigest, testNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tampered := *token
+	tampered.Token = append([]byte(nil), token.Token...)
+	tampered.Token[len(tampered.Token)-1] ^= 0xff
+	if _, err := tampered.Verify(signer.PublicKey(), &requester.PublicKey, testNonce); err == nil {
+		t.Fatal("tampered token verified")
+	}
+
+	// A validly-signed token carrying a stale nonce must be rejected when
+	// checked against the current request's challenge.
+	der, err := asn1.Marshal(sandboxTokenASN1{
+		Version:       sandboxTokenVersion,
+		SandboxID:     "sandbox-1",
+		KeyDigest:     keyDigest,
+		Nonce:         []byte("stale-challenge"),
+		InventoryHost: testHost,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := ecdsa.SignASN1(rand.Reader, signer.key, sandboxTokenSigningHash(der))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := &SignedSandboxToken{Token: der, Signature: sig}
+	if _, err := stale.Verify(signer.PublicKey(), &requester.PublicKey, testNonce); err == nil {
+		t.Fatal("token carrying a stale nonce verified against the current challenge")
+	}
+
+	// A signed token naming an unusable callback address is rejected: CDS would
+	// have nowhere to resolve the sandbox's digests.
+	bad, err := asn1.Marshal(sandboxTokenASN1{
+		Version:       sandboxTokenVersion,
+		SandboxID:     "sandbox-1",
+		KeyDigest:     keyDigest,
+		Nonce:         testNonce,
+		InventoryHost: "not-an-ip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	badSig, err := ecdsa.SignASN1(rand.Reader, signer.key, sandboxTokenSigningHash(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	badToken := &SignedSandboxToken{Token: bad, Signature: badSig}
+	if _, err := badToken.Verify(signer.PublicKey(), &requester.PublicKey, testNonce); err == nil {
+		t.Fatal("token with a malformed inventory address verified")
+	}
+}
+
+// Sign rejects an empty or over-long nonce so a hostile POST /sandbox body
+// cannot mint a nonce-free token or bloat the signed structure.
+func TestSignRejectsBadNonce(t *testing.T) {
+	signer := testSigner(t)
+	keyDigest := []byte("00000000000000000000000000000000")
+	if _, err := signer.Sign("sandbox-1", keyDigest, nil); err == nil {
+		t.Fatal("signed a token with an empty nonce")
+	}
+	if _, err := signer.Sign("sandbox-1", keyDigest, make([]byte, maxNonceLen+1)); err == nil {
+		t.Fatal("signed a token with an over-long nonce")
+	}
+}
+
+// NewSandboxTokenSigner refuses a host CDS could not dial, so the failure
+// surfaces at startup rather than as an unreachable callback at issuance.
+func TestNewSandboxTokenSignerValidatesHost(t *testing.T) {
+	for _, host := range []string{"", "nohost", "127.0.0.1", "10.0.0.1:9443"} {
+		if _, err := NewSandboxTokenSigner(host); err == nil {
+			t.Fatalf("host %q accepted", host)
+		}
+	}
+}
+
+// The identity route serves the signing key CDS resolves the token against.
+// Serving it on the same privileged-port listener as the digests is what makes
+// it an identity: a workload cannot bind the node's netns to answer here.
+func TestServeDigestsServesIdentity(t *testing.T) {
+	signer := testSigner(t)
+	sock := serveDigestsOnUnix(t, &fakeResolver{sandboxID: "sandbox-1"})
+	status, body := inventoryGetRaw(t, sock, IdentityPath)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var out InventoryIdentity
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.PublicKey, []byte("test-identity")) {
+		t.Fatalf("identity = %x, want the served key", out.PublicKey)
+	}
+	_ = signer
+}
+
+// An inventory without a signer serves no token route; FetchSandboxToken maps
+// that to ErrSandboxUnsupported so get-cert can issue without a sandbox ID
+// instead of failing closed (an unverifiable token is worse than none).
+func TestSandboxRouteAbsentWithoutSigner(t *testing.T) {
+	requester := testRequesterKey(t)
+	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, nil)
+	if _, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce); !errors.Is(err, ErrSandboxUnsupported) {
+		t.Fatalf("err = %v, want ErrSandboxUnsupported (no signer)", err)
+	}
+}
+
+// The token socket must not serve the digests route: it is peer-credential
+// bound for one caller, and answering for arbitrary sandboxes there would let
+// any pod enumerate the node.
+func TestTokenSocketDoesNotServeDigests(t *testing.T) {
+	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1", digests: map[string][]string{"sandbox-1": {digestA}}}, testSigner(t))
+	if status, _ := inventoryGetRaw(t, sock, SandboxDigestsPrefix+"sandbox-1"); status != http.StatusNotFound {
+		t.Fatalf("digests route on the token socket = %d, want 404", status)
+	}
+}
+
+// A resolution failure (unknown caller) stays fail-closed, distinct from the
+// route-absent case above.
+func TestSandboxTokenFailuresAreClosed(t *testing.T) {
+	requester := testRequesterKey(t)
+
+	sock := serveTokens(t, &fakeResolver{sandboxErr: fmt.Errorf("unknown caller")}, testSigner(t))
+	_, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce)
+	if err == nil || errors.Is(err, ErrSandboxUnsupported) {
+		t.Fatalf("err = %v, want a hard failure (resolver error)", err)
+	}
+}
+
+// A caller that sends no nonce is rejected at the route, before signing.
+func TestSandboxTokenRouteRejectsMissingNonce(t *testing.T) {
+	requester := testRequesterKey(t)
+	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t))
+	if _, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, nil); err == nil {
+		t.Fatal("inventory signed a token for a request with no nonce")
+	}
+}
+
+func TestSandboxDigestsRoute(t *testing.T) {
+	resolver := &fakeResolver{digests: map[string][]string{
+		"sandbox-1": {digestA, digestB},
+		"sandbox-2": nil,
+	}}
+	sock := serveDigestsOnUnix(t, resolver)
+
+	status, body := inventoryGetRaw(t, sock, SandboxDigestsPrefix+"sandbox-1")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var out SandboxDigestsResponse
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Digests) != 2 || out.Digests[0] != digestA || out.Digests[1] != digestB {
+		t.Fatalf("digests = %v", out.Digests)
+	}
+
+	// A known sandbox with no containers answers {"digests": []}, never null.
+	status, body = inventoryGetRaw(t, sock, SandboxDigestsPrefix+"sandbox-2")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if want := "{\"digests\":[]}\n"; body != want {
+		t.Fatalf("body = %q, want %q", body, want)
+	}
+
+	if status, _ := inventoryGetRaw(t, sock, SandboxDigestsPrefix+"nope"); status != http.StatusNotFound {
+		t.Fatalf("unknown sandbox status = %d, want 404", status)
+	}
+}
+
+// refreshResolver is a fakeResolver that also reports a refresh posture.
+type refreshResolver struct {
+	fakeResolver
+	refresh  AllowlistRefresh
+	reported bool
+}
+
+func (r *refreshResolver) AllowlistRefresh() (AllowlistRefresh, bool) {
+	return r.refresh, r.reported
+}
+
+// A guest enforcing a frozen allowlist must say so on the one channel that
+// leaves it: its journal is unreadable, so without this the state is invisible.
+func TestSandboxDigestsReportsFrozenAllowlist(t *testing.T) {
+	resolver := &refreshResolver{
+		fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
+		refresh:      AllowlistRefresh{Enabled: false, Reason: "no measurement pinned", Entries: 3},
+		reported:     true,
+	}
+	status, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var out SandboxDigestsResponse
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AllowlistRefresh == nil {
+		t.Fatal("allowlist_refresh absent; the frozen state never leaves the guest")
+	}
+	if out.AllowlistRefresh.Enabled || out.AllowlistRefresh.Reason != "no measurement pinned" || out.AllowlistRefresh.Entries != 3 {
+		t.Fatalf("allowlist_refresh = %+v", *out.AllowlistRefresh)
+	}
+}
+
+// An inventory with nothing to report must leave the field off the wire, so
+// "cannot say" never serializes as "refresh disabled".
+func TestSandboxDigestsOmitsUnreportedRefresh(t *testing.T) {
+	for name, resolver := range map[string]SandboxResolver{
+		"no reporter":    &fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}},
+		"reports absent": &refreshResolver{fakeResolver: fakeResolver{digests: map[string][]string{"sandbox-1": {digestA}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, body := inventoryGetRaw(t, serveDigestsOnUnix(t, resolver), SandboxDigestsPrefix+"sandbox-1")
+			if strings.Contains(body, "allowlist_refresh") {
+				t.Fatalf("body = %q, want no allowlist_refresh field", body)
+			}
+		})
+	}
+}
+
+// The reason crosses a trust boundary from an inventory the client may not pin,
+// so it must not be able to forge log lines or blow up a record.
+func TestSafeReasonBoundsRemoteString(t *testing.T) {
+	if got := safeReason("clean reason"); got != "clean reason" {
+		t.Fatalf("safeReason mangled a clean string: %q", got)
+	}
+	if got := safeReason("a\nlevel=ERROR msg=forged\rb\x00c"); strings.ContainsAny(got, "\n\r\x00") {
+		t.Fatalf("control characters survived: %q", got)
+	}
+	long := safeReason(strings.Repeat("é", 5000))
+	if n := len([]rune(long)); n != maxReasonLen+1 {
+		t.Fatalf("truncated to %d runes, want %d plus ellipsis", n, maxReasonLen)
+	}
+	if !utf8.ValidString(long) {
+		t.Fatalf("truncation split a rune: %q", long)
+	}
+}
+
+// The digests endpoint must not mint tokens: it answers for any sandbox and is
+// reachable over the network, so identity issuance there would be unbound.
+func TestDigestsEndpointDoesNotServeTokens(t *testing.T) {
+	sock := serveDigestsOnUnix(t, &fakeResolver{sandboxID: "sandbox-1"})
+	requester := testRequesterKey(t)
+	if _, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce); !errors.Is(err, ErrSandboxUnsupported) {
+		t.Fatalf("err = %v, want ErrSandboxUnsupported (digests endpoint mints no tokens)", err)
+	}
+}
+
+// FetchSandboxToken must be unable to reach anything but the baked unix socket
+// — that is what keeps the inventory un-redirectable
+// (docs/getcert-workload-binding.md, Corner 5).
 func TestFetchRejectsNonUnixEndpoint(t *testing.T) {
+	requester := testRequesterKey(t)
 	for _, ep := range []string{
 		"http://127.0.0.1:8080",
-		"https://broker.example",
+		"https://inventory.example",
 		"/run/c8s/workload-claims/workload-claims.sock",
 		"",
 	} {
-		if _, err := Fetch(context.Background(), ep, time.Second); err == nil {
+		if _, err := FetchSandboxToken(context.Background(), ep, time.Second, &requester.PublicKey, testNonce); err == nil {
 			t.Fatalf("endpoint %q accepted; only unix:// may be dialed", ep)
 		}
 	}
 }
 
-func TestBrokerResolverErrorFailsClosed(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "wc.sock")
-	l, err := net.Listen("unix", sock)
+func TestValidateInventoryHost(t *testing.T) {
+	for _, ok := range []string{"10.0.0.1", "192.0.2.5", "2001:db8::1"} {
+		if err := ValidateInventoryHost(ok); err != nil {
+			t.Fatalf("host %q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "10.0.0.1:9443", "not-an-ip"} {
+		if err := ValidateInventoryHost(bad); err == nil {
+			t.Fatalf("host %q accepted", bad)
+		}
+	}
+}
+
+// A sandbox token is mintable by anything holding an /attest-key EAR, so the
+// address it carries is attacker-chosen. These are the request-forgery targets
+// that must never be dialable: the cloud metadata service, CDS's own loopback,
+// and names that let DNS pick the destination after the check.
+func TestInventoryAddrRejectsRequestForgeryTargets(t *testing.T) {
+	for _, bad := range []string{
+		"169.254.169.254", // cloud metadata (IMDS)
+		"fe80::1",         // IPv6 link-local
+		"127.0.0.1",       // CDS's own loopback
+		"::1",             // IPv6 loopback
+		"0.0.0.0",         // unspecified
+		"::",              // IPv6 unspecified
+		"224.0.0.1",       // multicast
+		"metadata.google.internal",
+		"localhost",
+		"inventory.example", // any name: DNS could resolve anywhere
+	} {
+		if err := ValidateInventoryHost(bad); err == nil {
+			t.Fatalf("request-forgery target %q accepted as an inventory host", bad)
+		}
+	}
+}
+
+// What gets dialed is rebuilt from the parsed IP and port, not passed through
+// from the caller's bytes.
+func TestParseInventoryHostNormalizes(t *testing.T) {
+	got, err := parseInventoryHost("2001:0db8:0000::1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := &pidRecordingResolver{err: fmt.Errorf("unknown caller")}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = Serve(ctx, l, resolver) }()
+	if got != "2001:db8::1" {
+		t.Fatalf("normalized host = %q, want the re-serialized form", got)
+	}
+}
 
-	if _, err := Fetch(context.Background(), "unix://"+sock, 5*time.Second); err == nil {
-		t.Fatal("resolver error did not fail the fetch")
+// The node CIDRs are the boundary that stops a workload answering as its own
+// node's inventory: a pod IP is outside them, so CDS never dials it.
+func TestInventoryHostsBoundsTheCallback(t *testing.T) {
+	hosts, err := ParseInventoryHosts([]string{"10.0.0.0/24", "192.168.1.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hosts.Contains("10.0.0.7") || !hosts.Contains("192.168.1.9") {
+		t.Fatal("node address rejected")
+	}
+	for _, outside := range []string{"10.244.1.5", "172.16.0.1", "not-an-ip", ""} {
+		if hosts.Contains(outside) {
+			t.Fatalf("address %q outside the node CIDRs was accepted", outside)
+		}
+	}
+	// Empty contains nothing, so an unconfigured CDS dials nowhere.
+	if (InventoryHosts{}).Contains("10.0.0.7") {
+		t.Fatal("empty CIDR set accepted an address")
+	}
+	if _, err := ParseInventoryHosts([]string{"nonsense"}); err == nil {
+		t.Fatal("malformed CIDR accepted")
+	}
+}
+
+// Fetch must reject a forged address before it opens any connection.
+func TestFetchRejectsForgedAddrBeforeDialing(t *testing.T) {
+	c := &DigestsClient{timeout: time.Second}
+	if _, err := c.Fetch(context.Background(), "169.254.169.254", "sandbox-1"); err == nil {
+		t.Fatal("Fetch dialed the metadata service")
+	}
+	if _, err := c.Fetch(context.Background(), "10.0.0.1", "../../etc/passwd"); err == nil {
+		t.Fatal("Fetch accepted a sandbox ID that is not a sandbox ID")
+	}
+}
+
+func TestResolveAdvertiseHostPrefersExplicitHost(t *testing.T) {
+	host, err := ResolveAdvertiseHost("10.1.2.3", "cds.invalid:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "10.1.2.3" {
+		t.Fatalf("host = %q, want 10.1.2.3", host)
+	}
+}
+
+// An address CDS could never dial back is rejected where it is configured, so
+// the inventory fails at startup instead of minting tokens that steer CDS
+// somewhere useless.
+func TestResolveAdvertiseHostRejectsUnreachableHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "169.254.169.254", "inventory.example"} {
+		if _, err := ResolveAdvertiseHost(host, "cds.invalid:8443"); err == nil {
+			t.Fatalf("advertise host %q accepted", host)
+		}
 	}
 }
 
@@ -342,7 +623,7 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 	}
 
 	// CRI-O nests the (untracked) sandbox ID above the container scope; both
-	// are 64-hex, sandbox first. The broker skips it by picking the shallowest
+	// are 64-hex, sandbox first. The inventory skips it by picking the shallowest
 	// *tracked* container, but the resolver must surface both, sandbox first.
 	t.Run("crio sandbox then container, order preserved", func(t *testing.T) {
 		sandbox := "1111111111111111111111111111111111111111111111111111111111111111"
@@ -358,7 +639,7 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 
 	// The nesting attack: a caller in its own container scope (attackerCID)
 	// creates a child cgroup named with a victim's container ID. The victim ID
-	// must appear AFTER the caller's own, so a shallowest-tracked broker never
+	// must appear AFTER the caller's own, so a shallowest-tracked inventory never
 	// resolves to the victim.
 	t.Run("nested victim id comes after the real scope", func(t *testing.T) {
 		attacker := "aaaa000000000000000000000000000000000000000000000000000000000000"
@@ -390,15 +671,14 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 	})
 }
 
-// The broker runs as root but get-cert connects non-root, so ListenUnix must
-// group-own the socket (0660 + chgrp) for the caller to reach it, the exact
-// permission the same-process broker tests can't exercise. Root chgrps to a
-// group the socket would not otherwise get (BrokerSocketGID); non-root can only
-// chgrp to its own gid, which still proves ListenUnix applies the group.
+// The inventory runs as root but get-cert connects non-root, so ListenUnix must
+// group-own the socket (0660 + chgrp) for the caller to reach it — the exact
+// permission the same-process inventory tests can't exercise. Chgrp to our own gid
+// (InventorySocketGID needs root); this still proves ListenUnix applies the group.
 func TestListenUnixSetsModeAndGroup(t *testing.T) {
 	gid := os.Getgid()
 	if os.Getuid() == 0 {
-		gid = BrokerSocketGID
+		gid = InventorySocketGID
 	}
 	sock := filepath.Join(t.TempDir(), "b.sock")
 	l, err := ListenUnix(sock, gid)
@@ -434,7 +714,7 @@ func TestListenUnixGidZeroLeavesGroup(t *testing.T) {
 		t.Skip("requires root to set up a setgid directory with a foreign group")
 	}
 	dir := t.TempDir()
-	if err := os.Chown(dir, -1, BrokerSocketGID); err != nil {
+	if err := os.Chown(dir, -1, InventorySocketGID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o770|os.ModeSetgid); err != nil {
@@ -454,8 +734,8 @@ func TestListenUnixGidZeroLeavesGroup(t *testing.T) {
 	if !ok {
 		t.Skip("no syscall.Stat_t on this platform")
 	}
-	if int(st.Gid) != BrokerSocketGID {
-		t.Fatalf("socket gid = %d, want the setgid-inherited %d (gid 0 must mean no chgrp)", st.Gid, BrokerSocketGID)
+	if int(st.Gid) != InventorySocketGID {
+		t.Fatalf("socket gid = %d, want the setgid-inherited %d (gid 0 must mean no chgrp)", st.Gid, InventorySocketGID)
 	}
 }
 
@@ -468,8 +748,8 @@ func TestServeSurfacesListenerError(t *testing.T) {
 	l.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := Serve(ctx, l, &pidRecordingResolver{}); err == nil {
-		t.Fatal("Serve on a closed listener returned nil")
+	if err := ServeDigests(ctx, l, &fakeResolver{}, nil); err == nil {
+		t.Fatal("ServeDigests on a closed listener returned nil")
 	}
 }
 
@@ -487,4 +767,125 @@ func TestListenUnixNoChgrpWhenGIDNonPositive(t *testing.T) {
 	if fi.Mode().Perm() != 0o660 {
 		t.Fatalf("socket mode = %#o, want 0660", fi.Mode().Perm())
 	}
+}
+
+// Both ends of the callback need an attestation-api URL to verify their peer
+// against; without one ratls fails closed per connection, so it is rejected at
+// construction instead of at the first issuance.
+func TestDigestsCallbackRequiresAttestationApi(t *testing.T) {
+	attest := func(context.Context, string) (string, error) { return "", nil }
+	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "", nil, 0); err == nil {
+		t.Fatal("server config built with no attestation-api URL")
+	}
+	if _, err := NewDigestsClient(context.Background(), "sev-snp", attest, "", nil, 0); err == nil {
+		t.Fatal("client built with no attestation-api URL")
+	}
+}
+
+// An empty measurement list is the dev opt-out, not a construction error: it
+// yields a working, unpinned-but-attested peer on both ends.
+func TestDigestsCallbackAcceptsEmptyMeasurements(t *testing.T) {
+	attest := func(context.Context, string) (string, error) { return "", nil }
+	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "http://127.0.0.1:8400", nil, 0); err != nil {
+		t.Fatalf("server config rejected empty measurements: %v", err)
+	}
+}
+
+// ListenUnix must leave the socket reachable by the non-root get-cert sidecar
+// and must not fail on a stale socket file from a previous run.
+func TestListenUnixReplacesStaleSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "wc.sock")
+	first, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	// The file survives the close; a restart must reclaim it rather than
+	// fail with EADDRINUSE.
+	second, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatalf("stale socket not reclaimed: %v", err)
+	}
+	defer second.Close()
+
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o660 {
+		t.Fatalf("socket mode = %v, want 0660", fi.Mode().Perm())
+	}
+}
+
+// An unwritable directory fails closed rather than leaving the inventory
+// silently unreachable.
+func TestListenUnixFailsOnBadPath(t *testing.T) {
+	if _, err := ListenUnix(filepath.Join(t.TempDir(), "no-such-dir", "wc.sock"), 0); err == nil {
+		t.Fatal("listen succeeded on a nonexistent directory")
+	}
+}
+
+// The host is read from unverified bytes purely to pick a dial target, so it
+// must fail rather than return garbage when the token does not parse.
+func TestUnverifiedInventoryHostRejectsGarbage(t *testing.T) {
+	if _, err := UnverifiedInventoryHost([]byte("not-der")); err == nil {
+		t.Fatal("garbage token yielded a host")
+	}
+}
+
+// The token route rejects every malformed request before it reaches the
+// resolver, so a hostile caller cannot drive the signer with garbage.
+func TestServeTokensRejectsMalformedRequests(t *testing.T) {
+	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t))
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"not JSON", "{"},
+		{"public key is not PKIX", `{"public_key":"bm90LWtleQ==","nonce":"AAAA"}`},
+		{"missing nonce", `{"public_key":"","nonce":""}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := inventoryDo(context.Background(), "unix://"+sock, http.MethodPost, SandboxPath,
+				bytes.NewReader([]byte(tc.body)), 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				t.Fatalf("malformed request accepted (status %d)", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// The kata guest reaches its inventory on loopback, which is the second of the
+// two compiled endpoints inventoryDo accepts. Nothing else is dialable, so no
+// control-plane value can redirect the request.
+func TestGuestInventoryEndpointIsDialable(t *testing.T) {
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoaTest(GuestTokenPort)))
+	if err != nil {
+		t.Skipf("guest token port %d unavailable here: %v", GuestTokenPort, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeTokens(ctx, l, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t)) }()
+
+	requester := testRequesterKey(t)
+	token, err := FetchSandboxToken(ctx, GuestInventoryEndpoint(), 5*time.Second, &requester.PublicKey, testNonce)
+	if err != nil {
+		t.Fatalf("guest loopback fetch: %v", err)
+	}
+	sandbox, err := token.Verify(testSignerKeyFor(t, token), &requester.PublicKey, testNonce)
+	if err == nil && sandbox.SandboxID != "sandbox-1" {
+		t.Fatalf("sandbox = %q", sandbox.SandboxID)
+	}
+}
+
+// testSignerKeyFor is a stand-in: the guest test only needs a key to drive
+// Verify's signature branch, not a real inventory identity.
+func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
+	t.Helper()
+	return testSigner(t).PublicKey()
 }

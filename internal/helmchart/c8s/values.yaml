@@ -25,6 +25,9 @@ c8sComponents:
   - valuePath: nriImagePolicy.image
     enabledPath: nriImagePolicy.enabled
     cdsExempt: false
+  - valuePath: volumed.image
+    enabledPath: volumed.enabled
+    cdsExempt: false
 
 ## Operator container image. The same image runs every c8s mode that
 ## doesn't need extra OS bins: controller manager and injected get-cert.
@@ -88,6 +91,17 @@ serviceAccount:
 statusMirror:
   enabled: true
 
+## Denies tenant pods the host-namespace and hostPath privileges that would let
+## them impersonate a node-level c8s component from inside the node's TCB. The
+## sandbox-identity flow's inventory authentication rests on this — see the
+## template and docs/getcert-workload-binding.md, Corner 7. Disable only if
+## another admission policy already enforces the equivalent.
+hostNamespacePolicy:
+  enabled: true
+  ## Namespaces exempt in addition to the release namespace and kube-system,
+  ## for node-level components installed outside them.
+  exemptNamespaces: []
+
 ## Mutating admission webhook that injects get-cert containers into pods
 ## annotated with confidential.ai/cw.
 webhook:
@@ -142,6 +156,18 @@ cds:
     digest: ""
     pullPolicy: IfNotPresent
   port: 8443
+  ## CIDR(s) holding this cluster's node addresses. CDS dials a node's admission
+  ## inventory inside them and nowhere else, which is what stops a workload
+  ## pointing the sandbox-digests callback at its own pod IP and answering as
+  ## the inventory.
+  ##
+  ## REQUIRED for sandbox identity. Unset means CDS refuses every request
+  ## carrying a sandbox token, so workload pods still get mesh certificates but
+  ## with no sandbox ID and no issuance-time image gate; CDS logs a warning at
+  ## startup when it is empty. `c8s install` fills this in from the cluster as
+  ## one host route per node — see docs/operator.md for why host routes rather
+  ## than a range, and what that means for scale-up.
+  sandboxInventoryCIDRs: []
   service:
     type: NodePort
     nodePort: 30808
@@ -437,9 +463,12 @@ kata:
   ## a security boundary — attestation is. `c8s install --cvm-mode=pod` applies it to
   ## every kata-targeted node (declarative, no probe); -f/GitOps installs
   ## label out-of-band. Swept by `c8s uninstall` — keep in lockstep with
-  ## snpCapabilityNodeLabel in cmd/c8s/uninstall.go. Set {} for unrestricted
-  ## scheduling, or point at an existing capability label (e.g. NFD's
-  ## feature.node.kubernetes.io/cpu-security.sev.snp.enabled: "true").
+  ## snpCapabilityNodeLabel in cmd/c8s/uninstall.go.
+  ## Overriding: helm coalesces nested maps, so `{}` keeps the default and an
+  ## added key ANDs with it. Use `null` to drop the selector entirely; to swap
+  ## in a capability label (e.g. NFD's
+  ## feature.node.kubernetes.io/cpu-security.sev.snp.enabled) set `null` and
+  ## re-add. See docs/pitfalls.md — "Repointing `kata.snpNodeSelector` at NFD".
   snpNodeSelector:
     confidential.ai/sev-snp: "true"
   ## TDX twin of snpNodeSelector: rendered as scheduling.nodeSelector on the
@@ -772,7 +801,7 @@ nriImagePolicy:
   ## shape, not free: it MUST be false where another path already admits — under
   ## kata (the in-guest policy-monitor; enforce_host_components) and under
   ## cvmMode=node (the node image bakes a fail-closed plugin) — and MUST be true
-  ## otherwise (gke/aks/bare, where host NRI is the only allowlist gate;
+  ## otherwise (pod/gke/aks, where host NRI is the only allowlist gate;
   ## require_host_image_policy). `c8s install` sets it from --cvm-mode. The
   ## bootstrapAllowlist below still feeds CDS's served seed whenever a consumer
   ## exists — host NRI, kata's in-guest monitor, or the node-baked plugin (see
@@ -849,6 +878,18 @@ nriImagePolicy:
     configDir: /etc/nri/conf.d
     cacheDir: /var/lib/nri-image-policy
     runtimeDir: /var/run/nri-image-policy
+
+  ## The CDS-facing sandbox-digests endpoint (docs/ratls.md, "Sandbox
+  ## identity"). Its port is a compiled constant, not a value: it is privileged
+  ## so that binding it requires the node's network namespace, which is what
+  ## distinguishes this inventory from a workload sharing the node measurement.
+  ## CDS must be able to reach every node on it.
+  ##
+  ## The advertised host defaults to the installer's own status.hostIP, handed
+  ## to the host process through a file. Override only when that is not the
+  ## address CDS reaches the node on.
+  sandboxDigests:
+    advertiseHost: ""
 
   # Containerd configuration the installer targets. The config directory,
   # socket, and restart command default from distro; set the fields below only
@@ -951,6 +992,55 @@ nriImagePolicy:
   # plugin.health_addr config field (rendered as "unix://<path>").
   healthSocketName: health.sock
 
+## Node agent that opens encrypted volumes for the pods on a node
+## (docs/volumes.md). Off by default: it runs privileged with hostPID and a
+## writable bind of the kubelet directory, and nothing needs it until a
+## workload consumes a volume.
+volumed:
+  enabled: false
+
+  ## Container image. Its own debian-slim image (cmd/volumed/Dockerfile) carries
+  ## cryptsetup/veritysetup, which the distroless operator image cannot. `tag`
+  ## and `digest` are consumer-supplied (like every component image); `c8s
+  ## install` resolves and pins the digest, which also derives it into the NRI
+  ## floor so the daemon's own image is admitted.
+  image:
+    repository: ghcr.io/confidential-dot-ai/volumed
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  ## Host paths the daemon works through. The socket lives in the inventory's
+  ## socket directory (nriImagePolicy.hostPaths.runtimeDir), which is the only
+  ## hostPath the deny-host-namespaces VAP admits into a cw pod.
+  hostPaths:
+    kubeletRoot: /var/lib/kubelet
+    cgroupRoot: /sys/fs/cgroup
+
+  ## Volumes open on one node at once. Each costs two device-mapper devices and
+  ## a mount, and every confidential pod on the node can reach the socket.
+  maxMounts: 64
+
+  ## How often teardown checks which pods have gone.
+  reapInterval: 15s
+
+  imagePullSecrets: []
+  priorityClassName: system-node-critical
+  nodeSelector: {}
+  tolerations:
+    - operator: "Exists"
+      effect: "NoExecute"
+    - operator: "Exists"
+      effect: "NoSchedule"
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
 tlsLb:
   enabled: true
 
@@ -1031,6 +1121,41 @@ tlsLb:
       # path for a different upstream.
       trustedCAPath: /tls/cert.pem
 
+  # -- Publish CDS's complete /allowlist API through the tls-lb front door.
+  # The built-in route uses an in-pod loopback proxy that verifies the
+  # chart-managed CDS Service's RA-TLS evidence; nginx forwards the original
+  # method, URI, body, and Authorization header unchanged. Reads remain
+  # unauthenticated at CDS.
+  # Writes still require the short-lived, body-bound operator token minted by
+  # `c8s allowlist --operator-key`; the private key never enters the cluster.
+  #
+  # An explicit tlsLb.routes entry at /allowlist or /allowlist/ takes precedence
+  # for backwards compatibility. Set enabled: false to remove the built-in
+  # public route entirely.
+  allowlist:
+    enabled: true
+    # -- Loopback port for the RA-TLS-verifying allowlist proxy. This is not a
+    # pod or Service port and is reachable only inside the tls-lb pod.
+    proxyPort: 8801
+    # -- nginx write limiting, per public client and in aggregate across all
+    # clients. The aggregate bound protects the single per-source-IP CDS
+    # bucket the whole front door shares (see docs/operator.md, "Built-in
+    # allowlist route"). The chart requires requestsPerSecond/burst <=
+    # totalRequestsPerSecond/totalBurst < cds.rateLimit/rateBurst. GET, HEAD,
+    # and OPTIONS are exempt here (see readRateLimit).
+    rateLimit:
+      requestsPerSecond: 1
+      burst: 5
+      totalRequestsPerSecond: 8
+      totalBurst: 15
+    # -- Per-public-client read (GET/HEAD) limiting; generous by default to
+    # bound unauthenticated read pressure on CDS. OPTIONS is exempt.
+    readRateLimit:
+      requestsPerSecond: 20
+      burst: 40
+    # -- Container resources for the allowlist proxy.
+    resources: {}
+
   # -- Additional path routes proxied before the default upstream backend.
   # Useful for preserving control-plane endpoints while the catch-all route
   # points at an inference backend.
@@ -1068,8 +1193,26 @@ tlsLb:
   # `routes[i].cors.enabled: false` to disable CORS on that route while
   # leaving the global block enabled. Only the `enabled` key is honored on a
   # per-route cors block.
+  #
+  # Independent of this block, the c8s protocol-owned endpoints
+  # (/.well-known/c8s/*, the discovery document and certificate endpoints,
+  # and the built-in /allowlist route) serve wide-open CORS by default —
+  # see `protocolEndpoints` below.
   cors:
     enabled: false
+    # -- Wide-open CORS (Access-Control-Allow-Origin "*", no credentials) on
+    # the c8s protocol-owned endpoints only: /.well-known/c8s/*, the
+    # discovery document and certificate endpoints, and the built-in
+    # /allowlist route. On by default because those endpoints exist to be
+    # verified by any browser anywhere: responses are self-authenticating
+    # (hardware evidence, CDS-signed certificates, sealed tunnel records) or
+    # public by design, and no request relies on ambient browser credentials
+    # (allowlist mutations are operator-signed). An origin allowlist there
+    # cannot protect anything and only breaks third-party verifiers. Workload
+    # locations (`routes` and the catch-all upstream) are never affected by
+    # this flag. Ignored while `enabled` is true — the operator policy below
+    # then covers every location, protocol endpoints included.
+    protocolEndpoints: true
     # -- Allowed Origin values. Use ["*"] to allow any origin (cannot be
     # combined with allowCredentials: true; browsers reject that pairing).
     # Otherwise list exact origins; the request Origin header is echoed back
@@ -1199,6 +1342,13 @@ tlsLb:
     # (e.g. on AKS/GKE), with annotations below for cloud-LB specifics.
     type: ClusterIP
     port: 443
+    # -- externalTrafficPolicy for LoadBalancer/NodePort Services. Empty picks
+    # Local while the built-in /allowlist route renders (its limiters key on
+    # nginx's public peer address, which Cluster would SNAT away) and Cluster
+    # otherwise. Local delivers traffic only through nodes running the tls-lb
+    # pod; set Cluster explicitly if your LB cannot health-check nodes, at the
+    # cost of per-client limiting collapsing onto node IPs.
+    externalTrafficPolicy: ""
     # -- Optional annotations on the Service. Use the provider's LB annotation to
     # pin a static IP (e.g. networking.gke.io/load-balancer-ip-addresses on GKE,
     # service.beta.kubernetes.io/azure-pip-name on AKS); the deprecated

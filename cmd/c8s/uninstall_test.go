@@ -47,17 +47,17 @@ func TestValidateUninstallFlagsRejectsSweepOnlyWithoutSweep(t *testing.T) {
 // are unaffected by a kata uninstall.
 func TestFilterKataPodsKeepsOnlyKataRuntimeClasses(t *testing.T) {
 	lines := []string{
-		"default\tinference-0\tkata-qemu-snp",
-		"default\tweb-0\t", // no runtimeClassName (runc)
-		"team-a\tbatch-1\tkata-qemu",
-		"team-b\tsandbox-2\tgvisor", // non-kata RuntimeClass
-		"team-c\tclh-0\tkata-clh",
-		"team-d\ttd-0\tkata-qemu-tdx",
-		"team-e\tgpu-0\tkata-qemu-snp-nvidia",
+		"default\tinference-0\tkata-qemu-snp\t",
+		"default\tweb-0\t\t", // no runtimeClassName (runc)
+		"team-a\tbatch-1\tkata-qemu\t",
+		"team-b\tsandbox-2\tgvisor\t", // non-kata RuntimeClass
+		"team-c\tclh-0\tkata-clh\t",
+		"team-d\ttd-0\tkata-qemu-tdx\t",
+		"team-e\tgpu-0\tkata-qemu-snp-nvidia\t",
 		"", // trailing blank line from kubectl
 		"malformed-line-no-tabs",
 	}
-	got := filterKataPods(lines)
+	got, chartManaged := filterKataPods(lines, "c8s-system", "c8s")
 	want := []string{
 		"default/inference-0 (kata-qemu-snp)",
 		"team-a/batch-1 (kata-qemu)",
@@ -67,6 +67,97 @@ func TestFilterKataPodsKeepsOnlyKataRuntimeClasses(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("filterKataPods = %v, want %v", got, want)
+	}
+	if chartManaged != 0 {
+		t.Errorf("chartManaged = %d, want 0", chartManaged)
+	}
+}
+
+// The chart pins a kata RuntimeClass on its own CDS and tls-lb pods, so
+// counting them would refuse every uninstall on a cluster with no tenant
+// workloads and train operators to always pass --force. The exclusion is the
+// release namespace AND the chart's instance label, so neither a kata pod in
+// another namespace nor an unlabelled pod in the release namespace escapes it.
+func TestFilterKataPodsExcludesOnlyChartManagedPods(t *testing.T) {
+	const (
+		cdsPod   = "c8s-system\tc8s-cds-774d45db86-jgpp4\tkata-qemu-snp\tc8s"
+		lbPod    = "c8s-system\tc8s-tls-lb-6b9f7c5d4-xk2mq\tkata-qemu-snp\tc8s"
+		tenant   = "team-a\tinference-0\tkata-qemu-snp\t"
+		squatter = "c8s-system\toperator-scratch-0\tkata-qemu\t"
+		// Same instance label, different namespace: not this release's pod.
+		otherRelease = "other-ns\tc8s-cds-0\tkata-qemu-snp\tc8s"
+	)
+	tests := []struct {
+		name             string
+		lines            []string
+		want             []string
+		wantChartManaged int
+	}{
+		{
+			name:             "chart pods only — clean uninstall proceeds",
+			lines:            []string{cdsPod, lbPod},
+			wantChartManaged: 2,
+		},
+		{
+			name:             "tenant kata pod in another namespace still refuses",
+			lines:            []string{cdsPod, lbPod, tenant},
+			want:             []string{"team-a/inference-0 (kata-qemu-snp)"},
+			wantChartManaged: 2,
+		},
+		{
+			name:             "unrelated kata pod in the release namespace still refuses",
+			lines:            []string{cdsPod, squatter},
+			want:             []string{"c8s-system/operator-scratch-0 (kata-qemu)"},
+			wantChartManaged: 1,
+		},
+		{
+			name:  "mixed",
+			lines: []string{cdsPod, tenant, lbPod, squatter, otherRelease},
+			want: []string{
+				"team-a/inference-0 (kata-qemu-snp)",
+				"c8s-system/operator-scratch-0 (kata-qemu)",
+				"other-ns/c8s-cds-0 (kata-qemu-snp)",
+			},
+			wantChartManaged: 2,
+		},
+		{
+			name:  "a differently-named release in the namespace is not ours",
+			lines: []string{"c8s-system\tstaging-cds-0\tkata-qemu-snp\tstaging"},
+			want:  []string{"c8s-system/staging-cds-0 (kata-qemu-snp)"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, chartManaged := filterKataPods(tt.lines, "c8s-system", "c8s")
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("pods = %v, want %v", got, tt.want)
+			}
+			if chartManaged != tt.wantChartManaged {
+				t.Errorf("chartManaged = %d, want %d", chartManaged, tt.wantChartManaged)
+			}
+		})
+	}
+}
+
+// The refusal must name the skipped chart pods, or an operator reading it
+// cannot tell a scoped guard from a blanket one and reaches for --force.
+func TestKataPodsRunningErrorReportsSkippedChartPods(t *testing.T) {
+	msg := kataPodsRunningError([]string{"team-a/inference-0 (kata-qemu-snp)"}, 2, "c8s-system", "c8s").Error()
+	for _, want := range []string{
+		"team-a/inference-0 (kata-qemu-snp)",
+		`skipped 2 chart-managed pods of release "c8s" in namespace "c8s-system"`,
+		"--force",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+	// Nothing skipped — no parenthetical at all.
+	if msg := kataPodsRunningError([]string{"team-a/inference-0 (kata-qemu-snp)"}, 0, "c8s-system", "c8s").Error(); strings.Contains(msg, "skipped") {
+		t.Errorf("message mentions skipped pods when none were skipped: %q", msg)
+	}
+	if msg := kataPodsRunningError([]string{"team-a/inference-0 (kata-qemu-snp)"}, 1, "c8s-system", "c8s").Error(); !strings.Contains(msg, "skipped 1 chart-managed pod of") {
+		t.Errorf("singular skipped count not rendered: %q", msg)
 	}
 }
 
