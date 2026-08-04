@@ -356,8 +356,12 @@ the peer with `cds.measurements` (same launch digest), and requires an exact
 policy, CDS refuses to start rather than mint a divergent trust root. The
 startup log reports `source=adopted-from-peer` or `source=self-generated`.
 
-On SEV-SNP, the measurement pin is LAUNCH_DIGEST. On TDX it is MRTD; RTMRs
-(including workload RTMR[3]) are not covered by this adoption verdict.
+On SEV-SNP, the measurement pin is LAUNCH_DIGEST. On TDX it is MRTD, which
+covers only the TDVF firmware — two different guest images built against the
+same firmware share an MRTD — and RTMRs (including workload RTMR[3]) are not
+covered by this adoption verdict. Operator-side `c8s verify` can pin the full
+TDX image tuple instead (`--image-manifest`, below); the adoption verdict
+itself remains MRTD-only.
 
 Setting `peerUrl` also flips the rollout to `RollingUpdate`
 (`maxUnavailable: 0`/`maxSurge: 1`): the replacement pod starts and adopts from
@@ -447,6 +451,19 @@ are enforced client-side against the report's launch measurement; with no
 `--measurements` the command still runs but prints an UNSAFE warning — any
 genuine TEE is accepted.
 
+On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
+guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
+MRTD alone warns that they are unmeasured by that policy. To pin the whole
+image, pass `--image-manifest <file>` — a build-artifact manifest published
+with the guest image build, a JSON object carrying `mrtd`, `rtmr1` and
+`rtmr2` (96 lowercase hex chars each). The three registers are loaded
+atomically from that one provenanced manifest: MRTD joins the measurement
+allowlist and RTMR[1]/RTMR[2] are compared exactly. `--expected-rtmr3` can
+additionally pin the runtime register — the ordered operator-key/workload
+extend chain (`pkg/runtimemeasure`) — which is a deployment property, not a
+cluster identity. Supplying either flag against SEV-SNP evidence is a policy
+error, not an ignored option: SNP has no runtime measurement registers.
+
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
 (unreachable/unparseable).
@@ -462,6 +479,37 @@ Caveats the output surfaces:
   endpoint and the tls-lb's nginx serving port both answer unattested clients on
   their public address (the tls-lb serves `/v1/discovery` there with no client
   cert), so `c8s cds verify` and `c8s verify <lb>` work without any mesh changes.
+
+### Trust gate: `c8s get-kubeconfig`
+
+`c8s get-kubeconfig` obtains an admin kubeconfig from a measured TDX node CVM.
+Before any credential flows it enforces the node's **full measured identity**,
+and it enforces the identical policy twice — on the initial attestation gate
+and again on the RA-TLS credential-release connection:
+
+- **platform** — TDX only; any other platform is refused up front;
+- **guest image** — MRTD, RTMR[1] and RTMR[2] must match the tuple from
+  `--image-manifest` (required), an explicitly selected, provenanced
+  build-artifact manifest carrying all three fields. A generic artifact-hash
+  `manifest.json` is not an image pin and is rejected;
+- **RTMR[3] chain** — the register must equal the operator-key seed
+  (`pkg/runtimemeasure.ForOperatorKey` over the exact pubkey PEM bytes)
+  extended, in order, by each digest-pinned `--workload-image` ref (tags are
+  rejected). With no `--workload-image` the register must equal the bare seed;
+- **certificate body** — the credential-release serving cert must sit inside
+  its validity window (NotBefore with a bounded 5-minute skew, NotAfter with
+  none) and, being self-signed, verify its own signature with its attested
+  key.
+
+What the gate proves: a genuine TDX guest booted exactly the pinned image,
+was launched to trust exactly this operator key, and ran exactly the expected
+measured workloads. What it does not prove: anything about images or keys the
+manifest and flags do not name, or the provenance of the manifest file itself
+— select it deliberately from the trusted image build. An RTMR[3]-only gate
+would prove much less: the untrusted host stages the operator public key, so
+it can boot **any** image and reproduce the bare operator-key register — the
+image tuple is the identity anchor, and RTMR[3] then binds the key and
+workload set to it.
 
 ## Injection contract
 

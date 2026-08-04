@@ -3,6 +3,7 @@
 package certutil
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,47 @@ import (
 
 // serialNumberLimit is 2^128, the upper bound for X.509 serial numbers.
 var serialNumberLimit = new(big.Int).Lsh(big.NewInt(1), 128)
+
+// LeafValiditySkew is the single bounded clock-skew allowance every
+// certificate-sourced verification path grants NotBefore: a leaf issued up to
+// this long in the verifier's future is accepted, anything further is not.
+// NotAfter gets no allowance — an expired certificate is expired. 5 minutes
+// covers realistic clock drift between an issuing TEE and a verifying
+// operator machine without meaningfully extending a stolen-cert window.
+const LeafValiditySkew = 5 * time.Minute
+
+// AuthenticateLeafBody enforces the certificate-body checks shared by every
+// path that verifies a certificate-embedded attestation:
+//
+//   - validity: NotBefore within LeafValiditySkew, NotAfter with no
+//     allowance. A nonce-free attested certificate is replayable for as long
+//     as it validates, so the validity window is the only freshness bound
+//     these paths have — skipping it would make the replay window unbounded.
+//   - self-issued certificates (RawIssuer == RawSubject) must verify their
+//     own signature with their embedded key. The attestation extension binds
+//     only the public key, so without this check any field outside the key —
+//     subject, serial, validity, other extensions — could be rewritten under
+//     a genuine attestation and still verify.
+//
+// Returns selfIssued so callers can report what authenticates the body: its
+// own attested key, or (for CA-issued leaves) a CA chain the caller must
+// check separately.
+func AuthenticateLeafBody(cert *x509.Certificate, now time.Time) (selfIssued bool, err error) {
+	if now.Add(LeafValiditySkew).Before(cert.NotBefore) {
+		return false, fmt.Errorf("certificate is not yet valid: NotBefore %s is beyond the %s clock-skew allowance",
+			cert.NotBefore.Format(time.RFC3339), LeafValiditySkew)
+	}
+	if now.After(cert.NotAfter) {
+		return false, fmt.Errorf("certificate expired at NotAfter %s", cert.NotAfter.Format(time.RFC3339))
+	}
+	if !bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+		return false, nil
+	}
+	if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+		return true, fmt.Errorf("self-signed certificate body does not verify with its own key (altered or re-signed body): %w", err)
+	}
+	return true, nil
+}
 
 // OIDAttestationDigest marks issued certificates with a SHA-256 of the
 // attestation evidence that authorized issuance — an audit-trail extension

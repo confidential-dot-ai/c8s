@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 const (
@@ -25,21 +25,21 @@ const (
 // fakeTDX emulates the RTMR[3] sysfs node: writes fold into the register,
 // reads return it.
 type fakeTDX struct {
-	reg     [rtmr3.Size]byte
+	reg     [runtimemeasure.Size]byte
 	extends int
 	fail    error
 }
 
-func (f *fakeTDX) extend(event [rtmr3.Size]byte) error {
+func (f *fakeTDX) extend(event [runtimemeasure.Size]byte) error {
 	if f.fail != nil {
 		return f.fail
 	}
-	f.reg = rtmr3.Extend(f.reg, event)
+	f.reg = runtimemeasure.Extend(f.reg, event)
 	f.extends++
 	return nil
 }
 
-func (f *fakeTDX) read() ([rtmr3.Size]byte, error) { return f.reg, nil }
+func (f *fakeTDX) read() ([runtimemeasure.Size]byte, error) { return f.reg, nil }
 
 // newTestMeasurer wires a measurer against a tempdir watch dir, a tempdir
 // state file, and a fake TDX register. Reusing statePath and tdx across
@@ -94,7 +94,7 @@ func TestScanMeasuresWorkloadExactlyOnce(t *testing.T) {
 	if tdx.extends != 1 {
 		t.Fatalf("extends = %d, want 1", tdx.extends)
 	}
-	if tdx.reg != rtmr3.FromDigests([]string{"sha256:" + hexA}) {
+	if tdx.reg != runtimemeasure.FromDigests([]string{"sha256:" + hexA}) {
 		t.Fatal("register does not match the expected single-extend fold")
 	}
 }
@@ -142,7 +142,7 @@ func TestDaemonRestartDoesNotReExtend(t *testing.T) {
 	if tdx.extends != 2 {
 		t.Fatalf("extends = %d, want 2 (new digest after restart must extend)", tdx.extends)
 	}
-	if tdx.reg != rtmr3.FromDigests([]string{"sha256:" + hexA, "sha256:" + hexB}) {
+	if tdx.reg != runtimemeasure.FromDigests([]string{"sha256:" + hexA, "sha256:" + hexB}) {
 		t.Fatal("register does not match the expected two-extend fold")
 	}
 }
@@ -160,7 +160,7 @@ func TestCrashBetweenRecordAndExtendIsRepaired(t *testing.T) {
 	if tdx.extends != 1 {
 		t.Fatalf("extends = %d, want 1 (startup repair)", tdx.extends)
 	}
-	if tdx.reg != rtmr3.FromDigests([]string{"sha256:" + hexA}) {
+	if tdx.reg != runtimemeasure.FromDigests([]string{"sha256:" + hexA}) {
 		t.Fatal("register does not match the repaired fold")
 	}
 	// The repaired digest stays deduped.
@@ -178,7 +178,7 @@ func TestForeignExtendIsNotReExtended(t *testing.T) {
 	if err := os.WriteFile(state, []byte("sha256:"+hexA+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tdx := &fakeTDX{reg: rtmr3.FromDigests([]string{"sha256:" + hexB})}
+	tdx := &fakeTDX{reg: runtimemeasure.FromDigests([]string{"sha256:" + hexB})}
 
 	m := newTestMeasurer(t, watch, state, tdx)
 	if tdx.extends != 0 {

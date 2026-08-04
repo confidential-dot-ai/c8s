@@ -22,15 +22,24 @@ func execCmd(t *testing.T, args ...string) error {
 }
 
 func TestNewCmdValidation(t *testing.T) {
-	t.Run("missing operator-key and out", func(t *testing.T) {
+	t.Run("missing operator-key, image-manifest and out", func(t *testing.T) {
 		err := execCmd(t, "--node", "127.0.0.1")
-		if err == nil || !strings.Contains(err.Error(), "--operator-key and --out are required") {
+		if err == nil || !strings.Contains(err.Error(), "--operator-key, --image-manifest and --out are required") {
 			t.Fatalf("want required-flags error, got %v", err)
 		}
 	})
 
+	t.Run("missing image-manifest alone", func(t *testing.T) {
+		// The image tuple is not optional: without it the gate would rest on
+		// the host-reproducible operator-key register alone.
+		err := execCmd(t, "--node", "127.0.0.1", "--operator-key", "k.pem", "--out", "kc")
+		if err == nil || !strings.Contains(err.Error(), "--image-manifest") {
+			t.Fatalf("want required-flags error naming --image-manifest, got %v", err)
+		}
+	})
+
 	t.Run("missing node and URLs", func(t *testing.T) {
-		err := execCmd(t, "--operator-key", "k.pem", "--out", "kc")
+		err := execCmd(t, "--operator-key", "k.pem", "--image-manifest", "m.json", "--out", "kc")
 		if err == nil || !strings.Contains(err.Error(), "set --node") {
 			t.Fatalf("want set-node error, got %v", err)
 		}
@@ -42,6 +51,7 @@ func TestNewCmdValidation(t *testing.T) {
 		err := execCmd(t,
 			"--node", "127.0.0.1",
 			"--operator-key", filepath.Join(t.TempDir(), "nope.key"),
+			"--image-manifest", filepath.Join(t.TempDir(), "m.json"),
 			"--out", filepath.Join(t.TempDir(), "kc"))
 		if err == nil || !strings.Contains(err.Error(), "read operator key") {
 			t.Fatalf("want read-key error from Run, got %v", err)
@@ -59,6 +69,7 @@ func TestNewCmdEndToEnd(t *testing.T) {
 		"--release-url", env.releaseURL,
 		"--apiserver-url", "https://node:6443",
 		"--operator-key", env.keyPath,
+		"--image-manifest", env.manifestPath,
 		"--out", env.outPath,
 		"--context", "testctx",
 		"--tls-server-name", "c8s-cvm",

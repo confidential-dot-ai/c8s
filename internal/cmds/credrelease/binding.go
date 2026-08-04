@@ -8,10 +8,11 @@ package credrelease
 
 import (
 	"bytes"
-	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"os"
+
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -29,16 +30,19 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
 // expectedRTMR3ForKey computes the RTMR[3] value a guest reports after the
-// initrd extends the zeroed register once with SHA-384(pubkey):
+// initrd extends the zeroed register once with SHA-384(pubkey) — the bare
+// operator-key seed (runtimemeasure.ForOperatorKey; the convention lives
+// there so this service, the initrd, and every verifier cannot drift apart).
 //
-//	RTMR[3] = SHA384( 0x00*48 || SHA384(pubkey) )
-//
-// This is the same value the operator computes offline from their own key, so
-// matching it proves the guest was launched to trust exactly this key.
+// The bare seed — no workload extends — is correct HERE, at service startup,
+// even though remote verifiers compare against the seeded workload chain: the
+// node image runs no workload measurer, so at the moment this service starts
+// RTMR[3] must equal the seed exactly. Any extension beyond it means an
+// unexpected measurer ran or the register was tampered with, and the
+// comparison fails closed.
 func expectedRTMR3ForKey(pubkey []byte) []byte {
-	keyDigest := sha512.Sum384(pubkey)
-	rtmr3 := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	return rtmr3[:]
+	reg := runtimemeasure.ForOperatorKey(pubkey)
+	return reg[:]
 }
 
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.

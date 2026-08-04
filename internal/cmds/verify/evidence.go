@@ -63,9 +63,20 @@ type evidence struct {
 	// bindingNote explains what the REPORTDATA is bound to.
 	bindingNote string
 	// leaf is the CDS-issued leaf the evidence speaks for: the serving cert in
-	// cert modes, the transcript-committed mesh leaf in attest-pq mode, nil
-	// otherwise. Kept so --mesh-ca can check what CDS actually signed.
+	// cert and discovery modes, the transcript-committed mesh leaf in
+	// attest-pq mode, nil otherwise. Kept so --mesh-ca can check what CDS
+	// actually signed. Every leaf set here has passed authenticateLeafBody.
 	leaf *x509.Certificate
+	// leafSelfIssued records whether leaf is self-issued (its body is then
+	// authenticated by its own attested key) or CA-issued (its body is
+	// CA-vouched and needs a verified chain to be authenticated). Meaningless
+	// when leaf is nil.
+	leafSelfIssued bool
+	// leafChainVerified is true when the leaf's issuing chain was already
+	// verified while gathering (attest-pq: the chain to the
+	// transcript-committed CA), so a CA-issued body is authenticated even
+	// without --mesh-ca.
+	leafChainVerified bool
 	// sandboxID is the CRI pod sandbox the leaf names (cert modes only; ""
 	// when the cert carries no sandbox-ID extension). CDS stamps it into the
 	// signed area, so unlike the rest of this struct it is vouched by the mesh
@@ -134,32 +145,55 @@ func gatherFromRATLSCert(ctx context.Context, addr, serverName string, timeout t
 	return evidenceFromCert(certs[0], fmt.Sprintf("RA-TLS serving certificate at %s", addr))
 }
 
+// authenticateLeafBody runs the shared certificate-body checks on an
+// evidence-carrying leaf: validity (NotBefore within certutil.LeafValiditySkew,
+// NotAfter with none) and, for a self-issued leaf, its own signature under its
+// attested key. The attestation extension binds only the key, so without the
+// signature check every other field of a self-signed body — subject, serial,
+// validity — could be rewritten under a genuine extension and still verify.
+// Failures are securityErrors: the response was reachable and well-formed but
+// its certificate must not be trusted, so auto-mode never falls through past
+// one.
+func authenticateLeafBody(cert *x509.Certificate) (selfIssued bool, err error) {
+	selfIssued, err = certutil.AuthenticateLeafBody(cert, time.Now())
+	if err != nil {
+		return selfIssued, &securityError{err: err}
+	}
+	return selfIssued, nil
+}
+
 // evidenceFromCert extracts the attestation extension from a certificate and
 // binds REPORTDATA to the certificate's public key (localverify.CertEnvelope).
 // The serving cert carries no per-request nonce, so the binding proves "this
-// key was born in a TEE" but not freshness (fresh=false).
+// key was born in a TEE" but not freshness (fresh=false): the certificate is
+// replayable within its validity window, which authenticateLeafBody enforces.
 func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) {
 	platform, raw, erd, err := localverify.CertEnvelope(cert)
 	if err != nil {
 		return nil, err
 	}
-	binding := "REPORTDATA binds the certificate public key (no per-request nonce — not a freshness proof)"
+	selfIssued, err := authenticateLeafBody(cert)
+	if err != nil {
+		return nil, err
+	}
+	binding := "REPORTDATA binds the certificate public key (no per-request nonce — replayable within the certificate validity window, which is the only freshness bound on this path)"
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:    platform,
-		rawEvidence: raw,
-		erd:         erd,
-		fresh:       false,
-		source:      source,
-		certSHA256:  hex.EncodeToString(sum[:]),
-		bindingNote: binding,
-		leaf:        cert,
-		sandboxID:   sandboxID,
-		sandboxErr:  sandboxErr,
-		workload:    workload,
-		workloadErr: workloadErr,
+		platform:       platform,
+		rawEvidence:    raw,
+		erd:            erd,
+		fresh:          false,
+		source:         source,
+		certSHA256:     hex.EncodeToString(sum[:]),
+		bindingNote:    binding,
+		leaf:           cert,
+		leafSelfIssued: selfIssued,
+		sandboxID:      sandboxID,
+		sandboxErr:     sandboxErr,
+		workload:       workload,
+		workloadErr:    workloadErr,
 	}, nil
 }
 
@@ -272,17 +306,18 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
 	return &evidence{
-		platform:    platformOrDefault(r.Platform),
-		rawEvidence: r.Evidence,
-		erd:         erd,
-		fresh:       fresh,
-		source:      source,
-		bindingNote: "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
-		leaf:        leaf,
-		sandboxID:   sandboxID,
-		sandboxErr:  sandboxErr,
-		workload:    workload,
-		workloadErr: workloadErr,
+		platform:          platformOrDefault(r.Platform),
+		rawEvidence:       r.Evidence,
+		erd:               erd,
+		fresh:             fresh,
+		source:            source,
+		bindingNote:       "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		leaf:              leaf,
+		leafChainVerified: true,
+		sandboxID:         sandboxID,
+		sandboxErr:        sandboxErr,
+		workload:          workload,
+		workloadErr:       workloadErr,
 	}, nil
 }
 
@@ -351,9 +386,12 @@ func verifyIdentityProof(proof *types.MeshIdentityProof, leaf *x509.Certificate,
 }
 
 // verifyCommittedChain requires the committed mesh leaf to be a currently
-// valid certificate issued by the committed CA (§5 step 5). The CA here is
-// transcript-derived, not operator-pinned; --mesh-ca additionally pins it via
-// the standard chain check downstream.
+// valid certificate issued by the committed CA (§5 step 5) — that CA chain is
+// what authenticates the leaf's body fields. Validity on both certificates
+// uses the same bounded NotBefore skew as every other cert-sourced path
+// (certutil.AuthenticateLeafBody). The CA here is transcript-derived, not
+// operator-pinned; --mesh-ca additionally pins it via the standard chain
+// check downstream.
 func verifyCommittedChain(leaf, ca *x509.Certificate) error {
 	if err := leaf.CheckSignatureFrom(ca); err != nil {
 		return fmt.Errorf("mesh leaf is not signed by the transcript-committed CA: %w", err)
@@ -363,9 +401,8 @@ func verifyCommittedChain(leaf, ca *x509.Certificate) error {
 		role string
 		cert *x509.Certificate
 	}{{"leaf", leaf}, {"CA", ca}} {
-		if now.Before(c.cert.NotBefore) || now.After(c.cert.NotAfter) {
-			return fmt.Errorf("committed mesh %s is expired or not yet valid (not_before=%s not_after=%s)",
-				c.role, c.cert.NotBefore.Format(time.RFC3339), c.cert.NotAfter.Format(time.RFC3339))
+		if _, err := certutil.AuthenticateLeafBody(c.cert, now); err != nil {
+			return fmt.Errorf("committed mesh %s: %w", c.role, err)
 		}
 	}
 	return nil

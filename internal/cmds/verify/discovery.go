@@ -75,7 +75,10 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 
 // evidenceFromDiscovery parses a discovery document into verifiable evidence.
 // REPORTDATA = SHA-384(cert pubkey ‖ challenge), matching get-cert's issuance
-// binding (reportDataForCSR → ratls.ReportDataForKey).
+// binding (reportDataForCSR → ratls.ReportDataForKey). The parsed certificate
+// gets the same body authentication as every other cert-sourced path, and is
+// retained as the evidence leaf so the --mesh-ca / --sandbox-id / --workload
+// pins work against discovery targets too.
 func evidenceFromDiscovery(data []byte, source string) (*evidence, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
@@ -92,6 +95,10 @@ func evidenceFromDiscovery(data []byte, source string) (*evidence, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse cds cert: %w", err)
 	}
+	selfIssued, err := authenticateLeafBody(cert)
+	if err != nil {
+		return nil, err
+	}
 	challenge, err := base64.StdEncoding.DecodeString(d.Attestation.Challenge)
 	if err != nil {
 		return nil, fmt.Errorf("decode challenge: %w", err)
@@ -100,14 +107,22 @@ func evidenceFromDiscovery(data []byte, source string) (*evidence, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
 	}
+	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:    platformOrDefault(d.Attestation.Platform),
-		rawEvidence: d.Attestation.Evidence,
-		erd:         keyAnchor(rd),
-		fresh:       false,
-		source:      source,
-		certSHA256:  hex.EncodeToString(sum[:]),
-		bindingNote: "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; not a per-request nonce)",
+		platform:       platformOrDefault(d.Attestation.Platform),
+		rawEvidence:    d.Attestation.Evidence,
+		erd:            keyAnchor(rd),
+		fresh:          false,
+		source:         source,
+		certSHA256:     hex.EncodeToString(sum[:]),
+		bindingNote:    "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the certificate validity window)",
+		leaf:           cert,
+		leafSelfIssued: selfIssued,
+		sandboxID:      sandboxID,
+		sandboxErr:     sandboxErr,
+		workload:       workload,
+		workloadErr:    workloadErr,
 	}, nil
 }

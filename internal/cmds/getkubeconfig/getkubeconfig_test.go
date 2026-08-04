@@ -13,16 +13,20 @@ import (
 	"testing"
 )
 
-// TestExpectedRTMR3 checks the client computes the same value the guest
-// measures: RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)).
-func TestExpectedRTMR3(t *testing.T) {
+// TestPolicyForSeedMatchesGuestConvention checks the client computes the same
+// bare-seed value the guest measures at launch:
+// RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)), via the shared convention.
+func TestPolicyForSeedMatchesGuestConvention(t *testing.T) {
 	pub := []byte("-----BEGIN PUBLIC KEY-----\nMFk...\n-----END PUBLIC KEY-----\n")
-	got := expectedRTMR3(pub)
+	exp, err := policyFor(writeTestManifest(t), pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	keyDigest := sha512.Sum384(pub)
 	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	if got != hex.EncodeToString(want[:]) {
-		t.Errorf("expectedRTMR3 = %s, want %s", got, hex.EncodeToString(want[:]))
+	if hex.EncodeToString(exp.rtmr3[:]) != hex.EncodeToString(want[:]) {
+		t.Errorf("expected RTMR[3] = %x, want %x", exp.rtmr3, want)
 	}
 }
 
