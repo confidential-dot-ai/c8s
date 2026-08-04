@@ -724,6 +724,12 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if m.cfg.KataGuestReadyGate {
 			requireGuestReadyNode(pod)
 		}
+		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements); err != nil {
+			if errors.Is(err, errInvalidInjectionAnnotation) {
+				return admission.Errored(http.StatusBadRequest, err)
+			}
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
 		// Stamp AnnotationInjected here too — mutatePod only runs when
 		// get-cert is needed, but a kata-only mutation is still a mutation
 		// and the alreadyInjected short-circuit above must see it on

@@ -1,0 +1,66 @@
+package webhook
+
+import (
+	"fmt"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/confidential-dot-ai/c8s/pkg/initdata"
+)
+
+// Classes whose guest runs the c8s in-guest stack. Plain kata-qemu has no
+// policy-monitor to read the document.
+var confidentialKataClasses = map[string]struct{}{
+	kataSnpRuntimeClass:    {},
+	kataSnpGpuRuntimeClass: {},
+	kataTdxRuntimeClass:    {},
+	kataTdxGpuRuntimeClass: {},
+}
+
+// stampInitData carries the CDS measurements to the guest's policy-monitor.
+// Writing the annotation is not what makes it trustworthy — the shim hashes the
+// document into HOST_DATA and the guest re-derives the digest before trusting
+// it (docs/kata-image-policy.md).
+//
+// An author-supplied value would name the CDS their own guest pins, and the
+// HOST_DATA check cannot tell it from ours, so it is rejected. Comparing
+// against the desired value rather than banning the key is what keeps this
+// reinvocation-safe: initdata rendering is canonical.
+func stampInitData(pod *corev1.Pod, kataClass string, measurements []string) error {
+	want, err := initDataAnnotation(kataClass, measurements)
+	if err != nil {
+		return err
+	}
+	if got, ok := pod.Annotations[initdata.AnnotationKey]; ok && got != want {
+		return fmt.Errorf("%w: %s is set by c8s and must not be supplied by the pod author",
+			errInvalidInjectionAnnotation, initdata.AnnotationKey)
+	}
+	if want == "" {
+		return nil
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[initdata.AnnotationKey] = want
+	return nil
+}
+
+// initDataAnnotation renders the value, or "" when the shape carries none.
+func initDataAnnotation(kataClass string, measurements []string) (string, error) {
+	if _, ok := confidentialKataClasses[kataClass]; !ok {
+		return "", nil
+	}
+	joined := strings.Join(measurements, ",")
+	if joined == "" {
+		return "", nil
+	}
+	built, err := initdata.New(map[string]string{
+		initdata.KeyRole:            initdata.RoleWorkload,
+		initdata.KeyCDSMeasurements: joined,
+	}).Build()
+	if err != nil {
+		return "", fmt.Errorf("build init-data document: %w", err)
+	}
+	return built.Annotation, nil
+}
