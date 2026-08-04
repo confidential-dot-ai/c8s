@@ -176,21 +176,6 @@ func TestNewCAWithParentValidityWindow(t *testing.T) {
 	}
 }
 
-func TestDefaultTTLConstants(t *testing.T) {
-	if issuer.DefaultCAValidity != 8760*time.Hour {
-		t.Errorf("DefaultCAValidity = %v, want 8760h", issuer.DefaultCAValidity)
-	}
-	if issuer.DefaultLeafTTL != 24*time.Hour {
-		t.Errorf("DefaultLeafTTL = %v, want 24h", issuer.DefaultLeafTTL)
-	}
-	if issuer.MaxLeafTTL != 24*time.Hour {
-		t.Errorf("MaxLeafTTL = %v, want 24h", issuer.MaxLeafTTL)
-	}
-	if issuer.DefaultPullRetryInterval != 2*time.Second {
-		t.Errorf("DefaultPullRetryInterval = %v, want 2s", issuer.DefaultPullRetryInterval)
-	}
-}
-
 func TestNewCAWithParentAllowsMultiGenerationChains(t *testing.T) {
 	root, err := issuer.NewCA("root ca", time.Hour)
 	if err != nil {

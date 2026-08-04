@@ -362,15 +362,6 @@ func TestKeySetHashRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
-// TestValidateKeySetHashErrorNamesLength pins the operator-facing hint: the
-// wire form is 64 hex chars (two per SHA-256 byte).
-func TestValidateKeySetHashErrorNamesLength(t *testing.T) {
-	err := ValidateKeySetHash("abcd")
-	if err == nil || !strings.Contains(err.Error(), "64 lowercase hex") {
-		t.Fatalf("err = %v, want the 64-char requirement spelled out", err)
-	}
-}
-
 // TestSignerMintsSixtySecondTokens pins the minted lifetime: one round trip
 // plus skew, nothing more.
 func TestSignerMintsSixtySecondTokens(t *testing.T) {

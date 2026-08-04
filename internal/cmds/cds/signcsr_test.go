@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -182,14 +181,9 @@ func TestSignCSR_ZeroRequestTimeoutDisablesDeadline(t *testing.T) {
 	}
 }
 
-// TestSignCSR_SuccessDoesNotLogEncodeFailure pins that the response-encode
-// error path stays silent on success.
-func TestSignCSR_SuccessDoesNotLogEncodeFailure(t *testing.T) {
-	var logBuf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
+// TestSignCSR_SuccessBodyCarriesCertAndChain: a 200 response decodes as the
+// signed leaf plus the CA chain, both parseable PEM.
+func TestSignCSR_SuccessBodyCarriesCertAndChain(t *testing.T) {
 	h, earKey, _ := newTestSignCSRHandler(t)
 	csr, csrKey := csrFor(t, pkix.Name{CommonName: "test-node"}, nil)
 	ear := signEAR(t, earKey, earClaimsLite{
@@ -203,8 +197,19 @@ func TestSignCSR_SuccessDoesNotLogEncodeFailure(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if strings.Contains(logBuf.String(), "encode sign-csr response failed") {
-		t.Fatalf("success logged an encode failure: %s", logBuf.String())
+	var resp issuerapi.SignCSRResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	cert, err := x509.ParseCertificate(resp.Certificate.DER())
+	if err != nil {
+		t.Fatalf("parse signed leaf: %v", err)
+	}
+	if cert.Subject.CommonName != "test-node" {
+		t.Fatalf("leaf CN = %q, want the CSR's test-node", cert.Subject.CommonName)
+	}
+	if len(resp.CACertificate.DER()) == 0 {
+		t.Fatal("response ca_certificate carries no PEM block")
 	}
 }
 
