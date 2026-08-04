@@ -176,9 +176,9 @@ jobs:
       - name: resolve image refs + the paired c8s ref
         run: |
           set -euo pipefail
-          for k in image rootPvc mrtd c8sRef; do
+          for k in image rootPvc mrtd rtmr1 rtmr2 c8sRef; do
             v=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath="{.data.$k}" 2>/dev/null)
-            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref"; exit 1; }
+            [ -n "$v" ] || { echo "::error::$REFS_CM missing '$k'. The TDX refs CM is the single source of truth for image+measurement+paired ref (rtmr1/rtmr2 complete the image tuple get-kubeconfig now requires)"; exit 1; }
             echo "$k=$v" >> "$GITHUB_ENV"
           done
           # An explicit input overrides the pin, but say so loudly: the floor is
@@ -371,7 +371,10 @@ jobs:
       - name: get an attested, operator-key-bound kubeconfig (RA-TLS)
         run: |
           set -euo pipefail
-          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --out /tmp/guest.kubeconfig --timeout 180s
+          # The trust gate pins the whole image tuple, not MRTD alone; the
+          # manifest is written from the same refs CM the boot used.
+          printf '{"mrtd":"%s","rtmr1":"%s","rtmr2":"%s"}\n' "$mrtd" "$rtmr1" "$rtmr2" > /tmp/image-manifest.json
+          c8s get-kubeconfig --node "$GUEST_IP" --operator-key /tmp/op.key --image-manifest /tmp/image-manifest.json --out /tmp/guest.kubeconfig --timeout 180s
           [ -s /tmp/guest.kubeconfig ] || { echo "::error::no kubeconfig returned"; exit 1; }
           WHO=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
