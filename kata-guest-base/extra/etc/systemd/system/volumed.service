@@ -1,0 +1,33 @@
+[Unit]
+# Opens this pod's encrypted volumes inside the guest (docs/volumes.md). The
+# get-volume sidecar fetches each key from CDS over the attested secrets flow
+# and posts it here on loopback :8402; this opens dm-crypt + dm-verity and
+# mounts the plaintext read-only into kata's ephemeral directory.
+#
+# The node-side daemon resolves its caller from peer credentials because a node
+# holds many pods. A guest holds one, so there is no caller to tell apart and
+# --guest resolves every request to it — the same reason the token route on
+# :8401 needs no peer credentials.
+#
+# Not a gate on c8s-ready.target: a volume is released only once every main
+# container is running, so this cannot be on the path that starts them. A
+# sidecar that posts before this is up retries (--attempts).
+Description=c8s volumed (in-guest encrypted volume opener)
+Documentation=https://github.com/confidential-dot-ai/c8s/blob/main/docs/volumes.md
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/volumed --guest
+
+# Privileged by necessity: device-mapper ioctls and mount(2). No hardening
+# sandbox here — ProtectSystem/RestrictNamespaces would block exactly the
+# mounting this exists to do.
+Restart=on-failure
+RestartSec=2s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

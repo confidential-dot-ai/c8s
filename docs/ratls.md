@@ -533,7 +533,9 @@ Both shapes are wired.
 - **kata.** policy-monitor serves the token route on the guest's loopback
   `127.0.0.1:8401` and the digests routes on `:1019` inside the guest. No
   socket, no mount, and no configuration selects it: the port is compiled, so
-  the untrusted host cannot disable the binding by withholding a value.
+  the untrusted host cannot disable the binding by withholding a value. The
+  in-guest `volumed` follows the same pattern on `127.0.0.1:8402`
+  (docs/volumes.md), after the attestation-service on `:8400`.
   `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` overrides the advertised guest IP.
 
 get-cert picks the shape with `--workload-claims-guest`, which the webhook

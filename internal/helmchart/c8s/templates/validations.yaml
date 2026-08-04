@@ -36,8 +36,9 @@
   kata.enabled is enforcing: every workload runs as a kata CVM, where these
   host-side components are replaced by their in-guest counterparts baked into
   kata-guest-base: ratls routing runs in-VM, attestation is served by the
-  in-guest agent on loopback :8400 (see c8s.attestationApiURL), and image
-  admission is the in-guest policy-monitor fed from CDS's served allowlist.
+  in-guest agent on loopback :8400 (see c8s.attestationApiURL), image
+  admission is the in-guest policy-monitor fed from CDS's served allowlist, and
+  encrypted volumes are opened by `volumed --guest` on loopback :8402.
   Deploying the host versions alongside is at best dead weight and at worst a
   second, unattested enforcement path — require them off explicitly.
 */ -}}
@@ -46,8 +47,9 @@
 {{- if .Values.ratlsMesh.enabled -}}{{- $hostSide = append $hostSide "ratlsMesh.enabled" -}}{{- end -}}
 {{- if .Values.attestationApi.enabled -}}{{- $hostSide = append $hostSide "attestationApi.enabled" -}}{{- end -}}
 {{- if .Values.nriImagePolicy.enabled -}}{{- $hostSide = append $hostSide "nriImagePolicy.enabled" -}}{{- end -}}
+{{- if .Values.volumed.enabled -}}{{- $hostSide = append $hostSide "volumed.enabled" -}}{{- end -}}
 {{- with $hostSide -}}
-{{- fail (printf "VALIDATION_ERROR kind=enforce_host_components: kata.enabled=true requires %s =false. kata is enforcing — every workload runs as a kata CVM, where these host-side components are replaced by their in-guest counterparts in the kata-guest-base image (in-VM ratls routing, in-guest attestation-api on loopback, in-guest policy-monitor image admission). `c8s install --cvm-mode=pod` sets them for you." (join ", " .)) -}}
+{{- fail (printf "VALIDATION_ERROR kind=enforce_host_components: kata.enabled=true requires %s =false. kata is enforcing — every workload runs as a kata CVM, where these host-side components are replaced by their in-guest counterparts in the kata-guest-base image (in-VM ratls routing, in-guest attestation-api on loopback, in-guest policy-monitor image admission, in-guest volumed). `c8s install --cvm-mode=pod` sets them for you." (join ", " .)) -}}
 {{- end -}}
 {{- end -}}
 {{- /*

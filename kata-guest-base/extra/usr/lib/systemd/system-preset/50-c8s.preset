@@ -43,6 +43,11 @@ enable rtmr3-measurer.service
 # launched with a confai-scratch disk; no-op otherwise).
 enable scratch-setup.service
 
+# volumed opens this pod's encrypted volumes inside the guest, from keys the
+# get-volume sidecar posts on loopback :8402 (docs/volumes.md). Idle unless the
+# pod asks for a volume.
+enable volumed.service
+
 # Make sure cloud-init's units are on — without these, our env
 # materialisation never sees the user-data. Ubuntu's default preset
 # already enables them, but be explicit so a base-image refactor

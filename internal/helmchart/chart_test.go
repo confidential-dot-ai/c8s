@@ -6590,3 +6590,21 @@ func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
 		}
 	}
 }
+
+// The host volumed DaemonSet is replaced under kata by `volumed --guest` inside
+// the guest, which is where the fetcher posts. Leaving the host one enabled
+// deploys a privileged DaemonSet nothing calls, so the chart refuses it for the
+// same reason as the other host-side components.
+func TestChartKataRejectsHostVolumed(t *testing.T) {
+	out, err := helmTemplateKata(t, "--set", "volumed.enabled=true")
+	if err == nil {
+		t.Fatalf("helm template succeeded with kata and host volumed enabled, want failure\n%s", out)
+	}
+	msg := helmFailMessage(t, out)
+	if !strings.Contains(msg, "kind=enforce_host_components") {
+		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
+	}
+	if !strings.Contains(msg, "volumed.enabled") {
+		t.Errorf("fail message %q should name volumed.enabled", msg)
+	}
+}

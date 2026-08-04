@@ -205,7 +205,8 @@ kata-guest-base image:
 |---|---|
 | `ratls-mesh` DaemonSet | in-VM ratls routing |
 | `attestation-api` DaemonSet | in-guest attestation-api on loopback `:8400` (`c8s.attestationApiURL`) |
-| `nri-image-policy` (host NRI plugin) | in-guest policy-monitor, fed from CDS's served `/allowlist` |
+| `nri-image-policy` (host NRI plugin) | in-guest policy-monitor, fed from CDS's served `/allowlist`; also serves the sandbox-token route on loopback `:8401` |
+| `volumed` DaemonSet | in-guest `volumed --guest` on loopback `:8402` ([`docs/volumes.md`](volumes.md)) |
 
 `c8s install --cvm-mode=pod` sets `ratlsMesh.enabled=false`,
 `attestationApi.enabled=false`, and `nriImagePolicy.enabled=false` for you;
