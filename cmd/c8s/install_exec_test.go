@@ -243,13 +243,15 @@ func TestPreflightTDXNodesExec(t *testing.T) {
 }
 
 func TestPreflightTEENodesExec(t *testing.T) {
-	values := "kata:\n  snpNodeSelector:\n    confidential.ai/sev-snp: \"true\"\n  tdxNodeSelector:\n    confidential.ai/tdx: \"true\"\n"
+	values := map[string]any{"kata": map[string]any{
+		"snpNodeSelector": map[string]any{"confidential.ai/sev-snp": "true"},
+		"tdxNodeSelector": map[string]any{"confidential.ai/tdx": "true"},
+	}}
 
 	t.Run("snp checks the snp selector", func(t *testing.T) {
 		f := newFakeBin(t)
-		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", "echo node/node-a")
-		if err := preflightTEENodes(context.Background(), writeChart(t, values), "sev-snp"); err != nil {
+		if err := preflightTEENodes(context.Background(), values, "sev-snp", true); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		mustContainLine(t, f.calls(t), "kubectl get nodes -l confidential.ai/sev-snp=true -o name")
@@ -258,8 +260,7 @@ func TestPreflightTEENodesExec(t *testing.T) {
 	t.Run("tdx checks the tdx selector", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "kubectl", "echo node/node-a")
-		f.tool(t, "helm", helmShowValuesBody)
-		if err := preflightTEENodes(context.Background(), writeChart(t, values), "tdx"); err != nil {
+		if err := preflightTEENodes(context.Background(), values, "tdx", true); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		mustContainLine(t, f.calls(t), "kubectl get nodes -l confidential.ai/tdx=true -o name")
@@ -267,9 +268,8 @@ func TestPreflightTEENodesExec(t *testing.T) {
 
 	t.Run("no labelled node names the other platform", func(t *testing.T) {
 		f := newFakeBin(t)
-		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", "")
-		err := preflightTEENodes(context.Background(), writeChart(t, values), "tdx")
+		err := preflightTEENodes(context.Background(), values, "tdx", true)
 		if err == nil {
 			t.Fatal("want error when no node is labelled")
 		}
@@ -280,23 +280,26 @@ func TestPreflightTEENodesExec(t *testing.T) {
 		}
 	})
 
+	t.Run("user-supplied selector blames the values file", func(t *testing.T) {
+		f := newFakeBin(t)
+		f.tool(t, "kubectl", "")
+		err := preflightTEENodes(context.Background(), values, "sev-snp", false)
+		if err == nil {
+			t.Fatal("want error when no node is labelled")
+		}
+		if !strings.Contains(err.Error(), "-f values file sets kata.snpNodeSelector") {
+			t.Errorf("error %q does not blame the -f selector", err)
+		}
+	})
+
 	t.Run("cleared selector skips", func(t *testing.T) {
 		f := newFakeBin(t)
-		f.tool(t, "helm", helmShowValuesBody)
 		f.tool(t, "kubectl", "")
-		chart := writeChart(t, "kata:\n  snpNodeSelector: {}\n")
-		if err := preflightTEENodes(context.Background(), chart, "sev-snp"); err != nil {
+		cleared := map[string]any{"kata": map[string]any{"snpNodeSelector": map[string]any{}}}
+		if err := preflightTEENodes(context.Background(), cleared, "sev-snp", true); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		mustNotContainPrefix(t, f.calls(t), "kubectl")
-	})
-
-	t.Run("helm failure surfaces", func(t *testing.T) {
-		f := newFakeBin(t)
-		f.tool(t, "helm", "exit 1")
-		if err := preflightTEENodes(context.Background(), writeChart(t, values), "sev-snp"); err == nil {
-			t.Fatal("want error when helm fails")
-		}
 	})
 }
 
@@ -784,6 +787,7 @@ func clusterKubectl(applied, extra string) string {
 ` + extra + `*kubeletVersion*) /usr/bin/printf 'node-a\tv1.31.0\n' ;;
 "get nodes -l role=cds -o name") echo node/node-a ;;
 "get nodes -l confidential.ai/sev-snp=true -o name") echo node/node-a ;;
+"get nodes -o json") echo '{"items":[{"metadata":{"name":"node-a"},"spec":{"podCIDR":"10.42.0.0/24"},"status":{"addresses":[{"type":"InternalIP","address":"192.0.2.10"}]}}]}' ;;
 "get pods --all-namespaces -o json") echo '{"items":[]}' ;;
 "apply -f -") /bin/cat >> '` + applied + `' ;;
 esac`

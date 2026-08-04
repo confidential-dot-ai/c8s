@@ -24,7 +24,7 @@ var serialNumberLimit = new(big.Int).Lsh(big.NewInt(1), 128)
 // OIDAttestationDigest marks issued certificates with a SHA-256 of the
 // attestation evidence that authorized issuance — an audit-trail extension
 // shared between the CDS HTTP signer and the in-process issuer.
-var OIDAttestationDigest = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 59888, 1, 2}
+var OIDAttestationDigest = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66378, 1, 2}
 
 // GenerateSerial returns a cryptographically random 128-bit serial number
 // suitable for X.509 certificates.

@@ -142,7 +142,7 @@ func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
 
 func TestGatherFromFile(t *testing.T) {
 	t.Run("attested certificate PEM", func(t *testing.T) {
-		cert := claimsCert(t, nil)
+		cert := attestedCert(t, "")
 		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 		ev, err := gatherFromFile(pemBytes, nil, "file")
 		if err != nil {

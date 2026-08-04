@@ -100,6 +100,57 @@ func makeCtr(podSandboxID, name string) *api.Container {
 	}
 }
 
+// The pod-sandbox lifecycle feeds the inventory's sandbox set: Synchronize seeds
+// it even while the container check is deferred, RunPodSandbox adds,
+// RemovePodSandbox evicts.
+func TestPodSandboxEventsFeedInventory(t *testing.T) {
+	p := newTestPlugin(&config{Policy: policyConfig{EnforceExisting: true}})
+	p.inventory = newAdmissionInventory(t.TempDir())
+
+	pods := []*api.PodSandbox{makePod("default", "pod1")}
+	if _, err := p.Synchronize(context.Background(), pods, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod1-id"); !known {
+		t.Fatal("Synchronize did not seed the inventory sandbox set while deferring")
+	}
+
+	if err := p.RunPodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); !known {
+		t.Fatal("RunPodSandbox did not record the sandbox")
+	}
+
+	if err := p.RemovePodSandbox(context.Background(), makePod("default", "pod2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, known, _ := p.inventory.DigestsForSandbox("pod2-id"); known {
+		t.Fatal("RemovePodSandbox did not evict the sandbox")
+	}
+}
+
+// Pod-sandbox events are subscribed exactly when the inventory is enabled.
+func TestConfigureSubscribesPodSandboxEventsWithInventory(t *testing.T) {
+	p := newTestPlugin(&config{})
+	mask, err := p.Configure(context.Background(), "", "containerd", "2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mask.IsSet(api.Event_RUN_POD_SANDBOX) || mask.IsSet(api.Event_REMOVE_POD_SANDBOX) {
+		t.Fatal("pod-sandbox events subscribed without an inventory")
+	}
+
+	p.inventory = newAdmissionInventory(t.TempDir())
+	mask, err = p.Configure(context.Background(), "", "containerd", "2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mask.IsSet(api.Event_RUN_POD_SANDBOX) || !mask.IsSet(api.Event_REMOVE_POD_SANDBOX) {
+		t.Fatal("pod-sandbox events not subscribed with the inventory enabled")
+	}
+}
+
 func TestCreateContainer_NotReady_DenyNonExempt(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{
@@ -847,7 +898,7 @@ func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *test
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.broker = newWorkloadBroker("/proc")
+	p.inventory = newAdmissionInventory("/proc")
 	p.SetReady()
 
 	pod := makePod("default", "pod1")
@@ -860,15 +911,15 @@ func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *test
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rec, ok := p.broker.containers[allowed.Id]
+	rec, ok := p.inventory.containers[allowed.Id]
 	if !ok {
-		t.Fatalf("allowlisted container not recorded for the broker: %v", p.broker.containers)
+		t.Fatalf("allowlisted container not recorded in the inventory: %v", p.inventory.containers)
 	}
 	if rec.digest != pushDigestA {
 		t.Fatalf("recorded digest = %q, want %q", rec.digest, pushDigestA)
 	}
-	if _, ok := p.broker.containers[denied.Id]; ok {
-		t.Fatal("denied container must not be recorded for the broker")
+	if _, ok := p.inventory.containers[denied.Id]; ok {
+		t.Fatal("denied container must not be recorded in the inventory")
 	}
 }
 
@@ -879,7 +930,7 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: false},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.broker = newWorkloadBroker("/proc")
+	p.inventory = newAdmissionInventory("/proc")
 
 	pod := makePod("default", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestA)
@@ -887,15 +938,15 @@ func TestSynchronize_EnforceExistingDisabled_NotReady_DefersThenRecords(t *testi
 	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{ctr}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.broker.containers) != 0 {
+	if len(p.inventory.containers) != 0 {
 		t.Fatal("nothing should be recorded before the plugin is ready")
 	}
 
 	p.SetReady()
 	p.RunDeferredCheck(context.Background())
 
-	if _, ok := p.broker.containers[ctr.Id]; !ok {
-		t.Fatalf("deferred check did not record the container: %v", p.broker.containers)
+	if _, ok := p.inventory.containers[ctr.Id]; !ok {
+		t.Fatalf("deferred check did not record the container: %v", p.inventory.containers)
 	}
 }
 

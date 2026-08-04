@@ -735,21 +735,19 @@ func TestRenderTextSections(t *testing.T) {
 
 	t.Run("all sections present", func(t *testing.T) {
 		got := renderOut(Outcome{
-			Verified:                   true,
-			Fresh:                      true,
-			Pinned:                     true,
-			CertSHA256:                 "cert-digest-hex",
-			OperatorKeysAttestedDigest: "opkeys-digest-hex",
-			SeedAttestedDigest:         "seed-digest-hex",
-			WorkloadAttestedDigest:     "workload-digest-hex",
-			OperatorKeys:               []string{"fp-one"},
+			Verified:      true,
+			Fresh:         true,
+			Pinned:        true,
+			CertSHA256:    "cert-digest-hex",
+			SandboxID:     "sandbox-1",
+			SandboxIDNote: "vouched by the mesh CA",
+			OperatorKeys:  []string{"fp-one"},
 		})
 		for _, want := range []string{
 			"cert sha256:  cert-digest-hex",
-			"operator-keys digest (attested via config-claims): sha256:opkeys-digest-hex",
-			"allowlist-seed digest (attested via config-claims): seed-digest-hex",
-			"workload digest (attested via config-claims): sha256:workload-digest-hex",
-			"operator keys (allowlist writes; served list matches the attested digest):",
+			"sandbox id:   sandbox-1",
+			"vouched by the mesh CA",
+			"operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):",
 			"    sha256:fp-one",
 		} {
 			if !strings.Contains(got, want) {
@@ -765,21 +763,12 @@ func TestRenderTextSections(t *testing.T) {
 		}
 		for _, absent := range []string{
 			"cert sha256",
-			"operator-keys digest",
-			"allowlist-seed digest",
-			"workload digest",
+			"sandbox id",
 			"allowlist writes",
 		} {
 			if strings.Contains(got, absent) {
 				t.Errorf("output has %q without the datum:\n%s", absent, got)
 			}
-		}
-	})
-
-	t.Run("keys without attested digest use the unattested label", func(t *testing.T) {
-		got := renderOut(Outcome{Verified: true, Fresh: true, Pinned: true, OperatorKeys: []string{"fp-one"}})
-		if !strings.Contains(got, "CDS-reported config, NOT covered by the measurement") {
-			t.Errorf("expected the unattested key-list label:\n%s", got)
 		}
 	})
 }
@@ -879,12 +868,15 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err := os.WriteFile(path, pubPEM, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		policy, err := buildPolicy(config{operatorKeys: path})
-		if err != nil {
+		if _, err := buildPolicy(config{operatorKeys: path}); err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(policy.OperatorKeysDigest) == 0 {
-			t.Error("OperatorKeysDigest not set from --operator-keys")
+		digest, err := expectedOperatorKeysDigest(config{operatorKeys: path})
+		if err != nil {
+			t.Fatalf("expectedOperatorKeysDigest: %v", err)
+		}
+		if len(digest) == 0 {
+			t.Error("expected digest not derived from --operator-keys")
 		}
 	})
 
@@ -904,23 +896,6 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		}
 	})
 
-	t.Run("workload image pin", func(t *testing.T) {
-		img := "sha256:" + strings.Repeat("11", 32)
-		initImg := "sha256:" + strings.Repeat("22", 32)
-		policy, err := buildPolicy(config{workloadImages: []string{img}, workloadInitImages: []string{initImg}})
-		if err != nil {
-			t.Fatalf("buildPolicy: %v", err)
-		}
-		if len(policy.WorkloadDigest) == 0 {
-			t.Error("WorkloadDigest not set from --workload-image")
-		}
-	})
-
-	t.Run("bad workload image", func(t *testing.T) {
-		if _, err := buildPolicy(config{workloadImages: []string{"not-a-digest"}}); err == nil {
-			t.Error("malformed --workload-image must fail")
-		}
-	})
 }
 
 func TestGatherEvidence_ModesAndErrors(t *testing.T) {

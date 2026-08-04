@@ -86,6 +86,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		logger:    logger,
 		allowlist: a,
 		overlay:   &policyOverlay{},
+		refresh:   &refreshState{reason: reasonNotYetStarted},
 		killer:    newCgroupKiller(cfg.CgroupRoot),
 		// configReadDeadline is the budget for re-reading config.json
 		// after the initial CREATE event. kata-agent's setup_bundle
@@ -96,14 +97,26 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		revalidateInterval: 10 * time.Second,
 	}
 
-	// Workload-claims broker (docs/ratls.md): serve the guest
-	// pod's admitted digests to the in-guest get-cert over a Unix socket the
-	// guest bind-mounts into the pod.
-	if cfg.WorkloadClaimsSocketDir != "" {
-		m.broker = newWorkloadBroker()
-		socketPath := filepath.Join(cfg.WorkloadClaimsSocketDir, workloadclaims.SocketName)
-		if err := startWorkloadClaimsBroker(ctx, logger, m.broker, socketPath); err != nil {
-			return fmt.Errorf("start workload-claims broker: %w", err)
+	// Admission inventory (docs/ratls.md): the guest's sandbox identity, served
+	// to the in-guest get-cert on loopback. Always on — a guest always holds a
+	// pod that will ask, and gating it on configuration would let the untrusted
+	// host switch it off.
+	{
+		m.inventory = newAdmissionInventory()
+		m.inventory.refresh = func() workloadclaims.AllowlistRefresh { return m.refresh.report(a.Size()) }
+		signer := sandboxTokenSigner(cfg, logger)
+		if err := startAdmissionInventory(ctx, logger, m.inventory, signer); err != nil {
+			return fmt.Errorf("start admission inventory: %w", err)
+		}
+		// Only useful alongside tokens: the address CDS dials is signed into
+		// them, so without a signer nothing can direct CDS here.
+		// Fail-soft: a missing digests endpoint degrades issuance (CDS refuses
+		// tokens it cannot check), which is cheaper than taking the guest's
+		// only image-policy enforcer down with it.
+		if signer != nil {
+			if err := startSandboxDigests(ctx, logger, cfg, m.inventory, signer); err != nil {
+				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
+			}
 		}
 	}
 
@@ -113,8 +126,12 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// *allowlist with m, whose merge is mutex-guarded. No CDS URL →
 	// baked-seed-only and the network is never touched.
 	if cfg.CDSURL != "" {
-		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay)
+		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
 	} else {
+		// Info, not Error: seed-only is the configured intent here, unlike the
+		// failure paths in runAllowlistRefresh. Still recorded, so denies and
+		// the digests endpoint report the frozen set either way.
+		m.refresh.disable(reasonNoCDSURL)
 		logger.Info("allowlist refresh disabled (no CDS URL); enforcing baked seed only", "entries", a.Size())
 	}
 
@@ -130,8 +147,9 @@ type monitor struct {
 	logger             *slog.Logger
 	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
 	overlay            *policyOverlay // latest CDS pull's workload argv policy
+	refresh            *refreshState  // whether the allowlist still tracks CDS
 	killer             containerKiller
-	broker             *workloadBroker // serves the workload-claims flow (docs/ratls.md)
+	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
 	configReadDeadline time.Duration
 	configReadInterval time.Duration
 	revalidateInterval time.Duration
@@ -279,6 +297,16 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && filepath.Clean(evt.Name) == filepath.Clean(m.cfg.WatchDir) {
 				return watchDirGone("inotify " + evt.Op.String())
 			}
+			// A bundle disappearing means its container is gone; drop it
+			// from the inventory so /digests answers what the sandbox is
+			// running rather than everything it ever ran. The watch dir's
+			// own removal was handled above, so this is a child path.
+			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && m.pathLooksLikeContainer(evt.Name) {
+				if m.inventory != nil {
+					m.inventory.remove(filepath.Base(filepath.Clean(evt.Name)))
+				}
+				continue
+			}
 			// We only care about new entries appearing under the
 			// watched directory. IN_CREATE covers both dirs and
 			// files — we accept either and let pathLooksLikeContainer
@@ -420,6 +448,12 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	// mislabelled workload can't slip through (kata would run the measured
 	// pause for it, not the host's image). Checked before extractDigest
 	// because the pause carries no image-name annotation.
+	// Every container (the pause included) names its pod sandbox in the CRI
+	// annotations; capture it for the inventory's sandbox-identity surface.
+	if m.inventory != nil {
+		m.inventory.recordSandboxID(sandboxIDFromAnnotations(spec.Annotations))
+	}
+
 	if isSandbox(spec.Annotations) {
 		m.logger.Info("allow sandbox (pause) container — measured via rootfs, not allowlisted", "cid", cid)
 		return
@@ -447,13 +481,26 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	}
 	if m.admits(digest, argv) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
-		if m.broker != nil {
-			m.broker.record(cid, containerName(spec.Annotations), digest)
+		if m.inventory != nil {
+			m.inventory.record(cid, digest, argv)
 		}
 		return
 	}
-	m.logger.Warn("deny container: digest/argv not allowlisted", "cid", cid, "digest", digest, "argv", argv)
+	m.logger.Warn("deny container: digest/argv not allowlisted",
+		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
 	m.kill(cid)
+}
+
+// frozenAttrs annotates a deny with the fact that the allowlist never left the
+// baked seed, when that is why the deny happened. Without it a frozen guest and
+// a genuinely-unlisted image produce identical lines — and once the kill lands
+// a frozen guest denies everything at once.
+func (m *monitor) frozenAttrs() []any {
+	reason := m.refresh.frozenReason()
+	if reason == "" {
+		return nil
+	}
+	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
 }
 
 // kill resolves the container's cgroup and terminates it as a unit.

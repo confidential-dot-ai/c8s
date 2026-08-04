@@ -170,7 +170,7 @@ func TestUninstallNonKataSkipsSweep(t *testing.T) {
 
 func TestUninstallRefusesWhileKataPodsRun(t *testing.T) {
 	values := kataReleaseValuesFile(t, true, "/var/lib/c8s/kata-images", "")
-	running := `*runtimeClassName*) /usr/bin/printf 'default\tinference-0\tkata-qemu-snp\n' ;;
+	running := `*runtimeClassName*) /usr/bin/printf 'default\tinference-0\tkata-qemu-snp\tinference\n' ;;
 `
 
 	t.Run("refuses and names the pods", func(t *testing.T) {

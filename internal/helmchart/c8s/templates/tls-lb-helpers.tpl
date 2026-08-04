@@ -149,6 +149,71 @@ proxy_ssl_verify off;
 {{- end -}}
 
 {{/*
+Return true when the built-in /allowlist route renders: allowlist.enabled is a
+real bool set to true and no legacy typed route owns /allowlist. The nginx
+locations, the loopback proxy sidecar, and the Service traffic policy must all
+flip on this one predicate.
+*/}}
+{{- define "tls-lb.renderAllowlistRoute" -}}
+{{- if not (kindIs "bool" .Values.tlsLb.allowlist.enabled) -}}
+{{- fail (printf "tlsLb.allowlist.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.allowlist.enabled) -}}
+{{- end -}}
+{{- and .Values.tlsLb.allowlist.enabled (ne (include "tls-lb.hasExplicitAllowlistRoute" .) "true") -}}
+{{- end -}}
+
+{{/*
+Return true when a legacy typed route owns /allowlist. Such a route suppresses
+both the built-in nginx locations and their loopback proxy sidecar.
+*/}}
+{{- define "tls-lb.hasExplicitAllowlistRoute" -}}
+{{- $found := false -}}
+{{- range $route := .Values.tlsLb.routes -}}
+{{- $path := toString (default "" $route.path) -}}
+{{- if or (eq $path "/allowlist") (eq $path "/allowlist/") -}}
+{{- $found = true -}}
+{{- end -}}
+{{- end -}}
+{{- $found -}}
+{{- end -}}
+
+{{/*
+Render one half of the built-in CDS allowlist route. The caller emits an exact
+/allowlist location and a /allowlist/ prefix location so unrelated paths such
+as /allowlisted never reach the loopback proxy. proxy_pass includes $request_uri
+explicitly: operator authorization signs the HTTP method, exact path, and body,
+so nginx must not normalize or replace the path before CDS verifies the token.
+
+The loopback proxy verifies CDS's RA-TLS evidence. Stock nginx cannot verify
+the attestation extension itself, so it must never dial CDS directly here.
+
+Args: root, exact (bool), path, proxyPort, writeBurst, writeTotalBurst,
+readBurst — the numeric args arrive pre-validated by the configmap prologue.
+*/}}
+{{- define "tls-lb.allowlistLocation" -}}
+{{- $root := .root -}}
+location{{ if .exact }} ={{ end }} {{ .path }} {
+    {{- if default false $root.Values.tlsLb.cors.enabled }}
+    {{- include "tls-lb.corsLocationDirectives" $root.Values.tlsLb.cors | nindent 4 }}
+    {{- else if eq (include "tls-lb.protocolCorsEnabled" $root) "true" }}
+    {{- include "tls-lb.protocolCorsLocationDirectives" $root | nindent 4 }}
+    {{- end }}
+    # These run before nginx collapses callers onto the loopback proxy source.
+    # Each zone's map key is empty for the methods it does not cover, so
+    # mutations count per client and in aggregate, reads per client only.
+    limit_req zone=allowlist_write_per_client burst={{ .writeBurst }} nodelay;
+    limit_req zone=allowlist_write_total burst={{ .writeTotalBurst }} nodelay;
+    limit_req zone=allowlist_read_per_client burst={{ .readBurst }} nodelay;
+    limit_req_status 429;
+    proxy_pass http://127.0.0.1:{{ .proxyPort }}$request_uri;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+{{- end -}}
+
+{{/*
 Validate the global CORS configuration. Skips when disabled.
 */}}
 {{- define "tls-lb.validateCORS" -}}
@@ -156,6 +221,11 @@ Validate the global CORS configuration. Skips when disabled.
 {{- if hasKey $cors "enabled" -}}
 {{- if not (kindIs "bool" $cors.enabled) -}}
 {{- fail (printf "tlsLb.cors.enabled must be a boolean; do not set it via --set-string, got: %v" $cors.enabled) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $cors "protocolEndpoints" -}}
+{{- if not (kindIs "bool" $cors.protocolEndpoints) -}}
+{{- fail (printf "tlsLb.cors.protocolEndpoints must be a boolean; do not set it via --set-string, got: %v" $cors.protocolEndpoints) -}}
 {{- end -}}
 {{- end -}}
 {{- if default false $cors.enabled -}}
@@ -319,6 +389,52 @@ add_header Access-Control-Allow-Methods     $cors_out_methods always;
 add_header Access-Control-Allow-Headers     $cors_out_headers always;
 add_header Access-Control-Allow-Credentials $cors_out_credentials always;
 add_header Access-Control-Expose-Headers    $cors_out_expose always;
+{{- end -}}
+
+{{/*
+Whether the c8s protocol-owned locations get the built-in wide-open CORS
+block: tlsLb.cors.protocolEndpoints (default true), unless the operator's
+global CORS block is enabled — an explicit policy already covers every
+location, so the built-in one steps aside. hasKey instead of `default`
+because sprig's default treats an explicit false as unset.
+*/}}
+{{- define "tls-lb.protocolCorsEnabled" -}}
+{{- $cors := default dict .Values.tlsLb.cors -}}
+{{- $pe := true -}}
+{{- if hasKey $cors "protocolEndpoints" -}}{{- $pe = $cors.protocolEndpoints -}}{{- end -}}
+{{- and $pe (not (default false $cors.enabled)) -}}
+{{- end -}}
+
+{{/*
+Render wide-open CORS directives for a c8s protocol-owned location (the
+attestation/handshake/tunnel namespace, the discovery document and
+certificate endpoints, the built-in allowlist route). These endpoints exist
+to be verified by any browser anywhere: every response is either
+self-authenticating (hardware evidence, CDS-signed certificates, sealed
+tunnel records) or public by design, and no request relies on ambient
+browser credentials (allowlist mutations are operator-signed over method,
+path, and body). An origin allowlist here cannot protect anything and only
+breaks third-party verifiers, so the policy is a constant: any origin, no
+credentials. Self-contained on purpose — no http-level maps and no
+upstream pass-through; these endpoints are c8s-owned end to end, so tls-lb
+states their CORS policy itself. Caller nindents into a `location {}`
+block.
+*/}}
+{{- define "tls-lb.protocolCorsLocationDirectives" -}}
+proxy_hide_header Access-Control-Allow-Origin;
+proxy_hide_header Access-Control-Allow-Methods;
+proxy_hide_header Access-Control-Allow-Headers;
+proxy_hide_header Access-Control-Allow-Credentials;
+proxy_hide_header Access-Control-Expose-Headers;
+if ($request_method = 'OPTIONS') {
+    add_header Access-Control-Allow-Origin  "*" always;
+    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-C8s-Session" always;
+    add_header Access-Control-Max-Age       "600" always;
+    add_header Content-Length 0;
+    return 204;
+}
+add_header Access-Control-Allow-Origin "*" always;
 {{- end -}}
 
 {{/*

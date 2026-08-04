@@ -110,32 +110,37 @@ func (c Client) ObtainCertificateWithEvidence(attestationApiURL, csrPEM string) 
 // caller-controlled cancellation across authenticate, local attest, and CDS
 // attest requests.
 func (c Client) ObtainCertificateWithEvidenceContext(ctx context.Context, attestationApiURL, csrPEM string) (CertificateResult, error) {
-	return c.ObtainCertificateWithClaimsContext(ctx, attestationApiURL, csrPEM, nil, nil, nil)
-}
-
-// ObtainCertificateWithClaimsContext is ObtainCertificateWithEvidenceContext
-// that additionally binds an RA-TLS config-claims extension into the evidence
-// REPORTDATA and forwards it (plus the role-partitioned container-digest lists
-// it commits to) to CDS for verification and leaf embedding
-// (docs/ratls.md). claimsDER nil ⇒ the plain, claims-free flow
-// (byte-identical to before).
-func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestationApiURL, csrPEM string, claimsDER []byte, initDigests, mainDigests []string) (CertificateResult, error) {
 	ctx = contextOrBackground(ctx)
-
-	// Step 1: get challenge from CDS
+	// The plain flow fetches its own challenge; the sandbox flow has get-cert
+	// fetch it so one nonce binds both the token and the evidence.
 	challengeResp, err := c.AuthenticateContext(ctx)
 	if err != nil {
 		return CertificateResult{}, fmt.Errorf("authenticate: %w", err)
 	}
+	return c.ObtainCertificateWithSandboxContext(ctx, attestationApiURL, csrPEM, challengeResp.Challenge, nil)
+}
 
-	// Step 2: generate TEE evidence bound to the CSR public key, the config
-	// claims (if any), and the challenge.
-	challengeBytes, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
+// ObtainCertificateWithSandboxContext is ObtainCertificateWithEvidenceContext
+// that additionally forwards an inventory-signed sandbox token. challenge is
+// the base64 CDS challenge the caller already fetched (POST /authenticate); the
+// same nonce binds the evidence REPORTDATA and the sandbox token, so CDS checks
+// both against one single-use value. sandboxToken, when non-empty, is the
+// token JSON (workloadclaims.SignedSandboxToken) forwarded opaquely for CDS to
+// verify and stamp as the leaf's pod-sandbox-ID extension (ratls.OIDSandboxID).
+//
+// The requester never reports its own container images: CDS resolves those
+// from the inventory named by the token (docs/ratls.md, "Sandbox identity").
+func (c Client) ObtainCertificateWithSandboxContext(ctx context.Context, attestationApiURL, csrPEM, challenge string, sandboxToken json.RawMessage) (CertificateResult, error) {
+	ctx = contextOrBackground(ctx)
+
+	// The caller fetched the challenge so the same nonce binds both the sandbox
+	// token and the evidence REPORTDATA below.
+	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
 	if err != nil {
 		return CertificateResult{}, fmt.Errorf("invalid base64 in challenge: %w", err)
 	}
 
-	reportData, err := reportDataForCSR(csrPEM, claimsDER, challengeBytes)
+	reportData, err := reportDataForCSR(csrPEM, challengeBytes)
 	if err != nil {
 		return CertificateResult{}, err
 	}
@@ -145,22 +150,18 @@ func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestat
 		return CertificateResult{}, fmt.Errorf("attestation-api: %w", err)
 	}
 
-	// Step 3: submit evidence + CSR to CDS for verification and cert issuance.
+	// Submit evidence + CSR to CDS for verification and cert issuance.
 	// asResp.Evidence is the platform-specific evidence object as emitted by
 	// /attest; CDS's /attest expects it wrapped in an AttestationEvidence
 	// envelope keyed by Platform.
 	attestReq := attestRequest{
-		Challenge: challengeResp.Challenge,
+		Challenge: challenge,
 		Evidence: attestEvidence{
 			Platform: asResp.Platform,
 			Evidence: asResp.Evidence,
 		},
-		CSR:                  csrPEM,
-		InitContainerDigests: initDigests,
-		ContainerDigests:     mainDigests,
-	}
-	if len(claimsDER) > 0 {
-		attestReq.WorkloadClaims = base64.StdEncoding.EncodeToString(claimsDER)
+		CSR:          csrPEM,
+		SandboxToken: sandboxToken,
 	}
 	certPEM, err := c.AttestContext(ctx, attestReq)
 	if err != nil {
@@ -169,7 +170,7 @@ func (c Client) ObtainCertificateWithClaimsContext(ctx context.Context, attestat
 
 	return CertificateResult{
 		Certificate: certPEM,
-		Challenge:   challengeResp.Challenge,
+		Challenge:   challenge,
 		Platform:    asResp.Platform,
 		Evidence:    asResp.Evidence,
 	}, nil
@@ -288,12 +289,10 @@ func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeRespons
 }
 
 type attestRequest struct {
-	Challenge            string         `json:"challenge"`
-	Evidence             attestEvidence `json:"evidence"`
-	CSR                  string         `json:"csr"`
-	WorkloadClaims       string         `json:"workload_claims,omitempty"`
-	InitContainerDigests []string       `json:"init_container_digests,omitempty"`
-	ContainerDigests     []string       `json:"container_digests,omitempty"`
+	Challenge    string          `json:"challenge"`
+	Evidence     attestEvidence  `json:"evidence"`
+	CSR          string          `json:"csr"`
+	SandboxToken json.RawMessage `json:"sandbox_token,omitempty"`
 }
 
 type attestEvidence struct {
@@ -371,7 +370,7 @@ func contextOrBackground(ctx context.Context) context.Context {
 	return ctx
 }
 
-func reportDataForCSR(csrPEM string, claimsDER, challenge []byte) ([]byte, error) {
+func reportDataForCSR(csrPEM string, challenge []byte) ([]byte, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return nil, fmt.Errorf("CSR must be a PEM-encoded certificate request")
@@ -383,9 +382,7 @@ func reportDataForCSR(csrPEM string, claimsDER, challenge []byte) ([]byte, error
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("CSR signature invalid: %w", err)
 	}
-	// claimsDER nil ⇒ SHA-384(pubkey || challenge), identical to the
-	// pre-claims binding CDS recomputes for a claims-free request.
-	reportData, err := ratls.ReportDataForKeyAndClaims(csr.PublicKey, claimsDER, challenge)
+	reportData, err := ratls.ReportDataForKey(csr.PublicKey, challenge)
 	if err != nil {
 		return nil, err
 	}

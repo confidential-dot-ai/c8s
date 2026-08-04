@@ -283,7 +283,6 @@ func TestWorkloadApplyGetRoundTrip(t *testing.T) {
 				"image":   "registry.example.com/team/api@" + digA,
 				"command": map[string]any{"policy": "exact", "argv": []string{"/app/server"}},
 				"args":    map[string]any{"policy": "exact", "argv": []string{"--port=8080"}},
-				"paths":   map[string]any{"policy": "deny"},
 			}},
 		},
 	}

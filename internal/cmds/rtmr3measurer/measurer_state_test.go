@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // logLine is the subset of a JSON log record these tests decode.
@@ -41,28 +40,6 @@ func linesWithMsg(lines []logLine, msg string) []logLine {
 		}
 	}
 	return out
-}
-
-func TestNewMeasurerDefaults(t *testing.T) {
-	m := newMeasurer(slog.Default())
-	if m.watchDir != watchDir {
-		t.Errorf("watchDir = %q, want %q", m.watchDir, watchDir)
-	}
-	if m.statePath != statePath {
-		t.Errorf("statePath = %q, want %q", m.statePath, statePath)
-	}
-	if m.configReadDeadline != 2*time.Second {
-		t.Errorf("configReadDeadline = %v, want 2s", m.configReadDeadline)
-	}
-	if m.configReadInterval != 50*time.Millisecond {
-		t.Errorf("configReadInterval = %v, want 50ms", m.configReadInterval)
-	}
-	if m.extend == nil || m.readRegister == nil {
-		t.Error("sysfs extend/read hooks not wired")
-	}
-	if m.seenCids == nil || m.measuredDigests == nil {
-		t.Error("dedup maps not initialized")
-	}
 }
 
 // The cannot-read-watch-dir warning fires on the first failure and again after

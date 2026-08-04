@@ -9,6 +9,7 @@ Recreate, silently defeating the operator's opt-out. */ -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
 {{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
+{{- $renderAllowlistProxy := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +53,8 @@ spec:
       # must stay inside the TEE boundary.
       runtimeClassName: {{ include "c8s.controlPlaneKataRuntimeClass" . }}
       {{- end }}
+      {{- /* Pinned above, not injected, so the gate is spelled out here too. */}}
+      {{- include "c8s.kataGuestReadyAffinity" . | nindent 6 }}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.tlsLb.imagePullSecrets) | nindent 6 }}
       shareProcessNamespace: true
       initContainers:
@@ -156,7 +159,13 @@ spec:
             # publicTLS secret it is that cert (mounted below). Re-read per request, so
             # get-cert renewals are picked up.
             - --serving-cert-file={{ include "tls-lb.publicCertPath" . }}
-            # --cds-cert-file intentionally unset: nginx serves the live cert at discovery.cdsCertPath (/.well-known/cds-cert.pem); cds-attest would embed a stale startup copy.
+            # The identity-bound PQ flow must use the TEE-held mesh
+            # credential, never the optional publicTLS Secret: report_data
+            # commits the hybrid session key to this leaf and the sidecar
+            # proves possession with its matching private key.
+            - --mesh-identity-cert-file={{ .Values.tlsLb.tlsMountPath }}/cert.pem
+            - --mesh-identity-key-file={{ .Values.tlsLb.tlsMountPath }}/key.pem
+            - --mesh-identity-ca-file={{ .Values.tlsLb.tlsMountPath }}/ca.pem
             # Terminate over-encryption here and forward to the same workload
             # backend nginx proxies to. An http upstream is plaintext at the
             # app layer; pointed at a headless Service (an adopted workload),
@@ -201,6 +210,40 @@ spec:
               drop:
                 - ALL
           {{- with .Values.tlsLb.attest.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- if $renderAllowlistProxy }}
+        # nginx terminates the public, tls-lb-attested connection and forwards
+        # /allowlist over pod loopback. This sidecar establishes the second
+        # trust hop: it verifies CDS's RA-TLS evidence before proxying.
+        - name: allowlist-proxy
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          args:
+            - allowlist-proxy
+            - --host=127.0.0.1
+            - --port={{ include "c8s.int" .Values.tlsLb.allowlist.proxyPort }}
+            - --cds-url={{ include "c8s.cdsURL" . }}
+            - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
+            {{- with .Values.cds.measurements }}
+            - --cds-measurements={{ join "," . }}
+            {{- end }}
+          {{- with (include "c8s.attestationApiHostIPEnv" .) }}
+          # cvmMode=node: the proxy verifies CDS through the node-baked
+          # attestation-api, reached from this pod via its node IP.
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.tlsLb.allowlist.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

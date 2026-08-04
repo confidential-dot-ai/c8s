@@ -104,6 +104,7 @@ func resetCLIState(t *testing.T) {
 		installOperatorKeys, installUpstream, renderValuesDistro                     string
 		uninstallNamespace, uninstallRelease                                         string
 		installValues, installWorkloadRefs, installMeasurements                      []string
+		installInventoryCIDRs                                                        []string
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug       bool
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled bool
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce    bool
@@ -116,6 +117,7 @@ func resetCLIState(t *testing.T) {
 		installOperatorKeys, installUpstream, renderValuesDistro,
 		uninstallNamespace, uninstallRelease,
 		slices.Clone(installValues), slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements),
+		slices.Clone(installInventoryCIDRs),
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug,
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled,
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce,
@@ -129,6 +131,7 @@ func resetCLIState(t *testing.T) {
 		installOperatorKeys, installUpstream, renderValuesDistro = saved.installOperatorKeys, saved.installUpstream, saved.renderValuesDistro
 		uninstallNamespace, uninstallRelease = saved.uninstallNamespace, saved.uninstallRelease
 		installValues, installWorkloadRefs, installMeasurements = saved.installValues, saved.installWorkloadRefs, saved.installMeasurements
+		installInventoryCIDRs = saved.installInventoryCIDRs
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug = saved.installWait, saved.installCRDs, saved.installGetCertRunAsNonRoot, saved.installKataDebug
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled = saved.installSingleNode, saved.installForce, saved.installResolveDigests, saved.installAttestEnabled
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce = saved.uninstallWait, saved.uninstallKataSweep, saved.uninstallHostSweepOnly, saved.uninstallForce

@@ -707,9 +707,9 @@ func TestAttestationExtensionBindsBareKey(t *testing.T) {
 	}))
 	defer attestationApi.Close()
 
-	ext, err := attestclient.NewClient("").AttestationExtensionForClaims(context.Background(), attestationApi.URL, &key.PublicKey, nil)
+	ext, err := attestclient.NewClient("").AttestationExtension(context.Background(), attestationApi.URL, &key.PublicKey)
 	if err != nil {
-		t.Fatalf("AttestationExtensionForClaims: %v", err)
+		t.Fatalf("AttestationExtension: %v", err)
 	}
 
 	want, err := ratls.ReportDataForKey(&key.PublicKey, nil)
@@ -960,9 +960,19 @@ func TestObtainCertAttestationExtensionError(t *testing.T) {
 		http.Error(w, "attestation down", http.StatusInternalServerError)
 	}))
 	t.Cleanup(att.Close)
+	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/authenticate" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"challenge": base64.StdEncoding.EncodeToString([]byte("the-challenge")),
+		})
+	}))
+	t.Cleanup(cds.Close)
 
 	cfg := config{
-		CDSURL:            "https://127.0.0.1:1",
+		CDSURL:            cds.URL,
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}

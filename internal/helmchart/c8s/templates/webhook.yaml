@@ -44,6 +44,15 @@ webhooks:
         apiVersions: [v1]
         resources: [pods]
         scope: Namespaced
+      # Ephemeral containers attach to a running pod and are stripped from a
+      # CREATE, so they are only visible on this subresource. Without it,
+      # `kubectl debug` could mount the volume holding a released secret or the
+      # pod's private key and read it out (docs/secrets.md).
+      - operations: [UPDATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods/ephemeralcontainers]
+        scope: Namespaced
     clientConfig:
       service:
         namespace: {{ .Release.Namespace }}

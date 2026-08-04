@@ -77,7 +77,7 @@ signing and again for sending, any difference (key ordering, whitespace) makes
 do not re-marshal between signing and sending. `internal/cmds/allowlist`'s
 end-to-end test (`integration_test.go`) exists to catch a regression here.
 
-## Operator key-pinning: revocation is coarse; the attested config protects only pinning verifiers
+## Operator key-pinning: revocation is coarse; the served key set protects only verifiers that check it
 
 `internal/cmds/cds/run.go` (`loadOperatorKeys`), `pkg/operatorauth/operatorauth.go`, `docs/ratls.md`
 
@@ -90,24 +90,21 @@ it:
   (remove its public key from `cds.operatorKeys`). There is no per-key
   revocation short of that. Keys are long-lived; a leaked operator private key is
   usable until removed. Protect operator keys (vault/HSM/hardware token).
-- **The attested config-claims digests only protect verifiers that pin them.**
-  CDS binds the digests of its loaded key set and applied seed into its
-  serving-cert evidence, but the CDS args are still host-supplied: a control
-  plane can restart CDS with different keys or seed. That swap fails closed
-  only for clients pinning the expected values (`c8s cds verify
-  --operator-keys/--allowlist-seed`, pinned from the operator's own install
-  inputs); a client that pins nothing accepts whatever the running CDS
-  attests to, and
-  in-cluster enforcers pin nothing. Verify continuously (CI), not just at
+- **The served key set only protects verifiers that check it.** CDS's serving
+  certificate commits its key and measurement — not its operator keys, not its
+  allowlist seed — and the CDS args are still host-supplied: a control plane can
+  restart CDS with different keys or seed. That swap is caught only by clients
+  running `c8s cds verify --operator-keys` (which fetches `/operator-keys` over
+  the attested serving cert and compares it against the operator's own bundle);
+  a client that checks nothing accepts whatever the running CDS serves, and
+  in-cluster enforcers check nothing. Verify continuously (CI), not just at
   bootstrap, and gate ingress exposure on a passing verify.
-- **A rotated-out config stays claimable until cert expiry.** After changing
-  operator keys or the seed, the previous serving cert (and its claims)
-  remains replayable until its RA-TLS TTL (`cds.ratlsCertTTL`) runs out. An
-  operator-key change also fails handoff by design (the key-set hash is bound
-  into handoff REPORTDATA), so a key rotation rolls a fresh CA lineage rather
-  than inheriting the old one. A seed-only change does not gate handoff — the
-  seed digest rides the serving-cert claims, not the handoff exchange — and is
-  caught only by verifiers pinning `--allowlist-seed`.
+- **An operator-key rotation rolls the CA lineage; a seed change is invisible
+  to attestation.** The key-set hash is bound into `/handoff` REPORTDATA, so
+  changing operator keys fails handoff by design and a replacement replica mints
+  a fresh CA rather than inheriting the old one. A seed-only change gates
+  nothing — the seed is not committed anywhere in the certificate or the handoff
+  exchange — and is visible only by reading the allowlist CDS serves.
 
 This was a deliberate stop-gap to ship `c8s allowlist` without standing up a
 PKI. **Longer term** we want a CA + short-lived operator certificates (chain
@@ -297,6 +294,24 @@ in-guest attestation — a disruptive, easy-to-miss change that rewrites the tru
 boundary cds runs in. It is harmless on a fresh install but sharp on a running
 one. Pick kata vs non-kata at install time and keep it fixed; to switch, plan it
 as a deliberate migration (drain, reinstall), not a `helm upgrade --set`.
+
+## `default_vcpus = 1` does NOT give pod-mode a single fleet-wide launch measurement
+
+`internal/helmchart/c8s/files/scripts/pull-and-configure.sh`, `internal/cmds/katameasure/`
+
+Under `--cvm-mode=pod` every pod is its own SEV-SNP CVM, and the launch digest
+covers one VMSA page per vCPU plus `nr_cpus=N` in the measured kernel cmdline.
+The puller drop-in pins `default_vcpus = 1`, but the qemu-snp config also sets
+`static_sandbox_resource_mgmt = true`, so kata adds each pod's CPU limit on top:
+`vCPUs = ceil(default_vcpus + Σ container CPU limits)`. A pod with
+`limits.cpu: 500m` boots 2 vCPUs and measures differently from an unlimited one.
+Observed simultaneously on one live cluster: `e246273c…46f0fb` (every
+default-resource pod, 1 vCPU) and `ff0bfd88…dba9a` (CDS, `500m` → 2 vCPUs).
+
+`cds.measurements` is a single list, so it needs one entry per distinct vCPU
+count — or give every confidential pod the same CPU limit (or none) so the fleet
+shares one digest. Predict the values with `c8s kata measure --vcpus N`; see
+[`kata-launch-measurement.md`](kata-launch-measurement.md).
 
 ## The bootstrap allowlist binds to floating `:main` digests — operators MUST pin by digest
 
@@ -492,14 +507,78 @@ the cluster converges fine underneath, and a second `c8s install` run (helm
 upgrade) flips it to `deployed`. Don't start debugging from the helm status —
 check the pods first.
 
+## A tenant pod labelled `app.kubernetes.io/instance: <release>` evades the uninstall guard
+
+`cmd/c8s/uninstall.go` (`filterKataPods`)
+
+The running-kata-pod guard skips pods in the release namespace that carry the
+chart's `app.kubernetes.io/instance: <release>` label, so `c8s uninstall` is not
+blocked by its own CDS and tls-lb pods. Nothing stops an operator from putting
+that label on a real workload in `c8s-system`; such a pod is silently not
+protected and loses its runtime. Keep tenant workloads out of the release
+namespace, or off that label.
+
 ## `c8s uninstall` sweeps the TEE node labels — relabel before reinstalling
 
 `cmd/c8s/uninstall.go`, `cmd/c8s/tee_label.go`
 
 The kata sweep removes `confidential.ai/sev-snp` / `confidential.ai/tdx`
-along with the kata artifacts. A subsequent
-`c8s install --cvm-mode=pod -f <values>` can fail fast at the TDX/SNP node check (the
-auto-label path doesn't cover every `-f` shape). Relabel by hand and rerun.
+along with the kata artifacts. A subsequent `c8s install --cvm-mode=pod`
+relabels automatically, but one whose `-f` owns the selector (see the next
+entry) fails fast at the TEE node check instead. Relabel by hand and rerun.
+
+## A `-f` values file no longer disables TEE node labelling — only one that owns the selector does
+
+`cmd/c8s/install.go:782` (the `--cvm-mode=pod` block), `cmd/c8s/tee_label.go:90`
+(`valuesFilesSetTEESelector`)
+
+Any `-f` used to disable **both** the `confidential.ai/sev-snp` /
+`confidential.ai/tdx` auto-labelling **and** the preflight that catches the
+result — silently. That collided with the first thing a stock RKE2 cluster
+forces: `rke2-ingress-nginx` owns host port 443, so the tls-lb preflight
+(`cmd/c8s/install.go:249`) tells you to `install with -f setting
+tlsLb.hostPort.enabled=false` — and taking the tool's own advice dropped the
+labelling. CDS then sat `Pending` with `didn't match Pod's node
+affinity/selector`, `helm --wait` burned its full 10-minute timeout, and the
+surfaced error was an unrelated `Progress deadline exceeded`. Nothing named
+the missing label.
+
+Now:
+
+- Auto-labelling stands aside only when a `-f` file **sets the platform's own
+  `kata.snpNodeSelector` / `kata.tdxNodeSelector`** — the values-driven
+  install that really does own its labels. Everything else (`tlsLb.*`,
+  `kata.nodeSelector`, digests, …) still gets labelled.
+- When it does stand aside it **says so on stdout** and prints the exact
+  `kubectl label node <node> <k>=<v>` command.
+- The read-only preflight (`preflightTEENodes`, `cmd/c8s/install.go:392`) runs
+  on **every** `--cvm-mode=pod` install, against the *effective* selector
+  (`effectiveValues`, `cmd/c8s/install.go:1783`) rather than the chart
+  defaults. An unlabelled cluster fails in seconds naming the label.
+
+If you genuinely manage labels out of band and the nodes are not labelled yet,
+label them before installing — the preflight is a hard failure, not a warning.
+
+## Repointing `kata.snpNodeSelector` at NFD does not remove the c8s default key
+
+`internal/helmchart/c8s/values.yaml:466`, `cmd/c8s/install.go:1818`
+(`mergeValues`)
+
+helm coalesces nested maps **key-by-key**, so a `-f` file with
+
+```yaml
+kata:
+  snpNodeSelector:
+    feature.node.kubernetes.io/cpu-security.sev.snp.enabled: "true"
+```
+
+renders a selector requiring **both** that key and the chart's
+`confidential.ai/sev-snp: "true"`. The values.yaml comment's "set `{}` for
+unrestricted scheduling" is wrong for the same reason: an empty map coalesces
+to the default and the label is still required. Only `snpNodeSelector: null`
+actually clears it. `c8s install`'s preflight reports the coalesced selector,
+which is what the RuntimeClasses will really schedule on — label for every
+pair it prints, or use `null`.
 
 ## `cds.node.selector: null` in a values file does not survive helm's multi-file merge
 
@@ -633,26 +712,104 @@ failed to carry the stock params forward would drop load-bearing boot args
 ad-hoc params, keep the puller's preservation, and don't trust manual config
 edits to land until this is root-caused on a live sandbox.
 
-## Workload-claims broker socket: group must be reachable by the non-root sidecar
+## Admission inventory socket: group must be reachable by the non-root sidecar
 
-`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `BrokerSocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
+`pkg/workloadclaims/workloadclaims.go` (`ListenUnix`, `InventorySocketGID`), `internal/webhook/pod_mutator.go` (`ensureSupplementalGroup`)
 
-The broker runs as root (nri-image-policy is a containerd-launched NRI plugin),
+The inventory runs as root (nri-image-policy is a containerd-launched NRI plugin),
 so its Unix socket is created `root:root`. get-cert connects as the non-root
 sidecar (UID/GID 65532) over a **read-only** mount. A `root:root 0660` socket is
 unreachable by that caller — `connect()` needs write permission on the socket
-node — and get-cert is **fail-closed** on a broker error, so the pod hangs
+node — and get-cert is **fail-closed** on an inventory error, so the pod hangs
 forever on its initial cert (`c8s-cert-wait` never passes). It is a silent,
 node-wide brick of every `cw` pod, not a graceful degradation.
 
 The socket must therefore be group-owned by a GID the sidecar carries: `ListenUnix`
-chgrps it to `BrokerSocketGID` and the webhook injects that same GID as a pod
+chgrps it to `InventorySocketGID` and the webhook injects that same GID as a pod
 `SupplementalGroups` entry. **The two must stay equal** — they share the one
 constant, so change it in one place only. Do not "fix" a connect failure by
-relaxing fail-closed (broker error ⇒ issue claim-free): that hands an attacker
-who blocks the broker exactly the claim-free cert fail-closed exists to deny.
+relaxing fail-closed (inventory error ⇒ issue without a sandbox ID): that hands
+an attacker who blocks the inventory exactly the identity-free cert fail-closed
+exists to deny.
 Connecting to a socket is exempt from the read-only-mount write block (sockets
 are not regular files), so the RO mount still prevents a socket-file swap
-without blocking the connect. The same-process broker unit tests cannot catch
+without blocking the connect. The same-process inventory unit tests cannot catch
 this (listener and client share a UID); `TestListenUnixSetsModeAndGroup` and
-`TestWorkloadClaims_InjectsBrokerSupplementalGroup` guard the two halves.
+`TestWorkloadClaims_InjectsInventorySupplementalGroup` guard the two halves.
+
+## `pkg/snpmeasure` must bound the OVMF image before upstream parses it
+
+`pkg/snpmeasure/snpmeasure.go` (`openFirmware`)
+
+`virtee/sev-snp-measure-go`'s `ovmf.New` indexes the image without bounds checks
+— `data[size-32-18:]`, `data[start-tableSize:start]`, `data[len-offsetFromEnd:]`
+— so a truncated or corrupt firmware panics instead of returning an error. Worse,
+it returns **no error** when the footer table carries no `OVMF_SEV_META_DATA`
+entry: `MetadataItems()` comes back empty, the metadata loop measures nothing,
+and the tool emits a well-formed 48-byte digest that matches no guest — the worst
+possible failure mode for a measurement tool, because a pinned wrong digest
+refuses every pod with nothing to diagnose. `openFirmware` therefore stats the
+file for a positive page-multiple size, rejects an image with zero metadata
+sections, and recovers any panic out of the parser into an error. Keep all three
+guards across a dependency bump; upstream has no tests for malformed input.
+
+## TDX MRTD: only the *default* `LaunchOptions` is correct for kata
+
+`pkg/tdxmeasure/tdxmeasure.go` (`launchOptions`)
+
+`c8s kata measure --platform tdx` computes MRTD via
+`github.com/google/gce-tcb-verifier/tdx`, whose `LaunchOptions` API is shaped for
+GCE. Two of its three presets produce a digest that **no kata pod will ever
+report**: `LaunchOptionsDefaultTDHOBBug` models a Google hypervisor bug that
+measures all TDVF metadata regions, and `DisableUnacceptedMemory` changes the TD
+HOB. Both give `2815d6db…` on the TDVF kata boots, against the real `c78e2b8b…`.
+
+Pinning a wrong MRTD is worse than pinning nothing: CDS refuses every pod a
+certificate and the only symptom is `measurement not in allowlist`. Do not
+"tune" these options to fix an unrelated problem. `TestMRTDMatchesHardware`
+asserts the hardware-captured digest and `TestOtherLaunchOptionsAreWrong` asserts
+the rejected presets still differ — both skip without the real TDVF, so run them
+on a TDX node (or with `C8S_TDVF=`) before trusting a dependency bump.
+
+## kata + `shared_fs="none"`: a disk-backed `emptyDir` breaks on a large host FS
+
+Observed on a TDX node with a 28 TB ext4 root; affects any platform.
+
+With `shared_fs = "none"` the kata shim converts a **disk-backed** `emptyDir`
+(`emptyDir: {}`, i.e. `medium` unset) into a `disk.img` block device, and sizes
+that file from the *filesystem*, not the volume. On a filesystem larger than
+ext4's 16 TiB max file size the shim fails at
+`truncate …/disk.img: file too large` and the pod never starts, with the cause
+only visible in the kata shim log — the kubelet event just says
+`failed to create shim task`. Setting `sizeLimit` on the volume does **not**
+help; the shim ignores it.
+
+`emptyDir: {medium: Memory}` is unaffected (it stays a guest tmpfs), which is why
+the webhook-injected `c8s-certs` volume is fine. The CDS `data` volume
+(`cds.yaml`, when `cds.persistence.enabled` is false) is the one that hits this.
+Workaround on such a node: enable `cds.persistence`.
+
+## A kata pod placed before the guest drop-in exists is stuck on the stock guest
+
+`kata-runtime` resolves the c8s guest through a `config.d/50-c8s.toml` drop-in
+that the kata-image-puller writes per node. Until it lands, the same
+`kata-qemu-snp` RuntimeClass resolves the **stock** kata guest, which carries
+none of the c8s in-guest stack — no attestation-service on `127.0.0.1:8400`, no
+policy-monitor, no mesh.
+
+Nothing about the pod says so. `kubectl get pod` shows the confidential
+RuntimeClass either way; the only tell is the QEMU cmdline
+(`/proc/<pid>/cmdline`: `kata-ubuntu-noble-confidential.image` and the base
+config's verity root hash, instead of `/var/lib/c8s/kata-images/base/…`).
+
+**A kata sandbox is created once and reused across container restarts**, so a
+pod that lands in that window cannot recover: CrashLoopBackOff retries forever
+against a VM that will never gain the missing services. Deleting the *pod* is
+the only fix — deleting the container is not.
+
+`confidential.ai/kata-guest-ready` (webhook.GuestReadyNodeLabel) is the gate
+that prevents this: the operator's kata-guest-ready controller mirrors the
+puller's readiness onto the node, and both the webhook and the chart-pinned
+pods (cds, tls-lb) require it. If confidential pods sit `Pending` with
+`didn't match Pod's node affinity/selector`, check the puller on that node
+before touching the affinity — the gate is reporting a real condition.

@@ -3,7 +3,6 @@ package cdsattest
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -51,11 +50,6 @@ func TestRunErrors(t *testing.T) {
 		cfg     config
 		wantSub string
 	}{
-		{
-			name:    "unreadable cds cert file",
-			cfg:     config{cdsCertFile: filepath.Join(t.TempDir(), "missing.pem"), evidenceFixture: fixture},
-			wantSub: "read --cds-cert-file",
-		},
 		{
 			name:    "no evidence source",
 			cfg:     config{},
@@ -134,17 +128,12 @@ func freePort(t *testing.T) int {
 
 func TestRunServesUntilSignalled(t *testing.T) {
 	fixture := writeFixtureFile(t)
-	certFile := filepath.Join(t.TempDir(), "cds.pem")
-	if err := os.WriteFile(certFile, []byte(fakeCDSCert), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	port := freePort(t)
 	cfg := config{
 		host:              "127.0.0.1",
 		port:              port,
 		logLevel:          "not-a-level", // exercises the newLogger fallback too
-		cdsCertFile:       certFile,
 		evidenceFixture:   fixture,
 		platform:          "snp",
 		generation:        "genoa",
@@ -179,15 +168,15 @@ func TestRunServesUntilSignalled(t *testing.T) {
 		t.Fatalf("healthz status %d", resp.StatusCode)
 	}
 
-	// The optional cds-cert endpoint must be enabled when the file was supplied.
+	// The standalone cds-cert.pem discovery endpoint is gone: the bundle embeds
+	// the exact chain committed by report_data.
 	certResp, err := http.Get(base + "/.well-known/c8s/cds-cert.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(certResp.Body)
 	certResp.Body.Close()
-	if string(body) != fakeCDSCert {
-		t.Fatalf("cds-cert body = %q", body)
+	if certResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cds-cert.pem status = %d, want 404", certResp.StatusCode)
 	}
 
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {

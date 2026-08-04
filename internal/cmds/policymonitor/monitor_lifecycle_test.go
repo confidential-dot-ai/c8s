@@ -21,7 +21,6 @@ import (
 	"time"
 
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 // lockedBuffer is a goroutine-safe log sink for monitors running in goroutines.
@@ -304,49 +303,6 @@ func TestRun_WatchDirRemovalReestablishesWatch(t *testing.T) {
 	}
 }
 
-// --- runMonitor: workload-claims broker wiring ------------------------------
-
-func TestRunMonitor_ServesWorkloadClaimsSocket(t *testing.T) {
-	sockDir := t.TempDir()
-	cfg := &Config{
-		LogLevel:                "info",
-		AllowlistPath:           writeSeedFile(t, "sha256:"+strings.Repeat("a", 64)),
-		WatchDir:                filepath.Join(t.TempDir(), "watch"),
-		CgroupRoot:              t.TempDir(),
-		WorkloadClaimsSocketDir: sockDir,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runMonitor(ctx, cfg) }()
-
-	sockPath := filepath.Join(sockDir, workloadclaims.SocketName)
-	if !waitUntil(2*time.Second, func() bool {
-		fi, err := os.Stat(sockPath)
-		return err == nil && fi.Mode()&os.ModeSocket != 0
-	}) {
-		t.Fatal("workload-claims socket not created despite a configured socket dir")
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runMonitor: %v", err)
-	}
-}
-
-func TestRunMonitor_WorkloadClaimsSocketDirMissingFails(t *testing.T) {
-	cfg := &Config{
-		LogLevel:                "info",
-		AllowlistPath:           writeSeedFile(t, "sha256:"+strings.Repeat("a", 64)),
-		WatchDir:                filepath.Join(t.TempDir(), "watch"),
-		CgroupRoot:              t.TempDir(),
-		WorkloadClaimsSocketDir: filepath.Join(t.TempDir(), "absent", "deeper"),
-	}
-	err := runMonitor(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "workload-claims") {
-		t.Fatalf("err = %v, want workload-claims broker start failure", err)
-	}
-}
-
 // --- runMonitor: config.json settle window ----------------------------------
 
 // A config.json that lands shortly after the bundle dir's CREATE event must
@@ -511,7 +467,7 @@ func TestRunAllowlistRefresh_MergesFromCDS(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		runAllowlistRefresh(ctx, testLogger(t), cfg, a, overlay)
+		runAllowlistRefresh(ctx, testLogger(t), cfg, a, overlay, &refreshState{})
 		close(done)
 	}()
 
@@ -522,81 +478,11 @@ func TestRunAllowlistRefresh_MergesFromCDS(t *testing.T) {
 	<-done
 }
 
-// --- Config.fillDefaults ----------------------------------------------------
-
-func TestConfig_FillDefaults_WorkloadClaimsSocketDirFromEnv(t *testing.T) {
-	t.Setenv("C8S_WORKLOAD_CLAIMS_SOCKET_DIR", "/from/env")
-	var c Config
-	c.fillDefaults()
-	if c.WorkloadClaimsSocketDir != "/from/env" {
-		t.Fatalf("WorkloadClaimsSocketDir = %q, want env value", c.WorkloadClaimsSocketDir)
-	}
-	c2 := Config{WorkloadClaimsSocketDir: "/explicit"}
-	c2.fillDefaults()
-	if c2.WorkloadClaimsSocketDir != "/explicit" {
-		t.Fatalf("explicit WorkloadClaimsSocketDir overwritten: %q", c2.WorkloadClaimsSocketDir)
-	}
-}
-
 func TestConfig_FillDefaults_RefreshIntervalValue(t *testing.T) {
 	var c Config
 	c.fillDefaults()
 	if c.RefreshInterval != 30*time.Second {
 		t.Fatalf("RefreshInterval = %v, want 30s", c.RefreshInterval)
-	}
-}
-
-// --- workload-claims broker helpers -----------------------------------------
-
-func TestWorkloadBrokerRecord_FiltersInjectedAndEmptyDigest(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("a", 64)
-	b := newWorkloadBroker()
-	b.record("cid-app", "app", digest)
-	b.record("cid-injected", workloadclaims.ReservedInjectedNames[0], digest)
-	b.record("cid-empty", "other", "")
-
-	got, err := b.ContainersForPeer(0)
-	if err != nil {
-		t.Fatalf("ContainersForPeer: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("got %d containers, want 1: %+v", len(got), got)
-	}
-	if got[0].Name != "app" || got[0].Digest != digest {
-		t.Fatalf("got %+v, want the app container with its digest", got[0])
-	}
-}
-
-func TestContainerName_AnnotationKeys(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		annotations map[string]string
-		want        string
-	}{
-		{"containerd key", map[string]string{"io.kubernetes.cri.container-name": "app"}, "app"},
-		{"cri-o key", map[string]string{"io.kubernetes.cri-o.ContainerName": "crio-app"}, "crio-app"},
-		{"empty containerd falls through", map[string]string{
-			"io.kubernetes.cri.container-name":  "",
-			"io.kubernetes.cri-o.ContainerName": "fallback",
-		}, "fallback"},
-		{"absent", map[string]string{}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := containerName(tc.annotations); got != tc.want {
-				t.Fatalf("containerName = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestStartWorkloadClaimsBroker_ListenErrorSurfaces(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	logger, _ := captureLogger()
-	err := startWorkloadClaimsBroker(ctx, logger, newWorkloadBroker(),
-		filepath.Join(t.TempDir(), "absent", "x.sock"))
-	if err == nil {
-		t.Fatal("expected a listen error for a missing socket directory")
 	}
 }
 

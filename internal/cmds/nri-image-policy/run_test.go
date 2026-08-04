@@ -75,25 +75,25 @@ func TestPluginRun_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// --- RemoveContainer / Configure with broker ---
+// --- RemoveContainer / Configure with inventory ---
 
-func TestRemoveContainer_EvictsFromBroker(t *testing.T) {
+func TestRemoveContainer_EvictsFromInventory(t *testing.T) {
 	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
-	p.broker = newWorkloadBroker(t.TempDir())
-	p.broker.record(cidApp1, "sandbox-1", "app", digestApp)
+	p.inventory = newAdmissionInventory(t.TempDir())
+	p.inventory.record(cidApp1, "sandbox-1", "app", digestApp, nil)
 
 	ctr := &api.Container{Id: cidApp1, PodSandboxId: "sandbox-1", Name: "app"}
 	if err := p.RemoveContainer(context.Background(), &api.PodSandbox{Id: "sandbox-1"}, ctr); err != nil {
 		t.Fatalf("RemoveContainer: %v", err)
 	}
-	if _, ok := p.broker.containers[cidApp1]; ok {
-		t.Fatal("container not evicted from the broker")
+	if _, ok := p.inventory.containers[cidApp1]; ok {
+		t.Fatal("container not evicted from the inventory")
 	}
 }
 
-func TestConfigure_BrokerAddsRemoveContainerMask(t *testing.T) {
+func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 	p := newTestPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}})
-	p.broker = newWorkloadBroker(t.TempDir())
+	p.inventory = newAdmissionInventory(t.TempDir())
 
 	mask, err := p.Configure(context.Background(), "", "containerd", "1.7")
 	if err != nil {
@@ -102,6 +102,9 @@ func TestConfigure_BrokerAddsRemoveContainerMask(t *testing.T) {
 	var want api.EventMask
 	want.Set(api.Event_CREATE_CONTAINER)
 	want.Set(api.Event_REMOVE_CONTAINER)
+	// The inventory also needs the pod-sandbox lifecycle for its sandbox set.
+	want.Set(api.Event_RUN_POD_SANDBOX)
+	want.Set(api.Event_REMOVE_POD_SANDBOX)
 	if mask != want {
 		t.Fatalf("mask = %v, want %v", mask, want)
 	}
@@ -127,20 +130,20 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	}
 }
 
-func TestRecordForBroker_ResolveFails_RecordsEmptyDigest(t *testing.T) {
+func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
 	p.resolver = deadResolver(t)
-	p.broker = newWorkloadBroker(t.TempDir())
+	p.inventory = newAdmissionInventory(t.TempDir())
 
 	ctr := &api.Container{Id: "ctr-id", PodSandboxId: "sandbox-1", Name: "app"}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	p.recordForBroker(ctx, ctr, "registry/repo:latest")
+	p.recordForInventory(ctx, ctr, "registry/repo:latest")
 
-	rec, ok := p.broker.containers["ctr-id"]
+	rec, ok := p.inventory.containers["ctr-id"]
 	if !ok {
-		t.Fatal("container not recorded for the broker")
+		t.Fatal("container not recorded for the inventory")
 	}
 	if rec.digest != "" {
 		t.Fatalf("recorded digest = %q, want empty (fail-closed at query time)", rec.digest)
@@ -267,8 +270,8 @@ logging:
   level: error
 `, dir, dir, pushDigestA, dir)
 	err := runWithDeadline(t, 10*time.Second, []string{"-config", writeConfigYAML(t, cfgYAML)})
-	if err == nil || !strings.Contains(err.Error(), "start workload-claims broker") {
-		t.Fatalf("err = %v, want a workload-claims broker start failure", err)
+	if err == nil || !strings.Contains(err.Error(), "start admission inventory") {
+		t.Fatalf("err = %v, want an admission-inventory start failure", err)
 	}
 }
 
@@ -418,11 +421,11 @@ func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newPlugin: %v", err)
 			}
-			if (p.broker != nil) != tc.wantBroker {
-				t.Fatalf("broker configured = %v, want %v", p.broker != nil, tc.wantBroker)
+			if (p.inventory != nil) != tc.wantBroker {
+				t.Fatalf("inventory configured = %v, want %v", p.inventory != nil, tc.wantBroker)
 			}
-			if tc.wantBroker && p.broker.procRoot != tc.wantProcRoot {
-				t.Fatalf("procRoot = %q, want %q", p.broker.procRoot, tc.wantProcRoot)
+			if tc.wantBroker && p.inventory.procRoot != tc.wantProcRoot {
+				t.Fatalf("procRoot = %q, want %q", p.inventory.procRoot, tc.wantProcRoot)
 			}
 		})
 	}

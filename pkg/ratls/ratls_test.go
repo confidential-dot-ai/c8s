@@ -1225,38 +1225,6 @@ func TestPublicKeyFromCertCurves(t *testing.T) {
 	}
 }
 
-func TestVerifyAttestationConfigClaimsPins(t *testing.T) {
-	key, att := testKeyAndAttestation(t)
-	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	srv := newMockedVerifySrv(t, verifyResponse(measurement))
-	defer srv.Close()
-	digest := bytes.Repeat([]byte{0x11}, ClaimsDigestSize)
-
-	tests := []struct {
-		name       string
-		pin        func(*VerifyPolicy)
-		wantPinErr bool
-	}{
-		{"no pins verifies online", func(*VerifyPolicy) {}, false},
-		{"operator-keys pin fails closed", func(p *VerifyPolicy) { p.OperatorKeysDigest = digest }, true},
-		{"seed pin fails closed", func(p *VerifyPolicy) { p.SeedDigest = digest }, true},
-		{"workload pin fails closed", func(p *VerifyPolicy) { p.WorkloadDigest = digest }, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			policy := &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}}
-			tt.pin(policy)
-			_, err := VerifyAttestation(&key.PublicKey, att, policy, nil)
-			if tt.wantPinErr {
-				if !errors.Is(err, ErrPolicyViolation) {
-					t.Fatalf("got %v, want ErrPolicyViolation", err)
-				}
-			} else if err != nil {
-				t.Fatalf("VerifyAttestation: %v", err)
-			}
-		})
-	}
-}
 
 func TestVerifyAttestationUnsupportedKey(t *testing.T) {
 	_, att := testKeyAndAttestation(t)

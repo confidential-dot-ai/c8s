@@ -379,6 +379,15 @@ func TestParseTEEType(t *testing.T) {
 	}{
 		{"sev-snp", TEETypeSEVSNP, false},
 		{"tdx", TEETypeTDX, false},
+		// Aliases resolve here, so a caller can pass the platform string its
+		// own config carries without pre-normalizing.
+		{"snp", TEETypeSEVSNP, false},
+		{"az-snp", TEETypeSEVSNP, false},
+		{"gcp-snp", TEETypeSEVSNP, false},
+		{"az-tdx", TEETypeTDX, false},
+		{"gcp-tdx", TEETypeTDX, false},
+		{"SEV-SNP", TEETypeSEVSNP, false},
+		{"", 0, true},
 		{"unknown", 0, true},
 	}
 	for _, tt := range tests {
@@ -780,13 +789,13 @@ func TestDualVerifyPeerCallback_BothFail(t *testing.T) {
 	}
 }
 
-func TestDualVerifyPeerCallback_CASignedEnforcesClaimPins(t *testing.T) {
+func TestDualVerifyPeerCallback_CASignedEnforcesSandboxPin(t *testing.T) {
 	caKey, caCert := generateCACert(t)
 	shared := newSharedCACerts([]*x509.Certificate{caCert})
 
-	// makeLeaf builds a CA-signed leaf, optionally carrying a config-claims
-	// extension (nil = none).
-	makeLeaf := func(t *testing.T, ext []byte) []byte {
+	// makeLeaf builds a CA-signed leaf, optionally carrying a sandbox-ID
+	// extension ("" = none).
+	makeLeaf := func(t *testing.T, sandboxID string) []byte {
 		t.Helper()
 		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -799,8 +808,12 @@ func TestDualVerifyPeerCallback_CASignedEnforcesClaimPins(t *testing.T) {
 			NotAfter:     time.Now().Add(time.Hour),
 			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		}
-		if ext != nil {
-			tmpl.ExtraExtensions = []pkix.Extension{{Id: OIDRATLSConfigClaims, Value: ext}}
+		if sandboxID != "" {
+			ext, err := MarshalSandboxIDExtension(sandboxID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmpl.ExtraExtensions = []pkix.Extension{ext}
 		}
 		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caKey)
 		if err != nil {
@@ -808,43 +821,55 @@ func TestDualVerifyPeerCallback_CASignedEnforcesClaimPins(t *testing.T) {
 		}
 		return der
 	}
-	claimsExt := func(t *testing.T, operatorKeys []byte) []byte {
-		t.Helper()
-		c := &ConfigClaims{
-			OperatorKeysDigest: operatorKeys,
-			SeedDigest:         UnsetDigest(),
-			WorkloadDigest:     UnsetDigest(),
-		}
-		ext, err := c.MarshalExtension()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ext.Value
-	}
 
-	pinned := bytes.Repeat([]byte{0x11}, ClaimsDigestSize)
-	verify := dualVerifyPeerCallback(&VerifyPolicy{OperatorKeysDigest: pinned}, shared)
+	const pinned = "abc123def456"
+	verify := dualVerifyPeerCallback(&VerifyPolicy{SandboxID: pinned}, shared)
 
-	t.Run("missing claims rejected", func(t *testing.T) {
-		if err := verify([][]byte{makeLeaf(t, nil)}, nil); err == nil {
-			t.Fatal("CA-signed leaf without config-claims accepted despite a configured pin")
+	t.Run("missing sandbox ID rejected", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, "")}, nil); err == nil {
+			t.Fatal("CA-signed leaf without a sandbox ID accepted despite a configured pin")
 		}
 	})
-	t.Run("mismatched claims rejected", func(t *testing.T) {
-		wrong := bytes.Repeat([]byte{0x22}, ClaimsDigestSize)
-		if err := verify([][]byte{makeLeaf(t, claimsExt(t, wrong))}, nil); err == nil {
-			t.Fatal("CA-signed leaf with mismatched operator-keys digest accepted")
+	t.Run("mismatched sandbox ID rejected", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, "someothersandbox")}, nil); err == nil {
+			t.Fatal("CA-signed leaf with a mismatched sandbox ID accepted")
 		}
 	})
-	t.Run("matching claims accepted", func(t *testing.T) {
-		if err := verify([][]byte{makeLeaf(t, claimsExt(t, pinned))}, nil); err != nil {
+	t.Run("matching sandbox ID accepted", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, pinned)}, nil); err != nil {
 			t.Fatalf("CA-signed leaf with matching pin rejected: %v", err)
 		}
 	})
 	t.Run("no pin accepts CA-signed", func(t *testing.T) {
 		v := dualVerifyPeerCallback(&VerifyPolicy{}, shared)
-		if err := v([][]byte{makeLeaf(t, nil)}, nil); err != nil {
+		if err := v([][]byte{makeLeaf(t, "")}, nil); err != nil {
 			t.Fatalf("CA-signed leaf rejected when no pin configured: %v", err)
+		}
+	})
+	// A self-signed RA-TLS peer can put any string in the extension, so the pin
+	// must not be satisfiable off the CA path.
+	t.Run("self-signed cannot satisfy the pin", func(t *testing.T) {
+		selfKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ext, err := MarshalSandboxIDExtension(pinned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:    big.NewInt(401),
+			Subject:         pkix.Name{CommonName: "impostor"},
+			NotBefore:       time.Now().Add(-time.Hour),
+			NotAfter:        time.Now().Add(time.Hour),
+			ExtraExtensions: []pkix.Extension{ext},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &selfKey.PublicKey, selfKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verify([][]byte{der}, nil); err == nil {
+			t.Fatal("self-signed leaf claiming the pinned sandbox ID was accepted")
 		}
 	})
 }
