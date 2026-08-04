@@ -54,7 +54,7 @@ func (c Client) List(ctx context.Context) (*allowlist.Allowlist, string, error) 
 		// Unreachable without an If-None-Match, but treat as an empty response.
 		return nil, "", fmt.Errorf("unexpected 304 without If-None-Match")
 	}
-	return al, versionFromETag(etag), nil
+	return al, VersionFromETag(etag), nil
 }
 
 // Fetch issues GET /allowlist with If-None-Match. notModified is true on a 304
@@ -182,9 +182,10 @@ func (c Client) mutate(ctx context.Context, method, path string, body []byte, au
 	return nil
 }
 
-// versionFromETag extracts N from a weak ETag of the form W/"N", or "" if the
-// header is missing or malformed.
-func versionFromETag(etag string) string {
+// VersionFromETag extracts N from a weak ETag of the form W/"N", or "" if the
+// header is missing or malformed. Exported because enforcers polling the
+// allowlist track the same counter for epoch anti-rollback.
+func VersionFromETag(etag string) string {
 	v := strings.TrimPrefix(etag, "W/")
 	v = strings.TrimPrefix(v, `"`)
 	v = strings.TrimSuffix(v, `"`)

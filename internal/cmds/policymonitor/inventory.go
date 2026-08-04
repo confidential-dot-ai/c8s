@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
@@ -59,7 +57,8 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.containers[cid] = digest
-	b.admitted[digest+"\x1f"+strings.Join(argv, "\x1f")] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	b.admitted[c.Key()] = c
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
@@ -114,12 +113,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	slices.SortFunc(containers, func(x, y workloadclaims.SandboxContainer) int {
-		if x.Digest != y.Digest {
-			return strings.Compare(x.Digest, y.Digest)
-		}
-		return strings.Compare(strings.Join(x.Argv, "\x1f"), strings.Join(y.Argv, "\x1f"))
-	})
+	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
 	return slices.Compact(digests), containers, true, nil
 }
 
@@ -185,11 +179,7 @@ func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.Sandbo
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
 func sandboxDigestsHost(cfg *Config) (string, error) {
-	cdsHost := cfg.CDSURL
-	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
-		cdsHost = u.Host
-	}
-	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cdsHost)
+	return workloadclaims.ResolveAdvertiseHostForCDS(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
 // startAdmissionInventory serves the token route on the guest's loopback

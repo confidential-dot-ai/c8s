@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -426,9 +425,7 @@ func runPullLoop(ctx context.Context, args pullLoopArgs) {
 // mutation counter used for epoch anti-rollback. An unparseable ETag yields 0,
 // which can only be rejected as a rollback once a real version has been applied.
 func parseVersion(etag string) uint64 {
-	v := strings.TrimPrefix(etag, "W/")
-	v = strings.Trim(v, `"`)
-	n, err := strconv.ParseUint(v, 10, 64)
+	n, err := strconv.ParseUint(allowlistclient.VersionFromETag(etag), 10, 64)
 	if err != nil {
 		return 0
 	}
@@ -523,11 +520,7 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 	if host == "" {
 		host = strings.TrimSpace(os.Getenv("C8S_SANDBOX_DIGESTS_ADVERTISE_HOST"))
 	}
-	cdsHost := cfg.Allowlist.Pull.URL
-	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
-		cdsHost = u.Host
-	}
-	return workloadclaims.ResolveAdvertiseHost(host, cdsHost)
+	return workloadclaims.ResolveAdvertiseHostForCDS(host, cfg.Allowlist.Pull.URL)
 }
 
 // startSandboxDigests serves the CDS-facing digests endpoint over
