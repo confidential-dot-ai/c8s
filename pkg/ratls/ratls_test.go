@@ -1225,7 +1225,6 @@ func TestPublicKeyFromCertCurves(t *testing.T) {
 	}
 }
 
-
 func TestVerifyAttestationUnsupportedKey(t *testing.T) {
 	_, att := testKeyAndAttestation(t)
 	srv := newMockedVerifySrv(t, verifyResponse(nil))

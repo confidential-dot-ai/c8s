@@ -591,4 +591,3 @@ func TestAttestKeyRedirectStatusIsError(t *testing.T) {
 		t.Fatalf("status = %d, want 300", statusErr.Status)
 	}
 }
-
