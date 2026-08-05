@@ -277,15 +277,28 @@ image, run a CDS in it serving an attacker-chosen allowlist, and pass
 the attack. With the refresh disabled the guest enforces the measured
 seed alone, which is fail-closed.
 
-**Status:** no shipping path delivers this pin to guests today, so the
-refresh is disabled on every default install — operator additions reach
-the host-side enforcer but not running guests. Baking the pin is
-structurally impossible (under kata, CDS runs from this same guest
-image, so the pin's value would change the launch measurement it pins),
-and per-pod cloud-init injection is host-controlled, so a host-supplied
-pin could point at the host's own fake CDS. The candidate fix is
-operator-signed allowlist entries, verified in-guest against a baked
-operator public key.
+Baking the pin is structurally impossible — under kata, CDS runs from
+this same guest image, so the pin's value would change the launch
+measurement it pins — and a plain cloud-init value would be
+host-controlled, so a host-supplied pin could point at the host's own
+fake CDS.
+
+**Delivery: SEV-SNP init-data.** The host writes an init-data document
+the guest reads at `initdata.GuestDocumentPath`, and the shim commits
+`sha256(document)` into `HOST_DATA` at launch. policy-monitor attests
+itself against the in-guest attestation-service, reads `HOST_DATA` out
+of its own SNP report, and compares. The host still chooses the
+document, but it cannot choose one and commit another — the value is
+sealed into the measurement the operator already verifies, so a
+substituted pin changes an attested field rather than passing silently.
+On a mismatch, or with no document, the guest falls back to the baked
+seed.
+
+**TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`
+rather than `HOST_DATA`, which this code does not read, so a TDX guest
+enforces the baked seed alone. Empty `cds.measurements` (the chart
+default) also leaves the refresh disabled on every platform — operator
+additions then reach the host-side enforcer but not running guests.
 
 ## Scenarios
 
