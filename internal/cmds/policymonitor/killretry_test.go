@@ -163,3 +163,99 @@ func TestMonitorKill_ConfirmedFirstAttemptStaysInfo(t *testing.T) {
 		t.Errorf("confirmed kill not logged at INFO: %s", buf.String())
 	}
 }
+
+// A kill path that keeps erroring is enforcement that no longer works. The
+// process must exit so the unit can restart it and, failing that, power the
+// guest off (policy-monitor.service) — retrying quietly forever leaves a denied
+// container running for the life of the VM.
+func TestMonitorKill_PersistentErrorEscalates(t *testing.T) {
+	erofs := errors.New("kill cgroup: write cgroup.kill: read-only file system")
+	m, killer, dir := newRetryMonitor(t, func(int) (bool, error) { return false, erofs })
+	m.killEscalateAfter = 0
+	buf := captureLogs(m)
+
+	m.kill(context.Background(), dir)
+
+	if got := killer.count(); got != 1 {
+		t.Fatalf("attempts = %d, want 1 (escalate rather than keep retrying)", got)
+	}
+	select {
+	case got := <-m.fatal:
+		if !errors.Is(got, erofs) {
+			t.Errorf("fatal = %v, want it to wrap the kill error", got)
+		}
+	default:
+		t.Fatal("no fatal reported; the process would keep running unenforced")
+	}
+	if !strings.Contains(buf.String(), "enforcement is broken") {
+		t.Errorf("escalation not recorded: %s", buf.String())
+	}
+}
+
+// Escalation is bounded by killEscalateAfter, not by the first error: a kill
+// path that recovers within the window must not take the guest down.
+func TestMonitorKill_TransientErrorDoesNotEscalate(t *testing.T) {
+	m, killer, dir := newRetryMonitor(t, func(attempt int) (bool, error) {
+		if attempt < 3 {
+			return false, errors.New("transient")
+		}
+		return true, nil
+	})
+	buf := captureLogs(m)
+
+	m.kill(context.Background(), dir)
+
+	if got := killer.count(); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+	select {
+	case err := <-m.fatal:
+		t.Fatalf("escalated on a recoverable error: %v", err)
+	default:
+	}
+	if !strings.Contains(buf.String(), "SIGKILLed container cgroup") {
+		t.Errorf("no confirmed-kill record: %s", buf.String())
+	}
+}
+
+// An unconfirmed kill (cgroup absent or unpopulated) is not the same signal as
+// a broken kill path: a denied container that exited on its own looks exactly
+// like this, so it retries rather than powering the guest off.
+func TestMonitorKill_UnconfirmedDoesNotEscalate(t *testing.T) {
+	m, _, dir := newRetryMonitor(t, func(int) (bool, error) { return false, nil })
+	m.killEscalateAfter = 0
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	m.kill(ctx, dir)
+
+	select {
+	case err := <-m.fatal:
+		t.Fatalf("escalated on an unconfirmed kill: %v", err)
+	default:
+	}
+}
+
+// The watch loop turns a fatal into a non-zero exit from runMonitor.
+func TestWatch_ReturnsFatal(t *testing.T) {
+	m, _, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	boom := errors.New("kill path unusable")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- m.run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	m.abort(boom)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, boom) {
+			t.Errorf("run() = %v, want the fatal error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run() did not return after abort")
+	}
+}

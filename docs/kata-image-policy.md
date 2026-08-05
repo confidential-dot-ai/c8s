@@ -184,9 +184,15 @@ removes it. On failure the process exits non-zero before installing the inotify
 watch, so READY=1 is never sent, kata-agent's start job never resolves, and the
 poweroff action ends the guest. A policy-monitor that cannot kill must not look
 healthy.
-Correspondingly, a denied container whose kill errors — or which is never
-confirmed dead — is logged at **error**, not warning: it is a total bypass of
-the image policy, not a hiccup.
+The same reasoning applies after boot. A denied container is re-killed until
+the kill lands or kata-agent removes its bundle; a kill path that keeps
+**erroring** past `killEscalateAfter` exits the process non-zero, which the
+unit turns into restarts and then poweroff — the running-guest counterpart of
+the self-test, for a hierarchy remounted read-only after boot. A kill that is
+merely never **confirmed** (cgroup absent or unpopulated) keeps retrying and
+logs at error instead: a denied container that exited on its own is
+indistinguishable from one that never got a cgroup, and that must not power off
+a healthy guest.
 
 ## Why the OPA policy is permissive
 
