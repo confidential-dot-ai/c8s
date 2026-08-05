@@ -79,7 +79,7 @@ type volumeRequest struct {
 
 // parseVolumeSpec parses a NAME=/store/path pair. The name selects the device
 // by serial and names the Kubernetes volume the plaintext is mounted into, so
-// it must be a DNS-1123 label short enough for a virtio serial.
+// it must be a DNS-1123 label short enough for a disk serial.
 func parseVolumeSpec(spec string) (volumeRequest, error) {
 	name, path, ok := strings.Cut(spec, "=")
 	if !ok {

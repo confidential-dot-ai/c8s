@@ -37,6 +37,11 @@ func newCmd(verify localverify.VerifyFunc) *cobra.Command {
 puts its key into the CDS secret store. The image is ciphertext: copy it to the
 node by any means, including through the untrusted host.
 
+'attach' then presents that image to the node as a disk carrying the serial the
+volume is found by, and 'detach' removes it. Both run on the node, as root, and
+are only needed where the hypervisor cannot hand you a disk with a serial of
+your choosing.
+
 The key is released to a pod when the images running in that pod's sandbox match
 an allowlist entry whose 'secrets' grant covers the key's path. 'create' prints
 the grant and the pod annotations to apply; it does not modify any workload.
@@ -52,6 +57,9 @@ file 'create' writes.`,
 	}
 	cdsconn.BindFlags(cmd.PersistentFlags(), &o.Options)
 	cmd.AddCommand(newCreateCmd(o))
+	// attach/detach run on the node and never speak to CDS; they inherit the
+	// connection flags without requiring them.
+	cmd.AddCommand(newAttachCmd(Attacher{}), newDetachCmd(Attacher{}))
 	return cmd
 }
 
