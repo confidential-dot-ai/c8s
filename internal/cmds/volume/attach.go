@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -41,10 +43,19 @@ var lioModules = []string{"target_core_mod", "target_core_file", "tcm_loop"}
 // ErrNotAttached is returned by Detach when the volume has no backstore.
 var ErrNotAttached = errors.New("volume: not attached")
 
+// ErrInUse is returned by Detach when something still holds the volume's disk.
+var ErrInUse = errors.New("volume: in use")
+
+// DefaultSysRoot is the sysfs mount the attached disk is found through.
+const DefaultSysRoot = "/sys"
+
 // Attacher presents volume images to the node as SCSI disks.
 type Attacher struct {
 	// Root is the configfs mount; empty means DefaultConfigRoot.
 	Root string
+	// SysRoot is the sysfs mount; empty means DefaultSysRoot. Tests point it at
+	// a tree they build.
+	SysRoot string
 	// Run loads the kernel modules; nil uses execRunner. Tests set it so the
 	// configfs orchestration is exercised without root or a real LIO stack.
 	Run Runner
@@ -144,9 +155,20 @@ func (a Attacher) Attach(ctx context.Context, name, image string) (serial string
 // Detach unwinds what Attach built. It tolerates a partially-present tree so a
 // failed attach can always be cleaned up, and reports ErrNotAttached only when
 // there was no backstore to begin with.
+//
+// A disk something has opened is refused: the kernel unbinds it regardless, and
+// what held it is left mapping a device that no longer exists.
 func (a Attacher) Detach(ctx context.Context, name string) error {
 	if err := ValidVolumeName(name); err != nil {
 		return err
+	}
+	holders, err := a.holders(name)
+	if err != nil {
+		return err
+	}
+	if len(holders) > 0 {
+		return fmt.Errorf("%w: %q is held by %s; remove what is using it first",
+			ErrInUse, name, strings.Join(holders, ", "))
 	}
 	store := a.backstore(name)
 	_, statErr := os.Stat(store)
@@ -175,6 +197,49 @@ func (a Attacher) Detach(ctx context.Context, name string) error {
 	return nil
 }
 
+// holders names the kernel devices stacked on this volume's disk — volumed's
+// dm-crypt target is one.
+//
+// The disk is reached through the SCSI address LIO publishes for the target
+// attach built, rather than by scanning for the serial: the address names this
+// target's disk and no other, and a host is free to give a second disk the same
+// serial. A tree that was never built, or a disk the kernel has already dropped,
+// holds nothing.
+func (a Attacher) holders(name string) ([]string, error) {
+	addr, err := os.ReadFile(filepath.Join(a.tpgt(name), "address"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("volume: read target address for %q: %w", name, err)
+	}
+
+	// address is the "host:channel:target" of the portal group; attach maps the
+	// image at lun_0, which completes the SCSI device's four-part name.
+	blockDir := filepath.Join(a.sysRoot(), "class", "scsi_device",
+		strings.TrimSpace(string(addr))+":0", "device", "block")
+	disks, err := os.ReadDir(blockDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("volume: list disks for %q: %w", name, err)
+	}
+
+	var held []string
+	for _, disk := range disks {
+		entries, err := os.ReadDir(filepath.Join(blockDir, disk.Name(), "holders"))
+		if err != nil {
+			// A disk with no holders directory holds nothing.
+			continue
+		}
+		for _, e := range entries {
+			held = append(held, e.Name())
+		}
+	}
+	return held, nil
+}
+
 func (a Attacher) rmGroup(path string) error {
 	if a.RemoveGroup != nil {
 		return a.RemoveGroup(path)
@@ -187,6 +252,13 @@ func (a Attacher) root() string {
 		return a.Root
 	}
 	return DefaultConfigRoot
+}
+
+func (a Attacher) sysRoot() string {
+	if a.SysRoot != "" {
+		return a.SysRoot
+	}
+	return DefaultSysRoot
 }
 
 func (a Attacher) targetRoot() string { return filepath.Join(a.root(), "target") }
