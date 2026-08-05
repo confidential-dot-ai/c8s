@@ -7,7 +7,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/ptr"
 
 	v1alpha2 "github.com/confidential-dot-ai/c8s/api/v1alpha2"
 )
@@ -85,23 +84,5 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 				t.Fatalf("discovered groupVersion %q, want %q", fake.gotGV, v1alpha2.GroupVersion.String())
 			}
 		})
-	}
-}
-
-func TestBoolPtr(t *testing.T) {
-	for _, v := range []bool{true, false} {
-		p := ptr.To(v)
-		if p == nil || *p != v {
-			t.Fatalf("ptr.To(%v) = %v", v, p)
-		}
-	}
-}
-
-func TestInt64Ptr(t *testing.T) {
-	for _, v := range []int64{0, -1, 1000} {
-		p := ptr.To(v)
-		if p == nil || *p != v {
-			t.Fatalf("ptr.To(%d) = %v", v, p)
-		}
 	}
 }
