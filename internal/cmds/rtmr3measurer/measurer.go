@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
 )
 
@@ -44,8 +45,7 @@ const (
 	readDirWarnEvery = 60 // scans between repeated cannot-read-watch-dir warns
 )
 
-// Kata names each container directory by its 64-hex container id ("shared"/
-// "sandbox"/"image" never match); the same pattern validates sha256 hex.
+// Validates the sha256 hex recorded in the on-disk measurement log.
 var hex64Re = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type ociSpec struct {
@@ -199,8 +199,8 @@ func (m *measurer) scanOnce() {
 
 func (m *measurer) handle(dir string) {
 	cid := filepath.Base(dir)
-	if !hex64Re.MatchString(cid) {
-		return // "shared"/"sandbox"/"image" and other non-container entries
+	if !kataspec.ValidContainerID(cid) {
+		return // not a container id the baked kata-agent policy admits
 	}
 	if _, done := m.seenCids[cid]; done {
 		return
@@ -213,10 +213,10 @@ func (m *measurer) handle(dir string) {
 
 	// The pause/sandbox container is the measured rootfs, not a workload,
 	// and carries no image-name annotation.
-	if spec.Annotations["io.kubernetes.cri.container-type"] == "sandbox" {
+	if kataspec.IsSandbox(spec.Annotations) {
 		return
 	}
-	digest, ok := extractDigest(spec.Annotations)
+	digest, ok := kataspec.PullDigest(spec.Annotations)
 	if !ok {
 		// Measure-only: unlike policy-monitor we do not kill; an unpinned
 		// image simply isn't reflected in RTMR[3], so a relying party
@@ -315,38 +315,6 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 		}
 		time.Sleep(m.configReadInterval)
 	}
-}
-
-// extractDigest mirrors policy-monitor: normalize `<ref>@sha256:<hex>` (or a
-// bare `sha256:<hex>`) to canonical `sha256:<hex>`.
-func extractDigest(ann map[string]string) (string, bool) {
-	for _, key := range []string{
-		"io.kubernetes.cri.image-name",
-		"io.kubernetes.cri.image-id",
-		"org.opencontainers.image.ref.name",
-	} {
-		v := ann[key]
-		if v == "" {
-			continue
-		}
-		if norm, err := normalizeDigest(v); err == nil {
-			return "sha256:" + norm, true
-		}
-	}
-	return "", false
-}
-
-func normalizeDigest(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
-	}
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "sha256:")
-	if !hex64Re.MatchString(s) {
-		return "", errors.New("not a sha256:<64hex> digest")
-	}
-	return s, nil
 }
 
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:

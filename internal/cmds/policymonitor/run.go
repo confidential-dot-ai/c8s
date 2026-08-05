@@ -24,15 +24,13 @@
 //
 // # Why post-start kill, not pre-start gate
 //
-// In this kata version (3.30.0) the in-guest path from CreateContainer
-// → ttRPC OCI spec → on-disk config.json → fork+exec is entirely
-// in-process inside kata-agent. There is no upstream-supported pre-start
-// callout from kata-agent to a sibling daemon: kata-agent's OPA policy
-// is the only documented enforcement seam, and that seam is structurally
-// permissive in the c8s shape (we don't carry a c8s-specific
-// `default allow := false` in the baked policy because we don't yet have
-// the operator-supplied digest list at policy-bake time for arbitrary
-// workloads — only the bootstrap CDS images).
+// The in-guest path from CreateContainer → ttRPC OCI spec → on-disk
+// config.json → fork+exec is entirely in-process inside kata-agent, and
+// there is no upstream callout to a sibling daemon. The baked OPA policy
+// is the only pre-start seam, and regorus has no crypto builtins, so the
+// CDS-refreshed allowlist cannot be evaluated there — the policy gates
+// the request's shape (docs/kata-image-policy.md), this daemon gates the
+// digest.
 //
 // So we accept the post-start window. The container's init process runs
 // for the duration of the inotify event delivery + config.json parse +
@@ -64,20 +62,14 @@
 //     /sys/fs/cgroup/<container_id> (unified hierarchy) or one of the v1
 //     controller paths. We terminate the cgroup as a unit.
 //
-//   - The container_id format is verified by kata_sys_util::validate::
-//     verify_id (rpc.rs:222), which restricts to a conservative
-//     alphanum+dash subset. We re-validate inside the monitor before
-//     using the id as a path or signal target.
+//   - The container_id set is pinned by the baked policy and re-validated
+//     here (internal/kataspec) before the id is used as a path or signal
+//     target. kata's own verify_id is wider.
 //
-//   - The "io.kubernetes.cri.image-name" annotation carries a string
-//     of the form "<registry>/<image>@sha256:<hex>" when the image was
-//     pulled by digest (the CRI plugin uses the canonical reference
-//     when it has one). Some pulls record only "<registry>/<image>:<tag>"
-//     plus a sibling annotation; we also fall back to
-//     "io.kubernetes.cri.image-id" (rare) and the image-spec-style
-//     "org.opencontainers.image.ref.name" when present. The matcher
-//     normalises any of these forms to a bare sha256:<64hex> before
-//     comparing against the allowlist.
+//   - "io.kubernetes.cri.image-name" is the annotation kata's guest-pull
+//     handler builds its image reference from, so it is the only one the
+//     enforced digest may come from. The baked policy requires the
+//     guest-pull storage's source to equal it and to be digest-pinned.
 //
 // # CLI surface
 //

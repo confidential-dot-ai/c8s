@@ -15,14 +15,28 @@ the gaps it does not.
 > kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
-The short version: kata-agent's OPA policy is permissive on
-CreateContainerRequest (allow-all defaults with `default
-SetPolicyRequest := false`), so kata-agent does not gate by image digest
-inside the agent itself. The in-VM `policy-monitor` daemon watches
-kata-agent's container-bundle directory via inotify, reads each new
-container's OCI annotations to get the image digest, checks it against
-the allowlist, and SIGKILLs the container's init PID if the digest isn't
-on the list.
+The short version: the decision is split in two, and both halves are on the
+dm-verity root.
+
+kata-agent's baked OPA policy fails closed on CreateContainerRequest. It does
+not know the allowlist — regorus has no crypto builtins, so it cannot verify a
+signed allowlist update — but it does bind the request to itself: exactly one
+`image_guest_pull` storage, mounted at that container's rootfs, whose `source`
+is the digest-pinned reference the `io.kubernetes.cri.image-name` annotation
+carries. It runs before `do_create_container`, so a request that fails it is
+`PERMISSION_DENIED` with no pull and no bundle.
+
+The in-VM `policy-monitor` daemon then decides whether that digest is
+allowlisted: it watches kata-agent's container-bundle directory via inotify,
+reads the digest out of the same annotation, and SIGKILLs the container's cgroup
+if it is not on the list.
+
+Neither half is sufficient alone. The image reference and the guest-pull storage
+source are independent fields of a request the host writes, so without the
+binding the digest policy-monitor checks need not describe the bytes the guest
+fetches; without the allowlist the binding only proves the request is
+self-consistent. **A confidential pod must therefore reference its images by
+digest** — a tag names whatever the registry serves the guest at pull time.
 
 The allowlist is a **baked seed plus a CDS refresh** (see
 [Allowlist sourcing](#allowlist-sourcing-baked-seed--cds-refresh)). The
@@ -628,15 +642,31 @@ current design has. The [BPF-LSM upgrade path](#bpf-lsm-upgrade-path)
 above is the linear, non-controversial way to close it (and carries
 the full implementation sketch). Not on today's roadmap.
 
+### G5 — The enforced digest is bound to the pull, not reported by it
+
+policy-monitor reads the digest from a host-written annotation that the
+baked policy binds to the guest-pull source. The in-guest puller knows the
+digest it resolved first-hand, and CDH already returns it
+(`ImagePullResponse.manifest_digest`) — kata's vendored proto copy declares
+the response empty and drops it. Enforcing on that instead would take the
+annotation out of the trust path and let tag-form references work, since
+the guest would check what it actually got.
+
+It reports the *platform* manifest digest, though, where `crane digest` and
+pod `@sha256:` references name the *index* digest, so adopting it moves the
+allowlist to platform digests. That migration is why this is a follow-up and
+not part of the binding work.
+
 ## What this design does and doesn't claim
 
 **It claims:**
 
-- The host cannot mutate kata-agent's bootstrap policy after boot
-  — the `SetPolicyRequest := false` rule in the baked policy
-  rejects the canonical mechanism, and the on-disk file is on the
-  verity-protected, SEV-SNP-encrypted rootfs the host can't write
-  to. (S3, S4.)
+- The host cannot mutate kata-agent's policy. `SetPolicyRequest := false`
+  rejects the runtime mechanism, the on-disk file is on the
+  verity-protected, memory-encrypted rootfs the host can't write to
+  (S3, S4), and the boot-time init-data channel — which replaces the
+  engine outright, ahead of any rule — is removed from the agent by
+  `kata-guest-base/patches/0001-agent-refuse-an-init-data-supplied-policy.patch`.
 - The host cannot inject an over-permissive allowlist. The seed
   `/etc/c8s/bootstrap-allowlist.json` is on the verity root and part of
   the launch measurement (S4), and the runtime CDS additions arrive over
@@ -645,12 +675,20 @@ the full implementation sketch). Not on today's roadmap.
   host blocks new additions — it can't shrink enforcement below the
   measured seed.
 - The host cannot kill policy-monitor from outside the VM. (S5.)
-- The kata VM is the trust boundary (SEV-SNP-encrypted memory)
-  and policy-monitor + ratls-mesh + attestation-service inside
+- The kata VM is the trust boundary (CVM memory encryption — SEV-SNP or
+  TDX) and policy-monitor + ratls-mesh + attestation-service inside
   the guest image are part of the launch measurement. (S1, S11.)
 - Per-image-digest enforcement happens for every CreateContainer
   inside the VM (S2, S6, S9, S11) — at the cost of a single-digit-ms
-  post-start window (G1).
+  post-start window (G1). The container id set the baked policy admits is
+  the set policy-monitor and rtmr3-measurer resolve, and a bundle whose
+  config.json has not been written yet stays undecided rather than being
+  passed over, so "every CreateContainer" is literal.
+- The digest enforced is the digest of the reference the guest pulls. The
+  baked policy requires the guest-pull storage's `source` to equal the
+  `io.kubernetes.cri.image-name` annotation and to be digest-pinned, and
+  the in-guest puller verifies the manifest against that digest, so an
+  admitted digest describes the bytes that become the rootfs.
 
 **It does not claim:**
 
@@ -665,9 +703,14 @@ the full implementation sketch). Not on today's roadmap.
   that's a separate enforcement layer.)
 - That image *content* is hidden from the host during the
   guest-pull transport (G3).
+- That the rootfs still holds the admitted bytes at `execve`. The claim is
+  that it *originates* from a digest-pinned in-guest pull. `CopyFileRequest`
+  is scoped to `/run/kata-containers/shared/containers/` so it can no longer
+  reach the container rootfs, but the argv, env and mounts a container runs
+  with are still the host's (THREAT_MODEL §5).
 
 The G1 gap (post-start kill window) is the most consequential
 honest limitation. The BPF-LSM upgrade path (G4) is the documented
 way to close it; today's design accepts it because the in-VM
 post-fork pre-execve window is short, capability-poor, and inside
-the SEV-SNP trust boundary.
+the CVM trust boundary.

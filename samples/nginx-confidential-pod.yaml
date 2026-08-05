@@ -17,6 +17,10 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: nginx:1.27-alpine
+          # Confidential workloads reference images by digest: the guest pulls
+          # this reference and admits it against the allowlist, and a tag names
+          # whatever the registry serves at pull time. Bump with
+          # `c8s allowlist inspect-image nginx:<tag>`.
+          image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 # 1.27-alpine
           ports:
             - containerPort: 80

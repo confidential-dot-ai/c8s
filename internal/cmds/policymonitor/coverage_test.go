@@ -298,8 +298,14 @@ func TestSeedExisting_DeniesPreexistingContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.seedExisting(); err != nil {
+	if err := m.seedExisting(context.Background()); err != nil {
 		t.Fatalf("seedExisting: %v", err)
+	}
+	// seedExisting dispatches one goroutine per bundle so a slow pull cannot
+	// stall the watcher; the decision lands shortly after.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(killer.snapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if calls := killer.snapshot(); len(calls) != 1 {
 		t.Fatalf("expected 1 kill for the preexisting denied container, got %+v", calls)
@@ -309,20 +315,49 @@ func TestSeedExisting_DeniesPreexistingContainer(t *testing.T) {
 func TestSeedExisting_MissingWatchDir(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	m.cfg.WatchDir = filepath.Join(watchDir, "does-not-exist")
-	if err := m.seedExisting(); err == nil {
+	if err := m.seedExisting(context.Background()); err == nil {
 		t.Fatal("expected error reading a missing watch dir")
 	}
 }
 
 // --- readConfigJSON / readOCISpec error paths -----------------------------
 
-func TestReadConfigJSON_MissingForeverTimesOut(t *testing.T) {
+func TestReadConfigJSON_BundleGoneGivesUp(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
-	m.configReadDeadline = 60 * time.Millisecond
-	m.configReadInterval = 10 * time.Millisecond
-	_, err := m.readConfigJSON(context.Background(), filepath.Join(watchDir, "nope", "config.json"))
+	m.configReadDeadline = 20 * time.Millisecond
+	m.configReadInterval = 5 * time.Millisecond
+	m.configPendingInterval = 5 * time.Millisecond
+	_, err := m.readConfigJSON(context.Background(), filepath.Join(watchDir, "nope"))
 	if err == nil {
-		t.Fatal("expected error when config.json never appears")
+		t.Fatal("expected error when the bundle directory does not exist")
+	}
+}
+
+// The bundle appears when the guest pull starts and config.json only after it
+// finishes, so a pull slower than configReadDeadline must still get a decision.
+func TestReadConfigJSON_WaitsOutASlowPull(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.configReadDeadline = 20 * time.Millisecond
+	m.configReadInterval = 5 * time.Millisecond
+	m.configPendingInterval = 5 * time.Millisecond
+
+	dir := filepath.Join(watchDir, "slowpull")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		writeConfigJSON(t, watchDir, "slowpull", map[string]string{
+			"io.kubernetes.cri.image-name": "ghcr.io/x@sha256:" + strings.Repeat("a", 64),
+		})
+	}()
+
+	spec, err := m.readConfigJSON(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("readConfigJSON: %v", err)
+	}
+	if spec.Annotations["io.kubernetes.cri.image-name"] == "" {
+		t.Fatal("spec parsed without the image-name annotation")
 	}
 }
 
@@ -330,10 +365,13 @@ func TestReadConfigJSON_ContextCancelled(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	m.configReadDeadline = 5 * time.Second
 	m.configReadInterval = 10 * time.Millisecond
+	dir := filepath.Join(watchDir, "pending")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := m.readConfigJSON(ctx, filepath.Join(watchDir, "nope", "config.json"))
-	if err == nil {
+	if _, err := m.readConfigJSON(ctx, dir); err == nil {
 		t.Fatal("expected context error")
 	}
 }
@@ -342,18 +380,42 @@ func TestReadConfigJSON_UnrecoverableIsADir(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	// Point at a directory: os.ReadFile returns a non-ENOENT, non-partial
 	// error, which readConfigJSON must surface immediately rather than
-	// retrying to the deadline.
+	// waiting for the bundle to go away.
 	dir := filepath.Join(watchDir, "isadir")
 	if err := os.MkdirAll(filepath.Join(dir, "config.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m.configReadDeadline = 5 * time.Second
 	start := time.Now()
-	if _, err := m.readConfigJSON(context.Background(), filepath.Join(dir, "config.json")); err == nil {
+	if _, err := m.readConfigJSON(context.Background(), dir); err == nil {
 		t.Fatal("expected error for a directory in place of config.json")
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("readConfigJSON retried an unrecoverable error instead of failing fast")
+	}
+}
+
+// A symlink the host planted that resolves nowhere is a name that exists: the
+// container has a bundle whose spec cannot be read, which is a deny, not a
+// reason to keep waiting.
+func TestReadConfigJSON_DanglingSymlinkIsUnrecoverable(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.configReadDeadline = 20 * time.Millisecond
+	m.configReadInterval = 5 * time.Millisecond
+	m.configPendingInterval = 5 * time.Millisecond
+	dir := filepath.Join(watchDir, "dangling")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/nonexistent/target", filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := m.readConfigJSON(context.Background(), dir); err == nil {
+		t.Fatal("expected error for a config.json symlink that does not resolve")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("readConfigJSON waited on a dangling symlink instead of failing")
 	}
 }
 
@@ -381,20 +443,81 @@ func TestReadOCISpec_BadJSONIsPartial(t *testing.T) {
 	}
 }
 
-func TestHandleNewContainer_ConfigNeverAppears_NoKill(t *testing.T) {
+// The bundle directory is created when the guest pull starts, so a container
+// whose config.json has not landed yet is undecided, not admitted: the decision
+// has to survive a pull longer than configReadDeadline.
+func TestHandleNewContainer_SlowPullStillDenies(t *testing.T) {
+	denied := strings.Repeat("b", 64)
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
-	m.configReadDeadline = 40 * time.Millisecond
-	m.configReadInterval = 10 * time.Millisecond
-	// Only the directory, no config.json ever. The read fails and the
-	// container is logged-and-skipped (not killed: we couldn't make a
-	// decision).
+	m.configReadDeadline = 20 * time.Millisecond
+	m.configReadInterval = 5 * time.Millisecond
+	m.configPendingInterval = 5 * time.Millisecond
+
+	dir := filepath.Join(watchDir, "slowpull")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		writeConfigJSON(t, watchDir, "slowpull", map[string]string{
+			"io.kubernetes.cri.image-name": "ghcr.io/evil@sha256:" + denied,
+		})
+	}()
+
+	m.handleNewContainer(context.Background(), dir)
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected the denied container to be killed once the slow pull wrote config.json, got %+v", calls)
+	}
+}
+
+// A bundle that disappears without ever growing a config.json had no container
+// to decide on.
+func TestHandleNewContainer_BundleRemovedNoKill(t *testing.T) {
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.configReadDeadline = 20 * time.Millisecond
+	m.configReadInterval = 5 * time.Millisecond
+	m.configPendingInterval = 5 * time.Millisecond
+
 	dir := filepath.Join(watchDir, "ghost")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		os.RemoveAll(dir)
+	}()
+
 	m.handleNewContainer(context.Background(), dir)
 	if calls := killer.snapshot(); len(calls) != 0 {
-		t.Fatalf("expected no kill when config.json never appears, got %+v", calls)
+		t.Fatalf("expected no kill when the bundle went away, got %+v", calls)
+	}
+}
+
+// A tag names whatever the registry serves the guest at pull time, so there is
+// no digest to check against the allowlist.
+func TestHandleNewContainer_TagFormReferenceDenied(t *testing.T) {
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	writeConfigJSON(t, watchDir, "tagged", map[string]string{
+		"io.kubernetes.cri.image-name": "nginx:1.27-alpine",
+	})
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, "tagged"))
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected a kill for a tag-form image reference, got %+v", calls)
+	}
+}
+
+// The digest kata pulls is the one in image-name. A digest parked on image-id
+// describes bytes the guest never fetches, so it must not admit anything.
+func TestHandleNewContainer_AllowlistedImageIDDoesNotAdmit(t *testing.T) {
+	allowed := strings.Repeat("a", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + allowed})
+	writeConfigJSON(t, watchDir, "spoofed", map[string]string{
+		"io.kubernetes.cri.image-name": "attacker.example/evil:latest",
+		"io.kubernetes.cri.image-id":   "sha256:" + allowed,
+	})
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, "spoofed"))
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected a kill: the allowlisted digest is not the reference the guest pulls, got %+v", calls)
 	}
 }
 

@@ -3764,6 +3764,10 @@ func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
 // produces. kata is enforcing, so the host-side components whose function
 // moves into the kata-guest-base image are switched off (the chart validates
 // they are off — see TestChartKataRejectsHostSideComponents).
+// testImageDigest is a syntactically valid digest for renders that only need
+// `image` to be pinned.
+const testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
 func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	return helmTemplate(t, append([]string{
@@ -3771,6 +3775,9 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
+		// The guest admits only digest-pinned references, so kata.enabled
+		// requires one for the injected sidecars (kind=kata_image_digest).
+		"--set-string", "image.digest=" + testImageDigest,
 	}, args...)...)
 }
 
@@ -3879,6 +3886,27 @@ func TestChartKataRejectsZeroPcieRootPort(t *testing.T) {
 // attestation, and image admission run inside the kata-guest-base image. The
 // chart must refuse to deploy the host-side versions alongside — they would be
 // dead weight at best and a second, unattested enforcement path at worst.
+// The webhook injects the c8s sidecars into every confidential pod off `image`,
+// and they run inside the guest, which admits only digest-pinned references. A
+// tag renders sidecars the guest refuses at CreateContainer, so catch it at
+// render rather than as a pod that never starts.
+func TestChartKataRequiresImageDigest(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "kata.enabled=true",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set-string", "image.tag=dev",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with kata.enabled and a tag-only image, want failure\n%s", out)
+	}
+	msg := helmFailMessage(t, out)
+	if !strings.Contains(msg, "kind=kata_image_digest") {
+		t.Errorf("fail message %q missing the kata_image_digest marker", msg)
+	}
+}
+
 func TestChartKataRejectsHostSideComponents(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "kata.enabled=true")
 	if err == nil {
