@@ -241,19 +241,6 @@ func TestExecRunnerPinsEnvAndWrapsFailure(t *testing.T) {
 	}
 }
 
-func TestTrimSlash(t *testing.T) {
-	for in, want := range map[string]string{
-		"https://cds":    "https://cds",
-		"https://cds/":   "https://cds",
-		"https://cds///": "https://cds",
-		"":               "",
-	} {
-		if got := cmdsutil.TrimSlash(in); got != want {
-			t.Errorf("cmdsutil.TrimSlash(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestCmdCtxFallsBackToBackground(t *testing.T) {
 	if cmdsutil.CmdCtx(&cobra.Command{}) == nil {
 		t.Fatal("nil context for a command with none set")

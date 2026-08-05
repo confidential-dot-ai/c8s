@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -107,7 +108,7 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := putBlob(cmdsutil.CmdCtx(cmd), hc, cmdsutil.TrimSlash(o.URL), path, blob, signer); err != nil {
+	if err := putBlob(cmdsutil.CmdCtx(cmd), hc, strings.TrimRight(o.URL, "/"), path, blob, signer); err != nil {
 		return err
 	}
 

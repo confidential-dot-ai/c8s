@@ -10,11 +10,11 @@ package secrets
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 )
 
@@ -62,5 +62,5 @@ func (o *options) client(ctx context.Context) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	return client{baseURL: cmdsutil.TrimSlash(o.URL), http: hc}, nil
+	return client{baseURL: strings.TrimRight(o.URL, "/"), http: hc}, nil
 }
