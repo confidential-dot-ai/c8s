@@ -128,6 +128,10 @@ func newTestMonitor(t *testing.T, allowlistEntries []string) (*monitor, *fakeKil
 		killRetryDeadline:     50 * time.Millisecond,
 		killRetryInterval:     time.Millisecond,
 		killPendingInterval:   5 * time.Millisecond,
+		// Far longer than any interval above, so only the tests that shorten it
+		// exercise the escalation path.
+		killEscalateAfter: time.Minute,
+		fatal:             make(chan error, 1),
 	}
 	return m, killer, watchDir
 }

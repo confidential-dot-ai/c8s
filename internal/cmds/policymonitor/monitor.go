@@ -102,6 +102,10 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		killRetryDeadline:   30 * time.Second,
 		killRetryInterval:   500 * time.Millisecond,
 		killPendingInterval: 10 * time.Second,
+		// Well past the tight retry phase: a kill path still erroring here is
+		// broken, not busy.
+		killEscalateAfter: time.Minute,
+		fatal:             make(chan error, 1),
 	}
 
 	// A monitor that cannot write cgroup.kill enforces nothing, so refuse to
@@ -168,6 +172,8 @@ type monitor struct {
 	inventory             *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
 	ready                 func() error        // systemd READY=1; nil outside the unit
 	readyOnce             sync.Once
+	fatal                 chan error // an enforcement failure the process must exit on
+	killEscalateAfter     time.Duration
 	configReadDeadline    time.Duration
 	configReadInterval    time.Duration
 	configPendingInterval time.Duration
@@ -312,6 +318,9 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			m.logger.Info("policy-monitor stopping", "reason", ctx.Err())
 			return true, nil
 
+		case err := <-m.fatal:
+			return false, err
+
 		case evt, ok := <-watcher.Events:
 			if !ok {
 				return false, errors.New("watcher events channel closed")
@@ -383,6 +392,18 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 				return watchDirGone("periodic identity check")
 			}
 		}
+	}
+}
+
+// abort reports a condition the process cannot enforce through. The watch loop
+// returns it, runMonitor exits non-zero, and the unit escalates from there.
+// Buffered and non-blocking: the first caller wins and later ones are noise on
+// a process already on its way down.
+func (m *monitor) abort(err error) {
+	m.logger.Error("enforcement is broken; exiting so the unit can take the guest down", "error", err)
+	select {
+	case m.fatal <- err:
+	default:
 	}
 }
 
@@ -535,17 +556,31 @@ func (m *monitor) frozenAttrs() []any {
 // re-attempting until the kill is confirmed, the bundle directory goes away
 // (kata-agent removed the container), or ctx ends. Repeat failures are logged
 // once per escalation, not once per attempt.
+//
+// A kill mechanism that keeps erroring past killEscalateAfter is not a slow
+// container, it is enforcement that no longer works — cgroup.kill returning
+// EROFS under a remounted hierarchy is the case that motivated the boot-time
+// selfTest. Escalate: the process exits non-zero, and the unit turns that into
+// restarts and then poweroff (see policy-monitor.service). selfTest runs again
+// on each restart, so a hierarchy that is still read-only fails there instead.
 func (m *monitor) kill(ctx context.Context, dir string) {
 	cid := filepath.Base(dir)
 	tightUntil := time.Now().Add(m.killRetryDeadline)
+	escalateAt := time.Now().Add(m.killEscalateAfter)
 	backedOff := false
+	var lastErr error
 
 	for attempt := 1; ; attempt++ {
 		ok, err := m.killer.kill(cid)
 		switch {
 		case err != nil:
+			lastErr = err
 			if attempt == 1 {
 				m.logger.Error("kill cgroup failed: denied container was NOT terminated; retrying", "cid", cid, "error", err)
+			}
+			if time.Now().After(escalateAt) {
+				m.abort(fmt.Errorf("kill path unusable: container %s denied but not terminated after %s: %w", cid, m.killEscalateAfter, lastErr))
+				return
 			}
 		case ok:
 			m.logger.Info("SIGKILLed container cgroup", "cid", cid, "attempts", attempt)
