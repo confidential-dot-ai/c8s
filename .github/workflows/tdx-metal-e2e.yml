@@ -106,20 +106,25 @@ jobs:
       - name: tools (kubectl, go, crane, helm)
         run: |
           set -euo pipefail
-          # Each fetch below crosses the public internet from an ephemeral ARC
-          # pod; one hiccup killed the lane twice in six days (30529875545,
-          # 30895640537), both before it reached a CVM.
-          retry() {
-            local i
-            for i in 1 2 3; do
-              if eval "$1"; then return 0; fi
-              echo "attempt $i failed, retrying in $((i * 5))s: $1" >&2
-              sleep $((i * 5))
-            done
-            echo "::error::gave up after 3 attempts: $1" >&2
-            return 1
-          }
+          # Every fetch here crosses the public internet from an ephemeral ARC
+          # pod, and one hiccup fails the lane before it reaches a CVM.
           mkdir -p "$PWD/bin"
+          # retry <shell-snippet>: 4 attempts, exponential backoff 2s/4s/8s.
+          # A file, not a function, because each `run:` block is a fresh shell.
+          printf '%s\n' \
+            'retry() {' \
+            '  local i delay=2' \
+            '  for i in 1 2 3 4; do' \
+            '    if eval "$1"; then return 0; fi' \
+            '    [ "$i" -eq 4 ] && break' \
+            '    echo "attempt $i failed, retrying in ${delay}s: $1" >&2' \
+            '    sleep "$delay"' \
+            '    delay=$((delay * 2))' \
+            '  done' \
+            '  echo "::error::gave up after 4 attempts: $1" >&2' \
+            '  return 1' \
+            '}' > bin/retry.sh
+          . bin/retry.sh
           retry 'curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl'
           chmod +x bin/kubectl
           echo "$PWD/bin" >> "$GITHUB_PATH"
@@ -373,21 +378,13 @@ jobs:
       - name: build the c8s CLI at the paired ref
         run: |
           set -euo pipefail
-          rm -rf /tmp/c8s-src
           # Same exposure as the tools step: this clone and the module fetches
           # behind `go install` cross the public internet under `set -e`.
-          for i in 1 2 3; do
-            git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src && break
-            [ "$i" = 3 ] && { echo "::error::git clone failed after 3 attempts"; exit 1; }
-            echo "clone attempt $i failed, retrying in $((i * 5))s" >&2; rm -rf /tmp/c8s-src; sleep $((i * 5))
-          done
+          . "$GITHUB_WORKSPACE/bin/retry.sh"
+          retry 'rm -rf /tmp/c8s-src && git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src'
           git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
           echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
-          for i in 1 2 3; do
-            ( cd /tmp/c8s-src && go install ./cmd/c8s ) && break
-            [ "$i" = 3 ] && { echo "::error::go install failed after 3 attempts"; exit 1; }
-            echo "go install attempt $i failed, retrying in $((i * 5))s" >&2; sleep $((i * 5))
-          done
+          retry '( cd /tmp/c8s-src && go install ./cmd/c8s )'
           # An unstamped build reports "dev", which is exactly why --image-tag
           # is passed explicitly at install rather than trusting build metadata.
           c8s --version || true
