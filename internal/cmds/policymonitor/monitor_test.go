@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -109,12 +110,13 @@ func newTestMonitor(t *testing.T, allowlistEntries []string) (*monitor, *fakeKil
 			CgroupRoot:    "/sys/fs/cgroup",
 			LogLevel:      "debug",
 		},
-		logger:             logger,
-		allowlist:          a,
-		overlay:            &policyOverlay{},
-		killer:             killer,
-		configReadDeadline: 200 * time.Millisecond,
-		configReadInterval: 10 * time.Millisecond,
+		logger:                logger,
+		allowlist:             a,
+		overlay:               &policyOverlay{},
+		killer:                killer,
+		configReadDeadline:    200 * time.Millisecond,
+		configReadInterval:    10 * time.Millisecond,
+		configPendingInterval: 10 * time.Millisecond,
 	}
 	return m, killer, watchDir
 }
@@ -309,21 +311,18 @@ func TestHandleNewContainer_UnreadableConfigDenies(t *testing.T) {
 	}
 }
 
-func TestHandleNewContainer_AbsentConfigSkips(t *testing.T) {
-	// An absent config.json (a non-container watch entry, or a bundle not yet
-	// written) must be skipped, not killed — killing infrastructure dirs would
-	// be a false positive (H-01 scope boundary).
-	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	m.configReadDeadline = 50 * time.Millisecond
-	cid := "shared"
-	if err := os.MkdirAll(filepath.Join(watchDir, cid), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
-
-	if calls := killer.snapshot(); len(calls) != 0 {
-		t.Fatalf("expected no kill for an absent config.json, got %d calls: %+v", len(calls), calls)
+func TestKataOwnDirectoriesAreNotContainers(t *testing.T) {
+	// /run/kata-containers/{shared,sandbox,image} are kata's own; they never
+	// grow a config.json, so the watcher must not wait on one for a decision.
+	// The baked policy refuses these as container ids, so nothing can hide here.
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	for _, name := range kataspec.ReservedBundleNames {
+		if err := os.MkdirAll(filepath.Join(watchDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if m.pathLooksLikeContainer(filepath.Join(watchDir, name)) {
+			t.Errorf("%q treated as a container bundle", name)
+		}
 	}
 }
 
@@ -420,12 +419,11 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 func TestReadConfigJSON_ValidAnnotationlessSpecReturnsImmediately(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	cid := "annotationless"
-	path := filepath.Join(watchDir, cid, "config.json")
 	writeConfigJSON(t, watchDir, cid, map[string]string{"unrelated": "x"})
 	m.configReadDeadline = time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	spec, err := m.readConfigJSON(ctx, path)
+	spec, err := m.readConfigJSON(ctx, filepath.Join(watchDir, cid))
 	if err != nil {
 		t.Fatalf("readConfigJSON: %v", err)
 	}
@@ -441,7 +439,8 @@ func TestPathLooksLikeContainer(t *testing.T) {
 		want bool
 	}{
 		{filepath.Join(watchDir, "abc123"), true},
-		{filepath.Join(watchDir, "shared"), true},                    // not a digest, but valid id charset; filtered later by no annotation
+		{filepath.Join(watchDir, "aa_1.b"), true},                    // kata's verify_id charset
+		{filepath.Join(watchDir, "shared"), false},                   // kata's own dir, never a container
 		{filepath.Join(watchDir, "deep", "nested", "abc123"), false}, // not a direct child
 		{filepath.Join(watchDir, "with spaces"), false},              // disallowed character
 		{filepath.Join(watchDir, ""), false},                         // empty

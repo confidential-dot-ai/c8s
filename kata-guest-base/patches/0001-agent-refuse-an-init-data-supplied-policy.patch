@@ -1,0 +1,41 @@
+Subject: [PATCH] agent: refuse an init-data-supplied agent policy
+
+The agent policy is the measured /etc/kata-opa/default-policy.rego on the
+dm-verity root, and its CreateContainerRequest rules are what bind a
+container's enforced digest to the bytes the guest pulls. set_policy()
+replaces the engine outright, and the init-data document is written by the
+host: its sha256 lands in HOST_DATA, but nothing in the guest compares that
+against what the c8s webhook stamped, so the host can hand the guest its own
+policy.rego and drop every rule. `SetPolicyRequest := false` does not cover
+this path -- it never reaches allow_request.
+
+c8s never puts policy.rego in the document it builds (c8s/pkg/initdata), so
+refusing outright is exact: any document carrying one was not ours.
+
+--- a/src/agent/src/main.rs
++++ b/src/agent/src/main.rs
+@@ -415,17 +415,15 @@
+         init_attestation_components(logger, config, &initdata_return_value).await?;
+     }
+ 
+-    // if policy is given via initdata, use it
++    // c8s: the policy is the measured baked file. init-data is host-written
++    // and unverified in the guest, so a policy delivered there would replace
++    // it; fail the boot rather than enforce the host's rules.
+     #[cfg(feature = "agent-policy")]
+     if let Some(initdata_return_value) = initdata_return_value {
+-        if let Some(policy) = &initdata_return_value._policy {
+-            info!(logger, "using policy from initdata");
+-            AGENT_POLICY
+-                .lock()
+-                .await
+-                .set_policy(policy)
+-                .await
+-                .context("Failed to set policy from initdata")?;
++        if initdata_return_value._policy.is_some() {
++            return Err(anyhow!(
++                "init-data carries an agent policy; this guest enforces the measured baked policy only"
++            ));
+         }
+     }
+ 

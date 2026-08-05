@@ -124,6 +124,7 @@ KATA_SRC="${KATA_SRC:-${WORK_DIR}/kata-${KATA_VERSION}}"
 
 EXTRA_DIR="${IMAGE_DIR}/extra"
 EXTRA_NVIDIA_DIR="${IMAGE_DIR}/extra-nvidia"
+PATCH_DIR="${IMAGE_DIR}/patches"
 # GPU variant (Step 6). auto = build when the stock kata NVIDIA artifacts are
 # present at the paths below, skip loudly otherwise; 1 = require; 0 = skip.
 # CI sets BUILD_NVIDIA=1 and points both paths at artifacts staged from the
@@ -218,6 +219,9 @@ for bin in ratls-mesh policy-monitor attestation-service rtmr3-measurer volumed;
 done
 [[ -f "${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json" ]] || die "bootstrap-allowlist.json not staged — run scripts/fetch.sh (with IMAGE_TAG or *_DIGEST env vars) first."
 [[ -f "${EXTRA_DIR}/etc/kata-opa/default-policy.rego" ]] || die "default-policy.rego missing from overlay."
+# Without it the host can replace the baked policy via init-data, so a guest
+# built without it enforces nothing it claims to.
+[[ -f "${PATCH_DIR}/0001-agent-refuse-an-init-data-supplied-policy.patch" ]] || die "the init-data policy patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
@@ -302,6 +306,18 @@ if [[ ! -d "${OSBUILDER}" ]]; then
         > "${WORK_DIR}/kata-src.tar.gz"
     tar xzf "${WORK_DIR}/kata-src.tar.gz" -C "${KATA_SRC}" --strip-components=1
     [[ -d "${OSBUILDER}" ]] || die "osbuilder not found at ${OSBUILDER} after extract — kata source layout changed?"
+
+    # osbuilder compiles kata-agent from this tree, so patches must land before
+    # Step 2. They are pinned to KATA_SRC_COMMIT: a rejected hunk means the
+    # upstream code moved and the patch needs re-basing, so fail the build
+    # rather than ship a guest missing it.
+    shopt -s nullglob
+    for p in "${PATCH_DIR}"/*.patch; do
+        log "Applying $(basename "${p}")"
+        patch -p1 --forward --batch -d "${KATA_SRC}" < "${p}" \
+            || die "patch $(basename "${p}") does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
+    done
+    shopt -u nullglob
 fi
 echo "    osbuilder: ${OSBUILDER}"
 
