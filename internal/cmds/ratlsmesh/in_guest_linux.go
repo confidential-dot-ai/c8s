@@ -647,11 +647,11 @@ type readinessCheckResult struct {
 //
 // This is deliberate. Inside the CDS pod's VM, CDS is the workload
 // container itself: it hasn't been started by kata-agent yet when
-// ratls-mesh boots. If /ready required a CDS-signed leaf, the CDS
-// pod would deadlock (ratls-mesh waits for CDS, kata-agent waits
-// for ratls-mesh.service to be active, CDS waits for kata-agent
-// to start it). The weak gate lets the CDS VM boot: ratls-mesh comes
-// up self-signed, kata-agent starts CDS, the upgrade goroutine
+// ratls-mesh boots. c8s-ready.target Requires=ratls-mesh.service, so a
+// /ready that demanded a CDS-signed leaf would wait on a CDS that only
+// exists once the target's own dependency is satisfied, and the pod
+// would never report mesh-ready. The weak gate lets the CDS VM boot:
+// ratls-mesh comes up self-signed, kata-agent starts CDS, the goroutine
 // (which CDS can satisfy by issuing a cert to itself — it is its own
 // CA) eventually swaps the provider. Workload pods, where CDS already
 // exists in a peer VM, go through the same boot path and converge on a
