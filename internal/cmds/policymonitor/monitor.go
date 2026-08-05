@@ -96,6 +96,11 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		configReadInterval:    25 * time.Millisecond,
 		configPendingInterval: time.Second,
 		revalidateInterval:    10 * time.Second,
+		// A denied container is re-killed until the kill lands or its bundle
+		// is removed; killRetryDeadline bounds the tight phase.
+		killRetryDeadline:   30 * time.Second,
+		killRetryInterval:   500 * time.Millisecond,
+		killPendingInterval: 10 * time.Second,
 	}
 
 	// A monitor that cannot write cgroup.kill enforces nothing, so refuse to
@@ -164,6 +169,9 @@ type monitor struct {
 	configReadInterval    time.Duration
 	configPendingInterval time.Duration
 	revalidateInterval    time.Duration
+	killRetryDeadline     time.Duration
+	killRetryInterval     time.Duration
+	killPendingInterval   time.Duration
 }
 
 // policyOverlay holds the Index of the latest CDS pull that advanced the epoch.
@@ -430,7 +438,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// itself went away, or we are shutting down — nothing to decide.
 		if _, statErr := os.Lstat(configPath); statErr == nil {
 			m.logger.Warn("deny container: config.json present but unreadable/malformed", "cid", cid, "path", configPath, "error", err)
-			m.kill(cid)
+			m.kill(ctx, dir)
 			return
 		}
 		m.logger.Info("skip: bundle went away before config.json appeared", "cid", cid, "path", configPath, "error", err)
@@ -467,7 +475,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// policy was not in force.
 		m.logger.Warn("deny container: image reference is absent or not digest-pinned",
 			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey])
-		m.kill(cid)
+		m.kill(ctx, dir)
 		return
 	}
 
@@ -486,7 +494,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	}
 	m.logger.Warn("deny container: digest/argv not allowlisted",
 		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
-	m.kill(cid)
+	m.kill(ctx, dir)
 }
 
 // frozenAttrs annotates a deny with the fact that the allowlist never left the
@@ -501,22 +509,53 @@ func (m *monitor) frozenAttrs() []any {
 	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
 }
 
-// kill resolves the container's cgroup and terminates it as a unit. Every
-// caller has already DENIED the container, so anything short of a confirmed
-// termination is a bypass of the image policy and logs at Error — including
-// the "cgroup never materialised" case, which is indistinguishable from a
-// container that exited on its own.
-func (m *monitor) kill(cid string) {
-	ok, err := m.killer.kill(cid)
-	if err != nil {
-		m.logger.Error("kill cgroup failed: denied container was NOT terminated", "cid", cid, "error", err)
-		return
+// kill resolves the denied container's cgroup and terminates it as a unit,
+// re-attempting until the kill is confirmed, the bundle directory goes away
+// (kata-agent removed the container), or ctx ends. Repeat failures are logged
+// once per escalation, not once per attempt.
+func (m *monitor) kill(ctx context.Context, dir string) {
+	cid := filepath.Base(dir)
+	tightUntil := time.Now().Add(m.killRetryDeadline)
+	backedOff := false
+
+	for attempt := 1; ; attempt++ {
+		ok, err := m.killer.kill(cid)
+		switch {
+		case err != nil:
+			if attempt == 1 {
+				m.logger.Error("kill cgroup failed: denied container was NOT terminated; retrying", "cid", cid, "error", err)
+			}
+		case ok:
+			m.logger.Info("SIGKILLed container cgroup", "cid", cid, "attempts", attempt)
+			return
+		default:
+			if attempt == 1 {
+				m.logger.Error("denied container NOT confirmed terminated: cgroup never found or never populated; retrying", "cid", cid)
+			}
+		}
+
+		if _, statErr := os.Stat(dir); statErr != nil {
+			m.logger.Warn("denied container's bundle was removed before a kill was confirmed", "cid", cid, "attempts", attempt)
+			return
+		}
+
+		interval := m.killRetryInterval
+		if time.Now().After(tightUntil) {
+			interval = m.killPendingInterval
+			if !backedOff {
+				backedOff = true
+				m.logger.Error("denied container still NOT terminated; retrying at a slower cadence until its bundle is removed",
+					"cid", cid, "attempts", attempt, "interval", interval)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			m.logger.Error("gave up killing a denied container", "cid", cid, "attempts", attempt, "reason", ctx.Err())
+			return
+		case <-time.After(interval):
+		}
 	}
-	if !ok {
-		m.logger.Error("denied container NOT confirmed terminated: cgroup never found or never populated", "cid", cid)
-		return
-	}
-	m.logger.Info("SIGKILLed container cgroup", "cid", cid)
 }
 
 // readConfigJSON waits for kata-agent to write the bundle's config.json and

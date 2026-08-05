@@ -21,8 +21,8 @@ const (
 func TestKataInventoryIncludesInjectedSidecars(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp, nil)
-	b.record("cid-cert", pmDigestSidecar, nil)
+	b.record(testCID("app"), pmDigestApp, nil)
+	b.record(testCID("cert"), pmDigestSidecar, nil)
 
 	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
@@ -80,10 +80,10 @@ func TestSandboxIDFromAnnotations(t *testing.T) {
 func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp, nil)
-	b.record("cid-gone", pmDigestSidecar, nil)
+	b.record(testCID("app"), pmDigestApp, nil)
+	b.record(testCID("gone"), pmDigestSidecar, nil)
 
-	b.remove("cid-gone")
+	b.remove(testCID("gone"))
 
 	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
