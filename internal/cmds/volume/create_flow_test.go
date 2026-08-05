@@ -21,7 +21,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 )
 
@@ -238,11 +237,5 @@ func TestExecRunnerPinsEnvAndWrapsFailure(t *testing.T) {
 		t.Fatal("a failing tool reported success")
 	} else if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error drops the tool's output: %v", err)
-	}
-}
-
-func TestCmdCtxFallsBackToBackground(t *testing.T) {
-	if cmdsutil.CmdCtx(&cobra.Command{}) == nil {
-		t.Fatal("nil context for a command with none set")
 	}
 }

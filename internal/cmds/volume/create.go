@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
@@ -75,7 +74,7 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	verity, err := Build(cmdsutil.CmdCtx(cmd), BuildConfig{
+	verity, err := Build(cmd.Context(), BuildConfig{
 		Source: cfg.source, Out: cfg.out, Key: key, WorkDir: cfg.workDir, Run: cfg.run,
 	})
 	if err != nil {
@@ -104,11 +103,11 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	hc, err := o.HTTPClient(cmdsutil.CmdCtx(cmd))
+	hc, err := o.HTTPClient(cmd.Context())
 	if err != nil {
 		return err
 	}
-	if err := putBlob(cmdsutil.CmdCtx(cmd), hc, strings.TrimRight(o.URL, "/"), path, blob, signer); err != nil {
+	if err := putBlob(cmd.Context(), hc, strings.TrimRight(o.URL, "/"), path, blob, signer); err != nil {
 		return err
 	}
 

@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	intsecrets "github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -43,11 +42,11 @@ The sandbox ID is on the pod's certificate; 'c8s verify' prints it.`,
 			if err != nil {
 				return err
 			}
-			c, err := o.client(cmdsutil.CmdCtx(cmd))
+			c, err := o.client(cmd.Context())
 			if err != nil {
 				return err
 			}
-			resp, err := c.explain(cmdsutil.CmdCtx(cmd), sandboxID, signer)
+			resp, err := c.explain(cmd.Context(), sandboxID, signer)
 			if err != nil {
 				return err
 			}
