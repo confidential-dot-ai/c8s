@@ -1,7 +1,13 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
        test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
-       manifests generate check-crd-chart install-controller-gen require-controller-gen
+       manifests generate check-crd-chart install-controller-gen require-controller-gen \
+       policy-test print-opa-version
+
+OPA                ?= opa
+OPA_VERSION        ?= v1.9.0
+KATA_POLICY        ?= kata-guest-base/extra/etc/kata-opa/default-policy.rego
+KATA_POLICY_TESTS  ?= kata-guest-base/tests/default-policy_test.rego
 
 CONTROLLER_GEN         ?= controller-gen
 CONTROLLER_GEN_VERSION ?= v0.20.1
@@ -147,6 +153,19 @@ test-e2e-mesh-cw-enforcement:
 # Needs kubectl pointed at a node-as-CVM cluster with cds.handoff.enabled=true.
 test-e2e-ca-handoff:
 	./test/e2e/ca-handoff.sh
+
+# Parse + decision tests for the baked kata-agent policy. The guest evaluates
+# it with regorus, which reads Rego v0 plus the future keywords, so the checks
+# run with --v0-compatible. Install with:
+#   curl -fsSL -o opa https://openpolicyagent.org/downloads/$(OPA_VERSION)/opa_linux_amd64_static && chmod +x opa
+# Single source of the pinned version for CI's installer step.
+print-opa-version:
+	@echo $(OPA_VERSION)
+
+policy-test:
+	@command -v $(OPA) >/dev/null 2>&1 || { echo "opa not found; see the policy-test comment in the Makefile"; exit 1; }
+	$(OPA) check --v0-compatible --strict $(KATA_POLICY)
+	$(OPA) test --v0-compatible $(KATA_POLICY) $(KATA_POLICY_TESTS)
 
 # --- Linting ---
 

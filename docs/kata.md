@@ -470,13 +470,16 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   4. Intel PCS API key in `/etc/sgx_default_qcnl.conf` — DCAP fetches
      TCB collateral from Intel PCS during verify.
   5. The node label `confidential.ai/tdx=true` — the
-     `kata-qemu-tdx` RuntimeClass nodeSelector expects it. `c8s install
-     --hardware-platform=tdx` preflight-checks for this label and refuses
-     to proceed if no node has it.
+     `kata-qemu-tdx` RuntimeClass nodeSelector expects it. On the default
+     `--cvm-mode=pod` path the install applies it for you (see
+     [Installing](#installing)); you own it when a `-f` values file sets
+     `kata.tdxNodeSelector` itself, or under `--cvm-mode=node`. Either
+     way `c8s install --hardware-platform=tdx` preflight-checks it and
+     refuses to proceed if no node carries it.
 
-  A ready-made provisioning path is out of scope for this repo — any
-  Ansible playbook / OS-level configuration tool can install DCAP + qgsd
-  + the bridge unit and apply the label. If you're building one from
+  A ready-made provisioning path for items 1–4 is out of scope for this
+  repo — any Ansible playbook / OS-level configuration tool can install
+  DCAP + qgsd + the bridge unit. If you're building one from
   scratch, the [Intel TDX documentation](https://cdrdv2.intel.com/v1/dl/getContent/726790)
   and the DCAP quickstart are the canonical references. Once the host
   is configured, verify:
@@ -485,6 +488,12 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
   ls /dev/tdx_guest                           # exists
   systemctl is-active qgsd                    # active
   systemctl is-active tdx-qgs-bridge          # active
+  ```
+
+  The platform label is worth checking only when you own it; after a
+  default install it is already there:
+
+  ```
   kubectl get node <node> \
     -o jsonpath='{.metadata.labels.confidential\.ai/tdx}'
   # → true

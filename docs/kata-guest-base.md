@@ -29,9 +29,10 @@ it.
 
 Two of the three binaries baked into the image come from this repo
 (`ratls-mesh` from `cmd/ratls-mesh/`, plus the in-guest `C8S_*` cloud-init
-config — **Status:** today a single fixed default baked into the rootfs
-(`C8S_WORKLOAD_ID=c8s-broker`), not per-pod host-injected; per-pod injection
-was never built). The third — the in-guest attester staged
+config — a single fixed default baked into the rootfs
+(`C8S_WORKLOAD_ID=c8s-broker`); per-pod injection was never built, and
+`C8S_CDS_MEASUREMENTS` arrives over SNP init-data rather than either channel,
+see [`kata-image-policy.md`](kata-image-policy.md)). The third — the in-guest attester staged
 under the `attestation-service` role name — is the `attestation-api`
 binary from the sibling
 [confidential-dot-ai/attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
