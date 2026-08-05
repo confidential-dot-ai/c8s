@@ -617,6 +617,11 @@ not. Under kata the equivalent ordering is the guest image: a guest whose
 `127.0.0.1:8401`, so roll the guest image before the operator starts injecting
 `--workload-claims-guest`.
 
+The same ordering covers the secret and volume fetchers, which redeem at the
+same endpoints: a guest image predating `volumed --guest` answers nothing on
+`127.0.0.1:8402`, and a pod annotated for volumes there stays without its mount
+until the image is current.
+
 ## Audit pointers
 
 | Concern | Where |

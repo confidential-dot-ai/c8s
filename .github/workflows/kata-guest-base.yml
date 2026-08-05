@@ -183,6 +183,11 @@ jobs:
         working-directory: c8s
         run: make build-rtmr3-measurer
 
+      # Same: fetch.sh hard-fails without build/volumed.
+      - name: Build volumed binary
+        working-directory: c8s
+        run: make build-volumed
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
 

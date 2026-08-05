@@ -31,7 +31,7 @@ func openerWithVolumes(t *testing.T, ops *fakeOps, names ...string) *Opener {
 			t.Fatalf("mkdir %s: %v", n, err)
 		}
 	}
-	o := &Opener{Ops: ops, KubeletRoot: root}
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 	for _, n := range names {
 		req := testRequest(t)
 		req.Name = n
@@ -100,7 +100,7 @@ func TestSweepIsPerPod(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
 	}
-	o := &Opener{Ops: ops, KubeletRoot: root}
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 
 	for name, uid := range map[string]string{"weights": testPodUID, "datasets": other} {
 		req := testRequest(t)

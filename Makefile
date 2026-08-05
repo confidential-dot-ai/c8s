@@ -1,5 +1,5 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
-       build-nri-image-policy build-policy-monitor build-rtmr3-measurer \
+       build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
        test test-integration test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen
 
@@ -60,6 +60,17 @@ build-policy-monitor:
 		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
 		-o $(BUILD_DIR)/policy-monitor ./cmd/policy-monitor
 	@echo "Built $(BUILD_DIR)/policy-monitor"
+
+# --- Volumed (in-kata-guest encrypted-volume opener) ---
+# Standalone binary baked into kata-guest-base, run as `volumed --guest`. The
+# node-side DaemonSet runs `c8s volumed` from the multi-mode binary instead;
+# the guest gets its own so only this command sits on the dm-verity root.
+build-volumed:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -ldflags="-s -w -X $(MODULE)/internal/version.Version=$(VERSION)" \
+		-o $(BUILD_DIR)/volumed ./cmd/volumed
+	@echo "Built $(BUILD_DIR)/volumed"
 
 # --- RTMR3-measurer (in-kata-guest per-workload RTMR[3] measurer) ---
 # Standalone daemon baked into kata-guest-base. Scans kata-agent's container

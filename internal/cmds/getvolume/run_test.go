@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -98,5 +101,46 @@ func TestNewCmdHasTheSidecarFlags(t *testing.T) {
 		if cmd.Flags().Lookup(flag) == nil {
 			t.Errorf("missing --%s", flag)
 		}
+	}
+}
+
+// A kata guest mounts nothing, so requiring --socket-dir there would refuse
+// every volume the in-guest daemon can serve.
+func TestValidateSocketDirOnlyRequiredOnNodeCVM(t *testing.T) {
+	cfg := validConfig()
+	cfg.SocketDir = ""
+	if err := validate(&cfg); err == nil {
+		t.Error("node-CVM accepted a config with no socket dir")
+	}
+
+	guest := validConfig()
+	guest.SocketDir = ""
+	guest.WorkloadClaimsGuest = true
+	if err := validate(&guest); err != nil {
+		t.Errorf("guest shape rejected for want of a socket dir: %v", err)
+	}
+}
+
+// The daemon endpoint is compiled in both shapes: the flag picks which, never
+// an address, so a wrong setting fails closed instead of posting the key blob
+// somewhere the control plane chose.
+func TestDaemonClientSelectsCompiledShape(t *testing.T) {
+	_, base := daemonClient(config{SocketDir: "/run/c8s/workload-claims"})
+	if base != "http://volumed" {
+		t.Errorf("node-CVM base = %q, want the unix-transport placeholder", base)
+	}
+	if _, guestBase := daemonClient(config{WorkloadClaimsGuest: true}); guestBase != volumed.GuestEndpoint() {
+		t.Errorf("guest base = %q, want the compiled %q", guestBase, volumed.GuestEndpoint())
+	}
+}
+
+// The inventory endpoint moves with the same flag: on node-CVM the guest port
+// serves nothing, and in a guest the socket cannot exist.
+func TestInventoryEndpointFollowsTheShape(t *testing.T) {
+	if got, want := (config{}).endpoint(), workloadclaims.InventoryEndpoint(); got != want {
+		t.Errorf("node-CVM endpoint = %q, want %q", got, want)
+	}
+	if got, want := (config{WorkloadClaimsGuest: true}).endpoint(), workloadclaims.GuestInventoryEndpoint(); got != want {
+		t.Errorf("kata endpoint = %q, want %q", got, want)
 	}
 }
