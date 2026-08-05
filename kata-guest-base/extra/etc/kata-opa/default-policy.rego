@@ -103,11 +103,8 @@ default CreateContainerRequest := false
 CreateContainerRequest if {
 	print("CreateContainerRequest: start")
 
-	# policy-monitor and rtmr3-measurer only watch ids matching this; kata's
-	# own verify_id is wider (dots, underscores, Unicode), and an id outside
-	# their filter is a container neither of them ever decides on.
-	regex.match("^[a-zA-Z0-9][a-zA-Z0-9._-]{1,127}$", input.container_id)
-	not reserved_bundle_name
+	# A container id is the CRI's 32 random bytes, hex-encoded.
+	regex.match("^[a-f0-9]{64}$", input.container_id)
 	print("CreateContainerRequest: container_id ok")
 
 	# The Go runtime never sets this; setup_shared_mounts bind-mounts a
@@ -136,13 +133,6 @@ CreateContainerRequest if {
 }
 
 container_rootfs := concat("/", ["/run/kata-containers", input.container_id, "rootfs"])
-
-# kata's own subdirectories of /run/kata-containers. A container taking one of
-# these names collides with them, and the c8s watchers skip them by name.
-reserved_bundle_name if {
-	some name in ["shared", "sandbox", "image"]
-	input.container_id == name
-}
 
 sole_guest_pull_storage := s if {
 	pulls := [x | some x in input.storages; x.driver == "image_guest_pull"]

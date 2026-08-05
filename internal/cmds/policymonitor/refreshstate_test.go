@@ -32,7 +32,7 @@ func TestDenyNamesFrozenAllowlist(t *testing.T) {
 	m.refresh = &refreshState{reason: reasonNoMeasurements}
 	buf := captureLogs(m)
 
-	cid := "frozen-deny"
+	cid := testCID("frozen-deny")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + unlisted,
@@ -64,7 +64,7 @@ func TestDenyOmitsFrozenAttrsWhenRefreshLive(t *testing.T) {
 	m.refresh.enable()
 	buf := captureLogs(m)
 
-	cid := "live-deny"
+	cid := testCID("live-deny")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + unlisted,

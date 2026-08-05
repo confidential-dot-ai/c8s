@@ -55,23 +55,11 @@ func IsSandbox(annotations map[string]string) bool {
 	return false
 }
 
-// containerID is the id set the baked kata-agent policy admits. kata's own
-// verify_id is wider (Unicode alphanumerics, no length bound); the policy
-// narrows CreateContainerRequest to this so that every container the guest
-// creates is one the watchers below resolve.
-var containerID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{1,127}$`)
-
-// ReservedBundleNames are kata's own subdirectories of /run/kata-containers.
-// They are not containers and never grow a config.json. The baked policy
-// refuses them as container ids, so skipping them here cannot hide one.
-var ReservedBundleNames = []string{"shared", "sandbox", "image"}
+// containerID is the id set the baked kata-agent policy admits: the 32 random
+// bytes containerd's CRI and CRI-O hex-encode into a container or sandbox id.
+var containerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // ValidContainerID reports whether id is a container id c8s watches.
 func ValidContainerID(id string) bool {
-	for _, r := range ReservedBundleNames {
-		if id == r {
-			return false
-		}
-	}
 	return containerID.MatchString(id)
 }

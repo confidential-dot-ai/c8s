@@ -49,7 +49,7 @@ func (k *fakeKiller) snapshot() []string {
 
 func TestFindCgroupDir_FoundAtRoot(t *testing.T) {
 	root := t.TempDir()
-	cid := "abc123"
+	cid := testCID("found-at-root")
 	if err := os.MkdirAll(filepath.Join(root, cid), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestFindCgroupDir_FoundAtRoot(t *testing.T) {
 
 func TestFindCgroupDir_NestedUnderSlice(t *testing.T) {
 	root := t.TempDir()
-	cid := "deadbeef"
+	cid := testCID("nested-under-slice")
 	nested := filepath.Join(root, "system.slice", "kata-shim-foo.scope", cid)
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestFindCgroupDir_AmbiguousMatchRejected(t *testing.T) {
 
 func TestFindCgroupDir_NotFound(t *testing.T) {
 	root := t.TempDir()
-	got, err := findCgroupDir(root, "missing")
+	got, err := findCgroupDir(root, testCID("missing"))
 	if err != nil {
 		t.Fatalf("findCgroupDir: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestFindCgroupDir_NotFound(t *testing.T) {
 
 func TestCgroupKiller_WaitsForCgroupToAppear(t *testing.T) {
 	root := t.TempDir()
-	cid := "feedface"
+	cid := testCID("waits-for-cgroup")
 	killer := &cgroupKiller{
 		cgroupRoot:   root,
 		waitTimeout:  500 * time.Millisecond,
@@ -233,7 +233,7 @@ func TestCgroupKiller_WaitsForProcsToPopulateAndKillsGroup(t *testing.T) {
 // harmless no-op rather than blocking or erroring.
 func TestCgroupKiller_EmptyProcsTimesOut(t *testing.T) {
 	root := t.TempDir()
-	cid := "cafef00d"
+	cid := testCID("empty-procs")
 	scope := filepath.Join(root, "cri-containerd-"+cid+".scope")
 	if err := os.MkdirAll(scope, 0o755); err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestCgroupKiller_Timeout(t *testing.T) {
 		waitTimeout:  50 * time.Millisecond,
 		pollInterval: 20 * time.Millisecond,
 	}
-	ok, err := killer.kill("never-appears")
+	ok, err := killer.kill(testCID("never-appears"))
 	if err != nil {
 		t.Fatalf("kill: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestCgroupKiller_Timeout(t *testing.T) {
 
 func TestCgroupKiller_PropagatesMalformedProcs(t *testing.T) {
 	root := t.TempDir()
-	cid := "malformed"
+	cid := testCID("malformed-procs")
 	dir := filepath.Join(root, cid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -476,7 +476,7 @@ func TestOwnCgroupPath(t *testing.T) {
 
 func TestCgroupKiller_PropagatesMissingKillInterface(t *testing.T) {
 	root := t.TempDir()
-	cid := "missing-kill"
+	cid := testCID("missing-kill-interface")
 	dir := filepath.Join(root, cid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

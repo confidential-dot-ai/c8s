@@ -46,20 +46,29 @@ func extractPattern(t *testing.T, policy, subject string) *regexp.Regexp {
 
 func TestContainerIDAgreesWithBakedPolicy(t *testing.T) {
 	policy := extractPattern(t, readPolicy(t), "input.container_id")
+	hex64 := strings.Repeat("a", 64)
 	for _, id := range []string{
-		"6d7f5f7bd6e6b1f3a2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6",
+		"6d7f5f7bd6e6b1f3a2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6", hex64,
 		"aa-1", "aa_1", "aa.1", "ab", "a", "-ab", ".ab", "aa/1", "аа1", "",
-		strings.Repeat("a", 128), strings.Repeat("a", 129),
 	} {
 		if policy.MatchString(id) && !ValidContainerID(id) {
 			t.Errorf("policy admits container id %q but ValidContainerID rejects it: nothing would decide on that container", id)
 		}
 	}
-	// The watchers skip kata's own directories by name, which is only safe
-	// because the policy refuses them as container ids.
-	for _, name := range ReservedBundleNames {
-		if !strings.Contains(readPolicy(t), `"`+name+`"`) {
-			t.Errorf("the baked policy does not reserve the bundle name %q", name)
+
+	// Both sides admit only what the CRI generates. A shorter id can name a
+	// systemd unit cgroup, and the kill path resolves a denied container's
+	// cgroup by name; kata's own bundle directories are excluded by the same
+	// pattern rather than by a separate rule.
+	for _, id := range []string{
+		"init", "ab", "shared", "sandbox", "image",
+		hex64[:63], hex64 + "a", strings.ToUpper(hex64),
+	} {
+		if policy.MatchString(id) {
+			t.Errorf("baked policy admits container id %q", id)
+		}
+		if ValidContainerID(id) {
+			t.Errorf("ValidContainerID accepts container id %q", id)
 		}
 	}
 }
