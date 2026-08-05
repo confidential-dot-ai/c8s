@@ -1,6 +1,9 @@
 package kataspec
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const (
 	hexA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -115,26 +118,25 @@ func TestValidContainerID(t *testing.T) {
 		want bool
 	}{
 		{"6d7f5f7bd6e6b1f3a2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6", true},
-		{"aa-1", true},
-		{"aa_1", true},
-		{"aa.1", true},
-		{"ab", true},
-		{"a", false},   // kata's verify_id requires len > 1
-		{"-ab", false}, // must start alphanumeric
-		{".ab", false},
+		{hexA, true},
+		{"init", false}, // a systemd unit cgroup name
+		{"ab", false},
+		{"aa-1", false},
+		{"aa_1", false},
+		{"aa.1", false},
+		{"shared", false}, // kata's own subdirectory of /run/kata-containers
+		{"sandbox", false},
+		{"image", false},
 		{"aa/1", false},
-		{"аа1", false}, // Cyrillic: verify_id accepts it, the policy does not
+		{"аа1", false}, // Cyrillic
 		{"", false},
+		{hexA[:63], false},
+		{hexA + "a", false},
+		{strings.ToUpper(hexA), false},
+		{strings.Repeat("g", 64), false}, // not hex
 	} {
 		if got := ValidContainerID(tc.id); got != tc.want {
 			t.Errorf("ValidContainerID(%q) = %v, want %v", tc.id, got, tc.want)
 		}
-	}
-	long := make([]byte, 129)
-	for i := range long {
-		long[i] = 'a'
-	}
-	if ValidContainerID(string(long)) {
-		t.Errorf("ValidContainerID accepted a 129-char id")
 	}
 }

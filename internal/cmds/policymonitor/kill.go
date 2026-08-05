@@ -28,11 +28,9 @@ package policymonitor
 //                     or crio-<cid>.scope (CRI-O), nested under the pod's
 //                     kubepods*.slice — this is what a systemd-PID-1 kata
 //                     guest actually uses, so it is the common case in the
-//                     field. Matching only the bare <cid> basename here was a
-//                     silent enforcement hole: policy-monitor denied a
-//                     non-allowlisted container but then could not find its
-//                     cgroup, so the SIGKILL never landed and the container
-//                     ran. cgroupDirMatchesCID recognises both shapes.
+//                     field.
+//
+// cgroupDirMatchesCID recognises both shapes.
 
 import (
 	"errors"
@@ -212,18 +210,11 @@ func writeCgroupKill(dir string) error {
 	return closeErr
 }
 
-// findCgroupDir walks root looking for a directory that identifies
-// containerID (see cgroupDirMatchesCID for the naming schemes). Returns
-// the first match (depth-first) or an empty string. We don't bother with
-// finer disambiguation — the kata container id is a 64-hex-char SHA-256
-// (or similar high-entropy string) and collisions in the cgroup tree are
-// not credible.
-//
-// Implementation note: we use filepath.WalkDir rather than recursing
-// manually because the cgroup v2 hierarchy can be arbitrarily deep
-// when nested inside systemd slices (e.g. /sys/fs/cgroup/
-// system.slice/kata-shim-<sandbox>.scope/<cid>/), and WalkDir handles
-// the symlink and permission edge cases consistently.
+// findCgroupDir walks root looking for the directory that identifies
+// containerID (see cgroupDirMatchesCID for the naming schemes) and returns it,
+// or an empty string when there is none. The walk is a full-tree WalkDir: the
+// hierarchy is arbitrarily deep once containers are nested inside systemd
+// slices (/sys/fs/cgroup/system.slice/kata-shim-<sandbox>.scope/<cid>/).
 func findCgroupDir(root, containerID string) (string, error) {
 	if containerID == "" {
 		return "", errors.New("empty container id")
@@ -231,17 +222,9 @@ func findCgroupDir(root, containerID string) (string, error) {
 	var matches []string
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			// Permission-denied on a sibling slice (an unreadable systemd
-			// slice we don't own) is expected during a full-tree walk and
-			// must not stop the search — skip it and keep going. Worst
-			// case we miss the cgroup and the kill is a no-op, which is
-			// fine for a denied container (kata-agent reaps it when
-			// CreateContainer returns). But do NOT swallow *every* error:
-			// anything else (an I/O error, a broken/zombie cgroup) is a
-			// real signal, so propagate it. cgroupKiller returns it as
-			// "walk cgroup hierarchy: ..." and the monitor logs it at
-			// Warn — rather than silently continuing and reporting a
-			// misleading no-op kill for a container we never searched.
+			// A sibling slice we may not read is expected on a full-tree
+			// walk; anything else (I/O error, broken cgroup) means the
+			// search was incomplete and propagates to the caller.
 			if errors.Is(err, os.ErrPermission) {
 				return nil
 			}
@@ -264,12 +247,8 @@ func findCgroupDir(root, containerID string) (string, error) {
 	case 1:
 		return matches[0], nil
 	default:
-		// Ambiguity: more than one cgroup matches this id. The previous code
-		// returned the first depth-first match, so a container id that also
-		// matched an unrelated cgroup could redirect the SIGKILL onto that
-		// unrelated cgroup (H-02). A running denied container owns exactly one
-		// cgroup, so any collision shows up as a second match here; refuse to
-		// guess rather than terminate the wrong one.
+		// A running container owns exactly one cgroup, so a second match is a
+		// collision; refuse to guess rather than terminate the wrong one.
 		return "", fmt.Errorf("ambiguous container id %q matches %d cgroups: %v", containerID, len(matches), matches)
 	}
 }
@@ -280,11 +259,8 @@ func findCgroupDir(root, containerID string) (string, error) {
 //   - systemd scope:            cri-containerd-<cid>.scope, crio-<cid>.scope,
 //     or <cid>.scope
 //
-// Only these exact shapes count. The earlier form accepted any basename ending
-// in "-<cid>", so an unrelated cgroup whose name merely ended that way matched —
-// letting a short or adversarially chosen id redirect the kill onto an
-// unrelated scope (H-02). Enumerate the vendor prefixes kata-agent actually
-// emits instead of accepting an arbitrary one.
+// These exact shapes are the whole set — the vendor prefix is enumerated, not
+// accepted as an arbitrary "<anything>-<cid>".
 func cgroupDirMatchesCID(basename, containerID string) bool {
 	name := strings.TrimSuffix(basename, ".scope")
 	return name == containerID ||
