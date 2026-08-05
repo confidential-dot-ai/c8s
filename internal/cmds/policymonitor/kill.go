@@ -50,6 +50,8 @@ import (
 // never materialised within the configured budget.
 type containerKiller interface {
 	kill(containerID string) (bool, error)
+	// selfTest reports whether the kill mechanism is actually usable.
+	selfTest() error
 }
 
 // cgroupKiller searches the configured cgroup root and terminates the
@@ -59,6 +61,9 @@ type containerKiller interface {
 // successful.
 type cgroupKiller struct {
 	cgroupRoot string
+	// procSelfCgroup names this process's own cgroup, under which selfTest
+	// puts its scratch group. Overridable so tests need not be in one.
+	procSelfCgroup string
 	// waitTimeout caps how long we re-scan for the cgroup directory
 	// before giving up. kata-agent creates the cgroup and forks the
 	// init in quick succession after writing config.json, but
@@ -75,10 +80,63 @@ var _ containerKiller = (*cgroupKiller)(nil)
 
 func newCgroupKiller(root string) *cgroupKiller {
 	return &cgroupKiller{
-		cgroupRoot:   root,
-		waitTimeout:  2 * time.Second,
-		pollInterval: 50 * time.Millisecond,
+		cgroupRoot:     root,
+		procSelfCgroup: defaultProcSelfCgroup,
+		waitTimeout:    2 * time.Second,
+		pollInterval:   50 * time.Millisecond,
 	}
+}
+
+const (
+	// defaultProcSelfCgroup is where the kernel reports our own cgroup.
+	defaultProcSelfCgroup = "/proc/self/cgroup"
+
+	// selfTestCgroup is the scratch cgroup selfTest creates; the name makes a
+	// leftover after a hard kill obviously ours.
+	selfTestCgroup = "c8s-policy-monitor-selftest"
+)
+
+// selfTest exercises the real kill path once, at startup: create a scratch
+// cgroup, write its cgroup.kill (a no-op — a fresh cgroup holds no processes),
+// remove it. A read-only /sys/fs/cgroup fails here instead of silently at the
+// first denied container. Nesting the probe under our OWN cgroup is
+// load-bearing, not tidiness: the hierarchy root is mode 0555, so creating a
+// group there would need CAP_DAC_OVERRIDE, which the unit rightly withholds.
+// ProtectControlGroups=yes remounts /sys/fs/cgroup read-only inside this
+// unit's own mount namespace, so cgroup.kill returns EROFS while the guest
+// looks writable from anywhere else — a class of failure invisible without
+// this probe.
+func (c *cgroupKiller) selfTest() error {
+	own, err := ownCgroupPath(c.procSelfCgroup)
+	if err != nil {
+		return err
+	}
+	probe := filepath.Join(c.cgroupRoot, filepath.FromSlash(own), selfTestCgroup)
+	if err := os.Mkdir(probe, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("create probe cgroup %s: %w", probe, err)
+	}
+	defer func() { _ = os.Remove(probe) }()
+	if err := writeCgroupKill(probe); err != nil {
+		return fmt.Errorf("kill probe cgroup %s: %w", probe, err)
+	}
+	return nil
+}
+
+// ownCgroupPath returns this process's cgroup relative to the unified
+// hierarchy root, read from the "0::<path>" line of /proc/self/cgroup.
+func ownCgroupPath(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read own cgroup: %w", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		rel, ok := strings.CutPrefix(strings.TrimSpace(line), "0::")
+		if !ok {
+			continue
+		}
+		return strings.TrimPrefix(rel, "/"), nil
+	}
+	return "", fmt.Errorf("%s carries no cgroup v2 (0::) entry", path)
 }
 
 func (c *cgroupKiller) kill(containerID string) (bool, error) {

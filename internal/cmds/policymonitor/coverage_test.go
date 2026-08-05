@@ -237,22 +237,48 @@ func TestRunAllowlistRefresh_EmptyMeasurementsFailsClosed(t *testing.T) {
 }
 
 // --- monitor.kill paths ---------------------------------------------------
+// captureLogs lives in refreshstate_test.go.
 
 func TestMonitorKill_KillerError(t *testing.T) {
 	m, killer, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	killer.err = os.ErrPermission
+	buf := captureLogs(m)
 	m.kill("somecid")
 	if calls := killer.snapshot(); len(calls) != 1 {
 		t.Fatalf("expected one cgroup kill attempt, got %+v", calls)
+	}
+	// A denied container that survives its kill is a total bypass of the image
+	// policy, not a warning-grade hiccup.
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Errorf("failed kill logged at %s, want ERROR", buf.String())
 	}
 }
 
 func TestMonitorKill_CgroupNotFound(t *testing.T) {
 	m, killer, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	killer.ok = false
+	buf := captureLogs(m)
 	m.kill("somecid")
 	if calls := killer.snapshot(); len(calls) != 1 {
 		t.Fatalf("expected one cgroup lookup, got %+v", calls)
+	}
+	// "denied but never confirmed dead" is the same bypass — the cgroup that
+	// never materialised is indistinguishable from one we simply failed to find.
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Errorf("unconfirmed kill logged at %s, want ERROR", buf.String())
+	}
+}
+
+func TestMonitorKill_SuccessStaysInfo(t *testing.T) {
+	m, killer, _ := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	killer.ok = true
+	buf := captureLogs(m)
+	m.kill("somecid")
+	if strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Errorf("confirmed kill logged at ERROR: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"level":"INFO"`) {
+		t.Errorf("confirmed kill logged at %s, want INFO", buf.String())
 	}
 }
 
@@ -450,6 +476,38 @@ func TestRunMonitor_MissingAllowlist(t *testing.T) {
 	}
 }
 
+// A monitor whose cgroup hierarchy is not writable can decide but cannot
+// enforce. It must exit non-zero rather than run (and gate c8s-ready.target)
+// while silently enforcing nothing — the ProtectControlGroups=yes field bug.
+func TestRunMonitor_FailsWhenKillPathUnusable(t *testing.T) {
+	dir := t.TempDir()
+	allowlistPath := filepath.Join(dir, "allowlist.json")
+	body, _ := json.Marshal(bootstrapAllowlistFile{Sha256Digests: []string{"sha256:" + strings.Repeat("a", 64)}})
+	if err := os.WriteFile(allowlistPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		LogLevel:      "info",
+		AllowlistPath: allowlistPath,
+		WatchDir:      filepath.Join(dir, "watch"),
+		CgroupRoot:    t.TempDir(), // no cgroup.kill: the kill path cannot work
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := runMonitor(ctx, cfg)
+	if err == nil {
+		t.Fatal("runMonitor started with an unusable kill path")
+	}
+	if !strings.Contains(err.Error(), "kill-path self-test") {
+		t.Errorf("error = %v, want it to name the kill-path self-test", err)
+	}
+	// The self-test must gate startup, not just log: nothing should have been
+	// watched.
+	if _, statErr := os.Stat(cfg.WatchDir); !os.IsNotExist(statErr) {
+		t.Errorf("watch dir created despite a failed self-test: stat err = %v", statErr)
+	}
+}
+
 func TestRunMonitor_RunsAndStopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	allowlistPath := filepath.Join(dir, "allowlist.json")
@@ -461,7 +519,7 @@ func TestRunMonitor_RunsAndStopsOnContextCancel(t *testing.T) {
 		LogLevel:      "info",
 		AllowlistPath: allowlistPath,
 		WatchDir:      filepath.Join(dir, "watch"), // created by runMonitor
-		CgroupRoot:    t.TempDir(),
+		CgroupRoot:    writableCgroupRoot(t),
 		// CDSURL empty: stays baked-seed-only, never touches the network.
 	}
 	ctx, cancel := context.WithCancel(context.Background())

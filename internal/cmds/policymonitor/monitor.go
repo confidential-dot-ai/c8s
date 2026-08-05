@@ -97,6 +97,14 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		revalidateInterval: 10 * time.Second,
 	}
 
+	// A monitor that cannot write cgroup.kill enforces nothing, so refuse to
+	// come up rather than look healthy: c8s-ready.target Requires= this unit,
+	// so a failed exit keeps the guest from admitting workload containers.
+	if err := m.killer.selfTest(); err != nil {
+		return fmt.Errorf("kill-path self-test: %w", err)
+	}
+	logger.Info("kill-path self-test passed", "cgroup_root", cfg.CgroupRoot)
+
 	// Admission inventory (docs/ratls.md): the guest's sandbox identity, served
 	// to the in-guest get-cert on loopback. Always on — a guest always holds a
 	// pod that will ask, and gating it on configuration would let the untrusted
@@ -504,17 +512,19 @@ func (m *monitor) frozenAttrs() []any {
 	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
 }
 
-// kill resolves the container's cgroup and terminates it as a unit.
-// Best-effort: if the container has already exited, or its cgroup never
-// materialises within the budget, we log and move on.
+// kill resolves the container's cgroup and terminates it as a unit. Every
+// caller has already DENIED the container, so anything short of a confirmed
+// termination is a bypass of the image policy and logs at Error — including
+// the "cgroup never materialised" case, which is indistinguishable from a
+// container that exited on its own.
 func (m *monitor) kill(cid string) {
 	ok, err := m.killer.kill(cid)
 	if err != nil {
-		m.logger.Warn("kill cgroup failed", "cid", cid, "error", err)
+		m.logger.Error("kill cgroup failed: denied container was NOT terminated", "cid", cid, "error", err)
 		return
 	}
 	if !ok {
-		m.logger.Warn("container cgroup not found", "cid", cid)
+		m.logger.Error("denied container NOT confirmed terminated: cgroup never found or never populated", "cid", cid)
 		return
 	}
 	m.logger.Info("SIGKILLed container cgroup", "cid", cid)

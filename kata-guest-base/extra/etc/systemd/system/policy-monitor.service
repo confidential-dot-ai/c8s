@@ -65,14 +65,16 @@ ExecStart=/usr/local/bin/policy-monitor monitor
 CapabilityBoundingSet=CAP_KILL CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_KILL CAP_DAC_READ_SEARCH
 
-# Hardening — match the strictness of ratls-mesh's unit minus the
-# bits we don't need.
+# Hardening. ProtectControlGroups MUST stay `no`: enforcement is a write to
+# /sys/fs/cgroup/**/cgroup.kill, and `yes` remounts that hierarchy read-only in
+# this unit's own mount namespace — cgroup.kill returns EROFS while the guest
+# looks writable everywhere else. cgroupKiller.selfTest is the boot-time proof.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
+ProtectControlGroups=no
 # RestrictAddressFamilies keeps AF_UNIX (journald) and adds AF_INET/
 # AF_INET6 for the CDS allowlist refresh — policy-monitor pulls
 # CDS's /allowlist over RA-TLS (see cds_refresh.go). With no CDS URL
