@@ -445,7 +445,8 @@ fi
 # allow-all), the bootstrap allowlist, tmpfiles, and the cloud-init env
 # helper into the rootfs, then enable our units offline so they come up
 # at boot. We do NOT ship a kata-agent.service in the overlay — osbuilder
-# already installed and enabled the version-matched one.
+# already installed and enabled the version-matched one; the overlay only adds
+# a kata-agent.service.d/ drop-in, which needs no enabling.
 log "Step 3/5: overlaying c8s layer into the rootfs"
 sudo rsync -a "${EXTRA_DIR}/" "${TARGET_ROOTFS}/"
 

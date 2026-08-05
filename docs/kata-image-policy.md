@@ -82,38 +82,37 @@ reasons about are shown below; for the full boot/dependency graph
 in [`kata-guest-base.md`](kata-guest-base.md).
 
 ```
-local-fs.target ─→ policy-monitor.service       (orders only on
-                                                  local-fs.target; observes
-                                                  /run/kata-containers and
-                                                  acts on what it sees.
-                                                  c8s-ready.target
-                                                  Requires=+After= it —
-                                                  see kata-guest-base.md)
-
-(parallel) kata-agent.service
-           loads /etc/kata-opa/default-policy.rego
-           — a baked file on the dm-verity root. After=
-           network-online.target only.
+local-fs.target ─→ policy-monitor.service ─→ kata-agent.service
+                   (orders only on              (Requires=+After= the
+                    local-fs.target;             monitor; loads
+                    Type=notify: READY=1         /etc/kata-opa/default-policy.rego
+                    once the watch is            — a baked file on the
+                    installed and the seed       dm-verity root)
+                    pass has run)
 ```
 
 Key invariants:
 
 - **kata-agent's policy is the baked
   `/etc/kata-opa/default-policy.rego`**, a real file on the verity
-  root that's part of the launch measurement. It carries `default
-  SetPolicyRequest := false` plus upstream allow-all defaults for
-  every other RPC. It does NOT carry image-digest enforcement —
-  that's policy-monitor's job.
-- **policy-monitor gates readiness, but `Requires=` nothing itself.**
-  `c8s-ready.target` `Requires=` (and `After=`) policy-monitor.service,
-  so the guest does not reach readiness — and workload containers, which
-  `Requires=c8s-ready.target`, do not start — until the monitor is up and
-  its startup seed pass has run. That closes the window where containers
-  could run while digest enforcement is offline. The monitor itself
-  `Requires=` nothing (only `After=`/`Wants=` ordering for the optional
-  CDS refresh), so there is no bootstrap cycle: it enforces from t=0 on
-  the dm-verity-baked seed with no network. kata-agent doesn't reference
-  the monitor directly — the gate is pulled from c8s-ready.target's side.
+  root that's part of the launch measurement. It denies
+  `SetPolicyRequest`, denies the RPCs that reach into a running
+  container, and binds a `CreateContainerRequest` to the image it
+  names. It does NOT carry the digest allowlist — regorus has no
+  crypto builtins, so that half is policy-monitor's job.
+- **kata-agent gates on policy-monitor.** The drop-in
+  `kata-agent.service.d/10-c8s-policy-monitor.conf` adds
+  `Requires=`+`After=policy-monitor.service`, so a monitor that cannot
+  start keeps the agent from starting at all — no `CreateContainer`, no
+  bundle, no unenforced image. `Type=notify` makes the ordering resolve
+  on READY=1 (watch installed, seed pass run) rather than on a fork. The
+  monitor depends on nothing but the dm-verity root, which is what lets
+  it sit ahead of the agent without a cycle: it enforces from t=0 on the
+  baked seed with no network.
+- **A dead policy-monitor takes the guest with it.**
+  `FailureAction=`/`StartLimitAction=poweroff-force` fire once the
+  restart budget is spent. Ordering only covers startup; this is what
+  covers a monitor that dies while containers are running.
 - **`kata-agent.service` carries `FailureAction=poweroff`.** If
   kata-agent crashes after start, the VM shuts down rather than
   entering an ambiguous half-running state. kata-runtime sees the
@@ -182,8 +181,9 @@ of failure is invisible from outside the unit, policy-monitor now runs a
 **boot-time kill-path self-test** (`cgroupKiller.selfTest`): it creates a
 scratch cgroup under the configured cgroup root, writes its `cgroup.kill`, and
 removes it. On failure the process exits non-zero before installing the inotify
-watch, so `c8s-ready.target` never activates and no workload container is
-admitted. A policy-monitor that cannot kill must not look healthy.
+watch, so READY=1 is never sent, kata-agent's start job never resolves, and the
+poweroff action ends the guest. A policy-monitor that cannot kill must not look
+healthy.
 Correspondingly, a denied container whose kill errors — or which is never
 confirmed dead — is logged at **error**, not warning: it is a total bypass of
 the image policy, not a hiccup.

@@ -88,6 +88,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		overlay:   &policyOverlay{},
 		refresh:   &refreshState{reason: reasonNotYetStarted},
 		killer:    newCgroupKiller(cfg.CgroupRoot),
+		ready:     notifyReady,
 		// The bundle directory appears when the guest pull STARTS and
 		// config.json is written only once it finishes, so the wait is a
 		// registry fetch. configReadDeadline is just how long to poll
@@ -165,6 +166,8 @@ type monitor struct {
 	refresh               *refreshState  // whether the allowlist still tracks CDS
 	killer                containerKiller
 	inventory             *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
+	ready                 func() error        // systemd READY=1; nil outside the unit
+	readyOnce             sync.Once
 	configReadDeadline    time.Duration
 	configReadInterval    time.Duration
 	configPendingInterval time.Duration
@@ -282,6 +285,11 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 		m.logger.Warn("seed existing containers failed", "error", err)
 	}
 
+	// The watch is installed and the seed pass has dispatched, so every bundle
+	// kata-agent creates from here gets a decision. kata-agent's start job is
+	// waiting on this (see notify.go).
+	m.signalReady()
+
 	// Backstop for the event path below: if the Remove/Rename for the
 	// watch dir itself is dropped (e.g. inside a queue overflow), a
 	// periodic inode identity check still notices the swap.
@@ -376,6 +384,20 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			}
 		}
 	}
+}
+
+// signalReady notifies systemd once, on the first watch generation. A failed
+// notification leaves the unit un-started until TimeoutStartSec elapses, which
+// fails it and powers the guest off.
+func (m *monitor) signalReady() {
+	m.readyOnce.Do(func() {
+		if m.ready == nil {
+			return
+		}
+		if err := m.ready(); err != nil {
+			m.logger.Error("systemd readiness notification failed", "error", err)
+		}
+	})
 }
 
 // seedExisting walks the watch dir at startup and dispatches a
