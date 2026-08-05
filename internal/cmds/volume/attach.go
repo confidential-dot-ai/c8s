@@ -1,0 +1,325 @@
+package volume
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+)
+
+// Attaching a volume means presenting its image to the node as a block device
+// whose disk serial is c8s-vol-<name>, because that serial is the only thing
+// volumed matches on. How you get one depends on the hypervisor: a QEMU/KVM
+// node takes `-device virtio-blk,serial=...` and is done. Hyper-V has no virtio
+// bus at all, and a cloud disk's serial belongs to the provider, so there is
+// nothing to set. This drives LIO's loopback target instead — a local SCSI disk
+// whose unit serial (VPD page 0x80) is ours to choose.
+//
+// The serial is a selector, not a trust input: naming the wrong device fails
+// closed later, when the key does not decrypt it and verity refuses it.
+
+// DefaultConfigRoot is the configfs mount LIO is driven through.
+const DefaultConfigRoot = "/sys/kernel/config"
+
+// lioHBA is the fileio HBA every c8s backstore hangs off. Arbitrary but stable:
+// detach locates a backstore by this name.
+const lioHBA = "fileio_0"
+
+// lioTPGT is the one portal group per loopback target. Attach gives each volume
+// its own target, so a single group per target is all that is ever needed.
+const lioTPGT = "tpgt_1"
+
+// lioModules back the configfs tree below. Loaded before it is touched, since
+// on a node that has never served a volume none of it exists yet.
+var lioModules = []string{"target_core_mod", "target_core_file", "tcm_loop"}
+
+// ErrNotAttached is returned by Detach when the volume has no backstore.
+var ErrNotAttached = errors.New("volume: not attached")
+
+// Attacher presents volume images to the node as SCSI disks.
+type Attacher struct {
+	// Root is the configfs mount; empty means DefaultConfigRoot.
+	Root string
+	// Run loads the kernel modules; nil uses execRunner. Tests set it so the
+	// configfs orchestration is exercised without root or a real LIO stack.
+	Run Runner
+	// RemoveGroup removes one configfs group; nil uses os.Remove.
+	//
+	// configfs frees a group's attributes along with its directory, so rmdir on
+	// a group that still lists control/enable/wwn is correct there and is what
+	// production must issue. An ordinary directory does not behave that way,
+	// which is why the temp-dir fake substitutes os.RemoveAll.
+	RemoveGroup func(string) error
+}
+
+// Attach exposes image as a disk carrying the serial for name, and returns that
+// serial.
+//
+// Every step is unwound if a later one fails. A half-built target would occupy
+// the name while carrying no device, so the next attach would refuse and the
+// operator would have nothing to detach.
+func (a Attacher) Attach(ctx context.Context, name, image string) (serial string, err error) {
+	if err := ValidVolumeName(name); err != nil {
+		return "", err
+	}
+	image, size, err := checkImage(image)
+	if err != nil {
+		return "", err
+	}
+	if err := a.loadModules(ctx); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(a.targetRoot()); err != nil {
+		return "", fmt.Errorf("volume: %s is absent; is configfs mounted and the target stack loaded?: %w",
+			a.targetRoot(), err)
+	}
+
+	store := a.backstore(name)
+	if _, err := os.Stat(store); err == nil {
+		return "", fmt.Errorf("volume: %q is already attached; detach it first", name)
+	}
+
+	var undo []func()
+	defer func() {
+		if err == nil {
+			return
+		}
+		for i := len(undo) - 1; i >= 0; i-- {
+			undo[i]()
+		}
+	}()
+
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		return "", fmt.Errorf("volume: create backstore %s: %w", store, err)
+	}
+	undo = append(undo, func() { _ = a.rmGroup(store) })
+
+	if err := writeAttr(filepath.Join(store, "control"),
+		fmt.Sprintf("fd_dev_name=%s,fd_dev_size=%d", image, size)); err != nil {
+		return "", err
+	}
+	serial = SerialPrefix + name
+	// The kernel owns wwn/; MkdirAll is a no-op against real configfs and is
+	// what lets a temp-dir fake stand in for it under test.
+	if err := os.MkdirAll(filepath.Join(store, "wwn"), 0o755); err != nil {
+		return "", fmt.Errorf("volume: create %s/wwn: %w", store, err)
+	}
+	if err := writeAttr(filepath.Join(store, "wwn", "vpd_unit_serial"), serial); err != nil {
+		return "", err
+	}
+	if err := writeAttr(filepath.Join(store, "enable"), "1"); err != nil {
+		return "", err
+	}
+
+	wwn := loopbackWWN(name)
+	tpgt := a.tpgt(name)
+	if err := os.MkdirAll(tpgt, 0o755); err != nil {
+		return "", fmt.Errorf("volume: create loopback target %s: %w", tpgt, err)
+	}
+	undo = append(undo, func() { _ = a.rmGroup(tpgt); _ = a.rmGroup(filepath.Dir(tpgt)) })
+
+	// The nexus is what turns the target into a local initiator; without it the
+	// LUN below is exported to nobody and no disk appears.
+	if err := writeAttr(filepath.Join(tpgt, "nexus"), wwn); err != nil {
+		return "", err
+	}
+	lun := filepath.Join(tpgt, "lun", "lun_0")
+	if err := os.MkdirAll(lun, 0o755); err != nil {
+		return "", fmt.Errorf("volume: create lun %s: %w", lun, err)
+	}
+	undo = append(undo, func() { _ = a.rmGroup(lun) })
+
+	link := filepath.Join(lun, name)
+	if err := os.Symlink(store, link); err != nil {
+		return "", fmt.Errorf("volume: map %s into %s: %w", name, lun, err)
+	}
+	return serial, nil
+}
+
+// Detach unwinds what Attach built. It tolerates a partially-present tree so a
+// failed attach can always be cleaned up, and reports ErrNotAttached only when
+// there was no backstore to begin with.
+func (a Attacher) Detach(ctx context.Context, name string) error {
+	if err := ValidVolumeName(name); err != nil {
+		return err
+	}
+	store := a.backstore(name)
+	_, statErr := os.Stat(store)
+
+	tpgt := a.tpgt(name)
+	// LIO refuses to release a backstore while a LUN still references it, so the
+	// mapping goes first and the backstore last.
+	if entries, err := os.ReadDir(filepath.Join(tpgt, "lun", "lun_0")); err == nil {
+		for _, e := range entries {
+			_ = os.Remove(filepath.Join(tpgt, "lun", "lun_0", e.Name()))
+		}
+	}
+	_ = a.rmGroup(filepath.Join(tpgt, "lun", "lun_0"))
+	_ = a.rmGroup(tpgt)
+	_ = a.rmGroup(filepath.Dir(tpgt))
+
+	if statErr != nil {
+		return fmt.Errorf("%w: %q", ErrNotAttached, name)
+	}
+	// Best effort: some kernels refuse to un-enable a device, and the rmdir
+	// below is what actually releases it.
+	_ = writeAttr(filepath.Join(store, "enable"), "0")
+	if err := a.rmGroup(store); err != nil {
+		return fmt.Errorf("volume: remove backstore %s: %w", store, err)
+	}
+	return nil
+}
+
+func (a Attacher) rmGroup(path string) error {
+	if a.RemoveGroup != nil {
+		return a.RemoveGroup(path)
+	}
+	return os.Remove(path)
+}
+
+func (a Attacher) root() string {
+	if a.Root != "" {
+		return a.Root
+	}
+	return DefaultConfigRoot
+}
+
+func (a Attacher) targetRoot() string { return filepath.Join(a.root(), "target") }
+
+func (a Attacher) backstore(name string) string {
+	return filepath.Join(a.targetRoot(), "core", lioHBA, name)
+}
+
+func (a Attacher) tpgt(name string) string {
+	return filepath.Join(a.targetRoot(), "loopback", loopbackWWN(name), lioTPGT)
+}
+
+func (a Attacher) loadModules(ctx context.Context) error {
+	run := a.Run
+	if run == nil {
+		run = execRunner
+	}
+	for _, m := range lioModules {
+		if _, err := run(ctx, "modprobe", m); err != nil {
+			return fmt.Errorf("volume: load %s: %w", m, err)
+		}
+	}
+	return nil
+}
+
+// loopbackWWN derives a target name from the volume name, so detach can find
+// what attach built without keeping state on the node. The leading 5 is the
+// NAA IEEE-registered format LIO expects.
+func loopbackWWN(name string) string {
+	sum := sha256.Sum256([]byte(SerialPrefix + name))
+	return "naa.5" + hex.EncodeToString(sum[:])[:15]
+}
+
+// checkImage resolves the image and returns its size.
+//
+// A size that is not a whole number of verity blocks is a truncated or
+// corrupted copy. Attaching it would defer the failure to a verity error on
+// first read, which says nothing about what went wrong.
+func checkImage(image string) (string, int64, error) {
+	abs, err := filepath.Abs(image)
+	if err != nil {
+		return "", 0, fmt.Errorf("volume: resolve %s: %w", image, err)
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return "", 0, fmt.Errorf("volume: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", 0, fmt.Errorf("volume: %s is not a regular file", abs)
+	}
+	size := fi.Size()
+	if size == 0 || size%VerityBlockSize != 0 {
+		return "", 0, fmt.Errorf("volume: %s is %d bytes, not a whole number of %d-byte blocks; truncated copy?",
+			abs, size, VerityBlockSize)
+	}
+	return abs, size, nil
+}
+
+// writeAttr sets one configfs attribute.
+func writeAttr(path, value string) error {
+	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		return fmt.Errorf("volume: write %s: %w", path, err)
+	}
+	return nil
+}
+
+// newAttachCmd builds the command around a. Its Run and RemoveGroup are not
+// flags: tests set them so the command runs without root or a real LIO stack.
+func newAttachCmd(a Attacher) *cobra.Command {
+	var (
+		image  string
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "attach <name>",
+		Short: "Present a volume image to this node as a disk",
+		Long: `Expose --image as a block device whose disk serial is c8s-vol-<name>, which is
+what the node matches on to find a volume.
+
+Run this ON THE NODE holding the image, as root. It is only needed where the
+hypervisor cannot give you a disk with a serial of your choosing: a QEMU/KVM
+node can attach the image directly with virtio-blk and skip this entirely.
+Hyper-V exposes no virtio bus, and a cloud disk's serial is the provider's, so
+this drives LIO's loopback target to build a local SCSI disk instead.
+
+The image is ciphertext and this does not read it. Pointing a pod at the wrong
+device fails closed — the key will not decrypt it, and verity will refuse it.`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if image == "" {
+				return errors.New("--image is required")
+			}
+			serial, err := a.Attach(cmdCtx(cmd), args[0], image)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				fmt.Fprintf(cmd.OutOrStdout(), "{\"name\":%q,\"serial\":%q}\n", args[0], serial)
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "+ %s attached as a disk with serial %s\n", args[0], serial)
+			fmt.Fprintf(cmd.OutOrStdout(), "  confirm: grep -l %s /sys/block/*/device/vpd_pg80\n", serial)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&image, "image", "", "path on this node to the encrypted image (required)")
+	f.StringVar(&a.Root, "config-root", "", "configfs mount (default "+DefaultConfigRoot+")")
+	f.BoolVar(&asJSON, "json", false, "print the result as JSON")
+	return cmd
+}
+
+func newDetachCmd(a Attacher) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "detach <name>",
+		Short: "Remove a volume's disk from this node",
+		Long: `Unwind what 'attach' built for <name>.
+
+This removes the device, not the image: the ciphertext stays where it is, and
+the key stays in CDS. A volume still mounted into a running pod should be
+released by deleting that pod first — the node tears a mount down when the pod's
+cgroup goes away.`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.Detach(cmdCtx(cmd), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "+ %s detached\n", args[0])
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&a.Root, "config-root", "", "configfs mount (default "+DefaultConfigRoot+")")
+	return cmd
+}

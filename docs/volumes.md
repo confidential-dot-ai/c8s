@@ -84,7 +84,7 @@ The key is generated per volume and never taken from you. AES-XTS is
 deterministic, so re-encrypting a changed directory under a reused key would
 tell the host exactly which sectors changed between versions.
 
-`--name` is capped at 12 characters. The node selects the device by its virtio
+`--name` is capped at 12 characters. The node selects the device by its disk
 serial, `VIRTIO_BLK_ID_BYTES` is 20, and `c8s-vol-` takes eight; a thirteenth
 character is silently dropped, so two volumes would be indistinguishable to the
 node.
@@ -112,11 +112,26 @@ The image is ciphertext. Copy it to the node by any means, including through the
 untrusted host — that the host holds the bytes is the design premise, not a
 compromise of it.
 
-Attach it as a **raw block device** whose virtio serial is `c8s-vol-<name>`.
+Attach it as a **raw block device** whose disk serial is `c8s-vol-<name>`. The
+node reads that serial from `<dev>/serial` (virtio-blk) or from VPD page 0x80 at
+`<dev>/device/vpd_pg80` (SCSI), so either transport serves.
 
 A confos node has no persistent writable storage — the root overlay is
 reformatted on every boot — so a volume must be its own device rather than a
 file on the node's filesystem.
+
+How the device is produced depends on the hypervisor:
+
+| | |
+|---|---|
+| QEMU/KVM | `-device virtio-blk,drive=…,serial=c8s-vol-<name>` |
+| cannot set a serial | `c8s volume attach <name> --image <path>`, on the node, as root |
+
+Hyper-V exposes no virtio bus at all, and a cloud disk's serial belongs to the
+provider, so on those nodes there is nothing to set. `attach` drives LIO's
+loopback target instead — a local SCSI disk whose unit serial is ours to choose.
+`c8s volume detach <name>` removes it again, leaving the ciphertext and the key
+where they are.
 
 The serial is a **selector, not a trust input**. The host chooses it and answers
 the query per read. Pointing a pod at the wrong device fails closed: the wrong
