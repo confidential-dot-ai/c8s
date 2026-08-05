@@ -374,10 +374,20 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf /tmp/c8s-src
-          git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src
+          # Same exposure as the tools step: this clone and the module fetches
+          # behind `go install` cross the public internet under `set -e`.
+          for i in 1 2 3; do
+            git clone -q https://github.com/confidential-dot-ai/c8s.git /tmp/c8s-src && break
+            [ "$i" = 3 ] && { echo "::error::git clone failed after 3 attempts"; exit 1; }
+            echo "clone attempt $i failed, retrying in $((i * 5))s" >&2; rm -rf /tmp/c8s-src; sleep $((i * 5))
+          done
           git -C /tmp/c8s-src checkout -q "$c8sRef" || { echo "::error::bad c8s ref '$c8sRef': refusing to silently test main"; exit 1; }
           echo "c8s ref sha: $(git -C /tmp/c8s-src rev-parse HEAD)"
-          ( cd /tmp/c8s-src && go install ./cmd/c8s )
+          for i in 1 2 3; do
+            ( cd /tmp/c8s-src && go install ./cmd/c8s ) && break
+            [ "$i" = 3 ] && { echo "::error::go install failed after 3 attempts"; exit 1; }
+            echo "go install attempt $i failed, retrying in $((i * 5))s" >&2; sleep $((i * 5))
+          done
           # An unstamped build reports "dev", which is exactly why --image-tag
           # is passed explicitly at install rather than trusting build metadata.
           c8s --version || true
