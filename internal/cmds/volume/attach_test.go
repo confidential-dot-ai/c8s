@@ -45,7 +45,29 @@ func testAttacher(t *testing.T) Attacher {
 	t.Helper()
 	// RemoveAll stands in for configfs freeing a group's attributes with its
 	// directory, which plain rmdir on a temp dir will not do.
-	return Attacher{Root: fakeConfigfs(t), Run: noopModprobe, RemoveGroup: os.RemoveAll}
+	return Attacher{Root: fakeConfigfs(t), SysRoot: t.TempDir(), Run: noopModprobe, RemoveGroup: os.RemoveAll}
+}
+
+// scsiAddress is the "host:channel:target" LIO publishes for a portal group.
+const scsiAddress = "2:0:1"
+
+// attachedDisk adds what the kernel publishes once a target carries a disk: the
+// portal group's SCSI address, and the disk that address resolves to, held by
+// the named devices.
+func attachedDisk(t *testing.T, a Attacher, name string, holders ...string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(a.tpgt(name), "address"), []byte(scsiAddress+"\n"), 0o644); err != nil {
+		t.Fatalf("write address: %v", err)
+	}
+	dir := filepath.Join(a.SysRoot, "class", "scsi_device", scsiAddress+":0", "device", "block", "sdb", "holders")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir holders: %v", err)
+	}
+	for _, h := range holders {
+		if err := os.Mkdir(filepath.Join(dir, h), 0o755); err != nil {
+			t.Fatalf("mkdir holder %s: %v", h, err)
+		}
+	}
 }
 
 func TestAttachBuildsTheBackstoreAndMapsIt(t *testing.T) {
@@ -222,6 +244,49 @@ func TestDetachRemovesTheBackstoreAndTarget(t *testing.T) {
 	target := filepath.Join(a.Root, "target", "loopback", loopbackWWN("weights"))
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Errorf("loopback target survived detach: %v", err)
+	}
+}
+
+// The kernel unbinds a disk that is still open, leaving whatever held it mapping
+// a device that no longer exists — volumed's dm-crypt target, in practice.
+func TestDetachRefusesADiskSomethingHolds(t *testing.T) {
+	a := testAttacher(t)
+	if _, err := a.Attach(context.Background(), "weights", imageFile(t, 1)); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	attachedDisk(t, a, "weights", "dm-1")
+
+	err := a.Detach(context.Background(), "weights")
+	if !errors.Is(err, ErrInUse) {
+		t.Fatalf("detach = %v, want ErrInUse", err)
+	}
+	if !strings.Contains(err.Error(), "dm-1") {
+		t.Errorf("detach = %v, want it to name the holder", err)
+	}
+	// Refusing has to leave the volume usable, not half torn down.
+	store := filepath.Join(a.Root, "target", "core", lioHBA, "weights")
+	if _, err := os.Stat(store); err != nil {
+		t.Errorf("refused detach removed the backstore: %v", err)
+	}
+	if _, err := os.Stat(a.tpgt("weights")); err != nil {
+		t.Errorf("refused detach removed the portal group: %v", err)
+	}
+}
+
+// A disk nothing has opened detaches.
+func TestDetachRemovesADiskNothingHolds(t *testing.T) {
+	a := testAttacher(t)
+	if _, err := a.Attach(context.Background(), "weights", imageFile(t, 1)); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	attachedDisk(t, a, "weights")
+
+	if err := a.Detach(context.Background(), "weights"); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	store := filepath.Join(a.Root, "target", "core", lioHBA, "weights")
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Errorf("backstore survived detach: %v", err)
 	}
 }
 
