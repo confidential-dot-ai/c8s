@@ -3252,7 +3252,10 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 		t.Fatalf("operator services verbs = %v", got)
 	}
 	// No rendered Role/ClusterRole may grant any of these resources at all.
-	banned := []string{"confidentialworkloads/finalizers", "replicasets", "secrets", "configmaps", "nodes", "rolebindings"}
+	// nodes is granted — but only to CDS's node-reader, which keeps the
+	// sandbox-digests bound current from the live node list.
+	banned := []string{"confidentialworkloads/finalizers", "replicasets", "secrets", "configmaps", "rolebindings"}
+	var nodesGrantors []string
 	iterateManifests(t, out, func(doc []byte) bool {
 		var head docMeta
 		if err := sigsyaml.Unmarshal(doc, &head); err != nil || (head.Kind != "ClusterRole" && head.Kind != "Role") {
@@ -3270,9 +3273,15 @@ func TestChartOperatorRBACIsScoped(t *testing.T) {
 					t.Errorf("%s %s grants broad RBAC resource %q", head.Kind, head.Metadata.Name, resource)
 				}
 			}
+			if slices.Contains(rule.Resources, "nodes") {
+				nodesGrantors = append(nodesGrantors, head.Metadata.Name)
+			}
 		}
 		return false
 	})
+	if !slices.Equal(nodesGrantors, []string{"c8s-cds-node-reader"}) {
+		t.Fatalf("nodes granted to %v, want only c8s-cds-node-reader", nodesGrantors)
+	}
 }
 
 // operatorVerbsFor returns the verbs the ClusterRole grants on (apiGroup,
@@ -3286,6 +3295,47 @@ func operatorVerbsFor(role rbacv1.ClusterRole, apiGroup, resource string) []stri
 		}
 	}
 	return nil
+}
+
+// CDS derives the sandbox-digests dial bound from the live node list unless
+// cds.sandboxInventoryCIDRs pins it statically, so the node-reader role and
+// the API token exist only in the default mode — and the grant is read-only.
+func TestChartCDSNodeReaderRBAC(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var role rbacv1.ClusterRole
+	if !findDoc(t, out, "ClusterRole", "c8s-cds-node-reader", &role) {
+		t.Fatalf("default render missing the CDS node-reader ClusterRole\n%s", out)
+	}
+	if len(role.Rules) != 1 {
+		t.Fatalf("CDS node-reader rules = %v, want nodes only", role.Rules)
+	}
+	if got := operatorVerbsFor(role, "", "nodes"); !slices.Equal(got, []string{"get", "list", "watch"}) {
+		t.Fatalf("CDS nodes verbs = %v, want read-only [get list watch]", got)
+	}
+	var deploy appsv1.Deployment
+	if !findDoc(t, out, "Deployment", "c8s-cds", &deploy) {
+		t.Fatalf("render missing the CDS Deployment\n%s", out)
+	}
+	if am := deploy.Spec.Template.Spec.AutomountServiceAccountToken; am == nil || !*am {
+		t.Fatalf("lister mode must mount the CDS API token, got %v", am)
+	}
+
+	staticOut, err := helmTemplate(t, "--set-string", "cds.sandboxInventoryCIDRs[0]=10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("helm template static CIDRs: %v\n%s", err, staticOut)
+	}
+	if findDoc(t, staticOut, "ClusterRole", "c8s-cds-node-reader", &role) {
+		t.Fatalf("static CIDRs rendered the node-reader role\n%s", staticOut)
+	}
+	if !findDoc(t, staticOut, "Deployment", "c8s-cds", &deploy) {
+		t.Fatalf("render missing the CDS Deployment\n%s", staticOut)
+	}
+	if am := deploy.Spec.Template.Spec.AutomountServiceAccountToken; am == nil || *am {
+		t.Fatalf("static CIDRs must not mount the CDS API token, got %v", am)
+	}
 }
 
 func TestChartWebhookAddsCABundleRBAC(t *testing.T) {

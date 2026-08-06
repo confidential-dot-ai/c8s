@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -363,6 +365,143 @@ func TestRunRenewalModeFailsOnBadWatchSnapshot(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stat reload watch path") {
 		t.Fatalf("error = %v, want watch snapshot error", err)
 	}
+}
+
+// A CDS that refuses the first refusals times of asking and then issues, so a
+// test can watch get-cert recover on its own.
+func flakyCDS(t *testing.T, chain string, refusals int) (cdsURL, attURL string) {
+	t.Helper()
+
+	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		report := base64.StdEncoding.EncodeToString([]byte("fake-snp-report"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"platform": "snp",
+			"evidence": json.RawMessage(`{"attestation_report":"` + report + `"}`),
+		})
+	}))
+	t.Cleanup(att.Close)
+
+	var mu sync.Mutex
+	var asked int
+	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/authenticate":
+			mu.Lock()
+			asked++
+			refuse := asked <= refusals
+			mu.Unlock()
+			if refuse {
+				http.Error(w, `{"error":"csr_denied"}`, http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"challenge": base64.StdEncoding.EncodeToString([]byte("the-challenge")),
+			})
+		case "/attest":
+			_, _ = w.Write([]byte(chain))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(cds.Close)
+	return cds.URL, att.URL
+}
+
+// A workload is gated on the first certificate by c8s-cert-wait, so when the
+// initial request fails get-cert must keep asking on its own cadence. Pinning
+// RenewInterval to an hour means the certificate here can only have arrived via
+// the initial-retry backoff.
+func TestRenewLoopRetriesInitialCertBeforeRenewInterval(t *testing.T) {
+	dir := t.TempDir()
+	cdsURL, attURL := flakyCDS(t, testIssuedChainPEM(t), 2)
+
+	cfg := config{
+		CDSURL:                 cdsURL,
+		AttestationApiURL:      attURL,
+		SAN:                    "host.example.com",
+		OutPath:                filepath.Join(dir, "cert.pem"),
+		ContinueOnInitialError: true,
+		InitialRetryInterval:   5 * time.Millisecond,
+		RenewInterval:          time.Hour,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- renewLoop(ctx, cfg, plaintextCDSClient(cfg.CDSURL), false) }()
+
+	deadline := time.After(10 * time.Second)
+	for {
+		if _, err := os.Stat(cfg.OutPath); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("renewLoop returned early: %v", err)
+		case <-deadline:
+			t.Fatal("no certificate: get-cert waited out RenewInterval instead of retrying")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("renewLoop returned %v, want nil on shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("renewLoop did not shut down when the context was cancelled")
+	}
+}
+
+// Once the first certificate lands the cadence goes back to RenewInterval: the
+// backoff must not keep re-requesting for the life of the process.
+func TestRenewLoopStopsRetryingAfterFirstCert(t *testing.T) {
+	dir := t.TempDir()
+	cdsURL, attURL := flakyCDS(t, testIssuedChainPEM(t), 0)
+
+	cfg := config{
+		CDSURL:               cdsURL,
+		AttestationApiURL:    attURL,
+		SAN:                  "host.example.com",
+		OutPath:              filepath.Join(dir, "cert.pem"),
+		InitialRetryInterval: time.Millisecond,
+		RenewInterval:        time.Hour,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- renewLoop(ctx, cfg, plaintextCDSClient(cfg.CDSURL), false) }()
+
+	waitForFile(t, cfg.OutPath)
+	info, err := os.Stat(cfg.OutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // many backoff periods, no renewal tick
+	after, err := os.Stat(cfg.OutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(info.ModTime()) {
+		t.Fatal("certificate rewritten after the first success: the loop is still on the retry cadence")
+	}
+
+	cancel()
+	<-done
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	for range 2000 {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }
 
 // Drives the full renewal loop: a failing renewal tick, an unchanged watch

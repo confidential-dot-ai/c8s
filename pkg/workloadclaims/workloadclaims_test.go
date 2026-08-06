@@ -547,7 +547,7 @@ func TestInventoryHostsBoundsTheCallback(t *testing.T) {
 		}
 	}
 	// Empty contains nothing, so an unconfigured CDS dials nowhere.
-	if (InventoryHosts{}).Contains("10.0.0.7") {
+	if (CIDRHosts{}).Contains("10.0.0.7") {
 		t.Fatal("empty CIDR set accepted an address")
 	}
 	if _, err := ParseInventoryHosts([]string{"nonsense"}); err == nil {

@@ -371,7 +371,7 @@ That is what CDS's trust in the sandbox-token signing key rests on, because
 measurement cannot make the distinction: on node-CVM every pod shares the node's
 launch digest, so "attested TEE on an allowed measurement" is satisfied by every
 tenant. "Answers on `:1019` in the node's network namespace, at an address inside
-an operator-configured node CIDR" is not.
+the node bound" is not.
 
 Two things this rests on that attestation does not enforce:
 
@@ -423,10 +423,11 @@ get-cert forwards the envelope opaquely in the `/attest` request body
    dial target, and a wrong value simply yields a key the signature fails under.
 2. requires that host to be a routable unicast IP literal (no names — DNS would
    decide the destination after the check — and no loopback, link-local/IMDS,
-   multicast, or unspecified address) inside a CIDR the operator configured with
-   `--sandbox-inventory-cidr`. Unset means CDS refuses every request carrying a
-   sandbox token. A pod's IP is in the pod CIDR, so a workload cannot name
-   itself as its node's inventory.
+   multicast, or unspecified address) inside the node bound: the operator's
+   `--sandbox-inventory-cidr` CIDRs, or one host route per node derived live
+   from the cluster's node list when that is unset. With no known node
+   addresses CDS refuses every request carrying a sandbox token. A pod's IP is
+   in the pod CIDR, so a workload cannot name itself as its node's inventory.
 3. fetches the signing key from `https://<host>:1019/identity` over
    mutually-attested RA-TLS (`workloadclaims.DigestsClient.InventoryKey`,
    pinning the same measurement allowlist `/attest` uses and presenting CDS's
@@ -487,8 +488,8 @@ A self-signed RA-TLS peer can put any string in the extension and must never
 satisfy a pin.
 
 **Residual trust.** The key's provenance is "answered on `:1019` at an address
-inside a configured node CIDR, over RA-TLS on an allowed measurement". That
-narrows to a *node*, not to a process: anything able to bind that port on a node
+inside the node bound, over RA-TLS on an allowed measurement". That narrows to a
+*node*, not to a process: anything able to bind that port on a node
 — the inventory, or a privileged node DaemonSet — can sign for any sandbox that
 node admitted. Under kata each guest holds one pod, and the token's host selects
 which guest CDS asks, so a cross-guest forgery fails. Fleet-wide the residual is
@@ -543,9 +544,10 @@ injects under kata (and then injects no socket volume). Both endpoints are
 compiled in, so the flag selects a shape and never an address: a wrong setting
 fails closed against a port nothing serves.
 
-CDS must be able to reach every node and kata guest on `:1019`, and
-`cds.sandboxInventoryCIDRs` (`c8s install --node-cidr`) must cover those
-addresses — unset means CDS refuses any request carrying a sandbox token.
+CDS must be able to reach every node and kata guest on `:1019`, and the node
+bound must cover those addresses: `cds.sandboxInventoryCIDRs` (`c8s install
+--node-cidr`) when set, else one host route per node derived live from the node
+list — a node added later is covered without a CDS restart.
 
 An empty measurement allowlist does not disable any of this — it tracks the same
 posture `/attest` takes (see "What RA-TLS guarantees"): both ends still require
