@@ -1324,7 +1324,7 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 	if repo == "" {
 		return nil
 	}
-	if _, err := exec.LookPath("crane"); err != nil {
+	if !crane.Available() {
 		fmt.Fprintf(os.Stderr, "warning: cannot verify operator image %s:%s exists (crane not on PATH); a missing tag surfaces only as ImagePullBackOff after install\n", repo, tag)
 		return nil
 	}
@@ -1694,8 +1694,8 @@ func tagCouplingHint(repo, tag string) string {
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
 // registry digest (via crane) and appends the helm --set flags that pin it.
 func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
-	if _, err := exec.LookPath("crane"); err != nil {
-		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f: %w", err)
+	if !crane.Available() {
+		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f")
 	}
 	enabled, err := componentEnabledPredicate(ctx, chartPath, helmArgs)
 	if err != nil {

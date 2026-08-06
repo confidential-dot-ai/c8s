@@ -13,11 +13,19 @@ import (
 	"strings"
 )
 
+// Available reports whether the crane CLI is on PATH. Callers that can
+// degrade (warn and continue) branch on this; callers that cannot use
+// Require.
+func Available() bool {
+	_, err := exec.LookPath("crane")
+	return err == nil
+}
+
 // Require fails with actionable guidance when the crane CLI is not on PATH,
 // so a missing binary surfaces as an install hint rather than an opaque exec
 // error from the first crane call.
 func Require() error {
-	if _, err := exec.LookPath("crane"); err != nil {
+	if !Available() {
 		return fmt.Errorf("this command needs the 'crane' CLI on PATH (github.com/google/go-containerregistry); install it and retry")
 	}
 	return nil
