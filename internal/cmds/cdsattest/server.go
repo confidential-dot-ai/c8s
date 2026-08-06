@@ -353,50 +353,51 @@ func (s *Server) servingLeafDER() ([]byte, error) {
 }
 
 // handleReadyz gates readiness on the committed mesh identity, not the outer
-// serving leaf: with --expected-workload set, ready means the installed mesh
-// leaf carries a valid matched-workload stamp naming that workload, so ingress
-// never routes external traffic to a front door whose committed identity is
-// unnamed (initial deploy, or a post-foreign renewal). Absent, malformed, or
-// duplicate stamps fail closed. Without the flag, today's always-ready
-// behavior is kept.
+// serving leaf: with --expected-workload set, ready means the whole credential
+// the attestation endpoints would serve loads — leaf matching its private key,
+// leaf and issuing CA both inside their validity windows, chain to a configured
+// mesh CA — *and* that leaf carries a valid matched-workload stamp naming that
+// workload. So ingress never routes external traffic to a front door whose
+// committed identity is unusable or unnamed (initial deploy, or a post-foreign
+// renewal). Absent, malformed, or duplicate stamps fail closed. Without the
+// flag, today's always-ready behavior is kept.
+//
+// nginx proxies this endpoint from the public front door (location = /readyz),
+// so the 503 body carries a reason that is not configuration and the specifics
+// go to the log.
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	if s.cfg.ExpectedWorkload == "" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	notReady := func(reason string) {
+	notReady := func(reason string, detail ...any) {
+		s.log.Warn("readiness gate withholding traffic", append([]any{"reason", reason}, detail...)...)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintln(w, reason)
 	}
-	pemBytes, err := os.ReadFile(s.cfg.MeshIdentityCertFile)
+	// Exactly the load attest-pq/attest-lb do: reading and parsing the leaf
+	// alone would report ready on a credential those endpoints refuse — an
+	// expired leaf above all, which is what this gate exists to catch, since
+	// stamped leaves carry a short TTL (issuer.MaxNamedLeafTTL).
+	identity, err := loadMeshIdentity(s.cfg.MeshIdentityCertFile, s.cfg.MeshIdentityKeyFile, s.cfg.MeshIdentityCAFile)
 	if err != nil {
-		notReady("mesh identity leaf unreadable")
+		notReady("mesh identity credentials unusable", "error", err)
 		return
 	}
-	block, _ := pem.Decode(pemBytes)
-	if block == nil || block.Type != "CERTIFICATE" {
-		notReady("mesh identity leaf is not a PEM certificate")
-		return
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		notReady("mesh identity leaf unparseable")
-		return
-	}
-	workload, err := ratls.MatchedWorkloadFromCert(leaf)
-	if err != nil {
-		notReady("matched-workload stamp malformed")
-		return
-	}
-	if workload == nil {
+	workload, err := ratls.MatchedWorkloadFromCert(identity.leaf)
+	switch {
+	case err != nil:
+		notReady("matched-workload stamp malformed", "error", err)
+	case workload == nil:
 		notReady("mesh identity leaf carries no matched-workload stamp")
-		return
+	case workload.Name != s.cfg.ExpectedWorkload:
+		// Both names are this front door's configuration and this body is
+		// reachable from the public internet; name them only in the log.
+		notReady("mesh identity leaf is stamped for a different workload",
+			"stamped", workload.Name, "expected", s.cfg.ExpectedWorkload)
+	default:
+		w.WriteHeader(http.StatusOK)
 	}
-	if workload.Name != s.cfg.ExpectedWorkload {
-		notReady(fmt.Sprintf("mesh identity leaf is stamped for workload %q, expected %q", workload.Name, s.cfg.ExpectedWorkload))
-		return
-	}
-	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {

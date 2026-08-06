@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -237,10 +238,9 @@ func TestAttestLBWrongSizeNonce(t *testing.T) {
 	}
 }
 
-// writeStampedMeshIdentity mints a mesh identity whose leaf carries a
-// matched-workload stamp for name, using the same marshal helper CDS issuance
-// uses.
-func writeStampedMeshIdentity(t *testing.T, name string) testMeshIdentity {
+// matchedWorkloadExtension builds a matched-workload stamp for name with the
+// same marshal helper CDS issuance uses.
+func matchedWorkloadExtension(t *testing.T, name string) pkix.Extension {
 	t.Helper()
 	ext, err := ratls.MarshalMatchedWorkloadExtension(&ratls.MatchedWorkload{
 		Name:             name,
@@ -250,7 +250,14 @@ func writeStampedMeshIdentity(t *testing.T, name string) testMeshIdentity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return writeTestMeshIdentityWithLeafExtensions(t, ext)
+	return ext
+}
+
+// writeStampedMeshIdentity mints a mesh identity whose leaf carries a
+// matched-workload stamp for name.
+func writeStampedMeshIdentity(t *testing.T, name string) testMeshIdentity {
+	t.Helper()
+	return writeTestMeshIdentityWithLeafExtensions(t, matchedWorkloadExtension(t, name))
 }
 
 // pkixExtensionWithGarbage returns a matched-workload extension whose value
@@ -303,14 +310,19 @@ func TestReadyzGatesOnMatchedWorkloadStamp(t *testing.T) {
 		}
 	})
 
-	t.Run("wrong name is not ready", func(t *testing.T) {
+	t.Run("wrong name is not ready without naming either workload", func(t *testing.T) {
+		// nginx proxies /readyz from the public front door, so the body must
+		// not disclose the configured or the stamped workload name.
 		ts := newReadyzServer(t, writeStampedMeshIdentity(t, "other"), "web")
 		status, body := getReadyz(t, ts.URL)
 		if status != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503", status)
 		}
-		if !strings.Contains(body, `"other"`) || !strings.Contains(body, `"web"`) {
-			t.Fatalf("body = %q, want the mismatched names", body)
+		if !strings.Contains(body, "stamped for a different workload") {
+			t.Fatalf("body = %q, want a name-mismatch reason", body)
+		}
+		if strings.Contains(body, "other") || strings.Contains(body, "web") {
+			t.Fatalf("body = %q leaks a workload name", body)
 		}
 	})
 
@@ -344,4 +356,59 @@ func TestReadyzGatesOnMatchedWorkloadStamp(t *testing.T) {
 			t.Fatalf("status = %d, want 503", status)
 		}
 	})
+
+	// The gate must agree with the endpoints it fronts: a correctly stamped
+	// leaf that loadMeshIdentity refuses is not a servable front door, and
+	// reporting it ready routes traffic to a 503-ing attest-pq. The expiry case
+	// is the one that happens on its own — stamped leaves carry a short TTL
+	// (issuer.MaxNamedLeafTTL) and a stalled renewal walks straight into it.
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T) testMeshIdentity
+	}{
+		{
+			name: "expired stamped leaf",
+			mutate: func(t *testing.T) testMeshIdentity {
+				now := time.Now()
+				return writeTestMeshIdentityFull(t, now.Add(-2*time.Hour), now.Add(-time.Hour),
+					[]pkix.Extension{matchedWorkloadExtension(t, "web")})
+			},
+		},
+		{
+			name: "stamped leaf whose private key does not match",
+			mutate: func(t *testing.T) testMeshIdentity {
+				identity := writeStampedMeshIdentity(t, "web")
+				other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				otherDER, err := x509.MarshalECPrivateKey(other)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeTestPEM(t, identity.keyFile, "EC PRIVATE KEY", otherDER)
+				return identity
+			},
+		},
+		{
+			name: "stamped leaf under a foreign CA bundle",
+			mutate: func(t *testing.T) testMeshIdentity {
+				identity := writeStampedMeshIdentity(t, "web")
+				foreign := writeTestMeshIdentity(t)
+				writeTestPEM(t, identity.caFile, "CERTIFICATE", foreign.ca.Raw)
+				return identity
+			},
+		},
+	} {
+		t.Run(tc.name+" is not ready", func(t *testing.T) {
+			ts := newReadyzServer(t, tc.mutate(t), "web")
+			status, body := getReadyz(t, ts.URL)
+			if status != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503: %s", status, body)
+			}
+			if !strings.Contains(body, "unusable") {
+				t.Fatalf("body = %q, want an unusable-credential reason", body)
+			}
+		})
+	}
 }
