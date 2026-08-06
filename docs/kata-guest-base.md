@@ -306,7 +306,7 @@ reviewed commit.
 
 | Pin | Where | Covers |
 |---|---|---|
-| `KATA_VERSION` / `KATA_SRC_COMMIT` | `build.sh`, workflow env | osbuilder source (tag pinned to its commit) |
+| `KATA_VERSION` / `KATA_SRC_COMMIT` | `build.sh` (`KATA_VERSION` also workflow env) | osbuilder source (tag pinned to its commit) |
 | `KATA_STATIC_SHA256` | `scripts/ci/stage-kata-conf.sh` | guest-components, NVIDIA graft sources, GPU kernel |
 | `PAUSE_IMAGE_DIGEST` + `PAUSE_PINNED_VERSION` | `build.sh` | `/pause_bundle` |
 | `UBUNTU_BASE_DIGEST` | `build.sh` | osbuilder's rootfs-builder toolchain image |
@@ -325,7 +325,7 @@ Bump procedure:
   timestamp.
 - **runner upgrade**: update the `REPRO_*` versions with it.
 
-Re-resolve commands sit next to each pin.
+The `build.sh` pins carry a re-resolve command in a comment beside each.
 
 ## Releasing and pinning
 

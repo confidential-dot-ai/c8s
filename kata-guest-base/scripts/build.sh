@@ -84,11 +84,11 @@ KATA_VERSION="${KATA_VERSION:-3.30.0}"
 # sha256-pinned, so that download already can't drift.)
 KATA_SRC_COMMIT="${KATA_SRC_COMMIT:-86e5975ad6a20f091ed686e492672c70496d0400}"
 # Pause image baked at /pause_bundle (Step 3b); bumping moves root_hash. Re-resolve: skopeo inspect --format '{{.Digest}}' docker://registry.k8s.io/pause:<ver>
-PAUSE_IMAGE_DIGEST="${PAUSE_IMAGE_DIGEST:-sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a}"
+PAUSE_IMAGE_DIGEST="sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a"
 # The versions.yaml tag this digest was resolved for; Step 3b dies if the kata pin moves off it.
 PAUSE_PINNED_VERSION="3.10"
 # Base of osbuilder's rootfs-builder container; bumping moves root_hash. Re-resolve: skopeo inspect --format '{{.Digest}}' docker://docker.io/ubuntu:noble
-UBUNTU_BASE_DIGEST="${UBUNTU_BASE_DIGEST:-sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}"
+UBUNTU_BASE_DIGEST="sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea"
 # ext4, not erofs: kata 3.30.0's osbuilder only implements the dm-verity /
 # measured-rootfs path for ext4 (create_rootfs_image). Its erofs path
 # (create_erofs_rootfs_image) loop-attaches the image before creating it
@@ -117,7 +117,7 @@ FIXED_HASH_SEED="${FIXED_HASH_SEED:-d8d8d8d8-d8d8-d8d8-d8d8-d8d8d8d8d8d8}"
 # The deterministic re-lay (seal_and_assemble) runs mkfs.ext4 + veritysetup on
 # the HOST, so root_hash is reproducible only for a matching toolchain. The
 # versions found are recorded in manifest.json; set these to make a mismatch
-# fatal (the CI publish path should pin both).
+# fatal (the CI publish path pins both in kata-guest-base.yml).
 REPRO_E2FSPROGS_VERSION="${REPRO_E2FSPROGS_VERSION:-}"
 REPRO_CRYPTSETUP_VERSION="${REPRO_CRYPTSETUP_VERSION:-}"
 
@@ -330,6 +330,22 @@ if [[ ! -d "${OSBUILDER}" ]]; then
 fi
 echo "    osbuilder: ${OSBUILDER}"
 
+# Preflight the pause pin here (versions.yaml just became readable): failing before Step 2 saves the ~4-min osbuilder debootstrap on a kata bump.
+PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
+PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
+[[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
+[[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
+# Bytes come from the digest pin; a kata bump that moves externals.pause fails here until re-resolved.
+[[ "${PAUSE_VER}" == "${PAUSE_PINNED_VERSION}" ]] || die "kata versions.yaml pins pause ${PAUSE_VER} but PAUSE_IMAGE_DIGEST was resolved for ${PAUSE_PINNED_VERSION} — re-resolve the pin (top of this script)."
+
+# Pin osbuilder's rootfs-builder base structurally: rewrite its Dockerfile FROM (mutable ubuntu tag) to the digest, so a kata bump that reshapes the line dies here instead of silently unpinning.
+UBUNTU_DOCKERFILE="${OSBUILDER}/rootfs-builder/ubuntu/Dockerfile.in"
+if grep -qF 'FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@' "${UBUNTU_DOCKERFILE}"; then
+    sed -i 's|^FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@$|FROM ${IMAGE_REGISTRY}/ubuntu@'"${UBUNTU_BASE_DIGEST}"'|' "${UBUNTU_DOCKERFILE}"
+fi
+grep -qF "FROM \${IMAGE_REGISTRY}/ubuntu@${UBUNTU_BASE_DIGEST}" "${UBUNTU_DOCKERFILE}" \
+    || die "rootfs-builder Dockerfile.in FROM line is not the expected ubuntu tag form — kata ${KATA_SRC_COMMIT} moved; re-base the UBUNTU_BASE_DIGEST rewrite."
+
 # osbuilder writes the rootfs tree and the image under paths we control,
 # so the overlay can be injected between the two phases.
 ROOTFS_BUILD_DEST="${WORK_DIR}/rootfs"
@@ -429,9 +445,6 @@ if [[ -n "${ROOTFS_CACHE_TAR:-}" && -f "${ROOTFS_CACHE_TAR}" ]]; then
     sudo tar "${ROOTFS_TAR_FLAGS[@]}" -xpf "${ROOTFS_CACHE_TAR}" -C "${TARGET_ROOTFS}"
 else
     log "Step 2/5: building ${DISTRO} rootfs with osbuilder (kata-agent included)"
-    # osbuilder's `docker build` runs without --pull, so the retagged pinned digest wins over the Hub tag.
-    sudo docker pull "docker.io/library/ubuntu@${UBUNTU_BASE_DIGEST}"
-    sudo docker tag "docker.io/library/ubuntu@${UBUNTU_BASE_DIGEST}" "ubuntu:${OS_VERSION}"
     sudo make -C "${OSBUILDER}" \
         DISTRO="${DISTRO}" \
         OS_VERSION="${OS_VERSION}" \
@@ -495,15 +508,9 @@ done
 # The kata-agent reads /pause_bundle (config.json + rootfs) to start the
 # sandbox/pause container under guest-pull; it cannot pull the pause image.
 # We drop the bundle straight into the rootfs here so it's sealed into the
-# verity root (covered by the launch measurement) in Step 4. Version is
-# pinned from kata's own versions.yaml so the pause image tracks the kata
-# release. Same skopeo+umoci flow as kata's build-static-pause-image.sh.
-PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
-PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
-[[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
-[[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
-# Bytes come from the digest pin; a kata bump that moves externals.pause fails here until re-resolved.
-[[ "${PAUSE_VER}" == "${PAUSE_PINNED_VERSION}" ]] || die "kata versions.yaml pins pause ${PAUSE_VER} but PAUSE_IMAGE_DIGEST was resolved for ${PAUSE_PINNED_VERSION} — re-resolve the pin (top of this script)."
+# verity root (covered by the launch measurement) in Step 4. Bytes come
+# from PAUSE_IMAGE_DIGEST (the fetch-time preflight cross-checks it against
+# versions.yaml). Same skopeo+umoci flow as kata's build-static-pause-image.sh.
 log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER} @ ${PAUSE_IMAGE_DIGEST}) into the rootfs"
 rm -rf "${WORK_DIR}/pause-oci" "${WORK_DIR}/pause_bundle"
 skopeo copy "${PAUSE_REPO}@${PAUSE_IMAGE_DIGEST}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"

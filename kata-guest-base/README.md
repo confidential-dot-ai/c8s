@@ -108,13 +108,10 @@ shows up. For kernel version bumps see
 [base-images/rke2/README.md](https://github.com/confidential-dot-ai/base-images/blob/master/rke2/README.md)
 "Bumping versions".
 
-Every external input is pinned by immutable reference: kata source by
-commit, kata-static by sha256, the pause image and the rootfs-builder
-ubuntu base by digest, the apt archive by snapshot timestamp. Pins live
-at the top of `scripts/build.sh` with re-resolve commands beside each;
-moving any pin moves the verity root_hash. See
+Every external input is digest- or commit-pinned, and moving any pin
+moves the verity root_hash. See
 [`../docs/kata-guest-base.md`](../docs/kata-guest-base.md) "Component
-pins" for the bump procedure.
+pins" for the full list, locations, and bump procedure.
 
 ## How it's consumed in-cluster
 
