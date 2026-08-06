@@ -6636,3 +6636,30 @@ func TestChartKataRejectsHostVolumed(t *testing.T) {
 		t.Errorf("fail message %q should name volumed.enabled", msg)
 	}
 }
+
+// The host qemu wrapper needs one source of truth: the puller ConfigMap ships a
+// copy, and kata-guest-base scripts/ holds the canonical file because it lives
+// alongside the guest tooling it is coupled to. A silent drift would be a
+// launch-behaviour drift the launch measurement can't catch (the wrapper runs
+// on the host outside every attested boundary).
+func TestKataQemuWrapperCopiesMatch(t *testing.T) {
+	// Both paths are repo-relative; the chart test package sits under
+	// internal/helmchart, so climb two levels to reach the repo root.
+	const (
+		chart  = "c8s/files/scripts/kata-qemu-scratch-wrapper.sh"
+		source = "../../kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh"
+	)
+	chartBytes, err := os.ReadFile(chart)
+	if err != nil {
+		t.Fatalf("read %s: %v", chart, err)
+	}
+	sourceBytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	if !slices.Equal(chartBytes, sourceBytes) {
+		t.Fatalf("wrapper drift: %s and %s must be byte-identical\n"+
+			"the puller ConfigMap uses the chart copy; the guest-base tree is the source of truth\n"+
+			"fix: cp %s %s", chart, source, source, chart)
+	}
+}
