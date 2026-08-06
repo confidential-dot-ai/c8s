@@ -34,11 +34,14 @@ workload_input_for(id) := {
 		"options": [],
 		"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"container\"}"],
 	}],
-	"OCI": {"Annotations": {
-		"io.katacontainers.pkg.oci.container_type": "pod_container",
-		"io.kubernetes.cri.container-type": "container",
-		"io.kubernetes.cri.image-name": digest_ref,
-	}},
+	"OCI": {
+		"Annotations": {
+			"io.katacontainers.pkg.oci.container_type": "pod_container",
+			"io.kubernetes.cri.container-type": "container",
+			"io.kubernetes.cri.image-name": digest_ref,
+		},
+		"Mounts": [],
+	},
 }
 
 workload_input := workload_input_for(cid)
@@ -146,10 +149,13 @@ sandbox_input := {
 		"options": [],
 		"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"sandbox\"}"],
 	}],
-	"OCI": {"Annotations": {
-		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
-		"io.kubernetes.cri.container-type": "sandbox",
-	}},
+	"OCI": {
+		"Annotations": {
+			"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+			"io.kubernetes.cri.container-type": "sandbox",
+		},
+		"Mounts": [],
+	},
 }
 
 test_sandbox_allowed if {
@@ -182,6 +188,58 @@ test_sandbox_storage_shaped_like_a_rootfs_denied if {
 test_sandbox_storage_elsewhere_allowed if {
 	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x"}]}
 	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y"}]}
+}
+
+# --- mounts -------------------------------------------------------------
+#
+# The runtime rewrites every bind source it sends into a directory it manages,
+# so a source anywhere else is guest state the host is asking to hand a
+# container. Where a mount LANDS is not gated here — see the rule comment.
+
+honest_mounts := [
+	{"destination": "/proc", "source": "proc", "type_": "proc", "options": []},
+	{"destination": "/sys/fs/cgroup", "source": "cgroup", "type_": "cgroup", "options": []},
+	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": []},
+	{"destination": "/etc/resolv.conf", "source": "/run/kata-containers/shared/containers/pod-resolv.conf", "type_": "bind", "options": []},
+	{"destination": "/data", "source": "/run/kata-containers/sandbox/storage/aGk", "type_": "bind", "options": []},
+]
+
+with_mounts(ms) := object.union(workload_input, {"OCI": {"Mounts": ms}})
+
+bind_from(source) := {"destination": "/x", "source": source, "type_": "bind", "options": []}
+
+test_honest_mounts_allowed if {
+	CreateContainerRequest with input as with_mounts(honest_mounts)
+}
+
+test_mount_from_outside_the_sandbox_dirs_denied if {
+	every source in [
+		"/",
+		"/etc/c8s/bootstrap-allowlist.json",
+		"/run/c8s/ratls-mesh.env",
+		"/run/kata-containers/image",
+		"/run/kata-containers/other/rootfs",
+	] {
+		not CreateContainerRequest with input as with_mounts(array.concat(
+			honest_mounts,
+			[bind_from(source)],
+		))
+	}
+}
+
+test_mount_source_traversal_denied if {
+	not CreateContainerRequest with input as with_mounts(array.concat(
+		honest_mounts,
+		[bind_from("/run/kata-containers/sandbox/../../c8s/ratls-mesh.env")],
+	))
+}
+
+# Same names CopyFile has to keep working for.
+test_mount_allows_projected_volume_names if {
+	CreateContainerRequest with input as with_mounts(array.concat(
+		honest_mounts,
+		[bind_from("/run/kata-containers/shared/containers/pod-vol/..data")],
+	))
 }
 
 # --- CopyFile -----------------------------------------------------------

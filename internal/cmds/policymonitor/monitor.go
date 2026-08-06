@@ -481,7 +481,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// itself went away, or we are shutting down — nothing to decide.
 		if _, statErr := os.Lstat(configPath); statErr == nil {
 			m.logger.Warn("deny container: config.json present but unreadable/malformed", "cid", cid, "path", configPath, "error", err)
-			m.kill(ctx, dir)
+			m.deny(ctx, dir)
 			return
 		}
 		m.logger.Info("skip: bundle went away before config.json appeared", "cid", cid, "path", configPath, "error", err)
@@ -505,6 +505,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 
 	if kataspec.IsSandbox(spec.Annotations) {
 		m.logger.Info("allow sandbox (pause) container — measured via rootfs, not allowlisted", "cid", cid)
+		m.recordVerdict(dir, verdictAllow)
 		return
 	}
 
@@ -518,7 +519,7 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// policy was not in force.
 		m.logger.Warn("deny container: image reference is absent or not digest-pinned",
 			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey])
-		m.kill(ctx, dir)
+		m.deny(ctx, dir)
 		return
 	}
 
@@ -533,10 +534,20 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		if m.inventory != nil {
 			m.inventory.record(cid, digest, argv)
 		}
+		m.recordVerdict(dir, verdictAllow)
 		return
 	}
 	m.logger.Warn("deny container: digest/argv not allowlisted",
 		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
+	m.deny(ctx, dir)
+}
+
+// deny records the verdict, then kills. Order matters: the verdict is what
+// stops the container reaching execve, and kill retries until the cgroup is
+// confirmed empty — so writing it second would leave the agent free to start
+// the container while the kill is still being attempted.
+func (m *monitor) deny(ctx context.Context, dir string) {
+	m.recordVerdict(dir, verdictDeny)
 	m.kill(ctx, dir)
 }
 
