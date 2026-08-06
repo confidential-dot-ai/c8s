@@ -456,13 +456,34 @@ guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
 MRTD alone warns that they are unmeasured by that policy. To pin the whole
 image, pass `--image-manifest <file>` — a build-artifact manifest published
 with the guest image build, a JSON object carrying `mrtd`, `rtmr1` and
-`rtmr2` (96 lowercase hex chars each). The three registers are loaded
-atomically from that one provenanced manifest: MRTD joins the measurement
-allowlist and RTMR[1]/RTMR[2] are compared exactly. `--expected-rtmr3` can
-additionally pin the runtime register — the ordered operator-key/workload
-extend chain (`pkg/runtimemeasure`) — which is a deployment property, not a
-cluster identity. Supplying either flag against SEV-SNP evidence is a policy
-error, not an ignored option: SNP has no runtime measurement registers.
+`rtmr2` (96 lowercase hex chars each, each named once). The three registers
+are loaded atomically from that one provenanced manifest and all three are
+compared exactly, the same rule `c8s get-kubeconfig` applies to the same
+manifest — MRTD is deliberately not merged into the `--measurements`
+allowlist, since an allowlist is satisfied by any member and a launch digest
+from a different build would then pass alongside this manifest's
+RTMR[1]/RTMR[2]. `--expected-rtmr3` can additionally pin the runtime register
+— the ordered operator-key/workload extend chain (`pkg/runtimemeasure`) —
+which is a deployment property, not a cluster identity, and therefore
+requires `--image-manifest`: the untrusted host picks the guest image, so it
+can boot anything and reproduce that chain. Supplying either flag against
+SEV-SNP evidence is a policy error, not an ignored option: SNP has no runtime
+measurement registers.
+
+A TDX verdict pinned on MRTD alone is **rejected**, not warned about, when no
+CA anchor stands beside the measurements (no `--mesh-ca`, and no chain
+verified while gathering): the measurement pins are then the entire trust
+anchor, so an incomplete image policy leaves nothing behind the verdict.
+
+Certificate-sourced evidence must also carry an authenticated certificate
+body. A self-signed leaf authenticates its own body under the attested key; a
+CA-issued one does not, and `x509` parsing verifies no signature — so a
+CA-issued leaf is accepted only when its chain verifies against `--mesh-ca`,
+or when a live RA-TLS handshake proves the peer holds the attested key.
+Notably, `--mode discovery` fetches an unauthenticated public document over a
+connection that is not bound to the certificate inside it, so verifying a
+CA-issued discovery certificate requires `--mesh-ca` (the document publishes
+`cds_tls.mesh_ca_url`).
 
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable

@@ -719,19 +719,20 @@ func TestRenderOutcome(t *testing.T) {
 	measHex := "ab" + strings.Repeat("00", 47) // 48-byte launch digest
 	result := &teetypes.VerificationResult{SignatureValid: true, Claims: teetypes.Claims{LaunchDigest: measHex}}
 
-	pinnedPolicy := func(t *testing.T) *ratls.VerifyPolicy {
+	pinnedPlan := func(t *testing.T) *verifyPlan {
 		t.Helper()
 		m, err := ratls.ParseHexMeasurementsList([]string{measHex})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &ratls.VerifyPolicy{Measurements: m}
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: m}}
 	}
+	emptyPlan := func() *verifyPlan { return &verifyPlan{policy: &ratls.VerifyPolicy{}} }
 
 	t.Run("verified + pinned -> no UNSAFE warning", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, result, nil, pinnedPolicy(t))
+		oc := newOutcome(cfg, ev, result, nil, pinnedPlan(t))
 		render(cfg, oc, &out)
 		if !oc.Verified {
 			t.Fatalf("expected verified; oc=%+v", oc)
@@ -744,7 +745,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("unpinned warns UNSAFE", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		if !strings.Contains(out.String(), "UNSAFE") {
 			t.Errorf("expected UNSAFE warning when no measurements pinned: %s", out.String())
 		}
@@ -753,7 +754,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("json output", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "json"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		var oc Outcome
 		if err := json.Unmarshal(out.Bytes(), &oc); err != nil {
 			t.Fatalf("output is not valid JSON: %v", err)
@@ -766,7 +767,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("verdict error -> NOT VERIFIED", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, &ratls.VerifyPolicy{})
+		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, emptyPlan())
 		render(cfg, oc, &out)
 		if oc.Verified || !strings.Contains(out.String(), "NOT VERIFIED") {
 			t.Errorf("unexpected output: %s", out.String())
@@ -780,7 +781,7 @@ func TestRenderOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		oc := newOutcome(config{}, ev, result, nil, &ratls.VerifyPolicy{Measurements: other})
+		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: other}})
 		if oc.Verified || !strings.Contains(oc.Error, "not in --measurements allowlist") {
 			t.Errorf("expected allowlist rejection, got %+v", oc)
 		}
@@ -912,7 +913,7 @@ func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {
 	}))
 	defer lb.Close()
 
-	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, nil)
+	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if err != nil {
 		t.Fatalf("auto mode should reach the discovery doc, got: %v", err)
 	}
@@ -932,7 +933,7 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, nil)
+	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if !errors.Is(err, ratls.ErrNotAttested) {
 		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
 	}

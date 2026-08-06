@@ -73,12 +73,12 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err := os.WriteFile(path, []byte(measHex+"\n\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		policy, err := buildPolicy(config{measurementsFile: path})
+		plan, err := buildPolicy(config{measurementsFile: path})
 		if err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(policy.Measurements) != 1 || hex.EncodeToString(policy.Measurements[0]) != measHex {
-			t.Errorf("measurements = %v", policy.Measurements)
+		if len(plan.policy.Measurements) != 1 || hex.EncodeToString(plan.policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", plan.policy.Measurements)
 		}
 	})
 
@@ -280,7 +280,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 
 	t.Run("ratls-cert mode", func(t *testing.T) {
 		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
 			t.Fatalf("ratls-cert mode: %v", err)
 		}
@@ -303,7 +303,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 		}))
 		defer srv.Close()
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
 			t.Fatalf("attest-pq mode: %v", err)
 		}
@@ -321,7 +321,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			w.Write([]byte("not json"))
 		}))
 		defer srv.Close()
-		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, nil)
+		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err == nil || isSecurityError(err) {
 			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
 		}
