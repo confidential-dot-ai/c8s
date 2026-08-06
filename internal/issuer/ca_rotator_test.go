@@ -212,4 +212,3 @@ func TestCARotatorRotateCACommits(t *testing.T) {
 		t.Errorf("rotated CA not signed by parent: %v", err)
 	}
 }
-

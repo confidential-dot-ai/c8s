@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-
 )
 
 // A connection that never went through iptables REDIRECT has no

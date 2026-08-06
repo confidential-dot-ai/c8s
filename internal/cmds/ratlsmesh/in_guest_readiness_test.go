@@ -4,10 +4,10 @@ package ratlsmesh
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"strconv"
-	"errors"
 	"strings"
 	"syscall"
 	"testing"
