@@ -172,9 +172,9 @@ unavailable (unreachable / unparseable).`,
 	f.DurationVar(&cfg.timeout, "timeout", 15*time.Second, "per-attempt timeout (evidence fetch and AMD KDS collateral fetch)")
 	f.StringVar(&cfg.fromFile, "from-file", "", "verify evidence from a saved PEM certificate or attestation-response JSON instead of dialing")
 
-	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE). On TDX this pins MRTD only, which covers just the TDVF firmware — use --image-manifest to pin the whole guest image")
-	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
-	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. TDX evidence only — with SNP evidence this is a policy error")
+	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE). On TDX this pins MRTD only, which covers just the TDVF firmware — use --image-manifest to pin the whole guest image instead (the two are mutually exclusive: the manifest already pins MRTD exactly)")
+	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
+	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars — pins the runtime measurement register, i.e. the ordered operator-key/workload-event chain extended after boot (pkg/runtimemeasure). This is a deployment property, NOT a cluster identity, and cannot replace an image pin, so it requires --image-manifest. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
@@ -375,6 +375,20 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		}
 	}
 
+	// The launch-measurement allowlist and --image-manifest are alternatives,
+	// not complements. The manifest pins MRTD to exactly one value and that
+	// value is deliberately NOT unioned into the allowlist (see below), so an
+	// allowlist standing beside it can only restate the manifest's digest or
+	// exclude it — and the exclusion is a policy no guest can ever satisfy:
+	// every run fails on the MRTD compare, which reads like an attestation
+	// failure rather than the typo it is. Refuse the pair up front, before any
+	// file is read, so a contradictory invocation is a usage error here just as
+	// it already is in the client-side verifier.
+	if cfg.imageManifest != "" && (len(cfg.measurements) > 0 || cfg.measurementsFile != "") {
+		used := allowlistFlagsUsed(cfg)
+		return nil, fmt.Errorf("%s cannot be combined with --image-manifest: the manifest pins MRTD exactly (together with RTMR[1] and RTMR[2] from the same build), so a launch-measurement allowlist beside it can only narrow that single digest or contradict it, and a contradiction is a policy no guest can ever satisfy. To pin this image, drop %s; to accept several firmware images instead, drop --image-manifest — which also gives up its RTMR[1]/RTMR[2] guest kernel and rootfs pins", used, used)
+	}
+
 	hexes := append([]string{}, cfg.measurements...)
 	if cfg.measurementsFile != "" {
 		data, err := os.ReadFile(cfg.measurementsFile)
@@ -467,6 +481,19 @@ type rtmrPins struct {
 }
 
 func (p rtmrPins) any() bool { return p.image != nil || p.rtmr3 != nil }
+
+// allowlistFlagsUsed names the launch-measurement allowlist flags the operator
+// actually passed, so the --image-manifest conflict blames what was typed.
+func allowlistFlagsUsed(cfg config) string {
+	switch {
+	case len(cfg.measurements) > 0 && cfg.measurementsFile != "":
+		return "--measurements/--measurements-file"
+	case cfg.measurementsFile != "":
+		return "--measurements-file"
+	default:
+		return "--measurements"
+	}
+}
 
 // resolveRTMRPins parses --image-manifest and --expected-rtmr3. Called exactly
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
@@ -918,6 +945,10 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		// that merely appears somewhere in --measurements would let a launch
 		// digest from a different build satisfy the tuple. Same rule as
 		// getkubeconfig.checkMeasuredIdentity — one manifest, one meaning.
+		// buildPolicy now refuses a manifest and an allowlist in the same run,
+		// so the two compares below cannot both fire on a CLI-built plan; the
+		// exact compare stays exact anyway, because widening it is precisely
+		// the bypass this rule exists to close.
 		if plan.pins.image != nil && !bytes.Equal(mb, plan.pins.image.MRTD[:]) {
 			oc.Error = fmt.Sprintf("MRTD mismatch: launch measurement %s does not match the --image-manifest MRTD %s (a different guest firmware/image booted)",
 				launch, hex.EncodeToString(plan.pins.image.MRTD[:]))

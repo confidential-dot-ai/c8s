@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"context"
 	"crypto/x509"
 	"os"
 	"path/filepath"
@@ -81,24 +82,29 @@ func TestImageManifestPinVerifies(t *testing.T) {
 	}
 }
 
-// The manifest's MRTD is compared exactly, never unioned into --measurements.
-// An allowlist is satisfied by ANY member, so a launch digest from a different
-// build sitting in --measurements would otherwise pass while RTMR[1]/[2] were
-// pinned against this manifest — the tuple split the atomic load exists to
-// prevent, and the same rule get-kubeconfig applies to the same file.
+// The manifest's MRTD is compared exactly and is never unioned into the
+// --measurements allowlist. An allowlist is satisfied by ANY member, so a
+// launch digest from a different build sitting in --measurements would
+// otherwise pass while RTMR[1]/[2] were pinned against this manifest — the
+// tuple split the atomic load exists to prevent, and the same rule
+// get-kubeconfig applies to the same file.
+//
+// The CLI now refuses the two together outright (see
+// TestMeasurementsWithImageManifestIsAUsageError), so the second half of this
+// test drives a hand-built plan: widening the MRTD compare into the allowlist
+// is exactly the bypass that was closed, and it must stay closed however the
+// plan was assembled.
 func TestImageManifestMRTDIsNotWidenedByMeasurements(t *testing.T) {
 	otherLaunch := strings.Repeat("ee", 48)
-	cfg := config{imageManifest: writeTestManifest(t), measurements: []string{otherLaunch}}
+	cfg := config{imageManifest: writeTestManifest(t)}
 	plan := mustPlan(t, cfg)
 
-	for _, m := range plan.policy.Measurements {
-		if strings.EqualFold(string(m), testMRTD) {
-			t.Fatal("the manifest MRTD must not join the --measurements allowlist")
-		}
+	if len(plan.policy.Measurements) != 0 {
+		t.Fatalf("--image-manifest must contribute nothing to the allowlist, got %d entries", len(plan.policy.Measurements))
 	}
-	if len(plan.policy.Measurements) != 1 {
-		t.Fatalf("--measurements should carry only what the operator listed, got %d entries", len(plan.policy.Measurements))
-	}
+
+	// Graft an allowlist onto the manifest plan by hand.
+	plan.policy.Measurements = mustPlan(t, config{measurements: []string{otherLaunch}}).policy.Measurements
 
 	oc := newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(otherLaunch, matchingRTMRs()), nil, plan)
 	if oc.Verified {
@@ -108,11 +114,83 @@ func TestImageManifestMRTDIsNotWidenedByMeasurements(t *testing.T) {
 		t.Errorf("error = %q, want the MRTD mismatch", oc.Error)
 	}
 
-	// The allowlist still applies alongside the manifest — both, not either.
-	cfg2 := config{imageManifest: writeTestManifest(t), measurements: []string{otherLaunch}}
-	oc = newOutcome(cfg2, &evidence{platform: "tdx"}, tdxResult(testMRTD, matchingRTMRs()), nil, mustPlan(t, cfg2))
+	// And the manifest's own MRTD does not become an allowlist member either:
+	// the two pins are both enforced, never merged in either direction.
+	oc = newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(testMRTD, matchingRTMRs()), nil, plan)
 	if oc.Verified || !strings.Contains(oc.Error, "not in --measurements allowlist") {
 		t.Errorf("the MRTD must still satisfy an explicit --measurements allowlist: %+v", oc)
+	}
+}
+
+// --measurements and --image-manifest are alternatives, not complements. The
+// manifest pins MRTD to exactly one value, so an allowlist beside it either
+// restates that digest or contradicts it — and the contradiction is a policy no
+// guest can ever satisfy, turning every run into an "MRTD mismatch" that reads
+// like an attestation failure rather than the typo it is. The client-side
+// verifier refuses the same pair, so both tools must answer alike.
+func TestMeasurementsWithImageManifestIsAUsageError(t *testing.T) {
+	manifest := writeTestManifest(t)
+	measFile := filepath.Join(t.TempDir(), "measurements.txt")
+	if err := os.WriteFile(measFile, []byte(testMRTD+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		cfg  config
+		want string
+	}{
+		{"contradicting allowlist", config{imageManifest: manifest, measurements: []string{strings.Repeat("ee", 48)}},
+			"--measurements cannot be combined with --image-manifest"},
+		// Refused even when the allowlist agrees with the manifest: it can add
+		// nothing, and accepting the agreeing case would leave the operator to
+		// discover the contradicting one as a red verdict.
+		{"agreeing allowlist", config{imageManifest: manifest, measurements: []string{testMRTD}},
+			"--measurements cannot be combined with --image-manifest"},
+		{"--measurements-file", config{imageManifest: manifest, measurementsFile: measFile},
+			"--measurements-file cannot be combined with --image-manifest"},
+		{"both allowlist flags", config{imageManifest: manifest, measurements: []string{testMRTD}, measurementsFile: measFile},
+			"--measurements/--measurements-file cannot be combined with --image-manifest"},
+		// The pair is a flag contradiction, settled before any file is opened —
+		// so an unreadable allowlist file still reports the conflict.
+		{"conflict beats an unreadable allowlist file", config{imageManifest: manifest, measurementsFile: filepath.Join(t.TempDir(), "absent.txt")},
+			"cannot be combined with --image-manifest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildPolicy(tc.cfg)
+			if err == nil {
+				t.Fatal("the pair must be a usage error, not a policy no guest can satisfy")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+			// The message has to say what to do, not only what is refused.
+			for _, phrase := range []string{"pins MRTD exactly", "To pin this image, drop", "drop --image-manifest"} {
+				if !strings.Contains(err.Error(), phrase) {
+					t.Errorf("error = %q, want it to explain the way out (%q)", err, phrase)
+				}
+			}
+
+			// Usage class, not a verdict: exit 1, and nothing dialed.
+			var out, errOut strings.Builder
+			if code := run(context.Background(), tc.cfg, &out, &errOut); code != exitUsage {
+				t.Errorf("run code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+			}
+		})
+	}
+
+	// Each flag alone keeps working — this rejects a combination, not either
+	// way of pinning a launch measurement.
+	t.Run("--image-manifest alone", func(t *testing.T) {
+		plan := mustPlan(t, config{imageManifest: manifest})
+		if plan.pins.image == nil {
+			t.Error("--image-manifest alone must still resolve the image tuple")
+		}
+	})
+	for _, cfg := range []config{{measurements: []string{testMRTD}}, {measurementsFile: measFile}} {
+		if plan := mustPlan(t, cfg); len(plan.policy.Measurements) != 1 {
+			t.Errorf("%+v: an allowlist alone must still build, got %d entries", cfg, len(plan.policy.Measurements))
+		}
 	}
 }
 
@@ -167,8 +245,8 @@ func TestRTMRPinRejectsNonTDXPlatform(t *testing.T) {
 	snpLaunch := strings.Repeat("ab", 48)
 	manifest := writeTestManifest(t)
 	for _, cfg := range []config{
-		{imageManifest: manifest, measurements: []string{snpLaunch}},
-		{imageManifest: manifest, expectedRTMR3Hex: testRTMR3, measurements: []string{snpLaunch}},
+		{imageManifest: manifest},
+		{imageManifest: manifest, expectedRTMR3Hex: testRTMR3},
 	} {
 		result := &teetypes.VerificationResult{
 			SignatureValid: true,

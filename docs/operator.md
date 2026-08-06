@@ -462,12 +462,25 @@ compared exactly, the same rule `c8s get-kubeconfig` applies to the same
 manifest — MRTD is deliberately not merged into the `--measurements`
 allowlist, since an allowlist is satisfied by any member and a launch digest
 from a different build would then pass alongside this manifest's
-RTMR[1]/RTMR[2]. `--expected-rtmr3` can additionally pin the runtime register
-— the ordered operator-key/workload extend chain (`pkg/runtimemeasure`) —
-which is a deployment property, not a cluster identity, and therefore
-requires `--image-manifest`: the untrusted host picks the guest image, so it
-can boot anything and reproduce that chain. Supplying either flag against
-SEV-SNP evidence is a policy error, not an ignored option: SNP has no runtime
+RTMR[1]/RTMR[2].
+
+For that reason `--image-manifest` **replaces** the allowlist rather than
+combining with it: passing it together with `--measurements` or
+`--measurements-file` is a usage error (exit 1). The manifest already pins
+MRTD to exactly one value, so an allowlist beside it can only restate that
+digest or contradict it — and a contradiction builds a policy no guest can
+ever satisfy, failing every run with an `MRTD mismatch` that reads like an
+attestation failure rather than the typo it is. Pin this image and drop
+`--measurements`/`--measurements-file`; or, to accept several firmware
+images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
+rootfs pins with it.
+
+`--expected-rtmr3` can additionally pin the runtime register — the ordered
+operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
+deployment property, not a cluster identity, and therefore requires
+`--image-manifest`: the untrusted host picks the guest image, so it can boot
+anything and reproduce that chain. Supplying either flag against SEV-SNP
+evidence is a policy error, not an ignored option: SNP has no runtime
 measurement registers.
 
 A TDX verdict pinned on MRTD alone is **rejected**, not warned about, when no
