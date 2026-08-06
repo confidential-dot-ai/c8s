@@ -55,3 +55,23 @@ func ShutdownOnDone(ctx context.Context, srv *http.Server, timeout time.Duration
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
 }
+
+// CheckCDSPinned reports whether a sidecar may talk to CDS with the launch
+// measurements it was given.
+//
+// An empty set accepts any RA-TLS-attested CDS, so dropping the flag is enough
+// to point a sidecar at a CDS the host runs — and under kata the host writes
+// the argv. Refuse there. Outside kata "no pinning" is a supported development
+// shape (`c8s install --measurements` documents empty as UNSAFE), so it stays a
+// warning. Shared by get-cert, get-secret and get-volume: three copies of this
+// decision would be three chances to drift.
+func CheckCDSPinned(measurementCount int, insideGuest bool, warn string) error {
+	if measurementCount > 0 {
+		return nil
+	}
+	if insideGuest {
+		return errors.New("--measurements is empty: refusing to reach an unpinned CDS from inside a kata guest, where the host writes this argv")
+	}
+	slog.Warn(warn)
+	return nil
+}

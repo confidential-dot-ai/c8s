@@ -182,8 +182,9 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cds-measurements: %w", err)
 	}
-	if len(measurements) == 0 {
-		slog.Warn("--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement")
+	if err := cmdsutil.CheckCDSPinned(len(measurements), cfg.WorkloadClaimsGuest,
+		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
+		return nil, err
 	}
 
 	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)

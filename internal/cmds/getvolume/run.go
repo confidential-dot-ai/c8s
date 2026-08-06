@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
@@ -109,8 +110,9 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("--measurements: %w", err)
 	}
-	if len(measurements) == 0 {
-		slog.Warn("--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development.")
+	if err := cmdsutil.CheckCDSPinned(len(measurements), cfg.WorkloadClaimsGuest,
+		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
+		return err
 	}
 
 	if err := openWithRetry(ctx, cfg, func(ctx context.Context) error {
