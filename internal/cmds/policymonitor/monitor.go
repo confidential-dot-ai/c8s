@@ -655,10 +655,13 @@ func (m *monitor) readConfigJSON(ctx context.Context, dir string) (*ociSpec, err
 				return nil, err
 			}
 		default:
-			// Absent. A name that exists but does not resolve is something the
-			// host planted, not a file kata has yet to write.
-			if _, lerr := os.Lstat(path); lerr == nil {
-				return nil, fmt.Errorf("config.json exists but does not resolve to a readable file")
+			// Absent. A symlink here resolved to nothing, which is a name the
+			// host planted rather than a file kata has yet to write — the open
+			// returned ENOENT through the link, so it is dangling. Anything else
+			// Lstat can see is a regular config.json that kata created between
+			// the read above and this call; loop and read it.
+			if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("config.json is a symlink that does not resolve")
 			}
 			if _, derr := os.Stat(dir); derr != nil {
 				return nil, fmt.Errorf("bundle %s went away before config.json appeared: %w", dir, derr)

@@ -540,3 +540,39 @@ func TestRun_SurvivesWatchDirReplacement(t *testing.T) {
 		t.Fatalf("run returned err: %v", err)
 	}
 }
+
+// kata-agent creating config.json between readConfigJSON's open and its
+// follow-up Lstat must not read as a host-planted name. The loop below spins
+// the poll hot across the write so the window is hit repeatedly: treating any
+// Lstat-visible name as unresolvable denied a legitimate container here.
+func TestHandleNewContainer_ConfigAppearingDuringPollIsNotDenied(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for i := 0; i < 20; i++ {
+		m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+		m.configReadInterval = 50 * time.Microsecond
+
+		cid := testCID("poll-race")
+		dir := filepath.Join(watchDir, cid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(ociSpec{
+			Annotations: map[string]string{
+				"io.kubernetes.cri.container-type": "container",
+				"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644)
+		}()
+		m.handleNewContainer(context.Background(), dir)
+
+		if calls := killer.snapshot(); len(calls) != 0 {
+			t.Fatalf("iteration %d: denied a container whose config.json appeared mid-poll, got %+v", i, calls)
+		}
+	}
+}
