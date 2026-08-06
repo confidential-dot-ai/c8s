@@ -211,6 +211,12 @@ func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, grant *pk
 	}
 	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, OriginWorkload)
 	if err != nil {
+		if errors.Is(err, ErrExternal) {
+			// A vault-backed path exists by definition; withhold the value
+			// exactly like a lost create race, so the caller re-reads with GET.
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 		h.logger().Error("secret create failed", "path", path, "error", err)
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return

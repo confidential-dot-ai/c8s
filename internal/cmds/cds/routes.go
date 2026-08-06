@@ -30,8 +30,9 @@ type dependencies struct {
 	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
 	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
 	SecretsChallenges *attestation.ChallengeStore
-	SecretsOperator   *secrets.OperatorHandler // operator-supplied values; routed with SecretsHandler
-	SecretsExplain    *secrets.ExplainHandler  // release diagnostic; routed with SecretsHandler
+	SecretsOperator   *secrets.OperatorHandler       // operator-supplied values; routed with SecretsHandler
+	SecretsExplain    *secrets.ExplainHandler        // release diagnostic; routed with SecretsHandler
+	SecretsExternal   *secrets.ExternalConfigHandler // external-KMS config; routed with SecretsHandler
 }
 
 func newRouter(deps dependencies) http.Handler {
@@ -76,14 +77,19 @@ func newRouter(deps dependencies) http.Handler {
 	// token. PUT is the operator's, on allowlistWrite so it carries the same
 	// body-bound operator token an allowlist mutation does.
 	if deps.SecretsHandler != nil {
-		if deps.SecretsOperator == nil || deps.SecretsExplain == nil {
-			panic("cds: dependencies.SecretsOperator and SecretsExplain must be set alongside SecretsHandler")
+		if deps.SecretsOperator == nil || deps.SecretsExplain == nil || deps.SecretsExternal == nil {
+			panic("cds: dependencies.SecretsOperator, SecretsExplain and SecretsExternal must be set alongside SecretsHandler")
 		}
 		r.Method(http.MethodPost, secrets.ChallengeRoute, deps.perSandbox(attestation.HandleAuthenticate(deps.SecretsChallenges)))
 		r.Method(http.MethodGet, secrets.Route, deps.perSandbox(deps.SecretsHandler))
 		r.Method(http.MethodPost, secrets.Route, deps.perSandbox(deps.SecretsHandler))
 		r.Method(http.MethodPut, secrets.Route, deps.allowlistWrite(deps.SecretsOperator))
 		r.Method(http.MethodGet, secrets.ExplainRoute, deps.allowlistWrite(deps.SecretsExplain))
+		r.Method(http.MethodPut, secrets.ExternalRoute, deps.allowlistWrite(deps.SecretsExternal))
+		r.Method(http.MethodGet, secrets.ExternalRoute, deps.allowlistWrite(deps.SecretsExternal))
+		// POST too, so the wildcard below never sees the reserved path as a
+		// store path; the handler answers 405.
+		r.Method(http.MethodPost, secrets.ExternalRoute, deps.allowlistWrite(deps.SecretsExternal))
 	}
 
 	r.Get("/ca", handleCA(deps.CACertPEM))

@@ -190,7 +190,78 @@ keeps it until it is rolled. Replacing a path a workload created is worth
 pausing over for that reason: the pods that generated the value go on using it.
 
 Revoking a value means restarting CDS, which empties the whole store — see
-"Restarts".
+"Restarts". An externally-backed path is revoked at the KMS (delete or disable the
+secret, or cut the grant's access) and takes effect on the next fetch.
+
+## Externally-backed paths
+
+A store path can be backed by an external KMS instead of the CDS store: CDS
+fetches the value at release time and forwards it. The release gate is
+unchanged — mesh leaf, challenge, sandbox token, exact workload match, grant —
+and the workload side changes not at all. One backend is configured at a time;
+`azure-keyvault` is the supported backend, and the backend name is part of the
+config document so future backends share this interface.
+
+The operator connects the KMS over the same channel `put` uses:
+
+```sh
+c8s secrets external apply --url "$CDS" --measurements "$M" \
+  --operator-key operator.key -f external.json
+```
+
+```json
+{
+  "schema": "c8s.secrets-external/v1",
+  "backend": "azure-keyvault",
+  "credential": {"tenantId": "…", "clientId": "…", "clientSecret": "…"},
+  "mappings": {"/tenant-a/hf-token": {"vault": "https://v.vault.azure.net", "name": "hf-token"}}
+}
+```
+
+`apply` replaces the whole backend atomically; an empty document disconnects
+it. `c8s secrets external status` shows the mappings, whether a credential is
+live, and the last fetch per path — never the credential or a value.
+
+For `azure-keyvault`, the credential is an Entra app-registration client
+secret whose data-plane access should be the narrowest vault-scoped grant that
+covers the mapped secrets (`Key Vault Secrets User`, or an access policy with
+`secrets/get`). It reaches CDS over the attested channel and lives in CDS
+memory only — never in a Kubernetes resource. One app registration per trust
+boundary: the credential's RBAC scope is the blast radius if CDS is
+compromised, and the Entra tokens CDS caches are bearer material on the same
+footing.
+
+Semantics of a mapped path:
+
+- The KMS value's bytes are delivered **verbatim**. Encoding is part of the
+  KMS-side value contract — base64 a binary key in the vault if the workload
+  expects raw bytes. (This differs from `put`, where base64 is the wire
+  envelope CDS strips.)
+- The mapping is versionless: fetches resolve latest, so KMS-side rotation
+  takes effect on the next pod start.
+- Writes refuse: a workload `POST` gets the conflict response (no mint), and an
+  operator `put` is refused naming an external-KMS-backed value.
+- A fetch failure — KMS unreachable, secret missing, RBAC denial — is the
+  same opaque 500 as any store error; the sidecar retries. The reason is in
+  the CDS log and on `status`.
+- A mapping shadows any value the CDS store holds at the path; `status` lists
+  shadowed paths. Unmapping lets the stored value resurface.
+- `/external` itself is reserved for the config endpoint and cannot be a
+  store path.
+
+Restarts: the mapping set is persisted beside the allowlist database, so a
+restarted CDS fails mapped paths closed until the operator re-applies the
+credential — a mapped path never silently mints. That file is host-visible and
+unauthenticated: a host that deletes or rolls it back un-backs the paths (mint
+resumes) until re-apply, so the post-restart verify-and-re-apply runbook is the
+detector, not a prevention. Re-verify CDS
+(`c8s cds verify --operator-keys`) before re-applying: the operator key set is
+plumbed by Helm, not bound into CDS's attestation, and the cross-check is what
+detects a swapped set.
+
+CDS needs outbound 443 to the KMS endpoints — for Azure,
+`login.microsoftonline.com` and the vault host — with ordinary public-CA TLS
+over untrusted DNS. Global cloud only.
 
 ## Diagnosing a refusal
 
@@ -369,8 +440,9 @@ release decision.
 
 ## Restarts
 
-**A CDS restart destroys every secret, and requires rolling every workload that
-holds one.**
+**A CDS restart destroys every secret the CDS store holds, and requires rolling
+every workload that holds one.** Externally-backed paths are not in the store:
+they recover on re-apply — see "Externally-backed paths".
 
 The store is process memory and there is no persistence. Worse than losing it:
 a pod recreated after the restart calls `POST`, finds the path empty, and is

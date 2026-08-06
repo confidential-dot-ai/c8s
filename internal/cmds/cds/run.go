@@ -266,14 +266,30 @@ func run(cfg config) error {
 		secretsHandler  *secrets.Handler
 		secretsOperator *secrets.OperatorHandler
 		secretsExplain  *secrets.ExplainHandler
+		secretsExternal *secrets.ExternalConfigHandler
 	)
 	if enabled, why := secretsEnabled(cfg, sandboxDigests, inventoryHosts); enabled {
 		// One store behind both handlers: an operator write and a workload read
 		// are two doors onto the same paths.
 		store := secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxValueBytes)
+		// Externally-backed paths route around the memory store. The mapping
+		// set is persisted beside the allowlist DB (same durability class);
+		// the credential is memory-only and arrives over PUT /secrets/external.
+		externalMappings, externalPersist, err := secrets.LoadExternalMappings(cfg.allowlistDB)
+		if err != nil {
+			return err
+		}
+		externalBackend := secrets.NewExternalBackend(externalMappings, externalPersist, cfg.secretsMaxValueBytes)
+		routingStore := &secrets.RoutingStore{Mem: store, External: externalBackend}
+		if len(externalMappings) > 0 {
+			slog.Warn("external KMS mappings loaded without a credential: mapped paths fail closed until c8s secrets external apply re-arms them", "mappings", len(externalMappings))
+		}
+		if externalPersist == nil {
+			slog.Warn("--allowlist-db empty: external KMS mappings are not persisted, so a restart silently un-backs mapped paths until c8s secrets external apply re-runs")
+		}
 		policy := secrets.NewCachedPolicy(&allowlistStore)
 		secretsHandler = &secrets.Handler{
-			Store:          store,
+			Store:          routingStore,
 			Challenges:     &secretsChallenges,
 			Inventory:      sandboxDigests,
 			Bindings:       sandboxBindings,
@@ -282,7 +298,14 @@ func run(cfg config) error {
 			Logger:         slog.Default(),
 		}
 		secretsOperator = &secrets.OperatorHandler{
-			Store:        store,
+			Store:        routingStore,
+			Authorize:    writeAuthorizer,
+			MaxBodyBytes: allowlistWriteBodyCap,
+			Logger:       slog.Default(),
+		}
+		secretsExternal = &secrets.ExternalConfigHandler{
+			Backend:      externalBackend,
+			Mem:          store,
 			Authorize:    writeAuthorizer,
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Logger:       slog.Default(),
@@ -349,6 +372,7 @@ func run(cfg config) error {
 		SecretsChallenges: &secretsChallenges,
 		SecretsOperator:   secretsOperator,
 		SecretsExplain:    secretsExplain,
+		SecretsExternal:   secretsExternal,
 	}
 	if cfg.rotationInterval > 0 {
 		go rotator.Run(ctx)

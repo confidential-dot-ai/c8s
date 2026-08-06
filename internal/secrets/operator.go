@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -101,6 +102,10 @@ func (h OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h OperatorHandler) create(w http.ResponseWriter, r *http.Request, path string, value []byte) {
 	_, held, err := h.Store.PutIfAbsent(r.Context(), path, value, OriginOperator)
 	if err != nil {
+		if errors.Is(err, ErrExternal) {
+			writeResult(w, http.StatusConflict, PutResponse{Path: path, Existing: OriginExternal})
+			return
+		}
 		h.logger().Error("operator secret write failed", "path", path, "error", err)
 		http.Error(w, "secret write failed", http.StatusInternalServerError)
 		return
@@ -116,6 +121,10 @@ func (h OperatorHandler) create(w http.ResponseWriter, r *http.Request, path str
 func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path string, value []byte) {
 	held, err := h.Store.Put(r.Context(), path, value, OriginOperator)
 	if err != nil {
+		if errors.Is(err, ErrExternal) {
+			writeResult(w, http.StatusConflict, PutResponse{Path: path, Existing: OriginExternal})
+			return
+		}
 		h.logger().Error("operator secret write failed", "path", path, "error", err)
 		http.Error(w, "secret write failed", http.StatusInternalServerError)
 		return
@@ -133,11 +142,18 @@ func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path st
 // those exact bytes, so the token's body binding is checked against what the
 // handler goes on to decode.
 func (h OperatorHandler) authorize(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	if h.Authorize == nil {
+	return authorizeOperator(w, r, h.Authorize, h.MaxBodyBytes, h.logger(), "operator secret write")
+}
+
+// authorizeOperator is the shared authorization step for operator-facing
+// handlers: body under the cap first, then the token check against those
+// bytes. action names the operation in the rejection log line.
+func authorizeOperator(w http.ResponseWriter, r *http.Request, authorize func(*http.Request, []byte) error, maxBody int64, logger *slog.Logger, action string) ([]byte, bool) {
+	if authorize == nil {
 		http.Error(w, "operator writes are not configured", http.StatusUnauthorized)
 		return nil, false
 	}
-	cap := h.MaxBodyBytes
+	cap := maxBody
 	if cap <= 0 {
 		cap = DefaultMaxOperatorBodyBytes
 	}
@@ -145,8 +161,8 @@ func (h OperatorHandler) authorize(w http.ResponseWriter, r *http.Request) ([]by
 	if !ok {
 		return nil, false
 	}
-	if err := h.Authorize(r, body); err != nil {
-		h.logger().Warn("operator secret write rejected", "remote", r.RemoteAddr, "reason", err)
+	if err := authorize(r, body); err != nil {
+		logger.Warn(action+" rejected", "remote", r.RemoteAddr, "reason", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil, false
 	}
