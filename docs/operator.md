@@ -479,9 +479,19 @@ rootfs pins with it.
 operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
-anything and reproduce that chain. Supplying either flag against SEV-SNP
-evidence is a policy error, not an ignored option: SNP has no runtime
-measurement registers.
+anything and reproduce that chain. `--operator-pkey <file>` is the same pin
+without the arithmetic: point it at the operator **public** key PEM (the
+verbatim bytes the guest initrd hashed, as written by `openssl ec -pubout`)
+and `verify` derives the bare operator-key seed,
+`SHA-384(0x00*48 ‖ SHA-384(pubkey))`, itself. The two are mutually exclusive
+— one register, one expected value — and `--operator-pkey` carries the same
+`--image-manifest` requirement. Note its scope: it pins the **bare** seed,
+i.e. a node with no per-workload RTMR[3] extends on top. That is what every
+node reports today, because the workload measurer ships only inside the kata
+guest image; `c8s get-kubeconfig` is the command that also folds
+`--workload-image` extends into the expected register. Supplying any of these
+flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
+has no runtime measurement registers.
 
 A TDX verdict pinned on MRTD alone is **rejected**, not warned about, when no
 CA anchor stands beside the measurements (no `--mesh-ca`, and no chain

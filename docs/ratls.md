@@ -321,10 +321,11 @@ What it does **not** guarantee:
   not pinned on that path, and `MinTCBVersion` is dropped on the TDX path
   (GAPS). Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
-  `--measurements` rather than combining with it — and `--expected-rtmr3` the
-  runtime register (which requires the image pin — the host chooses the image,
-  so the runtime chain alone identifies nothing); `c8s get-kubeconfig` requires
-  the
+  `--measurements` rather than combining with it — and `--expected-rtmr3`
+  (or `--operator-pkey`, which derives the same value from the operator public
+  key) pins the runtime register, requiring the image pin because the host
+  chooses the image and the runtime chain alone identifies nothing;
+  `c8s get-kubeconfig` requires the
   full tuple plus the operator-key/workload RTMR[3] chain. `c8s verify` does
   not silently drop `--min-tcb-*` on TDX the way the mesh policy does: an
   SNP-shaped floor against TDX evidence is a policy failure naming the

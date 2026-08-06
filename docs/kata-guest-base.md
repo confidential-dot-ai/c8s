@@ -216,7 +216,11 @@ folded from the boot value (all zeros — or from the operator-key seed
 `ForOperatorKey` on nodes launched with one). Golden vectors in
 `pkg/runtimemeasure/runtimemeasure_test.go` freeze it; every verifier
 MUST build on `pkg/runtimemeasure`, never re-derive the convention
-(`c8s get-kubeconfig` and `c8s verify --expected-rtmr3` already do).
+(`c8s get-kubeconfig` and `c8s verify --operator-pkey` already do;
+`c8s verify --expected-rtmr3` takes the folded value directly). Note that
+`c8s verify --operator-pkey` pins the *bare* seed only — no per-workload
+extends — since `rtmr3-measurer` ships in this guest image, not on the node
+CVMs that command targets.
 
 **Dedup and restart safety.** RTMR[3] is hardware-append-only, so each
 DISTINCT image must extend exactly once: restarts and replicas (same

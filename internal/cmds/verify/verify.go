@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -91,6 +92,7 @@ type config struct {
 	measurementsFile string
 	imageManifest    string
 	expectedRTMR3Hex string
+	operatorPubkey   string
 	operatorKeys     string
 	sandboxID        string
 	workload         string
@@ -176,6 +178,7 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars — pins the runtime measurement register, i.e. the ordered operator-key/workload-event chain extended after boot (pkg/runtimemeasure). This is a deployment property, NOT a cluster identity, and cannot replace an image pin, so it requires --image-manifest. TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -414,11 +417,12 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}
 	// RTMR[3] is the runtime extend chain of a guest whose image the host
 	// chose. Without an image pin the host can boot anything and reproduce the
-	// chain, so a lone --expected-rtmr3 verdict reads like a proof of identity
-	// while proving none — the same reason get-kubeconfig makes the manifest
-	// mandatory.
+	// chain, so a lone RTMR[3] verdict reads like a proof of identity while
+	// proving none — the same reason get-kubeconfig makes the manifest
+	// mandatory. One check for both ways of supplying the pin: a second,
+	// parallel rule is a second place for the requirement to be forgotten.
 	if pins.rtmr3 != nil && pins.image == nil {
-		return nil, fmt.Errorf("--expected-rtmr3 requires --image-manifest: RTMR[3] records events extended into a guest whose image the untrusted host selects, so pinning it without pinning the image proves nothing about what is running")
+		return nil, fmt.Errorf("%s requires --image-manifest: RTMR[3] records events extended into a guest whose image the untrusted host selects, so pinning it without pinning the image proves nothing about what is running", rtmr3FlagUsed(cfg))
 	}
 
 	if _, err := expectedOperatorKeysDigest(cfg); err != nil {
@@ -473,8 +477,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 
 // rtmrPins are the TDX register pins resolved from the flags: the image tuple
 // (--image-manifest; MRTD, RTMR[1] and RTMR[2] all compare exactly) and the
-// optional runtime-register pin (--expected-rtmr3). Any non-nil pin against
-// non-TDX evidence is a policy error, never an ignored option.
+// optional runtime-register pin (--expected-rtmr3, or --operator-pkey, which
+// derives the same register from the operator public key). Any non-nil pin
+// against non-TDX evidence is a policy error, never an ignored option.
 type rtmrPins struct {
 	image *runtimemeasure.ImagePins
 	rtmr3 []byte
@@ -495,10 +500,25 @@ func allowlistFlagsUsed(cfg config) string {
 	}
 }
 
-// resolveRTMRPins parses --image-manifest and --expected-rtmr3. Called exactly
+// rtmr3FlagUsed names whichever flag supplied the RTMR[3] pin. Both feed one
+// slot, so the shared rules must be able to blame the right one.
+func rtmr3FlagUsed(cfg config) string {
+	if cfg.operatorPubkey != "" {
+		return "--operator-pkey"
+	}
+	return "--expected-rtmr3"
+}
+
+// resolveRTMRPins parses --image-manifest and the RTMR[3] pin. Called exactly
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
+	// Both RTMR[3] flags write one slot, so accepting both would silently let
+	// one win. The operator asking for two different expected values wants a
+	// verdict on neither.
+	if cfg.operatorPubkey != "" && cfg.expectedRTMR3Hex != "" {
+		return rtmrPins{}, fmt.Errorf("--operator-pkey and --expected-rtmr3 both pin RTMR[3]: pass the operator public key OR the precomputed register value, not both")
+	}
 	var pins rtmrPins
 	if cfg.imageManifest != "" {
 		img, err := runtimemeasure.LoadImageManifest(cfg.imageManifest)
@@ -518,7 +538,46 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		}
 		pins.rtmr3 = b
 	}
+	if cfg.operatorPubkey != "" {
+		pubPEM, err := os.ReadFile(cfg.operatorPubkey)
+		if err != nil {
+			return rtmrPins{}, fmt.Errorf("read --operator-pkey: %w", err)
+		}
+		if err := checkOperatorPublicKeyPEM(pubPEM); err != nil {
+			return rtmrPins{}, fmt.Errorf("--operator-pkey %s: %w", cfg.operatorPubkey, err)
+		}
+		// The seed is derived by the shared convention package, never
+		// recomputed here: the initrd, cred-release and get-kubeconfig all go
+		// through ForOperatorKey, and a second implementation of the same
+		// arithmetic is a second thing to drift. It hashes the file bytes
+		// verbatim — the check above only inspects them.
+		seed := runtimemeasure.ForOperatorKey(pubPEM)
+		pins.rtmr3 = seed[:]
+	}
 	return pins, nil
+}
+
+// checkOperatorPublicKeyPEM rejects a file that is not a PKIX public key before
+// its bytes become a register pin. ForOperatorKey hashes whatever it is given,
+// so any file yields some digest: without this check a mistyped path or a
+// private key handed over by mistake produces a pin no node can ever match, and
+// the resulting RTMR[3] mismatch would read like a compromised node rather than
+// a wrong file.
+func checkOperatorPublicKeyPEM(pemBytes []byte) error {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return fmt.Errorf("file is not PEM: expected a PKIX public key (\"-----BEGIN PUBLIC KEY-----\", as written by `openssl ec -pubout`)")
+	}
+	if strings.Contains(block.Type, "PRIVATE KEY") {
+		return fmt.Errorf("file holds a %q PEM block, but this flag takes the operator PUBLIC key — the exact bytes the guest initrd hashed; pass the `openssl ec -pubout` output instead", block.Type)
+	}
+	if block.Type != "PUBLIC KEY" {
+		return fmt.Errorf("PEM block type is %q, want \"PUBLIC KEY\" (a PKIX public key)", block.Type)
+	}
+	if _, err := x509.ParsePKIXPublicKey(block.Bytes); err != nil {
+		return fmt.Errorf("PEM block is not a parseable PKIX public key: %w", err)
+	}
+	return nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
@@ -926,7 +985,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
 	// register mismatch would obscure that the policy was inapplicable.
 	if plan.pins.any() && !isTDX(oc.Platform) {
-		oc.Error = fmt.Sprintf("an RTMR pin (--image-manifest / --expected-rtmr3) is set but the evidence platform is %q: runtime measurement registers exist only on TDX, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
+		oc.Error = fmt.Sprintf("an RTMR pin (--image-manifest / --expected-rtmr3 / --operator-pkey) is set but the evidence platform is %q: runtime measurement registers exist only on TDX, so this policy cannot be enforced against %q evidence", oc.Platform, oc.Platform)
 		return oc
 	}
 	if !enforceMinTCB(&oc, cfg, result) {
@@ -1043,8 +1102,8 @@ func isTDX(platform string) bool {
 	return ratls.NormalizePlatform(platform) == ratls.NormalizePlatform(string(teetypes.PlatformTDX))
 }
 
-// applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and --expected-rtmr3
-// pins on the verified claims, recording what was enforced in RTMRsPinned.
+// applyRTMRPins enforces the --image-manifest RTMR[1]/[2] and the RTMR[3] pin
+// on the verified claims, recording what was enforced in RTMRsPinned.
 // The pins come from the plan resolved once in buildPolicy, and newOutcome has
 // already gated the platform. Returns false (with oc.Error set) on an absent
 // or malformed claim, or a mismatch — never an ignored option.
