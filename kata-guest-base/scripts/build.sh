@@ -83,6 +83,21 @@ KATA_VERSION="${KATA_VERSION:-3.30.0}"
 # (The kata-static release asset in stage-kata-conf.sh is separately
 # sha256-pinned, so that download already can't drift.)
 KATA_SRC_COMMIT="${KATA_SRC_COMMIT:-86e5975ad6a20f091ed686e492672c70496d0400}"
+# Component-image digest pins: both are otherwise fetched by mutable tag and
+# feed the measured guest, so a registry-side re-point would silently move
+# root_hash. Bumping a pin moves root_hash — commit deliberately.
+#
+# Pause image baked at /pause_bundle (Step 3b). Repo/tag still come from
+# kata's versions.yaml; PAUSE_PINNED_VERSION is the tag this digest was
+# resolved for — Step 3b dies if versions.yaml moves off it. Re-resolve:
+#   skopeo inspect --format '{{.Digest}}' docker://registry.k8s.io/pause:<ver>
+PAUSE_IMAGE_DIGEST="${PAUSE_IMAGE_DIGEST:-sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a}"
+PAUSE_PINNED_VERSION="3.10"
+# Base of osbuilder's rootfs-builder container (`FROM docker.io/ubuntu:
+# <OS_VERSION>`) — the toolchain that runs mmdebstrap and builds the
+# kata-agent. Pre-pulled by digest + retagged in Step 2. Re-resolve:
+#   skopeo inspect --format '{{.Digest}}' docker://docker.io/ubuntu:noble
+UBUNTU_BASE_DIGEST="${UBUNTU_BASE_DIGEST:-sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}"
 # ext4, not erofs: kata 3.30.0's osbuilder only implements the dm-verity /
 # measured-rootfs path for ext4 (create_rootfs_image). Its erofs path
 # (create_erofs_rootfs_image) loop-attaches the image before creating it
@@ -104,7 +119,10 @@ OS_VERSION="${OS_VERSION:-noble}"
 # why: docs/kata-guest-base.md "Reproducible root_hash".
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"   # 2024-01-01T00:00:00Z
 VERITY_SALT="${VERITY_SALT:-c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8}"   # public; measured via the cmdline
-UBUNTU_REPO_URL="${UBUNTU_REPO_URL:-}"   # empty -> osbuilder's default archive
+# Time-pinned apt mirror for the guest debootstrap (the bulk of the measured
+# rootfs bytes); empty would mean archive.ubuntu.com, which drifts daily.
+# Bump to any recent snapshot timestamp — moves root_hash.
+UBUNTU_REPO_URL="${UBUNTU_REPO_URL:-https://snapshot.ubuntu.com/ubuntu/20260801T000000Z}"
 FIXED_FS_UUID="${FIXED_FS_UUID:-c8c8c8c8-c8c8-c8c8-c8c8-c8c8c8c8c8c8}"
 FIXED_HASH_SEED="${FIXED_HASH_SEED:-d8d8d8d8-d8d8-d8d8-d8d8-d8d8d8d8d8d8}"
 # The deterministic re-lay (seal_and_assemble) runs mkfs.ext4 + veritysetup on
@@ -422,6 +440,10 @@ if [[ -n "${ROOTFS_CACHE_TAR:-}" && -f "${ROOTFS_CACHE_TAR}" ]]; then
     sudo tar "${ROOTFS_TAR_FLAGS[@]}" -xpf "${ROOTFS_CACHE_TAR}" -C "${TARGET_ROOTFS}"
 else
     log "Step 2/5: building ${DISTRO} rootfs with osbuilder (kata-agent included)"
+    # osbuilder's `docker build` runs without --pull, so the retagged pinned
+    # digest wins over the mutable Hub tag.
+    sudo docker pull "docker.io/library/ubuntu@${UBUNTU_BASE_DIGEST}"
+    sudo docker tag "docker.io/library/ubuntu@${UBUNTU_BASE_DIGEST}" "ubuntu:${OS_VERSION}"
     sudo make -C "${OSBUILDER}" \
         DISTRO="${DISTRO}" \
         OS_VERSION="${OS_VERSION}" \
@@ -492,9 +514,12 @@ PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
 PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
 [[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
 [[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
-log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER}) into the rootfs"
+# Bytes come from the digest pin; the tag only names the OCI-layout ref. A
+# kata bump that moves externals.pause fails here until the pin is re-resolved.
+[[ "${PAUSE_VER}" == "${PAUSE_PINNED_VERSION}" ]] || die "kata versions.yaml pins pause ${PAUSE_VER} but PAUSE_IMAGE_DIGEST was resolved for ${PAUSE_PINNED_VERSION} — re-resolve the pin (top of this script)."
+log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER} @ ${PAUSE_IMAGE_DIGEST}) into the rootfs"
 rm -rf "${WORK_DIR}/pause-oci" "${WORK_DIR}/pause_bundle"
-skopeo copy "${PAUSE_REPO}:${PAUSE_VER}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
+skopeo copy "${PAUSE_REPO}@${PAUSE_IMAGE_DIGEST}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
 umoci unpack --rootless --image "${WORK_DIR}/pause-oci:${PAUSE_VER}" "${WORK_DIR}/pause_bundle"
 [[ -f "${WORK_DIR}/pause_bundle/config.json" ]] || die "umoci did not produce pause_bundle/config.json"
 # Reproducibility: umoci emits the OCI runtime config.json with mount `options`
