@@ -291,8 +291,7 @@ jobs:
       - name: Setup ORAS
         uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
         with:
-          # Explicit pin (= current action default) so an action bump can't
-          # silently change the oras that resolves the allowlist digests.
+          # Explicit pin so an action bump can't silently change the oras that resolves the allowlist digests.
           version: "1.2.3"
 
       # Log in to GHCR for the manifest-fetch step: authenticated reads
@@ -507,11 +506,7 @@ jobs:
           # an in-flight kernel change can still publish a branch-* image before
           # the snapshot is committed.
           CHECK_SNAPSHOT: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && '1' || '0' }}
-          # Re-lay toolchain gate: root_hash depends on the host
-          # e2fsprogs/cryptsetup. Values = the published artifact's
-          # relay_toolchain (what `the-machine` runs); a runner upgrade now
-          # fails preflight instead of silently shifting root_hash — update
-          # the pin with the upgrade, expecting a new measurement.
+          # Re-lay toolchain gate (values = published artifact's relay_toolchain): a runner upgrade fails preflight instead of silently shifting root_hash; re-pin on upgrade, expecting a new measurement.
           REPRO_E2FSPROGS_VERSION: "1.47.0"
           REPRO_CRYPTSETUP_VERSION: "2.7.0"
           # GPU variants are mandatory in CI. build.sh Step 6 grafts the
