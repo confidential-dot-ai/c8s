@@ -536,8 +536,9 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 }
 
 func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
-	// A config missing NodeIP makes provider creation fail; the goroutine
-	// must log and return rather than panic or retry.
+	// A config missing NodeIP makes provider creation fail; run must log and
+	// return rather than panic or retry. run is synchronous; a hang here is
+	// caught by the test binary timeout.
 	c := defaultInGuestConfig()
 	badCfg := &cdsclient.Config{
 		CDSURL:            "http://127.0.0.1:1",
@@ -545,14 +546,13 @@ func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
 		CDSCAURL:          "http://127.0.0.1:1",
 		// NodeIP intentionally missing.
 	}
-	done := make(chan struct{})
-	go func() {
-		runInGuestCDSUpgrade(context.Background(), testLogger(), &c, badCfg, nil, nil, testMetrics())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("runInGuestCDSUpgrade did not return on provider error")
-	}
+	cdsUpgrade{
+		logger:          testLogger(),
+		logPrefix:       "in-guest cds",
+		newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(badCfg, testLogger()) },
+		retryBackoff:    c.cdsRetryBackoff,
+		retryMaxBackoff: c.cdsRetryMaxBackoff,
+		opTimeout:       c.cdsOpTimeout,
+		metrics:         testMetrics(),
+	}.run(context.Background())
 }

@@ -1265,7 +1265,7 @@ func TestMutatePodAppliesZeroFSGroup(t *testing.T) {
 	}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage: "image",
-		CertFSGroup:  int64Ptr(0),
+		CertFSGroup:  ptr.To[int64](0),
 	})
 	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
 		t.Fatal("fsGroup 0 was not applied")

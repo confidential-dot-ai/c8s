@@ -172,7 +172,7 @@ func TestHandlerToleratesTokenClockSkew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
+	body, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestHandlerSigningFailureIsServerError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
+	body, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -333,7 +334,7 @@ func TestCraneDigestShellsOut(t *testing.T) {
 	t.Run("resolves the ref", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "crane", "echo "+testDigest)
-		got, err := craneDigest(context.Background(), "ghcr.io/x/app:v1")
+		got, err := crane.Digest(context.Background(), "ghcr.io/x/app:v1")
 		if err != nil || got != testDigest {
 			t.Fatalf("craneDigest = (%q, %v), want (%q, nil)", got, err, testDigest)
 		}
@@ -342,7 +343,7 @@ func TestCraneDigestShellsOut(t *testing.T) {
 	t.Run("failure carries crane stderr", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "crane", `echo "UNAUTHORIZED: bad creds" >&2; exit 1`)
-		_, err := craneDigest(context.Background(), "ghcr.io/x/app:v1")
+		_, err := crane.Digest(context.Background(), "ghcr.io/x/app:v1")
 		if err == nil || !strings.Contains(err.Error(), "UNAUTHORIZED: bad creds") {
 			t.Fatalf("want the registry stderr in the error, got %v", err)
 		}
@@ -350,7 +351,7 @@ func TestCraneDigestShellsOut(t *testing.T) {
 	t.Run("non-digest output is rejected", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "crane", "echo latest")
-		if _, err := craneDigest(context.Background(), "ghcr.io/x/app:v1"); err == nil {
+		if _, err := crane.Digest(context.Background(), "ghcr.io/x/app:v1"); err == nil {
 			t.Fatal("want error for a non-sha256 crane answer")
 		}
 	})
