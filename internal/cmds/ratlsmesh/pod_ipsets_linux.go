@@ -36,6 +36,37 @@ func iptablesIPSetOverflows() int64 {
 	return ipsetOverflows.Load()
 }
 
+// Membership levels for the last reconcile, plus a count of reconciles that
+// shrank the cw set. Absence from these sets is what silently removes
+// interception and the cw guard, so it has to be visible: a gauge alone cannot
+// distinguish "no cw pods on this node" from "the cw pods stopped being
+// reported", and the shrink counter separates them.
+var (
+	lastPodIPSetMembers atomic.Int64
+	lastCWIPSetMembers  atomic.Int64
+	cwIPSetShrinkages   atomic.Int64
+)
+
+func podIPSetMemberCount() int64 { return lastPodIPSetMembers.Load() }
+func cwIPSetMemberCount() int64  { return lastCWIPSetMembers.Load() }
+func cwIPSetShrinks() int64      { return cwIPSetShrinkages.Load() }
+
+// recordIPSetMembership publishes this reconcile's membership levels and counts
+// a cw set that came back smaller than the last one. The first reconcile has no
+// predecessor, so it establishes the level rather than counting a shrink.
+func recordIPSetMembership(logger *slog.Logger, podMembers, cwMembers int) {
+	lastPodIPSetMembers.Store(int64(podMembers))
+	prev := lastCWIPSetMembers.Swap(int64(cwMembers))
+	if prev > int64(cwMembers) {
+		cwIPSetShrinkages.Add(1)
+		// Warn, not Info: every IP that left the set is a confidential workload
+		// the guard no longer drops plaintext to. Routine on a scale-down,
+		// which is why this reports rather than acts.
+		logger.Warn("cw pod ipset shrank; those pods are no longer guarded",
+			"previous_members", prev, "members", cwMembers)
+	}
+}
+
 func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err := validatePort("--outbound-port", cfg.outboundPort); err != nil {
 		return err
@@ -271,6 +302,7 @@ func reconcilePodIPSets(store cache.Store, nodeIPs []string, excludedSourceNames
 			return nil, fmt.Errorf("sync %s: %w", spec.label, err)
 		}
 	}
+	recordIPSetMembership(logger, len(sets.allIPv4)+len(sets.allIPv6), len(sets.cwIPv4)+len(sets.cwIPv6))
 	logger.Debug("pod ipsets reconciled", "ipv4", len(sets.allIPv4), "ipv6", len(sets.allIPv6), "local_ipv4", len(sets.localIPv4), "local_ipv6", len(sets.localIPv6), "cw_ipv4", len(sets.cwIPv4), "cw_ipv6", len(sets.cwIPv6))
 	return append(append([]string{}, sets.cwIPv4...), sets.cwIPv6...), nil
 }

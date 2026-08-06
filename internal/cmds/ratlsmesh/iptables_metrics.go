@@ -25,6 +25,14 @@ type iptablesMetricsSnapshot struct {
 	JumpPositionCheckErrors int64 `json:"jump_position_check_errors"`
 	IPSetOverflows          int64 `json:"ipset_overflows"`
 	CWInboundDrops          int64 `json:"cw_inbound_drops"`
+	// Membership is what the guard and the interception rules key on, so a set
+	// that empties is enforcement that stopped without anything failing. The
+	// sizes make the level observable; CWIPSetShrinks makes the transition
+	// alertable, since a steady zero and a drop to zero read the same on a
+	// gauge scraped every 30s.
+	PodIPSetMembers int64 `json:"pod_ipset_members"`
+	CWIPSetMembers  int64 `json:"cw_ipset_members"`
+	CWIPSetShrinks  int64 `json:"cw_ipset_shrinks"`
 	// UpdatedAtUnixNano is the wall-clock time the sidecar wrote this
 	// snapshot, used by the proxy to expose a freshness gauge so a wedged
 	// iptables-sync (file not advancing) shows up as a stale-timestamp
@@ -51,6 +59,9 @@ func currentIptablesMetricsSnapshot() iptablesMetricsSnapshot {
 		JumpPositionCheckErrors: iptablesJumpPositionCheckErrors(),
 		IPSetOverflows:          iptablesIPSetOverflows(),
 		CWInboundDrops:          iptablesCWInboundDrops(),
+		PodIPSetMembers:         podIPSetMemberCount(),
+		CWIPSetMembers:          cwIPSetMemberCount(),
+		CWIPSetShrinks:          cwIPSetShrinks(),
 		UpdatedAtUnixNano:       time.Now().UnixNano(),
 	}
 }
