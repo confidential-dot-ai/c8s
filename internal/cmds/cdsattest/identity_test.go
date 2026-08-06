@@ -308,6 +308,12 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 			"binding=over-encryption",
 			"binding=unknown",
 			"pq=false&binding=tls-cert",
+			// Presence is the selector, not the value: an empty or bare
+			// parameter is still a client negotiating, and it must be told.
+			"pq=",
+			"pq",
+			"binding=",
+			"binding",
 		} {
 			resp, err := http.Get(ts.URL + "/.well-known/c8s" + path + "?nonce=" + b64url(make([]byte, 32)) + "&" + query)
 			if err != nil {

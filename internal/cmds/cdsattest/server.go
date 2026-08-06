@@ -172,11 +172,13 @@ func (s *Server) Handler() http.Handler {
 // client must get a loud 400, never something else than it expects.
 func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce []byte) {
 	q := r.URL.Query()
-	if q.Get("pq") != "" {
+	// Presence, not value: `?pq=` is still a client that thinks it selects a
+	// binding, and it must hear the 400 rather than be served silently.
+	if q.Has("pq") {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the pq query selector is gone: the endpoint path selects the binding")
 		return "", nil
 	}
-	if q.Get("binding") != "" {
+	if q.Has("binding") {
 		writeErr(w, http.StatusBadRequest, types.ErrorCodeInvalidRequest, "the attestation endpoints take no binding parameter")
 		return "", nil
 	}
