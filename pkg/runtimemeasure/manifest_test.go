@@ -24,9 +24,13 @@ func writeManifest(t *testing.T, content string) string {
 }
 
 func TestLoadImageManifestValid(t *testing.T) {
-	// Extra unknown fields are allowed: build manifests carry other data.
+	// Extra unknown fields are allowed: build manifests carry other data, and
+	// only the three register keys must be unambiguous — a repeated unknown
+	// key (and a nested object naming "mrtd") is none of this loader's
+	// business.
 	p := writeManifest(t, `{
-		"schema": 3, "artifacts": {"kernel": "deadbeef"},
+		"schema": 3, "schema": 4,
+		"artifacts": {"kernel": "deadbeef", "mrtd": "ignored", "mrtd": "ignored"},
 		"mrtd": "`+mrtdHex+`",
 		"rtmr1": "`+rtmr1Hex+`",
 		"rtmr2": "`+rtmr2Hex+`"
@@ -77,6 +81,18 @@ func TestLoadImageManifestRejects(t *testing.T) {
 			"want 96"},
 		{"wrong json type", `{"mrtd":7,"rtmr1":"` + rtmr1Hex + `","rtmr2":"` + rtmr2Hex + `"}`,
 			"not a JSON object"},
+		// encoding/json keeps the LAST value for a repeated key, so a
+		// duplicate lets the manifest load as a value other than the one it
+		// reads as. Each register must be named exactly once.
+		{"duplicate mrtd",
+			`{"mrtd":"` + mrtdHex + `","rtmr1":"` + rtmr1Hex + `","rtmr2":"` + rtmr2Hex + `","mrtd":"` + strings.Repeat("ff", Size) + `"}`,
+			`duplicate "mrtd"`},
+		{"duplicate rtmr1",
+			`{"mrtd":"` + mrtdHex + `","rtmr1":"` + rtmr1Hex + `","rtmr1":"` + rtmr1Hex + `","rtmr2":"` + rtmr2Hex + `"}`,
+			`duplicate "rtmr1"`},
+		{"duplicate rtmr2",
+			`{"mrtd":"` + mrtdHex + `","rtmr1":"` + rtmr1Hex + `","rtmr2":"` + rtmr2Hex + `","rtmr2":"` + rtmr2Hex + `"}`,
+			`duplicate "rtmr2"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadImageManifest(writeManifest(t, tc.content))

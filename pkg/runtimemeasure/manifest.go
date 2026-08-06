@@ -1,6 +1,7 @@
 package runtimemeasure
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,9 +31,10 @@ type imageManifest struct {
 
 // LoadImageManifest loads a TDX image pin — the MRTD + RTMR[1] + RTMR[2]
 // tuple — atomically from one provenanced build-artifact manifest. The file
-// must be a JSON object carrying all three fields ("mrtd", "rtmr1", "rtmr2"),
-// each exactly 96 lowercase hex chars; a missing or malformed field fails the
-// whole load, so a policy can never end up pinning part of an image. A
+// must be a JSON object carrying all three fields ("mrtd", "rtmr1", "rtmr2")
+// exactly once each, every one exactly 96 lowercase hex chars; a missing,
+// repeated or malformed field fails the whole load, so a policy can never end
+// up pinning part of an image, or a value other than the one it reads as. A
 // generic artifact-hash manifest.json (file digests of build outputs) is not
 // an image pin and is rejected by the same rule.
 func LoadImageManifest(path string) (ImagePins, error) {
@@ -44,6 +46,9 @@ func LoadImageManifest(path string) (ImagePins, error) {
 	var m imageManifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return pins, fmt.Errorf("image manifest %s is not a JSON object: %w", path, err)
+	}
+	if err := rejectDuplicateRegisters(data); err != nil {
+		return ImagePins{}, fmt.Errorf("image manifest %s: %w", path, err)
 	}
 	for _, f := range []struct {
 		name string
@@ -64,6 +69,48 @@ func LoadImageManifest(path string) (ImagePins, error) {
 		}
 	}
 	return pins, nil
+}
+
+// rejectDuplicateRegisters fails a manifest that names any of the three
+// register keys more than once. encoding/json silently keeps the LAST
+// occurrence, so {"mrtd":"<published>","mrtd":"<attacker>"} loads as one value
+// while a human (and any diff or signature-over-the-published-line review)
+// reads the other. Unknown extra fields stay tolerated — build manifests carry
+// plenty — but the three registers this pin is made of must be unambiguous.
+func rejectDuplicateRegisters(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil // not a JSON object; Unmarshal already reported the shape
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil
+	}
+	seen := make(map[string]bool, 3)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil
+		}
+		// Decode consumes the whole value, nested objects and arrays included,
+		// so the loop only ever sees top-level keys.
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil
+		}
+		switch key {
+		case "mrtd", "rtmr1", "rtmr2":
+			if seen[key] {
+				return fmt.Errorf("duplicate %q key — a register may be named only once, since JSON parsing would silently keep the last value", key)
+			}
+			seen[key] = true
+		}
+	}
+	return nil
 }
 
 // decodeRegister parses exactly 96 lowercase hex chars into a register value.
