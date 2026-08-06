@@ -247,8 +247,11 @@ func TestFetchWithRetryRecoversOnceReleased(t *testing.T) {
 	cfg.RetryInterval = time.Millisecond
 	cfg.Attempts = 5
 	pub := testKey(t)
-	values, err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) (map[string][]byte, error) {
-		return fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+	var values map[string][]byte
+	err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
+		var err error
+		values, err = fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("never released: %v", err)
@@ -273,9 +276,10 @@ func TestFetchWithRetryGivesUp(t *testing.T) {
 	cfg.Attempts = 2
 	pub := testKey(t)
 	attempts := 0
-	_, err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) (map[string][]byte, error) {
+	err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
 		attempts++
-		return fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+		_, err := fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+		return err
 	})
 	if err == nil {
 		t.Fatal("a permanently refused release reported success")

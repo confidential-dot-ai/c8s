@@ -13,12 +13,12 @@ func retryConfig() Config {
 
 func TestRetryRecoversOnceReleased(t *testing.T) {
 	var calls int
-	_, err := Retry(context.Background(), retryConfig(), "volume", func(context.Context) (struct{}, error) {
+	err := Retry(context.Background(), retryConfig(), "volume", func(context.Context) error {
 		calls++
 		if calls < 3 {
-			return struct{}{}, errNotYet
+			return errNotYet
 		}
-		return struct{}{}, nil
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("retry: %v", err)
@@ -31,9 +31,9 @@ func TestRetryRecoversOnceReleased(t *testing.T) {
 func TestRetryGivesUp(t *testing.T) {
 	cfg := retryConfig()
 	var calls int
-	_, err := Retry(context.Background(), cfg, "volume", func(context.Context) (struct{}, error) {
+	err := Retry(context.Background(), cfg, "volume", func(context.Context) error {
 		calls++
-		return struct{}{}, errNotYet
+		return errNotYet
 	})
 	if err == nil {
 		t.Fatal("retry never gave up")
@@ -46,8 +46,8 @@ func TestRetryGivesUp(t *testing.T) {
 func TestRetryStopsWhenTheContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := Retry(ctx, retryConfig(), "volume", func(context.Context) (struct{}, error) {
-		return struct{}{}, errNotYet
+	err := Retry(ctx, retryConfig(), "volume", func(context.Context) error {
+		return errNotYet
 	})
 	if err == nil {
 		t.Fatal("retry ignored a cancelled context")

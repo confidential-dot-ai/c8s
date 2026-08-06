@@ -74,8 +74,11 @@ func run(cfg config) error {
 		return err
 	}
 
-	values, err := sidecar.Retry(ctx, cfg.Config, "secret", func(ctx context.Context) (map[string][]byte, error) {
-		return fetchAll(ctx, cfg, measurements)
+	var values map[string][]byte
+	err = sidecar.Retry(ctx, cfg.Config, "secret", func(ctx context.Context) error {
+		var err error
+		values, err = fetchAll(ctx, cfg, measurements)
+		return err
 	})
 	if err != nil {
 		return err

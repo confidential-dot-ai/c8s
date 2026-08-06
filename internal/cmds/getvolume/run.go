@@ -79,8 +79,8 @@ func run(cfg config) error {
 		return err
 	}
 
-	if _, err := sidecar.Retry(ctx, cfg.Config, "volume", func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, openAll(ctx, cfg, measurements)
+	if err := sidecar.Retry(ctx, cfg.Config, "volume", func(ctx context.Context) error {
+		return openAll(ctx, cfg, measurements)
 	}); err != nil {
 		return err
 	}

@@ -96,15 +96,14 @@ func (c *Config) ParseMeasurements() ([][]byte, error) {
 // Retrying is expected, not exceptional: until every main container is running
 // the sandbox does not match its workload entry, so early attempts are denied
 // by design. The bound turns a genuinely stuck release into a visible failure
-// instead of an idle sidecar in a Running pod. what names the thing being
-// released ("secret", "volume") in the log lines.
-func Retry[T any](ctx context.Context, cfg Config, what string, attempt func(context.Context) (T, error)) (T, error) {
-	var zero T
+// instead of an idle sidecar in a Running pod. The what argument names the
+// thing being released ("secret", "volume") in the log lines.
+func Retry(ctx context.Context, cfg Config, what string, attempt func(context.Context) error) error {
 	var lastErr error
 	for n := 1; n <= cfg.Attempts; n++ {
-		v, err := attempt(ctx)
+		err := attempt(ctx)
 		if err == nil {
-			return v, nil
+			return nil
 		}
 		lastErr = err
 		if n == cfg.Attempts {
@@ -119,9 +118,9 @@ func Retry[T any](ctx context.Context, cfg Config, what string, attempt func(con
 			"attempt", n, "of", cfg.Attempts, "retry_in", cfg.RetryInterval, "error", err)
 		select {
 		case <-ctx.Done():
-			return zero, ctx.Err()
+			return ctx.Err()
 		case <-time.After(cfg.RetryInterval):
 		}
 	}
-	return zero, fmt.Errorf("giving up after %d attempts: %w", cfg.Attempts, lastErr)
+	return fmt.Errorf("giving up after %d attempts: %w", cfg.Attempts, lastErr)
 }
