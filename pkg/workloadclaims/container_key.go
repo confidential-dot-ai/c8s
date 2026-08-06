@@ -1,7 +1,9 @@
 package workloadclaims
 
 import (
+	"cmp"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -17,10 +19,7 @@ func (c SandboxContainer) Key() string {
 // digests endpoint serves, so identical sandboxes report identical
 // inventories.
 func (c SandboxContainer) Compare(o SandboxContainer) int {
-	if c.Digest != o.Digest {
-		return strings.Compare(c.Digest, o.Digest)
-	}
-	return strings.Compare(strings.Join(c.Argv, "\x1f"), strings.Join(o.Argv, "\x1f"))
+	return cmp.Or(strings.Compare(c.Digest, o.Digest), slices.Compare(c.Argv, o.Argv))
 }
 
 // ResolveAdvertiseHostForCDS is ResolveAdvertiseHost with the CDS endpoint
