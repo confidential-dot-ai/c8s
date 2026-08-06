@@ -461,3 +461,33 @@ func TestExplainSurfacesServerErrors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A put against an external-mapped path must fail loudly on BOTH the plain
+// and the --overwrite path: CDS refuses with Existing=external, and the CLI
+// must not print a success line for a write that never landed.
+func TestPutExternalPathRefusedLoudly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(intsecrets.PutResponse{Path: "/a", Existing: intsecrets.OriginExternal})
+	}))
+	t.Cleanup(srv.Close)
+	keyPath := writeOperatorKey(t)
+
+	for _, args := range [][]string{
+		{"put", "/a"},
+		{"put", "/a", "--overwrite"},
+	} {
+		args = append(args, "--url", srv.URL, "--insecure", "--operator-key", keyPath)
+		out, _, err := run(t, "dmFsdWU=", args...)
+		if err == nil {
+			t.Fatalf("%v: exited 0 for a refused write; stdout: %q", args, out)
+		}
+		if strings.Contains(out, "wrote") {
+			t.Fatalf("%v: printed a success line for a refused write: %q", args, out)
+		}
+		if !strings.Contains(err.Error(), "external KMS") {
+			t.Fatalf("%v: error %q does not name the external KMS", args, err)
+		}
+	}
+}
