@@ -65,6 +65,11 @@ type AttestHandler struct {
 	// token, since it could not be checked.
 	AllowlistStore policyStore
 
+	// PolicySnapshots memoizes that snapshot between allowlist writes, so the
+	// issuance path does not re-read and re-hash the whole document per
+	// request. nil loads afresh every time — same decision, more work.
+	PolicySnapshots *policySnapshotCache
+
 	// NamedCertTTL caps the TTL of a leaf that carries a matched-workload
 	// stamp — the documented stale-identity bound. It can only shorten
 	// issuer.MaxNamedLeafTTL, never raise it; zero means the ceiling itself.
@@ -376,7 +381,7 @@ func (h AttestHandler) resolveSandboxWorkload(ctx context.Context, sandbox workl
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox digests from %s: %w", sandbox.InventoryHost, err)
 	}
-	snapshot, err := loadPolicySnapshot(h.AllowlistStore)
+	snapshot, err := h.policySnapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -401,6 +406,15 @@ func (h AttestHandler) resolveSandboxWorkload(ctx context.Context, sandbox workl
 	}
 
 	return h.matchWorkload(snapshot, resp, membership, sandbox), nil
+}
+
+// policySnapshot returns the one immutable snapshot this issuance decides
+// against, memoized when the handler was given a cache.
+func (h AttestHandler) policySnapshot() (*PolicySnapshot, error) {
+	if h.PolicySnapshots == nil {
+		return loadPolicySnapshot(h.AllowlistStore)
+	}
+	return h.PolicySnapshots.snapshot(h.AllowlistStore)
 }
 
 // matchWorkload resolves the matched-workload stamp from an inventory answer
