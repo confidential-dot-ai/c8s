@@ -275,11 +275,10 @@ randomness:
   regardless of `SOURCE_DATE_EPOCH` (which only pins timestamps), and
   tune2fs can only reset the UUID, not the hash-seed; both live in the
   superblock that dm-verity hashes, so they are injected at mkfs time.
-- `UBUNTU_REPO_URL` — pins the apt archive; empty means osbuilder's
-  default `archive.ubuntu.com`, which drifts over time. Set it to
-  `https://snapshot.ubuntu.com/ubuntu/<YYYYMMDDTHHMMSSZ>` to time-pin
-  the base (old snapshots also need apt `Check-Valid-Until=false` in
-  osbuilder's mmdebstrap call).
+- `UBUNTU_REPO_URL` — the apt archive, defaulted in `build.sh` to a
+  committed `snapshot.ubuntu.com` timestamp so the guest packages don't
+  drift with build date. (Noble's snapshot Release files carry no
+  `Valid-Until`, so no apt override is needed.)
 
 Additionally, `image_builder.sh` populates the partition by mounting an
 empty ext4 and `cp -a`-ing files in, which leaves block allocation,
@@ -294,10 +293,39 @@ geometry.
 the build host, so the `root_hash` is reproducible only across builds
 using the same e2fsprogs and cryptsetup versions. The build records the
 versions it used in `manifest.json` (`relay_toolchain`) so a verifier
-knows exactly what to install; set `REPRO_E2FSPROGS_VERSION` /
-`REPRO_CRYPTSETUP_VERSION` to make a version mismatch fatal (the CI
-publish path should pin both). Running the re-lay inside a
-version-pinned container is the tracked longer-term fix.
+knows exactly what to install; `REPRO_E2FSPROGS_VERSION` /
+`REPRO_CRYPTSETUP_VERSION` make a version mismatch fatal (the CI
+publish path pins both in `kata-guest-base.yml`). Running the re-lay
+inside a version-pinned container is the tracked longer-term fix.
+
+## Component pins
+
+Every external input is pinned by immutable reference. Moving any pin
+moves `root_hash` and the launch measurement — bump deliberately, in a
+reviewed commit.
+
+| Pin | Where | Covers |
+|---|---|---|
+| `KATA_VERSION` / `KATA_SRC_COMMIT` | `build.sh`, workflow env | osbuilder source (tag pinned to its commit) |
+| `KATA_STATIC_SHA256` | `scripts/ci/stage-kata-conf.sh` | guest-components, NVIDIA graft sources, GPU kernel |
+| `PAUSE_IMAGE_DIGEST` + `PAUSE_PINNED_VERSION` | `build.sh` | `/pause_bundle` |
+| `UBUNTU_BASE_DIGEST` | `build.sh` | osbuilder's rootfs-builder toolchain image |
+| `UBUNTU_REPO_URL` (snapshot timestamp) | `build.sh` | guest apt packages |
+| `CONFOS_REF` | workflow env | guest kernel |
+| `REPRO_E2FSPROGS_VERSION` / `REPRO_CRYPTSETUP_VERSION` | workflow env | re-lay toolchain |
+| cds / get-cert / c8s-operator digests | resolved per build by `fetch.sh` | bootstrap allowlist |
+
+Bump procedure:
+
+- **kata bump** (`KATA_VERSION`): re-resolve `KATA_SRC_COMMIT`,
+  `KATA_STATIC_SHA256`, and the pause pin (`build.sh` dies if
+  `versions.yaml`'s pause version moved without it).
+- **periodic refresh** (security updates): re-resolve
+  `UBUNTU_BASE_DIGEST` and bump the `UBUNTU_REPO_URL` snapshot
+  timestamp.
+- **runner upgrade**: update the `REPRO_*` versions with it.
+
+Re-resolve commands sit next to each pin.
 
 ## Releasing and pinning
 
