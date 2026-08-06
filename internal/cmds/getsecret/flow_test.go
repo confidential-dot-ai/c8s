@@ -51,9 +51,7 @@ func startInventory(t *testing.T) {
 	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	prev := sidecar.InventoryEndpoint
-	sidecar.InventoryEndpoint = func() string { return "unix://" + sock }
-	t.Cleanup(func() { sidecar.InventoryEndpoint = prev })
+	sidecar.SetInventoryEndpointForTest(t, func() string { return "unix://" + sock })
 }
 
 // fakeCDS records what it was asked and answers from a scripted sequence.

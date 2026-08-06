@@ -43,9 +43,7 @@ func TestSecretResponseMustBeDecodable(t *testing.T) {
 // The inventory is where the sandbox token comes from; without it there is no
 // request to make.
 func TestUnreachableInventoryFails(t *testing.T) {
-	prev := sidecar.InventoryEndpoint
-	sidecar.InventoryEndpoint = func() string { return "unix://" + filepath.Join(t.TempDir(), "absent.sock") }
-	t.Cleanup(func() { sidecar.InventoryEndpoint = prev })
+	sidecar.SetInventoryEndpointForTest(t, func() string { return "unix://" + filepath.Join(t.TempDir(), "absent.sock") })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`))
