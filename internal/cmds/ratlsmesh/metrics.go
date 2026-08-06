@@ -45,6 +45,9 @@ type metrics struct {
 	iptablesJumpViolations   prometheus.Gauge
 	iptablesJumpCheckErrors  prometheus.Gauge
 	iptablesIPSetOverflows   prometheus.Gauge
+	iptablesPodIPSetMembers  prometheus.Gauge
+	iptablesCWIPSetMembers   prometheus.Gauge
+	iptablesCWIPSetShrinks   prometheus.Gauge
 	iptablesCWInboundDrops   prometheus.Gauge
 	iptablesMetricsTimestamp prometheus.Gauge
 	resolverCacheSize        prometheus.Gauge
@@ -134,6 +137,18 @@ func newMetrics() *metrics {
 		Name: "ratls_mesh_iptables_ipset_overflow_total",
 		Help: "Sidecar-reported reconcile cycles where pod count exceeded --ipset-maxelem.",
 	})
+	m.iptablesPodIPSetMembers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_pod_ipset_members",
+		Help: "Sidecar-reported pod IPs in the interception ipset (v4+v6). Interception is membership-driven, so a drop means those pods stopped being redirected through the proxy.",
+	})
+	m.iptablesCWIPSetMembers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_cw_ipset_members",
+		Help: "Sidecar-reported confidential-workload pod IPs in the cw guard ipset (v4+v6). The guard only drops plaintext to addresses in this set, so a drop to zero is enforcement off, not quiet.",
+	})
+	m.iptablesCWIPSetShrinks = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_cw_ipset_shrink_total",
+		Help: "Sidecar-reported reconciles where the cw ipset came back smaller than the previous one. Expected on a scale-down; unexplained increments mean cw pods stopped being reported by the Kubernetes API.",
+	})
 	m.iptablesCWInboundDrops = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_cw_inbound_drops_total",
 		Help: "Sidecar-reported packets dropped by the cw guard chain: non-mesh traffic that tried to reach a confidential-workload pod (Service VIP bypass, excluded-namespace or direct-to-pod-IP dials).",
@@ -209,6 +224,9 @@ func newMetrics() *metrics {
 		m.iptablesJumpViolations,
 		m.iptablesJumpCheckErrors,
 		m.iptablesIPSetOverflows,
+		m.iptablesPodIPSetMembers,
+		m.iptablesCWIPSetMembers,
+		m.iptablesCWIPSetShrinks,
 		m.iptablesCWInboundDrops,
 		m.iptablesMetricsTimestamp,
 		m.resolverCacheSize,
@@ -340,6 +358,9 @@ func (m *metrics) refreshIptablesMetrics(path string) error {
 	m.iptablesJumpViolations.Set(float64(snap.JumpPositionViolations))
 	m.iptablesJumpCheckErrors.Set(float64(snap.JumpPositionCheckErrors))
 	m.iptablesIPSetOverflows.Set(float64(snap.IPSetOverflows))
+	m.iptablesPodIPSetMembers.Set(float64(snap.PodIPSetMembers))
+	m.iptablesCWIPSetMembers.Set(float64(snap.CWIPSetMembers))
+	m.iptablesCWIPSetShrinks.Set(float64(snap.CWIPSetShrinks))
 	m.iptablesCWInboundDrops.Set(float64(snap.CWInboundDrops))
 	if snap.UpdatedAtUnixNano > 0 {
 		m.iptablesMetricsTimestamp.Set(float64(snap.UpdatedAtUnixNano / int64(time.Second)))

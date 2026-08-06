@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -637,5 +638,73 @@ func TestAttest_SignFailureReturns500(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), types.ErrorCodeSignFailed) {
 		t.Errorf("body should mention %s; got %s", types.ErrorCodeSignFailed, w.Body.String())
+	}
+}
+
+// The issuance record is the only durable trace that a mesh identity was
+// granted: a forged verdict or a compromised verifier still produces a real
+// leaf, and this line is what an operator reconciles against expected
+// workloads afterwards. The serial has to match the leaf actually returned.
+func TestAttest_IssuanceIsRecorded(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	challenge := issueChallenge(t, h)
+	csrPEM, _ := generateCSR(t)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	chain, err := certutil.ParsePEMCertificates(w.Body.Bytes())
+	if err != nil {
+		t.Fatalf("parse chain: %v", err)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "certificate issued") {
+		t.Fatalf("no issuance record: %s", logs)
+	}
+	// Names the certificate, so the record can be matched to a leaf in hand.
+	if want := fmt.Sprintf("%X", chain[0].SerialNumber); !strings.Contains(logs, want) {
+		t.Errorf("issuance record omits the leaf serial %s: %s", want, logs)
+	}
+	// Names what attested for it. Logged even with pinning off, which is when
+	// it is the only record of what was admitted.
+	if !strings.Contains(logs, "deadbeef") {
+		t.Errorf("issuance record omits the launch digest: %s", logs)
+	}
+	if !strings.Contains(logs, "launch_digest") || !strings.Contains(logs, "remote_addr") {
+		t.Errorf("issuance record missing expected keys: %s", logs)
+	}
+}
+
+// A denial and the issuance that follows it have to be correlatable, or a run
+// of probes against CDS cannot be tied to the leaf that eventually succeeded.
+func TestAttest_MeasurementDenialRecordsPeer(t *testing.T) {
+	mock := newMockAttestationApi(t, "deadbeef")
+	h := newTestAttestHandler(t, mock.URL, map[string]bool{"cafe": true})
+	challenge := issueChallenge(t, h)
+	csrPEM, _ := generateCSR(t)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403", w.Code)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "measurement not in allowlist") {
+		t.Fatalf("no denial record: %s", logs)
+	}
+	if !strings.Contains(logs, "remote_addr") {
+		t.Errorf("denial record omits the peer: %s", logs)
 	}
 }

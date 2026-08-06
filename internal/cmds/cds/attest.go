@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"slices"
 	"strings"
@@ -148,7 +149,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	if len(req.SandboxToken) > 0 {
 		sandbox, err = h.verifySandboxToken(ctx, req.SandboxToken, csrPubKey, challengeBytes)
 		if err != nil {
-			slog.Warn("sandbox token rejected", "error", err)
+			slog.Warn("sandbox token rejected", "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
 			return
 		}
@@ -172,15 +173,18 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
-		slog.Warn("attestation verification failed", "status", status, "error", err)
+		slog.Warn("attestation verification failed", "status", status, "error", err, "remote_addr", r.RemoteAddr)
 		attestation.WriteError(w, status, code, msg)
 		return
 	}
 
+	// Read outside the pinning branch: with h.Measurements empty every
+	// measurement is admitted, so the digest a leaf was issued against is the
+	// only record of what actually attested.
+	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
 	if len(h.Measurements) > 0 {
-		digest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-		if !h.Measurements[digest] {
-			slog.Warn("measurement not in allowlist", "launch_digest", digest)
+		if !h.Measurements[launchDigest] {
+			slog.Warn("measurement not in allowlist", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
 		}
@@ -205,7 +209,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		// the address CDS just dialled, so echoing what happened there would
 		// hand it a reachability oracle for CDS's network position.
 		slog.Warn("sandbox workload rejected",
-			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err)
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err,
+			"remote_addr", r.RemoteAddr)
 		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, "sandbox workload not authorized")
 		return
 	}
@@ -228,9 +233,10 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// The challenge-bound evidence verified above proves freshness at
 	// issuance but is NOT embeddable — its REPORTDATA includes the consumed
 	// challenge, so re-verification against the bare key would always fail.
-	certPEM, _, err := h.CA.SignCSR(issuer.SignCSRParams{
+	ttl := issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL)
+	certPEM, serial, err := h.CA.SignCSR(issuer.SignCSRParams{
 		CSR:       csr,
-		TTL:       issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL),
+		TTL:       ttl,
 		Evidence:  evidenceJSON,
 		SandboxID: sandbox.SandboxID,
 	})
@@ -246,9 +252,34 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("certificate issued (in-process)", "cn", csr.Subject.CommonName)
+	// The issuance record. A mesh identity is only as accountable as what was
+	// written down when it was granted: serial names the certificate, the SANs
+	// name the identity it carries (the CN does not — the mesh matches on
+	// SANs), launch_digest names what attested for it, sandbox_id and
+	// inventory_addr name who vouched, and remote_addr says where the request
+	// came from. Rejections above carry remote_addr for the same reason, so a
+	// run of denials and the issuance that follows correlate.
+	slog.Info("certificate issued (in-process)",
+		"cn", csr.Subject.CommonName,
+		"sans", csr.DNSNames,
+		"serial", serialHex(serial),
+		"ttl", ttl.String(),
+		"launch_digest", launchDigest,
+		"sandbox_id", sandbox.SandboxID,
+		"inventory_addr", sandbox.InventoryHost,
+		"remote_addr", r.RemoteAddr,
+	)
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(slices.Concat(certPEM, caChainPEM))
+}
+
+// serialHex renders a certificate serial the way `openssl x509 -serial` does,
+// so an issuance record can be matched against a leaf in hand.
+func serialHex(serial *big.Int) string {
+	if serial == nil {
+		return ""
+	}
+	return fmt.Sprintf("%X", serial)
 }
 
 // verifySandboxToken verifies an inventory-signed sandbox token and returns its
