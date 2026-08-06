@@ -18,13 +18,16 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cdsconn"
+	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
-	digA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	digB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// digA/digB alias the crane stub's sentinels so the --online tests and
+	// the stub cannot drift apart.
+	digA = cranetest.DigA
+	digB = cranetest.DigB
 	digC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	digD = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 )

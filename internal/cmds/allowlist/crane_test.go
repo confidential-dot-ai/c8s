@@ -7,38 +7,6 @@ import (
 	"testing"
 )
 
-// fakeCrane installs a crane stub on PATH: digest resolves any ref to digA
-// (refs containing "unresolvable" fail), config serves a fixed image config
-// (refs containing "badjson" serve garbage), and manifest fails for digB refs.
-func fakeCrane(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	script := `#!/bin/sh
-cmd="$1"; ref="$2"
-case "$cmd" in
-digest)
-  case "$ref" in
-  *unresolvable*) echo "MANIFEST_UNKNOWN" >&2; exit 1 ;;
-  *) echo "` + digA + `" ;;
-  esac ;;
-config)
-  case "$ref" in
-  *badjson*) echo "not json" ;;
-  *) echo '{"config":{"Entrypoint":["/bin/app"],"Cmd":["serve","--port=1"]}}' ;;
-  esac ;;
-manifest)
-  case "$ref" in
-  *` + digB + `*) exit 1 ;;
-  *) exit 0 ;;
-  esac ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(dir, "crane"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write crane stub: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // With crane off PATH, the crane-backed commands must fail with an actionable
 // message rather than an opaque exec error from the first crane call.
 
