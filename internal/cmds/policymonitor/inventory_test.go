@@ -5,6 +5,9 @@ package policymonitor
 import (
 	"bytes"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -163,5 +166,66 @@ func TestResolveSandboxDigestsHostWithRetry_ExhaustsBudget(t *testing.T) {
 	// off on the first failure the way the old code did.
 	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got != advertiseHostAttempts-1 {
 		t.Fatalf("got %d retry log lines, want %d; log:\n%s", got, advertiseHostAttempts-1, buf.String())
+	}
+}
+
+// The budget is the authoritative bound, not the attempt/backoff product: an
+// attempt count that would run long stops at the deadline instead.
+func TestResolveSandboxDigestsHostWithRetry_StopsAtBudget(t *testing.T) {
+	prevAttempts := advertiseHostAttempts
+	prevBackoff := advertiseHostBackoff
+	prevBudget := advertiseHostStartupBudget
+	// 100 x 50ms would be 5s of backoff; the budget must cut it far shorter.
+	advertiseHostAttempts = 100
+	advertiseHostBackoff = 50 * time.Millisecond
+	advertiseHostStartupBudget = 200 * time.Millisecond
+	t.Cleanup(func() {
+		advertiseHostAttempts = prevAttempts
+		advertiseHostBackoff = prevBackoff
+		advertiseHostStartupBudget = prevBudget
+	})
+
+	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	start := time.Now()
+	if _, err := resolveSandboxDigestsHostWithRetry(&Config{
+		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	}, logger); err == nil {
+		t.Fatal("want an error once the budget is exhausted")
+	}
+	// Generous ceiling: the point is that it returns in fractions of a second
+	// rather than running all 100 attempts, not the exact stopping instant.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("lookup blocked for %s; the budget of %s should have cut it short", elapsed, advertiseHostStartupBudget)
+	}
+}
+
+// The lookup runs before policy-monitor signals READY=1, and kata-agent
+// Requires= this unit, so blocking past TimeoutStartSec fails the unit —
+// whose FailureAction=poweroff-force then takes the whole guest down. This
+// asserts the Go budget and the shipped unit file cannot drift into that
+// state again: a previous change set the product to 12 x 5s against a 30s
+// timeout, and every kata pod stopped booting.
+func TestAdvertiseHostBudgetFitsUnitStartTimeout(t *testing.T) {
+	unit := filepath.Join("..", "..", "..", "kata-guest-base", "extra", "etc", "systemd", "system", "policy-monitor.service")
+	raw, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatalf("read %s: %v", unit, err)
+	}
+	m := regexp.MustCompile(`(?m)^TimeoutStartSec=(\S+)$`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("no TimeoutStartSec= in %s; if the unit no longer bounds startup, this test needs rewriting rather than deleting", unit)
+	}
+	timeout, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse TimeoutStartSec=%q: %v", m[1], err)
+	}
+
+	// A third of the window, so the rest of startup (kill-path self-test,
+	// allowlist load, listener bind) still has room even at the budget's worst
+	// case.
+	if limit := timeout / 3; advertiseHostStartupBudget > limit {
+		t.Fatalf("advertiseHostStartupBudget = %s exceeds %s (a third of the unit's TimeoutStartSec=%s); "+
+			"blocking this long before READY=1 fails the unit and poweroff-force kills the guest",
+			advertiseHostStartupBudget, limit, timeout)
 	}
 }
