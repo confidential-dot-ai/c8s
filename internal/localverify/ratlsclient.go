@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // NewRATLSHTTPClient returns an http.Client whose TLS handshake verifies the
@@ -27,6 +29,14 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 			cert, err := x509.ParseCertificate(rawCerts[0])
 			if err != nil {
 				return fmt.Errorf("localverify: parse peer cert: %w", err)
+			}
+			// Authenticate the certificate body before touching the evidence:
+			// validity within the shared skew window (the nonce-free evidence
+			// has no other freshness bound) and, for a self-issued leaf, its
+			// own signature under its attested key. Cheap, and it keeps an
+			// expired cert from costing an evidence verification.
+			if _, err := certutil.AuthenticateLeafBody(cert, time.Now()); err != nil {
+				return fmt.Errorf("localverify: peer certificate: %w", err)
 			}
 			platform, evidence, erd, err := CertEnvelope(cert)
 			if err != nil {

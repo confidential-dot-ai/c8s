@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -146,9 +147,20 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 // from any certificate authority signature. A sandbox-ID pin therefore cannot
 // be enforced here: the ID rests on CDS's signature over the leaf, which this
 // path does not check (docs/ratls.md, "Sandbox identity").
+//
+// The certificate's validity window is enforced first (NotBefore within
+// [certutil.LeafValiditySkew], NotAfter with no allowance): the embedded
+// evidence carries no per-connection nonce, so the window is the only
+// freshness bound this path has, and checking it before the evidence
+// round-trip keeps an expired certificate from consuming an attestation-api
+// call.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
+	}
+
+	if err := certutil.CheckValidity(cert, time.Now()); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCertValidity, err)
 	}
 
 	att, err := ExtractAttestation(cert)

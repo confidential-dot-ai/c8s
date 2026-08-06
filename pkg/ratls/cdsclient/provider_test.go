@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -26,6 +27,13 @@ import (
 // mockServers creates test HTTP servers simulating CDS, the attestation
 // service, and the in-process signer.
 func mockServers(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, caBundle ...*x509.Certificate) (cdsSrv, attestSvc, issuer *httptest.Server) {
+	t.Helper()
+	return mockServersWithLeafValidity(t, caKey, caCert, time.Now(), time.Now().Add(1*time.Hour), caBundle...)
+}
+
+// mockServersWithLeafValidity is mockServers with a caller-chosen validity
+// window on the issued leaf, for tests probing the client's window checks.
+func mockServersWithLeafValidity(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, leafNotBefore, leafNotAfter time.Time, caBundle ...*x509.Certificate) (cdsSrv, attestSvc, issuer *httptest.Server) {
 	t.Helper()
 	if len(caBundle) == 0 {
 		caBundle = []*x509.Certificate{caCert}
@@ -84,8 +92,8 @@ func mockServers(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate
 			tmpl := &x509.Certificate{
 				SerialNumber: serial,
 				Subject:      csr.Subject,
-				NotBefore:    time.Now(),
-				NotAfter:     time.Now().Add(1 * time.Hour),
+				NotBefore:    leafNotBefore,
+				NotAfter:     leafNotAfter,
 				KeyUsage:     x509.KeyUsageDigitalSignature,
 				ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 				IPAddresses:  csr.IPAddresses,
@@ -315,6 +323,47 @@ func TestProviderProvision(t *testing.T) {
 	trusted := p.client.TrustedCABundle()
 	if len(trusted) != 1 || !sameCertificate(trusted[0], caCert) {
 		t.Fatalf("trusted CA bundle = %d cert(s), want only issued-cert CA", len(trusted))
+	}
+}
+
+// TestProviderProvisionRejectsLeafOutsideValidityWindow proves an issued leaf
+// the mesh could never serve — expired, or NotBefore beyond the shared
+// clock-skew allowance — fails issuance instead of being cached.
+func TestProviderProvisionRejectsLeafOutsideValidityWindow(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		notBefore time.Time
+		notAfter  time.Time
+	}{
+		{"expired", now.Add(-2 * time.Hour), now.Add(-time.Hour)},
+		{"not yet valid beyond skew", now.Add(certutil.LeafValiditySkew + time.Hour), now.Add(3 * time.Hour)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			caKey, caCert := testCA(t)
+			cdsSrv, attestSvc, issuer := mockServersWithLeafValidity(t, caKey, caCert, tc.notBefore, tc.notAfter)
+			defer cdsSrv.Close()
+			defer attestSvc.Close()
+			defer issuer.Close()
+
+			p, err := NewProvider(&Config{
+				CDSURL:            cdsSrv.URL,
+				AttestationApiURL: attestSvc.URL,
+				CDSCAURL:          issuer.URL,
+				NodeIP:            "10.0.0.1",
+				TEEType:           ratls.TEETypeSEVSNP,
+				HTTPClient:        plainHTTPClient(),
+				NodeName:          "test-node",
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, _, err := p.Provision(context.Background()); err == nil {
+				t.Fatal("issued certificate outside its validity window was accepted")
+			}
+		})
 	}
 }
 

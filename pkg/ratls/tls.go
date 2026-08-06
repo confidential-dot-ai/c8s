@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // Logger is an optional structured logger for RA-TLS operations.
@@ -183,34 +185,42 @@ func (s *certState) WarmUp(ctx context.Context) error {
 // getOrProvision returns a cached certificate or provisions a new one.
 // If the cached cert is past its rotation deadline but still valid, the old
 // cert is returned immediately and rotation happens in the background.
-// Only the very first call (no cert at all) blocks synchronously.
+// A cached cert outside its validity window is never returned: rotateAt only
+// schedules replacement, so when background rotation has kept failing the
+// expired cert is discarded here and provisioning happens synchronously —
+// the handshake gets a fresh cert or an error, never a stale credential.
+// Otherwise only the very first call (no cert at all) blocks synchronously.
 func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error) {
 	s.mu.RLock()
-	if s.cert != nil {
-		cert := s.cert
-		needsRotation := time.Now().After(s.rotateAt)
-		currentProvider := s.provider // capture under RLock before releasing
-		s.mu.RUnlock()
-
-		if !needsRotation {
-			return cert, nil
-		}
-
-		// Cert still valid but due for rotation — return old cert,
-		// provision new one in the background.
-		if s.rotating.CompareAndSwap(false, true) {
-			go s.backgroundProvision(currentProvider)
-		}
-		return cert, nil
-	}
+	cached := s.cert
+	rotateAt := s.rotateAt
+	currentProvider := s.provider // capture under RLock before releasing
 	s.mu.RUnlock()
 
-	// No cert at all — first call, must provision synchronously.
+	if cached != nil {
+		if err := usableForHandshake(cached, time.Now()); err == nil {
+			if !time.Now().After(rotateAt) {
+				return cached, nil
+			}
+
+			// Cert still valid but due for rotation — return old cert,
+			// provision new one in the background.
+			if s.rotating.CompareAndSwap(false, true) {
+				go s.backgroundProvision(currentProvider)
+			}
+			return cached, nil
+		} else if s.logger != nil {
+			s.logger.Warn("ratls: cached certificate is outside its validity window, provisioning synchronously", "err", err)
+		}
+	}
+
+	// No cert at all, or the cached one is no longer usable — provision
+	// synchronously.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Double-check: another goroutine may have provisioned while we waited.
-	if s.cert != nil {
+	if s.cert != nil && usableForHandshake(s.cert, time.Now()) == nil {
 		return s.cert, nil
 	}
 
@@ -225,7 +235,7 @@ func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error
 	if ttl == 0 {
 		ttl = s.effectiveTTL()
 	}
-	rotateAt := time.Now().Add(ttl / 2)
+	rotateAt = time.Now().Add(ttl / 2)
 	s.cert = cert
 	s.rotateAt = rotateAt
 	s.provisioned.Store(true)
@@ -235,6 +245,24 @@ func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error
 	}
 
 	return cert, nil
+}
+
+// usableForHandshake reports whether a cached certificate may still be handed
+// to a TLS handshake: its leaf must be inside the validity window
+// (NotBefore within certutil.LeafValiditySkew, NotAfter with no allowance).
+func usableForHandshake(cert *tls.Certificate, now time.Time) error {
+	leaf := cert.Leaf
+	if leaf == nil {
+		if len(cert.Certificate) == 0 {
+			return fmt.Errorf("ratls: cached certificate has no leaf")
+		}
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("ratls: parse cached leaf: %w", err)
+		}
+		leaf = parsed
+	}
+	return certutil.CheckValidity(leaf, now)
 }
 
 // backgroundProvision provisions a new certificate without blocking callers.

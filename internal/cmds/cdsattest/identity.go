@@ -92,10 +92,12 @@ func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	return &meshIdentity{leaf: leaf, ca: issuer, private: private, bundlePEM: bundle}, nil
 }
 
+// checkValidity delegates to the repo-wide validity window
+// (certutil.CheckValidity: bounded NotBefore skew, hard NotAfter), adding the
+// role so a leaf failure reads differently from a CA failure.
 func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-		return fmt.Errorf("mesh identity %s is expired or not yet valid (not_before=%s not_after=%s)",
-			role, cert.NotBefore.Format(time.RFC3339), cert.NotAfter.Format(time.RFC3339))
+	if err := certutil.CheckValidity(cert, now); err != nil {
+		return fmt.Errorf("mesh identity %s: %w", role, err)
 	}
 	return nil
 }

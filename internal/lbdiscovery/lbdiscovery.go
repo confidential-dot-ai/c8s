@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -206,6 +207,15 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse serving cert: %w", err)
+	}
+	// The evidence binds only the serving-cert key, and this session then
+	// trusts the whole certificate — so the certificate body must hold on its
+	// own: inside the shared validity window (bounded NotBefore skew, hard
+	// NotAfter — the issuance-time evidence has no other freshness bound), and
+	// self-verifying when self-issued. Checked before the evidence so an
+	// expired cert never costs a verification.
+	if _, err := certutil.AuthenticateLeafBody(cert, time.Now()); err != nil {
+		return nil, fmt.Errorf("discovery serving cert: %w", err)
 	}
 	challenge, err := base64.StdEncoding.DecodeString(d.Attestation.Challenge)
 	if err != nil {
