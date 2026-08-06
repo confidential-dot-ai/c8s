@@ -29,15 +29,6 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 // Var (not const) so tests can point it at a temp file.
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
-// expectedRTMR3ForKey is rtmr3.ForOperatorKey — the value a guest reports
-// after the initrd extends the zeroed register with SHA-384(pubkey). The
-// operator computes the same value offline (getkubeconfig), so matching it
-// proves the guest was launched to trust exactly this key.
-func expectedRTMR3ForKey(pubkey []byte) []byte {
-	v := rtmr3.ForOperatorKey(pubkey)
-	return v[:]
-}
-
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.
 // Returns the raw 48 bytes.
 func readOwnRTMR3() ([]byte, error) {
@@ -65,12 +56,12 @@ func verifyKeyMeasured(pubkey []byte) error {
 	if err != nil {
 		return err
 	}
-	want := expectedRTMR3ForKey(pubkey)
+	want := rtmr3.ForOperatorKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
-	if !bytes.Equal(own, want) {
+	if !bytes.Equal(own, want[:]) {
 		return fmt.Errorf(
 			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
-			hex.EncodeToString(own), hex.EncodeToString(want))
+			hex.EncodeToString(own), hex.EncodeToString(want[:]))
 	}
 	return nil
 }

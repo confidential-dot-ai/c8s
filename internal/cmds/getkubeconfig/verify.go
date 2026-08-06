@@ -29,14 +29,6 @@ import (
 // verdict.
 var verifyEnvelope = teeverify.Verify
 
-// expectedRTMR3 is rtmr3.ForOperatorKey in hex — the value the guest reports
-// iff it was launched to trust this exact key. The operator computes it
-// offline from their own key, so a match is not TOFU.
-func expectedRTMR3(operatorPubPEM []byte) string {
-	v := rtmr3.ForOperatorKey(operatorPubPEM)
-	return hex.EncodeToString(v[:])
-}
-
 // verifyEvidence verifies an evidence envelope with attestation-go (HW chain +
 // report_data binding) and returns the result. expectedReportData is what the
 // quote must be bound to: the caller's nonce on the attest gate, the cert-key
@@ -71,14 +63,17 @@ func verifyEvidence(envelopeJSON, expectedReportData []byte) (*teetypes.Verifica
 	return res, nil
 }
 
-// checkRTMR3 asserts the verified quote's rtmr_3 equals expectedRTMR3(pub),
-// i.e. the node was launched to trust the operator's key. The compare is over
-// the rtmr_3 claim attestation-go extracted from the signature-verified quote
-// body, the same posture as confai verify.
+// checkRTMR3 asserts the verified quote's rtmr_3 equals
+// rtmr3.ForOperatorKey(pub), i.e. the node was launched to trust the
+// operator's key; the operator computes the expectation offline from their
+// own key, so a match is not TOFU. The compare is over the rtmr_3 claim
+// attestation-go extracted from the signature-verified quote body, the same
+// posture as confai verify.
 func checkRTMR3(res *teetypes.VerificationResult, operatorPubPEM []byte) error {
 	got, _ := res.Claims.PlatformData["rtmr_3"].(string)
 	got = strings.ToLower(strings.TrimSpace(got))
-	want := expectedRTMR3(operatorPubPEM)
+	v := rtmr3.ForOperatorKey(operatorPubPEM)
+	want := hex.EncodeToString(v[:])
 	if got == "" {
 		return fmt.Errorf("quote carries no rtmr_3")
 	}
@@ -91,7 +86,7 @@ func checkRTMR3(res *teetypes.VerificationResult, operatorPubPEM []byte) error {
 
 // attestAndCheckRTMR3 fetches a nonce-bound quote from the guest's
 // attestation-api, verifies it in-process (HW chain + report_data freshness),
-// and asserts the quote's rtmr_3 equals expectedRTMR3(pub). It proves: genuine
+// and asserts the quote's rtmr_3 equals rtmr3.ForOperatorKey(pub). It proves: genuine
 // TDX + the node trusts the operator's key. Returns nil on success.
 func attestAndCheckRTMR3(ctx context.Context, attestURL string, operatorPubPEM []byte) error {
 	nonce := make([]byte, 32)
