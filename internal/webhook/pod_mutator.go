@@ -100,6 +100,7 @@ var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation
 // the distroless nonroot UID/GID 65532, and get-cert writes tls.key 0640.
 const defaultCertFSGroup int64 = 65532
 const defaultCertKeyMode = "0640"
+
 // defaultCertRenewInterval must stay strictly below issuer.MaxNamedLeafTTL, the
 // shortest TTL CDS issues: a leaf carrying a matched-workload stamp is capped
 // there and its NotBefore is not backdated, so an equal interval would only
