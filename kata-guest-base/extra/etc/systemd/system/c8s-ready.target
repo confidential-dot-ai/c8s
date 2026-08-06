@@ -1,26 +1,13 @@
 [Unit]
-# Synthetic target reached when the in-guest c8s mesh is healthy.
+# Synthetic target reached when the in-guest c8s mesh is healthy: the
+# workload's traffic is proxied through RA-TLS once this is active.
 #
-# Workload-side units (kata-agent itself; anything ordered before
-# CreateContainer can complete) declare `Requires=c8s-ready.target
-# After=c8s-ready.target` — without c8s-ready active, the kata-agent's
-# CreateContainer flow blocks and kubelet reports CreateContainerError.
-#
-# The target gates on ratls-mesh.service AND policy-monitor.service.
-# Gating on policy-monitor closes the window where the guest goes ready
-# (and kata-agent starts containers) while digest enforcement is offline
-# — e.g. policy-monitor died on a bad or unreadable baked allowlist.
-# This does NOT reintroduce the CDS bootstrap cycle: policy-monitor
-# enforces from t=0 on the dm-verity-baked seed with no network (the CDS
-# allowlist refresh is a separate runtime loop, not a startup dependency),
-# so unlike the old guest-policy-agent it never dials CDS to come up. See
-# docs/kata-guest-base.md for the full rationale.
-#
-# Note: policy-monitor.service is Type=simple, so this gate guarantees the
-# enforcement process is launched (and its startup seed pass has run)
-# before ready — not a separately-signalled "watch is live". Switching it
-# to Type=notify + sd_notify after the inotify watch is established would
-# tighten that residual window further.
+# It is not the image-enforcement gate. kata-agent is held on
+# policy-monitor.service directly (kata-agent.service.d/10-c8s-policy-monitor.conf)
+# because this target also gates on ratls-mesh, which needs the pod IP that
+# arrives over kata-agent's own UpdateInterface RPC — an agent ordered after
+# this target would wait on itself. policy-monitor still appears below so a
+# guest that reaches "ready" has both halves up. See docs/kata-guest-base.md.
 Description=c8s in-guest readiness
 
 Requires=ratls-mesh.service policy-monitor.service

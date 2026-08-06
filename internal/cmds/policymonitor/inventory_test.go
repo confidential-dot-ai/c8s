@@ -3,8 +3,12 @@
 package policymonitor
 
 import (
+	"bytes"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -21,8 +25,8 @@ const (
 func TestKataInventoryIncludesInjectedSidecars(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp, nil)
-	b.record("cid-cert", pmDigestSidecar, nil)
+	b.record(testCID("app"), pmDigestApp, nil)
+	b.record(testCID("cert"), pmDigestSidecar, nil)
 
 	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
@@ -80,10 +84,10 @@ func TestSandboxIDFromAnnotations(t *testing.T) {
 func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	b := newAdmissionInventory()
 	b.recordSandboxID(pmSandboxID)
-	b.record("cid-app", pmDigestApp, nil)
-	b.record("cid-gone", pmDigestSidecar, nil)
+	b.record(testCID("app"), pmDigestApp, nil)
+	b.record(testCID("gone"), pmDigestSidecar, nil)
 
-	b.remove("cid-gone")
+	b.remove(testCID("gone"))
 
 	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
 	if err != nil || !known {
@@ -111,5 +115,53 @@ func TestSandboxDigestsHost(t *testing.T) {
 		CDSURL:                      "https://cds.invalid:8443",
 	}); err == nil {
 		t.Fatal("loopback accepted as an advertise host")
+	}
+}
+
+// A configured advertise host bypasses retry entirely: the routing-table
+// lookup never happens, so the CDS URL not resolving does not matter.
+func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T) {
+	prev := advertiseHostAttempts
+	advertiseHostAttempts = 3
+	t.Cleanup(func() { advertiseHostAttempts = prev })
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(buf, nil))
+	got, err := resolveSandboxDigestsHostWithRetry(&Config{
+		SandboxDigestsAdvertiseHost: "10.2.3.4",
+		CDSURL:                      "https://cds.invalid:8443",
+	}, logger)
+	if err != nil || got != "10.2.3.4" {
+		t.Fatalf("host = %q, err = %v; want 10.2.3.4 with no error", got, err)
+	}
+	if strings.Contains(buf.String(), "retrying") {
+		t.Fatalf("explicit host should not retry; log:\n%s", buf.String())
+	}
+}
+
+// A CDS URL that does not resolve exhausts the retry budget rather than
+// latching tokens off on the first failure.
+func TestResolveSandboxDigestsHostWithRetry_ExhaustsBudget(t *testing.T) {
+	prevAttempts := advertiseHostAttempts
+	prevBackoff := advertiseHostBackoff
+	advertiseHostAttempts = 3
+	advertiseHostBackoff = time.Millisecond
+	t.Cleanup(func() {
+		advertiseHostAttempts = prevAttempts
+		advertiseHostBackoff = prevBackoff
+	})
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(buf, nil))
+	_, err := resolveSandboxDigestsHostWithRetry(&Config{
+		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	}, logger)
+	if err == nil {
+		t.Fatal("want an error after retry budget exhausted")
+	}
+	// Every attempt but the last logs a retry line — proves we did not latch
+	// off on the first failure the way the old code did.
+	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got != advertiseHostAttempts-1 {
+		t.Fatalf("got %d retry log lines, want %d; log:\n%s", got, advertiseHostAttempts-1, buf.String())
 	}
 }

@@ -48,16 +48,31 @@ type Config struct {
 	CertPath string
 	KeyPath  string
 
+	// WorkloadClaimsGuest selects the kata shape: the inventory (and any
+	// node-local daemons) are inside the guest, reached on guest loopback
+	// rather than over sockets a kata guest cannot mount.
+	WorkloadClaimsGuest bool
+
 	Attempts         int
 	RetryInterval    time.Duration
 	RequestTimeout   time.Duration
 	InventoryTimeout time.Duration
 }
 
+// endpoint is the compiled inventory endpoint for this sidecar's shape. The
+// flag selects between two baked values, never an address.
+func (c Config) endpoint() string {
+	if c.WorkloadClaimsGuest {
+		return workloadclaims.GuestInventoryEndpoint()
+	}
+	return inventoryEndpoint()
+}
+
 // BindFlags registers the flags shared by every sidecar. requestTimeoutUsage
-// is per-command because get-volume's request timeout also covers the node
-// agent, not just CDS.
-func BindFlags(f *pflag.FlagSet, cfg *Config, requestTimeoutUsage string) {
+// and workloadClaimsGuestUsage are per-command: get-volume's request timeout
+// also covers the node agent, and its guest shape also moves the volume
+// daemon onto guest loopback.
+func BindFlags(f *pflag.FlagSet, cfg *Config, requestTimeoutUsage, workloadClaimsGuestUsage string) {
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
@@ -67,6 +82,7 @@ func BindFlags(f *pflag.FlagSet, cfg *Config, requestTimeoutUsage string) {
 	f.DurationVar(&cfg.RetryInterval, "retry-interval", 5*time.Second, "wait between attempts")
 	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, requestTimeoutUsage)
 	f.DurationVar(&cfg.InventoryTimeout, "inventory-timeout", 5*time.Second, "timeout for redeeming a sandbox token from the node's admission inventory")
+	f.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, workloadClaimsGuestUsage)
 }
 
 // Validate checks the shared half of a config and canonicalises the CDS URL.

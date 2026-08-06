@@ -30,6 +30,11 @@ import (
 type config struct {
 	sidecar.Config
 
+	// WorkloadClaimsGuest selects the kata shape: the inventory is
+	// policy-monitor inside the guest, reached on guest loopback rather than
+	// the node-CVM socket, which a kata guest cannot mount.
+	WorkloadClaimsGuest bool
+
 	Secrets  []secretRequest
 	OutDir   string
 	FileMode string

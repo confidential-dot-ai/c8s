@@ -57,3 +57,28 @@ func TestPeerIdentityDefaultsItsProcRoot(t *testing.T) {
 		t.Fatalf("procRoot = %q, want /proc", got)
 	}
 }
+
+// One pod per guest means there is no caller to tell apart, so resolution must
+// succeed without peer credentials — a TCP conn yields a zero-PID Peer, which
+// the node-CVM resolver rejects by design.
+func TestGuestIdentityResolvesWithoutPeerCredentials(t *testing.T) {
+	pod, err := GuestIdentity{}.Resolve(workloadclaims.Peer{})
+	if err != nil {
+		t.Fatalf("guest resolve: %v", err)
+	}
+	if pod.UID != GuestPodUID {
+		t.Fatalf("pod UID = %q, want %q", pod.UID, GuestPodUID)
+	}
+}
+
+// The guest daemon shares the guest's loopback with the attestation-service
+// (8400) and the token route (8401); colliding with either would make one of
+// them fail to bind and take confidential pod startup with it.
+func TestGuestPortDoesNotCollide(t *testing.T) {
+	if GuestPort == workloadclaims.GuestTokenPort {
+		t.Fatalf("volumed and the token route both claim %d", GuestPort)
+	}
+	if GuestPort == 8400 {
+		t.Fatalf("volumed collides with the in-guest attestation-service on %d", GuestPort)
+	}
+}

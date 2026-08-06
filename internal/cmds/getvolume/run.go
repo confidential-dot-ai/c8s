@@ -35,7 +35,9 @@ type config struct {
 	sidecar.Config
 
 	Volumes []volumeRequest
-	// SocketDir holds volumed's socket, as this pod sees it.
+	// SocketDir holds volumed's socket, as this pod sees it. Unused under
+	// WorkloadClaimsGuest, where volumed is in the guest and there is no
+	// filesystem shared with it.
 	SocketDir string
 }
 
@@ -48,7 +50,7 @@ type volumeRequest struct {
 
 // parseVolumeSpec parses a NAME=/store/path pair. The name selects the device
 // by serial and names the Kubernetes volume the plaintext is mounted into, so
-// it must be a DNS-1123 label short enough for a virtio serial.
+// it must be a DNS-1123 label short enough for a disk serial.
 func parseVolumeSpec(spec string) (volumeRequest, error) {
 	name, path, ok := strings.Cut(spec, "=")
 	if !ok {
@@ -102,17 +104,18 @@ func openAll(ctx context.Context, cfg config, measurements [][]byte) error {
 	if err != nil {
 		return err
 	}
-	return openAllWith(ctx, cfg, client, pub, daemonClient(cfg.SocketDir))
+	daemon, base := daemonClient(cfg)
+	return openAllWith(ctx, cfg, client, pub, daemon, base)
 }
 
 // openAllWith is openAll once the clients exist.
-func openAllWith(ctx context.Context, cfg config, cds *http.Client, pub crypto.PublicKey, daemon *http.Client) error {
+func openAllWith(ctx context.Context, cfg config, cds *http.Client, pub crypto.PublicKey, daemon *http.Client, daemonBase string) error {
 	for _, v := range cfg.Volumes {
 		blob, err := fetchBlob(ctx, cfg, cds, pub, v.Path)
 		if err != nil {
 			return fmt.Errorf("volume %s: %w", v.Name, err)
 		}
-		if err := openOne(ctx, cfg, daemon, v.Name, blob); err != nil {
+		if err := openOne(ctx, cfg, daemon, daemonBase, v.Name, blob); err != nil {
 			return fmt.Errorf("volume %s: %w", v.Name, err)
 		}
 	}
@@ -136,15 +139,14 @@ func fetchBlob(ctx context.Context, cfg config, client *http.Client, pub crypto.
 
 // openOne hands the blob to the node daemon, which resolves this pod from the
 // socket's peer credentials and mounts the volume into it.
-func openOne(ctx context.Context, cfg config, daemon *http.Client, name string, blob volume.Blob) error {
+func openOne(ctx context.Context, cfg config, daemon *http.Client, daemonBase, name string, blob volume.Blob) error {
 	body, err := json.Marshal(volumed.OpenRequest{Name: name, Blob: blob})
 	if err != nil {
 		return err
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 	defer cancel()
-	// The host is ignored on a unix transport; it only has to be a valid URL.
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "http://volumed"+volumed.VolumePath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, daemonBase+volumed.VolumePath, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -162,15 +164,24 @@ func openOne(ctx context.Context, cfg config, daemon *http.Client, name string, 
 	return nil
 }
 
-// daemonClient dials volumed's socket in the inventory socket directory the
-// webhook mounts into this sidecar.
-func daemonClient(socketDir string) *http.Client {
-	sock := filepath.Join(socketDir, volumed.SocketName)
+// daemonClient reaches volumed and returns the base URL to post to: the socket
+// the webhook mounts into this sidecar on node-CVM, or the guest's compiled
+// loopback address under kata, where volumed is in this VM and there is no
+// shared filesystem. Both are compiled; the flag selects a shape, not an
+// address.
+func daemonClient(cfg config) (*http.Client, string) {
+	if cfg.WorkloadClaimsGuest {
+		// Fresh Transport, so Proxy stays nil: no HTTP_PROXY can interpose on
+		// the key blob's trip to the daemon.
+		return &http.Client{Transport: &http.Transport{}}, volumed.GuestEndpoint()
+	}
+	sock := filepath.Join(cfg.SocketDir, volumed.SocketName)
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
 		},
-	}}
+		// The host is ignored on a unix transport; the URL only has to parse.
+	}}, "http://volumed"
 }
 
 func validate(cfg *config) error {
@@ -187,7 +198,9 @@ func validate(cfg *config) error {
 		}
 		seen[v.Name] = true
 	}
-	if cfg.SocketDir == "" {
+	// Under kata volumed is in the guest on a compiled loopback address, so
+	// there is no socket directory to require.
+	if cfg.SocketDir == "" && !cfg.WorkloadClaimsGuest {
 		return fmt.Errorf("--socket-dir is required")
 	}
 	return nil

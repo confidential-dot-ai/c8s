@@ -586,12 +586,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 
 	// Image allowlist check (only when configured)
 	if cfg.AllowlistEnabled() {
-		annotations := ctr.GetAnnotations()
-		imageRef := annotations[annotationImageName]
-		if imageRef == "" {
-			podAnnotations := pod.GetAnnotations()
-			imageRef = podAnnotations[annotationImageName]
-		}
+		imageRef := ctr.GetAnnotations()[annotationImageName]
 
 		// Effective argv (ctr.Args): NRI folds the OCI process.args here, so the
 		// full merged entrypoint+cmd the container runs is available at this hook.

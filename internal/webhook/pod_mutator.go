@@ -641,26 +641,23 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 			"%w: %s pods must not set hostNetwork — a hostNetwork pod shares the node IP and cannot be mesh-intercepted or protected by the cw inbound guard",
 			errInvalidInjectionAnnotation, AnnotationWorkload))
 	}
-	// The fetcher redeems a sandbox token from the node's inventory over the
-	// mounted nri-image-policy socket, and unlike get-cert it has no guest
-	// (kata loopback) endpoint. Without the host dir there is no socket to
-	// mount, so injecting it would produce a Running pod whose fetcher
-	// CrashLoops on a missing socket while the workload blocks forever waiting
-	// for a file that never lands. Refuse at admission instead — kata secrets
-	// are out of scope for further reasons too (see docs/secrets.md).
-	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" {
+	// The fetcher redeems a sandbox token from an inventory: the mounted
+	// nri-image-policy socket on node-CVM, or policy-monitor on guest loopback
+	// under kata. An operator with neither has nothing to point it at, so
+	// injecting would produce a Running pod whose fetcher CrashLoops while the
+	// workload blocks forever on a file that never lands. Refuse at admission.
+	if inj != nil && len(inj.Secrets.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
-			"%w: %s needs the node inventory socket, which this operator is not configured with (kata, or nri-image-policy disabled); see docs/secrets.md",
+			"%w: %s needs an admission inventory, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/secrets.md",
 			errInvalidInjectionAnnotation, AnnotationSecrets))
 	}
-	// Same for volumes, and more so: the fetcher hands the key to a node agent
-	// over that same socket directory, and the agent mounts into the pod's
-	// kubelet directory — neither of which exists for a kata guest. Refuse at
-	// admission rather than leave the workload waiting on a mount that can
-	// never land (docs/volumes.md).
-	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" {
+	// Same for volumes: the fetcher hands the key to volumed, over the mounted
+	// socket directory on node-CVM or on guest loopback under kata. An operator
+	// with neither shape has no daemon to hand it to, so the workload would wait
+	// on a mount that can never land (docs/volumes.md).
+	if inj != nil && len(inj.Volumes.Specs) > 0 && m.cfg.WorkloadClaimsHostDir == "" && !m.cfg.WorkloadClaimsGuest {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf(
-			"%w: %s needs the node volume agent, which this operator is not configured with (kata, or nri-image-policy disabled); see docs/volumes.md",
+			"%w: %s needs a volume daemon, which this operator is not configured with (nri-image-policy disabled, and not the kata guest shape); see docs/volumes.md",
 			errInvalidInjectionAnnotation, AnnotationVolumes))
 	}
 	if inj != nil && inj.SAN == "" {
@@ -713,7 +710,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if err := rejectReservedSecretsVolume(pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		if err := rejectReservedVolumeVolume(pod); err != nil {
+		if err := rejectReservedVolumeVolume(pod, m.cfg.WorkloadClaimsGuest); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		l.Info("injecting c8s get-cert containers", "workload", inj.WorkloadID)
@@ -980,7 +977,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 		// host-authored spec could pre-declare the volume or the mount and
 		// choose where the decrypted plaintext lands.
 		for _, name := range volumeNames(effective.Volumes.Specs) {
-			replaceVolume(pod, openedVolume(name))
+			replaceVolume(pod, openedVolume(name, cfg.WorkloadClaimsGuest))
 			remountAll(pod, corev1.VolumeMount{
 				Name:      volume.KubeVolumeName(name),
 				MountPath: filepath.Join(effective.Volumes.Dir, name),
@@ -1357,17 +1354,26 @@ func volumeNames(specs []string) []string {
 	return out
 }
 
-// openedVolume is the mount point the node agent mounts a decrypted volume
-// over. It holds nothing itself — the plaintext lives on the opened device
-// mounted over it — and it must share the pod directory's filesystem: volumed
-// resolves the target with RESOLVE_NO_XDEV, so a memory-backed (tmpfs)
-// placeholder is unreachable by construction.
-func openedVolume(name string) corev1.Volume {
+// openedVolume is the mount point volumed mounts a decrypted volume over. It
+// holds nothing itself — the plaintext lives on the opened device mounted over
+// it.
+//
+// The medium differs by shape, and each is load-bearing:
+//
+//   - node-CVM: default. The placeholder must share the pod directory's
+//     filesystem, because volumed resolves the target with RESOLVE_NO_XDEV.
+//   - kata: Memory. A default-medium emptyDir is turned into a disk.img block
+//     device by the shim under shared_fs="none", whereas a memory-backed one
+//     stays a guest tmpfs at kata's ephemeral path, which is what GuestTargets
+//     resolves.
+func openedVolume(name string, guest bool) corev1.Volume {
+	src := &corev1.EmptyDirVolumeSource{}
+	if guest {
+		src.Medium = corev1.StorageMediumMemory
+	}
 	return corev1.Volume{
-		Name: volume.KubeVolumeName(name),
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+		Name:         volume.KubeVolumeName(name),
+		VolumeSource: corev1.VolumeSource{EmptyDir: src},
 	}
 }
 
@@ -1406,18 +1412,29 @@ func remountAll(pod *corev1.Pod, mount corev1.VolumeMount) {
 // Reserved by prefix rather than by re-deriving names from the annotation: the
 // annotation is host-written, so a guard that reads it can be steered away from
 // the name it is meant to protect.
-func rejectReservedVolumeVolume(pod *corev1.Pod) error {
+func rejectReservedVolumeVolume(pod *corev1.Pod, guest bool) error {
+	want := corev1.StorageMediumDefault
+	if guest {
+		want = corev1.StorageMediumMemory
+	}
 	for i := range pod.Spec.Volumes {
 		v := &pod.Spec.Volumes[i]
 		if !strings.HasPrefix(v.Name, volume.KubeVolumePrefix) {
 			continue
 		}
-		if v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumDefault {
-			return fmt.Errorf("%w: volume %q is reserved for an encrypted volume; it must be a default-medium emptyDir or omitted (see openedVolume)",
-				errInvalidInjectionAnnotation, v.Name)
+		if v.EmptyDir == nil || v.EmptyDir.Medium != want {
+			return fmt.Errorf("%w: volume %q is reserved for an encrypted volume; it must be a %s-medium emptyDir or omitted (see openedVolume)",
+				errInvalidInjectionAnnotation, v.Name, mediumName(want))
 		}
 	}
 	return nil
+}
+
+func mediumName(m corev1.StorageMedium) string {
+	if m == corev1.StorageMediumMemory {
+		return "Memory"
+	}
+	return "default"
 }
 
 // volumeContainer is the workload's volume fetcher.
@@ -1438,6 +1455,11 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
+	}
+	// Under kata both the inventory and volumed are inside this guest, on
+	// compiled loopback ports, with nothing mounted to reach them by.
+	if cfg.WorkloadClaimsGuest {
+		args = append(args, "--workload-claims-guest")
 	}
 
 	always := corev1.ContainerRestartPolicyAlways
@@ -1476,6 +1498,11 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
+	}
+	// Unlike get-cert the token is not optional here, so only the shape is
+	// selected: the mounted socket on node-CVM, guest loopback under kata.
+	if cfg.WorkloadClaimsGuest {
+		args = append(args, "--workload-claims-guest")
 	}
 
 	always := corev1.ContainerRestartPolicyAlways

@@ -159,52 +159,6 @@ func (a *allowlist) Size() int {
 	return len(a.digests)
 }
 
-// extractDigest returns the container's image digest from its OCI
-// annotations, in canonical "sha256:<64hex>" form. Key priority and
-// normalisation live in types.DigestFromAnnotations; a miss means "no
-// digest available", which the caller denies.
-func extractDigest(annotations map[string]string) (string, bool) {
-	d, ok := types.DigestFromAnnotations(annotations)
-	if !ok {
-		return "", false
-	}
-	return d.String(), true
-}
-
-// k8sContainerTypeKeys mirrors kata-agent's K8S_CONTAINER_TYPE_KEYS
-// (src/agent/src/confidential_data_hub/image.rs in kata-containers
-// 3.30.0): the annotation keys a CRI runtime uses to mark a container's
-// type. A value of "sandbox" identifies the pod's sandbox (pause)
-// container.
-var k8sContainerTypeKeys = []string{
-	"io.kubernetes.cri.container-type",  // containerd CRI
-	"io.kubernetes.cri-o.ContainerType", // CRI-O
-}
-
-// isSandbox reports whether the OCI annotations mark this as the pod's
-// sandbox (pause) container. It mirrors kata-agent's own is_sandbox()
-// EXACTLY (same keys, same "sandbox" value), and that lockstep is
-// load-bearing for safety, not cosmetic. In guest-pull mode — which c8s
-// forces (shared_fs=none + experimental_force_guest_pull) — kata-agent's
-// get_process() overrides ANY container it deems a sandbox with the
-// pause process baked into the dm-verity rootfs (/pause_bundle),
-// ignoring whatever image the host requested. So a container the host
-// labels "sandbox" runs the measured pause, never a host-chosen image.
-// policy-monitor can therefore skip digest enforcement on exactly the
-// set kata treats as sandboxes: an adversarial host gains nothing by
-// mislabelling a workload as a sandbox, because kata won't run its image
-// either way. Identifying sandboxes any LOOSER than kata does would open
-// a bypass, so keep these keys in lockstep with the kata version the
-// guest is built against.
-func isSandbox(annotations map[string]string) bool {
-	for _, key := range k8sContainerTypeKeys {
-		if annotations[key] == "sandbox" {
-			return true
-		}
-	}
-	return false
-}
-
 // normalizeDigest takes any of the forms we see in the wild
 // (types.NormalizeDigest) and returns the bare 64-hex string — this
 // package's allowlist map keys carry no "sha256:" prefix.

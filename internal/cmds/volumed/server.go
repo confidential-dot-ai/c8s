@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,6 +18,20 @@ import (
 
 // VolumePath is the route the fetcher sidecar posts to.
 const VolumePath = "/volume"
+
+// GuestPort is the in-guest loopback port this daemon serves on under kata,
+// after the attestation-service on 8400 and the token route on 8401. A kata
+// guest holds one pod whose containers share its network namespace, so loopback
+// reaches the daemon without the shared filesystem a socket would need. Like
+// those two it is compiled, not configured: the untrusted host cannot redirect
+// the fetcher by withholding or rewriting a value.
+const GuestPort = 8402
+
+// GuestAddr is the address the in-guest daemon serves on.
+func GuestAddr() string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(GuestPort)) }
+
+// GuestEndpoint is the URL the in-guest fetcher posts to.
+func GuestEndpoint() string { return "http://" + GuestAddr() }
 
 // maxRequestBytes bounds a request body. It carries one key blob.
 const maxRequestBytes = 64 << 10

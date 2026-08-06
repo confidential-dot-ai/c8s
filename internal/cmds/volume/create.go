@@ -37,7 +37,8 @@ in the CDS secret store.
 
 The image is written as ciphertext and can travel by any means, including
 through the untrusted host. Attach it to the node as a raw block device whose
-virtio serial is c8s-vol-<name>.
+disk serial is c8s-vol-<name> — with virtio-blk where the hypervisor allows it,
+or 'c8s volume attach' on the node where it does not.
 
 The key is generated here and exists in exactly two places: the CDS process, and
 the escrow file. A CDS restart empties the store, and without the escrow file

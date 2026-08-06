@@ -1,0 +1,77 @@
+Subject: [PATCH] agent: wait for the in-guest admission verdict before execve
+
+policy-monitor decides whether a container's image is allowlisted after
+kata-agent has already forked its init, so enforcement is a race it can lose
+(kata-image-policy.md G1). The init is parked on the exec fifo the whole time
+though, and only do_start_container releases it -- so that is the point where
+the decision can be waited on instead of raced.
+
+policy-monitor writes its verdict into the container's bundle. Only in-guest
+root can write there (the baked agent policy scopes CopyFileRequest to the
+sandbox seeding directory), so the host cannot forge one, and an absent or
+unreadable verdict is not an admission: the wait expires and the container is
+refused. The wait is ahead of the sandbox lock so a slow verdict cannot stall
+unrelated agent work; in practice the spec was written during CreateContainer
+and the verdict is already there.
+
+--- a/src/agent/src/rpc.rs
++++ b/src/agent/src/rpc.rs
+@@ -360,6 +360,13 @@
+ 
+     #[instrument]
+     async fn do_start_container(&self, req: protocols::agent::StartContainerRequest) -> Result<()> {
++        // c8s: the container's init is parked on the exec fifo until ctr.exec()
++        // below, so this is the last point before it can execve. Wait for
++        // policy-monitor's admission verdict here rather than let the image
++        // policy race the container. Ahead of the sandbox lock: a slow verdict
++        // must not stall every other agent operation.
++        c8s_await_admission(&req.container_id).await?;
++
+         let mut s = self.sandbox.lock().await;
+         let sid = s.id.clone();
+         let cid = req.container_id.clone();
+@@ -2133,6 +2140,44 @@
+     Ok(())
+ }
+ 
++// c8s: policy-monitor writes its admission decision into the container's
++// bundle once it has read the OCI spec. Only in-guest root can write there --
++// the baked agent policy scopes CopyFileRequest to the sandbox seeding
++// directory -- so a verdict cannot be forged by the host. An absent or
++// unreadable verdict is not an admission: this waits, then refuses.
++const C8S_VERDICT_FILE: &str = "c8s-verdict";
++const C8S_VERDICT_TIMEOUT: Duration = Duration::from_secs(30);
++const C8S_VERDICT_POLL: Duration = Duration::from_millis(20);
++
++async fn c8s_await_admission(cid: &str) -> Result<()> {
++    kata_sys_util::validate::verify_id(cid).context("invalid container id")?;
++    let path = safe_path::scoped_join(CONTAINER_BASE, cid)?.join(C8S_VERDICT_FILE);
++    let deadline = tokio::time::Instant::now() + C8S_VERDICT_TIMEOUT;
++    loop {
++        if let Ok(verdict) = fs::read_to_string(&path) {
++            match verdict.trim() {
++                "allow" => return Ok(()),
++                "deny" => {
++                    return Err(anyhow!(
++                        "container {} refused by policy-monitor: image not allowlisted",
++                        cid
++                    ))
++                }
++                // Anything else is not an admission; wait for the timeout.
++                _ => {}
++            }
++        }
++        if tokio::time::Instant::now() >= deadline {
++            return Err(anyhow!(
++                "no policy-monitor verdict for container {} after {:?}; refusing to start it",
++                cid,
++                C8S_VERDICT_TIMEOUT
++            ));
++        }
++        tokio::time::sleep(C8S_VERDICT_POLL).await;
++    }
++}
++
+ fn do_copy_file(req: &CopyFileRequest) -> Result<()> {
+     let path = PathBuf::from(req.path.as_str());
+ 

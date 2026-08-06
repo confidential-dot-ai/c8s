@@ -183,6 +183,11 @@ jobs:
         working-directory: c8s
         run: make build-rtmr3-measurer
 
+      # Same: fetch.sh hard-fails without build/volumed.
+      - name: Build volumed binary
+        working-directory: c8s
+        run: make build-volumed
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
 
@@ -368,7 +373,8 @@ jobs:
       #
       # Key: KATA_VERSION (osbuilder + agent + toolchain pins all derive from
       # it) + build.sh itself, whose Step 2 block holds the remaining inputs
-      # (DISTRO/OS_VERSION/AGENT_*/EXTRA_PKGS). Hashing the whole script
+      # (DISTRO/OS_VERSION/AGENT_*/EXTRA_PKGS) + patches/, which osbuilder
+      # compiles into the cached kata-agent. Hashing the whole script
       # over-invalidates — any build.sh edit re-pays the ~4 min — which is the
       # safe direction; a stale hit is impossible by construction. No
       # restore-keys: a partial-input match could resurrect a rootfs built
@@ -378,7 +384,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/kata-base-rootfs.tar.zst
-          key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh') }}
+          key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh', 'c8s/kata-guest-base/patches/*.patch') }}
 
       # Cache the guest kernel build output (confidential-os-builder/output/kernel) — the most
       # expensive INVARIANT in this job. build.sh Step 1/5 runs `confos kernel`,

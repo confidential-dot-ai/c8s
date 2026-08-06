@@ -25,17 +25,24 @@ Sizing: `--secrets-max-paths`, `--secrets-max-value-bytes`,
 mesh CA, so a workload able to grow either map without limit could OOM it and
 take every certificate in the cluster with it.
 
-**kata is out of scope.** `--cvm-mode=pod` refuses `--measurements`, so the
-measurement requirement above is unmeetable there. Two other reasons stand
-independently: the kata sandbox ID comes from a host-written CRI annotation, and
-argv enforcement in the guest is watch-and-kill rather than synchronous.
+**kata is supported, with two caveats.** The fetcher redeems its sandbox token
+from whichever inventory its shape has: the mounted nri-image-policy socket on
+node-CVM, or `policy-monitor` on the guest's loopback `127.0.0.1:8401` under
+kata, where nothing is mounted. The webhook selects the shape with
+`--workload-claims-guest` and rejects `confidential.ai/c8s-secrets` only when
+the operator has neither — a pod whose fetcher would CrashLoop while the
+workload blocked forever on a file that never lands.
 
-This is enforced, not just documented: the fetcher redeems its sandbox token
-over the mounted nri-image-policy socket and has no guest (loopback) endpoint,
-so an operator without `--workload-claims-host-dir` has nothing to mount. The
-webhook rejects `confidential.ai/c8s-secrets` at admission there rather than
-admitting a pod whose fetcher would CrashLoop while the workload blocked
-forever on a file that never lands.
+The two caveats are weaker guarantees, not broken ones, and both are properties
+of the guest rather than of secret release:
+
+- the kata sandbox ID comes from a host-written CRI annotation, so the sandbox a
+  token names is asserted by the host rather than read from the kernel as it is
+  on node-CVM;
+- argv enforcement in the guest is watch-and-kill rather than synchronous, so a
+  container running a non-admitted argv is killed rather than refused.
+
+A deployment whose threat model cannot accept either should stay on node-CVM.
 
 ## Asking for a secret
 
@@ -106,9 +113,10 @@ A request carries:
 | `X-C8s-Challenge` | base64 of the challenge, consumed before anything else happens |
 | `Authorization: SandboxToken <base64>` | the inventory-signed token, in a header so it is bounded and never logged |
 
-The token is obtained from the node's admission inventory at `POST /sandbox`,
-bound to the leaf's key and that challenge — the same route and the same
-envelope `get-cert` uses at issuance.
+The token is obtained from the admission inventory at `POST /sandbox` — the
+node's on node-CVM, the guest's own under kata — bound to the leaf's key and
+that challenge, the same route and the same envelope `get-cert` uses at
+issuance.
 
 **`POST` never carries a value.** CDS generates it, so no caller chooses what
 another caller will later read. On a path that already exists it answers `409`

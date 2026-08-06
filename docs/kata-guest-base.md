@@ -29,9 +29,10 @@ it.
 
 Two of the three binaries baked into the image come from this repo
 (`ratls-mesh` from `cmd/ratls-mesh/`, plus the in-guest `C8S_*` cloud-init
-config — **Status:** today a single fixed default baked into the rootfs
-(`C8S_WORKLOAD_ID=c8s-broker`), not per-pod host-injected; per-pod injection
-was never built). The third — the in-guest attester staged
+config — a single fixed default baked into the rootfs
+(`C8S_WORKLOAD_ID=c8s-broker`); per-pod injection was never built, and
+`C8S_CDS_MEASUREMENTS` arrives over SNP init-data rather than either channel,
+see [`kata-image-policy.md`](kata-image-policy.md)). The third — the in-guest attester staged
 under the `attestation-service` role name — is the `attestation-api`
 binary from the sibling
 [confidential-dot-ai/attestation-rs](https://github.com/confidential-dot-ai/attestation-rs)
@@ -56,28 +57,41 @@ cloud-init.service ─→ c8s-cloudinit-env.service ─┤
                                                  │    readiness-check)    │   (Requires=+After=
                                                  │                        │    both services)
 local-fs.target ─→ policy-monitor.service ───────┘
-                   (Requires=/Wants= nothing else itself; enforces from
-                    t=0 on the baked seed. c8s-ready.target gates on it.)
-
-                                  (parallel) kata-agent.service
-                                             reads /etc/kata-opa/default-policy.rego
-                                             — a baked file in the dm-verity root.
-                                             After= network-online.target only.
+                   (Type=notify; READY=1 once the inotify watch is
+                    installed and the seed pass has run. Enforces from
+                    t=0 on the baked seed.)
+                          │
+                          ├─→ kata-agent.service
+                          │   (Requires=+After= policy-monitor.service, via
+                          │    kata-agent.service.d/10-c8s-policy-monitor.conf)
+                          │   reads /etc/kata-opa/default-policy.rego —
+                          │   a baked file in the dm-verity root.
 ```
 
 The dependency surface is intentionally minimal. kata-agent's bootstrap
 policy is part of the dm-verity root (covered by the launch
 measurement), not a runtime artifact, so kata-agent doesn't wait for any
 other in-guest service to render anything before it can load and enforce
-it. `policy-monitor` pulls in nothing itself (it `Requires=`/`Wants=` no
-other in-guest service), but it is **not** ungated: `c8s-ready.target`
-`Requires=`+`After=` it, so readiness — and therefore workload-container
-creation — waits for the monitor to be up and to have run its startup
-seed pass. It enforces from t=0 on the baked seed with no network, so
-gating on it adds no CDS bootstrap cycle. It observes what
-kata-agent does (via inotify on `/run/kata-containers/`) and reacts. See
-[`kata-image-policy.md`](kata-image-policy.md) for the enforcement
+it. It does wait for `policy-monitor.service`: `Requires=`+`After=`, so a
+monitor that cannot start keeps the agent from starting at all, and
+because the monitor is `Type=notify` the ordering resolves on READY=1 —
+watch installed, seed pass run — not on a fork. policy-monitor itself
+depends on nothing but the dm-verity root, which is what lets it sit
+ahead of the agent: it enforces from t=0 on the baked seed with no
+network, and the CDS refresh is a polling loop that retries. It observes
+what kata-agent does (via inotify on `/run/kata-containers/`) and reacts.
+See [`kata-image-policy.md`](kata-image-policy.md) for the enforcement
 mechanics.
+
+Enforcement readiness is deliberately **not** `c8s-ready.target`. That
+target also gates on `ratls-mesh.service`, which needs the pod IP that
+arrives over kata-agent's own `UpdateInterface` RPC — an agent ordered
+behind it would wait on itself. The mesh gate and the enforcement gate
+are separate edges for that reason.
+
+A policy-monitor that fails past its restart budget takes the guest down
+(`FailureAction=`/`StartLimitAction=poweroff-force`): a VM whose
+enforcement is dead must not keep running the containers it admitted.
 
 ### Readiness semantics and the CDS bootstrap
 
@@ -86,14 +100,13 @@ are bound and the cert manager has minted *any* leaf — the bootstrap
 self-signed one suffices. The background upgrade to a CDS-issued leaf
 does NOT gate readiness.
 
-This is deliberate. The CDS pod's workload is a single CDS container
-that kata-agent starts *after* `c8s-ready.target` is reached — and
-`c8s-ready.target` won't reach unless `ratls-mesh.service` is active.
-If readiness required a CDS-issued leaf, ratls-mesh would wait for
-CDS, kata-agent would wait for ratls-mesh, and CDS would wait for
-kata-agent to start it. Deadlock. The weak readiness gate breaks the
-cycle: ratls-mesh comes up self-signed so `c8s-ready.target` can be
-reached, kata-agent then starts the CDS container, and CDS — being its
+This is deliberate. The CDS pod's workload is a single CDS container, and
+`c8s-ready.target` `Requires=ratls-mesh.service`. If readiness required a
+CDS-issued leaf, ratls-mesh would wait for a CDS that only starts once
+kata-agent runs the container — and the target would never activate, so
+the pod would never report mesh-ready. The weak readiness gate breaks
+that: ratls-mesh comes up self-signed so `c8s-ready.target` can be
+reached, kata-agent starts the CDS container, and CDS — being its
 own in-process CA — issues its own leaf via the in-process
 attest → verify → mint chain (verifying SNP evidence against the
 in-guest attestation-service at `127.0.0.1:8400`, then signing in the

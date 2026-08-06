@@ -41,7 +41,8 @@ does not survive a CDS restart; nothing durable may be keyed on it.`,
 		},
 	}
 	f := cmd.Flags()
-	sidecar.BindFlags(f, &cfg.Config, "per-request timeout against CDS")
+	sidecar.BindFlags(f, &cfg.Config, "per-request timeout against CDS",
+		"Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 	f.StringSliceVar(&specs, "secret", nil, "NAME=/store/path to fetch; NAME is the filename written under --out-dir (repeatable)")
 	f.StringVar(&cfg.OutDir, "out-dir", "/run/c8s/secrets", "directory the secret files are written to; must be memory-backed")
 	f.StringVar(&cfg.FileMode, "file-mode", "0640", "octal mode for the written files")

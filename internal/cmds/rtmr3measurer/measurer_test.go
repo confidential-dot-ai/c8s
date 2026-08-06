@@ -270,39 +270,3 @@ func TestSeenCidsPrunedWhenContainerDirGoes(t *testing.T) {
 		t.Fatal("measuredDigests must NOT be pruned (it mirrors the append-only register)")
 	}
 }
-
-func TestExtractDigestAnnotationFallback(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		annotations map[string]string
-		want        string
-		wantOK      bool
-	}{
-		{
-			name: "image-name preferred",
-			annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "x@sha256:" + hexA,
-				"io.kubernetes.cri.image-id":   "y@sha256:" + hexB,
-			},
-			want: "sha256:" + hexA, wantOK: true,
-		},
-		{
-			name: "falls back to image-id",
-			annotations: map[string]string{
-				"io.kubernetes.cri.image-name": "x:latest",
-				"io.kubernetes.cri.image-id":   "y@sha256:" + hexB,
-			},
-			want: "sha256:" + hexB, wantOK: true,
-		},
-		{
-			name:        "nothing usable",
-			annotations: map[string]string{"io.kubernetes.cri.image-name": "x:latest"},
-			wantOK:      false,
-		},
-	} {
-		got, ok := extractDigest(tc.annotations)
-		if ok != tc.wantOK || (ok && got != tc.want) {
-			t.Errorf("%s: extractDigest = %q, %v; want %q, %v", tc.name, got, ok, tc.want, tc.wantOK)
-		}
-	}
-}

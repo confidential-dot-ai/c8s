@@ -4,6 +4,8 @@ package policymonitor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,6 +17,13 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// testCID derives a distinct container id of the shape the CRI generates (32
+// random bytes, hex-encoded) from a descriptive name.
+func testCID(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:])
+}
 
 // mustParseDigest parses a canonical digest or fails the test.
 func mustParseDigest(t *testing.T, s string) types.Digest {
@@ -109,12 +118,20 @@ func newTestMonitor(t *testing.T, allowlistEntries []string) (*monitor, *fakeKil
 			CgroupRoot:    "/sys/fs/cgroup",
 			LogLevel:      "debug",
 		},
-		logger:             logger,
-		allowlist:          a,
-		overlay:            &policyOverlay{},
-		killer:             killer,
-		configReadDeadline: 200 * time.Millisecond,
-		configReadInterval: 10 * time.Millisecond,
+		logger:                logger,
+		allowlist:             a,
+		overlay:               &policyOverlay{},
+		killer:                killer,
+		configReadDeadline:    200 * time.Millisecond,
+		configReadInterval:    10 * time.Millisecond,
+		configPendingInterval: 10 * time.Millisecond,
+		killRetryDeadline:     50 * time.Millisecond,
+		killRetryInterval:     time.Millisecond,
+		killPendingInterval:   5 * time.Millisecond,
+		// Far longer than any interval above, so only the tests that shorten it
+		// exercise the escalation path.
+		killEscalateAfter: time.Minute,
+		fatal:             make(chan error, 1),
 	}
 	return m, killer, watchDir
 }
@@ -123,7 +140,7 @@ func TestHandleNewContainer_AllowedDigest(t *testing.T) {
 	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
 
-	cid := "abcdef0123"
+	cid := testCID("allowed-digest")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
@@ -141,7 +158,7 @@ func TestHandleNewContainer_FloorDigestAdmitsAnyArgv(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
 
-	cid := "floor-weird-argv"
+	cid := testCID("floor-weird-argv")
 	writeConfigJSONArgs(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
@@ -162,7 +179,7 @@ func TestHandleNewContainer_WorkloadArgvMatchAdmits(t *testing.T) {
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + floor})
 	m.overlay.apply(exactEntrypointOverlay(t, "sha256:"+wl, []string{"/bin/app"}), 1)
 
-	cid := "wl-match"
+	cid := testCID("wl-match")
 	writeConfigJSONArgs(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + wl,
@@ -182,7 +199,7 @@ func TestHandleNewContainer_WorkloadArgvMismatchKills(t *testing.T) {
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + floor})
 	m.overlay.apply(exactEntrypointOverlay(t, "sha256:"+wl, []string{"/bin/app"}), 1)
 
-	cid := "wl-mismatch"
+	cid := testCID("wl-mismatch")
 	writeConfigJSONArgs(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + wl,
@@ -261,7 +278,7 @@ func TestHandleNewContainer_DeniedDigest(t *testing.T) {
 	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + allowed})
 
-	cid := "deadbeef"
+	cid := testCID("denied-digest")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
@@ -280,7 +297,7 @@ func TestHandleNewContainer_DeniedDigest(t *testing.T) {
 
 func TestHandleNewContainer_NoDigestAnnotation_Denies(t *testing.T) {
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	cid := "no-anno"
+	cid := testCID("no-anno")
 	writeConfigJSON(t, watchDir, cid, map[string]string{})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
@@ -296,7 +313,7 @@ func TestHandleNewContainer_UnreadableConfigDenies(t *testing.T) {
 	// so the monitor must fail closed (deny+kill) rather than let it run (H-01).
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	m.configReadDeadline = 50 * time.Millisecond
-	cid := "unreadable-config"
+	cid := testCID("unreadable-config")
 	dir := filepath.Join(watchDir, cid)
 	if err := os.MkdirAll(filepath.Join(dir, "config.json"), 0o755); err != nil {
 		t.Fatal(err)
@@ -309,28 +326,25 @@ func TestHandleNewContainer_UnreadableConfigDenies(t *testing.T) {
 	}
 }
 
-func TestHandleNewContainer_AbsentConfigSkips(t *testing.T) {
-	// An absent config.json (a non-container watch entry, or a bundle not yet
-	// written) must be skipped, not killed — killing infrastructure dirs would
-	// be a false positive (H-01 scope boundary).
-	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	m.configReadDeadline = 50 * time.Millisecond
-	cid := "shared"
-	if err := os.MkdirAll(filepath.Join(watchDir, cid), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
-
-	if calls := killer.snapshot(); len(calls) != 0 {
-		t.Fatalf("expected no kill for an absent config.json, got %d calls: %+v", len(calls), calls)
+func TestKataOwnDirectoriesAreNotContainers(t *testing.T) {
+	// /run/kata-containers/{shared,sandbox,image} are kata's own; they never
+	// grow a config.json, so the watcher must not wait on one for a decision.
+	// The baked policy refuses these as container ids, so nothing can hide here.
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	for _, name := range []string{"shared", "sandbox", "image"} {
+		if err := os.MkdirAll(filepath.Join(watchDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if m.pathLooksLikeContainer(filepath.Join(watchDir, name)) {
+			t.Errorf("%q treated as a container bundle", name)
+		}
 	}
 }
 
 func TestHandleNewContainer_MalformedConfigDenies(t *testing.T) {
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	m.configReadDeadline = 50 * time.Millisecond
-	cid := "bad-config"
+	cid := testCID("bad-config")
 	dir := filepath.Join(watchDir, cid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -352,7 +366,7 @@ func TestHandleNewContainer_SandboxSkipped(t *testing.T) {
 	// policy-monitor must skip it rather than deny — otherwise every pod's
 	// sandbox gets killed and no pod can start.
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	cid := "sandbox0"
+	cid := testCID("sandbox0")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "sandbox",
 	})
@@ -374,7 +388,7 @@ func TestHandleNewContainer_SandboxSkippedEvenWithUnallowlistedDigest(t *testing
 	// does (isSandbox), keeping the two in lockstep.
 	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	cid := "sandbox-evil"
+	cid := testCID("sandbox-evil")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "sandbox",
 		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
@@ -391,7 +405,7 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
 
-	cid := "late-config"
+	cid := testCID("late-config")
 	// Create only the directory; spawn a goroutine to drop config.json
 	// in after a short delay (mirrors the kata-agent race between mkdir
 	// and write).
@@ -419,38 +433,17 @@ func TestHandleNewContainer_ConfigJSONAppearsLate(t *testing.T) {
 // for an attacker-controlled annotation to appear.
 func TestReadConfigJSON_ValidAnnotationlessSpecReturnsImmediately(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	cid := "annotationless"
-	path := filepath.Join(watchDir, cid, "config.json")
+	cid := testCID("annotationless")
 	writeConfigJSON(t, watchDir, cid, map[string]string{"unrelated": "x"})
 	m.configReadDeadline = time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	spec, err := m.readConfigJSON(ctx, path)
+	spec, err := m.readConfigJSON(ctx, filepath.Join(watchDir, cid))
 	if err != nil {
 		t.Fatalf("readConfigJSON: %v", err)
 	}
 	if spec == nil || spec.Annotations["unrelated"] != "x" {
 		t.Fatalf("got spec %+v, want complete annotationless spec", spec)
-	}
-}
-
-func TestPathLooksLikeContainer(t *testing.T) {
-	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-	for _, tc := range []struct {
-		path string
-		want bool
-	}{
-		{filepath.Join(watchDir, "abc123"), true},
-		{filepath.Join(watchDir, "shared"), true},                    // not a digest, but valid id charset; filtered later by no annotation
-		{filepath.Join(watchDir, "deep", "nested", "abc123"), false}, // not a direct child
-		{filepath.Join(watchDir, "with spaces"), false},              // disallowed character
-		{filepath.Join(watchDir, ""), false},                         // empty
-		{watchDir, false},                                            // the watch dir itself
-	} {
-		got := m.pathLooksLikeContainer(tc.path)
-		if got != tc.want {
-			t.Errorf("pathLooksLikeContainer(%q) = %v, want %v", tc.path, got, tc.want)
-		}
 	}
 }
 
@@ -468,7 +461,7 @@ func TestRun_DetectsCreatedContainer(t *testing.T) {
 	// Give the watcher time to install.
 	time.Sleep(50 * time.Millisecond)
 
-	cid := "live-deny"
+	cid := testCID("live-deny")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.image-name": "ghcr.io/evil/badimage@sha256:" + denied,
 	})
@@ -528,7 +521,7 @@ func TestRun_SurvivesWatchDirReplacement(t *testing.T) {
 	if err := os.MkdirAll(watchDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeConfigJSON(t, watchDir, "post-replace-deny", map[string]string{
+	writeConfigJSON(t, watchDir, testCID("post-replace-deny"), map[string]string{
 		"io.kubernetes.cri.image-name": "ghcr.io/evil/badimage@sha256:" + denied,
 	})
 
@@ -545,5 +538,41 @@ func TestRun_SurvivesWatchDirReplacement(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("run returned err: %v", err)
+	}
+}
+
+// kata-agent creating config.json between readConfigJSON's open and its
+// follow-up Lstat must not read as a host-planted name. The loop below spins
+// the poll hot across the write so the window is hit repeatedly: treating any
+// Lstat-visible name as unresolvable denied a legitimate container here.
+func TestHandleNewContainer_ConfigAppearingDuringPollIsNotDenied(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for i := 0; i < 20; i++ {
+		m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+		m.configReadInterval = 50 * time.Microsecond
+
+		cid := testCID("poll-race")
+		dir := filepath.Join(watchDir, cid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(ociSpec{
+			Annotations: map[string]string{
+				"io.kubernetes.cri.container-type": "container",
+				"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = os.WriteFile(filepath.Join(dir, "config.json"), body, 0o644)
+		}()
+		m.handleNewContainer(context.Background(), dir)
+
+		if calls := killer.snapshot(); len(calls) != 0 {
+			t.Fatalf("iteration %d: denied a container whose config.json appeared mid-poll, got %+v", i, calls)
+		}
 	}
 }

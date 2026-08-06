@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // rtmr3Sysfs is the kernel TSM node backing extendSysfs/readRegisterSysfs.
@@ -45,8 +45,7 @@ const (
 	readDirWarnEvery = 60 // scans between repeated cannot-read-watch-dir warns
 )
 
-// Kata names each container directory by its 64-hex container id ("shared"/
-// "sandbox"/"image" never match); the same pattern validates sha256 hex.
+// Validates the sha256 hex recorded in the on-disk measurement log.
 var hex64Re = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type ociSpec struct {
@@ -200,8 +199,8 @@ func (m *measurer) scanOnce() {
 
 func (m *measurer) handle(dir string) {
 	cid := filepath.Base(dir)
-	if !hex64Re.MatchString(cid) {
-		return // "shared"/"sandbox"/"image" and other non-container entries
+	if !kataspec.ValidContainerID(cid) {
+		return // not a container id the baked kata-agent policy admits
 	}
 	if _, done := m.seenCids[cid]; done {
 		return
@@ -214,10 +213,10 @@ func (m *measurer) handle(dir string) {
 
 	// The pause/sandbox container is the measured rootfs, not a workload,
 	// and carries no image-name annotation.
-	if spec.Annotations["io.kubernetes.cri.container-type"] == "sandbox" {
+	if kataspec.IsSandbox(spec.Annotations) {
 		return
 	}
-	digest, ok := extractDigest(spec.Annotations)
+	digest, ok := kataspec.PullDigest(spec.Annotations)
 	if !ok {
 		// Measure-only: unlike policy-monitor we do not kill; an unpinned
 		// image simply isn't reflected in RTMR[3], so a relying party
@@ -316,17 +315,6 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 		}
 		time.Sleep(m.configReadInterval)
 	}
-}
-
-// extractDigest returns the container's image digest from its OCI
-// annotations in canonical "sha256:<hex>" form. Shared with policy-monitor
-// via types.DigestFromAnnotations so the two enforcers cannot drift.
-func extractDigest(ann map[string]string) (string, bool) {
-	d, ok := types.DigestFromAnnotations(ann)
-	if !ok {
-		return "", false
-	}
-	return d.String(), true
 }
 
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:

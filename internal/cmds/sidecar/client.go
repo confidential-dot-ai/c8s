@@ -65,7 +65,7 @@ func Do(ctx context.Context, cfg Config, client *http.Client, pub crypto.PublicK
 	if err != nil {
 		return nil, 0, err
 	}
-	token, err := workloadclaims.FetchSandboxToken(ctx, inventoryEndpoint(), cfg.InventoryTimeout, pub, challenge)
+	token, err := workloadclaims.FetchSandboxToken(ctx, cfg.endpoint(), cfg.InventoryTimeout, pub, challenge)
 	if err != nil {
 		return nil, 0, fmt.Errorf("redeem sandbox token: %w", err)
 	}
