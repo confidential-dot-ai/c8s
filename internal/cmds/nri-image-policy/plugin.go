@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -609,12 +609,14 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	return nil, nil, nil
 }
 
-// extractDigest extracts the digest from an image reference.
-// Returns empty string if no digest is present.
+// extractDigest returns the canonical "sha256:<64hex>" digest from an image
+// reference pulled by digest (registry/repo@sha256:... in any accepted form).
+// Returns empty string when the reference carries no valid digest; the caller
+// treats that as "no digest" and resolves via containerd or denies.
 func extractDigest(imageRef string) string {
-	// Format: registry/repo@sha256:abc123 or registry/repo:tag@sha256:abc123
-	if idx := strings.LastIndex(imageRef, "@"); idx != -1 {
-		return imageRef[idx+1:]
+	d, err := types.NormalizeDigest(imageRef)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return d.String()
 }
