@@ -57,11 +57,22 @@ func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []stri
 		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", err)
 	}
 	digests := make([]string, 0, len(workloadImages))
+	seen := make(map[string]string, len(workloadImages))
 	for _, ref := range workloadImages {
 		d, err := runtimemeasure.CanonicalDigest(ref)
 		if err != nil {
 			return measuredPolicy{}, fmt.Errorf("--workload-image: %w", err)
 		}
+		// RTMR[3] is an ordered extend chain over the deduped digest set (see
+		// FromDigests): the node's measurer extends a given image once, so a
+		// repeated ref here extends the expected register one time too many
+		// and produces a gate NO node can ever satisfy. Reject it rather than
+		// dedup silently — a repeat is a copy/paste, and a permanently red
+		// gate is worse than a usage error.
+		if prev, dup := seen[d]; dup {
+			return measuredPolicy{}, fmt.Errorf("--workload-image %q and %q are the same image (%s): each expected image must be given once, in first-extend order, or the expected RTMR[3] chain can never match the node's", prev, ref, d)
+		}
+		seen[d] = ref
 		digests = append(digests, d)
 	}
 	return measuredPolicy{

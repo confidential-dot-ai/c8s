@@ -403,6 +403,41 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 	}
 }
 
+// The node's measurer extends each image once, so repeating one here would
+// extend the EXPECTED register an extra time and build a gate no node can ever
+// satisfy — a permanently red, silently wrong policy. It has to be a usage
+// error, including when the two spellings differ but the digest does not.
+func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
+	pub := operatorPub(t)
+	manifest := writeTestManifest(t)
+	dig := "sha256:" + strings.Repeat("aa", 32)
+
+	for _, tc := range []struct {
+		name string
+		refs []string
+	}{
+		{"identical refs", []string{dig, dig}},
+		{"same digest, different spelling", []string{dig, "ghcr.io/acme/api@" + dig}},
+		{"repeat separated by another image", []string{dig, "sha256:" + strings.Repeat("bb", 32), dig}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := policyFor(manifest, pub, tc.refs); err == nil {
+				t.Fatal("a repeated workload image must be rejected, not silently doubled into the chain")
+			}
+		})
+	}
+
+	// Sanity: the single-occurrence policy this rejection protects is exactly
+	// the one a node with that image can satisfy.
+	single, err := policyFor(manifest, pub, []string{dig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig}) {
+		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
+	}
+}
+
 func TestPublicKeyPEMFromPrivateErrors(t *testing.T) {
 	t.Run("not PEM", func(t *testing.T) {
 		_, err := publicKeyPEMFromPrivate([]byte("garbage"))
