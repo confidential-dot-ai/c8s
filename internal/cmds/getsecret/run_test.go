@@ -224,3 +224,27 @@ func TestParseFileMode(t *testing.T) {
 }
 
 func ptr(c config) *config { return &c }
+
+// An unwritable output directory fails loudly rather than reporting success
+// with no file on disk.
+func TestWriteAllUnwritable(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.OutDir = filepath.Join(cfg.OutDir, "readonly", "secrets")
+	if err := os.MkdirAll(filepath.Dir(cfg.OutDir), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which ignores the directory mode")
+	}
+	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+		t.Fatal("an unwritable directory reported success")
+	}
+}
+
+func TestWriteAllRejectsBadMode(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.FileMode = "notamode"
+	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+		t.Fatal("a bad file mode was accepted")
+	}
+}
