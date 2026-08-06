@@ -145,8 +145,15 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// *allowlist with m, whose merge is mutex-guarded. No CDS URL →
 	// baked-seed-only and the network is never touched.
 	if cfg.CDSURL != "" {
-		applyInitDataMeasurements(ctx, logger, cfg)
-		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
+		// Both steps run here rather than on the startup path because the
+		// document they need is written by kata-agent, which systemd holds
+		// behind this unit's READY=1. cfg.CDSMeasurements is written only in
+		// this goroutine, after the synchronous readers above have finished
+		// with it.
+		go func() {
+			awaitInitDataMeasurements(ctx, logger, cfg)
+			runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
+		}()
 	} else {
 		// Info, not Error: seed-only is the configured intent here, unlike the
 		// failure paths in runAllowlistRefresh. Still recorded, so denies and
