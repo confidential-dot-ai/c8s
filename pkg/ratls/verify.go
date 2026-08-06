@@ -20,9 +20,19 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
-	// covered by this policy, including the per-workload RTMR[3].
+	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD.
 	Measurements [][]byte
+
+	// RTMRs pins TDX runtime measurement registers by index. MRTD covers TDVF
+	// alone, so on TDX it is these — RTMR[1] for the guest kernel, RTMR[2] for
+	// the command line carrying the dm-verity root hash — that make the guest
+	// image itself attested. Ignored on SNP, where kernel-hashes folds the
+	// command line into the launch digest. Empty pins nothing.
+	//
+	// Leave RTMR[0] unpinned: it carries the TD HOB, so it varies with the
+	// pod's vCPU and memory shape. RTMR[3] is extended by in-guest software and
+	// so cannot speak to guest identity.
+	RTMRs map[int][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component
@@ -106,7 +116,7 @@ type VerifyResult struct {
 //     the TEE (and the report is fresh if nonce is set), plus the debug and
 //     minimum-TCB policy.
 //  2. The launch measurement it returns is checked against
-//     policy.Measurements here.
+//     policy.Measurements here, and any pinned TDX RTMRs against policy.RTMRs.
 func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
@@ -277,6 +287,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
 		Measurements:       policy.Measurements,
+		RTMRs:              policy.RTMRs,
 	})
 	if err != nil {
 		return nil, mapVerifyError(evidence.Platform, err)

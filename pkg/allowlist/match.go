@@ -7,9 +7,20 @@ import "fmt"
 //
 // A local type rather than the inventory's own keeps this package a pure
 // function of the allowlist — the caller converts.
+// RunningContainer is an observed container, as an enforcer sees it.
+//
+// BindMounts holds the destinations of its BIND mounts only — the mounts whose
+// source is a guest path, and so the ones that can carry host-supplied content
+// in. EnvNames holds its environment variable names, without values.
+//
+// An enforcer that cannot observe a field leaves it nil, which an exact policy
+// treats as "nothing to refuse" rather than as a violation: the host-side NRI
+// plugin gates images on a node CVM and does not see the guest's mount table.
 type RunningContainer struct {
-	Digest string
-	Argv   []string
+	Digest     string
+	Argv       []string
+	BindMounts []string
+	EnvNames   []string
 }
 
 // ErrNoMatch reports that no entry describes the running set; ErrAmbiguous that
@@ -139,5 +150,43 @@ func (c Container) admits(r RunningContainer) bool {
 		return false
 	}
 	rest, ok := c.Command.matchCommand(r.Argv)
-	return ok && c.Args.matchArgs(rest)
+	if !ok || !c.Args.matchArgs(rest) {
+		return false
+	}
+	return c.Mounts.admits(r.BindMounts) && c.Env.admits(r.EnvNames)
+}
+
+// admits reports whether every bind destination is one this policy names.
+func (p MountPolicy) admits(destinations []string) bool {
+	if p.Policy != PolicyExact {
+		return true
+	}
+	return everyIn(destinations, p.Destinations)
+}
+
+// admits reports whether every environment name is one this policy names.
+func (p EnvPolicy) admits(names []string) bool {
+	if p.Policy != PolicyExact {
+		return true
+	}
+	return everyIn(names, p.Names)
+}
+
+// everyIn reports whether every observed value appears in allowed. An empty
+// observation is vacuously true — see RunningContainer on enforcers that cannot
+// see a field.
+func everyIn(observed, allowed []string) bool {
+	if len(observed) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		set[a] = struct{}{}
+	}
+	for _, o := range observed {
+		if _, ok := set[o]; !ok {
+			return false
+		}
+	}
+	return true
 }

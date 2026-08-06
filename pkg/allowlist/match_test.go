@@ -131,7 +131,7 @@ func TestMatchWorkloadDistinguishesByArgv(t *testing.T) {
 	}
 
 	idx := al.BuildIndex()
-	if !idx.AdmitsContainer(dApp, []string{"/serve", "--model", "a"}) {
+	if !idx.AdmitsContainer(RunningContainer{Digest: dApp, Argv: []string{"/serve", "--model", "a"}}) {
 		t.Fatal("precondition: Index should admit either argv for the shared digest")
 	}
 }
