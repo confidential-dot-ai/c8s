@@ -46,6 +46,10 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  # The attestation API is baked into the measured node rootfs. Do not use a
+  # floating branch here: a rebuild of the same c8s ref must use the reviewed
+  # attestation source revision recorded with the resulting image pin.
+  ATTESTATION_RS_REF: "41ad0c5495ec3cf4dc7a69d2870084bdf6b92f98"
   # confos build tree (kernel, rootfs, #82 firmware, measurement logic). Full
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
@@ -78,7 +82,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: confidential-dot-ai/attestation-rs
-          ref: main
+          ref: ${{ env.ATTESTATION_RS_REF }}
           path: attestation-rs
           token: ${{ secrets.GITHUB_TOKEN }}
 
