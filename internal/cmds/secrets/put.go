@@ -70,6 +70,9 @@ reaches a running pod when that pod next restarts.`,
 				fmt.Fprintf(cmd.OutOrStdout(), "wrote %d bytes to %s\n", len(value), path)
 				return nil
 			}
+			if res.Existing == intsecrets.OriginExternal {
+				return fmt.Errorf("%s is backed by the external KMS; writes do not reach it — change the value there, or unmap the path with 'c8s secrets external apply' first", path)
+			}
 			if !overwrite {
 				return fmt.Errorf("%s already holds %s; re-run with --overwrite to replace it", path, describe(res.Existing))
 			}
@@ -78,6 +81,10 @@ reaches a running pod when that pod next restarts.`,
 			res, err = c.put(cmdCtx(cmd), path, value, true, signer)
 			if err != nil {
 				return err
+			}
+			if res.Refused {
+				// The path became external-mapped between the two calls.
+				return fmt.Errorf("%s is backed by the external KMS; writes do not reach it — unmap the path with 'c8s secrets external apply' first", path)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %d bytes to %s\n", len(value), path)
 			if res.Existing == intsecrets.OriginWorkload {
@@ -101,6 +108,8 @@ func describe(o intsecrets.Origin) string {
 		return "a workload-generated value"
 	case intsecrets.OriginOperator:
 		return "an operator-supplied value"
+	case intsecrets.OriginExternal:
+		return "an external-KMS-backed value"
 	default:
 		return "a value"
 	}

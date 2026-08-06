@@ -46,12 +46,14 @@ Writes are signed with an operator EC private key you supply via --operator-key
 
 Values live in the CDS process and nowhere else, so a CDS restart clears the
 store and every workload holding a secret has to be rolled (see
-docs/secrets.md).`,
+docs/secrets.md) — except paths backed by an external KMS
+('c8s secrets external'), which are fetched from the vault at release time and recover on
+re-apply.`,
 		SilenceUsage: true,
 	}
 
 	cdsconn.BindFlags(cmd.PersistentFlags(), &o.Options)
-	cmd.AddCommand(newPutCmd(o), newExplainCmd(o))
+	cmd.AddCommand(newPutCmd(o), newExplainCmd(o), newExternalCmd(o))
 	return cmd
 }
 

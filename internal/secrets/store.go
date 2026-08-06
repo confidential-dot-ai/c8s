@@ -39,6 +39,10 @@ type Held struct {
 // chose values would force every backend to reimplement or contradict this
 // one's policy. PutIfAbsent is a compare-and-set, which every real key-value
 // store offers.
+//
+// Two conventions extend the contract for network backends: a write refusal
+// carries no current value (a write must not become a read), and Get may
+// perform blocking network I/O under the caller's context.
 type Store interface {
 	Get(ctx context.Context, path string) ([]byte, error)
 	// PutIfAbsent stores value at path if nothing is there, returning what the
