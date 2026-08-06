@@ -324,3 +324,28 @@ func TestProvisionPopulatesLeafOnce(t *testing.T) {
 		t.Fatal("usableForHandshake accepted a certificate with no parsed leaf")
 	}
 }
+
+// CertReady is sticky; CertUsable is what says a handshake would succeed. The
+// two must disagree exactly in the terminal state /ready has to catch.
+func TestCertUsableTracksTheValidityWindow(t *testing.T) {
+	s := &certState{provider: &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}, defaultTTL: time.Hour}
+	if s.CertUsable() {
+		t.Error("CertUsable = true before any certificate was provisioned")
+	}
+	if _, err := s.getOrProvision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !s.CertReady() || !s.CertUsable() {
+		t.Fatalf("after provisioning: CertReady = %v, CertUsable = %v, want both true", s.CertReady(), s.CertUsable())
+	}
+
+	s.mu.Lock()
+	s.cert = simpleCertWithWindow(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
+	s.mu.Unlock()
+	if !s.CertReady() {
+		t.Error("CertReady must keep its 'provisioned at least once' meaning")
+	}
+	if s.CertUsable() {
+		t.Error("CertUsable = true for a certificate past NotAfter")
+	}
+}

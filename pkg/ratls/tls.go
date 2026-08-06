@@ -199,8 +199,25 @@ type provisionAttempt struct {
 
 // CertReady returns true if a certificate has been successfully provisioned
 // at least once. Use this to gate readiness probes.
+//
+// It says nothing about whether that certificate can still be served — see
+// [certState.CertUsable].
 func (s *certState) CertReady() bool {
 	return s.provisioned.Load()
+}
+
+// CertUsable reports whether the cached certificate could be handed to a
+// handshake right now. CertReady is sticky ("provisioned at least once") and
+// since the manager stopped serving certificates outside their validity
+// window that no longer implies "can serve TLS": a pod whose certificate
+// source has been down past NotAfter fails 100% of its handshakes. Readiness
+// gates on this so such a pod leaves the endpoint list instead of
+// blackholing traffic.
+func (s *certState) CertUsable() bool {
+	s.mu.RLock()
+	cert := s.cert
+	s.mu.RUnlock()
+	return cert != nil && usableForHandshake(cert, time.Now()) == nil
 }
 
 // CertExpiry returns the NotAfter time of the current certificate, or the zero
@@ -590,8 +607,15 @@ func (m *CertManager) WarmUp(ctx context.Context) error {
 }
 
 // CertReady returns true if a certificate has been provisioned at least once.
+// It is sticky; gate readiness on [CertManager.CertUsable] as well.
 func (m *CertManager) CertReady() bool {
 	return m.state.CertReady()
+}
+
+// CertUsable returns true if the cached certificate is inside its validity
+// window and can therefore still be served. See [certState.CertUsable].
+func (m *CertManager) CertUsable() bool {
+	return m.state.CertUsable()
 }
 
 // CertExpiry returns the NotAfter time of the current certificate, or the zero
