@@ -13,60 +13,66 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
-// runCDSUpgrade swaps the server cert manager's provider from self-signed to
+// cdsUpgrade swaps the server cert manager's provider from self-signed to
 // CDS-issued, retrying with backoff until it succeeds, then upgrades the
 // client manager once and flips the cert-mode gauge. Shared by the host and
 // in-guest runs, which differ only in how the provider is built and in
 // logPrefix ("cds" vs "in-guest cds").
-func runCDSUpgrade(
-	ctx context.Context,
-	logger *slog.Logger,
-	logPrefix string,
-	newProvider func() (*cdsclient.Provider, error),
-	retryBackoff, retryMaxBackoff, opTimeout time.Duration,
-	serverCertMgr, clientCertMgr *ratls.CertManager,
-	m *metrics,
-) {
-	provider, err := newProvider()
+type cdsUpgrade struct {
+	logger      *slog.Logger
+	logPrefix   string
+	newProvider func() (*cdsclient.Provider, error)
+
+	retryBackoff    time.Duration
+	retryMaxBackoff time.Duration
+	opTimeout       time.Duration
+
+	serverCertMgr *ratls.CertManager
+	clientCertMgr *ratls.CertManager
+	metrics       *metrics
+}
+
+func (u cdsUpgrade) run(ctx context.Context) {
+	provider, err := u.newProvider()
 	if err != nil {
-		logger.Error(logPrefix+" provider creation failed", "error", err)
+		u.logger.Error(u.logPrefix+" provider creation failed", "error", err)
 		return
 	}
 
 	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = retryBackoff
-	bo.MaxInterval = retryMaxBackoff
+	bo.InitialInterval = u.retryBackoff
+	bo.MaxInterval = u.retryMaxBackoff
 	// MaxElapsedTime defaults to 0 (unlimited); ctx cancellation is the only
 	// exit.
 
 	_, err = backoff.Retry(ctx, func() (struct{}, error) {
-		upgradeCtx, cancel := context.WithTimeout(ctx, opTimeout)
+		upgradeCtx, cancel := context.WithTimeout(ctx, u.opTimeout)
 		defer cancel()
-		if err := serverCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
+		if err := u.serverCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, nil
 	},
 		backoff.WithBackOff(bo),
 		backoff.WithNotify(func(err error, d time.Duration) {
-			logger.Warn(logPrefix+" certificate upgrade attempt failed (will retry)", "error", err, "backoff", d)
+			u.logger.Warn(u.logPrefix+" certificate upgrade attempt failed (will retry)", "error", err, "backoff", d)
 		}),
 	)
 	if err != nil {
 		// ctx cancelled or unrecoverable error from the operation.
 		return
 	}
-	logger.Info(logPrefix + " certificate upgraded from self-signed to cds-issued (server)")
+	u.logger.Info(u.logPrefix + " certificate upgraded from self-signed to cds-issued (server)")
 
-	if clientCertMgr != nil {
-		upgradeCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		if err := clientCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
-			logger.Warn(logPrefix+" client certificate upgrade failed", "error", err)
+	if u.clientCertMgr != nil {
+		upgradeCtx, cancel := context.WithTimeout(ctx, u.opTimeout)
+		if err := u.clientCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
+			u.logger.Warn(u.logPrefix+" client certificate upgrade failed", "error", err)
 		} else {
-			logger.Info(logPrefix + " certificate upgraded from self-signed to cds-issued (client)")
+			u.logger.Info(u.logPrefix + " certificate upgraded from self-signed to cds-issued (client)")
 		}
 		cancel()
 	}
 
-	m.certMode.Store(1)
+	u.metrics.certMode.Store(1)
 }

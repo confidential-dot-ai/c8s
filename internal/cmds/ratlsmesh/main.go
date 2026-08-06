@@ -438,10 +438,17 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			CDSMeasurements:   cdsMeasurements,
 		}
 		cdsClient = cdsclient.NewClient(cdsCfg)
-		go runCDSUpgrade(ctx, logger, "cds",
-			func() (*cdsclient.Provider, error) { return cdsclient.NewProviderWithClient(cdsClient, logger) },
-			c.cdsRetryBackoff, c.cdsRetryMaxBackoff, c.cdsOpTimeout,
-			serverCertMgr, clientCertMgr, m)
+		go cdsUpgrade{
+			logger:          logger,
+			logPrefix:       "cds",
+			newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProviderWithClient(cdsClient, logger) },
+			retryBackoff:    c.cdsRetryBackoff,
+			retryMaxBackoff: c.cdsRetryMaxBackoff,
+			opTimeout:       c.cdsOpTimeout,
+			serverCertMgr:   serverCertMgr,
+			clientCertMgr:   clientCertMgr,
+			metrics:         m,
+		}.run(ctx)
 	}
 
 	// CA bundle refresh: periodically poll CDS /ca for updated CA bundle. Uses

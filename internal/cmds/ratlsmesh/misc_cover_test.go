@@ -353,10 +353,15 @@ func TestRunCDSUpgradeProviderError(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		runCDSUpgrade(context.Background(), testLogger(), "in-guest cds",
-			func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(badCfg, testLogger()) },
-			c.cdsRetryBackoff, c.cdsRetryMaxBackoff, c.cdsOpTimeout,
-			nil, nil, testMetrics())
+		cdsUpgrade{
+			logger:          testLogger(),
+			logPrefix:       "in-guest cds",
+			newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(badCfg, testLogger()) },
+			retryBackoff:    c.cdsRetryBackoff,
+			retryMaxBackoff: c.cdsRetryMaxBackoff,
+			opTimeout:       c.cdsOpTimeout,
+			metrics:         testMetrics(),
+		}.run(context.Background())
 		close(done)
 	}()
 	select {
