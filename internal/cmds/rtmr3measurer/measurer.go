@@ -329,15 +329,6 @@ func extractDigest(ann map[string]string) (string, bool) {
 	return d.String(), true
 }
 
-// normalizeDigest is types.NormalizeDigest returning the bare 64-hex form.
-func normalizeDigest(s string) (string, error) {
-	d, err := types.NormalizeDigest(s)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimPrefix(d.String(), "sha256:"), nil
-}
-
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
 // RTMR3 = SHA384(RTMR3 ‖ event). Needs mainline >= 6.16.
 func extendSysfs(event [rtmr3.Size]byte) error {

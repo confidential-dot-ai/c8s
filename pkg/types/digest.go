@@ -97,6 +97,12 @@ func (d Digest) String() string {
 	return d.value
 }
 
+// Hex returns the 64-char lowercase hex with no "sha256:" prefix, for callers
+// whose stores are keyed on the bare form. Empty for the zero value.
+func (d Digest) Hex() string {
+	return strings.TrimPrefix(d.value, "sha256:")
+}
+
 // MarshalText implements encoding.TextMarshaler, enabling Digest as a JSON map key.
 func (d Digest) MarshalText() ([]byte, error) {
 	return []byte(d.value), nil

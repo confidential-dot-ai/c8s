@@ -271,37 +271,6 @@ func TestSeenCidsPrunedWhenContainerDirGoes(t *testing.T) {
 	}
 }
 
-func TestNormalizeDigest(t *testing.T) {
-	for _, tc := range []struct {
-		in, want string
-		wantErr  bool
-	}{
-		{in: "ghcr.io/confidential-dot-ai/app@sha256:" + hexA, want: hexA},
-		{in: "sha256:" + hexA, want: hexA},
-		{in: hexA, want: hexA},
-		{in: "SHA256:" + hexA, want: hexA},
-		{in: "  sha256:" + hexA + "  ", want: hexA},
-		{in: "ghcr.io/confidential-dot-ai/app:latest", wantErr: true},
-		{in: "sha256:tooshort", wantErr: true},
-		{in: "", wantErr: true},
-	} {
-		got, err := normalizeDigest(tc.in)
-		if tc.wantErr {
-			if err == nil {
-				t.Errorf("normalizeDigest(%q) = %q, want error", tc.in, got)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("normalizeDigest(%q) err = %v", tc.in, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("normalizeDigest(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestExtractDigestAnnotationFallback(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

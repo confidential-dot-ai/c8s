@@ -38,7 +38,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -211,8 +210,5 @@ func isSandbox(annotations map[string]string) bool {
 // package's allowlist map keys carry no "sha256:" prefix.
 func normalizeDigest(s string) (string, error) {
 	d, err := types.NormalizeDigest(s)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimPrefix(d.String(), "sha256:"), nil
+	return d.Hex(), err
 }

@@ -17,6 +17,19 @@ func TestParseDigestValid(t *testing.T) {
 	}
 }
 
+func TestDigestHex(t *testing.T) {
+	d, err := ParseDigest(validDigest)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := d.Hex(), validDigest[len("sha256:"):]; got != want {
+		t.Fatalf("Hex() = %q, want %q", got, want)
+	}
+	if got := (Digest{}).Hex(); got != "" {
+		t.Fatalf("zero Digest Hex() = %q, want empty", got)
+	}
+}
+
 func TestParseDigestCanonicalizesToLowercase(t *testing.T) {
 	upper := "sha256:A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"
 	d, err := ParseDigest(upper)
