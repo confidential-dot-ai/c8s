@@ -195,7 +195,7 @@ func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowD
 
 // MeasurementAllowed reports whether measurement byte-equals one of the
 // allowed launch digests (an empty allowed set means "no pin" and is handled
-// by callers). Re-exported as ratls.MeasurementAllowed.
+// by callers).
 func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
 	for _, m := range allowed {
 		if bytes.Equal(measurement, m) {

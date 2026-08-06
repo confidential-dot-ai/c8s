@@ -20,6 +20,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
@@ -628,7 +629,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 			oc.Error = fmt.Sprintf("cannot enforce --measurements: launch_digest is missing or malformed (%q)", result.Claims.LaunchDigest)
 			return oc
 		}
-		if !ratls.MeasurementAllowed(mb, policy.Measurements) {
+		if !attestationclient.MeasurementAllowed(mb, policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}
