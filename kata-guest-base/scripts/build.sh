@@ -222,6 +222,8 @@ done
 # Without it the host can replace the baked policy via init-data, so a guest
 # built without it enforces nothing it claims to.
 [[ -f "${PATCH_DIR}/0001-agent-refuse-an-init-data-supplied-policy.patch" ]] || die "the init-data policy patch is missing from ${PATCH_DIR}."
+# Without it policy-monitor's decision races the container's execve.
+[[ -f "${PATCH_DIR}/0002-agent-wait-for-the-admission-verdict.patch" ]] || die "the admission-verdict patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
