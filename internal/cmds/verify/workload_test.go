@@ -137,7 +137,7 @@ func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
 	ev := &evidence{leaf: leaf, workload: matched}
 
 	oc := Outcome{Verified: true}
-	applyWorkloadPolicy(&oc, config{}, ev)
+	applyWorkloadPolicy(&oc, config{}, ev, nil)
 	if oc.Workload != "api" || oc.WorkloadAllowlistVersion != "4" {
 		t.Fatalf("workload = %q v%q, want api v4", oc.Workload, oc.WorkloadAllowlistVersion)
 	}
@@ -147,7 +147,7 @@ func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
 
 	// A failed hardware verdict must not surface an "attested-looking" name.
 	failed := Outcome{Verified: false}
-	applyWorkloadPolicy(&failed, config{}, ev)
+	applyWorkloadPolicy(&failed, config{}, ev, nil)
 	if failed.Workload != "" {
 		t.Fatalf("Workload = %q on a failed verdict, want empty", failed.Workload)
 	}
@@ -157,7 +157,7 @@ func TestApplyWorkloadPolicyReportsProvenance(t *testing.T) {
 // ignored — damage never reads as absence.
 func TestApplyWorkloadPolicyUnparseableFailsClosed(t *testing.T) {
 	oc := Outcome{Verified: true}
-	applyWorkloadPolicy(&oc, config{}, &evidence{workloadErr: errSandboxTest})
+	applyWorkloadPolicy(&oc, config{}, &evidence{workloadErr: errSandboxTest}, nil)
 	if oc.Verified {
 		t.Fatal("unparseable matched-workload extension did not fail the verdict")
 	}
@@ -181,9 +181,13 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 
 	run := func(cfg config, ev *evidence) Outcome {
 		t.Helper()
+		held, err := loadHeldAllowlist(cfg.allowlistFile)
+		if err != nil {
+			t.Fatalf("loadHeldAllowlist: %v", err)
+		}
 		oc := Outcome{Verified: true}
 		applySandboxPolicy(&oc, cfg, ev, operatorKeysReport{})
-		applyWorkloadPolicy(&oc, cfg, ev)
+		applyWorkloadPolicy(&oc, cfg, ev, held)
 		return oc
 	}
 
@@ -204,7 +208,7 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 	})
 	t.Run("absent stamp", func(t *testing.T) {
 		oc := Outcome{Verified: true}
-		applyWorkloadPolicy(&oc, config{workload: "api", meshCA: caPath}, &evidence{leaf: unstamped})
+		applyWorkloadPolicy(&oc, config{workload: "api", meshCA: caPath}, &evidence{leaf: unstamped}, nil)
 		if oc.Verified || !strings.Contains(oc.Error, "workload_absent") {
 			t.Fatalf("verdict = %v %q, want workload_absent", oc.Verified, oc.Error)
 		}
@@ -236,7 +240,7 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 	})
 	t.Run("pin needs a leaf", func(t *testing.T) {
 		oc := Outcome{Verified: true}
-		applyWorkloadPolicy(&oc, config{workload: "api", meshCA: caPath}, &evidence{})
+		applyWorkloadPolicy(&oc, config{workload: "api", meshCA: caPath}, &evidence{}, nil)
 		if oc.Verified {
 			t.Fatal("pin passed with no leaf certificate")
 		}
@@ -249,4 +253,52 @@ func TestApplyWorkloadPolicyPins(t *testing.T) {
 			t.Fatal("a leaf not chaining to --mesh-ca satisfied the workload pin")
 		}
 	})
+}
+
+// The --allowlist file is read exactly once. Two reads would let the verdict
+// validate one version of the file and hash another; the digest comparison must
+// be against the bytes that were parsed.
+func TestHeldAllowlistIsReadOnce(t *testing.T) {
+	canonical, digest := testHeldAllowlist(t)
+	matched := &ratls.MatchedWorkload{Name: "api", AllowlistVersion: "4", AllowlistDigest: digest}
+	leaf, caPath := caSignedWorkloadLeaf(t, matched)
+
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	if err := os.WriteFile(path, canonical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held, err := loadHeldAllowlist(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Swap the file underneath for something that would fail every check.
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config{allowlistFile: path, meshCA: caPath}
+	ev := &evidence{leaf: leaf, workload: matched}
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, cfg, ev, operatorKeysReport{})
+	applyWorkloadPolicy(&oc, cfg, ev, held)
+	if !oc.Verified {
+		t.Fatalf("verdict re-read the file instead of using the loaded bytes: %s", oc.Error)
+	}
+}
+
+func TestLoadHeldAllowlist(t *testing.T) {
+	if held, err := loadHeldAllowlist(""); held != nil || err != nil {
+		t.Fatalf("unset --allowlist = %v, %v; want nil, nil", held, err)
+	}
+	if _, err := loadHeldAllowlist(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+		t.Fatal("missing --allowlist file accepted")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHeldAllowlist(bad); err == nil {
+		t.Fatal("unparseable --allowlist file accepted")
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -207,7 +208,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	for _, want := range []string{
 		"--get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator:dev",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
-		"--get-cert-renew-interval=6h",
+		"--get-cert-renew-interval=2h",
 	} {
 		if !slices.Contains(args, want) {
 			t.Fatalf("operator args missing %q\n%v", want, args)
@@ -1507,6 +1508,45 @@ func findKey(node any, key string) string {
 	return ""
 }
 
+// The renewal interval the operator hands every injected sidecar must be
+// strictly below the shortest TTL CDS issues. cds.namedCertTTL is that TTL — a
+// named leaf's — and nothing backdates NotBefore, so an interval at or above it
+// would only fire once the installed leaf had already expired. get-cert paces
+// off the leaf's own NotAfter as a backstop, but the chart's own defaults must
+// not need it.
+func TestChartGetCertRenewIntervalIsBelowNamedCertTTL(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	renew := durationArg(t, renderedOperatorArgs(t, out), "--get-cert-renew-interval=")
+	named := durationArg(t, renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--named-cert-ttl=")
+	certTTL := durationArg(t, renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--cert-ttl=")
+
+	if renew >= named {
+		t.Fatalf("webhook.getCert.renewInterval %v >= cds.namedCertTTL %v: an injected sidecar would renew at or after its leaf expired", renew, named)
+	}
+	if renew >= certTTL {
+		t.Fatalf("webhook.getCert.renewInterval %v >= cds.certTTL %v", renew, certTTL)
+	}
+}
+
+// durationArg extracts and parses the value of the first arg carrying prefix.
+func durationArg(t *testing.T, args []string, prefix string) time.Duration {
+	t.Helper()
+	for _, a := range args {
+		if raw, ok := strings.CutPrefix(a, prefix); ok {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				t.Fatalf("parse %s%s: %v", prefix, raw, err)
+			}
+			return d
+		}
+	}
+	t.Fatalf("args missing %s\n%v", prefix, args)
+	return 0
+}
+
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "webhook.certVolume.fsGroup=4242",
@@ -1897,11 +1937,29 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	}
 }
 
+// assertTLSLBReadyzProbe pins the readiness gate's routing invariant in every
+// shape: the probe goes through nginx over HTTPS on the named `https` port —
+// never at the sidecar's own port, which is loopback-only and, under kata,
+// redirected into the guest's mutual-RA-TLS proxy that rejects the certless
+// kubelet prober — and nginx exact-matches /readyz onto the sidecar.
+func assertTLSLBReadyzProbe(t *testing.T, out string) {
+	t.Helper()
+	rp := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest").ReadinessProbe
+	if rp == nil || rp.HTTPGet == nil {
+		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe, got %+v", rp)
+	}
+	if rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.StrVal != "https" || rp.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+		t.Fatalf("readiness probe must be HTTPS /readyz on the nginx port, got %+v", rp.HTTPGet)
+	}
+	renderedTLSLBNginxConfig(t, out).location(t, "exact", "/readyz").
+		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
+}
+
 // TestChartTLSLBAttestFrontDoorModeAndReadinessGate pins the endpoint-split
 // wiring: a default (mesh-issued serving leaf) front door runs cds-attest in
 // cds front-door mode with no readiness gate, and tlsLb.attest.expectedWorkload
-// wires the /readyz matched-workload gate — the sidecar then binds the pod IP
-// so kubelet's httpGet probe can reach it.
+// wires the /readyz matched-workload gate — probed through nginx, because the
+// sidecar stays on loopback in every shape.
 func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
@@ -1913,16 +1971,17 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 		t.Fatalf("no expectedWorkload: cds-attest must keep today's probe-less shape, got %+v", attest.ReadinessProbe)
 	}
 
-	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer")
+	// Readiness can only gate ingress that flows through the Service, so the
+	// gate requires the node port off (see TestChartTLSLBReadinessGateGuards).
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template with expectedWorkload: %v\n%s", err, out)
 	}
 	attest = renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
-	assertContainerArgs(t, attest, "--front-door-mode=cds", "--expected-workload=infer", "--host=0.0.0.0")
-	rp := attest.ReadinessProbe
-	if rp == nil || rp.HTTPGet == nil || rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.IntValue() != 8800 {
-		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe on the attest port, got %+v", rp)
-	}
+	// The sidecar's single listener also carries the attestation, handshake and
+	// tunnel routes; the gate must never move it off loopback.
+	assertContainerArgs(t, attest, "--front-door-mode=cds", "--expected-workload=infer", "--host=127.0.0.1")
+	assertTLSLBReadyzProbe(t, out)
 
 	// The gate is satisfiable only if get-cert can earn the stamp: the
 	// claims flow must be wired on the same condition. Node-CVM shape:
@@ -1963,9 +2022,7 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 	}
 
 	// Kata: the guest serves the inventory on loopback — guest flag, no mount.
-	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "kata.enabled=true",
-		"--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false", "--set", "nriImagePolicy.enabled=false",
-		"--set-string", "image.digest=sha256:"+strings.Repeat("ab", 32))
+	out, err = helmTemplateKata(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
 	if err != nil {
 		t.Fatalf("helm template with expectedWorkload under kata: %v\n%s", err, out)
 	}
@@ -1978,6 +2035,64 @@ func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
 		if m.Name == "workload-claims" {
 			t.Fatal("kata get-cert must not mount the node socket")
 		}
+	}
+	assertContainerArgs(t, renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"), "--host=127.0.0.1")
+	// The probe shape is the whole reason this gate is reachable under kata:
+	// the guest exempts only the nginx port from the inbound mesh redirect.
+	assertTLSLBReadyzProbe(t, out)
+	dep = renderedDeployment(t, out, "c8s-tls-lb")
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "workload-claims" {
+			t.Fatal("kata pod must not carry the node inventory hostPath volume")
+		}
+	}
+	if sc := dep.Spec.Template.Spec.SecurityContext; sc != nil && len(sc.SupplementalGroups) != 0 {
+		t.Fatalf("kata pod needs no inventory socket group, got %+v", sc.SupplementalGroups)
+	}
+}
+
+// TestChartTLSLBReadinessGateGuards pins the render-time guards around the
+// readiness gate. Each rejected shape is one where the gate silently gates
+// nothing, or where the front door it protects is unreachable to begin with.
+func TestChartTLSLBReadinessGateGuards(t *testing.T) {
+	gate := []string{"--set-string", "tlsLb.attest.expectedWorkload=infer"}
+	noHostPort := []string{"--set", "tlsLb.hostPort.enabled=false"}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			// Readiness withdraws Service endpoints; the node port is
+			// published by CNI portmap at sandbox creation and keeps serving.
+			name: "hostPort defeats the gate",
+			args: gate,
+			want: "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload",
+		},
+		{
+			// Without the sidecar there is no /readyz to gate on, yet the
+			// claims wiring the gate pulls in would still render.
+			name: "gate without the sidecar it gates",
+			args: append(append([]string{}, gate...), append(noHostPort, "--set", "tlsLb.attest.enabled=false")...),
+			want: "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload",
+		},
+		{
+			// The probe and every external client reach nginx only on the one
+			// port the guest exempts from the inbound mesh redirect.
+			name: "kata with a non-exempt nginx port",
+			args: []string{"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
+				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest,
+				"--set", "tlsLb.nginx.httpsPort=9443"},
+			want: "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: 9443",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("render succeeded, want a fail\n%s", out)
+			}
+			assertHelmFailMessage(t, out, tc.want)
+		})
 	}
 }
 

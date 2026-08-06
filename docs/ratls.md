@@ -646,8 +646,9 @@ skew between the policy it pinned and the one CDS enforced.
 A sandbox's workload identity is `Unnamed → Named` (first renewal after the
 pod completes) or `→ Removed` (teardown). There is no invalidated state and no
 component that kills a named pod: the high-water inventory is the only
-authority. A foreign admission makes the sandbox permanently unmatchable, so
-every later renewal issues unnamed and the **named-leaf TTL** bounds how long
+authority. A foreign admission is intended to make the sandbox unmatchable for
+as long as that inventory lives — the record is never pruned — so every later
+renewal issues unnamed and the **named-leaf TTL** bounds how long
 the last named leaf survives (`--named-cert-ttl`, default
 `issuer.MaxNamedLeafTTL` = 6h, chart value `cds.namedCertTTL`). The stale
 bound for a named identity is therefore the shorter of the remaining leaf
@@ -657,7 +658,16 @@ leaf.
 get-cert discovers `Unnamed → Named` through renewal: with
 `--workload-claims` and a renewal loop it fast-polls (`--unnamed-renew-interval`,
 default 30s plus jitter) while the installed leaf is unnamed and settles to
-`--renew-interval` once named. Poll timing never changes the match decision.
+`--renew-interval` once named. A pod that stays unnamed backs off toward
+`--renew-interval` after a few polls, since being unnamed can be permanent.
+Poll timing never changes the match decision.
+
+Every delay is also capped at half the installed leaf's remaining lifetime, and
+a failed renewal retries on a short backoff rather than after a full interval.
+The named-leaf TTL is the shortest CDS issues and `certutil` does not backdate
+`NotBefore`, so a renewal interval alone — the chart's `renewInterval` — is not
+a safe schedule: it must stay strictly below `cds.namedCertTTL`, and the
+leaf-derived cap is the backstop when it does not.
 
 ### What vouches for the name
 
@@ -673,7 +683,14 @@ transcript.
   satisfy it.
 - `ratls.PeerMatchedWorkload(tls.ConnectionState)` reads a verified peer's
   stamp off a live connection for relying parties that route or authorize by
-  name; it refuses a connection whose chain was not verified.
+  name; it refuses a connection whose chain was not verified. It therefore
+  requires a `ServerConfig.ClientCAs` listener — the only branch where
+  crypto/tls builds the chain and fills `VerifiedChains`. A `ClientPolicy`
+  listener (which admits a self-signed RA-TLS peer by design) and every mesh
+  client (`InsecureSkipVerify`) leave it empty, so the function errors there.
+  That is the contract: on those connections nothing vouches for the stamp.
+  A caller that needs the name on such a hop must verify the leaf against the
+  mesh CA itself and use `MatchedWorkloadFromCert`, not weaken the check.
 
 A compromised mesh CA can mint any name — the stamp is CA-vouched, not
 hardware-bound.

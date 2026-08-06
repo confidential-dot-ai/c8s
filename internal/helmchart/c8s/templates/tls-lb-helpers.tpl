@@ -490,6 +490,25 @@ so it adds discovery output and verbose logging to the shared get-cert flow.
 {{- end }}
 
 {{/*
+"true" when the tls-lb pod must mount the node inventory's socket directory:
+the readiness gate is on and this is the node-CVM shape. Under kata the
+in-guest policy-monitor serves the inventory on loopback, so nothing is
+mounted and the pod needs no socket group either.
+
+The non-kata arm mirrors the operator's own inventory condition
+(operator.yaml): the directory exists only where an installer put it, and a
+`type: Directory` hostPath naming a path nothing created wedges the pod in
+ContainerCreating. validations.yaml (kind=require_host_image_policy) makes that
+arm true in every renderable non-kata shape today; the condition is spelled out
+anyway so the two consumers of the socket stay on one rule.
+*/}}
+{{- define "tls-lb.mountInventorySocket" -}}
+{{- if and .Values.tlsLb.attest.expectedWorkload (not .Values.kata.enabled) (or .Values.nriImagePolicy.enabled (eq .Values.attestationApi.cvmMode "node")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 c8s-cert native sidecar (restartPolicy: Always): obtains the leaf on startup
 and renews it on a ticker, SIGHUP-ing nginx after each renewal. Long-lived so
 its PID namespace can anchor shareProcessNamespace under kata (see
@@ -506,15 +525,17 @@ list.
 {{- /* The readiness gate (cds-attest /readyz) demands a matched-workload
        stamp on the mesh leaf, which only exists when get-cert redeems a
        sandbox token from the inventory — so wire the claims flow whenever
-       the gate is enabled. Node-CVM mounts the inventory socket directory
-       at get-cert's compiled path (workloadclaims.SidecarSocketDir); the
-       kata guest serves it on loopback instead, nothing to mount. The
-       deployment adds the hostPath volume and the socket's supplemental
-       group (workloadclaims.InventorySocketGID). */ -}}
+       the gate is enabled (the deployment fails the render if the gate is
+       set without the sidecar it gates). Node-CVM mounts the inventory
+       socket directory at get-cert's compiled path
+       (workloadclaims.SidecarSocketDir); the kata guest serves it on
+       loopback instead, nothing to mount. The deployment adds the hostPath
+       volume and the socket's supplemental group
+       (workloadclaims.InventorySocketGID) on the same condition. */ -}}
 {{- $extraArgs = append $extraArgs "--workload-claims" -}}
 {{- if .Values.kata.enabled -}}
 {{- $extraArgs = append $extraArgs "--workload-claims-guest" -}}
-{{- else -}}
+{{- else if eq (include "tls-lb.mountInventorySocket" .) "true" -}}
 {{- $mounts = append $mounts "- name: workload-claims\n  mountPath: /run/c8s/workload-claims\n  readOnly: true" -}}
 {{- end -}}
 {{- end -}}

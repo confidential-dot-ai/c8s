@@ -25,6 +25,12 @@ import (
 type Store struct {
 	mu sync.Mutex
 	db *sql.DB
+	// gen counts committed mutations in this process. It is the invalidation
+	// signal for a reader that memoizes a whole-document snapshot
+	// (internal/cmds/cds): unlike the version string — an operator-visible ETag
+	// that RestoreSnapshot deliberately moves backwards to the peer's value — it
+	// is monotone, so a restore can never make a stale snapshot look current.
+	gen uint64
 }
 
 // roleInit / roleMain label the two container partitions in the digest index.
@@ -286,6 +292,27 @@ func (s *Store) queryAll() ([]row, error) {
 	return result, rows.Err()
 }
 
+// commitTx commits a mutating transaction and records the mutation for
+// snapshot-cache invalidation. Every write path goes through it, including
+// RestoreSnapshot, which changes the document without bumping the version.
+// Callers must hold s.mu.
+func (s *Store) commitTx(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.gen++
+	return nil
+}
+
+// Generation returns the number of mutations committed to this store in this
+// process. A reader that caches a derived view invalidates it when the value
+// changes; it never goes backwards, and it costs no database round-trip.
+func (s *Store) Generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
 // bumpVersionTx increments the store version within tx. The version is the
 // worker pull ETag, so it is bumped once per mutation that changes the set.
 func bumpVersionTx(tx *sql.Tx) error {
@@ -316,7 +343,7 @@ func (s *Store) Add(digest types.Digest, image string) error {
 		return err
 	}
 
-	return tx.Commit()
+	return s.commitTx(tx)
 }
 
 // SeedDigests adds every floor digest not already present, in a single
@@ -360,7 +387,7 @@ func (s *Store) SeedDigests(digests map[types.Digest]string) (int, error) {
 		}
 	}
 
-	return int(added), tx.Commit()
+	return int(added), s.commitTx(tx)
 }
 
 // SeedWorkloads adds every workload entry whose name is not already present, in
@@ -413,7 +440,7 @@ func (s *Store) SeedWorkloads(workloads map[string]pkgallowlist.Workload) (int, 
 		}
 	}
 
-	return added, tx.Commit()
+	return added, s.commitTx(tx)
 }
 
 // PutWorkload upserts one named workload entry and rebuilds its digest index in
@@ -441,7 +468,7 @@ func (s *Store) PutWorkload(name string, w pkgallowlist.Workload) error {
 	if err := bumpVersionTx(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitTx(tx)
 }
 
 // DeleteWorkload removes one named entry and its index rows, bumping the version
@@ -473,7 +500,7 @@ func (s *Store) DeleteWorkload(name string) (bool, error) {
 	if err := bumpVersionTx(tx); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, s.commitTx(tx)
 }
 
 // ReplaceAll atomically swaps the entire allowlist — floor and workloads — for
@@ -498,7 +525,7 @@ func (s *Store) ReplaceAll(al *pkgallowlist.Allowlist) error {
 	if err := bumpVersionTx(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitTx(tx)
 }
 
 // RestoreSnapshot atomically replaces floor and workloads with an attested
@@ -528,7 +555,7 @@ func (s *Store) RestoreSnapshot(version string, al *pkgallowlist.Allowlist) erro
 	if _, err := tx.Exec("UPDATE allowlist_version SET version = ?", version); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitTx(tx)
 }
 
 // Replace atomically swaps the floor layer for digests and bumps the version,
@@ -558,7 +585,7 @@ func (s *Store) Replace(digests map[types.Digest]string) error {
 		return err
 	}
 
-	return tx.Commit()
+	return s.commitTx(tx)
 }
 
 // Delete removes all given floor digests atomically. Returns false (and deletes
@@ -604,7 +631,7 @@ func (s *Store) Delete(digests []types.Digest) (bool, error) {
 		return false, err
 	}
 
-	return true, tx.Commit()
+	return true, s.commitTx(tx)
 }
 
 // replaceContentsTx clears both layers and reloads them from al, without

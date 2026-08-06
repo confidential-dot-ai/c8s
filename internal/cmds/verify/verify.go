@@ -219,6 +219,11 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: %v\n", err)
 		return exitUsage
 	}
+	held, err := loadHeldAllowlist(cfg.allowlistFile)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return exitUsage
+	}
 
 	if cfg.url == "" && cfg.fromFile == "" {
 		fmt.Fprintf(errOut, "error: no target: pass a component's discovery URL / host:port (or --from-file)\n")
@@ -258,7 +263,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
-	return verifyEvidence(ctx, cfg, plan, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
+	return verifyEvidence(ctx, cfg, plan, ev, held, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
 }
 
 // targetDescription names the evidence source for a verdict produced before
@@ -316,7 +321,7 @@ func gatherOperatorKeys(ctx context.Context, cfg config, ev *evidence) operatorK
 // both work — then renders the verdict. The verification attempt (including the
 // KDS fetch) is bounded by --timeout; an unobtainable-collateral failure is
 // exit 3, not a verification verdict.
-func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, opKeys operatorKeysReport, out, errOut io.Writer) int {
+func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport, out, errOut io.Writer) int {
 	if cfg.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
@@ -331,7 +336,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
 	applySandboxPolicy(&oc, cfg, ev, opKeys)
-	applyWorkloadPolicy(&oc, cfg, ev)
+	applyWorkloadPolicy(&oc, cfg, ev, held)
 	render(cfg, oc, out)
 	if !oc.Verified {
 		return exitFailed
@@ -436,13 +441,10 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 			return nil, fmt.Errorf("--workload requires --mesh-ca: the matched workload is vouched by CDS's signature on the leaf, not by the hardware evidence")
 		}
 	}
-	if cfg.allowlistFile != "" {
-		if cfg.meshCA == "" {
-			return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
-		}
-		if _, _, err := heldAllowlist(cfg.allowlistFile); err != nil {
-			return nil, err
-		}
+	// The file itself is read by run, once, and threaded through — see
+	// loadHeldAllowlist.
+	if cfg.allowlistFile != "" && cfg.meshCA == "" {
+		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
 	}
 
 	return &verifyPlan{
@@ -509,19 +511,30 @@ func expectedOperatorKeysDigest(cfg config) ([]byte, error) {
 	return operatorauth.KeySetDigest(keys)
 }
 
-// heldAllowlist loads the --allowlist file: the exact bytes (which are what
-// gets hashed — no reserialization, per the canonical-bytes rule) and the
-// parsed document the stamped name resolves against.
-func heldAllowlist(path string) ([]byte, *pkgallowlist.Allowlist, error) {
+// heldAllowlist is the --allowlist file: the exact bytes (which are what gets
+// hashed — no reserialization, per the canonical-bytes rule) and the parsed
+// document the stamped name resolves against.
+type heldAllowlist struct {
+	raw []byte
+	doc *pkgallowlist.Allowlist
+}
+
+// loadHeldAllowlist reads --allowlist once, or returns nil when the flag is
+// unset. Once, deliberately: a second read would let the verdict validate one
+// version of the file and hash another.
+func loadHeldAllowlist(path string) (*heldAllowlist, error) {
+	if path == "" {
+		return nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read --allowlist: %w", err)
+		return nil, fmt.Errorf("read --allowlist: %w", err)
 	}
 	doc, err := pkgallowlist.ParseServedJSON(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("--allowlist: %w", err)
+		return nil, fmt.Errorf("--allowlist: %w", err)
 	}
-	return data, doc, nil
+	return &heldAllowlist{raw: data, doc: doc}, nil
 }
 
 // meshCAPool loads the mesh CA bundle used to authenticate a leaf's sandbox ID.
@@ -792,7 +805,7 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 // unparseable stamp fails closed; the mesh-CA chain check (applySandboxPolicy,
 // which always runs first) authenticates the stamp before anything from it is
 // reported or compared; the pins only ever demote Verified.
-func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence) {
+func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist) {
 	fail := func(format string, args ...any) {
 		oc.Verified = false
 		if oc.Error == "" {
@@ -817,7 +830,7 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence) {
 		}
 	}
 
-	if cfg.workload == "" && cfg.allowlistFile == "" {
+	if cfg.workload == "" && held == nil {
 		return
 	}
 	if ev.leaf == nil {
@@ -832,18 +845,13 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence) {
 		fail("workload_name_mismatch: leaf matched workload %q does not match pinned %q", ev.workload.Name, cfg.workload)
 		return
 	}
-	if cfg.allowlistFile != "" {
-		held, doc, err := heldAllowlist(cfg.allowlistFile)
-		if err != nil {
-			fail("%v", err)
-			return
-		}
-		digest := sha256.Sum256(held)
+	if held != nil {
+		digest := sha256.Sum256(held.raw)
 		if !bytes.Equal(digest[:], ev.workload.AllowlistDigest) {
 			fail("allowlist_digest_mismatch: stamped policy digest %x does not match SHA-256 %x of the held --allowlist bytes", ev.workload.AllowlistDigest, digest[:])
 			return
 		}
-		if _, ok := doc.Workloads[ev.workload.Name]; !ok {
+		if _, ok := held.doc.Workloads[ev.workload.Name]; !ok {
 			fail("workload_unresolved: stamped name %q does not resolve in the held allowlist document", ev.workload.Name)
 			return
 		}

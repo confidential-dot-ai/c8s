@@ -127,9 +127,13 @@ webhook:
     fsGroup: 65532
     keyMode: "0640"
   getCert:
-    ## Must be shorter than CDS's certTTL. The default renews at 25% of
-    ## the chart's 24h certificate TTL.
-    renewInterval: 6h
+    ## Must be strictly shorter than cds.namedCertTTL, which is the shortest
+    ## TTL CDS issues (a named leaf's, 6h) and therefore the binding one — a
+    ## renewal interval at or above it would only fire once the installed leaf
+    ## had already expired. The default is a third of it. get-cert additionally
+    ## paces off the installed leaf's own NotAfter, so a mis-set value here
+    ## degrades to more frequent renewals rather than an expired certificate.
+    renewInterval: 2h
     ## Defaults match distroless nonroot. Kata deployments that need UID 0
     ## inside the guest can set runAsUser/runAsGroup to 0 and runAsNonRoot=false.
     runAsUser: 65532
@@ -212,6 +216,8 @@ cds:
   # (OID …1.5). A named leaf can outlive its match by at most its remaining
   # lifetime, so this is the documented stale-identity bound; it never applies
   # to membership-only (unnamed) leaves. See docs/ratls.md, "Matched workload".
+  # It may only shorten the 6h built-in ceiling — CDS refuses to start on a
+  # larger value, or on 0, which is not a disable switch here.
   namedCertTTL: 6h
   maxTTL: 24h
   challengeTTL: 60s
@@ -1308,16 +1314,22 @@ tlsLb:
     attestationApiURL: ""
     # -- Workload-verified ingress gate: when set to an allowlist entry name,
     # the sidecar serves /readyz as 200 only while the installed mesh identity
-    # leaf carries a matched-workload stamp with exactly this name, and the
-    # chart wires a readinessProbe on the cds-attest container (binding it on
-    # the pod IP so kubelet can probe it), so ingress withholds traffic while
-    # the front door's committed mesh identity is unnamed. Setting it also
-    # switches the tls-lb get-cert onto the workload-claims flow (inventory
-    # socket mount + supplemental group on node-CVM, guest loopback under
-    # kata) — without that no stamp could ever arrive and the gate would hold
-    # the front door at 503 forever. The named entry must match the tls-lb
-    # pod's own non-injected container set (nginx). Empty keeps today's
-    # always-ready behavior.
+    # leaf is a usable credential carrying a matched-workload stamp with
+    # exactly this name, and the chart wires a readinessProbe on the cds-attest
+    # container (an HTTPS httpGet through nginx, which proxies /readyz to the
+    # sidecar's loopback port), so ingress withholds traffic while the front
+    # door's committed mesh identity is unnamed. Setting it also switches the
+    # tls-lb get-cert onto the workload-claims flow (inventory socket mount +
+    # supplemental group on node-CVM, guest loopback under kata) — without that
+    # no stamp could ever arrive and the gate would hold the front door at 503
+    # forever. The named entry must match the tls-lb pod's own non-injected
+    # container set (nginx).
+    #
+    # Requires attest.enabled and hostPort.enabled: false — readiness only
+    # withdraws Service endpoints, while a hostPort is published by the CNI
+    # portmap plugin independently of pod readiness, so the gate would withhold
+    # nothing. The chart fails the render on either mistake. Empty keeps
+    # today's always-ready behavior.
     expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.
     resources: {}

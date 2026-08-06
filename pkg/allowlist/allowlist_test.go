@@ -190,8 +190,8 @@ func TestValidWorkloadName(t *testing.T) {
 		{"a b", false},
 		{"a/b", false},
 	} {
-		if got := validWorkloadName(tc.name); got != tc.ok {
-			t.Errorf("validWorkloadName(%q) = %v, want %v", tc.name, got, tc.ok)
+		if got := ValidWorkloadName(tc.name); got != tc.ok {
+			t.Errorf("ValidWorkloadName(%q) = %v, want %v", tc.name, got, tc.ok)
 		}
 	}
 }
@@ -255,4 +255,45 @@ func mustParse(t *testing.T, s string) *Allowlist {
 		t.Fatalf("ParseJSON: %v\n%s", err, s)
 	}
 	return al
+}
+
+// The 63-byte bound arrived after entries could already be stored. A served
+// document carrying one over-long legacy name must still parse — failing it
+// would break every allowlist pull and every `c8s verify --allowlist` in the
+// cluster over an entry nobody can reach — while the write path still refuses
+// to create such a name.
+func TestWorkloadNameBoundIsWritePathOnly(t *testing.T) {
+	long := strings.Repeat("a", MaxWorkloadNameLen+1)
+	body := `{"schema":"c8s.allowlist/v1","workloads":{
+		"` + long + `":{"containers":[{"digest":"` + digestA + `"}]},
+		"ok":{"containers":[{"digest":"` + digestB + `"}]}}}`
+
+	if _, err := ParseJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "workload name") {
+		t.Fatalf("ParseJSON accepted an over-long name: %v", err)
+	}
+
+	al, err := ParseServedJSON([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseServedJSON failed the whole document over one legacy name: %v", err)
+	}
+	if _, ok := al.Workloads["ok"]; !ok {
+		t.Fatal("the in-bound entry was lost")
+	}
+	// Dropped, not carried: it can never be stamped on a leaf, and leaving its
+	// digests admitted would be the fail-open direction.
+	if _, ok := al.Workloads[long]; ok {
+		t.Fatal("the over-long entry survived a served parse")
+	}
+	if !ValidWorkloadName("ok") || ValidWorkloadName(long) {
+		t.Fatal("ValidWorkloadName must still apply the bound")
+	}
+}
+
+// The grammar itself is not relaxed on either path: the name is a URL path
+// segment.
+func TestParseServedJSON_StillRejectsBadWorkloadNameGrammar(t *testing.T) {
+	body := `{"schema":"c8s.allowlist/v1","workloads":{"a/b":{"containers":[{"digest":"` + digestA + `"}]}}}`
+	if _, err := ParseServedJSON([]byte(body)); err == nil || !strings.Contains(err.Error(), "workload name") {
+		t.Fatalf("expected workload name error, got %v", err)
+	}
 }
