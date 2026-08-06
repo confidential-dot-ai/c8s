@@ -99,9 +99,8 @@ type policyGenerationSource interface {
 // reuse, and is never mixed into what a leaf is stamped with.
 type policySnapshotCache struct {
 	mu   sync.Mutex
-	held *PolicySnapshot
+	held *PolicySnapshot // nil until the first successful load
 	gen  uint64
-	warm bool
 }
 
 // snapshot returns the memoized snapshot, loading one if the store has been
@@ -118,14 +117,14 @@ func (c *policySnapshotCache) snapshot(store policyStore) (*PolicySnapshot, erro
 	defer c.mu.Unlock()
 
 	gen := src.Generation()
-	if c.warm && c.gen == gen {
+	if c.held != nil && c.gen == gen {
 		return c.held, nil
 	}
 	snapshot, err := loadPolicySnapshot(store)
 	if err != nil {
 		return nil, err
 	}
-	c.held, c.gen, c.warm = snapshot, gen, true
+	c.held, c.gen = snapshot, gen
 	return snapshot, nil
 }
 
