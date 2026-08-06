@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
 )
 
 // writeOperatorKeysPEM writes a PEM bundle with one EC public key and returns
@@ -65,6 +67,7 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		earIssuerName:            "cds",
 		jwtClockSkew:             30,
 		maxTTL:                   time.Hour,
+		namedCertTTL:             issuer.MaxNamedLeafTTL,
 		certTTL:                  time.Hour,
 		challengeTTL:             time.Minute,
 		requestTimeout:           time.Second,

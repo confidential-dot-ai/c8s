@@ -66,8 +66,9 @@ type AttestHandler struct {
 	AllowlistStore policyStore
 
 	// NamedCertTTL caps the TTL of a leaf that carries a matched-workload
-	// stamp — the documented stale-identity bound (issuer.MaxNamedLeafTTL when
-	// zero). Never applied to membership-only leaves.
+	// stamp — the documented stale-identity bound. It can only shorten
+	// issuer.MaxNamedLeafTTL, never raise it; zero means the ceiling itself.
+	// Never applied to membership-only leaves.
 	NamedCertTTL time.Duration
 
 	// SandboxDigests resolves a sandbox's inventory: its signing key and what
@@ -236,11 +237,18 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	// A named leaf gets the shorter named-leaf TTL: it can outlive its match
 	// by at most its remaining lifetime, and that bound is a documented part
 	// of the stamp's contract (docs/ratls.md, "Matched workload").
+	//
+	// issuer.MaxNamedLeafTTL is a ceiling, not a default: NamedCertTTL can only
+	// shorten it. A configuration that raised it would silently extend how long
+	// a leaf keeps asserting a name its sandbox no longer matches, which is the
+	// one bound the stamp's contract rests on. A non-positive NamedCertTTL —
+	// rejected by the CLI, still reachable for a handler built in-process —
+	// lands on the ceiling rather than disabling the cap.
 	ttl := issuer.CapTTL(h.CertTTL, issuer.MaxLeafTTL)
 	if matched != nil {
-		namedTTL := h.NamedCertTTL
-		if namedTTL <= 0 {
-			namedTTL = issuer.MaxNamedLeafTTL
+		namedTTL := issuer.MaxNamedLeafTTL
+		if h.NamedCertTTL > 0 && h.NamedCertTTL < namedTTL {
+			namedTTL = h.NamedCertTTL
 		}
 		ttl = issuer.CapTTL(ttl, namedTTL)
 	}

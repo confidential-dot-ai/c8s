@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -239,5 +240,27 @@ func TestAttest_MatchedWorkload_NamedLeafTTL(t *testing.T) {
 	unnamed := leafFromInventory(t, store, []string{wlDigestA}, nil, tune)
 	if got := unnamed.NotAfter.Sub(unnamed.NotBefore); got < 11*time.Hour {
 		t.Fatalf("unnamed leaf validity = %v, want the ordinary ~12h", got)
+	}
+}
+
+// issuer.MaxNamedLeafTTL is a ceiling on the stamp's staleness bound, not a
+// default: NamedCertTTL can only shorten it. A handler configured above it — or
+// with the zero value — must still cap at the ceiling.
+func TestAttest_MatchedWorkload_NamedLeafTTLCeiling(t *testing.T) {
+	store := completeAPIStore(t)
+	for name, namedTTL := range map[string]time.Duration{
+		"above the ceiling": 24 * time.Hour,
+		"zero":              0,
+		"negative":          -time.Hour,
+	} {
+		t.Run(name, func(t *testing.T) {
+			leaf := leafFromInventory(t, store, []string{wlDigestA}, containersView(wlDigestA), func(h *AttestHandler) {
+				h.CertTTL = 24 * time.Hour
+				h.NamedCertTTL = namedTTL
+			})
+			if got := leaf.NotAfter.Sub(leaf.NotBefore); got > issuer.MaxNamedLeafTTL {
+				t.Fatalf("named leaf validity = %v, want capped at MaxNamedLeafTTL %v", got, issuer.MaxNamedLeafTTL)
+			}
+		})
 	}
 }

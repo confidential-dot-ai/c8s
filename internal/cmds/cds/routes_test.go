@@ -306,6 +306,7 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	valid := config{
 		maxHeaderBytes:       1,
 		maxTTL:               time.Hour,
+		namedCertTTL:         issuer.MaxNamedLeafTTL,
 		maxRequestSize:       1,
 		secretsMaxPaths:      1024,
 		secretsMaxValueBytes: 4096,
@@ -326,6 +327,9 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		{name: "negative max header bytes", edit: func(c *config) { c.maxHeaderBytes = -1 }},
 		{name: "zero max ttl", edit: func(c *config) { c.maxTTL = 0 }},
 		{name: "negative max ttl", edit: func(c *config) { c.maxTTL = -time.Hour }},
+		{name: "zero named cert ttl", edit: func(c *config) { c.namedCertTTL = 0 }},
+		{name: "negative named cert ttl", edit: func(c *config) { c.namedCertTTL = -time.Hour }},
+		{name: "named cert ttl above the ceiling", edit: func(c *config) { c.namedCertTTL = issuer.MaxNamedLeafTTL + time.Hour }},
 		{name: "zero max request size", edit: func(c *config) { c.maxRequestSize = 0 }},
 		{name: "negative max request size", edit: func(c *config) { c.maxRequestSize = -1 }},
 		{name: "zero readiness interval", edit: func(c *config) { c.readinessInterval = 0 }},
