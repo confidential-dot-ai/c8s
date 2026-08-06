@@ -1,7 +1,6 @@
 package allowlist
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,47 +59,6 @@ func TestLintOnlineRequiresCrane(t *testing.T) {
 	_, _, err := runCmd("lint", "--online", f)
 	if err == nil || !strings.Contains(err.Error(), "crane") {
 		t.Fatalf("expected a crane-not-found error, got %v", err)
-	}
-}
-
-func TestCraneDigest(t *testing.T) {
-	fakeCrane(t)
-	got, err := CraneDigest(context.Background(), "registry.example.com/app:v1")
-	if err != nil {
-		t.Fatalf("craneDigest: %v", err)
-	}
-	if got != digA {
-		t.Fatalf("craneDigest = %q, want %q", got, digA)
-	}
-	if _, err := CraneDigest(context.Background(), "registry.example.com/unresolvable:v1"); err == nil {
-		t.Fatal("expected a resolve failure")
-	}
-}
-
-func TestCraneConfig(t *testing.T) {
-	fakeCrane(t)
-	cfg, err := craneConfig(context.Background(), "registry.example.com/app:v1")
-	if err != nil {
-		t.Fatalf("craneConfig: %v", err)
-	}
-	if len(cfg.Config.Entrypoint) != 1 || cfg.Config.Entrypoint[0] != "/bin/app" {
-		t.Fatalf("entrypoint = %v", cfg.Config.Entrypoint)
-	}
-	if len(cfg.Config.Cmd) != 2 || cfg.Config.Cmd[0] != "serve" || cfg.Config.Cmd[1] != "--port=1" {
-		t.Fatalf("cmd = %v", cfg.Config.Cmd)
-	}
-	if _, err := craneConfig(context.Background(), "registry.example.com/badjson:v1"); err == nil || !strings.Contains(err.Error(), "parse crane config") {
-		t.Fatalf("expected a config parse error, got %v", err)
-	}
-}
-
-func TestCraneManifestExists(t *testing.T) {
-	fakeCrane(t)
-	if err := craneManifestExists(context.Background(), "registry.example.com/app@"+digA); err != nil {
-		t.Fatalf("existing manifest must not error: %v", err)
-	}
-	if err := craneManifestExists(context.Background(), "registry.example.com/app@"+digB); err == nil {
-		t.Fatal("expected a missing manifest to error")
 	}
 }
 

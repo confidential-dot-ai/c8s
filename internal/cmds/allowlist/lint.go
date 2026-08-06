@@ -10,6 +10,7 @@ import (
 	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
 
+	"github.com/confidential-dot-ai/c8s/internal/crane"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
@@ -41,7 +42,7 @@ same.`,
 			}
 			findings := lintOffline(al)
 			if online {
-				if err := requireCrane(); err != nil {
+				if err := crane.Require(); err != nil {
 					return err
 				}
 				findings = append(findings, lintOnline(ctx(cmd), al)...)
@@ -77,15 +78,15 @@ default Entrypoint and Cmd, so you can see the baked argv before writing an exac
 policy. This reads the registry only; it never contacts CDS.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireCrane(); err != nil {
+			if err := crane.Require(); err != nil {
 				return err
 			}
 			ref := args[0]
-			digest, err := CraneDigest(ctx(cmd), ref)
+			digest, err := crane.Digest(ctx(cmd), ref)
 			if err != nil {
 				return err
 			}
-			cfg, err := craneConfig(ctx(cmd), ref)
+			cfg, err := crane.Config(ctx(cmd), ref)
 			if err != nil {
 				return err
 			}
@@ -330,7 +331,7 @@ func lintOnline(ctx context.Context, al *pkgallowlist.Allowlist) []finding {
 				continue
 			}
 			checked[ref] = true
-			if err := craneManifestExists(ctx, ref); err != nil {
+			if err := crane.ManifestExists(ctx, ref); err != nil {
 				warnings = append(warnings, warnf("workload %q container digest not found in registry: %s (%v)", name, ref, err))
 			}
 		}

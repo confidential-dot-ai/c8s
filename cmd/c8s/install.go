@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/allowlist"
+	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -1332,8 +1332,8 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 		fmt.Fprintf(os.Stderr, "warning: cannot verify operator image %s:%s exists (crane not on PATH); a missing tag surfaces only as ImagePullBackOff after install\n", repo, tag)
 		return nil
 	}
-	if _, err := allowlist.CraneDigest(ctx, repo+":"+tag); err != nil {
-		if isImageNotFound(err) {
+	if _, err := crane.Digest(ctx, repo+":"+tag); err != nil {
+		if crane.IsNotFound(err) {
 			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not verify operator image %s:%s exists (%v); continuing\n", repo, tag, err)
@@ -1631,7 +1631,7 @@ func podTemplateImages(template corev1.PodTemplateSpec) []string {
 
 func appendResolvedWorkloadImageArgs(ctx context.Context, helmArgs []string, images []string) ([]string, error) {
 	return buildWorkloadImageArgs(helmArgs, images, func(ref string) (string, error) {
-		digest, err := allowlist.CraneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1683,20 +1683,6 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 	return parsed.String(), repo + "@" + parsed.String(), nil
 }
 
-// isImageNotFound reports whether a resolve error means the reference does
-// not exist in the registry (as opposed to auth/network trouble). crane
-// surfaces the registry's OCI error codes verbatim: MANIFEST_UNKNOWN for a
-// missing tag, NAME_UNKNOWN for a missing repository. Matching them lets the
-// callers attach the tag-coupling guidance only when the tag is genuinely
-// absent — a 401 or a DNS failure gets the raw error instead.
-func isImageNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "MANIFEST_UNKNOWN") || strings.Contains(msg, "NAME_UNKNOWN")
-}
-
 // tagCouplingHint explains a missing component image in terms of the c8s
 // publish model, so the operator lands on the right knob instead of retrying
 // tags. The c8s component images (operator, cds, …) publish in lockstep
@@ -1720,7 +1706,7 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 		return nil, err
 	}
 	return buildDigestArgs(helmArgs, tag, components, func(ref string) (string, error) {
-		digest, err := allowlist.CraneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1853,7 +1839,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 		repo := c.repository
 		digest, err := resolve(repo + ":" + tag)
 		if err != nil {
-			if isImageNotFound(err) {
+			if crane.IsNotFound(err) {
 				return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
 			}
 			return nil, err
