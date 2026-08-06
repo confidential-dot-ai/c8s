@@ -5,15 +5,9 @@ import (
 	"testing"
 )
 
-func retryConfig() Config {
-	cfg := testConfig("https://cds.example")
-	cfg.Attempts = 3
-	return cfg
-}
-
 func TestRetryRecoversOnceReleased(t *testing.T) {
 	var calls int
-	err := Retry(context.Background(), retryConfig(), "volume", func(context.Context) error {
+	err := Retry(context.Background(), testConfig("https://cds.example"), "volume", func(context.Context) error {
 		calls++
 		if calls < 3 {
 			return errNotYet
@@ -29,7 +23,7 @@ func TestRetryRecoversOnceReleased(t *testing.T) {
 }
 
 func TestRetryGivesUp(t *testing.T) {
-	cfg := retryConfig()
+	cfg := testConfig("https://cds.example")
 	var calls int
 	err := Retry(context.Background(), cfg, "volume", func(context.Context) error {
 		calls++
@@ -46,7 +40,7 @@ func TestRetryGivesUp(t *testing.T) {
 func TestRetryStopsWhenTheContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := Retry(ctx, retryConfig(), "volume", func(context.Context) error {
+	err := Retry(ctx, testConfig("https://cds.example"), "volume", func(context.Context) error {
 		return errNotYet
 	})
 	if err == nil {
