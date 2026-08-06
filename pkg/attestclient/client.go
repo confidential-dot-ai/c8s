@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -21,6 +22,16 @@ import (
 // maxErrorBodyBytes caps how much of an untrusted peer's non-2xx response
 // body is read into StatusError.
 const maxErrorBodyBytes = 8 << 10
+
+// maxResponseBodyBytes caps a 2xx response body. The largest legitimate
+// payloads are evidence envelopes carrying quotes and certificate chains,
+// well under this; anything bigger is a misbehaving peer, not data.
+const maxResponseBodyBytes = 8 << 20
+
+// defaultRequestTimeout bounds each request made by a NewClient-built client.
+// Callers needing a different bound pass their own client via
+// NewClientWithHTTP (or a per-call context deadline for a tighter one).
+const defaultRequestTimeout = 60 * time.Second
 
 // Client is a high-level client for the CDS attestation flow.
 // It handles the full challenge-attest-certify flow in a single call.
@@ -47,7 +58,7 @@ type CertificateResult struct {
 func NewClient(baseURL string) Client {
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultRequestTimeout},
 	}
 }
 
@@ -327,7 +338,7 @@ func (c Client) do(ctx context.Context, method, path string, body []byte) ([]byt
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return nil, &StatusError{Status: resp.StatusCode, Body: string(respBody)}
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 }
 
 // ok reports whether a GET of path returned 2xx.
