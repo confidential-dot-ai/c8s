@@ -10,38 +10,42 @@ import (
 	"testing"
 )
 
-// A connection that never went through iptables REDIRECT has no
-// SO_ORIGINAL_DST entry: both family probes must fail and the error must come
-// from the final IPv4 fallback, never a synthesized zero address.
+// A connection that never went through iptables REDIRECT must be rejected.
+// Without conntrack both family probes fail and the error must come from the
+// final IPv4 fallback, never a synthesized zero address; with conntrack the
+// kernel answers with the listener's own address, which must be refused as a
+// direct dial (forwarding there would loop the proxy onto itself).
 func TestDefaultOrigDstFuncFailsWithoutRedirect(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	accepted := make(chan struct{})
+	acceptedCh := make(chan net.Conn, 1)
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		<-accepted
-		c.Close()
+		acceptedCh <- c
 	}()
-	defer close(accepted)
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	accepted := <-acceptedCh
+	defer accepted.Close()
 
-	dst, err := defaultOrigDstFunc(conn)
+	// The proxy reads the original destination from the connection it
+	// accepted, so probe that side, not the client's.
+	dst, err := defaultOrigDstFunc(accepted)
 	if err == nil {
 		t.Fatalf("defaultOrigDstFunc succeeded with %q on a non-redirected connection", dst)
 	}
-	if !strings.Contains(err.Error(), "getsockopt IPv4") {
-		t.Errorf("error = %v, want the IPv4-fallback getsockopt failure", err)
+	if !strings.Contains(err.Error(), "getsockopt IPv4") && !strings.Contains(err.Error(), "dialed directly") {
+		t.Errorf("error = %v, want the IPv4-fallback getsockopt failure or the direct-dial rejection", err)
 	}
 }
 

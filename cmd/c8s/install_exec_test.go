@@ -1049,8 +1049,11 @@ func TestInstallNamespaceApplyFailureSurfaces(t *testing.T) {
 }
 
 func TestInstallRequiresCLIsOnPath(t *testing.T) {
+	// newFakeBin keeps /bin:/usr/bin on PATH, where CI runners ship real helm
+	// and kubectl; pin PATH to the stub dir so "missing" actually means missing.
 	t.Run("helm missing", func(t *testing.T) {
-		newFakeBin(t)
+		f := newFakeBin(t)
+		t.Setenv("PATH", f.dir)
 		err := runC8s(t, "install", "--cvm-mode=node", "--force")
 		if err == nil || !strings.Contains(err.Error(), "helm CLI not found") {
 			t.Fatalf("want a helm-not-found error, got %v", err)
@@ -1059,6 +1062,7 @@ func TestInstallRequiresCLIsOnPath(t *testing.T) {
 	t.Run("kubectl missing", func(t *testing.T) {
 		f := newFakeBin(t)
 		f.tool(t, "helm", "")
+		t.Setenv("PATH", f.dir)
 		err := runC8s(t, "install", "--cvm-mode=node", "--force")
 		if err == nil || !strings.Contains(err.Error(), "kubectl CLI not found") {
 			t.Fatalf("want a kubectl-not-found error, got %v", err)

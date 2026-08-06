@@ -28,11 +28,20 @@ func defaultOrigDstFunc(conn net.Conn) (string, error) {
 
 	// Try IPv6 first.
 	dst, err := getOrigDst6(raw)
-	if err == nil {
-		return dst, nil
+	if err != nil {
+		// Fall back to IPv4.
+		dst, err = getOrigDst4(raw)
+		if err != nil {
+			return "", err
+		}
 	}
-	// Fall back to IPv4.
-	return getOrigDst4(raw)
+	// With conntrack loaded, SO_ORIGINAL_DST answers even for a connection that
+	// was never REDIRECTed: the "original" destination is then the listener
+	// itself, and forwarding there would make the proxy dial itself in a loop.
+	if dst == tc.LocalAddr().String() {
+		return "", fmt.Errorf("origdst: %s was dialed directly, not redirected", dst)
+	}
+	return dst, nil
 }
 
 func getOrigDst4(raw syscall.RawConn) (string, error) {
