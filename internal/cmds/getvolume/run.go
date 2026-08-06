@@ -185,7 +185,7 @@ func daemonClient(cfg config) (*http.Client, string) {
 }
 
 func validate(cfg *config) error {
-	if err := cfg.Config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	if len(cfg.Volumes) == 0 {

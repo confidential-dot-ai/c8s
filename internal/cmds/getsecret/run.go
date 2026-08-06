@@ -177,7 +177,7 @@ func parseFileMode(s string) (os.FileMode, error) {
 }
 
 func validate(cfg *config) error {
-	if err := cfg.Config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	if len(cfg.Secrets) == 0 {
