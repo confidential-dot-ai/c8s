@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -168,7 +169,7 @@ func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.Sandbo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	host, err := sandboxDigestsHost(cfg)
+	host, err := resolveSandboxDigestsHostWithRetry(cfg, logger)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
 		return nil
@@ -190,6 +191,44 @@ func sandboxDigestsHost(cfg *Config) (string, error) {
 		cdsHost = u.Host
 	}
 	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cdsHost)
+}
+
+// advertiseHostRetryBudget bounds the wait for the guest network to reach a
+// state where the routing-table lookup for CDS returns a real local IP. Kata
+// brings the pod network up after policy-monitor starts, so the first attempts
+// hit `network is unreachable`; that must not permanently latch tokens off.
+// Overridable in tests.
+var (
+	advertiseHostAttempts = 12
+	advertiseHostBackoff  = 5 * time.Second
+)
+
+// resolveSandboxDigestsHostWithRetry keeps retrying the routing-table lookup
+// while the guest's network is still being configured. It returns the last
+// error only when every attempt in the budget failed — the caller then falls
+// back to the same "sandbox tokens disabled" posture it always had.
+func resolveSandboxDigestsHostWithRetry(cfg *Config, logger *slog.Logger) (string, error) {
+	// Explicit host bypasses inference entirely — no reason to wait.
+	if cfg.SandboxDigestsAdvertiseHost != "" {
+		return sandboxDigestsHost(cfg)
+	}
+	var lastErr error
+	for i := 1; i <= advertiseHostAttempts; i++ {
+		host, err := sandboxDigestsHost(cfg)
+		if err == nil {
+			if i > 1 {
+				logger.Info("advertise-host inference recovered", "attempt", i, "host", host)
+			}
+			return host, nil
+		}
+		lastErr = err
+		if i < advertiseHostAttempts {
+			logger.Warn("advertise-host inference failed; retrying",
+				"attempt", i, "of", advertiseHostAttempts, "retry_in", advertiseHostBackoff, "error", err)
+			time.Sleep(advertiseHostBackoff)
+		}
+	}
+	return "", lastErr
 }
 
 // startAdmissionInventory serves the token route on the guest's loopback

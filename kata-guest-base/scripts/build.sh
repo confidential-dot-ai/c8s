@@ -506,14 +506,26 @@ sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
 sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 
 # --- Reproducibility normalisation (must be the LAST rootfs mutation) ------
-# 1. umoci writes a *.mtree metadata manifest into the pause bundle whose bytes
-#    embed timestamps — the ONLY file that differs between two builds. It is
-#    unused at runtime (kata reads config.json + rootfs/), so drop it.
-# 2. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
+# 1. Drop the build host's /etc/resolv.conf. Docker seeds it into the rootfs
+#    from the daemon's own resolver — Azure CI hosts leave `nameserver
+#    168.63.129.16` in the sealed image. In-guest policy-monitor reads it at
+#    boot, before kata's CopyFile stamps the pod's real resolv.conf on top,
+#    tries to resolve `c8s-cds.c8s-system.svc` against that unreachable Azure
+#    DNS, fails, and latches sandbox tokens off for the guest's whole life.
+#    An empty file boots to loopback DNS for the ~seconds before kata's
+#    CopyFile lands; a symlink into /run picks up systemd-resolved's stub if
+#    it comes up first. Empty file is the safer default under kata's
+#    guest-pull shape (no /run mount at read time).
+# 2. umoci writes a *.mtree metadata manifest into the pause bundle whose
+#    bytes embed timestamps — the ONLY file that differs between two builds.
+#    It is unused at runtime (kata reads config.json + rootfs/), so drop it.
+# 3. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
 #    timestamps are deterministic (image_builder's `cp -a` preserves them).
 # Together with SOURCE_DATE_EPOCH-driven mke2fs (deterministic UUID/hash-seed/
 # created-time) and the fixed VERITY_SALT in seal_and_assemble, this makes the
 # dm-verity root_hash bit-for-bit reproducible.
+sudo rm -f "${TARGET_ROOTFS}/etc/resolv.conf"
+: | sudo tee "${TARGET_ROOTFS}/etc/resolv.conf" >/dev/null
 sudo find "${TARGET_ROOTFS}/pause_bundle" -name '*.mtree' -delete
 sudo find "${TARGET_ROOTFS}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
 
