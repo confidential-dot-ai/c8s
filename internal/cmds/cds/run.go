@@ -315,6 +315,7 @@ func run(cfg config) error {
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
+			PolicySnapshots:   &policySnapshotCache{},
 			SandboxDigests:    sandboxDigests,
 			InventoryHosts:    inventoryHosts,
 			SandboxBindings:   sandboxBindings,
@@ -563,6 +564,15 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.maxTTL <= 0 {
 		return fmt.Errorf("--max-ttl must be positive")
+	}
+	// Not "0 disables": this is the stale-identity bound for a named leaf, and
+	// 0 is the disable idiom elsewhere in the chart, so a zero here would read
+	// as "no bound" while silently meaning issuer.MaxNamedLeafTTL.
+	if cfg.namedCertTTL <= 0 {
+		return fmt.Errorf("--named-cert-ttl must be positive (it bounds how long a leaf may keep asserting a workload name; it cannot be disabled)")
+	}
+	if cfg.namedCertTTL > issuer.MaxNamedLeafTTL {
+		return fmt.Errorf("--named-cert-ttl must not exceed %v (issuer.MaxNamedLeafTTL, the documented stale-identity bound); it can only shorten that ceiling", issuer.MaxNamedLeafTTL)
 	}
 	if cfg.maxRequestSize <= 0 {
 		return fmt.Errorf("--max-request-size must be positive")

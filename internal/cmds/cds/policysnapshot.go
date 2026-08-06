@@ -2,6 +2,7 @@ package cds
 
 import (
 	"fmt"
+	"sync"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
@@ -74,6 +75,57 @@ func loadPolicySnapshot(store policyStore) (*PolicySnapshot, error) {
 		return nil, fmt.Errorf("load allowlist: %w", err)
 	}
 	return NewPolicySnapshot(al, version)
+}
+
+// policyGenerationSource is a store that can say whether it has been written
+// since a given moment, satisfied by *internal/allowlist.Store. A store without
+// it is never memoized.
+type policyGenerationSource interface {
+	Generation() uint64
+}
+
+// policySnapshotCache memoizes the immutable snapshot between allowlist writes.
+//
+// A snapshot costs a full LoadAll — the store lock, a JSON unmarshal per entry —
+// plus a re-marshal and a SHA-256 of the whole document, and /attest needs one
+// per request. Nothing about it changes until the store is written, so it is
+// built once per generation instead.
+//
+// Correctness rests on two things. The generation is read BEFORE the load, so a
+// write landing during the load leaves the memo tagged with the older
+// generation and the next request rebuilds — the cache can waste a load, never
+// serve a stale one. And the snapshot's version still comes from the same
+// LoadAll that produced the document: the generation only decides whether to
+// reuse, and is never mixed into what a leaf is stamped with.
+type policySnapshotCache struct {
+	mu   sync.Mutex
+	held *PolicySnapshot // nil until the first successful load
+	gen  uint64
+}
+
+// snapshot returns the memoized snapshot, loading one if the store has been
+// written since it was built. The lock is held across the load so a burst of
+// concurrent issuances collapses onto one LoadAll rather than racing to repeat
+// it.
+func (c *policySnapshotCache) snapshot(store policyStore) (*PolicySnapshot, error) {
+	src, ok := store.(policyGenerationSource)
+	if !ok {
+		return loadPolicySnapshot(store)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	gen := src.Generation()
+	if c.held != nil && c.gen == gen {
+		return c.held, nil
+	}
+	snapshot, err := loadPolicySnapshot(store)
+	if err != nil {
+		return nil, err
+	}
+	c.held, c.gen = snapshot, gen
+	return snapshot, nil
 }
 
 // Contains reports whether a canonical digest string is admitted: present in

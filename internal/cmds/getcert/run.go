@@ -85,6 +85,7 @@ var procRoot = "/proc"
 var (
 	errInvalidDiscoveryPublicTLSMode             = errors.New("invalid discovery public TLS mode")
 	errInvalidReloadWatchInterval                = errors.New("invalid reload watch interval")
+	errInvalidUnnamedRenewInterval               = errors.New("invalid unnamed renew interval")
 	errReloadWatchRequiresRenewInterval          = errors.New("reload watch requires renew interval")
 	errContinueOnInitialErrorRequiresRenewalLoop = errors.New("continue on initial error requires renewal loop")
 )
@@ -140,7 +141,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.BoolVar(&cfg.WorkloadClaims, "workload-claims", false, "Request an inventory-signed sandbox token, which CDS verifies and stamps into the issued leaf, from the local inventory at get-cert's compiled Unix socket path — nri-image-policy on node-CVM, policy-monitor in the kata guest (docs/ratls.md). The path is baked in, not supplied, so the control plane cannot redirect the request; fail-closed if the inventory is unreachable")
 	flags.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 	flags.DurationVar(&cfg.WorkloadClaimsTimeout, "workload-claims-timeout", 5*time.Second, "Timeout for the admission inventory request")
-	flags.DurationVar(&cfg.UnnamedRenewInterval, "unnamed-renew-interval", 30*time.Second, "With --workload-claims and --renew-interval, renew this often (plus jitter) while the installed leaf carries no matched-workload stamp, so a pod picks up its name at the first post-completion renewal instead of waiting a full interval; settles to --renew-interval once named. Poll timing never changes the match decision. 0 disables the fast poll")
+	flags.DurationVar(&cfg.UnnamedRenewInterval, "unnamed-renew-interval", 30*time.Second, "With --workload-claims and --renew-interval, renew this often (plus jitter) while the installed leaf carries no matched-workload stamp, so a pod picks up its name at the first post-completion renewal instead of waiting a full interval; settles to --renew-interval once named, and backs off toward it for a pod that stays unnamed. Poll timing never changes the match decision. 0 disables the fast poll")
 
 	_ = cmd.MarkFlagRequired("cds-url")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
@@ -227,12 +228,17 @@ func run(cfg config) error {
 	}
 
 	// Daemon mode: renew certificate periodically with graceful shutdown. The
-	// renewal timer is resettable: while the installed leaf is unnamed (and
-	// --workload-claims is on), it fires at the fast unnamed interval so the
-	// pod's first post-completion renewal picks up its matched-workload stamp
-	// promptly; once named it settles back to --renew-interval.
+	// renewal timer is resettable: it is paced off the installed leaf's own
+	// expiry as well as --renew-interval, and while the installed leaf is
+	// unnamed (and --workload-claims is on) it fires at the fast unnamed
+	// interval so the pod's first post-completion renewal picks up its
+	// matched-workload stamp promptly.
 	slog.Info("entering renewal loop", "interval", cfg.RenewInterval)
-	renewTimer := time.NewTimer(renewalInterval(cfg, leaf))
+	// unnamedRuns counts consecutive renewals that came back without a
+	// matched-workload stamp; failures counts consecutive renewal errors. Both
+	// only pace the timer.
+	var unnamedRuns, failures int
+	renewTimer := time.NewTimer(renewalInterval(cfg, leaf, unnamedRuns))
 	defer renewTimer.Stop()
 
 	var watchC <-chan time.Time
@@ -258,16 +264,30 @@ func run(cfg config) error {
 		case <-renewTimer.C:
 			renewed, err := obtainCert(ctx, cfg, client)
 			if err != nil {
-				slog.Error("certificate renewal failed, will retry next interval", "error", err)
+				// A short backoff, not a full interval: the timer is paced so
+				// it fires around half the installed leaf's remaining
+				// lifetime, so by the time a renewal fails the leaf is already
+				// close to expiry. Sleeping out --renew-interval here would
+				// leave the workload serving a dead certificate.
+				failures++
+				retry := renewalRetryInterval(cfg, leaf, failures)
+				slog.Error("certificate renewal failed, retrying", "error", err, "retry_in", retry, "failures", failures)
+				renewTimer.Reset(retry)
+				continue
+			}
+			failures = 0
+			leaf = renewed
+			if isNamedLeaf(leaf) {
+				unnamedRuns = 0
 			} else {
-				leaf = renewed
-				if cfg.ReloadNginx {
-					if err := reloadNginx(); err != nil {
-						slog.Warn("certificate renewed but nginx reload failed", "error", err)
-					}
+				unnamedRuns++
+			}
+			if cfg.ReloadNginx {
+				if err := reloadNginx(); err != nil {
+					slog.Warn("certificate renewed but nginx reload failed", "error", err)
 				}
 			}
-			renewTimer.Reset(renewalInterval(cfg, leaf))
+			renewTimer.Reset(renewalInterval(cfg, leaf, unnamedRuns))
 		case <-watchC:
 			changed, nextState, err := reloadWatchChanged(watchState, cfg.ReloadWatchPaths)
 			if err != nil {
@@ -286,23 +306,103 @@ func run(cfg config) error {
 	}
 }
 
-// renewalInterval picks the next renewal delay from the installed leaf: the
-// fast unnamed interval (with jitter, never faster than the flag) while a
-// workload-claims leaf carries no matched-workload stamp, the ordinary
-// --renew-interval otherwise. An unparseable or unknown leaf counts as
-// unnamed — polling fast on damage is harmless, serving stale identity is not.
-func renewalInterval(cfg config, leaf *x509.Certificate) time.Duration {
-	if !cfg.WorkloadClaims || cfg.UnnamedRenewInterval <= 0 || cfg.UnnamedRenewInterval >= cfg.RenewInterval {
-		return cfg.RenewInterval
-	}
-	if leaf != nil {
-		if matched, err := ratls.MatchedWorkloadFromCert(leaf); err == nil && matched != nil {
-			return cfg.RenewInterval
+const (
+	// minRenewalDelay floors every computed delay so an already-expired leaf
+	// cannot turn the renewal loop into a hot attestation spin against CDS. It
+	// never raises a delay above --renew-interval, which the operator chose.
+	minRenewalDelay = 5 * time.Second
+
+	// renewalRetryBase is the first delay after a failed renewal; consecutive
+	// failures double it up to the ordinary pacing.
+	renewalRetryBase = 15 * time.Second
+
+	// unnamedBackoffAfter is how many consecutive unnamed renewals run at the
+	// fast poll before it doubles toward --renew-interval. A pod can be
+	// permanently unnamed — a foreign admission, an inventory with no
+	// containers view, an ambiguous match, a main container that never comes
+	// up — and must not run a full attestation every --unnamed-renew-interval
+	// for its whole lifetime.
+	unnamedBackoffAfter = 10
+)
+
+// renewalInterval picks the next renewal delay.
+//
+// The ceiling is whichever comes first: --renew-interval, or half the installed
+// leaf's remaining lifetime. That second bound is what keeps a leaf from
+// expiring exactly as its renewal fires: CDS caps a named leaf at
+// issuer.MaxNamedLeafTTL and nothing backdates NotBefore, so pacing on the flag
+// alone — which the chart sets to the same value — would reset the timer after
+// issuance, drift later every cycle, and leave a single failed renewal serving a
+// dead leaf for a full interval.
+//
+// Under that ceiling a workload-claims leaf carrying no matched-workload stamp
+// fast-polls at --unnamed-renew-interval, so a pod picks up its name at the
+// first post-completion renewal. unnamedRuns is the number of consecutive
+// renewals that came back unnamed; see unnamedBackoffAfter.
+//
+// An unparseable or unknown leaf counts as unnamed — polling fast on damage is
+// harmless, serving stale identity is not.
+func renewalInterval(cfg config, leaf *x509.Certificate, unnamedRuns int) time.Duration {
+	delay := cfg.RenewInterval
+	if leaf != nil && !leaf.NotAfter.IsZero() {
+		if half := time.Until(leaf.NotAfter) / 2; half < delay {
+			delay = half
 		}
 	}
+	if fast := unnamedPollInterval(cfg, leaf, unnamedRuns); fast > 0 && fast < delay {
+		delay = fast
+	}
+	if delay < minRenewalDelay {
+		delay = min(minRenewalDelay, cfg.RenewInterval)
+	}
+	return delay
+}
+
+// unnamedPollInterval returns the fast-poll delay for an unnamed
+// workload-claims leaf, or 0 when the fast poll does not apply. Jitter is added
+// here and clamped by the caller, so it can never push a delay past
+// --renew-interval or past the installed leaf's remaining lifetime.
+func unnamedPollInterval(cfg config, leaf *x509.Certificate, unnamedRuns int) time.Duration {
+	if !cfg.WorkloadClaims || cfg.UnnamedRenewInterval <= 0 || isNamedLeaf(leaf) {
+		return 0
+	}
+	iv := cfg.UnnamedRenewInterval
+	// Doubling past unnamedBackoffAfter bounds a permanently-unnamed pod to a
+	// handful of fast polls; the caller's clamp lands it on --renew-interval.
+	// The loop cannot run away: it stops at the clamp, so at most log2 steps.
+	for i := 0; i < unnamedRuns-unnamedBackoffAfter && iv < cfg.RenewInterval; i++ {
+		iv *= 2
+	}
 	// Jitter up to +25% so a fleet of unnamed pods does not renew in lockstep.
-	jitter := time.Duration(mrand.Int64N(int64(cfg.UnnamedRenewInterval) / 4))
-	return cfg.UnnamedRenewInterval + jitter
+	// Integer division makes the divisor zero for a sub-4ns interval, which
+	// mrand.Int64N panics on.
+	if quarter := int64(iv) / 4; quarter > 0 {
+		iv += time.Duration(mrand.Int64N(quarter))
+	}
+	return iv
+}
+
+// renewalRetryInterval is the delay after a failed renewal: exponential from
+// renewalRetryBase so a CDS outage is not hammered, but never slower than the
+// ordinary pacing, which is itself bounded by the installed leaf's remaining
+// lifetime.
+func renewalRetryInterval(cfg config, leaf *x509.Certificate, failures int) time.Duration {
+	ceiling := renewalInterval(cfg, leaf, 0)
+	delay := renewalRetryBase
+	for i := 1; i < failures && delay < ceiling; i++ {
+		delay *= 2
+	}
+	return min(delay, ceiling)
+}
+
+// isNamedLeaf reports whether the installed leaf carries a valid
+// matched-workload stamp. A nil, unparseable, or unstamped leaf is not named.
+func isNamedLeaf(leaf *x509.Certificate) bool {
+	if leaf == nil {
+		return false
+	}
+	matched, err := ratls.MatchedWorkloadFromCert(leaf)
+	return err == nil && matched != nil
 }
 
 // obtainCertWithRetry runs the first certificate request, retrying in-process
@@ -498,6 +598,11 @@ func validateConfig(cfg config) error {
 		if cfg.RenewInterval <= 0 {
 			return fmt.Errorf("%w: --renew-interval must be greater than 0 when --reload-watch is set", errReloadWatchRequiresRenewInterval)
 		}
+	}
+	// A fast poll is a full attestation round-trip, so a sub-second value is
+	// never what an operator means; 0 is the documented "disabled".
+	if cfg.UnnamedRenewInterval != 0 && cfg.UnnamedRenewInterval < time.Second {
+		return fmt.Errorf("%w: --unnamed-renew-interval must be 0 (disabled) or at least 1s, got %v", errInvalidUnnamedRenewInterval, cfg.UnnamedRenewInterval)
 	}
 	if cfg.ContinueOnInitialError && cfg.RenewInterval <= 0 {
 		return fmt.Errorf("%w: --continue-on-initial-error requires --renew-interval", errContinueOnInitialErrorRequiresRenewalLoop)

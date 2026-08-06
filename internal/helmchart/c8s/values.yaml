@@ -127,9 +127,13 @@ webhook:
     fsGroup: 65532
     keyMode: "0640"
   getCert:
-    ## Must be shorter than CDS's certTTL. The default renews at 25% of
-    ## the chart's 24h certificate TTL.
-    renewInterval: 6h
+    ## Must be strictly shorter than cds.namedCertTTL, which is the shortest
+    ## TTL CDS issues (a named leaf's, 6h) and therefore the binding one — a
+    ## renewal interval at or above it would only fire once the installed leaf
+    ## had already expired. The default is a third of it. get-cert additionally
+    ## paces off the installed leaf's own NotAfter, so a mis-set value here
+    ## degrades to more frequent renewals rather than an expired certificate.
+    renewInterval: 2h
     ## Defaults match distroless nonroot. Kata deployments that need UID 0
     ## inside the guest can set runAsUser/runAsGroup to 0 and runAsNonRoot=false.
     runAsUser: 65532
@@ -212,6 +216,8 @@ cds:
   # (OID …1.5). A named leaf can outlive its match by at most its remaining
   # lifetime, so this is the documented stale-identity bound; it never applies
   # to membership-only (unnamed) leaves. See docs/ratls.md, "Matched workload".
+  # It may only shorten the 6h built-in ceiling — CDS refuses to start on a
+  # larger value, or on 0, which is not a disable switch here.
   namedCertTTL: 6h
   maxTTL: 24h
   challengeTTL: 60s

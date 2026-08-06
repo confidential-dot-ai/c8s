@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
@@ -116,7 +117,7 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
 	}
-	if err := a.normalize(); err != nil {
+	if err := a.normalize(strict); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -176,7 +177,14 @@ func (a *Allowlist) CanonicalDigest() ([]byte, error) {
 	return sum[:], nil
 }
 
-func (a *Allowlist) normalize() error {
+// normalize canonicalizes the document. strict is the write/ingest posture
+// (ParseJSON): it enforces MaxWorkloadNameLen, so no entry that the cw selector
+// or the leaf stamp cannot represent ever enters the store. A served document
+// (ParseServedJSON) is not ours to reject over that bound — it arrived after
+// entries could already have been written, and failing the whole document would
+// break every allowlist pull in the cluster over one legacy name — so an
+// over-long entry is dropped instead. See docs/allowlist-and-capabilities.md.
+func (a *Allowlist) normalize(strict bool) error {
 	if a.Schema != Schema {
 		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
 	}
@@ -195,8 +203,23 @@ func (a *Allowlist) normalize() error {
 		a.Digests = canon
 	}
 	for name, w := range a.Workloads {
-		if !validWorkloadName(name) {
-			return fmt.Errorf("workload name %q must match [A-Za-z0-9][A-Za-z0-9._-]* and be at most %d bytes (it is a URL path segment and a label value)", name, MaxWorkloadNameLen)
+		// The grammar is not negotiable on either path: the name is used
+		// verbatim as a URL path segment.
+		if !workloadNameGrammarOK(name) {
+			return fmt.Errorf("workload name %q must match [A-Za-z0-9][A-Za-z0-9._-]* (it is a URL path segment)", name)
+		}
+		if len(name) > MaxWorkloadNameLen {
+			if strict {
+				return fmt.Errorf("workload name %q is %d bytes; the maximum is %d (it is mirrored as a Kubernetes label value)", name, len(name), MaxWorkloadNameLen)
+			}
+			// Dropping is fail-closed: the entry's digests stop being admitted
+			// by this consumer. It could never have been named on a leaf either
+			// (ratls.MatchedWorkload.Validate applies the same bound), so
+			// nothing that depended on it is lost.
+			slog.Warn("allowlist: dropping a served workload entry whose name exceeds the label-value bound",
+				"name", name, "bytes", len(name), "max", MaxWorkloadNameLen)
+			delete(a.Workloads, name)
+			continue
 		}
 		if err := normalizeContainers(name, "initContainers", w.InitContainers); err != nil {
 			return err
@@ -344,14 +367,16 @@ func policyKey(c Container) string {
 
 // MaxWorkloadNameLen bounds an entry name to the Kubernetes label-value length,
 // so the confidential.ai/cw selector, an allowlist entry name, and the
-// matched-workload leaf stamp (pkg/ratls) all admit exactly the same names.
+// matched-workload leaf stamp (pkg/ratls) can all represent it. It is enforced
+// where entries are written, not where a served document is read — see
+// normalize.
 const MaxWorkloadNameLen = 63
 
-// validWorkloadName restricts entry names to a URL-safe segment so a name can be
-// used verbatim as a path parameter without escaping ambiguity, bounded to
-// MaxWorkloadNameLen bytes.
-func validWorkloadName(name string) bool {
-	if name == "" || len(name) > MaxWorkloadNameLen {
+// workloadNameGrammarOK restricts entry names to a URL-safe segment so a name
+// can be used verbatim as a path parameter without escaping ambiguity. It does
+// not apply MaxWorkloadNameLen; ValidWorkloadName is the bounded form.
+func workloadNameGrammarOK(name string) bool {
+	if name == "" {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
@@ -366,10 +391,16 @@ func validWorkloadName(name string) bool {
 	return true
 }
 
-// ValidWorkloadName reports whether name is a legal workload entry name. One
-// grammar backs allowlist parsing, the admission selector, and the
-// matched-workload certificate stamp — no entry can exist that the others
-// cannot represent.
+// ValidWorkloadName reports whether name is a legal workload entry name: the
+// URL-path-segment grammar, bounded to MaxWorkloadNameLen. It is the check the
+// write path, the admission selector, and the matched-workload certificate
+// stamp share.
+//
+// It is not identical to what every consumer accepts: a name may end in '.',
+// '_' or '-' here and still fail k8s validation.IsValidLabelValue, which the
+// injection webhook applies to the cw label. Tightening the grammar to close
+// that gap would retroactively invalidate stored entries, so the narrower rule
+// stays where it is enforced.
 func ValidWorkloadName(name string) bool {
-	return validWorkloadName(name)
+	return workloadNameGrammarOK(name) && len(name) <= MaxWorkloadNameLen
 }

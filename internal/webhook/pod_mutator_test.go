@@ -54,7 +54,7 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		"--out=/etc/c8s/certs/tls.crt",
 		"--key-out=/etc/c8s/certs/tls.key",
 		"--key-mode=0640",
-		"--renew-interval=6h0m0s",
+		"--renew-interval=2h0m0s",
 		"--reload-nginx=false",
 		"--continue-on-initial-error",
 	} {

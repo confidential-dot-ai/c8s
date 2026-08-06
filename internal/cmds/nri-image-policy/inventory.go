@@ -48,13 +48,6 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 	}
 }
 
-// admittedKey identifies a (digest, argv) pair for dedup. The unit separator
-// cannot appear in a digest and is not a shell-reachable argv byte in practice;
-// a collision would only merge two identical-looking containers anyway.
-func admittedKey(digest string, argv []string) string {
-	return digest + "\x1f" + strings.Join(argv, "\x1f")
-}
-
 // record notes an admitted container, injected sidecars included: /digests is
 // an inventory of what was admitted in the sandbox, and the injected images are
 // allowlist floor entries, so CDS drops them from workload matching itself.
@@ -74,7 +67,8 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 	if digest == "" {
 		rec.unresolved = true
 	} else {
-		rec.byKey[admittedKey(digest, argv)] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+		c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+		rec.byKey[c.Key()] = c
 	}
 	b.admitted[sandboxID] = rec
 
@@ -196,7 +190,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		if a.Digest != b.Digest {
 			return strings.Compare(a.Digest, b.Digest)
 		}
-		return strings.Compare(strings.Join(a.Argv, "\x1f"), strings.Join(b.Argv, "\x1f"))
+		return slices.Compare(a.Argv, b.Argv)
 	})
 	return slices.Compact(digests), containers, true, nil
 }
