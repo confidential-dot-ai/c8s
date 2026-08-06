@@ -632,7 +632,7 @@ func TestCertManagerRotationFailCallback(t *testing.T) {
 	// Trigger background rotation (which will fail).
 	state := mgr.state
 	if state.rotating.CompareAndSwap(false, true) {
-		state.backgroundProvision(state.provider)
+		state.backgroundProvision(state.provider, state.rotateAt)
 	}
 
 	// The failure callback should have been called.

@@ -188,7 +188,9 @@ func simpleCertWithWindow(t *testing.T, notBefore, notAfter time.Time) *tls.Cert
 func TestGetOrProvisionRefusesExpiredCachedCert(t *testing.T) {
 	expired := simpleCertWithWindow(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
 	provisionErr := errors.New("certificate source down")
-	s := &certState{provider: &erroringProvider{err: provisionErr}}
+	// syncCooldown is minimal so the recovery step below is observable
+	// immediately; the negative cache has its own test.
+	s := &certState{provider: &erroringProvider{err: provisionErr}, syncCooldown: time.Nanosecond}
 	s.cert = expired
 	// Rotation not even due yet — expiry must be a hard stop on its own.
 	s.rotateAt = time.Now().Add(time.Hour)
