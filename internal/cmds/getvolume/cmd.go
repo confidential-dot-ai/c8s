@@ -42,8 +42,11 @@ Nothing here creates one.`,
 		},
 	}
 	f := cmd.Flags()
-	sidecar.BindFlags(f, &cfg.Config, "per-request timeout against CDS and the node agent",
-		"Reach the inventory and the volume daemon on the kata guest's loopback addresses instead of node-CVM Unix sockets. Both shapes are compiled in; this only selects which applies, so a wrong setting fails closed rather than redirecting the request")
+	sidecar.BindFlags(f, &cfg.Config)
+	// This command's timeout also covers the node agent, and its guest shape
+	// also moves the volume daemon onto guest loopback.
+	f.Lookup("request-timeout").Usage = "per-request timeout against CDS and the node agent"
+	f.Lookup("workload-claims-guest").Usage = "Reach the inventory and the volume daemon on the kata guest's loopback addresses instead of node-CVM Unix sockets. Both shapes are compiled in; this only selects which applies, so a wrong setting fails closed rather than redirecting the request"
 	f.StringSliceVar(&specs, "volume", nil, "NAME=/store/path to open; NAME selects the device by serial (repeatable)")
 	f.StringVar(&cfg.SocketDir, "socket-dir", workloadclaims.SidecarSocketDir, "directory holding the node agent's socket, as this pod sees it")
 	return cmd

@@ -68,11 +68,12 @@ func (c Config) endpoint() string {
 	return inventoryEndpoint()
 }
 
-// BindFlags registers the flags shared by every sidecar. requestTimeoutUsage
-// and workloadClaimsGuestUsage are per-command: get-volume's request timeout
-// also covers the node agent, and its guest shape also moves the volume
-// daemon onto guest loopback.
-func BindFlags(f *pflag.FlagSet, cfg *Config, requestTimeoutUsage, workloadClaimsGuestUsage string) {
+// BindFlags registers the flags shared by every sidecar, with get-secret's
+// usage texts as the default prose. A command whose semantics differ (e.g.
+// get-volume's request timeout also covers the node agent, and its guest
+// shape also moves the volume daemon onto guest loopback) overrides the
+// affected flag's Usage via f.Lookup after this call.
+func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
@@ -80,9 +81,9 @@ func BindFlags(f *pflag.FlagSet, cfg *Config, requestTimeoutUsage, workloadClaim
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")
 	f.DurationVar(&cfg.RetryInterval, "retry-interval", 5*time.Second, "wait between attempts")
-	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, requestTimeoutUsage)
+	f.DurationVar(&cfg.RequestTimeout, "request-timeout", 10*time.Second, "per-request timeout against CDS")
 	f.DurationVar(&cfg.InventoryTimeout, "inventory-timeout", 5*time.Second, "timeout for redeeming a sandbox token from the node's admission inventory")
-	f.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, workloadClaimsGuestUsage)
+	f.BoolVar(&cfg.WorkloadClaimsGuest, "workload-claims-guest", false, "Reach the inventory on the kata guest's loopback address instead of the node-CVM Unix socket. Both endpoints are compiled in; this only selects which shape applies, so a wrong setting fails closed rather than redirecting the request")
 }
 
 // Validate checks the shared half of a config and canonicalises the CDS URL.
