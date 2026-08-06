@@ -637,8 +637,9 @@ skew between the policy it pinned and the one CDS enforced.
 A sandbox's workload identity is `Unnamed → Named` (first renewal after the
 pod completes) or `→ Removed` (teardown). There is no invalidated state and no
 component that kills a named pod: the high-water inventory is the only
-authority. A foreign admission makes the sandbox permanently unmatchable, so
-every later renewal issues unnamed and the **named-leaf TTL** bounds how long
+authority. A foreign admission is intended to make the sandbox unmatchable for
+as long as that inventory lives — the record is never pruned — so every later
+renewal issues unnamed and the **named-leaf TTL** bounds how long
 the last named leaf survives (`--named-cert-ttl`, default
 `issuer.MaxNamedLeafTTL` = 6h, chart value `cds.namedCertTTL`). The stale
 bound for a named identity is therefore the shorter of the remaining leaf

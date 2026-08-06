@@ -59,7 +59,8 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.containers[cid] = digest
-	b.admitted[digest+"\x1f"+strings.Join(argv, "\x1f")] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	b.admitted[c.Key()] = c
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
@@ -118,7 +119,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		if x.Digest != y.Digest {
 			return strings.Compare(x.Digest, y.Digest)
 		}
-		return strings.Compare(strings.Join(x.Argv, "\x1f"), strings.Join(y.Argv, "\x1f"))
+		return slices.Compare(x.Argv, y.Argv)
 	})
 	return slices.Compact(digests), containers, true, nil
 }
