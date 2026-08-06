@@ -153,6 +153,29 @@ func TestNewCAWithParent(t *testing.T) {
 	}
 }
 
+func TestNewCAWithParentValidityWindow(t *testing.T) {
+	parent, err := issuer.NewCA("parent ca", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA parent: %v", err)
+	}
+
+	child, err := issuer.NewCAWithParent("child ca", time.Hour, elliptic.P384(), parent.Cert, parent.Key)
+	if err != nil {
+		t.Fatalf("NewCAWithParent: %v", err)
+	}
+	if got := time.Until(child.Cert.NotAfter); got < 59*time.Minute || got > 61*time.Minute {
+		t.Fatalf("explicit validity: NotAfter in %v, want ~1h", got)
+	}
+
+	defaulted, err := issuer.NewCAWithParent("child ca", 0, elliptic.P384(), parent.Cert, parent.Key)
+	if err != nil {
+		t.Fatalf("NewCAWithParent zero validity: %v", err)
+	}
+	if got := time.Until(defaulted.Cert.NotAfter); got < 364*24*time.Hour || got > 366*24*time.Hour {
+		t.Fatalf("zero validity: NotAfter in %v, want ~365d default", got)
+	}
+}
+
 func TestNewCAWithParentAllowsMultiGenerationChains(t *testing.T) {
 	root, err := issuer.NewCA("root ca", time.Hour)
 	if err != nil {

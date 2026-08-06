@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
@@ -116,6 +119,45 @@ func TestReinjectSweepDeleteErrorSurfaces(t *testing.T) {
 	}
 }
 
+// The completion log is the sweep's audit record: its counters must reflect
+// what actually happened.
+func TestReinjectSweepReportsCounts(t *testing.T) {
+	cw := map[string]string{webhook.AnnotationWorkload: "wl"}
+	c := fake.NewClientBuilder().WithObjects(
+		pod("owned-1", "tenant", "ReplicaSet", cw),
+		pod("owned-2", "tenant", "StatefulSet", cw),
+		pod("bare", "tenant", "", cw),
+	).Build()
+
+	rec := newLogRecorder()
+	ctx := log.IntoContext(context.Background(), rec.logger())
+	if err := reinjectSweep(ctx, c, nil); err != nil {
+		t.Fatalf("reinjectSweep: %v", err)
+	}
+
+	e, ok := rec.find("reinject sweep complete")
+	if !ok {
+		t.Fatal("completion log entry missing")
+	}
+	if deleted, ok := e.kv["deleted"].(int); !ok || deleted != 2 {
+		t.Fatalf("deleted = %v, want 2", e.kv["deleted"])
+	}
+	if skipped, ok := e.kv["skipped_bare"].(int); !ok || skipped != 1 {
+		t.Fatalf("skipped_bare = %v, want 1", e.kv["skipped_bare"])
+	}
+}
+
+func TestExcludedNamespaceSetManyExtras(t *testing.T) {
+	got := excludedNamespaceSet("rel", []string{"a", "b", "c", "d", "e", " f ", ""})
+	want := map[string]struct{}{
+		"rel": {}, "kube-system": {}, "kube-public": {}, "kube-node-lease": {},
+		"a": {}, "b": {}, "c": {}, "d": {}, "e": {}, "f": {},
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("excludedNamespaceSet = %v, want %v", got, want)
+	}
+}
+
 func TestNeedsReinjectSkipsTerminatingPod(t *testing.T) {
 	excluded := excludedNamespaceSet("c8s-system", nil)
 	p := pod("term", "tenant", "ReplicaSet", map[string]string{webhook.AnnotationWorkload: "wl"})
@@ -124,4 +166,31 @@ func TestNeedsReinjectSkipsTerminatingPod(t *testing.T) {
 	if needsReinject(p, excluded) {
 		t.Fatal("terminating pod should not be swept")
 	}
+}
+
+func TestRunReinjectSweep(t *testing.T) {
+	mgr := newTestManager(t)
+	excluded := excludedNamespaceSet("c8s-system", nil)
+
+	t.Run("client build failure is wrapped", func(t *testing.T) {
+		stubDirectClient(t, nil, errors.New("boom"))
+		err := runReinjectSweep(context.Background(), mgr, excluded)
+		if err == nil || !strings.Contains(err.Error(), "build sweep client: boom") {
+			t.Fatalf("runReinjectSweep error = %v, want wrapped client-build error", err)
+		}
+	})
+
+	t.Run("sweeps through the built client", func(t *testing.T) {
+		cw := map[string]string{webhook.AnnotationWorkload: "wl"}
+		fc := fake.NewClientBuilder().WithObjects(pod("needs", "tenant", "ReplicaSet", cw)).Build()
+		stubDirectClient(t, fc, nil)
+		if err := runReinjectSweep(context.Background(), mgr, excluded); err != nil {
+			t.Fatalf("runReinjectSweep: %v", err)
+		}
+		var p corev1.Pod
+		err := fc.Get(context.Background(), client.ObjectKey{Namespace: "tenant", Name: "needs"}, &p)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("uninjected cw pod still present after sweep (get err = %v)", err)
+		}
+	})
 }

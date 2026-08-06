@@ -3,6 +3,8 @@
 unleash:
   exclude-files:
     # helmchart tests exec a real helm binary the mutation CI job does not
-    # install; deepcopy is generated code.
+    # install; deepcopy is generated code; test/ holds mock servers whose
+    # mutants grade the fixtures, not the product.
     - "internal/helmchart/.*"
     - "api/v1alpha2/zz_generated.deepcopy.go"
+    - "test/.*"

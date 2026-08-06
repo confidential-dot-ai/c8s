@@ -101,3 +101,45 @@ func TestAttestationExtension_BindsKeyAnchor(t *testing.T) {
 		t.Fatalf("TEEType = %d, want SEV-SNP", att.TEEType)
 	}
 }
+
+// TestRATLSEvidenceTDXStripsEventlog: bare-metal TDX evidence must be embedded
+// as the envelope with cc_eventlog dropped and the quote kept.
+func TestRATLSEvidenceTDXStripsEventlog(t *testing.T) {
+	resp := types.AttestResponse{
+		Platform: string(types.PlatformTdx),
+		Evidence: json.RawMessage(`{"quote":"abc","cc_eventlog":"AAAA"}`),
+	}
+	out, err := RATLSEvidence(resp)
+	if err != nil {
+		t.Fatalf("RATLSEvidence: %v", err)
+	}
+	var envelope struct {
+		Platform string                     `json:"platform"`
+		Evidence map[string]json.RawMessage `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("unmarshal envelope %q: %v", out, err)
+	}
+	if envelope.Platform != string(types.PlatformTdx) {
+		t.Errorf("platform = %q, want tdx", envelope.Platform)
+	}
+	if got := string(envelope.Evidence["quote"]); got != `"abc"` {
+		t.Errorf("quote = %s, want \"abc\"", got)
+	}
+	if _, ok := envelope.Evidence["cc_eventlog"]; ok {
+		t.Error("cc_eventlog survived the strip")
+	}
+	if len(envelope.Evidence) != 1 {
+		t.Errorf("evidence keys = %d, want only quote", len(envelope.Evidence))
+	}
+}
+
+func TestRATLSEvidenceTDXBadEvidence(t *testing.T) {
+	resp := types.AttestResponse{
+		Platform: string(types.PlatformTdx),
+		Evidence: json.RawMessage(`not-json`),
+	}
+	if _, err := RATLSEvidence(resp); err == nil {
+		t.Fatal("expected error for unparseable tdx evidence")
+	}
+}
