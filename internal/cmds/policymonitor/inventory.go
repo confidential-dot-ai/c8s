@@ -179,7 +179,7 @@ func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.Sandbo
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
 func sandboxDigestsHost(cfg *Config) (string, error) {
-	return workloadclaims.ResolveAdvertiseHostForCDS(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
+	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
 // startAdmissionInventory serves the token route on the guest's loopback

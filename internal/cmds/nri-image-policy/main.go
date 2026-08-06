@@ -520,7 +520,7 @@ func digestsAdvertiseHost(cfg *config) (string, error) {
 	if host == "" {
 		host = strings.TrimSpace(os.Getenv("C8S_SANDBOX_DIGESTS_ADVERTISE_HOST"))
 	}
-	return workloadclaims.ResolveAdvertiseHostForCDS(host, cfg.Allowlist.Pull.URL)
+	return workloadclaims.ResolveAdvertiseHost(host, cfg.Allowlist.Pull.URL)
 }
 
 // startSandboxDigests serves the CDS-facing digests endpoint over
