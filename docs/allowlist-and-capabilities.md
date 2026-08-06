@@ -130,6 +130,54 @@ entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
 guarantee is recovered at [cert issuance](#where-its-enforced).
 
+## Mount and environment policy (`mounts`, `env`)
+
+An image digest pins the bytes, and process policy pins what runs them, but
+neither says anything about what the host lays *over* those bytes at start-up.
+With `shared_fs="none"` the runtime seeds every configmap, secret and
+serviceaccount token by copying it into the sandbox seeding directory and
+bind-mounting it in — a mechanism a pod cannot work without, and one whose
+source directory the host may write. Staging a file there and binding it over a
+path inside the image runs host code from an allowlisted digest, and every
+digest still reports as admitted.
+
+Client-side verification does not catch this, unlike a pod whose trust
+configuration was repointed: the pod keeps its genuine identity — real CDS, real
+mesh CA, correct launch measurement — and a verifying client passes it and sends
+data to a container running injected code.
+
+`mounts` constrains **bind** mounts only, by destination. The rest of a mount
+table names filesystem types (`proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`,
+`cgroup`) and carries nothing in, so pinning it would only make an operator
+restate the OCI base set to say nothing. `env` constrains variable **names**;
+values are never matched, because the allowlist is served to every enforcer and
+values carry secrets. `LD_PRELOAD` is the case that motivates it — an injected
+name is code execution inside an otherwise-allowlisted image.
+
+```json
+"mounts": { "policy": "exact", "destinations": ["/etc/hosts", "/config"] },
+"env":    { "policy": "exact", "names": ["PATH", "MODEL_DIR"] }
+```
+
+`exact` requires every observed bind destination (or name) to appear in the
+list. An `exact` destination list is what the pod's `volumeMounts` declare plus
+the handful the kubelet always adds — `/etc/hosts`, `/etc/hostname`,
+`/etc/resolv.conf`, `/dev/termination-log`, `/dev/shm`, the serviceaccount token
+— so it is written against a pod spec, not guessed.
+
+Both default to `any` when absent, unlike argv, which defaults to `deny`. A
+container always carries a mount table and an environment it never declared, so
+a `deny` default would refuse every real pod and adopting the field would mean
+adopting an outage. That makes these opt-in: a digest with no policy is
+constrained exactly as much as it was before.
+
+Two limits worth stating. They bind only digests a `workloads` entry names —
+floor digests are admitted on the digest alone, so `c8s allowlist add` does not
+produce a mount-gated image. And an enforcer that cannot observe a field leaves
+it unset, which is treated as nothing-to-refuse rather than a violation: the
+host-side NRI plugin gates images on a node CVM and never sees a guest's mount
+table.
+
 ## Secret grants (`secrets`)
 
 An entry may grant secret-store paths to the workload it names. The subject is
