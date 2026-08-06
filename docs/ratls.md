@@ -674,7 +674,14 @@ transcript.
   satisfy it.
 - `ratls.PeerMatchedWorkload(tls.ConnectionState)` reads a verified peer's
   stamp off a live connection for relying parties that route or authorize by
-  name; it refuses a connection whose chain was not verified.
+  name; it refuses a connection whose chain was not verified. It therefore
+  requires a `ServerConfig.ClientCAs` listener — the only branch where
+  crypto/tls builds the chain and fills `VerifiedChains`. A `ClientPolicy`
+  listener (which admits a self-signed RA-TLS peer by design) and every mesh
+  client (`InsecureSkipVerify`) leave it empty, so the function errors there.
+  That is the contract: on those connections nothing vouches for the stamp.
+  A caller that needs the name on such a hop must verify the leaf against the
+  mesh CA itself and use `MatchedWorkloadFromCert`, not weaken the check.
 
 A compromised mesh CA can mint any name — the stamp is CA-vouched, not
 hardware-bound.

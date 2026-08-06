@@ -195,6 +195,19 @@ func CheckWorkloadPin(cert *x509.Certificate, expectedName string) error {
 // against the mesh CA (VerifiedChains non-empty) — a self-signed RA-TLS peer's
 // extension is whatever it chose, and is refused here. nil with no error means
 // the verified peer carries no stamp.
+//
+// This means it only works on a ServerConfig.ClientCAs listener, the one branch
+// that lets crypto/tls build the chain itself. It returns an error on every
+// other c8s connection today: a ClientPolicy listener verifies through
+// dualVerifyPeerCallback (which deliberately also admits a self-signed RA-TLS
+// peer) and every mesh client sets InsecureSkipVerify, and neither populates
+// VerifiedChains.
+//
+// That is the intended contract, not an oversight: on those connections there
+// is no chain for the stamp to be vouched by. Do NOT "fix" a caller by dropping
+// the VerifiedChains check — read the stamp off a leaf the caller has itself
+// verified against the mesh CA (MatchedWorkloadFromCert), or move the listener
+// to ClientCAs. See docs/ratls.md, "Matched workload".
 func PeerMatchedWorkload(cs tls.ConnectionState) (*MatchedWorkload, error) {
 	if len(cs.PeerCertificates) == 0 {
 		return nil, fmt.Errorf("ratls: no peer certificate")

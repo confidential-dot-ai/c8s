@@ -7,10 +7,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -276,7 +278,21 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("certificate issued (in-process)", "cn", csr.Subject.CommonName)
+	// Naming a leaf is the audit-relevant event: it is what a relying party
+	// later authorizes on. Record which name was stamped, under which policy,
+	// and for which sandbox, so a disputed identity can be reconstructed from
+	// the log alone. The unnamed cases already log their reason above.
+	issued := []any{"cn", csr.Subject.CommonName, "ttl", ttl}
+	if sandbox.SandboxID != "" {
+		issued = append(issued, "sandbox_id", sandbox.SandboxID)
+	}
+	if matched != nil {
+		issued = append(issued,
+			"workload", matched.Name,
+			"allowlist_version", matched.AllowlistVersion,
+			"allowlist_digest", hex.EncodeToString(matched.AllowlistDigest))
+	}
+	slog.Info("certificate issued (in-process)", issued...)
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(slices.Concat(certPEM, caChainPEM))
 }
@@ -405,7 +421,7 @@ func (h AttestHandler) resolveSandboxWorkload(ctx context.Context, sandbox workl
 		membership[digest.String()] = struct{}{}
 	}
 
-	return h.matchWorkload(snapshot, resp, membership, sandbox), nil
+	return h.matchWorkload(ctx, snapshot, resp, membership, sandbox), nil
 }
 
 // policySnapshot returns the one immutable snapshot this issuance decides
@@ -422,10 +438,10 @@ func (h AttestHandler) policySnapshot() (*PolicySnapshot, error) {
 // issuance: every failure returns nil (unnamed) with a bounded log line —
 // the diagnostics name the sandbox and attested inventory, never the full
 // inventory response.
-func (h AttestHandler) matchWorkload(snapshot *PolicySnapshot, resp workloadclaims.SandboxDigestsResponse, membership map[string]struct{}, sandbox workloadclaims.VerifiedSandbox) *ratls.MatchedWorkload {
+func (h AttestHandler) matchWorkload(ctx context.Context, snapshot *PolicySnapshot, resp workloadclaims.SandboxDigestsResponse, membership map[string]struct{}, sandbox workloadclaims.VerifiedSandbox) *ratls.MatchedWorkload {
 	unnamed := func(level slog.Level, why string, args ...any) *ratls.MatchedWorkload {
 		args = append(args, "sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost)
-		slog.Log(context.Background(), level, "issuing unnamed: "+why, args...)
+		slog.Log(ctx, level, "issuing unnamed: "+why, args...)
 		return nil
 	}
 
@@ -453,7 +469,7 @@ func (h AttestHandler) matchWorkload(snapshot *PolicySnapshot, resp workloadclai
 	// implementation or integrity fault, never a valid alternate
 	// representation — it can never produce a workload identity. The
 	// membership decision from the independent digests view stands.
-	if !equalDigestSets(membership, containerSet) {
+	if !maps.Equal(membership, containerSet) {
 		return unnamed(slog.LevelError, "inventory digests and containers views disagree")
 	}
 
@@ -473,19 +489,6 @@ func (h AttestHandler) matchWorkload(snapshot *PolicySnapshot, resp workloadclai
 		return unnamed(slog.LevelError, "matched workload failed validation", "error", err)
 	}
 	return matched
-}
-
-// equalDigestSets reports whether the two canonical digest sets are equal.
-func equalDigestSets(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for d := range a {
-		if _, ok := b[d]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // recordSandboxBinding notes which inventory vouched for this sandbox.
