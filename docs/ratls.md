@@ -648,7 +648,16 @@ leaf.
 get-cert discovers `Unnamed → Named` through renewal: with
 `--workload-claims` and a renewal loop it fast-polls (`--unnamed-renew-interval`,
 default 30s plus jitter) while the installed leaf is unnamed and settles to
-`--renew-interval` once named. Poll timing never changes the match decision.
+`--renew-interval` once named. A pod that stays unnamed backs off toward
+`--renew-interval` after a few polls, since being unnamed can be permanent.
+Poll timing never changes the match decision.
+
+Every delay is also capped at half the installed leaf's remaining lifetime, and
+a failed renewal retries on a short backoff rather than after a full interval.
+The named-leaf TTL is the shortest CDS issues and `certutil` does not backdate
+`NotBefore`, so a renewal interval alone — the chart's `renewInterval` — is not
+a safe schedule: it must stay strictly below `cds.namedCertTTL`, and the
+leaf-derived cap is the backstop when it does not.
 
 ### What vouches for the name
 
