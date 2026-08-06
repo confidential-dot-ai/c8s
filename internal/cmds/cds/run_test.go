@@ -2,6 +2,7 @@ package cds
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -25,9 +26,169 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/confidential-dot-ai/c8s/internal/allowlist"
+	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+const testOperatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestCompilePattern(t *testing.T) {
+	t.Run("empty returns nil", func(t *testing.T) {
+		re, err := compilePattern("--x", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if re != nil {
+			t.Fatalf("empty pattern should yield nil regexp, got %v", re)
+		}
+	})
+
+	t.Run("valid compiles", func(t *testing.T) {
+		re, err := compilePattern("--x", `^a.*z$`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if re == nil || !re.MatchString("abz") {
+			t.Fatalf("expected compiled pattern matching abz, got %v", re)
+		}
+	})
+
+	t.Run("invalid returns error", func(t *testing.T) {
+		if _, err := compilePattern("--x", "("); err == nil {
+			t.Fatal("expected error for invalid regex, got nil")
+		}
+	})
+}
+
+func TestCompilePatterns(t *testing.T) {
+	t.Run("nil input yields nil slice", func(t *testing.T) {
+		got, err := compilePatterns("--x", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("expected nil slice, got %v", got)
+		}
+	})
+
+	t.Run("empties are skipped", func(t *testing.T) {
+		got, err := compilePatterns("--x", []string{"", `^a$`, ""})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected 1 compiled pattern (empties skipped), got %d", len(got))
+		}
+	})
+
+	t.Run("propagates compile error", func(t *testing.T) {
+		if _, err := compilePatterns("--x", []string{"["}); err == nil {
+			t.Fatal("expected error for invalid regex in list, got nil")
+		}
+	})
+}
+
+func TestBuildHandoffHandler_DisabledWhenNoMeasurements(t *testing.T) {
+	cfg := config{} // handoffMeasurements empty
+	hh, err := buildHandoffHandler(
+		context.Background(),
+		cfg,
+		nil,          // mesh unused on the disabled path
+		nil,          // allowlist store unused on the disabled path
+		"",           // operator policy unused on the disabled path
+		nil,          // keyProvider unused
+		ear.Issuer{}, // earIssuer unused on the disabled path
+		attestationclient.NewClient(""),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error on disabled handoff: %v", err)
+	}
+	if hh != nil {
+		t.Fatalf("expected nil handler when --handoff-measurements unset, got %v", hh)
+	}
+}
+
+func TestBuildHandoffHandler_EnabledReturnsHandler(t *testing.T) {
+	// Cancel the context up front so the background refresh/expiry goroutines
+	// the enabled path spawns return immediately instead of leaking.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("ear key: %v", err)
+	}
+	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	if err != nil {
+		t.Fatalf("ear issuer: %v", err)
+	}
+	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
+	if err != nil {
+		t.Fatalf("rotator: %v", err)
+	}
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("ca: %v", err)
+	}
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("allowlist: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfg := config{
+		handoffMeasurements: []string{"deadbeef"},
+		earIssuerName:       "cds",
+	}
+	hh, err := buildHandoffHandler(ctx, cfg, ca, &store, testOperatorKeysHash, rotator, earIss, attestationclient.NewClient(""))
+	if err != nil {
+		t.Fatalf("buildHandoffHandler: %v", err)
+	}
+	if hh == nil {
+		t.Fatal("expected a non-nil handoff handler when measurements are set")
+	}
+}
+
+func TestNormalizeHTTPServerConfig_FillsZeroDefaults(t *testing.T) {
+	got := normalizeHTTPServerConfig(config{})
+	if got.readTimeout != defaultHTTPReadTimeout {
+		t.Errorf("readTimeout = %v, want %v", got.readTimeout, defaultHTTPReadTimeout)
+	}
+	if got.readHeaderTimeout != defaultHTTPReadHeaderTimeout {
+		t.Errorf("readHeaderTimeout = %v, want %v", got.readHeaderTimeout, defaultHTTPReadHeaderTimeout)
+	}
+	if got.writeTimeout != defaultHTTPWriteTimeout {
+		t.Errorf("writeTimeout = %v, want %v", got.writeTimeout, defaultHTTPWriteTimeout)
+	}
+	if got.idleTimeout != defaultHTTPIdleTimeout {
+		t.Errorf("idleTimeout = %v, want %v", got.idleTimeout, defaultHTTPIdleTimeout)
+	}
+	if got.maxHeaderBytes != defaultHTTPMaxHeaderBytes {
+		t.Errorf("maxHeaderBytes = %d, want %d", got.maxHeaderBytes, defaultHTTPMaxHeaderBytes)
+	}
+}
+
+func TestNormalizeHTTPServerConfig_PreservesNonZero(t *testing.T) {
+	in := config{
+		readTimeout:       time.Second,
+		readHeaderTimeout: 2 * time.Second,
+		writeTimeout:      3 * time.Second,
+		idleTimeout:       4 * time.Second,
+		maxHeaderBytes:    99,
+	}
+	got := normalizeHTTPServerConfig(in)
+	if got.readTimeout != in.readTimeout ||
+		got.readHeaderTimeout != in.readHeaderTimeout ||
+		got.writeTimeout != in.writeTimeout ||
+		got.idleTimeout != in.idleTimeout ||
+		got.maxHeaderBytes != in.maxHeaderBytes {
+		t.Fatalf("normalizeHTTPServerConfig altered non-zero config: got %+v, want %+v", got, in)
+	}
+}
 
 // writeOperatorKeyPair generates an operator EC key, writes the public half as
 // a PEM bundle, and returns the private key plus the bundle path.

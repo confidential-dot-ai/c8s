@@ -547,3 +547,137 @@ func TestRun_SurvivesWatchDirReplacement(t *testing.T) {
 		t.Fatalf("run returned err: %v", err)
 	}
 }
+
+func TestSeedExisting_DeniesPreexistingContainer(t *testing.T) {
+	denied := strings.Repeat("b", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+
+	// A container directory already present when the monitor starts (e.g.
+	// systemd restarted policy-monitor while a workload was live).
+	writeConfigJSON(t, watchDir, "preexisting", map[string]string{
+		"io.kubernetes.cri.image-name": "ghcr.io/evil@sha256:" + denied,
+	})
+	// A sibling artifact that is not a container id should be skipped.
+	if err := os.MkdirAll(filepath.Join(watchDir, "shared", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.seedExisting(); err != nil {
+		t.Fatalf("seedExisting: %v", err)
+	}
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected 1 kill for the preexisting denied container, got %+v", calls)
+	}
+}
+
+func TestSeedExisting_MissingWatchDir(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.cfg.WatchDir = filepath.Join(watchDir, "does-not-exist")
+	if err := m.seedExisting(); err == nil {
+		t.Fatal("expected error reading a missing watch dir")
+	}
+}
+
+func TestReadConfigJSON_MissingForeverTimesOut(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.configReadDeadline = 60 * time.Millisecond
+	m.configReadInterval = 10 * time.Millisecond
+	_, err := m.readConfigJSON(context.Background(), filepath.Join(watchDir, "nope", "config.json"))
+	if err == nil {
+		t.Fatal("expected error when config.json never appears")
+	}
+}
+
+func TestReadConfigJSON_ContextCancelled(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	m.configReadDeadline = 5 * time.Second
+	m.configReadInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.readConfigJSON(ctx, filepath.Join(watchDir, "nope", "config.json"))
+	if err == nil {
+		t.Fatal("expected context error")
+	}
+}
+
+func TestReadConfigJSON_UnrecoverableIsADir(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	// Point at a directory: os.ReadFile returns a non-ENOENT, non-partial
+	// error, which readConfigJSON must surface immediately rather than
+	// retrying to the deadline.
+	dir := filepath.Join(watchDir, "isadir")
+	if err := os.MkdirAll(filepath.Join(dir, "config.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m.configReadDeadline = 5 * time.Second
+	start := time.Now()
+	if _, err := m.readConfigJSON(context.Background(), filepath.Join(dir, "config.json")); err == nil {
+		t.Fatal("expected error for a directory in place of config.json")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("readConfigJSON retried an unrecoverable error instead of failing fast")
+	}
+}
+
+func TestReadOCISpec_EmptyFileIsPartial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readOCISpec(path)
+	if !isPartialJSON(err) {
+		t.Fatalf("empty file: err = %v, want partial-json sentinel", err)
+	}
+}
+
+func TestReadOCISpec_BadJSONIsPartial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readOCISpec(path)
+	if !isPartialJSON(err) {
+		t.Fatalf("bad json: err = %v, want partial-json sentinel", err)
+	}
+}
+
+func TestMonitorRun_AllowedContainerNotKilled(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	writeConfigJSON(t, watchDir, "allowed-live", map[string]string{
+		"io.kubernetes.cri.image-name": "ghcr.io/ok@sha256:" + digest,
+	})
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run err: %v", err)
+	}
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("allowed container should not be killed, got %+v", calls)
+	}
+}
+
+// run() creates a missing watch dir itself, as it must to re-establish the
+// watch after kata-agent replaces the dir at sandbox creation, so "missing"
+// is not an error. "Uncreatable" still must be: a regular file where the
+// parent dir should be.
+func TestMonitorRun_WatchDirUncreatable(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
+	blocker := filepath.Join(watchDir, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.WatchDir = filepath.Join(blocker, "absent")
+	if err := m.run(context.Background()); err == nil {
+		t.Fatal("expected error when the watch dir cannot be created")
+	}
+}

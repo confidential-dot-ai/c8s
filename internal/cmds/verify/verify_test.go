@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -809,4 +811,162 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	if !errors.Is(err, ratls.ErrNotAttested) {
 		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
 	}
+}
+
+func TestNormalizeTarget_Errors(t *testing.T) {
+	if _, _, err := normalizeTarget("https://\x7f", 443); err == nil {
+		t.Error("control character URL should fail to parse")
+	}
+	if _, _, err := normalizeTarget("https:///path-only", 443); err == nil {
+		t.Error("URL without a host should be rejected")
+	}
+}
+
+func TestMinTCBFromCfg(t *testing.T) {
+	if got := minTCBFromCfg(config{}); got != nil {
+		t.Errorf("all-zero flags should yield nil, got %+v", got)
+	}
+	got := minTCBFromCfg(config{minTCBBootloader: 1, minTCBTEE: 2, minTCBSNP: 3, minTCBMicrocode: 4})
+	if got == nil || got.Bootloader != 1 || got.Tee != 2 || got.Snp != 3 || got.Microcode != 4 {
+		t.Errorf("minTCBFromCfg = %+v, want 1/2/3/4", got)
+	}
+}
+
+func TestBuildPolicy_FileInputs(t *testing.T) {
+	dir := t.TempDir()
+	measHex := strings.Repeat("ab", 48)
+
+	t.Run("measurements file", func(t *testing.T) {
+		path := filepath.Join(dir, "measurements.txt")
+		if err := os.WriteFile(path, []byte(measHex+"\n\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		policy, err := buildPolicy(config{measurementsFile: path})
+		if err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+		if len(policy.Measurements) != 1 || hex.EncodeToString(policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", policy.Measurements)
+		}
+	})
+
+	t.Run("measurements file missing", func(t *testing.T) {
+		if _, err := buildPolicy(config{measurementsFile: filepath.Join(dir, "absent")}); err == nil {
+			t.Error("missing --measurements-file must fail")
+		}
+	})
+
+	t.Run("bad measurement hex", func(t *testing.T) {
+		if _, err := buildPolicy(config{measurements: []string{"zz"}}); err == nil {
+			t.Error("non-hex measurement must fail")
+		}
+	})
+
+	t.Run("operator keys PEM", func(t *testing.T) {
+		pubPEM, _ := operatorPubPEM(t)
+		path := filepath.Join(dir, "op.pub")
+		if err := os.WriteFile(path, pubPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildPolicy(config{operatorKeys: path}); err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+		digest, err := expectedOperatorKeysDigest(config{operatorKeys: path})
+		if err != nil {
+			t.Fatalf("expectedOperatorKeysDigest: %v", err)
+		}
+		if len(digest) == 0 {
+			t.Error("expected digest not derived from --operator-keys")
+		}
+	})
+
+	t.Run("operator keys missing file", func(t *testing.T) {
+		if _, err := buildPolicy(config{operatorKeys: filepath.Join(dir, "absent")}); err == nil {
+			t.Error("missing --operator-keys must fail")
+		}
+	})
+
+	t.Run("operator keys bad PEM", func(t *testing.T) {
+		path := filepath.Join(dir, "bad.pub")
+		if err := os.WriteFile(path, []byte("not pem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildPolicy(config{operatorKeys: path}); err == nil {
+			t.Error("unparseable --operator-keys must fail")
+		}
+	})
+
+}
+
+func TestGatherEvidence_ModesAndErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ratls-cert mode", func(t *testing.T) {
+		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
+		if err != nil {
+			t.Fatalf("ratls-cert mode: %v", err)
+		}
+		if !strings.Contains(ev.source, "RA-TLS serving certificate") {
+			t.Errorf("source = %q, want the cert path", ev.source)
+		}
+	})
+
+	t.Run("attestation-endpoint mode", func(t *testing.T) {
+		report := bytes.Repeat([]byte{0x01}, 64)
+		x := bytes.Repeat([]byte{0x02}, 32)
+		m := bytes.Repeat([]byte{0x03}, 1184)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			nonce, _ := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("nonce"))
+			w.Write(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m))
+		}))
+		defer srv.Close()
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attestation-endpoint", timeout: 5 * time.Second}, nil)
+		if err != nil {
+			t.Fatalf("attestation-endpoint mode: %v", err)
+		}
+		if !ev.fresh {
+			t.Error("endpoint evidence should be fresh")
+		}
+	})
+
+	t.Run("auto falls through to the cert path on discovery parse failure", func(t *testing.T) {
+		// auto tries discovery first; serve a discovery doc that is not JSON so
+		// parsing fails. That failure is not a security error, so auto must fall
+		// through to the cert path (which then errors on the self-signed test
+		// cert) rather than aborting with a security verdict.
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("not json"))
+		}))
+		defer srv.Close()
+		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, nil)
+		if err == nil || isSecurityError(err) {
+			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
+		}
+	})
+}
+
+func TestRun_UsageAndGatherFailures(t *testing.T) {
+	t.Run("policy error", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		if code := run(context.Background(), config{minTCBSNP: 256, url: "x"}, &out, &errOut); code != exitUsage {
+			t.Errorf("code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("bad expected-report-data", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{fromFile: "whatever", expectedRDHex: "zz"}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "expected-report-data") {
+			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
+
+	t.Run("missing from-file exits no-evidence", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{fromFile: filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
+		if code != exitNoEvidence || !strings.Contains(errOut.String(), "could not obtain evidence") {
+			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
 }

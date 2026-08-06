@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -44,5 +45,25 @@ func TestNodeTrackerGauges(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(oldestActiveCertExpiry); got != 0 {
 		t.Fatalf("oldest cert expiry gauge = %v, want 0 for empty tracker", got)
+	}
+}
+
+func TestNodeTrackerRunUpdaterStopsOnCancel(t *testing.T) {
+	nt := NewNodeTracker(time.Hour)
+	nt.Track("10.0.0.1", time.Now().Add(time.Hour))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		nt.RunUpdater(ctx, time.Millisecond)
+		close(done)
+	}()
+	// Let it tick at least once, then cancel.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunUpdater did not return after cancel")
 	}
 }

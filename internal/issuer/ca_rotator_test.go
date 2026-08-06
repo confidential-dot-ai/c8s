@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -134,3 +135,81 @@ func TestCARotatorRunLogsCompletedRotation(t *testing.T) {
 		t.Fatal("successful scheduled rotation logged a failure")
 	}
 }
+
+func TestNewCARotatorValidatesDeps(t *testing.T) {
+	if _, err := NewCARotator(CARotatorDeps{}); err == nil {
+		t.Error("missing Snapshot: expected error")
+	}
+	if _, err := NewCARotator(CARotatorDeps{
+		Snapshot: func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+			return nil, nil, nil, false
+		},
+	}); err == nil {
+		t.Error("missing CommitRotation: expected error")
+	}
+}
+
+func TestCARotatorRotateCANoBundle(t *testing.T) {
+	cr, err := NewCARotator(CARotatorDeps{
+		Snapshot: func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+			return nil, nil, nil, false
+		},
+		CommitRotation: func(*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, *x509.Certificate) string {
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCARotator: %v", err)
+	}
+	if _, _, err := cr.RotateCA(); !errors.Is(err, ErrNoCertificateBundle) {
+		t.Fatalf("RotateCA err = %v, want ErrNoCertificateBundle", err)
+	}
+}
+
+func TestCARotatorRotateCACommits(t *testing.T) {
+	ca, err := NewCA("parent", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	var committed bool
+	var newCertSeen *x509.Certificate
+	cr, err := NewCARotator(CARotatorDeps{
+		CACertValidity: time.Hour,
+		CACommonName:   "rotated ca",
+		Snapshot: func() (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, bool) {
+			return ca.Cert, ca.Key, ca.Cert, true
+		},
+		CommitRotation: func(newCert *x509.Certificate, _ *ecdsa.PrivateKey, _ *x509.Certificate, parent *x509.Certificate) string {
+			committed = true
+			newCertSeen = newCert
+			if !parent.Equal(ca.Cert) {
+				t.Error("parent passed to CommitRotation is not the snapshot CA")
+			}
+			return "fp-123"
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCARotator: %v", err)
+	}
+	newCert, fp, err := cr.RotateCA()
+	if err != nil {
+		t.Fatalf("RotateCA: %v", err)
+	}
+	if !committed {
+		t.Error("CommitRotation was not invoked")
+	}
+	if fp != "fp-123" {
+		t.Errorf("fingerprint = %q, want fp-123", fp)
+	}
+	if newCert.Subject.CommonName != "rotated ca" {
+		t.Errorf("new CA CN = %q, want rotated ca", newCert.Subject.CommonName)
+	}
+	if newCertSeen == nil || !newCertSeen.Equal(newCert) {
+		t.Error("CommitRotation received a different cert than returned")
+	}
+	// New CA must chain to the parent.
+	if err := newCert.CheckSignatureFrom(ca.Cert); err != nil {
+		t.Errorf("rotated CA not signed by parent: %v", err)
+	}
+}
+
