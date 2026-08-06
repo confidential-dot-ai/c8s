@@ -84,7 +84,7 @@ The key is generated per volume and never taken from you. AES-XTS is
 deterministic, so re-encrypting a changed directory under a reused key would
 tell the host exactly which sectors changed between versions.
 
-`--name` is capped at 12 characters. The node selects the device by its virtio
+`--name` is capped at 12 characters. The node selects the device by its disk
 serial, `VIRTIO_BLK_ID_BYTES` is 20, and `c8s-vol-` takes eight; a thirteenth
 character is silently dropped, so two volumes would be indistinguishable to the
 node.
@@ -112,11 +112,26 @@ The image is ciphertext. Copy it to the node by any means, including through the
 untrusted host — that the host holds the bytes is the design premise, not a
 compromise of it.
 
-Attach it as a **raw block device** whose virtio serial is `c8s-vol-<name>`.
+Attach it as a **raw block device** whose disk serial is `c8s-vol-<name>`. The
+node reads that serial from `<dev>/serial` (virtio-blk) or from VPD page 0x80 at
+`<dev>/device/vpd_pg80` (SCSI), so either transport serves.
 
 A confos node has no persistent writable storage — the root overlay is
 reformatted on every boot — so a volume must be its own device rather than a
 file on the node's filesystem.
+
+How the device is produced depends on the hypervisor:
+
+| | |
+|---|---|
+| QEMU/KVM | `-device virtio-blk,drive=…,serial=c8s-vol-<name>` |
+| cannot set a serial | `c8s volume attach <name> --image <path>`, on the node, as root |
+
+Hyper-V exposes no virtio bus at all, and a cloud disk's serial belongs to the
+provider, so on those nodes there is nothing to set. `attach` drives LIO's
+loopback target instead — a local SCSI disk whose unit serial is ours to choose.
+`c8s volume detach <name>` removes it again, leaving the ciphertext and the key
+where they are.
 
 The serial is a **selector, not a trust input**. The host chooses it and answers
 the query per read. Pointing a pod at the wrong device fails closed: the wrong
@@ -160,15 +175,33 @@ most 12 characters, because the serial holds no more.
 The webhook injects a `c8s-volume` sidecar and, per volume, an `emptyDir`
 mounted read-only with `mountPropagation: HostToContainer`. The sidecar fetches
 the key over the attested `/secrets` flow and posts `{name, blob}` to
-`c8s volumed` — a privileged daemon on every node — over a unix socket in the
-inventory's socket directory. The daemon opens the device and mounts it
-read-only into that pod's `emptyDir`.
+`c8s volumed`, which opens the device and mounts it read-only into that pod's
+`emptyDir`.
 
-The daemon is a DaemonSet, **off by default**: it runs privileged, with
-`hostPID` and a writable bind of the kubelet directory. Turn it on with
+Where volumed runs, and how the sidecar reaches it, depends on the shape:
+
+| | node-CVM | kata |
+|---|---|---|
+| volumed | a privileged DaemonSet on every node | `volumed --guest`, baked into the guest rootfs |
+| reached over | a unix socket in the inventory's socket directory | the guest's loopback `127.0.0.1:8402` |
+| mounts into | the pod's kubelet directory | kata's ephemeral directory inside the VM |
+| `emptyDir` medium | default — volumed resolves with `RESOLVE_NO_XDEV` | `Memory`, so kata keeps it a guest tmpfs; with `shared_fs="none"` a default-medium one becomes a `disk.img` block device |
+
+The node-CVM DaemonSet is **off by default**: it runs privileged, with `hostPID`
+and a writable bind of the kubelet directory. Turn it on with
 `volumed.enabled=true` where volumes are served. A pod requesting a volume on a
-cluster without it — under kata, or with `nri-image-policy` disabled — is
+cluster with neither shape — `nri-image-policy` disabled and not kata — is
 refused at admission rather than left waiting on a mount that can never land.
+
+Under kata the device must also reach the guest. kata-agent always mounts a
+block storage it is handed and cannot mount ciphertext, so direct-volume
+assignment is not usable; the qemu wrapper
+(`kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh`) attaches this pod's
+volume devices to its VM instead, read-only and with the serial preserved. Which
+volumes it attaches comes from the pod's annotation — a selector, not a trust
+input, on the same reasoning as the serial: attaching another tenant's device
+hands the guest ciphertext the host already holds, and it still cannot be opened
+without the key CDS releases against the grant.
 
 What decides whether a mount happens, in order:
 
@@ -200,19 +233,27 @@ as long as the mount that would be torn down.
 
 The daemon does not repeat CDS's release decision. It resolves who is calling
 only to decide where to mount, and checks nothing about what that caller is
-entitled to — any pod on the node presenting a well-formed blob has that volume
-opened into its own directory.
+entitled to — any pod that reaches it presenting a well-formed blob has that
+volume opened into its own directory.
 
-This rests on **node-as-CVM being single-tenant**: every pod on the node belongs
-to the same tenant, so a blob one of them can obtain is one they are all entitled
-to. Under kata, volumes are refused at admission, so the case does not arise
-there.
+What makes that sound is that the daemon's reach is confined to one tenant:
 
-A node shared between tenants, or a kata path for volumes, needs a daemon-side
-check restored. That needs the caller's *sandbox*, which the daemon cannot
+- **node-CVM** rests on the node being single-tenant. Every pod on it belongs to
+  the same tenant, so a blob one of them can obtain is one they are all entitled
+  to.
+- **kata** rests on the guest holding exactly one pod. The daemon serves only
+  that guest's loopback, so the only caller that can present a blob is the pod
+  the blob was released to — and with no second pod there is nothing to
+  disambiguate, which is why `--guest` needs no peer credentials, the same
+  reasoning as the token route on `:8401`.
+
+A node shared between tenants breaks the first and needs a daemon-side check
+restored. That needs the caller's *sandbox*, which the node daemon cannot
 resolve for itself — the inventory's socket answers only for the process asking
-it — so the sandbox has to arrive as an inventory-signed token, bound to a nonce
-the daemon issued, because such a token is otherwise transferable between pods.
+it — so the sandbox would have to arrive as an inventory-signed token bound to a
+nonce the daemon issued, because such a token is otherwise transferable between
+pods. The kata shape does not need this: moving the daemon inside the guest
+removes the second caller instead of authenticating it.
 
 ## What this defends
 
@@ -240,8 +281,8 @@ a modified data block surfaces as an I/O error when it is read, not at open.
   RBAC boundary, not an attested one.
 - **Volume integrity is rooted in the operator keys CDS pins**, and CDS's
   arguments are host-supplied. A host that restarts CDS under its own operator
-  key can write a matching grant and blob. `THREAT_MODEL.md` records this as
-  detection rather than prevention; the detection is
+  key can write a matching grant and blob. This is detection rather than
+  prevention; the detection is
   `c8s cds verify --operator-keys`, and running it continuously is a
   precondition for trusting a volume.
 - **Access patterns are visible.** Which sectors are read, and when, leaks

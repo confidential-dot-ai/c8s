@@ -28,9 +28,8 @@ equivalents instead):
    class into any pod whose containers request an `nvidia.com/*` extended
    resource. **GPU implies confidential** — c8s has no non-confidential GPU
    runtime, so a GPU request alone selects the class, regardless of the
-   `confidential.ai/cw` annotation (see `docs/pitfalls.md` "A GPU request
-   alone forces the confidential GPU class"). The kata-enforcement allowlist
-   accepts the class.
+   `confidential.ai/cw` annotation — a GPU request alone forces the
+   confidential GPU class. The kata-enforcement allowlist accepts the class.
 4. **The GPU image puller** (`c8s-kata-deploy-image-puller-nvidia` DaemonSet) —
    pulls the `<tag>-nvidia` kata-guest-base artifact and patches the
    platform's `configuration-qemu-nvidia-gpu-*.toml` (below).

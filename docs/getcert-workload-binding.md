@@ -397,14 +397,14 @@ inventory's honesty about what it admitted (Corner 6), and the fact that the
 sandbox ID on the leaf is vouched by the mesh CA signature rather than bound
 into hardware evidence (`docs/ratls.md`, "What vouches for the ID"). Making the
 pod's images part of a hardware measurement, enforced at `/attest`, is the
-stronger close and is unimplemented (GAPS §Trust model).
+stronger close and is unimplemented.
 
 The one surface still on an untrusted path is the **node-CVM** socket mount:
 the inventory socket sits on a host directory the webhook hostPath-mounts, so a
 malicious *allowlisted* pod able to mount that directory read-write could swap
 the socket file before get-cert connects. That is a PodSecurity /
 filesystem-permission concern (the socket dir must be unwritable by untrusted
-pods; overlaps THREAT_MODEL §Addressable), not a redirectable arg — see
+pods), not a redirectable arg — see
 the residual note under "Why a unix socket". Under kata there is no mount: the
 token endpoint is guest-internal loopback.
 
@@ -543,7 +543,7 @@ splits cleanly:
   is a *malicious allowlisted pod* — inside the node's TCB in the TEE sense, but
   not benign — that can `hostPath`-mount the socket directory **read-write** and
   swap the file. This is a PodSecurity / filesystem-permission problem, the same
-  residual as "Why a unix socket" (overlaps THREAT_MODEL §Addressable). It is
+  residual as "Why a unix socket". It is
   gated by: the dir is **root-owned `0711`** (untrusted pods cannot write it),
   get-cert's own mount is **read-only**, get-cert dials a **compiled** path the
   control plane cannot redirect, and the chart's `deny-host-namespaces` policy
@@ -616,6 +616,11 @@ not. Under kata the equivalent ordering is the guest image: a guest whose
 `policy-monitor` predates the loopback token route answers nothing on
 `127.0.0.1:8401`, so roll the guest image before the operator starts injecting
 `--workload-claims-guest`.
+
+The same ordering covers the secret and volume fetchers, which redeem at the
+same endpoints: a guest image predating `volumed --guest` answers nothing on
+`127.0.0.1:8402`, and a pod annotated for volumes there stays without its mount
+until the image is current.
 
 ## Audit pointers
 

@@ -36,6 +36,14 @@ metadata:
 data:
   pull-and-configure.sh: |
 {{ .Files.Get "files/scripts/pull-and-configure.sh" | indent 4 }}
+  # Host-side qemu wrapper. Attaches this pod's encrypted volume devices to the
+  # kata guest, since kata's own direct-volume path assumes ciphertext-free
+  # storage. Installed onto the host and pointed at from the drop-in's
+  # [hypervisor.qemu] path by pull-and-configure.sh. Byte-identical to
+  # kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh (enforced by
+  # internal/helmchart/chart_test.go).
+  kata-qemu-scratch-wrapper.sh: |
+{{ .Files.Get "files/scripts/kata-qemu-scratch-wrapper.sh" | indent 4 }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -154,8 +162,7 @@ spec:
             # oras reads ~/.docker/config.json; the container runs as root
             # (privileged), so $HOME=/root. The projected volume below renames
             # the standard dockerconfigjson key (.dockerconfigjson) to the
-            # filename oras expects (config.json). See docs/pitfalls.md
-            # "kata-guest-base puller credentials".
+            # filename oras expects (config.json).
             - name: dockercfg
               mountPath: /root/.docker
               readOnly: true

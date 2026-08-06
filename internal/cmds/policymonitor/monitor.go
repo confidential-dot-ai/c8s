@@ -11,12 +11,12 @@ package policymonitor
 //
 // Order-of-events caveat
 //
-// inotify on a directory fires IN_CREATE when the new entry appears,
-// not when its contents are settled. setup_bundle() in rpc.rs makes
-// the child dir, writes config.json, then bind-mounts rootfs/. We
-// retry the config.json read a few times with a short backoff to
-// absorb the gap; in practice config.json appears within
-// single-digit ms.
+// The bundle directory is created when the guest pull starts
+// (confidential_data_hub::pull_image), and config.json is written after
+// add_storages returns — so the IN_CREATE event arrives one registry
+// fetch before the spec exists. handleNewContainer therefore waits for
+// config.json until the bundle goes away rather than on a deadline: a
+// container we stopped waiting for is a container we never decided on.
 //
 // We use filepath.Walk on startup to seed the watcher with any
 // directories already present (e.g. policy-monitor restarted by
@@ -33,8 +33,8 @@ package policymonitor
 // inode revalidation as backstop for dropped events) ends the
 // generation, and the next one re-creates the dir if needed, re-Adds,
 // and re-runs the seed pass so bundles created in the gap still get a
-// decision. See docs/pitfalls.md — "kata-agent replaces
-// /run/kata-containers at sandbox creation".
+// decision. kata-agent replaces /run/kata-containers at sandbox
+// creation.
 
 import (
 	"context"
@@ -44,13 +44,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -88,14 +88,33 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		overlay:   &policyOverlay{},
 		refresh:   &refreshState{reason: reasonNotYetStarted},
 		killer:    newCgroupKiller(cfg.CgroupRoot),
-		// configReadDeadline is the budget for re-reading config.json
-		// after the initial CREATE event. kata-agent's setup_bundle
-		// finishes well under this; the limit is just to bound a
-		// pathological case.
-		configReadDeadline: 2 * time.Second,
-		configReadInterval: 25 * time.Millisecond,
-		revalidateInterval: 10 * time.Second,
+		ready:     notifyReady,
+		// The bundle directory appears when the guest pull STARTS and
+		// config.json is written only once it finishes, so the wait is a
+		// registry fetch. configReadDeadline is just how long to poll
+		// tightly before backing off to configPendingInterval.
+		configReadDeadline:    2 * time.Second,
+		configReadInterval:    25 * time.Millisecond,
+		configPendingInterval: time.Second,
+		revalidateInterval:    10 * time.Second,
+		// A denied container is re-killed until the kill lands or its bundle
+		// is removed; killRetryDeadline bounds the tight phase.
+		killRetryDeadline:   30 * time.Second,
+		killRetryInterval:   500 * time.Millisecond,
+		killPendingInterval: 10 * time.Second,
+		// Well past the tight retry phase: a kill path still erroring here is
+		// broken, not busy.
+		killEscalateAfter: time.Minute,
+		fatal:             make(chan error, 1),
 	}
+
+	// A monitor that cannot write cgroup.kill enforces nothing, so refuse to
+	// come up rather than look healthy: c8s-ready.target Requires= this unit,
+	// so a failed exit keeps the guest from admitting workload containers.
+	if err := m.killer.selfTest(); err != nil {
+		return fmt.Errorf("kill-path self-test: %w", err)
+	}
+	logger.Info("kill-path self-test passed", "cgroup_root", cfg.CgroupRoot)
 
 	// Admission inventory (docs/ratls.md): the guest's sandbox identity, served
 	// to the in-guest get-cert on loopback. Always on — a guest always holds a
@@ -144,16 +163,24 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 // decisions against a tempdir without touching /sys/fs/cgroup or
 // real PIDs.
 type monitor struct {
-	cfg                *Config
-	logger             *slog.Logger
-	allowlist          *allowlist     // baked floor: additive digest set, never shrinks
-	overlay            *policyOverlay // latest CDS pull's workload argv policy
-	refresh            *refreshState  // whether the allowlist still tracks CDS
-	killer             containerKiller
-	inventory          *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
-	configReadDeadline time.Duration
-	configReadInterval time.Duration
-	revalidateInterval time.Duration
+	cfg                   *Config
+	logger                *slog.Logger
+	allowlist             *allowlist     // baked floor: additive digest set, never shrinks
+	overlay               *policyOverlay // latest CDS pull's workload argv policy
+	refresh               *refreshState  // whether the allowlist still tracks CDS
+	killer                containerKiller
+	inventory             *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
+	ready                 func() error        // systemd READY=1; nil outside the unit
+	readyOnce             sync.Once
+	fatal                 chan error // an enforcement failure the process must exit on
+	killEscalateAfter     time.Duration
+	configReadDeadline    time.Duration
+	configReadInterval    time.Duration
+	configPendingInterval time.Duration
+	revalidateInterval    time.Duration
+	killRetryDeadline     time.Duration
+	killRetryInterval     time.Duration
+	killPendingInterval   time.Duration
 }
 
 // policyOverlay holds the Index of the latest CDS pull that advanced the epoch.
@@ -257,12 +284,17 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 	// shouldn't grandfather containers in just because we missed their
 	// CREATE event. The fact that they're still around means kata-agent
 	// considers them live, so we should make a decision on each.
-	if err := m.seedExisting(); err != nil {
+	if err := m.seedExisting(ctx); err != nil {
 		// Non-fatal: if we can't walk for some reason (permission,
 		// transient FS error), log and keep going. New containers
 		// from this point on are still observed via inotify.
 		m.logger.Warn("seed existing containers failed", "error", err)
 	}
+
+	// The watch is installed and the seed pass has dispatched, so every bundle
+	// kata-agent creates from here gets a decision. kata-agent's start job is
+	// waiting on this (see notify.go).
+	m.signalReady()
 
 	// Backstop for the event path below: if the Remove/Rename for the
 	// watch dir itself is dropped (e.g. inside a queue overflow), a
@@ -285,6 +317,9 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 		case <-ctx.Done():
 			m.logger.Info("policy-monitor stopping", "reason", ctx.Err())
 			return true, nil
+
+		case err := <-m.fatal:
+			return false, err
 
 		case evt, ok := <-watcher.Events:
 			if !ok {
@@ -342,7 +377,7 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			// too rather than wait for the next tick.
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
 				m.logger.Warn("inotify queue overflow; rescanning watch dir to recover dropped events")
-				if serr := m.seedExisting(); serr != nil {
+				if serr := m.seedExisting(ctx); serr != nil {
 					return false, fmt.Errorf("rescan after inotify overflow: %w", serr)
 				}
 				if fi, serr := os.Stat(m.cfg.WatchDir); serr != nil || !os.SameFile(watchedFI, fi) {
@@ -360,12 +395,38 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 	}
 }
 
+// abort reports a condition the process cannot enforce through. The watch loop
+// returns it, runMonitor exits non-zero, and the unit escalates from there.
+// Buffered and non-blocking: the first caller wins and later ones are noise on
+// a process already on its way down.
+func (m *monitor) abort(err error) {
+	m.logger.Error("enforcement is broken; exiting so the unit can take the guest down", "error", err)
+	select {
+	case m.fatal <- err:
+	default:
+	}
+}
+
+// signalReady notifies systemd once, on the first watch generation. A failed
+// notification leaves the unit un-started until TimeoutStartSec elapses, which
+// fails it and powers the guest off.
+func (m *monitor) signalReady() {
+	m.readyOnce.Do(func() {
+		if m.ready == nil {
+			return
+		}
+		if err := m.ready(); err != nil {
+			m.logger.Error("systemd readiness notification failed", "error", err)
+		}
+	})
+}
+
 // seedExisting walks the watch dir at startup and dispatches a
 // decision for every child directory present. Idempotent — kata-agent
 // keeps the bundle around until the container is removed, and we make
 // a fresh decision either way (allowlisted = nothing happens; denied
 // = kill, but the kill is a no-op if the init has already exited).
-func (m *monitor) seedExisting() error {
+func (m *monitor) seedExisting(ctx context.Context) error {
 	entries, err := os.ReadDir(m.cfg.WatchDir)
 	if err != nil {
 		return err
@@ -375,22 +436,19 @@ func (m *monitor) seedExisting() error {
 		if !m.pathLooksLikeContainer(full) {
 			continue
 		}
-		// Note: we pass context.Background here intentionally — the
-		// seed pass is part of startup, not the main event loop, and
-		// we want it to complete before we start handling new events.
-		// Time bound is the per-decision configReadDeadline already
-		// enforced in handleNewContainer.
-		m.handleNewContainer(context.Background(), full)
+		// One goroutine per bundle, same as the event path: a decision now
+		// waits for the container's image pull, and the watcher must keep
+		// serving events meanwhile.
+		go m.handleNewContainer(ctx, full)
 	}
 	return nil
 }
 
 // pathLooksLikeContainer applies a coarse filter: the path must be a
-// direct child of WatchDir whose basename matches the kata
-// verify_id() regex (alphanum + dash, 1-128 chars; this is what
-// kata_sys_util::validate::verify_id accepts in upstream
-// kata-containers 3.30.0). Anything else is a sibling artifact
-// (e.g. /run/kata-containers/shared) and we ignore it.
+// direct child of WatchDir whose basename is a container id the baked
+// kata-agent policy admits (kataspec.ValidContainerID). Anything else is
+// a sibling artifact (e.g. /run/kata-containers/shared) that will never
+// grow a config.json.
 func (m *monitor) pathLooksLikeContainer(path string) bool {
 	rel, err := filepath.Rel(m.cfg.WatchDir, path)
 	if err != nil {
@@ -402,15 +460,8 @@ func (m *monitor) pathLooksLikeContainer(path string) bool {
 	if rel == "." || rel == "" {
 		return false
 	}
-	return containerIDRe.MatchString(rel)
+	return kataspec.ValidContainerID(rel)
 }
-
-// containerIDRe mirrors kata_sys_util::validate::verify_id. We're
-// deliberately a touch tighter than upstream (no dots, no
-// underscores) to avoid matching obvious non-container entries like
-// "shared" or "sandbox.sock"; the kata container ids we see in
-// practice are all hex-or-base32 strings well within this set.
-var containerIDRe = regexp.MustCompile(`^[a-zA-Z0-9-]{1,128}$`)
 
 // handleNewContainer runs the full decision for one container
 // directory. Synchronous from the caller's POV; the caller wraps it
@@ -419,24 +470,21 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	cid := filepath.Base(dir)
 	configPath := filepath.Join(dir, "config.json")
 
-	spec, err := m.readConfigJSON(ctx, configPath)
+	spec, err := m.readConfigJSON(ctx, dir)
 	if err != nil {
 		// A config.json that EXISTS but cannot be read or parsed (malformed
-		// JSON, permission games, a directory in its place) means we cannot
-		// determine the image digest for a container that clearly has a bundle.
-		// Fail closed: deny (kill) rather than let it run unmonitored — an
-		// attacker must not be able to evade the allowlist by mangling the
-		// spec. When the file is simply absent (the common non-container watch
-		// entry such as kata's "shared" dir, or a bundle whose config.json has
-		// not been written yet), we skip: killing there would be a false
-		// positive on infrastructure directories. The delayed-write/cgroup race
-		// is tracked separately (persistent pending state, audit H-01/PR 07).
-		if _, statErr := os.Stat(configPath); statErr == nil {
+		// JSON, permission games, a symlink that does not resolve) means we
+		// cannot determine the image digest for a container that clearly has a
+		// bundle. Fail closed: deny (kill) rather than let it run unmonitored.
+		// Lstat, not Stat: a dangling symlink is a name the host planted, not
+		// an absent file. Reaching here with the name absent means the bundle
+		// itself went away, or we are shutting down — nothing to decide.
+		if _, statErr := os.Lstat(configPath); statErr == nil {
 			m.logger.Warn("deny container: config.json present but unreadable/malformed", "cid", cid, "path", configPath, "error", err)
-			m.kill(cid)
+			m.deny(ctx, dir)
 			return
 		}
-		m.logger.Warn("skip: config.json absent (not a container bundle, or not written yet)", "cid", cid, "path", configPath, "error", err)
+		m.logger.Info("skip: bundle went away before config.json appeared", "cid", cid, "path", configPath, "error", err)
 		return
 	}
 
@@ -455,22 +503,23 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		m.inventory.recordSandboxID(sandboxIDFromAnnotations(spec.Annotations))
 	}
 
-	if isSandbox(spec.Annotations) {
+	if kataspec.IsSandbox(spec.Annotations) {
 		m.logger.Info("allow sandbox (pause) container — measured via rootfs, not allowlisted", "cid", cid)
+		m.recordVerdict(dir, verdictAllow)
 		return
 	}
 
-	digest, ok := extractDigest(spec.Annotations)
+	digest, ok := kataspec.PullDigest(spec.Annotations)
 	if !ok {
-		// A non-sandbox container with no digest annotation we recognise
-		// (the sandbox/pause container is handled above): a hand-crafted
-		// bundle, or an attacker who stripped the annotation to evade the
-		// policy. Threat-model decision: deny (fail closed) — stripping
-		// the annotation must not buy a free pass. The cost is that an
-		// operator who side-loads a bundle without CRI annotations must
-		// put its digest on the allowlist or accept the kill.
-		m.logger.Warn("deny container: no image digest annotation found", "cid", cid)
-		m.kill(cid)
+		// A non-sandbox container whose pull reference is missing or carries a
+		// tag rather than a digest (the sandbox/pause container is handled
+		// above). Deny: a tag names whatever the registry serves the guest at
+		// pull time, so there is no digest to check. The baked kata-agent
+		// policy rejects the same request earlier, so reaching here means the
+		// policy was not in force.
+		m.logger.Warn("deny container: image reference is absent or not digest-pinned",
+			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey])
+		m.deny(ctx, dir)
 		return
 	}
 
@@ -485,11 +534,21 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		if m.inventory != nil {
 			m.inventory.record(cid, digest, argv)
 		}
+		m.recordVerdict(dir, verdictAllow)
 		return
 	}
 	m.logger.Warn("deny container: digest/argv not allowlisted",
 		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
-	m.kill(cid)
+	m.deny(ctx, dir)
+}
+
+// deny records the verdict, then kills. Order matters: the verdict is what
+// stops the container reaching execve, and kill retries until the cgroup is
+// confirmed empty — so writing it second would leave the agent free to start
+// the container while the kill is still being attempted.
+func (m *monitor) deny(ctx context.Context, dir string) {
+	m.recordVerdict(dir, verdictDeny)
+	m.kill(ctx, dir)
 }
 
 // frozenAttrs annotates a deny with the fact that the allowlist never left the
@@ -504,52 +563,133 @@ func (m *monitor) frozenAttrs() []any {
 	return []any{"allowlist_frozen", true, "frozen_reason", reason, "allowlist_entries", m.allowlist.Size()}
 }
 
-// kill resolves the container's cgroup and terminates it as a unit.
-// Best-effort: if the container has already exited, or its cgroup never
-// materialises within the budget, we log and move on.
-func (m *monitor) kill(cid string) {
-	ok, err := m.killer.kill(cid)
-	if err != nil {
-		m.logger.Warn("kill cgroup failed", "cid", cid, "error", err)
-		return
+// kill resolves the denied container's cgroup and terminates it as a unit,
+// re-attempting until the kill is confirmed, the bundle directory goes away
+// (kata-agent removed the container), or ctx ends. Repeat failures are logged
+// once per escalation, not once per attempt.
+//
+// A kill mechanism that keeps erroring past killEscalateAfter is not a slow
+// container, it is enforcement that no longer works — cgroup.kill returning
+// EROFS under a remounted hierarchy is the case that motivated the boot-time
+// selfTest. Escalate: the process exits non-zero, and the unit turns that into
+// restarts and then poweroff (see policy-monitor.service). selfTest runs again
+// on each restart, so a hierarchy that is still read-only fails there instead.
+func (m *monitor) kill(ctx context.Context, dir string) {
+	cid := filepath.Base(dir)
+	tightUntil := time.Now().Add(m.killRetryDeadline)
+	escalateAt := time.Now().Add(m.killEscalateAfter)
+	backedOff := false
+	var lastErr error
+
+	for attempt := 1; ; attempt++ {
+		ok, err := m.killer.kill(cid)
+		switch {
+		case err != nil:
+			lastErr = err
+			if attempt == 1 {
+				m.logger.Error("kill cgroup failed: denied container was NOT terminated; retrying", "cid", cid, "error", err)
+			}
+			if time.Now().After(escalateAt) {
+				m.abort(fmt.Errorf("kill path unusable: container %s denied but not terminated after %s: %w", cid, m.killEscalateAfter, lastErr))
+				return
+			}
+		case ok:
+			m.logger.Info("SIGKILLed container cgroup", "cid", cid, "attempts", attempt)
+			return
+		default:
+			if attempt == 1 {
+				m.logger.Error("denied container NOT confirmed terminated: cgroup never found or never populated; retrying", "cid", cid)
+			}
+		}
+
+		if _, statErr := os.Stat(dir); statErr != nil {
+			m.logger.Warn("denied container's bundle was removed before a kill was confirmed", "cid", cid, "attempts", attempt)
+			return
+		}
+
+		interval := m.killRetryInterval
+		if time.Now().After(tightUntil) {
+			interval = m.killPendingInterval
+			if !backedOff {
+				backedOff = true
+				m.logger.Error("denied container still NOT terminated; retrying at a slower cadence until its bundle is removed",
+					"cid", cid, "attempts", attempt, "interval", interval)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			m.logger.Error("gave up killing a denied container", "cid", cid, "attempts", attempt, "reason", ctx.Err())
+			return
+		case <-time.After(interval):
+		}
 	}
-	if !ok {
-		m.logger.Warn("container cgroup not found", "cid", cid)
-		return
-	}
-	m.logger.Info("SIGKILLed container cgroup", "cid", cid)
 }
 
-// readConfigJSON retries reading + parsing config.json for the budget
-// configReadDeadline. The retry absorbs the gap between directory creation
-// (which triggers our IN_CREATE event, and re-seed after kata-agent replaces
-// the watch dir) and kata-agent finishing the config.json write.
+// readConfigJSON waits for kata-agent to write the bundle's config.json and
+// returns the parsed spec. It gives up only when the bundle directory itself
+// goes away or the context ends — the bundle appears when the guest pull STARTS
+// (confidential_data_hub::pull_image creates it) and config.json is written
+// after add_storages returns, so the gap between the two is a registry fetch,
+// not a filesystem race. A deadline shorter than the pull leaves the container
+// undecided, which is indistinguishable from admitting it.
 //
 // A successfully parsed spec is complete: kata-agent builds the OCI spec in
 // memory and saves config.json once. A valid spec without annotations is
 // therefore an enforcement decision, not a partial write. The host controls
 // this file, so delaying that decision based on an optional annotation would
 // give a stripped workload an avoidable execution window.
-func (m *monitor) readConfigJSON(ctx context.Context, path string) (*ociSpec, error) {
-	deadline := time.Now().Add(m.configReadDeadline)
-	var lastErr error
+func (m *monitor) readConfigJSON(ctx context.Context, dir string) (*ociSpec, error) {
+	path := filepath.Join(dir, "config.json")
+	absentUntil := time.Now().Add(m.configReadDeadline)
+	var partialUntil time.Time
+	backedOff := false
 	for {
 		spec, err := readOCISpec(path)
 		if err == nil {
 			return spec, nil
 		}
-		lastErr = err
 		if !errors.Is(err, os.ErrNotExist) && !isPartialJSON(err) {
 			// Unrecoverable: not a transient race. Return immediately.
 			return nil, err
 		}
-		if time.Now().After(deadline) {
-			return nil, lastErr
+
+		interval := m.configReadInterval
+		switch {
+		case isPartialJSON(err):
+			// The file is there. kata-agent saves the spec once, so this is a
+			// half-finished write or a spec that will never parse — bound it
+			// and let the caller deny, rather than wait on it forever.
+			if partialUntil.IsZero() {
+				partialUntil = time.Now().Add(m.configReadDeadline)
+			} else if time.Now().After(partialUntil) {
+				return nil, err
+			}
+		default:
+			// Absent. A symlink here resolved to nothing, which is a name the
+			// host planted rather than a file kata has yet to write — the open
+			// returned ENOENT through the link, so it is dangling. Anything else
+			// Lstat can see is a regular config.json that kata created between
+			// the read above and this call; loop and read it.
+			if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("config.json is a symlink that does not resolve")
+			}
+			if _, derr := os.Stat(dir); derr != nil {
+				return nil, fmt.Errorf("bundle %s went away before config.json appeared: %w", dir, derr)
+			}
+			if time.Now().After(absentUntil) {
+				interval = m.configPendingInterval
+				if !backedOff {
+					backedOff = true
+					m.logger.Info("waiting for config.json; container stays undecided until it appears", "dir", dir)
+				}
+			}
 		}
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(m.configReadInterval):
+		case <-time.After(interval):
 		}
 	}
 }

@@ -107,20 +107,26 @@ dropin="${dropin_dir}/50-c8s.toml"
 # (values change, kata-deploy bumped the base kernel_params) or the artifact
 # went missing; exit early otherwise so the steady-state tick stays free of
 # writes (no clobber races) and network pulls. A re-published artifact under
-# the SAME tag is deliberately not detected — see docs/pitfalls.md "Running
-# clusters do NOT pick up new kata-guest-base artifacts".
+# the SAME tag is deliberately not detected: running clusters do NOT pick up
+# new kata-guest-base artifacts.
 # gen= versions the generator itself: bump it whenever the emitted TOML
-# changes shape, so nodes with unchanged inputs still rewrite.
-config_fingerprint="gen=2|registry=${REGISTRY}|tag=${TAG}|dir=${HOST_IMG_DIR}|shim=${SHIM_NAME}|debug=${KATA_DEBUG}|pcie=${GPU_PCIE_ROOT_PORT}|mem=${GPU_DEFAULT_MEMORY}|base_params=${base_kernel_params}"
+# changes shape, so nodes with unchanged inputs still rewrite. gen=3 wires the
+# host qemu wrapper via `[hypervisor.qemu] path=`; an older drop-in without it
+# leaves volume-annotated pods hanging at first StartContainer.
+config_fingerprint="gen=3|registry=${REGISTRY}|tag=${TAG}|dir=${HOST_IMG_DIR}|shim=${SHIM_NAME}|debug=${KATA_DEBUG}|pcie=${GPU_PCIE_ROOT_PORT}|mem=${GPU_DEFAULT_MEMORY}|base_params=${base_kernel_params}"
 marker="# c8s-config: ${config_fingerprint}"
 
 out_dir="${HOST_IMG_DIR}/base"
+wrapper_dst="${HOST_KATA_DIR}/bin/kata-qemu-scratch-wrapper.sh"
 up_to_date=false
 if [ -f "${dropin}" ] && grep -qFx "${marker}" "${dropin}"; then
     up_to_date=true
     for required in vmlinuz kata-rootfs.img kernel_verity_params rootfs_type; do
         [ -f "${out_dir}/${required}" ] || up_to_date=false
     done
+    # A wrapper that got swept between reconciles must trigger the full pass so
+    # the drop-in and the on-disk wrapper stay in lockstep.
+    [ -x "${wrapper_dst}" ] || up_to_date=false
 fi
 if [ "${up_to_date}" = "true" ]; then
     echo "==> c8s-kata-image-puller: up to date (shim=${SHIM_NAME}, mode=${MODE})"
@@ -188,6 +194,20 @@ rm -rf "${old_dir}"
 # the host root at /host; kata-runtime running on the host
 # sees the same files without the prefix.
 host_out_dir="${out_dir#/host}"
+
+# Install the host-side qemu wrapper next to kata's real qemu binary. It
+# resolves the pod's encrypted-volume annotation into a `-device virtio-blk`
+# argv addition before exec'ing the real qemu. Copy is via a temp path +
+# rename so a puller restart mid-copy can't leave a partial script in the
+# path kata is about to exec. Executable-bit is load-bearing: kata calls
+# hypervisor.qemu path directly, no shell in between. wrapper_dst was pinned
+# above so the up-to-date check gates on the same file this write produces.
+wrapper_src="/scripts/kata-qemu-scratch-wrapper.sh"
+host_wrapper_dst="${wrapper_dst#/host}"
+mkdir -p "$(dirname "${wrapper_dst}")"
+cp "${wrapper_src}" "${wrapper_dst}.c8s-tmp"
+chmod 0755 "${wrapper_dst}.c8s-tmp"
+mv -f "${wrapper_dst}.c8s-tmp" "${wrapper_dst}"
 
 # c8s writes ONLY a config.d/ drop-in — never the main configuration-<shim>.toml.
 #
@@ -261,6 +281,13 @@ tmp="${dropin}.c8s-tmp"
     echo "${marker}"
     echo ''
     echo '[hypervisor.qemu]'
+    # Wrap qemu so the launcher can attach this pod's encrypted volume devices
+    # (docs/volumes.md): kata's direct-volume path assumes ciphertext-free
+    # storage kata-agent can mount, and the wrapper carries only the volume
+    # attachment logic — the base qemu path is CONFAI_REAL_QEMU. Without the
+    # override the LIO disk `c8s volume attach` writes to the node is never
+    # attached to the guest, and the sandbox times out at first StartContainer.
+    printf 'path = "%s"\n' "${host_wrapper_dst}"
     printf 'kernel = "%s/vmlinuz"\n' "${host_out_dir}"
     printf 'image = "%s/kata-rootfs.img"\n' "${host_out_dir}"
     printf 'rootfs_type = "%s"\n' "${RFT}"
@@ -273,9 +300,9 @@ tmp="${dropin}.c8s-tmp"
     # pci=realloc pci=nocrs pci=assign-busses nvrc.smi.srs=1 — dropping
     # cgroup_no_v1 kills the NVRC-exec'd kata-agent at startup). Re-emit the
     # base value verbatim. A live session once saw drop-in kernel_params edits
-    # not reach the qemu -append line — unexplained; see docs/pitfalls.md
-    # "Guest kernel params" — but the config semantics make this preservation
-    # load-bearing whenever the drop-in IS honored, so it stays.
+    # not reach the qemu -append line — unexplained — but the config semantics
+    # make this preservation load-bearing whenever the drop-in IS honored, so
+    # it stays.
     if [ -n "${base_kernel_params}" ]; then
         printf 'kernel_params = "%s"\n' "${base_kernel_params}"
     fi

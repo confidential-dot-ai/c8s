@@ -8,9 +8,9 @@ package policymonitor
 // A guest whose refresh never starts enforces its baked seed forever, and
 // `c8s allowlist add` has no effect on it. That state is invisible from
 // outside: the locked guest denies ReadStreamRequest, so its journal is
-// unreachable (docs/pitfalls.md — "kubectl logs on locked-guest pods is empty
-// by design"). This type carries the state to the two places an operator can
-// reach it: every deny decision, and the CDS-facing digests endpoint.
+// unreachable — kubectl logs on locked-guest pods is empty by design. This
+// type carries the state to the two places an operator can reach it: every
+// deny decision, and the CDS-facing digests endpoint.
 
 import (
 	"sync"

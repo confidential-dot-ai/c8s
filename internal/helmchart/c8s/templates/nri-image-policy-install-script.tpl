@@ -38,7 +38,7 @@ mkdir -p "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
 # The workload-claims broker socket lives here; the non-root get-cert sidecar
 # must traverse the dir (o+x) to connect. Pin it explicitly so a strict root
 # umask can't drop o+x (get-cert is fail-closed — no traversal, no cert). Not
-# world-writable, so an untrusted pod can't swap the socket (docs/pitfalls.md).
+# world-writable, so an untrusted pod can't swap the socket.
 chmod 0711 "/host{{ $root.Values.nriImagePolicy.hostPaths.runtimeDir }}"
 
 # Written separately from the boot config so it never participates in the

@@ -111,6 +111,21 @@ fi
 install -m 0755 "${RTMR3_MEASURER_BIN}" "${BIN_DIR}/rtmr3-measurer"
 echo "==> rtmr3-measurer: ${BIN_DIR}/rtmr3-measurer ($(stat -c '%s' "${BIN_DIR}/rtmr3-measurer") bytes)"
 
+# volumed: in-VM encrypted-volume opener, run as `volumed --guest`. Opens
+# dm-crypt + dm-verity for keys the get-volume sidecar posts on loopback.
+# Source at /workspace/c8s/cmd/volumed. Built by `make build-volumed` ->
+# ${C8S_DIR}/build/volumed. cryptsetup/veritysetup come from the rootfs's
+# cryptsetup-bin (KATA_EXTRA_PKGS in build.sh), not from here.
+VOLUMED_BIN="${VOLUMED_BIN:-${C8S_DIR}/build/volumed}"
+if [[ ! -x "${VOLUMED_BIN}" ]]; then
+    echo "FATAL: ${VOLUMED_BIN} missing" >&2
+    echo "       Build first:" >&2
+    echo "         cd ${C8S_DIR} && make build-volumed" >&2
+    exit 1
+fi
+install -m 0755 "${VOLUMED_BIN}" "${BIN_DIR}/volumed"
+echo "==> volumed: ${BIN_DIR}/volumed ($(stat -c '%s' "${BIN_DIR}/volumed") bytes)"
+
 # In-guest attester: the `attestation-api` bin from attestation-rs, built for
 # the default (glibc) target. Staged under the attestation-service role name
 # (the in-guest unit, the C8S_ATTESTATION_SERVICE_URL contract, and the

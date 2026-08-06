@@ -41,9 +41,9 @@ when it is set (see [`secrets.md`](secrets.md), "When it is served"). So pod
 mode needs the *set* of per-shape digests, and until now the only way to learn
 one was to boot a pod, let attestation fail, and read the
 `measurement not in allowlist` warning out of the CDS log. `c8s install
---cvm-mode=pod` still refuses `--measurements` (`cmd/c8s/install.go`), because
-that flag pins the *node* CVM's measurement; the values this tool produces go
-into a values file instead.
+--cvm-mode=pod --measurements` takes the digests this tool produces
+(`cmd/c8s/install.go`); under `--cvm-mode=node/gke/aks` the same flag takes the
+node image's `manifest.json` value instead.
 
 ## What goes into the digest
 

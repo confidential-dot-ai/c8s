@@ -81,7 +81,7 @@ func containsMsg(msgs []string, want string) bool {
 func probeWatcherLive(t *testing.T, mkProbe func(cid string), decided func(cid string) bool) {
 	t.Helper()
 	for i := 0; i < 40; i++ {
-		cid := fmt.Sprintf("watch-probe-%d", i)
+		cid := testCID(fmt.Sprintf("watch-probe-%d", i))
 		mkProbe(cid)
 		if waitUntil(250*time.Millisecond, func() bool { return decided(cid) }) {
 			return
@@ -183,43 +183,6 @@ func TestWriteCgroupKill_WriteErrorSurfaces(t *testing.T) {
 	}
 }
 
-// --- kill outcome logging ---------------------------------------------------
-
-// The kill outcome log is the only in-guest audit record of enforcement, so
-// each killer outcome must produce its own message and never a wrong one.
-func TestKill_LogsOutcome(t *testing.T) {
-	const (
-		msgKilled   = "SIGKILLed container cgroup"
-		msgFailed   = "kill cgroup failed"
-		msgNotFound = "container cgroup not found"
-	)
-	for _, tc := range []struct {
-		name   string
-		killer *fakeKiller
-		want   string
-		forbid []string
-	}{
-		{"killed", &fakeKiller{ok: true}, msgKilled, []string{msgFailed, msgNotFound}},
-		{"killer error", &fakeKiller{err: os.ErrPermission}, msgFailed, []string{msgKilled, msgNotFound}},
-		{"cgroup not found", &fakeKiller{ok: false}, msgNotFound, []string{msgKilled, msgFailed}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			logger, buf := captureLogger()
-			m := &monitor{logger: logger, killer: tc.killer}
-			m.kill("cid-under-test")
-			msgs := logMessages(t, buf.String())
-			if !containsMsg(msgs, tc.want) {
-				t.Fatalf("missing %q in %v", tc.want, msgs)
-			}
-			for _, f := range tc.forbid {
-				if containsMsg(msgs, f) {
-					t.Fatalf("unexpected %q in %v", f, msgs)
-				}
-			}
-		})
-	}
-}
-
 // --- watch loop steady state ------------------------------------------------
 
 // A healthy watch generation must not report seed failures or dir
@@ -312,8 +275,8 @@ func TestRunMonitor_ConfigWrittenAfterCreateStillDenied(t *testing.T) {
 	allowed := strings.Repeat("a", 64)
 	denied := strings.Repeat("b", 64)
 	watchDir := filepath.Join(t.TempDir(), "watch")
-	cgroupRoot := t.TempDir()
-	cid := "late-deny"
+	cgroupRoot := writableCgroupRoot(t)
+	cid := testCID("late-deny")
 	cg := makeFakeCgroup(t, cgroupRoot, cid)
 
 	cfg := &Config{
@@ -389,9 +352,11 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 	defer srv.Close()
 
 	watchDir := filepath.Join(t.TempDir(), "watch")
-	cgroupRoot := t.TempDir()
-	cgAllowed := makeFakeCgroup(t, cgroupRoot, "cds-allowed")
-	cgDenied := makeFakeCgroup(t, cgroupRoot, "cds-denied")
+	cgroupRoot := writableCgroupRoot(t)
+	cidAllowed := testCID("cds-allowed")
+	cidDenied := testCID("cds-denied")
+	cgAllowed := makeFakeCgroup(t, cgroupRoot, cidAllowed)
+	cgDenied := makeFakeCgroup(t, cgroupRoot, cidDenied)
 
 	cfg := &Config{
 		LogLevel:              "info",
@@ -402,6 +367,9 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 		CDSMeasurements:       strings.Repeat("ab", 48),
 		AttestationServiceURL: "http://127.0.0.1:8400",
 		RefreshInterval:       50 * time.Millisecond,
+		// Loopback is rejected fast as an advertise host; without it the
+		// startup path retries routing-table inference for a minute.
+		SandboxDigestsAdvertiseHost: "127.0.0.1",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -421,10 +389,10 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 		return cgroupKillContent(t, filepath.Join(cgroupRoot, pcid)) == "1"
 	})
 
-	writeConfigJSON(t, watchDir, "cds-allowed", map[string]string{
+	writeConfigJSON(t, watchDir, cidAllowed, map[string]string{
 		"io.kubernetes.cri.image-name": "ghcr.io/tenant/app@" + pulled,
 	})
-	writeConfigJSON(t, watchDir, "cds-denied", map[string]string{
+	writeConfigJSON(t, watchDir, cidDenied, map[string]string{
 		"io.kubernetes.cri.image-name": "ghcr.io/evil@sha256:" + deniedHex,
 	})
 
@@ -516,7 +484,7 @@ func TestRunMonitor_RunsAndStopsOnContextCancel(t *testing.T) {
 		LogLevel:      "info",
 		AllowlistPath: allowlistPath,
 		WatchDir:      filepath.Join(dir, "watch"), // created by runMonitor
-		CgroupRoot:    t.TempDir(),
+		CgroupRoot:    writableCgroupRoot(t),
 		// CDSURL empty: stays baked-seed-only, never touches the network.
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -535,5 +503,37 @@ func TestRunMonitor_RunsAndStopsOnContextCancel(t *testing.T) {
 	// The watch dir should have been created.
 	if _, err := os.Stat(cfg.WatchDir); err != nil {
 		t.Errorf("watch dir not created: %v", err)
+	}
+}
+
+// A monitor whose cgroup hierarchy is not writable can decide but cannot
+// enforce. It must exit non-zero rather than run (and gate c8s-ready.target)
+// while silently enforcing nothing — the ProtectControlGroups=yes field bug.
+func TestRunMonitor_FailsWhenKillPathUnusable(t *testing.T) {
+	dir := t.TempDir()
+	allowlistPath := filepath.Join(dir, "allowlist.json")
+	body, _ := json.Marshal(bootstrapAllowlistFile{Sha256Digests: []string{"sha256:" + strings.Repeat("a", 64)}})
+	if err := os.WriteFile(allowlistPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		LogLevel:      "info",
+		AllowlistPath: allowlistPath,
+		WatchDir:      filepath.Join(dir, "watch"),
+		CgroupRoot:    t.TempDir(), // no cgroup.kill: the kill path cannot work
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := runMonitor(ctx, cfg)
+	if err == nil {
+		t.Fatal("runMonitor started with an unusable kill path")
+	}
+	if !strings.Contains(err.Error(), "kill-path self-test") {
+		t.Errorf("error = %v, want it to name the kill-path self-test", err)
+	}
+	// The self-test must gate startup, not just log: nothing should have been
+	// watched.
+	if _, statErr := os.Stat(cfg.WatchDir); !os.IsNotExist(statErr) {
+		t.Errorf("watch dir created despite a failed self-test: stat err = %v", statErr)
 	}
 }

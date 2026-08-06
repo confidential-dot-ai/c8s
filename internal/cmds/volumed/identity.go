@@ -34,3 +34,21 @@ func (p PeerIdentity) procRoot() string {
 	}
 	return "/proc"
 }
+
+// GuestPodUID stands in for the pod UID inside a kata guest. It is a map key
+// and a device-mapper name component, never an identity claim, and it never
+// reaches a filesystem path: GuestTargets ignores it.
+const GuestPodUID = "guest"
+
+// GuestIdentity resolves every caller to the guest's single pod.
+//
+// A kata guest holds exactly one pod, so there is no caller to tell apart and
+// nothing for peer credentials to decide — the guest boundary is the binding,
+// for the same reason the guest's token route needs no peer credentials. The
+// pod UID kubelet would supply does not exist in here and is not needed.
+type GuestIdentity struct{}
+
+// Resolve returns the guest's single pod.
+func (GuestIdentity) Resolve(workloadclaims.Peer) (PodCgroup, error) {
+	return PodCgroup{UID: GuestPodUID}, nil
+}

@@ -13,8 +13,7 @@ CDS-issued certificates, what the whole construction does and does not
 guarantee, how it operates under the two confidential shapes (node-as-CVM and
 pod-as-CVM), and which certificate is used where.
 
-Companion docs: [THREAT_MODEL.md](THREAT_MODEL.md) (adversaries, gates,
-residual risk), [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh
+Companion docs: [`cmd/ratls-mesh/DESIGN.md`](../cmd/ratls-mesh/DESIGN.md) (mesh
 dataplane), [install-flows.md](install-flows.md) (which components deploy in
 which mode).
 The implementation is [`pkg/ratls`](../pkg/ratls/), with the CDS client flow in
@@ -173,8 +172,7 @@ Step by step:
    attestation-api is compared against the caller's allowlist
    (`VerifyPolicy.Measurements`; SNP LAUNCH_DIGEST or TDX MRTD, 48 bytes). An
    **empty allowlist accepts any genuine TEE** — deliberate bootstrap
-   ergonomics, loudly warned, and unsafe in production
-   ([THREAT_MODEL.md](THREAT_MODEL.md) §5 Open).
+   ergonomics, loudly warned, and unsafe in production.
 6. **mTLS.** Servers configured with a `ClientPolicy` require a client
    certificate and verify it the same way (steps 3–5, roles swapped).
 
@@ -229,8 +227,7 @@ Properties worth noting:
   flow — the key crosses the wire only as recipient-encrypted ciphertext
   (X25519-ECDH → HKDF-SHA256 → AES-256-GCM, gated on both sides' EAR
   measurements and operator-key-policy equality). Without handoff, a
-  (singleton) CDS restart mints a fresh CA and workloads re-bootstrap; see
-  THREAT_MODEL.md §9.
+  (singleton) CDS restart mints a fresh CA and workloads re-bootstrap.
 - **Issued leaves are capped at 24h** and always carry a SHA-256 digest of
   the issuance evidence as an audit extension. When the CSR itself embeds an
   RA-TLS extension — the mesh client and get-cert both do, bound to the bare
@@ -280,12 +277,12 @@ CA", not "runs launch digest X". `VerifyPolicy.RequireCAEvidence` is the
 mechanism that would close the gap: it makes a valid chain insufficient and
 re-verifies the leaf's copied nonce-free `.1.1` evidence per connection,
 measurement allowlist included. **No profile sets it today**, so the gap is
-open in practice — see [THREAT_MODEL.md](THREAT_MODEL.md) §5 Addressable.
+open in practice.
 
 ## What RA-TLS guarantees — and what it does not
 
-A successful handshake against a pinned policy proves, assuming the
-[THREAT_MODEL.md](THREAT_MODEL.md) §6 assumptions hold:
+A successful handshake against a pinned policy proves, assuming c8s's
+trust assumptions hold:
 
 1. **Genuine TEE.** The peer's evidence was signed by real AMD/Intel silicon —
    a hypervisor, control plane, or network attacker cannot forge it.
@@ -319,7 +316,7 @@ What it does **not** guarantee:
 - **Per-handshake measurement of CA-verified peers.** See "Dual verification"
   above: after the CDS upgrade, mesh peers are verified by CA chain only.
 - **Full TDX runtime measurement.** Policy pins MRTD; RTMR[0..3] are not yet
-  pinned, and `MinTCBVersion` is dropped on the TDX path (GAPS).
+  pinned, and `MinTCBVersion` is dropped on the TDX path.
 - **Workload-granular identity beyond the TEE boundary.** The unit of
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS
@@ -328,8 +325,7 @@ What it does **not** guarantee:
   vouched by the mesh CA signature, not by hardware evidence, and it is only as
   good as the inventory's honesty about what it admitted. The gate is
   membership, not composition, so it does not say the pod runs one particular
-  workload. Enforcing per-workload measurement at `/attest` is unimplemented
-  (GAPS §Trust model).
+  workload. Enforcing per-workload measurement at `/attest` is unimplemented.
 - **Post-boot integrity.** The launch digest covers boot state; runtime
   compromise inside a measured guest is out of scope (that is the image
   allowlist and guest lockdown's job — [kata-image-policy.md](kata-image-policy.md)).
@@ -537,7 +533,9 @@ Both shapes are wired.
 - **kata.** policy-monitor serves the token route on the guest's loopback
   `127.0.0.1:8401` and the digests routes on `:1019` inside the guest. No
   socket, no mount, and no configuration selects it: the port is compiled, so
-  the untrusted host cannot disable the binding by withholding a value.
+  the untrusted host cannot disable the binding by withholding a value. The
+  in-guest `volumed` follows the same pattern on `127.0.0.1:8402`
+  (docs/volumes.md), after the attestation-service on `:8400`.
   `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` overrides the advertised guest IP.
 
 get-cert picks the shape with `--workload-claims-guest`, which the webhook
@@ -656,8 +654,7 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 - **Identity granularity:** per pod. Tenants on one node are isolated from
   each other by hardware memory encryption, and each workload proves its own
   guest state independently.
-- **Sharp edges** (both tracked in [THREAT_MODEL.md](THREAT_MODEL.md) §5 /
-  [pitfalls.md](pitfalls.md)): UID-0 egress is exempted from in-guest
+- **Sharp edges:** UID-0 egress is exempted from in-guest
   interception (so the attestation-service can reach AMD KDS) — root
   workloads bypass the mesh, run workloads non-root; and guests bake
   `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the CDS/tls-lb front doors can
@@ -681,12 +678,11 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
 
 - **The admission webhook's TLS** is ordinary Kubernetes PKI (Secret +
   `caBundle`) — it is availability/injection machinery, not a confidentiality
-  boundary, and its material is visible to etcd readers (THREAT_MODEL.md §2).
+  boundary, and its material is visible to etcd readers.
 - **Browser verification** cannot use RA-TLS (browsers cannot inspect
   certificates mid-handshake). External clients get a challenge–response
   attestation and a post-quantum over-encrypted channel instead — see
-  [c8s-verify-js](https://github.com/confidential-dot-ai/c8s-verify-js)
-  and THREAT_MODEL.md §10.
+  [c8s-verify-js](https://github.com/confidential-dot-ai/c8s-verify-js).
 - **Attested RKE2 credential release** (`c8s cred-release` /
   `c8s cds request-handoff`) and the operator/allowlist CLIs are RA-TLS
   *clients* of the surfaces above rather than new certificate types.
@@ -706,4 +702,3 @@ Adjacent surfaces that are deliberately **not** RA-TLS:
 6. [getcert-workload-binding.md](getcert-workload-binding.md) — how a pod's
    sandbox identity is established and how CDS gates issuance on what that
    sandbox runs.
-7. [THREAT_MODEL.md](THREAT_MODEL.md) — what all of this is for.

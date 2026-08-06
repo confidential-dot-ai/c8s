@@ -124,6 +124,7 @@ KATA_SRC="${KATA_SRC:-${WORK_DIR}/kata-${KATA_VERSION}}"
 
 EXTRA_DIR="${IMAGE_DIR}/extra"
 EXTRA_NVIDIA_DIR="${IMAGE_DIR}/extra-nvidia"
+PATCH_DIR="${IMAGE_DIR}/patches"
 # GPU variant (Step 6). auto = build when the stock kata NVIDIA artifacts are
 # present at the paths below, skip loudly otherwise; 1 = require; 0 = skip.
 # CI sets BUILD_NVIDIA=1 and points both paths at artifacts staged from the
@@ -213,11 +214,16 @@ sudo modprobe loop 2>/dev/null || true
 
 # The overlay binaries must be staged before we build the rootfs image,
 # because they end up in the dm-verity root (and thus the measurement).
-for bin in ratls-mesh policy-monitor attestation-service rtmr3-measurer; do
+for bin in ratls-mesh policy-monitor attestation-service rtmr3-measurer volumed; do
     [[ -x "${EXTRA_DIR}/usr/local/bin/${bin}" ]] || die "${EXTRA_DIR}/usr/local/bin/${bin} missing — run scripts/fetch.sh first."
 done
 [[ -f "${EXTRA_DIR}/etc/c8s/bootstrap-allowlist.json" ]] || die "bootstrap-allowlist.json not staged — run scripts/fetch.sh (with IMAGE_TAG or *_DIGEST env vars) first."
 [[ -f "${EXTRA_DIR}/etc/kata-opa/default-policy.rego" ]] || die "default-policy.rego missing from overlay."
+# Without it the host can replace the baked policy via init-data, so a guest
+# built without it enforces nothing it claims to.
+[[ -f "${PATCH_DIR}/0001-agent-refuse-an-init-data-supplied-policy.patch" ]] || die "the init-data policy patch is missing from ${PATCH_DIR}."
+# Without it policy-monitor's decision races the container's execve.
+[[ -f "${PATCH_DIR}/0002-agent-wait-for-the-admission-verdict.patch" ]] || die "the admission-verdict patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
@@ -302,6 +308,18 @@ if [[ ! -d "${OSBUILDER}" ]]; then
         > "${WORK_DIR}/kata-src.tar.gz"
     tar xzf "${WORK_DIR}/kata-src.tar.gz" -C "${KATA_SRC}" --strip-components=1
     [[ -d "${OSBUILDER}" ]] || die "osbuilder not found at ${OSBUILDER} after extract — kata source layout changed?"
+
+    # osbuilder compiles kata-agent from this tree, so patches must land before
+    # Step 2. They are pinned to KATA_SRC_COMMIT: a rejected hunk means the
+    # upstream code moved and the patch needs re-basing, so fail the build
+    # rather than ship a guest missing it.
+    shopt -s nullglob
+    for p in "${PATCH_DIR}"/*.patch; do
+        log "Applying $(basename "${p}")"
+        patch -p1 --forward --batch -d "${KATA_SRC}" < "${p}" \
+            || die "patch $(basename "${p}") does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
+    done
+    shopt -u nullglob
 fi
 echo "    osbuilder: ${OSBUILDER}"
 
@@ -429,7 +447,8 @@ fi
 # allow-all), the bootstrap allowlist, tmpfiles, and the cloud-init env
 # helper into the rootfs, then enable our units offline so they come up
 # at boot. We do NOT ship a kata-agent.service in the overlay — osbuilder
-# already installed and enabled the version-matched one.
+# already installed and enabled the version-matched one; the overlay only adds
+# a kata-agent.service.d/ drop-in, which needs no enabling.
 log "Step 3/5: overlaying c8s layer into the rootfs"
 sudo rsync -a "${EXTRA_DIR}/" "${TARGET_ROOTFS}/"
 
@@ -442,6 +461,7 @@ C8S_UNITS=(
     policy-monitor.service
     rtmr3-measurer.service
     scratch-setup.service
+    volumed.service
     c8s-cloudinit-env.service
 )
 # kata boots the guest with `systemd.unit=kata-containers.target` on the kernel
@@ -488,14 +508,26 @@ sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
 sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 
 # --- Reproducibility normalisation (must be the LAST rootfs mutation) ------
-# 1. umoci writes a *.mtree metadata manifest into the pause bundle whose bytes
-#    embed timestamps — the ONLY file that differs between two builds. It is
-#    unused at runtime (kata reads config.json + rootfs/), so drop it.
-# 2. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
+# 1. Drop the build host's /etc/resolv.conf. Docker seeds it into the rootfs
+#    from the daemon's own resolver — Azure CI hosts leave `nameserver
+#    168.63.129.16` in the sealed image. In-guest policy-monitor reads it at
+#    boot, before kata's CopyFile stamps the pod's real resolv.conf on top,
+#    tries to resolve `c8s-cds.c8s-system.svc` against that unreachable Azure
+#    DNS, fails, and latches sandbox tokens off for the guest's whole life.
+#    An empty file boots to loopback DNS for the ~seconds before kata's
+#    CopyFile lands; a symlink into /run picks up systemd-resolved's stub if
+#    it comes up first. Empty file is the safer default under kata's
+#    guest-pull shape (no /run mount at read time).
+# 2. umoci writes a *.mtree metadata manifest into the pause bundle whose
+#    bytes embed timestamps — the ONLY file that differs between two builds.
+#    It is unused at runtime (kata reads config.json + rootfs/), so drop it.
+# 3. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
 #    timestamps are deterministic (image_builder's `cp -a` preserves them).
 # Together with SOURCE_DATE_EPOCH-driven mke2fs (deterministic UUID/hash-seed/
 # created-time) and the fixed VERITY_SALT in seal_and_assemble, this makes the
 # dm-verity root_hash bit-for-bit reproducible.
+sudo rm -f "${TARGET_ROOTFS}/etc/resolv.conf"
+: | sudo tee "${TARGET_ROOTFS}/etc/resolv.conf" >/dev/null
 sudo find "${TARGET_ROOTFS}/pause_bundle" -name '*.mtree' -delete
 sudo find "${TARGET_ROOTFS}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
 

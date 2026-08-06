@@ -281,5 +281,5 @@ and Helm rendering for `hostNetwork`, `iptables-sync`, and hostPort behavior.
 
 ## Security
 
-- [Threat Model](../../docs/THREAT_MODEL.md) — adversary model, trust graph, enforcement gates, and residual risks
-- [Pitfalls](../../docs/pitfalls.md) — operational sharp edges, including the mesh inbound-passthrough trade-off
+- [RA-TLS](../../docs/ratls.md) — the attested handshake, what it guarantees, and what it does not
+- Sharp edge: guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443`, so inbound :8443 is unmeshed in every guest

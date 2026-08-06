@@ -124,7 +124,7 @@ func testOpener(t *testing.T, ops DeviceOps) *Opener {
 	if err := os.Mkdir(filepath.Join(base, KubeVolumeName("weights")), 0o755); err != nil {
 		t.Fatalf("mkdir volume dir: %v", err)
 	}
-	return &Opener{Ops: ops, KubeletRoot: root}
+	return &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 }
 
 func testRequest(t *testing.T) Request {
@@ -348,7 +348,7 @@ func TestClosePodTearsDownEveryVolumeItHolds(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", n, err)
 		}
 	}
-	o := &Opener{Ops: ops, KubeletRoot: root}
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 
 	for _, n := range []string{"weights", "datasets"} {
 		req := testRequest(t)

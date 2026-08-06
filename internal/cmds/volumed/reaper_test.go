@@ -22,6 +22,20 @@ func (l livenessFor) Live(pod PodCgroup) (bool, error) {
 	return l.live[pod.UID], nil
 }
 
+// togglingLiveness answers whatever it is currently set to, so a test can move a
+// pod between sweeps.
+type togglingLiveness struct {
+	live bool
+	err  error
+}
+
+func (l *togglingLiveness) Live(PodCgroup) (bool, error) {
+	if l.err != nil {
+		return false, l.err
+	}
+	return l.live, nil
+}
+
 // openerWithVolumes opens one volume per name for testPodUID.
 func openerWithVolumes(t *testing.T, ops *fakeOps, names ...string) *Opener {
 	t.Helper()
@@ -31,7 +45,7 @@ func openerWithVolumes(t *testing.T, ops *fakeOps, names ...string) *Opener {
 			t.Fatalf("mkdir %s: %v", n, err)
 		}
 	}
-	o := &Opener{Ops: ops, KubeletRoot: root}
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 	for _, n := range names {
 		req := testRequest(t)
 		req.Name = n
@@ -46,7 +60,7 @@ func TestSweepTearsDownAGonePod(t *testing.T) {
 	ops := newOps()
 	o := openerWithVolumes(t, ops, "weights", "datasets")
 
-	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{}}}
+	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{}}, ConfirmGone: 1}
 	if got := r.Sweep(t.Context()); got != 2 {
 		t.Fatalf("swept %d volumes, want 2", got)
 	}
@@ -100,7 +114,7 @@ func TestSweepIsPerPod(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
 	}
-	o := &Opener{Ops: ops, KubeletRoot: root}
+	o := &Opener{Ops: ops, Targets: KubeletTargets{Root: root}}
 
 	for name, uid := range map[string]string{"weights": testPodUID, "datasets": other} {
 		req := testRequest(t)
@@ -110,7 +124,7 @@ func TestSweepIsPerPod(t *testing.T) {
 		}
 	}
 
-	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{other: true}}}
+	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{other: true}}, ConfirmGone: 1}
 	if got := r.Sweep(t.Context()); got != 1 {
 		t.Fatalf("swept %d volumes, want 1", got)
 	}
@@ -122,13 +136,70 @@ func TestSweepIsPerPod(t *testing.T) {
 func TestSweepIsIdempotent(t *testing.T) {
 	ops := newOps()
 	o := openerWithVolumes(t, ops, "weights")
-	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{}}}
+	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{}}, ConfirmGone: 1}
 
 	if got := r.Sweep(t.Context()); got != 1 {
 		t.Fatalf("first sweep closed %d", got)
 	}
 	if got := r.Sweep(t.Context()); got != 0 {
 		t.Fatalf("second sweep closed %d, want 0", got)
+	}
+}
+
+// A volume torn down under a live pod never comes back, so one sweep finding
+// the cgroup empty is not enough to act on.
+func TestSweepConfirmsGoneBeforeTearingDown(t *testing.T) {
+	ops := newOps()
+	o := openerWithVolumes(t, ops, "weights")
+	r := &Reaper{Opener: o, Liveness: livenessFor{live: map[string]bool{}}}
+
+	if got := r.Sweep(t.Context()); got != 0 {
+		t.Fatalf("first sweep closed %d, want 0 pending confirmation", got)
+	}
+	if o.Len() != 1 {
+		t.Fatal("an unconfirmed sweep tore down a volume")
+	}
+	if got := r.Sweep(t.Context()); got != 1 {
+		t.Fatalf("confirming sweep closed %d, want 1", got)
+	}
+}
+
+// A pod that is empty for one sweep and populated the next is mid-restart, not
+// gone, and the count it accrued must not carry.
+func TestSweepForgetsAPodThatComesBack(t *testing.T) {
+	ops := newOps()
+	o := openerWithVolumes(t, ops, "weights")
+	liveness := &togglingLiveness{}
+	r := &Reaper{Opener: o, Liveness: liveness}
+
+	r.Sweep(t.Context()) // gone once
+	liveness.live = true
+	r.Sweep(t.Context()) // back
+	liveness.live = false
+	if got := r.Sweep(t.Context()); got != 0 {
+		t.Fatalf("sweep closed %d after the pod came back; the count was carried", got)
+	}
+	if o.Len() != 1 {
+		t.Fatal("a pod that came back lost its volume")
+	}
+}
+
+// An unanswered lookup neither confirms nor forgets, so the sweep after it still
+// needs its own confirmation.
+func TestSweepCarriesTheCountAcrossAnUnansweredLookup(t *testing.T) {
+	ops := newOps()
+	o := openerWithVolumes(t, ops, "weights")
+	liveness := &togglingLiveness{}
+	r := &Reaper{Opener: o, Liveness: liveness}
+
+	r.Sweep(t.Context()) // gone once
+	liveness.err = errors.New("cgroup root unreadable")
+	if got := r.Sweep(t.Context()); got != 0 {
+		t.Fatalf("sweep closed %d on an unanswered lookup", got)
+	}
+	liveness.err = nil
+	if got := r.Sweep(t.Context()); got != 1 {
+		t.Fatalf("sweep closed %d, want the carried count to confirm", got)
 	}
 }
 
@@ -237,6 +308,56 @@ func TestCgroupLivenessRefusesAnAbsentRoot(t *testing.T) {
 	}
 }
 
+// The slice outlives the pod — kubelet holds it until the volumes this daemon
+// has mounted are cleaned up — so an empty one is the pod being gone.
+func TestCgroupLivenessReadsPopulation(t *testing.T) {
+	root := t.TempDir()
+	pod := testPod(testPodUID)
+	slice := filepath.Join(root, pod.Path)
+	if err := os.MkdirAll(slice, 0o755); err != nil {
+		t.Fatalf("mkdir pod slice: %v", err)
+	}
+	events := filepath.Join(slice, "cgroup.events")
+
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"populated", "populated 1\nfrozen 0\n", true},
+		{"empty", "populated 0\nfrozen 0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(events, []byte(tc.content), 0o644); err != nil {
+				t.Fatalf("write cgroup.events: %v", err)
+			}
+			got, err := (CgroupLiveness{Root: root}).Live(pod)
+			if err != nil {
+				t.Fatalf("live: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("live = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A cgroup.events with no populated field answers nothing, so the volume stays.
+func TestCgroupLivenessRefusesEventsWithoutPopulation(t *testing.T) {
+	root := t.TempDir()
+	pod := testPod(testPodUID)
+	slice := filepath.Join(root, pod.Path)
+	if err := os.MkdirAll(slice, 0o755); err != nil {
+		t.Fatalf("mkdir pod slice: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slice, "cgroup.events"), []byte("frozen 0\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup.events: %v", err)
+	}
+	if _, err := (CgroupLiveness{Root: root}).Live(pod); err == nil {
+		t.Fatal("a cgroup.events with no populated field judged the pod")
+	}
+}
+
 func TestCgroupLivenessDefaultsItsRoot(t *testing.T) {
 	if got := (CgroupLiveness{}).root(); got != DefaultCgroupRoot {
 		t.Fatalf("root = %q, want %q", got, DefaultCgroupRoot)
@@ -248,6 +369,9 @@ func TestCgroupLivenessDefaultsItsRoot(t *testing.T) {
 func TestZeroValuesFallBackToDefaults(t *testing.T) {
 	if got := (&Reaper{}).interval(); got != DefaultReapInterval {
 		t.Errorf("interval = %v, want %v", got, DefaultReapInterval)
+	}
+	if got := (&Reaper{}).confirmGone(); got != DefaultConfirmGone {
+		t.Errorf("confirmGone = %v, want %v", got, DefaultConfirmGone)
 	}
 	if (&Reaper{}).logger() == nil {
 		t.Error("reaper has no logger")

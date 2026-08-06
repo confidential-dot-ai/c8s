@@ -62,8 +62,9 @@ type mount struct {
 // Opener opens volumes and remembers what it has open.
 type Opener struct {
 	Ops DeviceOps
-	// KubeletRoot is where kubelet keeps pod directories.
-	KubeletRoot string
+	// Targets resolves where a volume is mounted: kubelet's pod directory on
+	// node-CVM, the guest's ephemeral directory under kata.
+	Targets Targets
 	// MaxMounts caps live volumes; zero means DefaultMaxMounts.
 	MaxMounts int
 
@@ -141,7 +142,7 @@ func (o *Opener) Open(ctx context.Context, req Request) error {
 // step fails. A half-open volume leaves a device-mapper target holding the key
 // in kernel memory with nothing owning it.
 func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [sha256.Size]byte) (*mount, error) {
-	target, err := TargetDir(o.KubeletRoot, req.Pod.UID, KubeVolumeName(req.Name))
+	target, err := o.Targets.Dir(req.Pod.UID, KubeVolumeName(req.Name))
 	if err != nil {
 		return nil, err
 	}

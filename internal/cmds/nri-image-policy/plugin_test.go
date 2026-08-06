@@ -771,11 +771,12 @@ func TestCreateContainer_DigestInAllowlist_Allows(t *testing.T) {
 	}
 }
 
-func TestCreateContainer_ImageFromPodAnnotation(t *testing.T) {
-	// Container has no image annotation; falls back to the pod annotation.
+// The pod annotation names the sandbox image, not this container's, so a
+// container without its own annotation has no reference to check.
+func TestCreateContainer_PodAnnotationDoesNotSupplyImage(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
-		Policy:    policyConfig{Mode: ModeFailClosed},
+		Policy:    policyConfig{Mode: ModeFailClosed, DenyMissingAnnotation: true},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
 	p.SetReady()
 
@@ -784,8 +785,8 @@ func TestCreateContainer_ImageFromPodAnnotation(t *testing.T) {
 	ctr := makeCtr(pod.Id, "myctr") // no annotations
 
 	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
-	if err != nil {
-		t.Fatalf("expected pod-annotation fallback to resolve allowlisted digest, got: %v", err)
+	if err == nil {
+		t.Fatal("expected denial: the container carries no image annotation")
 	}
 }
 

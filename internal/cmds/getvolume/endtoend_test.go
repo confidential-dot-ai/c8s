@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -83,7 +84,7 @@ func startDaemon(t *testing.T, dir string) *recordingOps {
 	ops := &recordingOps{}
 	srv := &volumed.Server{
 		Identity: fixedIdentity{pod: volumed.PodCgroup{UID: e2ePodUID, Path: "/kubepods.slice/pod"}},
-		Opener:   &volumed.Opener{Ops: ops, KubeletRoot: kubeletRoot},
+		Opener:   &volumed.Opener{Ops: ops, Targets: volumed.KubeletTargets{Root: kubeletRoot}},
 		Devices:  fixedDevices{},
 	}
 
@@ -112,7 +113,8 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 
 	cfg := flowConfig(t, url)
 	cfg.SocketDir = socketDir
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemonClient(socketDir)); err != nil {
+	daemon, daemonBase := daemonClient(cfg)
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
@@ -169,7 +171,8 @@ func TestSidecarRepeatIsIdempotent(t *testing.T) {
 	cfg := flowConfig(t, url)
 	cfg.SocketDir = socketDir
 	for i := 0; i < 2; i++ {
-		if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemonClient(socketDir)); err != nil {
+		daemon, daemonBase := daemonClient(cfg)
+		if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 	}
@@ -196,7 +199,8 @@ func TestSidecarReportsADaemonRefusal(t *testing.T) {
 	cfg.SocketDir = socketDir
 	// A volume the pod has no emptyDir for: the daemon has nowhere to mount it.
 	cfg.Volumes = []volumeRequest{{Name: "absent", Path: "/tenant-a/volumes/weights"}}
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemonClient(socketDir)); err == nil {
+	daemon, daemonBase := daemonClient(cfg)
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err == nil {
 		t.Fatal("a refused open was reported as success")
 	}
 }
@@ -210,4 +214,89 @@ func containsDir(path, want string) bool {
 		path = filepath.Dir(path)
 	}
 	return false
+}
+
+// startGuestDaemon runs a real volumed in its in-guest shape on the compiled
+// loopback port, over a kata ephemeral directory with the volume's mount point
+// already materialised.
+func startGuestDaemon(t *testing.T) *recordingOps {
+	t.Helper()
+	ephemeral := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ephemeral, volumed.KubeVolumeName("weights")), 0o755); err != nil {
+		t.Fatalf("mkdir ephemeral volume: %v", err)
+	}
+
+	ops := &recordingOps{}
+	srv := &volumed.Server{
+		Identity: volumed.GuestIdentity{},
+		Opener:   &volumed.Opener{Ops: ops, Targets: volumed.GuestTargets{Root: ephemeral}},
+		Devices:  fixedDevices{},
+	}
+	l, err := net.Listen("tcp", volumed.GuestAddr())
+	if err != nil {
+		t.Skipf("guest volume port %d unavailable here: %v", volumed.GuestPort, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Serve(ctx, l) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return ops
+}
+
+// startGuestInventory serves the token route on the compiled guest loopback
+// port, which is where the sidecar redeems under kata and is not overridable.
+func startGuestInventory(t *testing.T) {
+	t.Helper()
+	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(workloadclaims.GuestTokenPort)))
+	if err != nil {
+		t.Skipf("guest token port %d unavailable here: %v", workloadclaims.GuestTokenPort, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
+	t.Cleanup(func() { cancel(); l.Close() })
+}
+
+// The kata path end to end, with nothing mounted: the sidecar redeems its token
+// on guest loopback, reads the blob from CDS, and hands it to an in-guest
+// volumed that mounts into kata's ephemeral directory. This is the whole of
+// what the host unix socket used to carry.
+func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
+	startGuestInventory(t)
+	_, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
+	})
+	ops := startGuestDaemon(t)
+
+	cfg := flowConfig(t, url)
+	cfg.WorkloadClaimsGuest = true
+	cfg.SocketDir = "" // nothing is mounted in a guest
+
+	daemon, daemonBase := daemonClient(cfg)
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+	want := []string{
+		"CryptOpen /dev/disk/by-id/virtio-c8s-vol-weights c8s-crypt-" + volumed.GuestPodUID + "-weights",
+		"VerityOpen c8s-verity-" + volumed.GuestPodUID + "-weights",
+		"MountRO",
+	}
+	for i, w := range want {
+		if i >= len(ops.calls) || ops.calls[i] != w {
+			t.Fatalf("calls = %v, want %v", ops.calls, want)
+		}
+	}
+	stored, err := testBlob(t).DecodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ops.key) != string(stored) {
+		t.Error("the key handed to dm-crypt is not the one CDS released")
+	}
 }

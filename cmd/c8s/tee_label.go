@@ -111,7 +111,7 @@ func valuesFilesSetTEESelector(files []string, hardwarePlatform string) (bool, e
 
 // reportTEELabelSkip says auto-labelling stood aside and names the label the
 // operator must apply. Silence here is what left confidential pods Pending
-// until `helm --wait` timed out (docs/pitfalls.md).
+// until `helm --wait` timed out.
 func reportTEELabelSkip(w io.Writer, values map[string]any, hardwarePlatform string) {
 	key := teeSelectorKey(hardwarePlatform)
 	sel, _ := nestedMap(values, "kata", key)

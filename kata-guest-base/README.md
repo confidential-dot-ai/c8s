@@ -46,6 +46,7 @@ the kata-agent + its systemd unit + the OPA policy engine
 | `/usr/local/bin/ratls-mesh` | c8s (Go) | In-guest mesh proxy — runs as `ratls-mesh in-guest`. |
 | `/usr/local/bin/policy-monitor` | c8s (Go) | In-VM container-digest enforcement — watches `/run/kata-containers/` via inotify, SIGKILLs containers whose digest isn't on the baked allowlist. |
 | `/usr/local/bin/attestation-service` | attestation-rs `attestation-api` bin (Rust) | Localhost-only attester on `127.0.0.1:8400` (staged under the attestation-service role name). |
+| `/usr/local/bin/volumed` | c8s (Go) | In-guest encrypted-volume opener — runs as `volumed --guest`, serving `127.0.0.1:8402`. Uses the rootfs's `cryptsetup`/`veritysetup` (`cryptsetup-bin`, already in `KATA_EXTRA_PKGS`). |
 | `/etc/c8s/attestation-service.toml` | this dir | Localhost-only mode config — no API key, no TLS. |
 | `/etc/c8s/bootstrap-allowlist.json` | rendered by `scripts/fetch.sh` | Image-digest allowlist `policy-monitor` reads at boot. Digests of the c8s images at `IMAGE_TAG` are substituted in. Part of the dm-verity root → covered by the launch measurement; updates require an image rebuild. |
 | `/etc/kata-opa/default-policy.rego` | this dir | Overlays osbuilder's allow-all with our policy: `SetPolicyRequest` is denied (the host can't swap the policy at runtime), and so are the host-reach-in RPCs `ExecProcessRequest`/`ReadStreamRequest`/`WriteStreamRequest` (no `kubectl exec`/`logs` against a locked guest — see "Debug variant" below). The agent is built with `AGENT_POLICY=yes` so this is enforced. Per-image-digest gating is policy-monitor's job — see `docs/kata-image-policy.md`. |
@@ -53,6 +54,7 @@ the kata-agent + its systemd unit + the OPA policy engine
 | `/etc/systemd/system/c8s-cloudinit-env.service` | this dir | One-shot — turns cloud-init user-data into `/run/c8s/ratls-mesh.env`. |
 | `/etc/systemd/system/ratls-mesh.service` | this dir | Runs the in-guest proxy with `CAP_NET_ADMIN`. |
 | `/etc/systemd/system/policy-monitor.service` | this dir | Runs `policy-monitor monitor`. |
+| `/etc/systemd/system/volumed.service` | this dir | Runs `volumed --guest`. Not a `c8s-ready.target` gate — release needs every main container already running. |
 | `/etc/systemd/system/c8s-ready.target` | this dir | Synthetic target reached when the in-guest mesh is healthy. |
 | `/etc/tmpfiles.d/c8s.conf` | this dir | Creates `/run/c8s/` early in boot. |
 | `/usr/local/lib/c8s/cloudinit-env.sh` | this dir | Invoked by `c8s-cloudinit-env.service`. |
@@ -73,7 +75,7 @@ comes up independently.
 sudo apt-get install -y docker.io && sudo systemctl enable --now docker
 
 # Once per c8s/attestation-rs revision: build the in-guest binaries.
-cd /workspace/c8s            && make build-c8s-node && make build-policy-monitor && make build-rtmr3-measurer
+cd /workspace/c8s            && make build-c8s-node && make build-policy-monitor && make build-rtmr3-measurer && make build-volumed
 cd /workspace/attestation-rs && cargo build --release -p attestation-api --bin attestation-api --target x86_64-unknown-linux-musl
 
 # Stage the binaries + the bootstrap allowlist into extra/. (The attester
@@ -170,8 +172,16 @@ a debug image can't silently stand in for a locked one. Select it with
   kata-runtime via vsock + cloud-init, and the locked policy denies the
   host exec/stream RPCs — `kubectl exec`/`logs` work only on the `-debug`
   image variant (above).
-- **Cloud-init's user-data is host-injected** and visible to the host —
-  C8S_* values are URLs and workload IDs, not secrets.
+- **The in-guest `C8S_*` config is a baked default.** There is no per-pod
+  NoCloud datasource, so cloud-init finds nothing and
+  `c8s-cloudinit-env.service` materialises `/etc/c8s/cloudinit.env` from the
+  rootfs — one fixed identity (`C8S_WORKLOAD_ID=c8s-broker`) shared by every
+  guest. Should per-pod user-data injection land it would be host-written and
+  host-visible, which is why these values are URLs and workload IDs rather
+  than secrets. The one value that must not come from the host,
+  `C8S_CDS_MEASUREMENTS`, is delivered over SNP init-data instead and checked
+  against `HOST_DATA` (see
+  [`docs/kata-image-policy.md`](../docs/kata-image-policy.md)).
 - **kata version pin.** `scripts/build.sh` (osbuilder source tag) must
   stay in lockstep with `internal/helmchart/c8s/values.yaml` (kata-deploy
   version) — host/guest agent skew breaks the ttRPC contract.

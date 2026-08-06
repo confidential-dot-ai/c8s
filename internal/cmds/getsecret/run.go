@@ -34,10 +34,11 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-// inventoryEndpoint is where the sandbox token is redeemed. A package variable
-// only so tests can point it at a socket they control; production always uses
-// the compiled path, which is what stops a control-plane value redirecting the
-// redemption to a rogue inventory (docs/getcert-workload-binding.md, Corner 5).
+// inventoryEndpoint is the node-CVM endpoint the sandbox token is redeemed at.
+// A package variable only so tests can point it at a socket they control;
+// production always uses one of the two compiled paths, which is what stops a
+// control-plane value redirecting the redemption to a rogue inventory
+// (docs/getcert-workload-binding.md, Corner 5).
 var inventoryEndpoint = workloadclaims.InventoryEndpoint
 
 // config is everything the sidecar needs. The webhook renders all of it.
@@ -48,6 +49,11 @@ type config struct {
 
 	CertPath string
 	KeyPath  string
+
+	// WorkloadClaimsGuest selects the kata shape: the inventory is
+	// policy-monitor inside the guest, reached on guest loopback rather than
+	// the node-CVM socket, which a kata guest cannot mount.
+	WorkloadClaimsGuest bool
 
 	Secrets  []secretRequest
 	OutDir   string
@@ -209,7 +215,7 @@ func do(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicK
 	if err != nil {
 		return nil, 0, err
 	}
-	token, err := workloadclaims.FetchSandboxToken(ctx, inventoryEndpoint(), cfg.InventoryTimeout, pub, challenge)
+	token, err := workloadclaims.FetchSandboxToken(ctx, cfg.endpoint(), cfg.InventoryTimeout, pub, challenge)
 	if err != nil {
 		return nil, 0, fmt.Errorf("redeem sandbox token: %w", err)
 	}
@@ -251,6 +257,15 @@ func do(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicK
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, resp.StatusCode, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(detail)))
 	}
+}
+
+// endpoint is the compiled inventory endpoint for this sidecar's shape. The
+// flag selects between two baked values, never an address.
+func (c config) endpoint() string {
+	if c.WorkloadClaimsGuest {
+		return workloadclaims.GuestInventoryEndpoint()
+	}
+	return inventoryEndpoint()
 }
 
 func fetchChallenge(ctx context.Context, cfg config, client *http.Client) ([]byte, error) {

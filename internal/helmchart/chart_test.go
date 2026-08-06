@@ -3764,6 +3764,10 @@ func TestChartCwLabelIntegrityPolicyDisabled(t *testing.T) {
 // produces. kata is enforcing, so the host-side components whose function
 // moves into the kata-guest-base image are switched off (the chart validates
 // they are off — see TestChartKataRejectsHostSideComponents).
+// testImageDigest is a syntactically valid digest for renders that only need
+// `image` to be pinned.
+const testImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
 func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	return helmTemplate(t, append([]string{
@@ -3771,6 +3775,9 @@ func helmTemplateKata(t *testing.T, args ...string) (string, error) {
 		"--set", "ratlsMesh.enabled=false",
 		"--set", "attestationApi.enabled=false",
 		"--set", "nriImagePolicy.enabled=false",
+		// The guest admits only digest-pinned references, so kata.enabled
+		// requires one for the injected sidecars (kind=kata_image_digest).
+		"--set-string", "image.digest=" + testImageDigest,
 	}, args...)...)
 }
 
@@ -3879,6 +3886,27 @@ func TestChartKataRejectsZeroPcieRootPort(t *testing.T) {
 // attestation, and image admission run inside the kata-guest-base image. The
 // chart must refuse to deploy the host-side versions alongside — they would be
 // dead weight at best and a second, unattested enforcement path at worst.
+// The webhook injects the c8s sidecars into every confidential pod off `image`,
+// and they run inside the guest, which admits only digest-pinned references. A
+// tag renders sidecars the guest refuses at CreateContainer, so catch it at
+// render rather than as a pod that never starts.
+func TestChartKataRequiresImageDigest(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "kata.enabled=true",
+		"--set", "ratlsMesh.enabled=false",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set-string", "image.tag=dev",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with kata.enabled and a tag-only image, want failure\n%s", out)
+	}
+	msg := helmFailMessage(t, out)
+	if !strings.Contains(msg, "kind=kata_image_digest") {
+		t.Errorf("fail message %q missing the kata_image_digest marker", msg)
+	}
+}
+
 func TestChartKataRejectsHostSideComponents(t *testing.T) {
 	out, err := helmTemplate(t, "--set", "kata.enabled=true")
 	if err == nil {
@@ -6588,5 +6616,50 @@ func TestChartKataPinnedPodsCarryGuestReadyAffinity(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("%s missing the guest-ready node affinity", name)
 		}
+	}
+}
+
+// The host volumed DaemonSet is replaced under kata by `volumed --guest` inside
+// the guest, which is where the fetcher posts. Leaving the host one enabled
+// deploys a privileged DaemonSet nothing calls, so the chart refuses it for the
+// same reason as the other host-side components.
+func TestChartKataRejectsHostVolumed(t *testing.T) {
+	out, err := helmTemplateKata(t, "--set", "volumed.enabled=true")
+	if err == nil {
+		t.Fatalf("helm template succeeded with kata and host volumed enabled, want failure\n%s", out)
+	}
+	msg := helmFailMessage(t, out)
+	if !strings.Contains(msg, "kind=enforce_host_components") {
+		t.Errorf("fail message %q missing the enforce_host_components marker", msg)
+	}
+	if !strings.Contains(msg, "volumed.enabled") {
+		t.Errorf("fail message %q should name volumed.enabled", msg)
+	}
+}
+
+// The host qemu wrapper needs one source of truth: the puller ConfigMap ships a
+// copy, and kata-guest-base scripts/ holds the canonical file because it lives
+// alongside the guest tooling it is coupled to. A silent drift would be a
+// launch-behaviour drift the launch measurement can't catch (the wrapper runs
+// on the host outside every attested boundary).
+func TestKataQemuWrapperCopiesMatch(t *testing.T) {
+	// Both paths are repo-relative; the chart test package sits under
+	// internal/helmchart, so climb two levels to reach the repo root.
+	const (
+		chart  = "c8s/files/scripts/kata-qemu-scratch-wrapper.sh"
+		source = "../../kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh"
+	)
+	chartBytes, err := os.ReadFile(chart)
+	if err != nil {
+		t.Fatalf("read %s: %v", chart, err)
+	}
+	sourceBytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	if !slices.Equal(chartBytes, sourceBytes) {
+		t.Fatalf("wrapper drift: %s and %s must be byte-identical\n"+
+			"the puller ConfigMap uses the chart copy; the guest-base tree is the source of truth\n"+
+			"fix: cp %s %s", chart, source, source, chart)
 	}
 }
