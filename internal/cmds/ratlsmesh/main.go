@@ -438,17 +438,23 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			CDSMeasurements:   cdsMeasurements,
 		}
 		cdsClient = cdsclient.NewClient(cdsCfg)
-		go cdsUpgrade{
-			logger:          logger,
-			logPrefix:       "cds",
-			newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProviderWithClient(cdsClient, logger) },
-			retryBackoff:    c.cdsRetryBackoff,
-			retryMaxBackoff: c.cdsRetryMaxBackoff,
-			opTimeout:       c.cdsOpTimeout,
-			serverCertMgr:   serverCertMgr,
-			clientCertMgr:   clientCertMgr,
-			metrics:         m,
-		}.run(ctx)
+		// A provider-construction failure (config validation) is logged and
+		// the mesh keeps serving self-signed certs; it never blocks startup.
+		if provider, err := cdsclient.NewProviderWithClient(cdsClient, logger); err != nil {
+			logger.Error("cds provider creation failed", "error", err)
+		} else {
+			go cdsUpgrade{
+				logger:          logger,
+				logPrefix:       "cds",
+				provider:        provider,
+				retryBackoff:    c.cdsRetryBackoff,
+				retryMaxBackoff: c.cdsRetryMaxBackoff,
+				opTimeout:       c.cdsOpTimeout,
+				serverCertMgr:   serverCertMgr,
+				clientCertMgr:   clientCertMgr,
+				metrics:         m,
+			}.run(ctx)
+		}
 	}
 
 	// CA bundle refresh: periodically poll CDS /ca for updated CA bundle. Uses

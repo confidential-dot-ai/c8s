@@ -16,12 +16,12 @@ import (
 // cdsUpgrade swaps the server cert manager's provider from self-signed to
 // CDS-issued, retrying with backoff until it succeeds, then upgrades the
 // client manager once and flips the cert-mode gauge. Shared by the host and
-// in-guest runs, which differ only in how the provider is built and in
+// in-guest runs, which differ only in how the provider was built and in
 // logPrefix ("cds" vs "in-guest cds").
 type cdsUpgrade struct {
-	logger      *slog.Logger
-	logPrefix   string
-	newProvider func() (*cdsclient.Provider, error)
+	logger    *slog.Logger
+	logPrefix string
+	provider  *cdsclient.Provider
 
 	retryBackoff    time.Duration
 	retryMaxBackoff time.Duration
@@ -33,22 +33,16 @@ type cdsUpgrade struct {
 }
 
 func (u cdsUpgrade) run(ctx context.Context) {
-	provider, err := u.newProvider()
-	if err != nil {
-		u.logger.Error(u.logPrefix+" provider creation failed", "error", err)
-		return
-	}
-
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = u.retryBackoff
 	bo.MaxInterval = u.retryMaxBackoff
 	// MaxElapsedTime defaults to 0 (unlimited); ctx cancellation is the only
 	// exit.
 
-	_, err = backoff.Retry(ctx, func() (struct{}, error) {
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
 		upgradeCtx, cancel := context.WithTimeout(ctx, u.opTimeout)
 		defer cancel()
-		if err := u.serverCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
+		if err := u.serverCertMgr.SwapProvider(upgradeCtx, u.provider); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, nil
@@ -66,7 +60,7 @@ func (u cdsUpgrade) run(ctx context.Context) {
 
 	if u.clientCertMgr != nil {
 		upgradeCtx, cancel := context.WithTimeout(ctx, u.opTimeout)
-		if err := u.clientCertMgr.SwapProvider(upgradeCtx, provider); err != nil {
+		if err := u.clientCertMgr.SwapProvider(upgradeCtx, u.provider); err != nil {
 			u.logger.Warn(u.logPrefix+" client certificate upgrade failed", "error", err)
 		} else {
 			u.logger.Info(u.logPrefix + " certificate upgraded from self-signed to cds-issued (client)")

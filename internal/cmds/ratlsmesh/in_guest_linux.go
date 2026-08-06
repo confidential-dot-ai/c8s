@@ -434,17 +434,23 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
 	}
-	go cdsUpgrade{
-		logger:          logger,
-		logPrefix:       "in-guest cds",
-		newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(cdsCfg, logger) },
-		retryBackoff:    c.cdsRetryBackoff,
-		retryMaxBackoff: c.cdsRetryMaxBackoff,
-		opTimeout:       c.cdsOpTimeout,
-		serverCertMgr:   serverCertMgr,
-		clientCertMgr:   clientCertMgr,
-		metrics:         m,
-	}.run(ctx)
+	// A provider-construction failure (config validation) is logged and the
+	// mesh keeps serving self-signed certs; it never blocks startup.
+	if provider, err := cdsclient.NewProvider(cdsCfg, logger); err != nil {
+		logger.Error("in-guest cds provider creation failed", "error", err)
+	} else {
+		go cdsUpgrade{
+			logger:          logger,
+			logPrefix:       "in-guest cds",
+			provider:        provider,
+			retryBackoff:    c.cdsRetryBackoff,
+			retryMaxBackoff: c.cdsRetryMaxBackoff,
+			opTimeout:       c.cdsOpTimeout,
+			serverCertMgr:   serverCertMgr,
+			clientCertMgr:   clientCertMgr,
+			metrics:         m,
+		}.run(ctx)
+	}
 	go runInGuestCABundleRefresh(ctx, logger, c, cdsCfg, serverCertMgr, clientCertMgr)
 
 	logger.Info("ratls-mesh in-guest listening",

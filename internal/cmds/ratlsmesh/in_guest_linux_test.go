@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
 func TestLoadInGuestConfigDefaults(t *testing.T) {
@@ -533,26 +531,4 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-}
-
-func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
-	// A config missing NodeIP makes provider creation fail; run must log and
-	// return rather than panic or retry. run is synchronous; a hang here is
-	// caught by the test binary timeout.
-	c := defaultInGuestConfig()
-	badCfg := &cdsclient.Config{
-		CDSURL:            "http://127.0.0.1:1",
-		AttestationApiURL: "http://127.0.0.1:1",
-		CDSCAURL:          "http://127.0.0.1:1",
-		// NodeIP intentionally missing.
-	}
-	cdsUpgrade{
-		logger:          testLogger(),
-		logPrefix:       "in-guest cds",
-		newProvider:     func() (*cdsclient.Provider, error) { return cdsclient.NewProvider(badCfg, testLogger()) },
-		retryBackoff:    c.cdsRetryBackoff,
-		retryMaxBackoff: c.cdsRetryMaxBackoff,
-		opTimeout:       c.cdsOpTimeout,
-		metrics:         testMetrics(),
-	}.run(context.Background())
 }
