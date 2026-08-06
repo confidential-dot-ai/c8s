@@ -335,9 +335,14 @@ func TestProviderProvisionRejectsLeafOutsideValidityWindow(t *testing.T) {
 		name      string
 		notBefore time.Time
 		notAfter  time.Time
+		// wantMsg pins WHICH check rejected the leaf. The expired case would
+		// pass on the pre-existing "ttl <= 0" guard further down Provision
+		// even with the validity check deleted, so asserting only "an error
+		// happened" would not pin the window check at all.
+		wantMsg string
 	}{
-		{"expired", now.Add(-2 * time.Hour), now.Add(-time.Hour)},
-		{"not yet valid beyond skew", now.Add(certutil.LeafValiditySkew + time.Hour), now.Add(3 * time.Hour)},
+		{"expired", now.Add(-2 * time.Hour), now.Add(-time.Hour), "issued certificate: certificate expired at NotAfter"},
+		{"not yet valid beyond skew", now.Add(certutil.LeafValiditySkew + time.Hour), now.Add(3 * time.Hour), "issued certificate: certificate is not yet valid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -360,8 +365,12 @@ func TestProviderProvisionRejectsLeafOutsideValidityWindow(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, _, err := p.Provision(context.Background()); err == nil {
+			_, _, err = p.Provision(context.Background())
+			if err == nil {
 				t.Fatal("issued certificate outside its validity window was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("err = %v, want the validity-window rejection (%q)", err, tc.wantMsg)
 			}
 		})
 	}
