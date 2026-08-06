@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -262,5 +263,82 @@ func TestSelfHostDataRejectsUnparseableReport(t *testing.T) {
 
 	if _, err := selfHostData(context.Background(), &Config{AttestationServiceURL: srv.URL}); err == nil {
 		t.Fatal("accepted a report that does not parse")
+	}
+}
+
+// pointInitDataAt aims initDataDocumentPath at a path that does not exist yet,
+// the state every guest is in until kata-agent writes the document.
+func pointInitDataAt(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "initdata.toml")
+	old := initDataDocumentPath
+	initDataDocumentPath = path
+	t.Cleanup(func() { initDataDocumentPath = old })
+	return path
+}
+
+func shortInitDataWait(t *testing.T, budget, interval time.Duration) {
+	t.Helper()
+	prevBudget, prevInterval := initDataWaitBudget, initDataWaitInterval
+	initDataWaitBudget, initDataWaitInterval = budget, interval
+	t.Cleanup(func() { initDataWaitBudget, initDataWaitInterval = prevBudget, prevInterval })
+}
+
+// The regression this fixes: kata-agent writes the document during its own
+// startup, and systemd orders kata-agent.service behind this unit's READY=1,
+// so a single read on the startup path could only ever miss it. The wait has
+// to survive an initially-absent file.
+func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
+	raw := testDocument(t, "aabb,ccdd")
+	digest := initdata.Digest(raw)
+	path := pointInitDataAt(t)
+	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
+
+	// Written a beat late, the way kata-agent does.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = os.WriteFile(path, raw, 0o644)
+	}()
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "aabb,ccdd" {
+		t.Fatalf("CDSMeasurements = %q, want it picked up once kata-agent wrote the document", cfg.CDSMeasurements)
+	}
+}
+
+// A document HOST_DATA does not commit is a verdict, not a timing problem, so
+// the wait must abandon it immediately rather than retry until the budget runs
+// out — otherwise a tampering host delays every guest's refresh.
+func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
+	writeInitData(t, testDocument(t, "aabb"))
+	other := initdata.Digest(testDocument(t, "deadbeef"))
+	// A budget that would dominate the test if the tamper path retried.
+	shortInitDataWait(t, time.Minute, 10*time.Second)
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, other[:])}
+	start := time.Now()
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "" {
+		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("tamper verdict took %s; it must not consume the wait budget", elapsed)
+	}
+}
+
+// A host that delivers no document at all leaves the guest exactly where it
+// was before: seed-only enforcement, no measurements.
+func TestAwaitInitDataMeasurementsBudgetExhausted(t *testing.T) {
+	pointInitDataAt(t)
+	shortInitDataWait(t, 100*time.Millisecond, 10*time.Millisecond)
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, 48))}
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "" {
+		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
 	}
 }
