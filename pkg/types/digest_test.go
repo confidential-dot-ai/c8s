@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +53,22 @@ func TestParseDigestRejectsWrongHexLength(t *testing.T) {
 	_, err := ParseDigest("sha256:abcd")
 	if err == nil {
 		t.Fatal("expected error for wrong hex length")
+	}
+}
+
+func TestParseDigestAcceptsHexAlphabetEdges(t *testing.T) {
+	// Digests made solely of the first/last char of each hex range.
+	for _, hex := range []string{
+		strings.Repeat("0", 64),
+		strings.Repeat("9", 64),
+		strings.Repeat("a", 64),
+		strings.Repeat("f", 64),
+		strings.Repeat("A", 64),
+		strings.Repeat("F", 64),
+	} {
+		if _, err := ParseDigest("sha256:" + hex); err != nil {
+			t.Errorf("ParseDigest(sha256:%s): %v", hex, err)
+		}
 	}
 }
 

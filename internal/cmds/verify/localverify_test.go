@@ -59,6 +59,22 @@ func TestVerifyInProcess_KDSFetchBoundedByContext(t *testing.T) {
 	}
 }
 
+// TestVerifyEvidence_TimeoutBoundsCollateralFetch proves --timeout bounds the
+// verification attempt itself: with a short timeout, a bare report's KDS fetch
+// must fail promptly as collateral-unavailable (exit 3), not run unbounded.
+func TestVerifyEvidence_TimeoutBoundsCollateralFetch(t *testing.T) {
+	cfg := config{timeout: 50 * time.Millisecond, output: "text"}
+	var out, errOut bytes.Buffer
+	start := time.Now()
+	code := verifyEvidence(context.Background(), cfg, &ratls.VerifyPolicy{}, bareSnpEvidence(t), operatorKeysReport{}, &out, &errOut)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("verifyEvidence took %v, want the 50ms timeout enforced", elapsed)
+	}
+	if code != exitNoEvidence {
+		t.Fatalf("exit = %d, want %d (collateral unavailable); stderr: %s", code, exitNoEvidence, errOut.String())
+	}
+}
+
 // TestRun_BareEvidenceTimeoutExitsNoEvidence drives the full command path
 // (--from-file, bare evidence) with a dead parent context standing in for an
 // elapsed --timeout: the command must exit 3 promptly, with the collateral

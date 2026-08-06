@@ -304,6 +304,29 @@ func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 	}
 }
 
+// TestNewSingleConnClientConfig pins the connection-bound client's shape: the
+// timeout knobs mirror ratls.NewVerifyingHTTPClient and the transport is
+// limited to the single attested connection.
+func TestNewSingleConnClientConfig(t *testing.T) {
+	hc := newSingleConnClient(nil)
+	if hc.Timeout != 30*time.Second {
+		t.Errorf("Timeout = %v, want 30s", hc.Timeout)
+	}
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", hc.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 10*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want 10s", tr.ResponseHeaderTimeout)
+	}
+	if tr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 90s", tr.IdleConnTimeout)
+	}
+	if tr.MaxIdleConns != 1 || tr.MaxConnsPerHost != 1 {
+		t.Errorf("MaxIdleConns/MaxConnsPerHost = %d/%d, want 1/1", tr.MaxIdleConns, tr.MaxConnsPerHost)
+	}
+}
+
 // TestNewVerifiedHTTPClient_RequiresHTTPS proves a non-https URL is rejected
 // outright: the trust model binds attestation to a TLS handshake, which
 // plaintext has none of.

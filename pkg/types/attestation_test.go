@@ -2,8 +2,17 @@ package types
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
+	"strings"
 	"testing"
+	"time"
 )
 
 func ptrTo[T any](v T) *T { return &v }
@@ -186,5 +195,83 @@ func TestVerifyReportData(t *testing.T) {
 	// Token issuance must be explicitly off — c8s mints its own EAR.
 	if req.IssueToken == nil || *req.IssueToken {
 		t.Fatalf("IssueToken = %v, want explicit false", req.IssueToken)
+	}
+}
+
+func selfSignedCertPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+func TestSignCsrResponseSignedCert(t *testing.T) {
+	leaf := selfSignedCertPEM(t)
+	ca := selfSignedCertPEM(t)
+	leafTrim := strings.TrimSpace(leaf)
+	caTrim := strings.TrimSpace(ca)
+
+	cases := map[string]struct {
+		resp    SignCsrResponse
+		want    string
+		wantErr string
+	}{
+		"leaf only": {
+			resp: SignCsrResponse{Certificate: leaf},
+			want: leafTrim + "\n",
+		},
+		"leaf plus ca bundle": {
+			resp: SignCsrResponse{Certificate: leaf, CACertificate: ca},
+			want: leafTrim + "\n" + caTrim + "\n",
+		},
+		"empty certificate": {
+			resp:    SignCsrResponse{CACertificate: ca},
+			wantErr: "certificate is required",
+		},
+		"whitespace certificate": {
+			resp:    SignCsrResponse{Certificate: "  \n\t"},
+			wantErr: "certificate is required",
+		},
+		"non-PEM certificate": {
+			resp:    SignCsrResponse{Certificate: "not a certificate"},
+			wantErr: "PEM-encoded X.509",
+		},
+		"two leaf blocks": {
+			resp:    SignCsrResponse{Certificate: leaf + selfSignedCertPEM(t)},
+			wantErr: "exactly one CERTIFICATE block",
+		},
+		"garbage ca": {
+			resp:    SignCsrResponse{Certificate: leaf, CACertificate: "not a ca"},
+			wantErr: "ca_certificate must be PEM-encoded X.509",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := tc.resp.SignedCert()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SignedCert: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("SignedCert = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

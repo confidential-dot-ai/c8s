@@ -295,11 +295,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 		// Deletes at startup must not pin a cluster-wide pod informer for the
 		// operator's lifetime.
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-			c, err := newDirectClient(mgr)
-			if err != nil {
-				return fmt.Errorf("build sweep client: %w", err)
-			}
-			return reinjectSweep(ctx, c, excluded)
+			return runReinjectSweep(ctx, mgr, excluded)
 		})); err != nil {
 			return fmt.Errorf("add reinject sweep: %w", err)
 		}
@@ -312,6 +308,16 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 		return fmt.Errorf("add readyz: %w", err)
 	}
 	return nil
+}
+
+// runReinjectSweep is the reinject-sweep runnable body; a named function so
+// its client-build failure path is testable without starting the manager.
+func runReinjectSweep(ctx context.Context, mgr manager.Manager, excluded map[string]struct{}) error {
+	c, err := newDirectClient(mgr)
+	if err != nil {
+		return fmt.Errorf("build sweep client: %w", err)
+	}
+	return reinjectSweep(ctx, c, excluded)
 }
 
 type serverResourcesForGroupVersion interface {

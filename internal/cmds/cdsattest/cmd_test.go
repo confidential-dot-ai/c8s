@@ -1,7 +1,9 @@
 package cdsattest
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +13,26 @@ import (
 	"testing"
 	"time"
 )
+
+// TestNewCmdDurationDefaults pins the shipped duration-flag defaults.
+func TestNewCmdDurationDefaults(t *testing.T) {
+	flags := NewCmd().Flags()
+	for _, tc := range []struct {
+		flag string
+		want string
+	}{
+		{"session-ttl", "5m0s"},
+		{"read-header-timeout", "5s"},
+	} {
+		f := flags.Lookup(tc.flag)
+		if f == nil {
+			t.Fatalf("missing --%s flag", tc.flag)
+		}
+		if f.DefValue != tc.want {
+			t.Fatalf("default --%s = %q, want %q", tc.flag, f.DefValue, tc.want)
+		}
+	}
+}
 
 func writeFixtureFile(t *testing.T) string {
 	t.Helper()
@@ -43,6 +65,13 @@ func TestRunErrors(t *testing.T) {
 			cfg:     config{evidenceFixture: fixture, upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
+		{
+			// The live-evidence branch must be selected on --attestation-api-url
+			// alone; the bad upstream proves run() got past provider selection.
+			name:    "invalid upstream URL with live evidence source",
+			cfg:     config{attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
+			wantSub: "upstream must be an http:// or https:// URL",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +80,37 @@ func TestRunErrors(t *testing.T) {
 				t.Fatalf("run() error = %v, want substring %q", err, tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestRunReturnsListenError: a failed bind must surface as a run() error, not a
+// silent nil exit.
+func TestRunReturnsListenError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	cfg := config{
+		host:              "127.0.0.1",
+		port:              l.Addr().(*net.TCPAddr).Port, // already taken
+		attestationAPIURL: "http://127.0.0.1:9",
+	}
+	if err := run(cfg); err == nil {
+		t.Fatal("run() on an occupied port returned nil, want bind error")
+	}
+}
+
+func TestNewLoggerLevels(t *testing.T) {
+	ctx := context.Background()
+	if !newLogger("debug").Enabled(ctx, slog.LevelDebug) {
+		t.Fatal("newLogger(debug) does not enable debug logging")
+	}
+	if newLogger("info").Enabled(ctx, slog.LevelDebug) {
+		t.Fatal("newLogger(info) unexpectedly enables debug logging")
+	}
+	if !newLogger("bogus").Enabled(ctx, slog.LevelInfo) {
+		t.Fatal("newLogger(bogus) must fall back to info")
 	}
 }
 

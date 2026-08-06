@@ -7,15 +7,21 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -140,6 +146,104 @@ func csrPEMFromKey(t *testing.T, key crypto.Signer) []byte {
 func TestNewHandlerRejectsBadPubkey(t *testing.T) {
 	if _, err := NewHandler([]byte("not a key"), testCA(t), "system:masters", "operator", time.Hour); err == nil {
 		t.Error("expected error for non-PEM operator pubkey")
+	}
+}
+
+// TestHandlerToleratesTokenClockSkew: a token stamped slightly ahead of the
+// guest clock (operator clock skew) must still authorize; the verifier's
+// bounded leeway absorbs it.
+func TestHandlerToleratesTokenClockSkew(t *testing.T) {
+	opKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&opKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+
+	h, err := NewHandler(pubPEM, testCA(t), "system:masters", "operator", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mint the token by hand with iat 30s in the future: within the verifier's
+	// leeway, but ahead of the guest clock.
+	sum := sha256.Sum256(body)
+	iat := time.Now().Add(30 * time.Second)
+	claims := jwt.MapClaims{
+		"iat": iat.Unix(),
+		"exp": iat.Add(time.Minute).Unix(),
+		"htm": http.MethodPost,
+		"htu": "/release-credential",
+		"pbh": base64.RawURLEncoding.EncodeToString(sum[:]),
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(opKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/release-credential", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %q; want 200 for a token within clock-skew leeway", rec.Code, rec.Body.String())
+	}
+}
+
+// stubSigner is a crypto.Signer whose public key x509 cannot sign for, forcing
+// the certificate-signing step to fail after auth and CSR validation pass.
+type stubSigner struct{}
+
+func (stubSigner) Public() crypto.PublicKey { return struct{}{} }
+func (stubSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
+	return nil, errors.New("stub signer")
+}
+
+// TestHandlerSigningFailureIsServerError: a signing failure on a valid,
+// authorized request is a 500 with the sign error surfaced.
+func TestHandlerSigningFailureIsServerError(t *testing.T) {
+	signer, pubPEM := newOperatorAuth(t)
+	ca := testCA(t)
+	ca.key = stubSigner{}
+	h, err := NewHandler(pubPEM, ca, "system:masters", "operator", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csrKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEMFromKey(t, csrKey))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz, err := signer.Authorization(http.MethodPost, "/release-credential", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/release-credential", bytes.NewReader(body))
+	req.Header.Set("Authorization", authz)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body %q; want 500", rec.Code, rec.Body.String())
+	}
+	if !strings.HasPrefix(rec.Body.String(), "sign: ") {
+		t.Fatalf("body = %q, want a sign error", rec.Body.String())
 	}
 }
 

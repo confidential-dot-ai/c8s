@@ -94,6 +94,28 @@ func TestSignOperatorCert(t *testing.T) {
 	}
 }
 
+// TestSignOperatorCertValidityWindow pins the exact issued validity: NotBefore
+// is backdated one minute to absorb clock skew, NotAfter is now+ttl.
+func TestSignOperatorCertValidityWindow(t *testing.T) {
+	ca := testCA(t)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	certPEM, err := ca.signOperatorCert(signParams{
+		csr: testCSR(t), org: "system:masters", cn: "operator", ttl: time.Hour,
+	}, now)
+	if err != nil {
+		t.Fatalf("signOperatorCert: %v", err)
+	}
+	cert := parseLeaf(t, certPEM)
+
+	if want := now.Add(-1 * time.Minute); !cert.NotBefore.Equal(want) {
+		t.Errorf("NotBefore = %v, want %v", cert.NotBefore, want)
+	}
+	if want := now.Add(time.Hour); !cert.NotAfter.Equal(want) {
+		t.Errorf("NotAfter = %v, want %v", cert.NotAfter, want)
+	}
+}
+
 // TestSignOperatorCertRejectsBadCSR: a CSR with a broken self-signature is
 // refused (the signer verifies it).
 func TestSignOperatorCertRejectsBadCSR(t *testing.T) {
