@@ -657,11 +657,25 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				intermediates.AddCert(ic)
 			}
 		}
+		// Both branches must share one validity window. x509.Verify grants no
+		// NotBefore skew while certutil.CheckValidity (the RA-TLS branch,
+		// through VerifyCert) grants certutil.LeafValiditySkew, so without
+		// CurrentTime a CA-signed leaf minted a couple of minutes into our
+		// future fails the chain here and silently falls through to RA-TLS —
+		// where the sandbox and workload pins below are not enforced at all.
+		// Shifting CurrentTime closes that divergence; the leaf's own NotAfter
+		// is then re-checked at the true now, so the shift buys nothing at the
+		// expiry end.
+		now := time.Now()
 		_, chainErr := cert.Verify(x509.VerifyOptions{
 			Roots:         caPool,
 			Intermediates: intermediates,
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+			CurrentTime:   now.Add(certutil.LeafValiditySkew),
 		})
+		if chainErr == nil {
+			chainErr = certutil.CheckValidity(cert, now)
+		}
 		if chainErr == nil {
 			// The chain is verified here and only here, so this is the one place
 			// a sandbox-ID or workload pin can be enforced: CDS's signature over

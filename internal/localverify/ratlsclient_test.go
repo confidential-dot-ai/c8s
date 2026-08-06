@@ -110,3 +110,70 @@ func TestNewRATLSHTTPClientEnforcesPeerCertValidity(t *testing.T) {
 		}
 	})
 }
+
+// caSignedRATLSCert mints a CA-issued serving cert carrying a well-formed
+// RA-TLS extension: genuine evidence, but a body nothing on this path
+// authenticates (issuer != subject, and this client verifies no chain).
+func caSignedRATLSCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		Subject:               pkix.Name{CommonName: "some CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaf := ratlsServingCert(t, now.Add(-time.Hour), now.Add(time.Hour))
+	tmpl := leaf.Leaf
+	tmpl.ExtraExtensions = tmpl.Extensions
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, tmpl.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: leaf.PrivateKey, Leaf: parsed}
+}
+
+// Peers here are self-signed RA-TLS leaves; this client verifies no chain and
+// holds no CA. A CA-vouched leaf therefore arrives with NOTHING having
+// authenticated its body — no signature is checked when issuer != subject —
+// so its window, subject and stamps are whatever the producer of the bytes
+// chose, under a genuine attestation extension. The classification must be
+// asserted, not discarded.
+func TestNewRATLSHTTPClientRejectsCAVouchedPeer(t *testing.T) {
+	var verifyCalls atomic.Int32
+	approve := func(context.Context, string, json.RawMessage, Params) (*teetypes.VerificationResult, error) {
+		verifyCalls.Add(1)
+		match := true
+		return &teetypes.VerificationResult{SignatureValid: true, ReportDataMatch: &match}, nil
+	}
+
+	srv := tlsServer(t, caSignedRATLSCert(t))
+	hc := NewRATLSHTTPClient(nil, approve, time.Second)
+	_, err := hc.Get(srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "not self-signed") {
+		t.Fatalf("want a body-authentication rejection, got: %v", err)
+	}
+	if got := verifyCalls.Load(); got != 0 {
+		t.Fatalf("a CA-vouched peer consumed %d evidence verification(s), want 0", got)
+	}
+}

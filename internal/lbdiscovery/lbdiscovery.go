@@ -208,12 +208,21 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	if err != nil {
 		return nil, fmt.Errorf("parse serving cert: %w", err)
 	}
-	// The evidence binds only the serving-cert key, and this session then
-	// trusts the whole certificate — so the certificate body must hold on its
-	// own: inside the shared validity window (bounded NotBefore skew, hard
-	// NotAfter — the issuance-time evidence has no other freshness bound), and
-	// self-verifying when self-issued. Checked before the evidence so an
-	// expired cert never costs a verification.
+	// Enforce the shared validity window before the evidence round-trip, so an
+	// honestly-stale document is refused without costing a verification.
+	//
+	// The classification is deliberately not asserted here, and the window is
+	// ADVISORY on this path: cds_tls.certificate_pem is the tls-lb's
+	// CDS-issued leaf, so RawIssuer != RawSubject and the result is
+	// BodyCAVouched — nothing checked that issuer's signature. This package
+	// cannot fix that: it is bootstrapping trust, the only CA it could reach
+	// is one this same unauthenticated document advertises, and the challenge
+	// it binds is read out of the document too, so there is no freshness
+	// anywhere on this path. A forger re-minting this body around the attested
+	// key picks its own NotAfter. The bound that actually holds is applied by
+	// the caller, NewVerifiedHTTPClient: the attested leaf must be
+	// byte-identical to the one this connection's handshake presented, which
+	// only the holder of the attested key can produce.
 	if _, err := certutil.AuthenticateLeafBody(cert, time.Now()); err != nil {
 		return nil, fmt.Errorf("discovery serving cert: %w", err)
 	}

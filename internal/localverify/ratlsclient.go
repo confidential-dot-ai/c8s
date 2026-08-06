@@ -35,8 +35,20 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 			// has no other freshness bound) and, for a self-issued leaf, its
 			// own signature under its attested key. Cheap, and it keeps an
 			// expired cert from costing an evidence verification.
-			if _, err := certutil.AuthenticateLeafBody(cert, time.Now()); err != nil {
+			//
+			// Peers on this path are self-signed RA-TLS leaves (this client
+			// verifies no chain and holds no CA), so the classification must
+			// come back BodySelfSigned. Assert it instead of discarding it: a
+			// CA-vouched leaf here would have had NOTHING authenticate its
+			// body — no signature is checked when issuer != subject — so its
+			// window, subject and stamps would be whatever the producer of
+			// the bytes chose, under a genuine attestation extension.
+			body, err := certutil.AuthenticateLeafBody(cert, time.Now())
+			if err != nil {
 				return fmt.Errorf("localverify: peer certificate: %w", err)
+			}
+			if body != certutil.BodySelfSigned {
+				return fmt.Errorf("localverify: peer certificate is not self-signed (issuer != subject) and this client verifies no issuing chain, so nothing authenticates its body")
 			}
 			platform, evidence, erd, err := CertEnvelope(cert)
 			if err != nil {

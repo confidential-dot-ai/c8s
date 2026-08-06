@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -227,5 +228,112 @@ func TestGetOrProvisionRefusesNotYetValidCachedCert(t *testing.T) {
 
 	if _, err := s.getOrProvision(context.Background()); !errors.Is(err, provisionErr) {
 		t.Fatalf("err = %v, want the provisioning error (and never the not-yet-valid cert)", err)
+	}
+}
+
+// caSignedLeaf mints a leaf signed by ca with the given window.
+func caSignedLeaf(t *testing.T, caKey *ecdsa.PrivateKey, ca *x509.Certificate, notBefore, notAfter time.Time) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(603),
+		Subject:      pkix.Name{CommonName: "skewed-leaf"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+// The two branches of the dual verifier must share one validity window.
+// x509.Verify grants no NotBefore skew of its own, so a CA-signed leaf minted
+// a few minutes into the verifier's future used to fail the chain branch and
+// fall through to RA-TLS — where the sandbox and workload pins are not
+// enforced at all. The skew is granted at the NotBefore end only.
+func TestDualVerifyPeerCallbackSharesTheSkewWindow(t *testing.T) {
+	caKey, caCert := generateCACert(t)
+	shared := newSharedCACerts([]*x509.Certificate{caCert})
+	now := time.Now()
+
+	t.Run("NotBefore within skew takes the chain branch", func(t *testing.T) {
+		der := caSignedLeaf(t, caKey, caCert, now.Add(2*time.Minute), now.Add(time.Hour))
+		if err := dualVerifyPeerCallback(&VerifyPolicy{}, shared)([][]byte{der}, nil); err != nil {
+			t.Fatalf("a within-skew CA-signed leaf was not accepted on the chain branch: %v", err)
+		}
+	})
+
+	t.Run("chain branch still enforces the pins", func(t *testing.T) {
+		der := caSignedLeaf(t, caKey, caCert, now.Add(2*time.Minute), now.Add(time.Hour))
+		policy := &VerifyPolicy{SandboxID: "pod-abc"}
+		err := dualVerifyPeerCallback(policy, shared)([][]byte{der}, nil)
+		if err == nil {
+			t.Fatal("a leaf with no sandbox-ID extension satisfied a sandbox pin")
+		}
+		// The chain branch's own rejection, not the RA-TLS fallback's "pin
+		// requires a CA-verified certificate" — that difference IS the bug.
+		if !strings.Contains(err.Error(), "CA-signed peer failed the sandbox-ID pin") {
+			t.Fatalf("err = %v, want the chain branch's pin rejection (the leaf fell through to RA-TLS)", err)
+		}
+	})
+
+	t.Run("the skew does not extend NotAfter", func(t *testing.T) {
+		der := caSignedLeaf(t, caKey, caCert, now.Add(-time.Hour), now.Add(-time.Minute))
+		err := dualVerifyPeerCallback(&VerifyPolicy{}, shared)([][]byte{der}, nil)
+		if err == nil {
+			t.Fatal("a leaf one minute past NotAfter was accepted")
+		}
+	})
+}
+
+// VerifyCert is the mesh's highest-traffic self-signed path and is exported
+// for certificates that arrive as data, not only from handshakes. The
+// attestation extension binds only the public key, so a self-issued leaf must
+// verify its body under that key — otherwise subject, serial and validity are
+// rewritable under a genuine attestation. That check belongs here, not only
+// in the callers that happen to run certutil.AuthenticateLeafBody themselves.
+func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
+	srv, calls := countingVerifySrv(t)
+	now := time.Now()
+
+	// Same attested key, body signed by a different key: a self-issued leaf
+	// whose signature was never anyone's to make.
+	key, att := testKeyAndAttestation(t)
+	ext, err := att.MarshalExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:    big.NewInt(604),
+		Subject:         pkix.Name{CommonName: "re-signed-ratls"},
+		NotBefore:       now.Add(-time.Hour),
+		NotAfter:        now.Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{ext},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+	if err == nil || !strings.Contains(err.Error(), "does not verify with its own key") {
+		t.Fatalf("err = %v, want the self-signature rejection", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("a re-signed body consumed %d attestation-api call(s), want 0", got)
 	}
 }

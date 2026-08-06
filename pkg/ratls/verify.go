@@ -148,19 +148,34 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 // be enforced here: the ID rests on CDS's signature over the leaf, which this
 // path does not check (docs/ratls.md, "Sandbox identity").
 //
-// The certificate's validity window is enforced first (NotBefore within
-// [certutil.LeafValiditySkew], NotAfter with no allowance): the embedded
-// evidence carries no per-connection nonce, so the window is the only
-// freshness bound this path has, and checking it before the evidence
-// round-trip keeps an expired certificate from consuming an attestation-api
+// The certificate body is authenticated first (certutil.AuthenticateLeafBody):
+// the validity window (NotBefore within [certutil.LeafValiditySkew], NotAfter
+// with no allowance), because the embedded evidence carries no per-connection
+// nonce and the window is the only freshness bound this path has; and, for a
+// self-issued leaf, its signature under its own attested key, because the
+// attestation binds only the key — every other field could otherwise be
+// rewritten under a genuine extension. Doing it before the evidence
+// round-trip also keeps a bad certificate from consuming an attestation-api
 // call.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
 	}
 
-	if err := certutil.CheckValidity(cert, time.Now()); err != nil {
+	// Split out so a window failure keeps its own sentinel; callers
+	// (dualVerifyPeerCallback, the mesh proxies) branch on ErrCertValidity.
+	now := time.Now()
+	if err := certutil.CheckValidity(cert, now); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCertValidity, err)
+	}
+	// The classification is not actionable at this layer: both classes reach
+	// here legitimately — the self-signed mesh peer, and (via
+	// dualVerifyPeerCallback's RequireCAEvidence step) a CA-signed leaf whose
+	// chain that caller has already verified. What the call buys is the
+	// self-signature check on the self-issued case, which is the half of body
+	// authentication this path would otherwise skip.
+	if _, err := certutil.AuthenticateLeafBody(cert, now); err != nil {
+		return nil, fmt.Errorf("ratls: peer certificate body: %w", err)
 	}
 
 	att, err := ExtractAttestation(cert)
