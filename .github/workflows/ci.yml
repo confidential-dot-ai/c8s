@@ -15,7 +15,6 @@ on:
       - "internal/helmchart/c8s/**"
       - "scripts/coverage-gate.sh"
       - "scripts/mutation-check.sh"
-      - "scripts/testdata/**"
       - ".gremlins.yaml"
       - ".github/workflows/ci.yml"
       # internal/kataspec reads the baked policy and asserts the two admit the
