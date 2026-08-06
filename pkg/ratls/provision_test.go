@@ -349,3 +349,40 @@ func TestCertUsableTracksTheValidityWindow(t *testing.T) {
 		t.Error("CertUsable = true for a certificate past NotAfter")
 	}
 }
+
+// A success is newer evidence about the provider than the failure that
+// populated the negative cache, so it must drop it: otherwise the next
+// handshake that needs a synchronous provision replays a stale error.
+func TestSyncProvisionSuccessClearsTheNegativeCache(t *testing.T) {
+	provisionErr := errors.New("certificate source down")
+	s := expiredState(t, &erroringProvider{err: provisionErr})
+	s.syncCooldown = time.Hour
+
+	if _, err := s.getOrProvision(context.Background()); !errors.Is(err, provisionErr) {
+		t.Fatalf("err = %v, want the provisioning error", err)
+	}
+
+	// A background rotation lands a certificate while the cooldown is still
+	// running; the cache it left behind must not outlive it.
+	fresh := generateSimpleCert(t)
+	working := &mockProvider{cert: fresh, ttl: time.Hour}
+	s.mu.Lock()
+	s.provider = working
+	spawnRotateAt := s.rotateAt
+	s.mu.Unlock()
+	s.rotating.Store(true)
+	s.backgroundProvision(working, spawnRotateAt)
+
+	// Back into the fail-closed path with a provider that works.
+	s.mu.Lock()
+	s.cert = simpleCertWithWindow(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
+	s.mu.Unlock()
+
+	got, err := s.getOrProvision(context.Background())
+	if err != nil {
+		t.Fatalf("a stale negative cache outlived a successful provision: %v", err)
+	}
+	if got != fresh {
+		t.Fatal("expected the freshly provisioned certificate")
+	}
+}

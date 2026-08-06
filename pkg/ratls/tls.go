@@ -385,12 +385,23 @@ func (s *certState) provisionNow(ctx context.Context) (*tls.Certificate, error) 
 	s.mu.Unlock()
 	s.provisioned.Store(true)
 	s.unusableLogged.Store(false)
+	s.clearCooldown()
 
 	if s.logger != nil {
 		s.logger.Info("ratls: certificate provisioned", "ttl", ttl, "rotateAt", newRotateAt)
 	}
 
 	return cert, nil
+}
+
+// clearCooldown drops the negative cache. A success is newer evidence about
+// the provider than the failure that populated it, so leaving it in place
+// could replay a stale error at the next handshake that needs one.
+func (s *certState) clearCooldown() {
+	s.syncMu.Lock()
+	s.cooldownUntil = time.Time{}
+	s.cooldownErr = nil
+	s.syncMu.Unlock()
 }
 
 // ensureLeaf populates cert.Leaf once, at provision time. Every CertProvider
@@ -482,6 +493,7 @@ func (s *certState) backgroundProvision(spawnProvider CertProvider, spawnRotateA
 	s.rotateAt = rotateAt
 	s.mu.Unlock()
 	s.unusableLogged.Store(false)
+	s.clearCooldown()
 
 	if s.logger != nil {
 		s.logger.Info("ratls: certificate rotated (background)", "ttl", ttl, "rotateAt", rotateAt)
@@ -554,10 +566,7 @@ func (s *certState) SwapProvider(ctx context.Context, provider CertProvider) err
 
 	// A new provider is a different certificate source; a failure cached
 	// against the old one says nothing about it.
-	s.syncMu.Lock()
-	s.cooldownUntil = time.Time{}
-	s.cooldownErr = nil
-	s.syncMu.Unlock()
+	s.clearCooldown()
 
 	if s.logger != nil {
 		s.logger.Info("ratls: certificate provisioned", "ttl", ttl, "rotateAt", rotateAt)
