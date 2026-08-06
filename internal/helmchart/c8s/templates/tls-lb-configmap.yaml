@@ -248,6 +248,18 @@ data:
 
             {{- end }}
             {{- if .Values.tlsLb.attest.enabled }}
+            # The sidecar's readiness gate, proxied so kubelet can reach it.
+            # cds-attest listens on loopback (its one listener also carries the
+            # attestation, handshake and tunnel routes, which must not be
+            # published on the pod IP), and under kata the guest redirects every
+            # inbound port but this one into the mutual RA-TLS proxy, which
+            # rejects the certless prober. So the probe rides the front door:
+            # exact-match, ahead of any catch-all upstream.
+            location = /readyz {
+                access_log off;
+                proxy_pass http://127.0.0.1:{{ .Values.tlsLb.attest.port }};
+            }
+
             # c8s-verify attestation + over-encryption sidecar (loopback).
             # nginx serves the static cert(s) via discovery above; the dynamic
             # per-session endpoints — the explicit attest-pq and attest-lb

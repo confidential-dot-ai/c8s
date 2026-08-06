@@ -1308,16 +1308,22 @@ tlsLb:
     attestationApiURL: ""
     # -- Workload-verified ingress gate: when set to an allowlist entry name,
     # the sidecar serves /readyz as 200 only while the installed mesh identity
-    # leaf carries a matched-workload stamp with exactly this name, and the
-    # chart wires a readinessProbe on the cds-attest container (binding it on
-    # the pod IP so kubelet can probe it), so ingress withholds traffic while
-    # the front door's committed mesh identity is unnamed. Setting it also
-    # switches the tls-lb get-cert onto the workload-claims flow (inventory
-    # socket mount + supplemental group on node-CVM, guest loopback under
-    # kata) — without that no stamp could ever arrive and the gate would hold
-    # the front door at 503 forever. The named entry must match the tls-lb
-    # pod's own non-injected container set (nginx). Empty keeps today's
-    # always-ready behavior.
+    # leaf is a usable credential carrying a matched-workload stamp with
+    # exactly this name, and the chart wires a readinessProbe on the cds-attest
+    # container (an HTTPS httpGet through nginx, which proxies /readyz to the
+    # sidecar's loopback port), so ingress withholds traffic while the front
+    # door's committed mesh identity is unnamed. Setting it also switches the
+    # tls-lb get-cert onto the workload-claims flow (inventory socket mount +
+    # supplemental group on node-CVM, guest loopback under kata) — without that
+    # no stamp could ever arrive and the gate would hold the front door at 503
+    # forever. The named entry must match the tls-lb pod's own non-injected
+    # container set (nginx).
+    #
+    # Requires attest.enabled and hostPort.enabled: false — readiness only
+    # withdraws Service endpoints, while a hostPort is published by the CNI
+    # portmap plugin independently of pod readiness, so the gate would withhold
+    # nothing. The chart fails the render on either mistake. Empty keeps
+    # today's always-ready behavior.
     expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.
     resources: {}

@@ -4,6 +4,31 @@
 Recreate, silently defeating the operator's opt-out. */ -}}
 {{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
 {{- end -}}
+{{- if and .Values.kata.enabled (ne (int .Values.tlsLb.nginx.httpsPort) 8443) -}}
+{{- /* The guest bakes C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 (a guest-wide
+default in cloudinit.env, not a chart value) and redirects every other inbound
+port into the mutual-RA-TLS proxy. On any other port the front door answers
+certless clients — external TLS and the kubelet prober alike — with
+"certificate required". */ -}}
+{{- fail (printf "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: %v" .Values.tlsLb.nginx.httpsPort) -}}
+{{- end -}}
+{{- if .Values.tlsLb.attest.expectedWorkload -}}
+{{- if not .Values.tlsLb.attest.enabled -}}
+{{- /* The gate *is* the cds-attest sidecar's /readyz. Without the sidecar
+nothing renders it, yet the claims wiring it pulls in (get-cert's
+--workload-claims, the inventory hostPath, the supplemental group) still would
+— cost and hostPath surface for a gate that does not exist. */ -}}
+{{- fail "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload" -}}
+{{- end -}}
+{{- if .Values.tlsLb.hostPort.enabled -}}
+{{- /* Readiness only withdraws Service endpoints. The hostPort is published by
+the CNI portmap plugin, wired at sandbox creation and independent of pod
+readiness, so an unnamed front door would keep serving external traffic on the
+node port while the operator watched a NotReady pod and believed traffic was
+withheld. */ -}}
+{{- fail "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload" -}}
+{{- end -}}
+{{- end -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
@@ -80,14 +105,14 @@ spec:
               drop:
                 - ALL
           {{- if .Values.kata.enabled }}
-          # Under kata the RA-TLS mesh moves into the guest, so the pod's
-          # serving port is fronted by the in-guest inbound proxy, which expects
-          # mutual attested TLS. The kubelet prober presents no attested client
-          # cert, so an httpGet handshake is rejected ("tls: certificate
-          # required"); a TCP accept is the correct "attested and serving"
-          # signal. Same pattern and rationale as cds.yaml. In the base shape
-          # the host-side mesh excludes kubelet's UID, so it reaches nginx
-          # directly and the richer httpGet /healthz check below applies.
+          # Under kata the RA-TLS mesh moves into the guest, which redirects
+          # inbound TCP into a proxy expecting mutual attested TLS — but the
+          # guest exempts exactly this port (C8S_MESH_INBOUND_PASSTHROUGH=
+          # tcp:8443, pinned by the render guard above), so the certless kubelet
+          # prober does reach nginx. A TCP accept is kept as the liveness and
+          # readiness signal here because nginx's own /healthz says nothing the
+          # accept does not; the cds-attest gate below is what needs a real
+          # request, and it takes the httpGet path. Same shape as cds.yaml.
           readinessProbe:
             tcpSocket:
               port: https
@@ -146,14 +171,12 @@ spec:
           imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
           args:
             - cds-attest
-            {{- if .Values.tlsLb.attest.expectedWorkload }}
-            {{- /* kubelet's httpGet readiness probe dials the pod IP, which a
-            loopback-only listener cannot answer. nginx keeps proxying to
-            loopback and no Service exposes this port. */}}
-            - --host=0.0.0.0
-            {{- else }}
+            {{- /* Loopback only: every endpoint this sidecar registers
+            (/healthz, /readyz, both attest routes, /handshake, /tunnel) sits on
+            one listener, so binding the pod IP would publish the whole surface
+            with no NetworkPolicy in front of it. The readiness probe reaches
+            /readyz through nginx instead (location = /readyz). */}}
             - --host=127.0.0.1
-            {{- end }}
             - --port={{ .Values.tlsLb.attest.port }}
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
@@ -212,15 +235,25 @@ spec:
             {{- . | nindent 12 }}
           {{- end }}
           {{- if .Values.tlsLb.attest.expectedWorkload }}
-          # Workload-verified ingress gate (docs/THREAT_MODEL.md §10): ready
-          # only while the installed mesh identity leaf carries a
-          # matched-workload stamp naming expectedWorkload, so ingress
-          # withholds traffic while the committed identity is unnamed (initial
-          # deploy, or after a foreign admission unnames the next renewal).
+          # Workload-verified ingress gate (docs/getcert-workload-binding.md):
+          # ready only while the installed mesh identity leaf is a usable
+          # credential carrying a matched-workload stamp naming
+          # expectedWorkload, so ingress withholds traffic while the committed
+          # identity is unnamed (initial deploy, or after a foreign admission
+          # unnames the next renewal).
+          #
+          # Probed through nginx (location = /readyz), not the sidecar's own
+          # port: the sidecar listens on loopback, and under kata the guest
+          # redirects every inbound port except the nginx one into the mutual
+          # RA-TLS proxy, which rejects the certless kubelet prober. Scheme
+          # HTTPS on the nginx port works in both shapes — nginx sets no
+          # ssl_verify_client and kubelet skips certificate verification on
+          # HTTPS probes.
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ .Values.tlsLb.attest.port }}
+              port: https
+              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
           {{- end }}
@@ -318,7 +351,7 @@ spec:
         - name: nginx-config
           configMap:
             name: {{ include "tls-lb.fullname" . }}-nginx
-        {{- if and .Values.tlsLb.attest.expectedWorkload (not .Values.kata.enabled) }}
+        {{- if eq (include "tls-lb.mountInventorySocket" .) "true" }}
         # The readiness gate needs a stamped mesh leaf, so get-cert redeems a
         # sandbox token over the node inventory's Unix socket (see
         # tls-lb.getCertContainers). Read-only: the sidecar only connects.
@@ -330,7 +363,7 @@ spec:
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
         fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
-        {{- if .Values.tlsLb.attest.expectedWorkload }}
+        {{- if eq (include "tls-lb.mountInventorySocket" .) "true" }}
         # workloadclaims.InventorySocketGID: the inventory chgrps its socket to
         # this group so the non-root get-cert sidecar can connect. get-cert
         # itself must stay on the nginx uid — it SIGHUPs nginx on renewal, and
