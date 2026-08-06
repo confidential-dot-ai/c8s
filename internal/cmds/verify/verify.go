@@ -239,10 +239,34 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 	}
 	ev, err := gatherEvidence(ctx, cfg, overrideERD)
 	if err != nil {
+		// A securityError means the target was reachable and its response
+		// well-formed, but a check on it failed (a nonce that does not echo,
+		// a re-signed certificate body, a substituted CA). That is a verdict,
+		// not an unavailability: exit 3 is the code a CI gate retries on, and
+		// retrying against an actively tampered target is exactly the wrong
+		// move. Render it as a failed verdict so it reads like one too.
+		if isSecurityError(err) {
+			render(cfg, Outcome{
+				Backend:    "attestation-go",
+				VerifiedAt: time.Now().UTC(),
+				Source:     targetDescription(cfg),
+				Error:      err.Error(),
+			}, out)
+			return exitFailed
+		}
 		fmt.Fprintf(errOut, "error: could not obtain evidence: %v\n", err)
 		return exitNoEvidence
 	}
 	return verifyEvidence(ctx, cfg, policy, ev, gatherOperatorKeys(ctx, cfg, ev), out, errOut)
+}
+
+// targetDescription names the evidence source for a verdict produced before
+// any evidence struct exists (a gather-time security failure).
+func targetDescription(cfg config) string {
+	if cfg.fromFile != "" {
+		return "file " + cfg.fromFile
+	}
+	return cfg.url
 }
 
 // operatorKeysReport is the pinned-operator-key section of the verdict. Keys
@@ -487,12 +511,25 @@ func meshCAPool(path string) (*x509.CertPool, error) {
 }
 
 func gatherEvidence(ctx context.Context, cfg config, overrideERD []byte) (*evidence, error) {
+	// The --mesh-ca anchor travels with the gather, not just the verdict: a
+	// leaf whose body nothing authenticates is not usable evidence, so the
+	// chain check that authenticates it has to happen before the leaf's
+	// contents are believed (authorizeLeafBody).
+	var trust leafTrust
+	if cfg.meshCA != "" {
+		pool, err := meshCAPool(cfg.meshCA)
+		if err != nil {
+			return nil, err
+		}
+		trust.meshCA = pool
+	}
+
 	if cfg.fromFile != "" {
 		data, err := os.ReadFile(cfg.fromFile)
 		if err != nil {
 			return nil, err
 		}
-		return gatherFromFile(data, overrideERD, "file "+cfg.fromFile)
+		return gatherFromFile(data, overrideERD, "file "+cfg.fromFile, trust)
 	}
 	if cfg.url == "" {
 		return nil, fmt.Errorf("no target: pass a host:port / URL argument or --from-file")
@@ -505,16 +542,16 @@ func gatherEvidence(ctx context.Context, cfg config, overrideERD []byte) (*evide
 
 	switch resolveMode(cfg) {
 	case "ratls-cert":
-		return gatherFromRATLSCert(ctx, dialAddr, cfg.server, cfg.timeout)
+		return gatherFromRATLSCert(ctx, dialAddr, cfg.server, cfg.timeout, trust)
 	case "discovery":
-		return gatherFromDiscovery(ctx, baseURL, cfg.discoveryPath, cfg.server, cfg.timeout)
+		return gatherFromDiscovery(ctx, baseURL, cfg.discoveryPath, cfg.server, cfg.timeout, trust)
 	case "attest-pq":
 		return gatherFromEndpoint(ctx, baseURL, cfg.server, cfg.timeout)
 	default: // auto: try the LB discovery doc (what the chart serves), then the
 		// serving cert. Don't fall back on a security error — surface it.
-		ev, err := gatherFromDiscovery(ctx, baseURL, cfg.discoveryPath, cfg.server, cfg.timeout)
+		ev, err := gatherFromDiscovery(ctx, baseURL, cfg.discoveryPath, cfg.server, cfg.timeout, trust)
 		if err != nil && !isSecurityError(err) {
-			return gatherFromRATLSCert(ctx, dialAddr, cfg.server, cfg.timeout)
+			return gatherFromRATLSCert(ctx, dialAddr, cfg.server, cfg.timeout, trust)
 		}
 		return ev, err
 	}
@@ -610,9 +647,10 @@ type Outcome struct {
 
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
-	// self-signed, or a CA chain — which is unauthenticated until --mesh-ca
-	// pins it. Validity (NotBefore with a bounded skew, NotAfter) is enforced
-	// on every cert-sourced path before this verdict is produced.
+	// self-signed, a verified issuing chain, or — on a live RA-TLS dial —
+	// possession of the attested key. A leaf with none of the three is not
+	// accepted as evidence at all (authorizeLeafBody), because checking a
+	// validity window inside an unsigned body bounds nothing.
 	CertBody string `json:"cert_body,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
@@ -912,18 +950,21 @@ func applyRTMRPins(oc *Outcome, cfg config, result *teetypes.VerificationResult)
 }
 
 // describeCertBody says what stands behind the leaf's body fields. Validity
-// itself was already enforced when the evidence was gathered
-// (authenticateLeafBody), so this only reports the authentication class.
-func describeCertBody(cfg config, ev *evidence) string {
+// was already enforced when the evidence was gathered (authenticateLeafBody),
+// so this reports the authentication class — and only claims validity was
+// enforced where the bytes carrying it are authenticated. Checking NotAfter
+// against a body nothing signed for bounds nothing: the attacker picked it.
+func describeCertBody(_ config, ev *evidence) string {
+	const skew = " (validity enforced, NotBefore skew ≤"
 	switch {
-	case ev.leafSelfIssued:
-		return "self-signed: body authenticated by the certificate's own attested key; validity enforced (NotBefore skew ≤" + certutil.LeafValiditySkew.String() + ")"
-	case cfg.meshCA != "":
-		return "CA-signed: body authenticated by the --mesh-ca chain check; validity enforced"
+	case ev.leafBody == certutil.BodySelfSigned:
+		return "self-signed: body authenticated by the certificate's own attested key" + skew + certutil.LeafValiditySkew.String() + ")"
 	case ev.leafChainVerified:
-		return "CA-signed: body authenticated by the transcript-committed issuing CA (chain verified); validity enforced"
+		return "CA-signed: body authenticated by a verified issuing chain (--mesh-ca, or the transcript-committed CA)" + skew + certutil.LeafValiditySkew.String() + ")"
+	case ev.leafKeyProven:
+		return "CA-signed: body not chain-checked, but the live RA-TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
 	default:
-		return "CA-signed: body fields are CA-vouched and UNAUTHENTICATED without a CA pin — pass --mesh-ca to check the chain; validity enforced"
+		return "CA-signed: body fields are CA-vouched and UNAUTHENTICATED — pass --mesh-ca to check the chain"
 	}
 }
 

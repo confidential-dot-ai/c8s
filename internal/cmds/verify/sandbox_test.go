@@ -69,7 +69,7 @@ func reissueWithSandboxID(t *testing.T, key *ecdsa.PrivateKey, sandboxID string)
 
 func TestEvidenceFromCertReadsSandboxID(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
-	ev, err := evidenceFromCert(attestedCert(t, id), "test")
+	ev, err := evidenceFromCert(attestedCert(t, id), "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestEvidenceFromCertReadsSandboxID(t *testing.T) {
 // would read as attested, which it is not.
 func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
-	ev, err := evidenceFromCert(attestedCert(t, id), "test")
+	ev, err := evidenceFromCert(attestedCert(t, id), "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 func TestApplySandboxPolicySelfSignedFailsMeshCA(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
 	cert := attestedCert(t, id)
-	ev, err := evidenceFromCert(cert, "test")
+	ev, err := evidenceFromCert(cert, "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}

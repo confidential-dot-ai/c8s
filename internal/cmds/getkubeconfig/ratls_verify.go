@@ -43,15 +43,25 @@ func newRATLSClient(cfg Config, exp measuredPolicy) *http.Client {
 
 // verifyServerCert runs the RA-TLS check on the :8443 leaf cert: it
 // authenticates the certificate body itself (validity within the shared skew
-// bound; the self-signature under the cert's own key when self-issued — the
-// quote binds only the key, so without that check any other body field could
-// be rewritten), then pulls the embedded TDX quote, binds it to the cert's own
-// public key, verifies it in-process with attestation-go (HW chain +
-// report_data binding), and enforces the full measured-identity policy —
-// identical to the attest gate. Fails closed on any missing piece.
+// bound; the self-signature under the cert's own key — the quote binds only
+// the key, so without that check any other body field could be rewritten),
+// then pulls the embedded TDX quote, binds it to the cert's own public key,
+// verifies it in-process with attestation-go (HW chain + report_data
+// binding), and enforces the full measured-identity policy — identical to the
+// attest gate. Fails closed on any missing piece.
 func verifyServerCert(leaf *x509.Certificate, exp measuredPolicy) error {
-	if _, err := certutil.AuthenticateLeafBody(leaf, time.Now()); err != nil {
+	// This leaf is self-signed by construction (newRATLSClient's doc comment:
+	// there is no CA on this path at all), so the classification must come
+	// back BodySelfSigned. Assert it rather than discard it: a CA-vouched
+	// result here means the presented cert was issued by something, and
+	// nothing in this flow would check that issuer — the body would ride in
+	// unauthenticated under a genuine quote.
+	body, err := certutil.AuthenticateLeafBody(leaf, time.Now())
+	if err != nil {
 		return fmt.Errorf("ratls: %w", err)
+	}
+	if body != certutil.BodySelfSigned {
+		return fmt.Errorf("ratls: cred-release serving cert is not self-signed (issuer != subject), so its body is authenticated by nothing this flow checks; the RA-TLS leaf must carry its own signature under the attested key")
 	}
 	att, err := ratls.ExtractAttestation(leaf)
 	if err != nil {

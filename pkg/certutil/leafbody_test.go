@@ -1,6 +1,7 @@
 package certutil
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -49,12 +50,12 @@ func TestAuthenticateLeafBodySelfSigned(t *testing.T) {
 
 	t.Run("genuine self-signed accepted", func(t *testing.T) {
 		cert := mintLeaf(t, &key.PublicKey, key, now.Add(-time.Hour), now.Add(time.Hour))
-		selfIssued, err := AuthenticateLeafBody(cert, now)
+		body, err := AuthenticateLeafBody(cert, now)
 		if err != nil {
 			t.Fatalf("AuthenticateLeafBody: %v", err)
 		}
-		if !selfIssued {
-			t.Error("selfIssued = false for a self-issued cert")
+		if body != BodySelfSigned {
+			t.Errorf("body = %v, want BodySelfSigned for a self-issued cert", body)
 		}
 	})
 
@@ -78,6 +79,59 @@ func TestAuthenticateLeafBodySelfSigned(t *testing.T) {
 			t.Fatal("want rejection of a tampered TBS body")
 		}
 	})
+}
+
+// The self-signature check is reached only when RawIssuer == RawSubject, and
+// both DNs are written by whoever produced the bytes. Altering the Issuer by
+// one byte therefore skips it entirely — and x509.ParseCertificate verifies no
+// signature, so the Signature field can be junk. The classification must
+// report that nothing authenticated the body, never BodySelfSigned.
+func TestAuthenticateLeafBodyForgedIssuerIsNotSelfSigned(t *testing.T) {
+	now := time.Now()
+	key := genKey(t)
+
+	// The attacker's mint: same (attested) public key, an Issuer DN one word
+	// off the Subject, and NotAfter decades out.
+	issuer := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "leaf-issuer"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(500000 * time.Hour),
+		IsCA:         true,
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "leaf"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(500000 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, issuer, &key.PublicKey, genKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing ever checked this signature; prove it by destroying it.
+	cert.Signature = bytes.Repeat([]byte{0xff}, len(cert.Signature))
+
+	body, err := AuthenticateLeafBody(cert, now)
+	if err != nil {
+		t.Fatalf("AuthenticateLeafBody: %v", err)
+	}
+	if body == BodySelfSigned {
+		t.Fatal("an issuer != subject body claimed self-signed authentication; its signature was never checked")
+	}
+	if body != BodyCAVouched {
+		t.Fatalf("body = %v, want BodyCAVouched", body)
+	}
+	// The zero value must be the unauthenticated one, so a caller that drops
+	// the classification into a fresh variable fails closed rather than open.
+	var zero BodyAuthentication
+	if zero != BodyCAVouched {
+		t.Error("the zero BodyAuthentication must be the unauthenticated class")
+	}
 }
 
 func TestAuthenticateLeafBodyValidity(t *testing.T) {
@@ -159,12 +213,12 @@ func TestAuthenticateLeafBodyCASigned(t *testing.T) {
 
 	// A CA-issued leaf is not self-issued: validity is enforced here, and body
 	// authentication is the caller's CA-chain check.
-	selfIssued, err := AuthenticateLeafBody(leaf, now)
+	body, err := AuthenticateLeafBody(leaf, now)
 	if err != nil {
 		t.Fatalf("AuthenticateLeafBody: %v", err)
 	}
-	if selfIssued {
-		t.Error("selfIssued = true for a CA-issued leaf")
+	if body != BodyCAVouched {
+		t.Errorf("body = %v, want BodyCAVouched for a CA-issued leaf", body)
 	}
 	if _, err := AuthenticateLeafBody(leaf, now.Add(2*time.Hour)); err == nil {
 		t.Fatal("validity must be enforced on CA-issued leaves too")

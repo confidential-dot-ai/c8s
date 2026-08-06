@@ -19,12 +19,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -77,7 +79,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	}
 
 	t.Run("forwards platform + evidence verbatim and binds cert key + challenge", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -104,7 +106,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("forwards a non-snp platform (e.g. tdx) rather than rejecting it", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -114,7 +116,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("rejects missing certificate", func(t *testing.T) {
-		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test"); err == nil {
+		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test", leafTrust{}); err == nil {
 			t.Fatal("expected error when certificate_pem is absent")
 		}
 	})
@@ -639,7 +641,7 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture")
+	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,8 +791,29 @@ func TestGatherFromFile_RejectsExpectedReportDataOnCert(t *testing.T) {
 	// A certificate's binding is its key; an override would silently replace a
 	// real binding while still reporting "binds the certificate public key".
 	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("does-not-matter")})
-	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file"); err == nil {
+	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file", leafTrust{}); err == nil {
 		t.Fatal("expected --expected-report-data to be rejected for a certificate file")
+	}
+}
+
+// A gather-time security failure is a verdict (exit 2), not an unavailability
+// (exit 3). The exit codes are a CI contract: a gate that retries on 3 and
+// pages on 2 must not quietly retry against an actively tampered certificate.
+func TestRun_SecurityFailureDuringGatherExitsFailed(t *testing.T) {
+	holder := testKey(t)
+	forged := mintForgedIssuerLeaf(t, &holder.PublicKey, time.Now().Add(500000*time.Hour))
+	path := filepath.Join(t.TempDir(), "leaf.pem")
+	if err := os.WriteFile(path, certutil.EncodeCertPEM(forged.Raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), config{fromFile: path, output: "text"}, &out, &errOut)
+	if code != exitFailed {
+		t.Errorf("code = %d, want %d (evidence obtained, security check failed)", code, exitFailed)
+	}
+	if !strings.Contains(out.String(), "NOT VERIFIED") {
+		t.Errorf("a security failure must render as a verdict, got:\n%s%s", out.String(), errOut.String())
 	}
 }
 
