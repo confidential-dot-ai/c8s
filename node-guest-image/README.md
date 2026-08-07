@@ -26,7 +26,10 @@ Layout:
 Migration state (see [#264] for the full plan):
 
 1. Content here is a verbatim copy of confos main at v0.3.0 (`3e6f858`);
-   nothing consumes it yet.
+   nothing consumes it yet. While both copies exist, the
+   `node-guest-image sync` workflow (PR-triggered + weekly) fails on any
+   byte drift between this dir and confos at the pinned `CONFOS_REF` —
+   delete that workflow in the flip PR.
 2. `--profile-dir` refuses to shadow an in-tree profile, so building from
    here requires a confos ref with `mkosi.profiles/c8s` deleted (the
    phase-1 confos PR). The switch gate: build the same c8s ref both ways
