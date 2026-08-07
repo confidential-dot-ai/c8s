@@ -42,11 +42,11 @@ The sandbox ID is on the pod's certificate; 'c8s verify' prints it.`,
 			if err != nil {
 				return err
 			}
-			c, err := o.client(cmdCtx(cmd))
+			c, err := o.client(cmd.Context())
 			if err != nil {
 				return err
 			}
-			resp, err := c.explain(cmdCtx(cmd), sandboxID, signer)
+			resp, err := c.explain(cmd.Context(), sandboxID, signer)
 			if err != nil {
 				return err
 			}

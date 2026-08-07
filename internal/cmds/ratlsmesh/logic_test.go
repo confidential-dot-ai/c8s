@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -94,55 +93,6 @@ func TestValidatePort(t *testing.T) {
 			}
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestParseHexMeasurements(t *testing.T) {
-	valid := strings.Repeat("ab", ratls.SNPMeasurementSize)      // 48 bytes hex
-	another := strings.Repeat("cd", ratls.SNPMeasurementSize)    // 48 bytes hex
-	tooShort := strings.Repeat("ab", ratls.SNPMeasurementSize-1) // 47 bytes
-	tooLong := strings.Repeat("ab", ratls.SNPMeasurementSize+1)  // 49 bytes
-
-	tests := []struct {
-		name      string
-		raw       string
-		wantCount int
-		wantErr   string
-	}{
-		{name: "empty", raw: "", wantCount: 0},
-		{name: "only whitespace", raw: "   ", wantCount: 0},
-		{name: "single", raw: valid, wantCount: 1},
-		{name: "multiple", raw: valid + "," + another, wantCount: 2},
-		{name: "trims spaces", raw: " " + valid + " , " + another + " ", wantCount: 2},
-		{name: "skips empty fields", raw: valid + ",,", wantCount: 1},
-		{name: "invalid hex", raw: "zz" + valid[2:], wantErr: "invalid hex measurement"},
-		{name: "wrong size short", raw: tooShort, wantErr: "want"},
-		{name: "wrong size long", raw: tooLong, wantErr: "want"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseHexMeasurements(tt.raw)
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(got) != tt.wantCount {
-				t.Fatalf("got %d measurements, want %d", len(got), tt.wantCount)
-			}
-			for i, m := range got {
-				if len(m) != ratls.SNPMeasurementSize {
-					t.Errorf("measurement %d is %d bytes, want %d", i, len(m), ratls.SNPMeasurementSize)
-				}
 			}
 		})
 	}

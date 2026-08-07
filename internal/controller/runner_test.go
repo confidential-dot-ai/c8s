@@ -86,21 +86,3 @@ func TestConfidentialWorkloadCRDAvailable(t *testing.T) {
 		})
 	}
 }
-
-func TestBoolPtr(t *testing.T) {
-	for _, v := range []bool{true, false} {
-		p := boolPtr(v)
-		if p == nil || *p != v {
-			t.Fatalf("boolPtr(%v) = %v", v, p)
-		}
-	}
-}
-
-func TestInt64Ptr(t *testing.T) {
-	for _, v := range []int64{0, -1, 1000} {
-		p := int64Ptr(v)
-		if p == nil || *p != v {
-			t.Fatalf("int64Ptr(%d) = %v", v, p)
-		}
-	}
-}

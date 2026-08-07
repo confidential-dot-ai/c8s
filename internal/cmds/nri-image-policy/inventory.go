@@ -3,7 +3,6 @@ package nriimagepolicy
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
@@ -186,11 +185,6 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	slices.SortFunc(containers, func(a, b workloadclaims.SandboxContainer) int {
-		if a.Digest != b.Digest {
-			return strings.Compare(a.Digest, b.Digest)
-		}
-		return slices.Compare(a.Argv, b.Argv)
-	})
+	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
 	return slices.Compact(digests), containers, true, nil
 }

@@ -36,9 +36,33 @@ func isHexDigit(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
+// NormalizeDigest parses the digest forms seen in the wild — CRI annotations,
+// image refs, containerd status output — into a validated Digest. Recognised
+// inputs:
+//
+//   - "sha256:<64hex>" (any case, e.g. "SHA256:" from upstream tooling)
+//   - "<anything>@sha256:<64hex>" — an image ref pulled by digest
+//   - "<64hex>" — a bare digest with no algorithm prefix
+//
+// Anything else returns an error; callers treat that as "no digest".
+func NormalizeDigest(s string) (Digest, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.TrimPrefix(s, "sha256:")
+	return ParseDigest("sha256:" + s)
+}
+
 // String returns the full digest string.
 func (d Digest) String() string {
 	return d.value
+}
+
+// Hex returns the 64-char lowercase hex with no "sha256:" prefix, for callers
+// whose stores are keyed on the bare form. Empty for the zero value.
+func (d Digest) Hex() string {
+	return strings.TrimPrefix(d.value, "sha256:")
 }
 
 // MarshalText implements encoding.TextMarshaler, enabling Digest as a JSON map key.

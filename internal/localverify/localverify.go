@@ -23,6 +23,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 	"github.com/confidential-dot-ai/attestation-go/attestation/teeverify"
 
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -101,7 +102,7 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		if err != nil || len(mb) == 0 {
 			return nil, fmt.Errorf("cannot enforce the measurement pin: launch digest missing or malformed (%q)", res.Claims.LaunchDigest)
 		}
-		if !ratls.MeasurementAllowed(mb, p.Measurements) {
+		if !attestationclient.MeasurementAllowed(mb, p.Measurements) {
 			return nil, fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
 		}
 	}
