@@ -1,0 +1,125 @@
+name: Meat
+
+# Abridge each PR's diff into a "reading diff" with meat
+# (https://github.com/boldsoftware/meat) and post it as a sticky PR comment.
+
+on:
+  pull_request:
+    branches: [main, "feat/**"]
+
+concurrency:
+  group: meat-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  meat:
+    name: Reading diff (advisory)
+    runs-on: meaty-runner
+    timeout-minutes: 30
+    # Advisory: a flaky LLM run never blocks the PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # meat diffs base...head, so both sides' history must be present.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      # meat caches results in ~/.meat, content-keyed by (rubric, model, diff).
+      # A persistent runner keeps that directory between jobs on its own; only
+      # when the job starts cold do we route it through the Actions cache.
+      - name: Detect runner-local meat cache
+        id: meat-cache
+        run: |
+          if compgen -G "$HOME/.meat/*.json" > /dev/null; then
+            echo "persisted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "persisted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore meat cache
+        if: steps.meat-cache.outputs.persisted != 'true'
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.meat
+          # The unique key never hits, so the save step below always uploads a
+          # fresh accumulated snapshot; restore-keys picks the newest one.
+          key: meat-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            meat-
+
+      - name: Install meat
+        run: go install meat.dev/cmd/meat@latest
+
+      - name: Abridge the PR diff
+        env:
+          # Real keys (when the secrets exist) take precedence; empty values
+          # fall through to the runner's managed LLM gateway.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+        run: |
+          "$(go env GOPATH)/bin/meat" -json "$RANGE" > meat.json
+
+      - name: Save meat cache
+        if: steps.meat-cache.outputs.persisted != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.meat
+          key: meat-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Post reading diff
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const res = JSON.parse(fs.readFileSync('meat.json', 'utf8'));
+            const marker = '<!-- meat-reading-diff -->';
+            const diff = (res.smart_diff || '').replace(/\s+$/, '');
+
+            // A fence longer than any backtick run inside the diff keeps the
+            // ```diff block intact even when the diff itself contains fences.
+            let tick = 3;
+            for (const m of diff.matchAll(/`{3,}/g)) tick = Math.max(tick, m[0].length + 1);
+            const fence = '`'.repeat(tick);
+
+            // GitHub caps comments at 65536 chars; cut at a line boundary.
+            const limit = 60000;
+            let shown = diff, note = '';
+            if (shown.length > limit) {
+              shown = shown.slice(0, shown.lastIndexOf('\n', limit));
+              note = '\n\n_Truncated to fit the comment size limit._';
+            }
+
+            const pr = context.payload.pull_request;
+            const body = [
+              marker,
+              '## 🥩 Reading diff',
+              '',
+              `**${res.summary || 'No summary produced.'}**`,
+              '',
+              diff ? `${fence}diff\n${shown}\n${fence}${note}` : '_Nothing left to read after abridging._',
+              '',
+              `<sub>${res.elision || ''} — [meat](https://github.com/boldsoftware/meat) on ${pr.head.sha.slice(0, 7)}</sub>`,
+            ].join('\n');
+
+            await core.summary.addRaw(body).write();
+
+            // Fork PRs run with a read-only token; for them the run summary
+            // above is all we can publish.
+            if (pr.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) return;
+
+            const {data: comments} = await github.rest.issues.listComments({
+              ...context.repo, issue_number: pr.number, per_page: 100,
+            });
+            const prev = comments.find(c => c.body && c.body.includes(marker));
+            if (prev) {
+              await github.rest.issues.updateComment({...context.repo, comment_id: prev.id, body});
+            } else {
+              await github.rest.issues.createComment({...context.repo, issue_number: pr.number, body});
+            }
