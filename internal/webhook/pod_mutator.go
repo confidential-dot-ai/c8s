@@ -33,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -959,7 +960,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	})
 
 	if effective.Reload.Nginx {
-		pod.Spec.ShareProcessNamespace = boolPtr(true)
+		pod.Spec.ShareProcessNamespace = ptr.To(true)
 	}
 
 	injected := []corev1.Container{certContainer(&effective, cfg), certWaitContainer(&effective, cfg)}
@@ -1210,7 +1211,7 @@ func (cfg Config) withDefaults() Config {
 		cfg.CertDir = "/etc/c8s/certs"
 	}
 	if cfg.CertFSGroup == nil {
-		cfg.CertFSGroup = int64Ptr(defaultCertFSGroup)
+		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
 	}
 	if cfg.CertKeyMode == "" {
 		cfg.CertKeyMode = defaultCertKeyMode
@@ -1219,13 +1220,13 @@ func (cfg Config) withDefaults() Config {
 		cfg.CertRenewInterval = defaultCertRenewInterval
 	}
 	if cfg.GetCertRunAsUser == nil {
-		cfg.GetCertRunAsUser = int64Ptr(defaultGetCertRunAsUser)
+		cfg.GetCertRunAsUser = ptr.To(defaultGetCertRunAsUser)
 	}
 	if cfg.GetCertRunAsGroup == nil {
-		cfg.GetCertRunAsGroup = int64Ptr(defaultGetCertRunAsGroup)
+		cfg.GetCertRunAsGroup = ptr.To(defaultGetCertRunAsGroup)
 	}
 	if cfg.GetCertRunAsNonRoot == nil {
-		cfg.GetCertRunAsNonRoot = boolPtr(defaultGetCertRunAsNonRoot)
+		cfg.GetCertRunAsNonRoot = ptr.To(defaultGetCertRunAsNonRoot)
 	}
 	if cfg.HardwarePlatform == "" {
 		cfg.HardwarePlatform = HardwarePlatformSNP
@@ -1247,14 +1248,6 @@ func getCertSecurityContext(inj *injection) *corev1.SecurityContext {
 		},
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func int64Ptr(v int64) *int64 {
-	return &v
 }
 
 // secretsVolume is the memory-backed volume released values are written to.

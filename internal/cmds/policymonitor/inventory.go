@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -116,12 +114,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	slices.SortFunc(containers, func(x, y workloadclaims.SandboxContainer) int {
-		if x.Digest != y.Digest {
-			return strings.Compare(x.Digest, y.Digest)
-		}
-		return slices.Compare(x.Argv, y.Argv)
-	})
+	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
 	return slices.Compact(digests), containers, true, nil
 }
 
@@ -187,11 +180,7 @@ func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.Sandbo
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
 func sandboxDigestsHost(cfg *Config) (string, error) {
-	cdsHost := cfg.CDSURL
-	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
-		cdsHost = u.Host
-	}
-	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cdsHost)
+	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
 // advertiseHostRetryBudget bounds the wait for the guest network to reach a

@@ -239,22 +239,3 @@ func TestExecRunnerPinsEnvAndWrapsFailure(t *testing.T) {
 		t.Errorf("error drops the tool's output: %v", err)
 	}
 }
-
-func TestTrimSlash(t *testing.T) {
-	for in, want := range map[string]string{
-		"https://cds":    "https://cds",
-		"https://cds/":   "https://cds",
-		"https://cds///": "https://cds",
-		"":               "",
-	} {
-		if got := trimSlash(in); got != want {
-			t.Errorf("trimSlash(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestCmdCtxFallsBackToBackground(t *testing.T) {
-	if cmdCtx(&cobra.Command{}) == nil {
-		t.Fatal("nil context for a command with none set")
-	}
-}

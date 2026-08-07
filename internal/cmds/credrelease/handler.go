@@ -16,18 +16,23 @@ import (
 // maxBodyBytes caps the request body — a CSR is small; refuse anything large.
 const maxBodyBytes = 1 << 16 // 64 KiB
 
-// releaseRequest is the POST /release-credential body: a PEM CERTIFICATE
-// REQUEST the operator generated locally. The operator authorizes the request
-// with an operatorauth Bearer token whose pbh binds this exact body, so the
-// CSR cannot be swapped in transit.
-type releaseRequest struct {
+// ReleasePath is the credential-release endpoint. The wire contract is
+// exported because getkubeconfig (the operator-side client) marshals these
+// exact shapes; the server package owns the protocol.
+const ReleasePath = "/release-credential"
+
+// ReleaseRequest is the POST ReleasePath body: a PEM CERTIFICATE REQUEST the
+// operator generated locally. The operator authorizes the request with an
+// operatorauth Bearer token whose pbh binds this exact body, so the CSR
+// cannot be swapped in transit.
+type ReleaseRequest struct {
 	CSRPEM string `json:"csr"`
 }
 
-// releaseResponse returns the signed client cert and the cluster CA so the
+// ReleaseResponse returns the signed client cert and the cluster CA so the
 // operator can assemble a kubeconfig. The apiserver address is known to the
 // operator (it dialled this service on the same host).
-type releaseResponse struct {
+type ReleaseResponse struct {
 	CertPEM string `json:"cert"`
 	CAPEM   string `json:"ca"`
 }
@@ -68,7 +73,7 @@ func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.D
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/release-credential" {
+	if r.URL.Path != ReleasePath {
 		http.NotFound(w, r)
 		return
 	}
@@ -92,7 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req releaseRequest
+	var req ReleaseRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
@@ -114,7 +119,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := releaseResponse{CertPEM: string(certPEM), CAPEM: string(h.ca.pem)}
+	resp := ReleaseResponse{CertPEM: string(certPEM), CAPEM: string(h.ca.pem)}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
