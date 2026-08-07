@@ -9,7 +9,7 @@ Recreate, silently defeating the operator's opt-out. */ -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
 {{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
-{{- $renderAllowlistProxy := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
+{{- $renderAllowlistProxy := eq (include "tls-lb.renderCDSProxy" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -216,8 +216,9 @@ spec:
         {{- end }}
         {{- if $renderAllowlistProxy }}
         # nginx terminates the public, tls-lb-attested connection and forwards
-        # /allowlist over pod loopback. This sidecar establishes the second
-        # trust hop: it verifies CDS's RA-TLS evidence before proxying.
+        # the /allowlist and /secrets control-plane routes over pod loopback.
+        # This sidecar establishes the second trust hop: it verifies CDS's
+        # RA-TLS evidence before proxying.
         - name: allowlist-proxy
           image: {{ include "c8s.image" . }}
           imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}

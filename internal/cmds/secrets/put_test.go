@@ -146,6 +146,32 @@ func TestPutCreates(t *testing.T) {
 	}
 }
 
+// A front door without the /secrets route (an older tls-lb) answers with its
+// own HTML error page; the CLI must name the actual problem and the fixes
+// rather than dump nginx HTML.
+func TestPutNamesFrontDoorWithoutSecretsRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte("<html><body><center><h1>405 Not Allowed</h1></center></body></html>"))
+	}))
+	defer srv.Close()
+	key := writeOperatorKey(t)
+
+	_, _, err := run(t, "hunter2", "put", "/tenant-a/db", "--url", srv.URL, "--insecure", "--operator-key", key)
+	if err == nil {
+		t.Fatal("put against a front door without /secrets succeeded, want error")
+	}
+	for _, want := range []string{"does not route /secrets", "port-forward svc/c8s-cds"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "<html>") {
+		t.Errorf("error %q leaks the HTML error page", err.Error())
+	}
+}
+
 // The refusal names what is there and leaves it alone, which is the whole point
 // of asking to create before asking to replace.
 func TestPutRefusesOccupiedPathWithoutOverwrite(t *testing.T) {

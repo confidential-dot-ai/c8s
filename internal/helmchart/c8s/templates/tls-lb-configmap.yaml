@@ -7,6 +7,8 @@
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
 {{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
+{{- $renderSecretsRoute := eq (include "tls-lb.renderSecretsRoute" .) "true" -}}
+{{- $renderCDSProxy := eq (include "tls-lb.renderCDSProxy" .) "true" -}}
 {{- $allowlistProxyPort := 0 -}}
 {{- $allowlistWriteRate := 0 -}}
 {{- $allowlistWriteBurst := 0 -}}
@@ -14,7 +16,7 @@
 {{- $allowlistWriteTotalBurst := 0 -}}
 {{- $allowlistReadRate := 0 -}}
 {{- $allowlistReadBurst := 0 -}}
-{{- if $renderAllowlistRoute -}}
+{{- if $renderCDSProxy -}}
 {{- $allowlistProxyPort = include "c8s.int" .Values.tlsLb.allowlist.proxyPort | int -}}
 {{- if or (lt $allowlistProxyPort 1) (gt $allowlistProxyPort 65535) -}}
 {{- fail (printf "tlsLb.allowlist.proxyPort must be between 1 and 65535, got: %d" $allowlistProxyPort) -}}
@@ -83,14 +85,16 @@ data:
 {{- if default false .Values.tlsLb.cors.enabled }}
         {{- include "tls-lb.corsMap" . | nindent 8 }}
 {{- end }}
-{{- if $renderAllowlistRoute }}
+{{- if $renderCDSProxy }}
 
-        # Rate-limit /allowlist while nginx still has the public client IP;
-        # empty map keys are not accounted by limit_req. Mutations count per
-        # client and in aggregate (the constant-key zone guards the shared
-        # per-pod-IP CDS bucket; see docs/operator.md), reads per client;
-        # OPTIONS (CORS preflight) is exempt. The total key chains off the
-        # write key so the exempt-method list exists once.
+        # Rate-limit the control-plane routes (/allowlist, /secrets) while
+        # nginx still has the public client IP; empty map keys are not
+        # accounted by limit_req. Mutations count per client and in aggregate
+        # (the constant-key zone guards the shared per-pod-IP CDS bucket; see
+        # docs/operator.md), reads per client; OPTIONS (CORS preflight) is
+        # exempt. The total key chains off the write key so the exempt-method
+        # list exists once. Both routes share one budget: they collapse onto
+        # the same loopback proxy source and the same CDS bucket.
         map $request_method $allowlist_write_rate_key {
             default $binary_remote_addr;
             GET "";
@@ -148,12 +152,21 @@ data:
             proxy_buffer_size 16k;
             proxy_buffers 4 16k;
 
+            {{- if $renderCDSProxy }}
+            # Built-in control-plane routes. Each exact + slash-prefix pair
+            # exposes only the API subtree, not lookalike paths.
+            {{- $cdsProxyLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
             {{- if $renderAllowlistRoute }}
-            # Built-in control-plane route. The exact + slash-prefix pair
-            # exposes only /allowlist and its API subtree, not lookalike paths.
-            {{- $allowlistLocationArgs := dict "root" $ "proxyPort" $allowlistProxyPort "writeBurst" $allowlistWriteBurst "writeTotalBurst" $allowlistWriteTotalBurst "readBurst" $allowlistReadBurst }}
-            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $allowlistLocationArgs) | nindent 12 }}
-            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $allowlistLocationArgs) | nindent 12 }}
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" true "path" "/allowlist") $cdsProxyLocationArgs) | nindent 12 }}
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" false "path" "/allowlist/") $cdsProxyLocationArgs) | nindent 12 }}
+            {{- end }}
+            {{- if $renderSecretsRoute }}
+            # Operator `c8s secrets put` surface. Workload secret reads
+            # authenticate with the pod's mesh leaf, which never crosses this
+            # hop, so only operator-key-signed writes can succeed here.
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" true "path" "/secrets") $cdsProxyLocationArgs) | nindent 12 }}
+            {{- include "tls-lb.allowlistLocation" (merge (dict "exact" false "path" "/secrets/") $cdsProxyLocationArgs) | nindent 12 }}
+            {{- end }}
 
             {{- end }}
             {{- range $i, $route := .Values.tlsLb.routes }}

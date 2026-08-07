@@ -117,7 +117,7 @@ func TestProxyPreservesAuthorizedRequests(t *testing.T) {
 	}
 }
 
-func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
+func TestProxyExposesOnlyControlPlanePaths(t *testing.T) {
 	hits := 0
 	router := newRouter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
@@ -131,6 +131,9 @@ func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
 		{path: "/allowlist", want: http.StatusNoContent},
 		{path: "/allowlist/digests", want: http.StatusNoContent},
 		{path: "/allowlisted", want: http.StatusNotFound},
+		{path: "/secrets", want: http.StatusNoContent},
+		{path: "/secrets/tenant-a/db", want: http.StatusNoContent},
+		{path: "/secretstore", want: http.StatusNotFound},
 		{path: "/", want: http.StatusNotFound},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -140,8 +143,8 @@ func TestProxyExposesOnlyAllowlistPaths(t *testing.T) {
 			t.Errorf("%s status = %d, want %d", tc.path, rec.Code, tc.want)
 		}
 	}
-	if hits != 2 {
-		t.Fatalf("proxy hits = %d, want 2", hits)
+	if hits != 4 {
+		t.Fatalf("proxy hits = %d, want 4", hits)
 	}
 }
 
