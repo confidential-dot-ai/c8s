@@ -16,6 +16,7 @@ const SECTIONS: { title: string; href: string; file: string }[] = [
   { title: "Attestable Builds", href: "/docs/attestable-builds", file: "attestable-builds/README.md" },
   { title: "Zero Knowledge", href: "/docs/zk", file: "zk.md" },
   { title: "Confidential Agents API", href: "/docs/confidential-agents-api", file: "confidential-agents-api.md" },
+  { title: "Confidential Inference API", href: "/docs/confidential-inference-api", file: "confidential-inference-api.md" },
 ];
 
 function buildDocsToc(): TocItem[] {

@@ -7,6 +7,7 @@ New to confidential computing at large? Start with the [Confidential Computing P
 ## Product APIs
 
 - **[Confidential Agents API](confidential-agents-api/)**: REST API to provision and manage confidential agents in CVMs.
+- **[Confidential Inference API](confidential-inference-api/)**: OpenAI-compatible confidential inference and attestation API.
 
 ## Whitepapers
 
@@ -20,6 +21,7 @@ New to confidential computing at large? Start with the [Confidential Computing P
 - **[Attestable Builds](attestable-builds/)**: Learn what attestable builds are, why they matter, and how TEEs make software verification possible.
 - **[Zero Knowledge](zk.md)**: Learn about zero-knowledge (ZK) proofs and their applications.
 - **[Confidential Agents API](confidential-agents-api/)**: Reference for the public REST API that provisions and manages confidential VM instances.
+- **[Confidential Inference API](confidential-inference-api/)**: Reference for the public confidential inference API.
 
 ## Need Help?
 
