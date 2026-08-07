@@ -68,6 +68,34 @@ reproduces the same bytes and pins the exact format. It also makes a malformed
 or foreign body fail loud instead of parsing as an empty (and therefore deny-all
 or, worse, allow-nothing-changed) allowlist.
 
+#### Entry names
+
+An entry name must match `[A-Za-z0-9][A-Za-z0-9._-]*` — it is used verbatim as a
+URL path segment — and be at most **63 bytes**, the Kubernetes label-value
+length, so the same string can also be a `confidential.ai/cw` selector value and
+a matched-workload leaf stamp (`docs/ratls.md`).
+
+The grammar is enforced everywhere. The 63-byte bound is enforced only where
+entries are **written**: `PUT /allowlist`, `PUT /allowlist/workloads/{name}`,
+and the CLI. A document *served* by CDS is parsed leniently, because the bound
+was introduced after entries could already have been stored and one legacy name
+must not fail the whole document for every puller in the cluster. An over-long
+entry is dropped from a served parse with a warning: its digests stop being
+admitted by that consumer (fail-closed), and it could never have been stamped on
+a leaf in the first place.
+
+**Migration.** An over-long entry created before the bound is still served by
+CDS and still counts toward the document's canonical digest, but no pod can be
+named for it and every consumer ignores it. Rename it — `c8s allowlist workload
+put <new-name>` followed by a delete of the old one — and pods matching it start
+getting named leaves. The lenient served parse is a compatibility measure for
+one release; do not rely on it.
+
+The grammar is slightly wider than what the injection webhook accepts for the
+`confidential.ai/cw` label: `a-`, `a_` and `a.` are valid entry names but are
+not valid label values. It is not tightened here, because that would
+retroactively invalidate stored entries.
+
 ## Process policy: command and args
 
 An image digest already pins the image's baked `ENTRYPOINT`/`CMD` — they are in
@@ -173,13 +201,20 @@ Three independent points enforce, at different strengths:
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
    container. It reads the digest and `process.args` and applies the same index.
 
-3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
+3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
-   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
-   where the running set is a strict subset of the declared one, so requiring a
-   whole entry would deny ordinary states
+   allowlisted (floor or workload), checked against one atomic allowlist
+   snapshot. Membership only: issuance lands mid-lifecycle, where the running
+   set is a strict subset of the declared one, so requiring a whole entry would
+   deny ordinary states
    ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
+   Additionally — and without changing the membership contract — when the
+   high-water `(digest, argv)` inventory uniquely matches one workload entry,
+   the leaf is stamped with that entry's name and the snapshot's version and
+   canonical digest (OID `…1.5`, `docs/ratls.md` "Matched workload"), which is
+   what `c8s verify --workload/--allowlist` and
+   `ratls.VerifyPolicy.WorkloadName` enforce against the mesh-CA chain.
 
 ### What each layer can and cannot promise
 

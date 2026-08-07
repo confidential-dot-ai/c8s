@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
@@ -207,7 +208,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	for _, want := range []string{
 		"--get-cert-image=ghcr.io/confidential-dot-ai/c8s-operator:dev",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
-		"--get-cert-renew-interval=6h",
+		"--get-cert-renew-interval=2h",
 	} {
 		if !slices.Contains(args, want) {
 			t.Fatalf("operator args missing %q\n%v", want, args)
@@ -1505,6 +1506,45 @@ func findKey(node any, key string) string {
 		}
 	}
 	return ""
+}
+
+// The renewal interval the operator hands every injected sidecar must be
+// strictly below the shortest TTL CDS issues. cds.namedCertTTL is that TTL — a
+// named leaf's — and nothing backdates NotBefore, so an interval at or above it
+// would only fire once the installed leaf had already expired. get-cert paces
+// off the leaf's own NotAfter as a backstop, but the chart's own defaults must
+// not need it.
+func TestChartGetCertRenewIntervalIsBelowNamedCertTTL(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	renew := durationArg(t, renderedOperatorArgs(t, out), "--get-cert-renew-interval=")
+	named := durationArg(t, renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--named-cert-ttl=")
+	certTTL := durationArg(t, renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--cert-ttl=")
+
+	if renew >= named {
+		t.Fatalf("webhook.getCert.renewInterval %v >= cds.namedCertTTL %v: an injected sidecar would renew at or after its leaf expired", renew, named)
+	}
+	if renew >= certTTL {
+		t.Fatalf("webhook.getCert.renewInterval %v >= cds.certTTL %v", renew, certTTL)
+	}
+}
+
+// durationArg extracts and parses the value of the first arg carrying prefix.
+func durationArg(t *testing.T, args []string, prefix string) time.Duration {
+	t.Helper()
+	for _, a := range args {
+		if raw, ok := strings.CutPrefix(a, prefix); ok {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				t.Fatalf("parse %s%s: %v", prefix, raw, err)
+			}
+			return d
+		}
+	}
+	t.Fatalf("args missing %s\n%v", prefix, args)
+	return 0
 }
 
 func TestChartWebhookRendersSecurityKnobs(t *testing.T) {

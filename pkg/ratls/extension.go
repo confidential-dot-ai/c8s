@@ -47,6 +47,7 @@ const (
 //	1.3.6.1.4.1.66378.1.1 - RA-TLS attestation extension
 //	1.3.6.1.4.1.66378.1.2 - attestation-evidence audit digest (certutil)
 //	1.3.6.1.4.1.66378.1.4 - pod sandbox ID extension (sandbox.go)
+//	1.3.6.1.4.1.66378.1.5 - matched workload extension (matchedworkload.go)
 //
 // .1.3 was the RA-TLS config-claims extension; it is retired, not reusable.
 var (

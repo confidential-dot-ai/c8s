@@ -1,0 +1,213 @@
+package getcert
+
+import (
+	"bytes"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+)
+
+func namedLeaf(t *testing.T) *x509.Certificate {
+	t.Helper()
+	ext, err := ratls.MarshalMatchedWorkloadExtension(&ratls.MatchedWorkload{
+		Name:             "api",
+		AllowlistVersion: "1",
+		AllowlistDigest:  bytes.Repeat([]byte{0x11}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &x509.Certificate{Extensions: []pkix.Extension{ext}}
+}
+
+// expiring returns a copy of leaf that CDS just issued with the given TTL: no
+// backdated NotBefore, exactly as certutil.NewLeafTemplate builds one.
+func expiring(leaf *x509.Certificate, ttl time.Duration) *x509.Certificate {
+	out := *leaf
+	out.NotBefore = time.Now()
+	out.NotAfter = out.NotBefore.Add(ttl)
+	return &out
+}
+
+func TestRenewalInterval(t *testing.T) {
+	base := config{RenewInterval: 6 * time.Hour, UnnamedRenewInterval: 30 * time.Second, WorkloadClaims: true}
+
+	t.Run("unnamed leaf fast-polls with bounded jitter", func(t *testing.T) {
+		got := renewalInterval(base, &x509.Certificate{}, 0)
+		if got < 30*time.Second || got > 38*time.Second {
+			t.Fatalf("interval = %v, want [30s, ~37.5s]", got)
+		}
+	})
+	t.Run("nil leaf counts as unnamed", func(t *testing.T) {
+		if got := renewalInterval(base, nil, 0); got >= time.Minute {
+			t.Fatalf("interval = %v, want fast", got)
+		}
+	})
+	t.Run("named leaf settles to renew-interval", func(t *testing.T) {
+		if got := renewalInterval(base, namedLeaf(t), 0); got != 6*time.Hour {
+			t.Fatalf("interval = %v, want 6h", got)
+		}
+	})
+	t.Run("no workload-claims never fast-polls", func(t *testing.T) {
+		cfg := base
+		cfg.WorkloadClaims = false
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 6*time.Hour {
+			t.Fatalf("interval = %v, want 6h", got)
+		}
+	})
+	t.Run("fast poll disabled by zero", func(t *testing.T) {
+		cfg := base
+		cfg.UnnamedRenewInterval = 0
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 6*time.Hour {
+			t.Fatalf("interval = %v, want 6h", got)
+		}
+	})
+	t.Run("fast interval never exceeds renew-interval", func(t *testing.T) {
+		cfg := base
+		cfg.RenewInterval = 10 * time.Second
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got != 10*time.Second {
+			t.Fatalf("interval = %v, want the shorter renew-interval", got)
+		}
+	})
+}
+
+// The invariant: whatever the flags say, the next renewal must fire strictly
+// before the installed leaf's NotAfter. The chart ships --renew-interval equal
+// to the named-leaf TTL, so pacing on the flag alone would fire exactly at (or
+// after) expiry.
+func TestRenewalIntervalFiresBeforeLeafExpiry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  config
+		leaf *x509.Certificate
+	}{
+		"named leaf at the chart's renew-interval == named TTL": {
+			cfg:  config{RenewInterval: issuer.MaxNamedLeafTTL, UnnamedRenewInterval: 30 * time.Second, WorkloadClaims: true},
+			leaf: expiring(namedLeaf(t), issuer.MaxNamedLeafTTL),
+		},
+		"named leaf with a renew-interval far past its TTL": {
+			cfg:  config{RenewInterval: 24 * time.Hour},
+			leaf: expiring(namedLeaf(t), issuer.MaxNamedLeafTTL),
+		},
+		"unnamed leaf shorter than the fast poll": {
+			cfg:  config{RenewInterval: 6 * time.Hour, UnnamedRenewInterval: 30 * time.Second, WorkloadClaims: true},
+			leaf: expiring(&x509.Certificate{}, 20*time.Second),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			remaining := time.Until(tc.leaf.NotAfter)
+			if got := renewalInterval(tc.cfg, tc.leaf, 0); got >= remaining {
+				t.Fatalf("delay = %v, leaf expires in %v: renewal would fire at or after expiry", got, remaining)
+			}
+		})
+	}
+}
+
+// An already-expired leaf must not spin the loop, and the floor must never
+// override a shorter operator-chosen --renew-interval.
+func TestRenewalIntervalFloor(t *testing.T) {
+	cfg := config{RenewInterval: time.Hour}
+	if got := renewalInterval(cfg, expiring(&x509.Certificate{}, -time.Hour), 0); got != minRenewalDelay {
+		t.Fatalf("expired leaf delay = %v, want the %v floor", got, minRenewalDelay)
+	}
+	cfg.RenewInterval = time.Second
+	if got := renewalInterval(cfg, expiring(&x509.Certificate{}, -time.Hour), 0); got != time.Second {
+		t.Fatalf("delay = %v, want the operator's shorter --renew-interval", got)
+	}
+}
+
+// Jitter is added before the clamp, so no delay may exceed --renew-interval —
+// the probe that found this used 31s/30s, where +25% jitter overshot.
+func TestRenewalIntervalJitterIsClamped(t *testing.T) {
+	cfg := config{RenewInterval: 31 * time.Second, UnnamedRenewInterval: 30 * time.Second, WorkloadClaims: true}
+	for range 500 {
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got > cfg.RenewInterval {
+			t.Fatalf("delay = %v exceeds --renew-interval %v", got, cfg.RenewInterval)
+		}
+	}
+}
+
+// A sub-4ns interval makes the jitter divisor zero, which mrand.Int64N panics
+// on. validateConfig rejects such a value, but the pacer must not panic on one.
+func TestRenewalIntervalTinyUnnamedIntervalDoesNotPanic(t *testing.T) {
+	for _, iv := range []time.Duration{1, 2, 3, 4} {
+		cfg := config{RenewInterval: time.Hour, UnnamedRenewInterval: iv, WorkloadClaims: true}
+		if got := renewalInterval(cfg, &x509.Certificate{}, 0); got <= 0 {
+			t.Fatalf("unnamed interval %v: delay = %v, want positive", iv, got)
+		}
+	}
+}
+
+// A permanently-unnamed pod must not attest every --unnamed-renew-interval for
+// its whole lifetime: the fast poll backs off toward --renew-interval.
+func TestRenewalIntervalUnnamedBacksOff(t *testing.T) {
+	cfg := config{RenewInterval: time.Hour, UnnamedRenewInterval: 30 * time.Second, WorkloadClaims: true}
+	leaf := &x509.Certificate{}
+
+	steady := renewalInterval(cfg, leaf, unnamedBackoffAfter)
+	if steady > 38*time.Second {
+		t.Fatalf("delay before backoff = %v, want the fast poll", steady)
+	}
+	if got := renewalInterval(cfg, leaf, unnamedBackoffAfter+4); got < 8*steady {
+		t.Fatalf("delay after 4 backoff steps = %v, want at least 8x the fast poll", got)
+	}
+	if got := renewalInterval(cfg, leaf, 1000); got != cfg.RenewInterval {
+		t.Fatalf("delay for a permanently unnamed pod = %v, want --renew-interval %v", got, cfg.RenewInterval)
+	}
+	// A leaf that gets named resets to the ordinary interval.
+	if got := renewalInterval(cfg, namedLeaf(t), 1000); got != cfg.RenewInterval {
+		t.Fatalf("named delay = %v, want %v", got, cfg.RenewInterval)
+	}
+}
+
+// A failed renewal retries on a short backoff, never slower than the ordinary
+// pacing — the installed leaf may be minutes from expiry.
+func TestRenewalRetryInterval(t *testing.T) {
+	cfg := config{RenewInterval: 6 * time.Hour}
+	leaf := expiring(namedLeaf(t), 6*time.Hour)
+
+	first := renewalRetryInterval(cfg, leaf, 1)
+	if first != renewalRetryBase {
+		t.Fatalf("first retry = %v, want %v", first, renewalRetryBase)
+	}
+	if second := renewalRetryInterval(cfg, leaf, 2); second != 2*renewalRetryBase {
+		t.Fatalf("second retry = %v, want %v", second, 2*renewalRetryBase)
+	}
+	// Never past what ordinary pacing would have chosen.
+	for _, failures := range []int{1, 5, 50} {
+		ceiling := renewalInterval(cfg, leaf, 0)
+		if got := renewalRetryInterval(cfg, leaf, failures); got > ceiling {
+			t.Fatalf("retry after %d failures = %v, exceeds the pacing ceiling %v", failures, got, ceiling)
+		}
+	}
+	// An expiring leaf shortens the retry below the base delay.
+	if got := renewalRetryInterval(cfg, expiring(namedLeaf(t), 12*time.Second), 9); got > 12*time.Second {
+		t.Fatalf("retry = %v, want under the leaf's remaining 12s", got)
+	}
+}
+
+func TestValidateConfigUnnamedRenewInterval(t *testing.T) {
+	base := config{
+		CDSURL:            "https://cds:8443",
+		AttestationApiURL: "http://localhost:8400",
+		SAN:               "workload.example.com",
+	}
+	for _, iv := range []time.Duration{-time.Second, 1, 999 * time.Millisecond} {
+		cfg := base
+		cfg.UnnamedRenewInterval = iv
+		if err := validateConfig(cfg); !errors.Is(err, errInvalidUnnamedRenewInterval) {
+			t.Fatalf("--unnamed-renew-interval=%v: err = %v, want errInvalidUnnamedRenewInterval", iv, err)
+		}
+	}
+	for _, iv := range []time.Duration{0, time.Second, 30 * time.Second} {
+		cfg := base
+		cfg.UnnamedRenewInterval = iv
+		if err := validateConfig(cfg); err != nil {
+			t.Fatalf("--unnamed-renew-interval=%v: unexpected error %v", iv, err)
+		}
+	}
+}

@@ -294,3 +294,31 @@ func TestInventorySandboxLifecycle(t *testing.T) {
 		t.Fatalf("containers = %v, want only sandbox-2's", b.containers)
 	}
 }
+
+// Two admissions whose argv differ only in how a separator byte falls must both
+// survive in the high-water mark. Under a separator argv can carry, the second
+// record overwrote the first — and it vanished from the digests view too, so
+// CDS's cross-check between the two views still agreed and the sandbox stayed
+// eligible to be named for a workload it had not run.
+func TestInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
+	b := newAdmissionInventory(t.TempDir())
+	const sandbox = "sandbox-1"
+
+	b.record(cidApp1, sandbox, "app", digestApp, []string{"/app\x1f--serve"})
+	b.record(cidApp2, sandbox, "app", digestApp, []string{"/app", "--serve"})
+
+	_, containers, known, err := b.DigestsForSandbox(sandbox)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers = %+v, want both admissions recorded", containers)
+	}
+	for _, want := range [][]string{{"/app\x1f--serve"}, {"/app", "--serve"}} {
+		if !slices.ContainsFunc(containers, func(c workloadclaims.SandboxContainer) bool {
+			return slices.Equal(c.Argv, want)
+		}) {
+			t.Fatalf("argv %q was erased from the high-water mark: %+v", want, containers)
+		}
+	}
+}

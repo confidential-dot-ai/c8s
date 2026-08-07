@@ -149,8 +149,9 @@ type SandboxTokenRequest struct {
 // now — see docs/secrets.md, "The report is a high-water mark".
 //
 // Digests is the deduplicated digest set cert issuance gates on. Containers
-// carries each container's effective argv and is not deduplicated, so a consumer
-// can hold a sandbox to the same (digest, argv) pair admission evaluated.
+// carries each container's effective argv, deduplicated by SandboxContainer.Key
+// (the whole (digest, argv) pair, not the digest alone), so a consumer can hold
+// a sandbox to the same pair admission evaluated.
 //
 // Digests is [] (never null) for a known sandbox with no containers. Containers
 // is absent on an inventory that predates it, which consumers must treat as

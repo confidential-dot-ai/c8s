@@ -926,7 +926,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 		OutPath:           filepath.Join(dir, "cert.pem"),
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
 	got, err := os.ReadFile(cfg.OutPath)
@@ -950,7 +950,7 @@ func TestObtainCertCDSError(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com"}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCert succeeded, want error when CDS fails")
 	}
 }
@@ -976,7 +976,7 @@ func TestObtainCertAttestationExtensionError(t *testing.T) {
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}
-	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL))
+	_, err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL))
 	if err == nil {
 		t.Fatal("obtainCert succeeded, want attestation extension error")
 	}
@@ -1023,7 +1023,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 		InitialRetryInterval: time.Millisecond,
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if calls < 2 {
@@ -1045,7 +1045,7 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com", InitialRetryTimeout: 0}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCertWithRetry succeeded, want error")
 	}
 	if calls != 1 {

@@ -874,6 +874,99 @@ func TestDualVerifyPeerCallback_CASignedEnforcesSandboxPin(t *testing.T) {
 	})
 }
 
+func TestDualVerifyPeerCallback_CASignedEnforcesWorkloadPin(t *testing.T) {
+	caKey, caCert := generateCACert(t)
+	shared := newSharedCACerts([]*x509.Certificate{caCert})
+
+	// makeLeaf builds a CA-signed leaf, optionally carrying a matched-workload
+	// stamp ("" = none).
+	makeLeaf := func(t *testing.T, workload string) []byte {
+		t.Helper()
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(500),
+			Subject:      pkix.Name{CommonName: "workload"},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		}
+		if workload != "" {
+			ext, err := MarshalMatchedWorkloadExtension(&MatchedWorkload{
+				Name:             workload,
+				AllowlistVersion: "3",
+				AllowlistDigest:  bytes.Repeat([]byte{0x22}, 32),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmpl.ExtraExtensions = []pkix.Extension{ext}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+
+	const pinned = "api"
+	verify := dualVerifyPeerCallback(&VerifyPolicy{WorkloadName: pinned}, shared)
+
+	t.Run("missing stamp rejected", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, "")}, nil); err == nil {
+			t.Fatal("CA-signed leaf without a workload stamp accepted despite a configured pin")
+		}
+	})
+	t.Run("mismatched name rejected", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, "other")}, nil); err == nil {
+			t.Fatal("CA-signed leaf with a mismatched workload accepted")
+		}
+	})
+	t.Run("matching name accepted", func(t *testing.T) {
+		if err := verify([][]byte{makeLeaf(t, pinned)}, nil); err != nil {
+			t.Fatalf("CA-signed leaf with matching pin rejected: %v", err)
+		}
+	})
+	t.Run("no pin accepts CA-signed", func(t *testing.T) {
+		v := dualVerifyPeerCallback(&VerifyPolicy{}, shared)
+		if err := v([][]byte{makeLeaf(t, "")}, nil); err != nil {
+			t.Fatalf("CA-signed leaf rejected when no pin configured: %v", err)
+		}
+	})
+	// A self-signed RA-TLS peer's stamp is whatever it chose, so the pin must
+	// never be satisfiable off the CA path — VerifyCert fails closed on it.
+	t.Run("self-signed cannot satisfy the pin", func(t *testing.T) {
+		selfKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ext, err := MarshalMatchedWorkloadExtension(&MatchedWorkload{
+			Name:             pinned,
+			AllowlistVersion: "3",
+			AllowlistDigest:  bytes.Repeat([]byte{0x22}, 32),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:    big.NewInt(501),
+			Subject:         pkix.Name{CommonName: "impostor"},
+			NotBefore:       time.Now().Add(-time.Hour),
+			NotAfter:        time.Now().Add(time.Hour),
+			ExtraExtensions: []pkix.Extension{ext},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &selfKey.PublicKey, selfKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verify([][]byte{der}, nil); err == nil {
+			t.Fatal("self-signed leaf claiming the pinned workload was accepted")
+		}
+	})
+}
+
 // TestDualVerifyPeerCallback_RequireCAEvidence covers the production trust mode:
 // a valid CA chain is no longer sufficient — the leaf's embedded RA-TLS evidence
 // (issuer copies the requester's nonce-free .1.1 extension onto the leaf) is

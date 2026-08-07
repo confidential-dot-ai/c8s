@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -888,4 +889,54 @@ func TestGuestInventoryEndpointIsDialable(t *testing.T) {
 func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
 	t.Helper()
 	return testSigner(t).PublicKey()
+}
+
+// The high-water mark deduplicates on SandboxContainer.Key, so the key must be
+// injective over (digest, argv): two distinct admissions that collide onto one
+// key erase each other from the sandbox's record, and the erasure is invisible
+// to CDS because it removes the container from both the digests and the
+// containers view at once.
+func TestSandboxContainerKeyIsInjective(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const other = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	argvs := [][]string{
+		nil,
+		{},
+		{""},
+		{"", ""},
+		{"/app"},
+		{"/app", "--serve"},
+		// Separator smuggling: every byte an argv may legally carry, including
+		// the unit and record separators an earlier key used.
+		{"/app\x1f--serve"},
+		{"/app\x1f", "-serve"},
+		{"/app\x1e--serve"},
+		{"/app --serve"},
+		{"/app\t--serve"},
+		{"/app\n--serve"},
+		{"/app", "", "--serve"},
+	}
+
+	seen := map[string][]string{}
+	for _, d := range []string{digest, other} {
+		for _, argv := range argvs {
+			c := SandboxContainer{Digest: d, Argv: argv}
+			key := c.Key()
+			if prev, dup := seen[key]; dup && !slices.Equal(prev, argv) {
+				t.Fatalf("argv %q and %q collide on key %q", prev, argv, key)
+			}
+			seen[key] = argv
+		}
+	}
+	// A digest change must move the key too.
+	a := SandboxContainer{Digest: digest, Argv: []string{"/app"}}
+	b := SandboxContainer{Digest: other, Argv: []string{"/app"}}
+	if a.Key() == b.Key() {
+		t.Fatal("two digests share one key")
+	}
+	// nil and empty argv are the same admission (json omits an empty list).
+	if (SandboxContainer{Digest: digest}).Key() != (SandboxContainer{Digest: digest, Argv: []string{}}).Key() {
+		t.Fatal("nil and empty argv must key alike")
+	}
 }

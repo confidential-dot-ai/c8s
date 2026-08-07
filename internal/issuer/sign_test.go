@@ -1,6 +1,7 @@
 package issuer_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -181,6 +182,46 @@ func TestCASignCSR_StampsSandboxID(t *testing.T) {
 	// An invalid sandbox ID fails the signing, not silently drops.
 	if _, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, SandboxID: "not valid!"}); err == nil {
 		t.Fatal("invalid sandbox ID signed")
+	}
+}
+
+func TestCASignCSR_StampsMatchedWorkload(t *testing.T) {
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	csr, _ := mustCSR(t, "node", nil, nil, nil)
+	matched := &ratls.MatchedWorkload{
+		Name:             "api",
+		AllowlistVersion: "7",
+		AllowlistDigest:  bytes.Repeat([]byte{0x11}, 32),
+	}
+
+	certPEM, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, MatchedWorkload: matched})
+	if err != nil {
+		t.Fatalf("SignCSR: %v", err)
+	}
+	got, err := ratls.MatchedWorkloadFromCert(mustParseCert(t, certPEM))
+	if err != nil {
+		t.Fatalf("MatchedWorkloadFromCert: %v", err)
+	}
+	if got == nil || got.Name != "api" || got.AllowlistVersion != "7" || !bytes.Equal(got.AllowlistDigest, matched.AllowlistDigest) {
+		t.Fatalf("matched workload = %+v, want %+v", got, matched)
+	}
+
+	// No MatchedWorkload param ⇒ no extension.
+	certPEM, _, err = ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("SignCSR: %v", err)
+	}
+	if got, err := ratls.MatchedWorkloadFromCert(mustParseCert(t, certPEM)); err != nil || got != nil {
+		t.Fatalf("matched workload without param = %+v, %v; want nil", got, err)
+	}
+
+	// An invalid value fails the signing, not silently drops.
+	bad := &ratls.MatchedWorkload{Name: "api", AllowlistVersion: "0", AllowlistDigest: matched.AllowlistDigest}
+	if _, _, err := ca.SignCSR(issuer.SignCSRParams{CSR: csr, TTL: time.Hour, MatchedWorkload: bad}); err == nil {
+		t.Fatal("invalid matched workload signed")
 	}
 }
 

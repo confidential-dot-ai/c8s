@@ -118,6 +118,23 @@ func TestSandboxDigestsHost(t *testing.T) {
 	}
 }
 
+// The guest inventory keys its high-water mark the same way, and must not lose
+// an admission to a separator byte in argv either.
+func TestKataInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("a"), pmDigestApp, []string{"/app\x1f--serve"})
+	b.record(testCID("b"), pmDigestApp, []string{"/app", "--serve"})
+
+	_, containers, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers = %+v, want both admissions recorded", containers)
+	}
+}
+
 // A configured advertise host bypasses retry entirely: the routing-table
 // lookup never happens, so the CDS URL not resolving does not matter.
 func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T) {

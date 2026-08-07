@@ -676,7 +676,7 @@ webhook:
     fsGroup: 65532
     keyMode: "0640"
   getCert:
-    renewInterval: 6h
+    renewInterval: 2h
     runAsUser: 65532
     runAsGroup: 65532
     runAsNonRoot: true

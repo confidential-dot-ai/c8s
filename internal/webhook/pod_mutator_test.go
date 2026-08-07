@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -55,7 +57,7 @@ func TestMutatePodInjectsCertSidecar(t *testing.T) {
 		"--out=/etc/c8s/certs/tls.crt",
 		"--key-out=/etc/c8s/certs/tls.key",
 		"--key-mode=0640",
-		"--renew-interval=6h0m0s",
+		"--renew-interval=2h0m0s",
 		"--reload-nginx=false",
 		"--continue-on-initial-error",
 	} {
@@ -1296,12 +1298,15 @@ func TestConfigWithDefaultsPreservesExplicitValues(t *testing.T) {
 	if def.CertDir != "/etc/c8s/certs" {
 		t.Fatalf("default CertDir = %q", def.CertDir)
 	}
-	wantRenew, err := time.ParseDuration("6h")
-	if err != nil {
-		t.Fatal(err)
+	// Pinned against the constant, not a literal: the default must stay
+	// strictly below issuer.MaxNamedLeafTTL so a named leaf always has a
+	// renewal attempt left before it expires.
+	if def.CertRenewInterval != defaultCertRenewInterval {
+		t.Fatalf("default CertRenewInterval = %v, want %v", def.CertRenewInterval, defaultCertRenewInterval)
 	}
-	if def.CertRenewInterval != wantRenew {
-		t.Fatalf("default CertRenewInterval = %v, want %v", def.CertRenewInterval, wantRenew)
+	if def.CertRenewInterval >= issuer.MaxNamedLeafTTL {
+		t.Fatalf("default CertRenewInterval %v must stay below issuer.MaxNamedLeafTTL %v",
+			def.CertRenewInterval, issuer.MaxNamedLeafTTL)
 	}
 }
 
