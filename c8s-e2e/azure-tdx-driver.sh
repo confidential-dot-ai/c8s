@@ -77,6 +77,22 @@ NRI_REV=""; NRI_BEHIND=""     # set by the provenance block; referenced under se
 
 m180() { mark "$1 $(printf '%.180s' "${2//@/}")"; }
 
+# pf_start <local-port> <port-forward args...>: start a forward and wait for it
+# to actually accept. A fixed sleep loses this race on a loaded single node, and
+# curl's 000 then reads as an attestation failure rather than a missing tunnel.
+pf_start() {
+  local port=$1 i; shift
+  kubectl -n c8s-system port-forward "$@" >"/tmp/pf-$port.log" 2>&1 &
+  PF=$!
+  for i in $(seq 1 30); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then exec 3<&- 3>&-; return 0; fi
+    kill -0 "$PF" 2>/dev/null || break
+    sleep 1
+  done
+  m180 D_PF "port $port never accepted: $(tail -2 "/tmp/pf-$port.log" 2>/dev/null | tr '\n' ' ')"
+  return 1
+}
+
 # ── generic pod diagnostics ──────────────────────────────────────────────────
 # diag_nri only covers NRI, so a tls-lb failure left us with a pod name and a
 # 1/4. Markers are the only thing that survives the poller's window.
@@ -256,7 +272,7 @@ PLAT=$(kubectl -n c8s-system get deploy c8s-cds -o jsonpath='{.spec.template.spe
 echo "@@CDS_RATLS $PLAT@@"
 echo "$PLAT" | grep -q 'ratls-platform=tdx' || fail "cds not on tdx ratls ($PLAT)"
 # /ca 200 => CDS issued its RA-TLS serving cert, which required a valid az-tdx quote
-kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 & PF=$!; sleep 4
+pf_start 8443 svc/c8s-cds 8443:8443 || fail "port-forward to cds never came up"
 CA_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 15 https://127.0.0.1:8443/ca 2>/dev/null)
 kill $PF 2>/dev/null || true
 echo "@@CDS_CA_HTTP $CA_CODE@@"
@@ -265,7 +281,7 @@ mark CDS_ATTESTS_TDX
 
 # ── vTPM attestation probe (the Azure-unique evidence path; platform=az-tdx) ──
 mark STAGE_ATTEST_PROBE
-kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 & PF=$!; sleep 4
+pf_start 8400 svc/c8s-attestation-api 8400:8400 || fail "port-forward to attestation-api never came up"
 NONCE=$(head -c 32 /dev/urandom | base64 -w0)
 # platform:auto matches every in-repo caller (getkubeconfig, attestclient,
 # handoff_bootstrap); an omitted platform is an untested request shape.
@@ -298,8 +314,8 @@ echo "injected image set:"; echo "$IMGS"
 # --attestation-api-url is NOT a flag on `allowlist add` (only on `c8s cds`) —
 # passing it makes cobra reject the command. Don't mask the exit either: a
 # failed add here otherwise surfaces 300s later as an opaque workload timeout.
-kubectl -n c8s-system port-forward svc/c8s-cds 8443:8443 >/dev/null 2>&1 & PF1=$!
-sleep 4
+pf_start 8443 svc/c8s-cds 8443:8443 || fail "port-forward to cds never came up"
+PF1=$PF
 AL="--url https://127.0.0.1:8443 --operator-key /root/operator.key"
 ADDED=0
 while IFS= read -r img; do
