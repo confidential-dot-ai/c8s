@@ -14,6 +14,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -331,18 +332,38 @@ func startProxyRun(t *testing.T, mutate func(*Proxy)) *proxyRunFixture {
 
 func (f *proxyRunFixture) roundTrip(t *testing.T, payload string) string {
 	t.Helper()
-	conn, err := net.Dial("tcp", f.p.outboundAddr)
-	if err != nil {
-		t.Fatal(err)
+	// The proxy legitimately resets a client instead of serving it in two
+	// transient situations: the accept loop closing an accepted conn at a
+	// connection limit, and the upstream RA-TLS leg failing its dial or
+	// handshake (the handler then closes the downstream with the payload
+	// unread, which the kernel turns into an RST). On a starved CI runner the
+	// second case fires rarely; retry a reset a few times — the assertions on
+	// the response bytes and on connLimitRejected still catch every
+	// non-transient bug, and a persistent failure surfaces the proxy's access
+	// log so the cause is visible instead of an opaque ECONNRESET.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		conn, err := net.Dial("tcp", f.p.outboundAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprint(conn, payload)
+		conn.(*net.TCPConn).CloseWrite()
+		got, err := io.ReadAll(conn)
+		conn.Close()
+		if err == nil {
+			return string(got)
+		}
+		if !errors.Is(err, syscall.ECONNRESET) {
+			t.Fatal(err)
+		}
+		lastErr = err
 	}
-	defer conn.Close()
-	fmt.Fprint(conn, payload)
-	conn.(*net.TCPConn).CloseWrite()
-	got, err := io.ReadAll(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(got)
+	t.Fatalf("connection reset on every attempt: %v\naccess log:\n%s", lastErr, f.logBuf.String())
+	return ""
 }
 
 // End-to-end through Run: plain outbound listener, TLS inbound listener, and
