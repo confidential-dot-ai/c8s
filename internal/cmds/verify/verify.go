@@ -71,7 +71,7 @@ type Defaults struct {
 	Short string
 	// Kind preselects the component (cds|lb|workload|auto).
 	Kind string
-	// Mode preselects the evidence mode (auto|ratls-cert|attestation-endpoint).
+	// Mode preselects the evidence mode (auto|ratls-cert|discovery|attest-pq).
 	Mode string
 	// DefaultPort is the port assumed when the target omits one (0 = by kind).
 	DefaultPort int
@@ -163,7 +163,7 @@ unavailable (unreachable / unparseable).`,
 	f := cmd.Flags()
 	f.StringVar(&cfg.url, "url", "", "target URL or host:port (alternative to the positional argument)")
 	f.StringVar(&cfg.kind, "kind", orDefault(d.Kind, "auto"), "component being verified: cds, lb, workload, or auto")
-	f.StringVar(&cfg.mode, "mode", orDefault(d.Mode, "auto"), "evidence mode: auto, ratls-cert, discovery, or attestation-endpoint")
+	f.StringVar(&cfg.mode, "mode", orDefault(d.Mode, "auto"), "evidence mode: auto, ratls-cert, discovery, or attest-pq")
 	f.StringVar(&cfg.discoveryPath, "discovery-path", defaultDiscoveryPath, "path of the LB discovery document (discovery mode)")
 	f.StringVar(&cfg.server, "server-name", "", "TLS SNI server name (for port-forward / routed domains)")
 	f.DurationVar(&cfg.timeout, "timeout", 15*time.Second, "per-attempt timeout (evidence fetch and AMD KDS collateral fetch)")
@@ -199,6 +199,15 @@ func orDefault(v, fallback string) string {
 // run performs the whole verification and renders the result, returning the
 // process exit code. It is the unit-testable core (no os.Exit inside).
 func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
+	// No mode alias: the retired "attestation-endpoint" name (and anything
+	// else unknown) is a usage error, not a silent fall-through to auto.
+	switch cfg.mode {
+	case "", "auto", "ratls-cert", "discovery", "attest-pq":
+	default:
+		fmt.Fprintf(errOut, "error: unknown --mode %q (valid modes: auto, ratls-cert, discovery, attest-pq)\n", cfg.mode)
+		return exitUsage
+	}
+
 	policy, err := buildPolicy(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "error: %v\n", err)
@@ -458,7 +467,7 @@ func gatherEvidence(ctx context.Context, cfg config, overrideERD []byte) (*evide
 		return gatherFromRATLSCert(ctx, dialAddr, cfg.server, cfg.timeout)
 	case "discovery":
 		return gatherFromDiscovery(ctx, baseURL, cfg.discoveryPath, cfg.server, cfg.timeout)
-	case "attestation-endpoint":
+	case "attest-pq":
 		return gatherFromEndpoint(ctx, baseURL, cfg.server, cfg.timeout)
 	default: // auto: try the LB discovery doc (what the chart serves), then the
 		// serving cert. Don't fall back on a security error — surface it.
@@ -592,7 +601,7 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	// claim "verified" for a check that then failed.
 	if cfg.meshCA != "" {
 		if ev.leaf == nil {
-			fail("--mesh-ca needs the target's leaf certificate (use a cert mode, not --mode attestation-endpoint or a discovery target)")
+			fail("--mesh-ca needs the target's leaf certificate (use a cert mode or --mode attest-pq, not a discovery target)")
 			return
 		}
 		pool, err := meshCAPool(cfg.meshCA)
@@ -622,7 +631,7 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 	}
 	if cfg.sandboxID != "" {
 		if ev.leaf == nil {
-			fail("--sandbox-id needs the target's leaf certificate (use a cert mode, not --mode attestation-endpoint)")
+			fail("--sandbox-id needs the target's leaf certificate (use a cert mode or --mode attest-pq)")
 			return
 		}
 		// One implementation of the pin, shared with the mesh's CA path — and
@@ -695,7 +704,7 @@ func applyWorkloadPolicy(oc *Outcome, cfg config, ev *evidence, held *heldAllowl
 		return
 	}
 	if ev.leaf == nil {
-		fail("--workload/--allowlist need the target's leaf certificate (use a cert mode, not --mode attestation-endpoint)")
+		fail("--workload/--allowlist need the target's leaf certificate (use a cert mode or --mode attest-pq)")
 		return
 	}
 	if ev.workload == nil {

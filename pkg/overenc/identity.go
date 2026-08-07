@@ -11,7 +11,11 @@ import (
 
 const (
 	identityTranscriptDomain = types.ProtocolVersion
-	identityNonceBytes       = 32
+	// lbTranscriptDomain separates the attest-lb transcript from the attest-pq
+	// one: the two endpoints sign different statements, so a response can
+	// never be replayed across them.
+	lbTranscriptDomain = types.BindingAttestLB
+	identityNonceBytes = 32
 )
 
 // IdentityTranscriptHash commits the hybrid server key, client nonce, exact
@@ -43,6 +47,46 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 		pub.X25519,
 		pub.MLKEM768,
 		nonce,
+	} {
+		var err error
+		if encoded, err = appendLengthPrefixed(encoded, field); err != nil {
+			return nil, err
+		}
+	}
+	sum := sha512.Sum384(encoded)
+	return sum[:], nil
+}
+
+// LBTranscriptHash commits the client nonce, exact outer serving leaf,
+// exact mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
+// report_data — the attest-lb binding for clients that ride ordinary nginx
+// TLS:
+//
+//	SHA-384( LP("c8s/attest-lb/v1") || LP(nonce) ||
+//	         LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
+//	         LP(SHA-256(mesh_CA_DER)) )
+//
+// A client recomputes it from the exact leaf it observed on the connection
+// being authorized, so a response relayed through a different serving leaf
+// fails even when both leaves share an issuer.
+func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+	if len(nonce) != identityNonceBytes {
+		return nil, fmt.Errorf("overenc: lb transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
+	}
+	if len(servingLeafDER) == 0 || len(meshLeafDER) == 0 || len(caDER) == 0 {
+		return nil, fmt.Errorf("overenc: lb transcript requires serving leaf, mesh leaf, and CA certificates")
+	}
+
+	servingHash := sha256.Sum256(servingLeafDER)
+	meshHash := sha256.Sum256(meshLeafDER)
+	caHash := sha256.Sum256(caDER)
+	var encoded []byte
+	for _, field := range [][]byte{
+		[]byte(lbTranscriptDomain),
+		nonce,
+		servingHash[:],
+		meshHash[:],
+		caHash[:],
 	} {
 		var err error
 		if encoded, err = appendLengthPrefixed(encoded, field); err != nil {

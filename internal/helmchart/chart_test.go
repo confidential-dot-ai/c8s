@@ -1927,9 +1927,172 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 		"--reload-watch=/edge-tls/public.crt",
 		"--reload-watch=/edge-tls/public.key",
 	)
+	// A WebPKI-secret front door is attest-pq-only: its host-visible serving
+	// key cannot support attest-lb's transport binding.
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest, "--front-door-mode=webpki")
 	deployment := renderedDeployment(t, out, "c8s-tls-lb")
 	if got := deployment.Spec.Template.Spec.ShareProcessNamespace; got == nil || !*got {
 		t.Fatalf("tls-lb shareProcessNamespace = %v, want true", got)
+	}
+}
+
+// assertTLSLBReadyzProbe pins the readiness gate's routing invariant in every
+// shape: the probe goes through nginx over HTTPS on the named `https` port —
+// never at the sidecar's own port, which is loopback-only and, under kata,
+// redirected into the guest's mutual-RA-TLS proxy that rejects the certless
+// kubelet prober — and nginx exact-matches /readyz onto the sidecar.
+func assertTLSLBReadyzProbe(t *testing.T, out string) {
+	t.Helper()
+	rp := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest").ReadinessProbe
+	if rp == nil || rp.HTTPGet == nil {
+		t.Fatalf("expectedWorkload must wire an httpGet /readyz probe, got %+v", rp)
+	}
+	if rp.HTTPGet.Path != "/readyz" || rp.HTTPGet.Port.StrVal != "https" || rp.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+		t.Fatalf("readiness probe must be HTTPS /readyz on the nginx port, got %+v", rp.HTTPGet)
+	}
+	renderedTLSLBNginxConfig(t, out).location(t, "exact", "/readyz").
+		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
+}
+
+// TestChartTLSLBAttestFrontDoorModeAndReadinessGate pins the endpoint-split
+// wiring: a default (mesh-issued serving leaf) front door runs cds-attest in
+// cds front-door mode with no readiness gate, and tlsLb.attest.expectedWorkload
+// wires the /readyz matched-workload gate — probed through nginx, because the
+// sidecar stays on loopback in every shape.
+func TestChartTLSLBAttestFrontDoorModeAndReadinessGate(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	attest := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, attest, "--front-door-mode=cds", "--host=127.0.0.1")
+	if attest.ReadinessProbe != nil {
+		t.Fatalf("no expectedWorkload: cds-attest must keep today's probe-less shape, got %+v", attest.ReadinessProbe)
+	}
+
+	// Readiness can only gate ingress that flows through the Service, so the
+	// gate requires the node port off (see TestChartTLSLBReadinessGateGuards).
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template with expectedWorkload: %v\n%s", err, out)
+	}
+	attest = renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	// The sidecar's single listener also carries the attestation, handshake and
+	// tunnel routes; the gate must never move it off loopback.
+	assertContainerArgs(t, attest, "--front-door-mode=cds", "--expected-workload=infer", "--host=127.0.0.1")
+	assertTLSLBReadyzProbe(t, out)
+
+	// The gate is satisfiable only if get-cert can earn the stamp: the
+	// claims flow must be wired on the same condition. Node-CVM shape:
+	// --workload-claims, the inventory socket mounted read-only at the
+	// compiled path, and the socket's supplemental group on the pod.
+	cert, ok := findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
+	if !ok {
+		t.Fatal("c8s-cert init container missing")
+	}
+	assertContainerArgs(t, cert, "--workload-claims")
+	for _, a := range cert.Args {
+		if a == "--workload-claims-guest" {
+			t.Fatal("node-CVM get-cert must use the socket, not the guest loopback")
+		}
+	}
+	var mount *corev1.VolumeMount
+	for i, m := range cert.VolumeMounts {
+		if m.Name == "workload-claims" {
+			mount = &cert.VolumeMounts[i]
+		}
+	}
+	if mount == nil || mount.MountPath != "/run/c8s/workload-claims" || !mount.ReadOnly {
+		t.Fatalf("get-cert must mount the inventory socket read-only at the compiled path, got %+v", cert.VolumeMounts)
+	}
+	dep := renderedDeployment(t, out, "c8s-tls-lb")
+	sc := dep.Spec.Template.Spec.SecurityContext
+	if sc == nil || len(sc.SupplementalGroups) != 1 || sc.SupplementalGroups[0] != 65532 {
+		t.Fatalf("pod must carry the inventory socket's supplemental group 65532, got %+v", sc)
+	}
+	var vol *corev1.Volume
+	for i, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "workload-claims" {
+			vol = &dep.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if vol == nil || vol.HostPath == nil || vol.HostPath.Path != "/var/run/nri-image-policy" {
+		t.Fatalf("workload-claims hostPath volume missing or wrong, got %+v", dep.Spec.Template.Spec.Volumes)
+	}
+
+	// Kata: the guest serves the inventory on loopback — guest flag, no mount.
+	out, err = helmTemplateKata(t, "--set-string", "tlsLb.attest.expectedWorkload=infer", "--set", "tlsLb.hostPort.enabled=false")
+	if err != nil {
+		t.Fatalf("helm template with expectedWorkload under kata: %v\n%s", err, out)
+	}
+	cert, ok = findContainer(renderedDeploymentInitContainers(t, out, "c8s-tls-lb"), "c8s-cert")
+	if !ok {
+		t.Fatal("c8s-cert init container missing under kata")
+	}
+	assertContainerArgs(t, cert, "--workload-claims", "--workload-claims-guest")
+	for _, m := range cert.VolumeMounts {
+		if m.Name == "workload-claims" {
+			t.Fatal("kata get-cert must not mount the node socket")
+		}
+	}
+	assertContainerArgs(t, renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"), "--host=127.0.0.1")
+	// The probe shape is the whole reason this gate is reachable under kata:
+	// the guest exempts only the nginx port from the inbound mesh redirect.
+	assertTLSLBReadyzProbe(t, out)
+	dep = renderedDeployment(t, out, "c8s-tls-lb")
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "workload-claims" {
+			t.Fatal("kata pod must not carry the node inventory hostPath volume")
+		}
+	}
+	if sc := dep.Spec.Template.Spec.SecurityContext; sc != nil && len(sc.SupplementalGroups) != 0 {
+		t.Fatalf("kata pod needs no inventory socket group, got %+v", sc.SupplementalGroups)
+	}
+}
+
+// TestChartTLSLBReadinessGateGuards pins the render-time guards around the
+// readiness gate. Each rejected shape is one where the gate silently gates
+// nothing, or where the front door it protects is unreachable to begin with.
+func TestChartTLSLBReadinessGateGuards(t *testing.T) {
+	gate := []string{"--set-string", "tlsLb.attest.expectedWorkload=infer"}
+	noHostPort := []string{"--set", "tlsLb.hostPort.enabled=false"}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			// Readiness withdraws Service endpoints; the node port is
+			// published by CNI portmap at sandbox creation and keeps serving.
+			name: "hostPort defeats the gate",
+			args: gate,
+			want: "tlsLb.attest.expectedWorkload cannot gate ingress while tlsLb.hostPort.enabled=true: the node port is published by CNI portmap regardless of pod readiness. Set tlsLb.hostPort.enabled=false and route through the Service, or clear expectedWorkload",
+		},
+		{
+			// Without the sidecar there is no /readyz to gate on, yet the
+			// claims wiring the gate pulls in would still render.
+			name: "gate without the sidecar it gates",
+			args: append(append([]string{}, gate...), append(noHostPort, "--set", "tlsLb.attest.enabled=false")...),
+			want: "tlsLb.attest.expectedWorkload gates the cds-attest sidecar's /readyz endpoint: set tlsLb.attest.enabled=true or clear expectedWorkload",
+		},
+		{
+			// The probe and every external client reach nginx only on the one
+			// port the guest exempts from the inbound mesh redirect.
+			name: "kata with a non-exempt nginx port",
+			args: []string{"--set", "kata.enabled=true", "--set", "ratlsMesh.enabled=false", "--set", "attestationApi.enabled=false",
+				"--set", "nriImagePolicy.enabled=false", "--set-string", "image.digest=" + testImageDigest,
+				"--set", "tlsLb.nginx.httpsPort=9443"},
+			want: "kata.enabled requires tlsLb.nginx.httpsPort 8443: the guest exempts exactly tcp:8443 from the inbound mesh redirect, so nginx on any other port is unreachable from outside the mesh, got: 9443",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("render succeeded, want a fail\n%s", out)
+			}
+			assertHelmFailMessage(t, out, tc.want)
+		})
 	}
 }
 

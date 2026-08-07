@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -21,24 +22,20 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// attestationPath is the LB's well-known endpoint for nonce-bound attestation
-// evidence (GET ?nonce=<b64url>), per c8s-verify-js PROTOCOL.md.
-const attestationPath = "/.well-known/c8s/attestation"
+// attestationPath is the LB's explicit attest-pq endpoint for nonce-bound
+// attestation evidence (GET ?nonce=<b64url>), per c8s-verify-js PROTOCOL.md.
+// There is no alias for the retired /attestation path and no fallback to
+// attest-lb: a response must carry the attest-pq binding identifier.
+const attestationPath = "/.well-known/c8s/attest-pq"
 
 // nonceSize is the verifier challenge length (bytes) for the endpoint flow.
 const nonceSize = 32
-
-// Canonical session-key lengths from c8s-verify-js PROTOCOL.md (X25519 public
-// key = 32 bytes, ML-KEM-768 encapsulation key = 1184 bytes). Documentary — the
-// verifier does not enforce them; see evidenceFromEndpointJSON for why.
-const (
-	x25519PubLen     = 32
-	mlkem768EncapLen = 1184
-)
 
 // evidence is normalized attestation evidence ready for verification, plus the
 // metadata needed to explain the result to a human. platform + rawEvidence are
@@ -65,8 +62,9 @@ type evidence struct {
 	certSHA256 string
 	// bindingNote explains what the REPORTDATA is bound to.
 	bindingNote string
-	// leaf is the certificate the evidence came off (cert modes only; nil
-	// otherwise). Kept so --mesh-ca can check what CDS actually signed.
+	// leaf is the CDS-issued leaf the evidence speaks for: the serving cert in
+	// cert modes, the transcript-committed mesh leaf in attest-pq mode, nil
+	// otherwise. Kept so --mesh-ca can check what CDS actually signed.
 	leaf *x509.Certificate
 	// sandboxID is the CRI pod sandbox the leaf names (cert modes only; ""
 	// when the cert carries no sandbox-ID extension). CDS stamps it into the
@@ -95,17 +93,21 @@ func platformOrDefault(p string) string {
 	return p
 }
 
-// attestationResponse is the JSON the attestation endpoint returns. The evidence
-// object is kept raw and forwarded verbatim (platform-specific); only the nonce
-// and session keys (used to derive the REPORTDATA binding) are parsed here.
+// attestationResponse is the JSON the attest-pq endpoint returns. The evidence
+// object is kept raw and forwarded verbatim (platform-specific); the version,
+// nonce, session keys, served mesh chain, and identity proof (which together
+// derive and authenticate the REPORTDATA binding) are parsed here.
 type attestationResponse struct {
+	Version       string          `json:"version"`
 	Platform      string          `json:"platform"`
 	Nonce         string          `json:"nonce"`
 	Evidence      json.RawMessage `json:"evidence"`
+	CDSCertPEM    string          `json:"cds_cert_pem"`
 	SessionPubkey struct {
 		X25519   string `json:"x25519"`
 		Mlkem768 string `json:"mlkem768"`
 	} `json:"session_pubkey"`
+	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
 }
 
 // gatherFromRATLSCert dials an RA-TLS TLS endpoint, captures the serving
@@ -211,6 +213,13 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("parse attestation response: %w", err)
 	}
+	// This parser consumes exactly the attest-pq binding. Anything else —
+	// including the retired "c8s-verify/v1" tag or a cross-endpoint attest-lb
+	// response — is rejected even if its evidence is otherwise valid: the
+	// endpoints are non-negotiated and there is no downgrade.
+	if r.Version != types.BindingAttestPQ {
+		return nil, fmt.Errorf("attestation response version %q is not the attest-pq binding %q", r.Version, types.BindingAttestPQ)
+	}
 	if len(r.Evidence) == 0 {
 		return nil, fmt.Errorf("attestation response carries no evidence")
 	}
@@ -238,34 +247,133 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	if len(x25519) == 0 && len(mlkem) == 0 {
 		return nil, fmt.Errorf("attestation response has no session_pubkey; pass --expected-report-data to verify bare evidence")
 	}
-	// Session-key lengths are NOT enforced. The freshness proof's security rests
-	// on REPORTDATA == SHA-384(x25519‖mlkem768‖nonce) matching the
-	// hardware-signed report (checked downstream): preimage resistance means a
-	// response can't present session keys the TEE didn't bind, whatever their
-	// length, and a re-split of the same bytes hashes the same (this verifier
-	// never uses the keys beyond the binding, so the split is moot). The exact
-	// lengths are a per-platform PROTOCOL.md detail (x25519PubLen /
-	// mlkem768EncapLen document the current c8s scheme), not a property to police
-	// here — enforcing them would wrongly reject other platforms' bindings.
-	erd := endpointReportData(x25519, mlkem, nonce)
+
+	leaf, ca, err := committedMeshChain(r.CDSCertPEM, r.IdentityProof)
+	if err != nil {
+		return nil, err
+	}
+	// The transcript rejects wrong-size keys and nonces: report_data framing is
+	// length-prefixed, so a wrong-size field can never reproduce the served
+	// hash — refuse it here instead of failing report-data match downstream.
+	erd, err := overenc.IdentityTranscriptHash(
+		overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, leaf.Raw, ca.Raw)
+	if err != nil {
+		return nil, fmt.Errorf("compute identity transcript: %w", err)
+	}
+	// §5 step 4 (proof of possession) and step 5 (chain to the committed CA)
+	// come before anything from the leaf is surfaced. The hardware evidence
+	// itself is verified downstream against erd; a failure here means the
+	// responder does not hold the committed identity, whatever its evidence
+	// says.
+	if err := verifyIdentityProof(r.IdentityProof, leaf, erd); err != nil {
+		return nil, &securityError{err: err}
+	}
+	if err := verifyCommittedChain(leaf, ca); err != nil {
+		return nil, &securityError{err: err}
+	}
+
+	// The CA-vouched leaf stamps, read off the transcript-committed mesh leaf.
+	// --mesh-ca / --workload enforce them downstream exactly as in cert modes.
+	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
 	return &evidence{
 		platform:    platformOrDefault(r.Platform),
 		rawEvidence: r.Evidence,
 		erd:         erd,
 		fresh:       fresh,
 		source:      source,
-		bindingNote: "REPORTDATA binds the attested session keys + nonce",
+		bindingNote: "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		leaf:        leaf,
+		sandboxID:   sandboxID,
+		sandboxErr:  sandboxErr,
+		workload:    workload,
+		workloadErr: workloadErr,
 	}, nil
 }
 
-// endpointReportData computes the freshness anchor SHA-384(x25519 ‖ mlkem768 ‖
-// nonce) per c8s-verify-js PROTOCOL.md — unpadded (see evidence.erd).
-func endpointReportData(x25519, mlkem, nonce []byte) []byte {
-	h := sha512.New384()
-	h.Write(x25519)
-	h.Write(mlkem)
-	h.Write(nonce)
-	return h.Sum(nil)
+// committedMeshChain parses the served mesh chain and returns the leaf plus
+// the issuing CA the identity proof commits: the first CERTIFICATE block is
+// the mesh leaf; the CA is selected among the remaining blocks by
+// SHA-256(DER) == identity_proof.mesh_ca_sha256 — by commitment, not by
+// position, so an extra served certificate cannot displace the CA the
+// transcript binds.
+func committedMeshChain(chainPEM string, proof *types.MeshIdentityProof) (leaf, ca *x509.Certificate, err error) {
+	if proof == nil {
+		return nil, nil, fmt.Errorf("attestation response carries no identity_proof")
+	}
+	certs, err := certutil.ParsePEMCertificates([]byte(chainPEM))
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse cds_cert_pem: %w", err)
+	}
+	if len(certs) < 2 {
+		return nil, nil, fmt.Errorf("cds_cert_pem must carry the mesh leaf and its issuing CA, got %d certificate(s)", len(certs))
+	}
+	leaf = certs[0]
+	caHash, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(proof.MeshCASHA256, "="))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode identity proof mesh_ca_sha256: %w", err)
+	}
+	for _, candidate := range certs[1:] {
+		sum := sha256.Sum256(candidate.Raw)
+		if bytes.Equal(sum[:], caHash) {
+			// Equal hashes mean byte-equal certificates, so a repeat is not
+			// ambiguous; take the first.
+			return leaf, candidate, nil
+		}
+	}
+	return nil, nil, &securityError{err: fmt.Errorf("no served certificate matches the transcript-committed mesh_ca_sha256 (possible CA substitution)")}
+}
+
+// verifyIdentityProof checks proof of possession of the mesh leaf key (§5
+// step 4): the proof must commit exactly the served leaf and carry an
+// ECDSA-SHA384 signature by that leaf's key over sha512.Sum384(transcript) —
+// the same construction the sidecar's prove() emits.
+func verifyIdentityProof(proof *types.MeshIdentityProof, leaf *x509.Certificate, transcript []byte) error {
+	if proof.Algorithm != types.MeshIdentityProofECDSASHA384 {
+		return fmt.Errorf("unsupported identity proof algorithm %q (want %q)", proof.Algorithm, types.MeshIdentityProofECDSASHA384)
+	}
+	claimed, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(proof.LeafSHA256, "="))
+	if err != nil {
+		return fmt.Errorf("decode identity proof leaf_sha256: %w", err)
+	}
+	leafHash := sha256.Sum256(leaf.Raw)
+	if !bytes.Equal(claimed, leafHash[:]) {
+		return fmt.Errorf("identity proof leaf_sha256 does not match the served mesh leaf")
+	}
+	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("mesh leaf public key is %T, want ECDSA", leaf.PublicKey)
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(proof.Signature, "="))
+	if err != nil {
+		return fmt.Errorf("decode identity proof signature: %w", err)
+	}
+	digest := sha512.Sum384(transcript)
+	if !ecdsa.VerifyASN1(pub, digest[:], signature) {
+		return fmt.Errorf("identity proof signature did not verify: the responder does not hold the committed mesh leaf key")
+	}
+	return nil
+}
+
+// verifyCommittedChain requires the committed mesh leaf to be a currently
+// valid certificate issued by the committed CA (§5 step 5). The CA here is
+// transcript-derived, not operator-pinned; --mesh-ca additionally pins it via
+// the standard chain check downstream.
+func verifyCommittedChain(leaf, ca *x509.Certificate) error {
+	if err := leaf.CheckSignatureFrom(ca); err != nil {
+		return fmt.Errorf("mesh leaf is not signed by the transcript-committed CA: %w", err)
+	}
+	now := time.Now()
+	for _, c := range []struct {
+		role string
+		cert *x509.Certificate
+	}{{"leaf", leaf}, {"CA", ca}} {
+		if now.Before(c.cert.NotBefore) || now.After(c.cert.NotAfter) {
+			return fmt.Errorf("committed mesh %s is expired or not yet valid (not_before=%s not_after=%s)",
+				c.role, c.cert.NotBefore.Format(time.RFC3339), c.cert.NotAfter.Format(time.RFC3339))
+		}
+	}
+	return nil
 }
 
 // keyAnchor extracts the unpadded SHA-384 anchor from ReportDataForKey's

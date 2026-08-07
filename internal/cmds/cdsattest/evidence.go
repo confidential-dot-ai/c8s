@@ -10,10 +10,11 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// EvidenceProvider yields TEE attestation evidence whose report_data equals the
-// identity transcript hash (or the serving-leaf SPKI binding for pq=false). The
-// returned evidence is the platform's attestation-rs evidence JSON (SnpEvidence,
-// AzSnpEvidence, TdxEvidence, …) the browser verifier consumes verbatim.
+// EvidenceProvider yields TEE attestation evidence whose report_data equals
+// the endpoint's transcript hash (overenc.IdentityTranscriptHash for
+// attest-pq, overenc.LBTranscriptHash for attest-lb). The returned evidence is
+// the platform's attestation-rs evidence JSON (SnpEvidence, AzSnpEvidence,
+// TdxEvidence, …) the client verifier consumes verbatim.
 type EvidenceProvider interface {
 	Evidence(ctx context.Context, reportData []byte) (evidence json.RawMessage, platform, generation string, err error)
 }

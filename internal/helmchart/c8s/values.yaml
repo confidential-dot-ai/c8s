@@ -1285,11 +1285,11 @@ tlsLb:
     #    nginx. Must be shorter than the cert TTL issued by CDS.
     renewInterval: "1h"
 
-  # -- Attestation + over-encryption sidecar (c8s-verify/v1). When enabled, an
-  # in-pod `c8s cds-attest` container serves the *dynamic* browser-facing
-  # endpoints (the per-session attestation challenge and the post-quantum
-  # over-encryption handshake) and nginx reverse-proxies `/.well-known/c8s/` to
-  # it on loopback. The static CDS/mesh-CA certs are still served by nginx via
+  # -- Attestation + over-encryption sidecar (the c8s-verify protocol). When
+  # enabled, an in-pod `c8s cds-attest` container serves the *dynamic*
+  # client-facing endpoints (the explicit attest-pq and attest-lb per-session
+  # challenges and the post-quantum over-encryption handshake) and nginx
+  # reverse-proxies `/.well-known/c8s/` to it on loopback. The static CDS/mesh-CA certs are still served by nginx via
   # `discovery`. The browser client is lunal-dev/c8s-verify-js (wire contract:
   # c8s-verify-js/PROTOCOL.md).
   #
@@ -1312,6 +1312,25 @@ tlsLb:
     # -- Attestation-api URL the sidecar binds session keys against. Empty
     # defaults to this chart's attestation-api.
     attestationApiURL: ""
+    # -- Workload-verified ingress gate: when set to an allowlist entry name,
+    # the sidecar serves /readyz as 200 only while the installed mesh identity
+    # leaf is a usable credential carrying a matched-workload stamp with
+    # exactly this name, and the chart wires a readinessProbe on the cds-attest
+    # container (an HTTPS httpGet through nginx, which proxies /readyz to the
+    # sidecar's loopback port), so ingress withholds traffic while the front
+    # door's committed mesh identity is unnamed. Setting it also switches the
+    # tls-lb get-cert onto the workload-claims flow (inventory socket mount +
+    # supplemental group on node-CVM, guest loopback under kata) — without that
+    # no stamp could ever arrive and the gate would hold the front door at 503
+    # forever. The named entry must match the tls-lb pod's own non-injected
+    # container set (nginx).
+    #
+    # Requires attest.enabled and hostPort.enabled: false — readiness only
+    # withdraws Service endpoints, while a hostPort is published by the CNI
+    # portmap plugin independently of pod readiness, so the gate would withhold
+    # nothing. The chart fails the render on either mistake. Empty keeps
+    # today's always-ready behavior.
+    expectedWorkload: ""
     # -- Container resource requests/limits for the sidecar.
     resources: {}
 
