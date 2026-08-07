@@ -138,6 +138,56 @@ func TestNewServerTLSConfigWithoutClientPolicy(t *testing.T) {
 	}
 }
 
+func TestNewServerTLSConfigWithClientCAs(t *testing.T) {
+	_, ca := generateCACert(t)
+
+	t.Run("pool installed with verify-if-given default", func(t *testing.T) {
+		cfg := testServerConfig()
+		cfg.ClientCAs = []*x509.Certificate{ca}
+
+		tlsCfg, _, err := NewServerTLSConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tlsCfg.ClientCAs == nil {
+			t.Fatal("ClientCAs pool not installed")
+		}
+		if tlsCfg.ClientAuth != tls.VerifyClientCertIfGiven {
+			t.Errorf("ClientAuth = %v, want the VerifyClientCertIfGiven default", tlsCfg.ClientAuth)
+		}
+		if tlsCfg.VerifyPeerCertificate != nil {
+			t.Error("VerifyPeerCertificate must stay nil: ClientCAs verification is crypto/tls's, not RA-TLS")
+		}
+	})
+
+	t.Run("explicit ClientAuth is kept", func(t *testing.T) {
+		cfg := testServerConfig()
+		cfg.ClientCAs = []*x509.Certificate{ca}
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+
+		tlsCfg, _, err := NewServerTLSConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tlsCfg.ClientAuth != tls.RequireAndVerifyClientCert {
+			t.Errorf("ClientAuth = %v, want RequireAndVerifyClientCert kept", tlsCfg.ClientAuth)
+		}
+	})
+
+	t.Run("ClientCAs and ClientPolicy are mutually exclusive", func(t *testing.T) {
+		// ClientPolicy admits a self-signed RA-TLS peer, which ClientCAs exists
+		// to refuse; combining them must be a construction-time error, not a
+		// silently weaker listener.
+		cfg := testServerConfig()
+		cfg.ClientCAs = []*x509.Certificate{ca}
+		cfg.ClientPolicy = &VerifyPolicy{}
+
+		if _, _, err := NewServerTLSConfig(cfg); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("err = %v, want the mutual-exclusion refusal", err)
+		}
+	})
+}
+
 func TestNewClientTLSConfig(t *testing.T) {
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{Policy: &VerifyPolicy{}})
 	if err != nil {
