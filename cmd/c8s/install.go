@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -1323,12 +1324,12 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 	if repo == "" {
 		return nil
 	}
-	if _, err := exec.LookPath("crane"); err != nil {
+	if !crane.Available() {
 		fmt.Fprintf(os.Stderr, "warning: cannot verify operator image %s:%s exists (crane not on PATH); a missing tag surfaces only as ImagePullBackOff after install\n", repo, tag)
 		return nil
 	}
-	if _, err := craneDigest(ctx, repo+":"+tag); err != nil {
-		if isImageNotFound(err) {
+	if _, err := crane.Digest(ctx, repo+":"+tag); err != nil {
+		if crane.IsNotFound(err) {
 			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not verify operator image %s:%s exists (%v); continuing\n", repo, tag, err)
@@ -1626,7 +1627,7 @@ func podTemplateImages(template corev1.PodTemplateSpec) []string {
 
 func appendResolvedWorkloadImageArgs(ctx context.Context, helmArgs []string, images []string) ([]string, error) {
 	return buildWorkloadImageArgs(helmArgs, images, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1678,20 +1679,6 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 	return parsed.String(), repo + "@" + parsed.String(), nil
 }
 
-// isImageNotFound reports whether a resolve error means the reference does
-// not exist in the registry (as opposed to auth/network trouble). crane
-// surfaces the registry's OCI error codes verbatim: MANIFEST_UNKNOWN for a
-// missing tag, NAME_UNKNOWN for a missing repository. Matching them lets the
-// callers attach the tag-coupling guidance only when the tag is genuinely
-// absent — a 401 or a DNS failure gets the raw error instead.
-func isImageNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "MANIFEST_UNKNOWN") || strings.Contains(msg, "NAME_UNKNOWN")
-}
-
 // tagCouplingHint explains a missing component image in terms of the c8s
 // publish model, so the operator lands on the right knob instead of retrying
 // tags. The c8s component images (operator, cds, …) publish in lockstep
@@ -1704,39 +1691,18 @@ func tagCouplingHint(repo, tag string) string {
 	return fmt.Sprintf("every c8s component image must be published at the install tag (they publish in lockstep; a mismatched older operator would silently lack webhook features the chart expects). If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. Verify with: crane ls %s", tag, tag, repo)
 }
 
-// craneDigest resolves an image reference to its registry digest by shelling
-// out to `crane digest <ref>`. crane handles registry auth (docker config),
-// manifest lists, and the v2 protocol — reimplementing that in-process would
-// pull a heavyweight registry client for one lookup. The returned value is a
-// bare "sha256:<hex>".
-func craneDigest(ctx context.Context, ref string) (string, error) {
-	out, err := exec.CommandContext(ctx, "crane", "digest", ref).Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("crane digest %q: %w: %s", ref, err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", fmt.Errorf("crane digest %q: %w", ref, err)
-	}
-	digest := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(digest, "sha256:") {
-		return "", fmt.Errorf("crane digest %q returned unexpected value %q", ref, digest)
-	}
-	return digest, nil
-}
-
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
 // registry digest (via crane) and appends the helm --set flags that pin it.
 func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
-	if _, err := exec.LookPath("crane"); err != nil {
-		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f: %w", err)
+	if !crane.Available() {
+		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f")
 	}
 	enabled, err := componentEnabledPredicate(ctx, chartPath, helmArgs)
 	if err != nil {
 		return nil, err
 	}
 	return buildDigestArgs(helmArgs, tag, components, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1869,7 +1835,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 		repo := c.repository
 		digest, err := resolve(repo + ":" + tag)
 		if err != nil {
-			if isImageNotFound(err) {
+			if crane.IsNotFound(err) {
 				return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
 			}
 			return nil, err

@@ -16,6 +16,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -263,12 +264,12 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			CDSURL:                opts.CDSURL,
 			AttestationApiURL:     opts.AttestationApiURL,
 			CDSMeasurements:       opts.CDSMeasurements,
-			CertFSGroup:           int64Ptr(opts.CertFSGroup),
+			CertFSGroup:           ptr.To(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,
-			GetCertRunAsUser:      int64Ptr(opts.GetCertRunAsUser),
-			GetCertRunAsGroup:     int64Ptr(opts.GetCertRunAsGroup),
-			GetCertRunAsNonRoot:   boolPtr(opts.GetCertRunAsNonRoot),
+			GetCertRunAsUser:      ptr.To(opts.GetCertRunAsUser),
+			GetCertRunAsGroup:     ptr.To(opts.GetCertRunAsGroup),
+			GetCertRunAsNonRoot:   ptr.To(opts.GetCertRunAsNonRoot),
 			KataEnforce:           opts.KataEnforce,
 			HardwarePlatform:      opts.HardwarePlatform,
 			KataGuestReadyGate:    opts.KataGuestReadyGate,
@@ -428,12 +429,4 @@ func webhookCertRotator(ca *issuer.CA, hostnames []string, certDir string, leafT
 			}
 		}
 	}
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func int64Ptr(v int64) *int64 {
-	return &v
 }

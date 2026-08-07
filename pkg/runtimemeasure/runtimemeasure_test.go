@@ -82,6 +82,26 @@ func TestForOperatorKeyIsByteExact(t *testing.T) {
 	}
 }
 
+// TestForOperatorKeyMatchesHardware pins the operator-key extend to the exact
+// value a B1+B2 hardware run produced: keyDigest is SHA-384(operator pubkey)
+// from that run, wantRTMR3 what /sys/.../rtmr3:sha384 read back after launch.
+func TestForOperatorKeyMatchesHardware(t *testing.T) {
+	const (
+		keyDigest = "0c06aa4f364e480ece13c58b1585dab43d7222fa331ccc9ff05ea18fdd39a4d9d75e87d711ac6aeda2782c2e339de7c1"
+		wantRTMR3 = "db479dfe6333f8d3a2761494b6004bc4332688c6d5b72577b48ecfc0409e4cb53988dcd26b89ec605a81b00e7f0e0863"
+	)
+	dig, err := hex.DecodeString(keyDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ForOperatorKey hashes the pubkey; here we already have the digest, so
+	// pin the second step (the Zero extend) directly.
+	got := Extend(Zero, [Size]byte(dig))
+	if hex.EncodeToString(got[:]) != wantRTMR3 {
+		t.Errorf("RTMR[3] from key digest = %x, want %s (hardware-confirmed)", got, wantRTMR3)
+	}
+}
+
 func TestFromDigestsSeededFromZeroMatchesFromDigests(t *testing.T) {
 	digests := []string{digestA, digestB}
 	if FromDigestsSeeded(Zero, digests) != FromDigests(digests) {

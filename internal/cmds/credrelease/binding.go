@@ -29,22 +29,6 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 // Var (not const) so tests can point it at a temp file.
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 
-// expectedRTMR3ForKey computes the RTMR[3] value a guest reports after the
-// initrd extends the zeroed register once with SHA-384(pubkey) — the bare
-// operator-key seed (runtimemeasure.ForOperatorKey; the convention lives
-// there so this service, the initrd, and every verifier cannot drift apart).
-//
-// The bare seed — no workload extends — is correct HERE, at service startup,
-// even though remote verifiers compare against the seeded workload chain: the
-// node image runs no workload measurer, so at the moment this service starts
-// RTMR[3] must equal the seed exactly. Any extension beyond it means an
-// unexpected measurer ran or the register was tampered with, and the
-// comparison fails closed.
-func expectedRTMR3ForKey(pubkey []byte) []byte {
-	reg := runtimemeasure.ForOperatorKey(pubkey)
-	return reg[:]
-}
-
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.
 // Returns the raw 48 bytes.
 func readOwnRTMR3() ([]byte, error) {
@@ -72,12 +56,18 @@ func verifyKeyMeasured(pubkey []byte) error {
 	if err != nil {
 		return err
 	}
-	want := expectedRTMR3ForKey(pubkey)
+	// The bare operator-key seed — no workload extends — is correct HERE, at
+	// service startup, even though remote verifiers compare against the seeded
+	// workload chain: the node image runs no workload measurer, so at this
+	// moment RTMR[3] must equal the seed exactly. Any extension beyond it means
+	// an unexpected measurer ran or the register was tampered with, and the
+	// comparison fails closed.
+	want := runtimemeasure.ForOperatorKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
-	if !bytes.Equal(own, want) {
+	if !bytes.Equal(own, want[:]) {
 		return fmt.Errorf(
 			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
-			hex.EncodeToString(own), hex.EncodeToString(want))
+			hex.EncodeToString(own), hex.EncodeToString(want[:]))
 	}
 	return nil
 }

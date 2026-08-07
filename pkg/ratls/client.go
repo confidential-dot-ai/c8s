@@ -1,6 +1,7 @@
 package ratls
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,6 +30,14 @@ func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*h
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)
 	}
+	return HTTPClient(tlsCfg), nil
+}
+
+// HTTPClient wraps tlsCfg in the standard RA-TLS client shape: 5s dial, 10s
+// response-header, 30s overall, MaxIdleConns=5, MaxConnsPerHost=2. Shared by
+// the delegated verifier above and the in-process one (internal/localverify)
+// so the two clients cannot drift on pooling or timeouts.
+func HTTPClient(tlsCfg *tls.Config) *http.Client {
 	return &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
@@ -39,5 +48,5 @@ func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*h
 			MaxConnsPerHost:       2,
 			TLSClientConfig:       tlsCfg,
 		},
-	}, nil
+	}
 }

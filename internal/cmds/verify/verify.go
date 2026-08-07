@@ -23,6 +23,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -1013,7 +1014,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 				launch, hex.EncodeToString(plan.pins.image.MRTD[:]))
 			return oc
 		}
-		if len(plan.policy.Measurements) > 0 && !ratls.MeasurementAllowed(mb, plan.policy.Measurements) {
+		if len(plan.policy.Measurements) > 0 && !attestationclient.MeasurementAllowed(mb, plan.policy.Measurements) {
 			oc.Error = "launch measurement not in --measurements allowlist"
 			return oc
 		}

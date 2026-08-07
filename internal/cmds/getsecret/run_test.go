@@ -1,15 +1,13 @@
 package getsecret
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 )
 
 func TestParseSecretSpec(t *testing.T) {
@@ -55,15 +53,17 @@ func TestParseSecretSpec(t *testing.T) {
 func validConfig(t *testing.T) config {
 	t.Helper()
 	return config{
-		CDSURL:            "https://cds.example",
-		AttestationApiURL: "http://127.0.0.1:8080",
-		Secrets:           []secretRequest{{Name: "DB", Path: "/api/db"}},
-		OutDir:            t.TempDir(),
-		FileMode:          "0640",
-		Attempts:          3,
-		RetryInterval:     time.Second,
-		RequestTimeout:    time.Second,
-		InventoryTimeout:  time.Second,
+		Config: sidecar.Config{
+			CDSURL:            "https://cds.example",
+			AttestationApiURL: "http://127.0.0.1:8080",
+			Attempts:          3,
+			RetryInterval:     time.Second,
+			RequestTimeout:    time.Second,
+			InventoryTimeout:  time.Second,
+		},
+		Secrets:  []secretRequest{{Name: "DB", Path: "/api/db"}},
+		OutDir:   t.TempDir(),
+		FileMode: "0640",
 	}
 }
 
@@ -225,29 +225,26 @@ func TestParseFileMode(t *testing.T) {
 
 func ptr(c config) *config { return &c }
 
-// The two endpoints are compiled: --workload-claims-guest picks a shape, never
-// an address, so a wrong setting fails closed against a port nothing serves
-// rather than redirecting redemption to a rogue inventory.
-func TestEndpointSelectsCompiledShape(t *testing.T) {
-	if got, want := (config{}).endpoint(), workloadclaims.InventoryEndpoint(); got != want {
-		t.Errorf("node-CVM endpoint = %q, want the compiled unix socket %q", got, want)
-	}
-	guest := config{WorkloadClaimsGuest: true}.endpoint()
-	if want := workloadclaims.GuestInventoryEndpoint(); guest != want {
-		t.Errorf("kata endpoint = %q, want the compiled guest loopback %q", guest, want)
-	}
-	// workloadclaims refuses anything that is not one of the two compiled
-	// endpoints, so a shape it rejects would fail every redemption. Use a real
-	// key: a nil one fails at marshalling, short of the endpoint check.
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
+// An unwritable output directory fails loudly rather than reporting success
+// with no file on disk.
+func TestWriteAllUnwritable(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.OutDir = filepath.Join(cfg.OutDir, "readonly", "secrets")
+	if err := os.MkdirAll(filepath.Dir(cfg.OutDir), 0o500); err != nil {
 		t.Fatal(err)
 	}
-	_, err = workloadclaims.FetchSandboxToken(t.Context(), guest, time.Millisecond, pub, []byte("nonce"))
-	if err == nil {
-		t.Fatal("expected the guest endpoint to fail with nothing listening")
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which ignores the directory mode")
 	}
-	if strings.Contains(err.Error(), "endpoint must be") {
-		t.Fatalf("guest endpoint rejected by the compiled-endpoint check: %v", err)
+	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+		t.Fatal("an unwritable directory reported success")
+	}
+}
+
+func TestWriteAllRejectsBadMode(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.FileMode = "notamode"
+	if err := writeAll(cfg, map[string][]byte{"DB": []byte("v")}); err == nil {
+		t.Fatal("a bad file mode was accepted")
 	}
 }

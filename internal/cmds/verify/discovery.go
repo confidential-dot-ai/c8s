@@ -3,12 +3,8 @@ package verify
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,9 +51,7 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 	u.Path = path
 	u.RawQuery = ""
 
-	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
-	}}
+	client := insecureClient(serverName, timeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, "", err
@@ -92,16 +86,9 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*eviden
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
 	}
-	if len(d.Attestation.Evidence) == 0 {
-		return nil, fmt.Errorf("discovery document carries no attestation.evidence")
-	}
-	block, _ := pem.Decode([]byte(d.CDSTLS.CertificatePEM))
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("discovery cds_tls.certificate_pem is not a PEM certificate")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, rd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {
-		return nil, fmt.Errorf("parse cds cert: %w", err)
+		return nil, err
 	}
 	body, err := authenticateLeafBody(cert)
 	if err != nil {
@@ -110,14 +97,6 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*eviden
 	chainVerified, err := authorizeLeafBody(cert, body, trust)
 	if err != nil {
 		return nil, err
-	}
-	challenge, err := base64.StdEncoding.DecodeString(d.Attestation.Challenge)
-	if err != nil {
-		return nil, fmt.Errorf("decode challenge: %w", err)
-	}
-	rd, err := ratls.ReportDataForKey(cert.PublicKey, challenge)
-	if err != nil {
-		return nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
 	}
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
