@@ -336,11 +336,11 @@ func (f *proxyRunFixture) roundTrip(t *testing.T, payload string) string {
 	// transient situations: the accept loop closing an accepted conn at a
 	// connection limit, and the upstream RA-TLS leg failing its dial or
 	// handshake (the handler then closes the downstream with the payload
-	// unread, which the kernel turns into an RST). On a starved CI runner the
-	// second case fires rarely; retry a reset a few times — the assertions on
-	// the response bytes and on connLimitRejected still catch every
-	// non-transient bug, and a persistent failure surfaces the proxy's access
-	// log so the cause is visible instead of an opaque ECONNRESET.
+	// unread, which the kernel turns into an RST). On a starved CI runner
+	// either case fires rarely; retry a reset a few times — the response-byte
+	// assertions and the drain guards still catch every non-transient bug,
+	// and a persistent failure surfaces the proxy's access log so the cause
+	// is visible instead of an opaque ECONNRESET.
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -381,9 +381,16 @@ func TestProxyRunEndToEnd(t *testing.T) {
 			t.Fatalf("connection %d: got %q, want %q", i, got, want)
 		}
 	}
-	if v := testutil.ToFloat64(f.p.metrics.connLimitRejected); v != 0 {
-		t.Errorf("connLimitRejected = %v after sequential connections, want 0 (slots must be released)", v)
-	}
+	// Leak detection is the per-iteration drain guard above: a slot that is
+	// never released times out the 5s wait, and a fully wedged semaphore
+	// exhausts the round trip's reset retries. connLimitRejected is NOT
+	// asserted to be zero — a transient rejection is designed behavior when
+	// an accept lands in the window between the client seeing EOF and the
+	// handlers' deferred releases, and asserting a zero counter turns that
+	// scheduling race into a flake (seen on loaded CI runners). Drained means
+	// released.
+	assertEventually(t, 5*time.Second, func() bool { return len(f.p.connSem) == 0 },
+		"semaphore slots not released after the final connection")
 
 	// Listener-ready logs must report the TLS posture per listener.
 	records := recordsWithMsg(decodeLogRecords(f.logBuf.String()), "listener ready")
