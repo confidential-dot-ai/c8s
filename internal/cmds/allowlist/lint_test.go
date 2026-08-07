@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/crane/cranetest"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 )
 
@@ -90,7 +91,7 @@ func TestLintAnyCountWarning(t *testing.T) {
 }
 
 func TestLintOnlineChecks(t *testing.T) {
-	fakeCrane(t)
+	cranetest.Install(t)
 	goodRef := "registry.example.com/app@" + digA
 	missingRef := "registry.example.com/app@" + digB
 	f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[
@@ -118,7 +119,7 @@ func TestLintOnlineChecks(t *testing.T) {
 }
 
 func TestInspectImageText(t *testing.T) {
-	fakeCrane(t)
+	cranetest.Install(t)
 	out, _, err := runCmd("inspect-image", "registry.example.com/app:v1")
 	if err != nil {
 		t.Fatalf("inspect-image: %v", err)
@@ -140,7 +141,7 @@ func TestInspectImageText(t *testing.T) {
 }
 
 func TestInspectImageJSON(t *testing.T) {
-	fakeCrane(t)
+	cranetest.Install(t)
 	out, _, err := runCmd("inspect-image", "registry.example.com/app:v1", "-o", "json")
 	if err != nil {
 		t.Fatalf("inspect-image -o json: %v", err)

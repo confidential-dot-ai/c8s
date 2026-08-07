@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -183,12 +184,12 @@ func TestMutatePodUsesConfiguredCertAndInitSecurity(t *testing.T) {
 		CDSURL:              "http://cds",
 		AttestationApiURL:   "http://attestation-api",
 		CertDir:             "/etc/c8s/certs",
-		CertFSGroup:         int64Ptr(4242),
+		CertFSGroup:         ptr.To(int64(4242)),
 		CertKeyMode:         "0440",
 		CertRenewInterval:   time.Hour,
-		GetCertRunAsUser:    int64Ptr(0),
-		GetCertRunAsGroup:   int64Ptr(0),
-		GetCertRunAsNonRoot: boolPtr(false),
+		GetCertRunAsUser:    ptr.To(int64(0)),
+		GetCertRunAsGroup:   ptr.To(int64(0)),
+		GetCertRunAsNonRoot: ptr.To(false),
 	})
 
 	if got := *pod.Spec.SecurityContext.FSGroup; got != 4242 {
@@ -1264,7 +1265,7 @@ func TestMutatePodAppliesZeroFSGroup(t *testing.T) {
 	}
 	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
 		GetCertImage: "image",
-		CertFSGroup:  int64Ptr(0),
+		CertFSGroup:  ptr.To[int64](0),
 	})
 	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
 		t.Fatal("fsGroup 0 was not applied")

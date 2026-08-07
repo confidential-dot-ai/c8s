@@ -42,7 +42,7 @@ func newRATLSClient(cfg Config, operatorPubPEM []byte) *http.Client {
 // verifyServerCert runs the RA-TLS check on the :8443 leaf cert: it pulls the
 // embedded TDX quote, binds it to the cert's own public key, verifies it
 // in-process with attestation-go (HW chain + report_data binding), and asserts
-// rtmr_3 equals expectedRTMR3(op_pub). Fails closed on any missing piece.
+// rtmr_3 equals rtmr3.ForOperatorKey(op_pub). Fails closed on any missing piece.
 func verifyServerCert(leaf *x509.Certificate, operatorPubPEM []byte) error {
 	att, err := ratls.ExtractAttestation(leaf)
 	if err != nil {

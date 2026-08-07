@@ -4,26 +4,21 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"strings"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
 )
 
-// TestExpectedRTMR3 checks the client computes the same value the guest
-// measures: RTMR[3] = SHA384(0x00*48 || SHA384(pubkey)).
-func TestExpectedRTMR3(t *testing.T) {
-	pub := []byte("-----BEGIN PUBLIC KEY-----\nMFk...\n-----END PUBLIC KEY-----\n")
-	got := expectedRTMR3(pub)
-
-	keyDigest := sha512.Sum384(pub)
-	want := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	if got != hex.EncodeToString(want[:]) {
-		t.Errorf("expectedRTMR3 = %s, want %s", got, hex.EncodeToString(want[:]))
-	}
+// expectedRTMR3 adapts rtmr3.ForOperatorKey to the hex form the stubbed
+// verifier serves. The formula and hardware vectors are pinned in pkg/rtmr3.
+func expectedRTMR3(pub []byte) string {
+	v := rtmr3.ForOperatorKey(pub)
+	return hex.EncodeToString(v[:])
 }
 
 // TestPublicKeyPEMFromPrivateMatchesMarshal confirms deriving the pubkey from a

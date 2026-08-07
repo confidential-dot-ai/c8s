@@ -1,11 +1,11 @@
 package volume
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -75,7 +75,7 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	verity, err := Build(cmdCtx(cmd), BuildConfig{
+	verity, err := Build(cmd.Context(), BuildConfig{
 		Source: cfg.source, Out: cfg.out, Key: key, WorkDir: cfg.workDir, Run: cfg.run,
 	})
 	if err != nil {
@@ -104,11 +104,11 @@ func runCreate(cmd *cobra.Command, o *options, cfg createConfig) error {
 	if err != nil {
 		return err
 	}
-	hc, err := o.HTTPClient(cmdCtx(cmd))
+	hc, err := o.HTTPClient(cmd.Context())
 	if err != nil {
 		return err
 	}
-	if err := putBlob(cmdCtx(cmd), hc, trimSlash(o.URL), path, blob, signer); err != nil {
+	if err := putBlob(cmd.Context(), hc, strings.TrimRight(o.URL, "/"), path, blob, signer); err != nil {
 		return err
 	}
 
@@ -176,17 +176,3 @@ func printResult(w io.Writer, cfg createConfig, path string, v Verity) {
 }
 
 func base64Std(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
-
-func trimSlash(u string) string {
-	for len(u) > 0 && u[len(u)-1] == '/' {
-		u = u[:len(u)-1]
-	}
-	return u
-}
-
-func cmdCtx(cmd *cobra.Command) context.Context {
-	if c := cmd.Context(); c != nil {
-		return c
-	}
-	return context.Background()
-}

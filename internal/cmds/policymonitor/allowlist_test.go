@@ -90,37 +90,15 @@ func TestLoadAllowlist_MissingFile(t *testing.T) {
 	}
 }
 
-func TestNormalizeDigest(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		in      string
-		want    string
-		wantErr bool
-	}{
-		{"prefixed", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"bare", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"image-ref-with-digest", "ghcr.io/confidential-dot-ai/assam@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"uppercase-normalised", "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"empty", "", "", true},
-		{"too-short", "sha256:abc", "", true},
-		{"non-hex", "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "", true},
-		{"tag-only", "ghcr.io/confidential-dot-ai/assam:v1.0.0", "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := normalizeDigest(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("normalizeDigest(%q) = %q, want error", tc.in, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("normalizeDigest(%q) err = %v", tc.in, err)
-			}
-			if got != tc.want {
-				t.Errorf("normalizeDigest(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
+// The accepted input forms are pinned by pkg/types; this only asserts the
+// package's map-key contract — bare hex out, errors passed through.
+func TestNormalizeDigestReturnsBareHex(t *testing.T) {
+	hex := strings.Repeat("a", 64)
+	if got, err := normalizeDigest("sha256:" + hex); err != nil || got != hex {
+		t.Fatalf("normalizeDigest = %q, %v; want the bare hex", got, err)
+	}
+	if _, err := normalizeDigest("ghcr.io/confidential-dot-ai/assam:v1.0.0"); err == nil {
+		t.Fatal("a tag-only reference was accepted")
 	}
 }
 

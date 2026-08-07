@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
 func TestLoadInGuestConfigDefaults(t *testing.T) {
@@ -533,26 +531,4 @@ func TestRunInGuestConfigErrors(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-}
-
-func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
-	// A config missing NodeIP makes provider creation fail; the goroutine
-	// must log and return rather than panic or retry.
-	c := defaultInGuestConfig()
-	badCfg := &cdsclient.Config{
-		CDSURL:            "http://127.0.0.1:1",
-		AttestationApiURL: "http://127.0.0.1:1",
-		CDSCAURL:          "http://127.0.0.1:1",
-		// NodeIP intentionally missing.
-	}
-	done := make(chan struct{})
-	go func() {
-		runInGuestCDSUpgrade(context.Background(), testLogger(), &c, badCfg, nil, nil, testMetrics())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("runInGuestCDSUpgrade did not return on provider error")
-	}
 }

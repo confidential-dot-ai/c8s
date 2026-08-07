@@ -336,14 +336,3 @@ func snpEvidence(rawReport []byte) (*types.AttestationEvidence, error) {
 		Evidence: inner,
 	}, nil
 }
-
-// MeasurementAllowed reports whether measurement byte-equals one of the allowed
-// launch digests (an empty allowed set means "no pin" and is handled by callers).
-func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
-	for _, m := range allowed {
-		if bytes.Equal(measurement, m) {
-			return true
-		}
-	}
-	return false
-}

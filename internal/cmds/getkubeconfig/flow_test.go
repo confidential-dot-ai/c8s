@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -78,14 +79,14 @@ func attestHandler(t *testing.T, status int) http.Handler {
 func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != releasePath {
-			t.Errorf("release path = %s, want %s", r.URL.Path, releasePath)
+		if r.URL.Path != credrelease.ReleasePath {
+			t.Errorf("release path = %s, want %s", r.URL.Path, credrelease.ReleasePath)
 		}
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			t.Errorf("release Authorization = %q, want Bearer JWT", r.Header.Get("Authorization"))
 		}
 		body, _ := io.ReadAll(r.Body)
-		var req releaseRequest
+		var req credrelease.ReleaseRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			t.Errorf("release body: %v", err)
 		}
