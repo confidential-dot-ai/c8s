@@ -18,6 +18,11 @@ function resolveDocPath(slug: string[]): string | null {
 
   const joined = slug.join("/");
 
+  // Retain the historical source document without publishing a route for it.
+  if (joined === "confidential-agents-api") {
+    return null;
+  }
+
   // Direct file match: e.g., intro-to-tees -> intro-to-tees.md
   const directFile = path.join(DOCS_ROOT, joined + ".md");
   if (fs.existsSync(directFile)) {
@@ -53,6 +58,9 @@ export function generateStaticParams() {
         walk(path.join(dir, entry.name), [...prefix, entry.name]);
       } else if (entry.name.endsWith(".md") && entry.name !== "README.md") {
         const name = entry.name.replace(/\.md$/, "");
+        if (prefix.length === 0 && name === "confidential-agents-api") {
+          continue;
+        }
         params.push({ slug: [...prefix, name] });
       }
     }

@@ -29,4 +29,4 @@ Every instance gets attested inference out of the box — open-weight models ser
 
 ## Get access
 
-API keys are issued per organization. [Contact us](mailto:hello@confidential.ai) to request access, and see the [Agents API reference](/docs/confidential-agents-api) for the full endpoint surface.
+API keys are issued per organization. [Contact us](mailto:hello@confidential.ai) to request access, and see the [Confidential Inference API reference](/docs/inference-api) for the public endpoint surface.
