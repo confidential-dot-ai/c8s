@@ -1,0 +1,46 @@
+#!/bin/bash
+# Build the c8s node image from THIS repo's profile, using a
+# confidential-os-builder checkout purely as the builder (c8s#264).
+# Drop-in replacement for confos's bin/build-c8s: same env contract
+# (C8S_REF, C8S_REGISTRY, C8S_DEV, C8S_NO_GPU, C8S_STOCK_ATTEST, C8S_NAME,
+# C8S_MEMORY), same profile stack and order — only the c8s profile content
+# and kernel fragments come from ./c8s and ./kernel here.
+set -euo pipefail
+NGI_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFOS_DIR=${CONFOS_DIR:-"$NGI_DIR/../../confidential-os-builder"}
+[ -x "$CONFOS_DIR/bin/confos" ] || { echo "node-guest-image/build: confos checkout not found at $CONFOS_DIR (set CONFOS_DIR)" >&2; exit 1; }
+cd "$CONFOS_DIR"
+mkdir -p mkosi/base/mkosi.local
+printf '%s\n' "${C8S_REF:-}" > mkosi/base/mkosi.local/c8s-ref
+printf '%s\n' "${C8S_REGISTRY:-}" > mkosi/base/mkosi.local/c8s-registry
+FRAGMENT="$NGI_DIR/kernel/c8s.config"
+DEV_PROFILE=()
+if [ "${C8S_DEV:-0}" = 1 ]; then
+    FRAGMENT="$NGI_DIR/kernel/c8s-dev.config"
+    DEV_PROFILE=(--profile dev)
+    : "${C8S_NAME:=c8s-dev}"
+fi
+KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
+bin/confos kernel \
+    --kernel-config-fragment "$FRAGMENT" \
+    --kernel-builder-package "$KB_PKGS"
+if [ "${C8S_NO_GPU:-0}" = 1 ]; then
+    PROFILES=(--profile attest --profile c8s)
+elif [ "${C8S_STOCK_ATTEST:-0}" = 1 ]; then
+    PROFILES=(--profile gpu --profile attest --profile c8s)
+    bin/steep-fetch-gpu
+else
+    PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
+    bin/steep-fetch-gpu
+    bin/steep-fetch-attest-gpu
+fi
+exec bin/confos build "${C8S_NAME:-c8s}" \
+    "${PROFILES[@]}" \
+    ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
+    --profile-dir "$NGI_DIR/c8s" \
+    --kernel-config-fragment "$FRAGMENT" \
+    --kernel-builder-package "$KB_PKGS" \
+    --cloud-init "$NGI_DIR/c8s/user-data" \
+    --platform tdx \
+    --memory "${C8S_MEMORY:-16G}" \
+    "$@"
