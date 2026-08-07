@@ -228,3 +228,20 @@ func TestNewPEMDataFromDER(t *testing.T) {
 		t.Errorf("re-decoded DER = %q, want %q", block.Bytes, "der-bytes")
 	}
 }
+
+func TestMustPEMData(t *testing.T) {
+	t.Run("valid PEM", func(t *testing.T) {
+		p := MustPEMData([]byte(testCertPEM))
+		if p.BlockType() != "CERTIFICATE" || len(p.Blocks()) != 1 {
+			t.Fatalf("MustPEMData = type %q, %d blocks; want one CERTIFICATE block", p.BlockType(), len(p.Blocks()))
+		}
+	})
+	t.Run("invalid PEM panics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("MustPEMData(non-PEM) did not panic")
+			}
+		}()
+		MustPEMData([]byte("not pem"))
+	})
+}

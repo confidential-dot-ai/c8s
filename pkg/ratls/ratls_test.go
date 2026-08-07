@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1100,6 +1101,203 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 		_, err := VerifyCert(cert, &VerifyPolicy{Measurements: [][]byte{measurement}}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
+		}
+	})
+}
+
+func TestNormalizeSEVSNPReportSizeEdges(t *testing.T) {
+	t.Run("header-only HCL input reports HCL truncation", func(t *testing.T) {
+		// Exactly one HCL header, no payload: must be recognized as an HCL
+		// envelope and rejected as truncated, not misreported as a bare report.
+		raw := make([]byte, 32)
+		copy(raw[:4], hclReportMagic)
+		_, err := NormalizeSEVSNPReport(raw)
+		if err == nil {
+			t.Fatal("expected error for truncated HCL envelope")
+		}
+		if !strings.Contains(err.Error(), "HCL report") {
+			t.Fatalf("error = %v, want HCL truncation error", err)
+		}
+	})
+
+	t.Run("exact-size HCL envelope is accepted", func(t *testing.T) {
+		report := fakeSNPReport([64]byte{1, 2, 3})
+		normalized, err := NormalizeSEVSNPReport(fakeHCLEnvelope(report, 0))
+		if err != nil {
+			t.Fatalf("NormalizeSEVSNPReport: %v", err)
+		}
+		if !bytes.Equal(normalized, report) {
+			t.Fatal("normalized report mismatch")
+		}
+	})
+}
+
+func TestAttestationReportData(t *testing.T) {
+	rd := [64]byte{0xA1, 0xB2, 0xC3}
+
+	t.Run("raw SNP report exposes REPORTDATA", func(t *testing.T) {
+		att := &Attestation{TEEType: TEETypeSEVSNP, Report: fakeSNPReport(rd)}
+		got, ok := att.ReportData()
+		if !ok {
+			t.Fatal("ReportData() = false for raw SNP report")
+		}
+		if !bytes.Equal(got, rd[:]) {
+			t.Fatalf("ReportData = %x, want %x", got, rd[:])
+		}
+	})
+
+	t.Run("minimum-length report is accepted", func(t *testing.T) {
+		report := make([]byte, snpReportDataOffset+64)
+		copy(report[snpReportDataOffset:], rd[:])
+		att := &Attestation{TEEType: TEETypeSEVSNP, Report: report}
+		got, ok := att.ReportData()
+		if !ok {
+			t.Fatal("ReportData() = false for minimum-length report")
+		}
+		if !bytes.Equal(got, rd[:]) {
+			t.Fatalf("ReportData = %x, want %x", got, rd[:])
+		}
+	})
+
+	t.Run("short report is refused", func(t *testing.T) {
+		att := &Attestation{TEEType: TEETypeSEVSNP, Report: make([]byte, snpReportDataOffset+63)}
+		if got, ok := att.ReportData(); ok || got != nil {
+			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
+		}
+	})
+
+	t.Run("TDX type is refused", func(t *testing.T) {
+		att := &Attestation{TEEType: TEETypeTDX, Report: fakeSNPReport(rd)}
+		if got, ok := att.ReportData(); ok || got != nil {
+			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
+		}
+	})
+
+	t.Run("envelope evidence is refused", func(t *testing.T) {
+		data, err := marshalASN1(&attestationASN1{
+			TEEType: int(TEETypeSEVSNP),
+			Report:  []byte(`{"platform":"az-snp","evidence":{"hcl_report":"fake"}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		att, err := UnmarshalExtension(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := att.ReportData(); ok || got != nil {
+			t.Fatalf("ReportData = %x, %v; want nil, false", got, ok)
+		}
+	})
+}
+
+func TestPublicKeyFromCertCurves(t *testing.T) {
+	makeCert := func(t *testing.T, curve elliptic.Curve) *x509.Certificate {
+		t.Helper()
+		key, err := ecdsa.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert
+	}
+
+	tests := []struct {
+		name    string
+		curve   elliptic.Curve
+		wantErr bool
+	}{
+		{"P-256 accepted", elliptic.P256(), false},
+		{"P-384 accepted", elliptic.P384(), false},
+		{"P-521 rejected", elliptic.P521(), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := publicKeyFromCert(makeCert(t, tt.curve))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("publicKeyFromCert err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestVerifyAttestationUnsupportedKey(t *testing.T) {
+	_, att := testKeyAndAttestation(t)
+	srv := newMockedVerifySrv(t, verifyResponse(nil))
+	defer srv.Close()
+
+	_, err := VerifyAttestation("not-a-key", att, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+	if err == nil || !strings.Contains(err.Error(), "compute expected REPORTDATA") {
+		t.Fatalf("got %v, want REPORTDATA computation error", err)
+	}
+}
+
+func TestVerifyResultPlatformInfo(t *testing.T) {
+	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
+	newPolicy := func(url string) *VerifyPolicy {
+		return &VerifyPolicy{AttestationApiURL: url, Measurements: [][]byte{measurement}}
+	}
+	withPlatformData := func(platform string, platformData any) map[string]any {
+		resp := verifyResponse(measurement)
+		result := resp["result"].(map[string]any)
+		result["platform"] = platform
+		result["claims"] = map[string]any{
+			"launch_digest": hex.EncodeToString(measurement),
+			"platform_data": platformData,
+		}
+		return resp
+	}
+
+	t.Run("SNP platform data is surfaced", func(t *testing.T) {
+		cert, _ := embeddedAzureCert(t)
+		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformAzSnp), map[string]any{"source": "unit"}))
+		defer srv.Close()
+		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
+		if err != nil {
+			t.Fatalf("VerifyCert: %v", err)
+		}
+		var pd struct {
+			Source string `json:"source"`
+		}
+		if err := json.Unmarshal(result.PlatformInfo, &pd); err != nil {
+			t.Fatalf("PlatformInfo = %q: %v", result.PlatformInfo, err)
+		}
+		if pd.Source != "unit" {
+			t.Fatalf("PlatformInfo source = %q, want %q", pd.Source, "unit")
+		}
+	})
+
+	t.Run("null SNP platform data is dropped", func(t *testing.T) {
+		cert, _ := embeddedAzureCert(t)
+		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformAzSnp), nil))
+		defer srv.Close()
+		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
+		if err != nil {
+			t.Fatalf("VerifyCert: %v", err)
+		}
+		if result.PlatformInfo != nil {
+			t.Fatalf("PlatformInfo = %q, want nil", result.PlatformInfo)
+		}
+	})
+
+	t.Run("TDX platform data is not surfaced", func(t *testing.T) {
+		cert, _ := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
+		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformTdx), map[string]any{"source": "unit"}))
+		defer srv.Close()
+		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
+		if err != nil {
+			t.Fatalf("VerifyCert: %v", err)
+		}
+		if result.PlatformInfo != nil {
+			t.Fatalf("PlatformInfo = %q, want nil on the TDX path", result.PlatformInfo)
 		}
 	})
 }

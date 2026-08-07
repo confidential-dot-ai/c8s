@@ -419,6 +419,17 @@ policy:
 	}
 }
 
+func TestLabelOperator(t *testing.T) {
+	for _, op := range []string{OpIn, OpNotIn, OpExists, OpDoesNotExist} {
+		if _, err := labelOperator(op); err != nil {
+			t.Errorf("labelOperator(%q) returned error: %v", op, err)
+		}
+	}
+	if _, err := labelOperator("Bogus"); err == nil {
+		t.Fatal("expected error for unknown operator")
+	}
+}
+
 // The sandbox-digests endpoint types its RA-TLS identity with this platform and
 // CDS refuses a peer whose type disagrees with the evidence envelope the
 // attestation-api returns. Hardcoding it to snp denied every sandbox token on a

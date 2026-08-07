@@ -1,6 +1,7 @@
 package cdsattest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -50,6 +51,58 @@ func writeClientKeyPair(t *testing.T) (certPath, keyPath string) {
 		t.Fatal(err)
 	}
 	return certPath, keyPath
+}
+
+// TestNewHTTPBackendTimeouts pins the client timeout fallback and the
+// transport's idle-connection timeout.
+func TestNewHTTPBackendTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{"zero falls back to default", 0, 30 * time.Second},
+		{"negative falls back to default", -time.Second, 30 * time.Second},
+		{"positive kept verbatim", 5 * time.Second, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hb, err := NewHTTPBackend("http://backend", HTTPBackendOptions{Timeout: tc.timeout})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hb.client.Timeout != tc.want {
+				t.Fatalf("client timeout = %v, want %v", hb.client.Timeout, tc.want)
+			}
+			transport, ok := hb.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport is %T, want *http.Transport", hb.client.Transport)
+			}
+			if transport.IdleConnTimeout != 90*time.Second {
+				t.Fatalf("IdleConnTimeout = %v, want 90s", transport.IdleConnTimeout)
+			}
+		})
+	}
+}
+
+// TestHTTPBackendAcceptsMaxSizedUpstreamResponse: a response of exactly the cap
+// must pass; only strictly-larger bodies are rejected.
+func TestHTTPBackendAcceptsMaxSizedUpstreamResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(bytes.Repeat([]byte("a"), maxUpstreamResponseBytes))
+	}))
+	defer backend.Close()
+
+	hb, err := NewHTTPBackend(backend.URL, HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hb.Forward(context.Background(), types.TunnelRequest{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("max-sized upstream response rejected: %v", err)
+	}
+	if len(resp.Body) != maxUpstreamResponseBytes {
+		t.Fatalf("body length = %d, want %d", len(resp.Body), maxUpstreamResponseBytes)
+	}
 }
 
 func TestNewHTTPBackendErrors(t *testing.T) {

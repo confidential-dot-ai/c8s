@@ -489,3 +489,10 @@ func TestCgroupKiller_PropagatesMissingKillInterface(t *testing.T) {
 		t.Fatalf("kill = (%v, %v), want missing cgroup.kill error", ok, err)
 	}
 }
+
+func TestFindCgroupDir_EmptyID(t *testing.T) {
+	_, err := findCgroupDir(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("expected error for empty container id")
+	}
+}

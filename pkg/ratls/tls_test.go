@@ -1158,3 +1158,377 @@ func TestSwapProvider_ConcurrentAccess(t *testing.T) {
 		t.Error("expected GetCertificate to return the new cert after SwapProvider")
 	}
 }
+
+// errProvider always fails provisioning.
+type errProvider struct{}
+
+func (errProvider) Provision(context.Context) (*tls.Certificate, time.Duration, error) {
+	return nil, 0, fmt.Errorf("provision refused")
+}
+
+// deadlineProvider records the context deadline it was provisioned under.
+type deadlineProvider struct {
+	cert     *tls.Certificate
+	deadline time.Time
+	ok       bool
+}
+
+func (p *deadlineProvider) Provision(ctx context.Context) (*tls.Certificate, time.Duration, error) {
+	p.deadline, p.ok = ctx.Deadline()
+	return p.cert, time.Hour, nil
+}
+
+// caSignedLeafDER issues a leaf certificate signed by the given CA.
+func caSignedLeafDER(t *testing.T, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(500),
+		Subject:      pkix.Name{CommonName: "peer"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+// rotateAtOf reads the rotation deadline under the state lock.
+func rotateAtOf(s *certState) time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rotateAt
+}
+
+// requireRotateAtNear asserts rotateAt falls in (start+lo, start+hi).
+func requireRotateAtNear(t *testing.T, rotateAt, start time.Time, lo, hi time.Duration) {
+	t.Helper()
+	if rotateAt.Before(start.Add(lo)) || rotateAt.After(time.Now().Add(hi)) {
+		t.Fatalf("rotateAt = %v, want within (%v, %v) of %v", rotateAt, lo, hi, start)
+	}
+}
+
+func TestCertStateCertExpiry(t *testing.T) {
+	t.Run("no cert yet", func(t *testing.T) {
+		s := &certState{}
+		if got := s.CertExpiry(); !got.IsZero() {
+			t.Fatalf("CertExpiry = %v, want zero time", got)
+		}
+	})
+
+	t.Run("cert without leaf", func(t *testing.T) {
+		s := &certState{cert: &tls.Certificate{}}
+		if got := s.CertExpiry(); !got.IsZero() {
+			t.Fatalf("CertExpiry = %v, want zero time", got)
+		}
+	})
+
+	t.Run("provisioned cert", func(t *testing.T) {
+		cert := generateSimpleCert(t)
+		s := &certState{provider: &mockProvider{cert: cert, ttl: time.Hour}}
+		if _, err := s.getOrProvision(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.CertExpiry(); !got.Equal(cert.Leaf.NotAfter) {
+			t.Fatalf("CertExpiry = %v, want %v", got, cert.Leaf.NotAfter)
+		}
+	})
+}
+
+func TestCertStateProvisionFailure(t *testing.T) {
+	s := &certState{provider: errProvider{}}
+	if _, err := s.getOrProvision(context.Background()); err == nil {
+		t.Fatal("expected provisioning error")
+	}
+	if s.CertReady() {
+		t.Fatal("CertReady = true after failed provisioning")
+	}
+}
+
+func TestCertStateRotateAtHalvesDefaultTTL(t *testing.T) {
+	// Provider reports no TTL: the configured default applies, halved.
+	s := &certState{
+		provider:   &mockProvider{cert: generateSimpleCert(t), ttl: 0},
+		defaultTTL: 10 * time.Hour,
+	}
+	start := time.Now()
+	if _, err := s.getOrProvision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireRotateAtNear(t, rotateAtOf(s), start, 4*time.Hour, 6*time.Hour)
+}
+
+func TestBackgroundProvisionRotationTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		lo, hi  time.Duration
+	}{
+		{"default 30s", 0, 20 * time.Second, 40 * time.Second},
+		{"configured", 5 * time.Minute, 4 * time.Minute, 6 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &deadlineProvider{cert: generateSimpleCert(t)}
+			s := &certState{provider: p, rotationTimeout: tt.timeout}
+			start := time.Now()
+			s.backgroundProvision(p, s.rotateAt)
+			if !p.ok {
+				t.Fatal("provisioning context has no deadline")
+			}
+			if d := p.deadline.Sub(start); d < tt.lo || d > tt.hi {
+				t.Fatalf("provisioning deadline in %v, want within (%v, %v)", d, tt.lo, tt.hi)
+			}
+		})
+	}
+}
+
+func TestBackgroundProvisionRotateAtHalvesDefaultTTL(t *testing.T) {
+	cert := generateSimpleCert(t)
+	p := &mockProvider{cert: cert, ttl: 0}
+	s := &certState{provider: p, defaultTTL: 10 * time.Hour}
+	start := time.Now()
+	s.backgroundProvision(p, s.rotateAt)
+	s.mu.RLock()
+	got := s.cert
+	s.mu.RUnlock()
+	if got != cert {
+		t.Fatal("background provisioning did not install the new cert")
+	}
+	requireRotateAtNear(t, rotateAtOf(s), start, 4*time.Hour, 6*time.Hour)
+}
+
+func TestBackgroundProvisionDiscardsStaleProvider(t *testing.T) {
+	current := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
+	stale := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
+	s := &certState{provider: current}
+	s.backgroundProvision(stale, s.rotateAt)
+	s.mu.RLock()
+	got := s.cert
+	s.mu.RUnlock()
+	if got != nil {
+		t.Fatal("stale provider's cert was installed after provider swap")
+	}
+}
+
+func TestEffectiveTTL(t *testing.T) {
+	tests := []struct {
+		name       string
+		defaultTTL time.Duration
+		want       time.Duration
+	}{
+		{"configured", 10 * time.Hour, 10 * time.Hour},
+		{"unset falls back to 24h", 0, 24 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &certState{defaultTTL: tt.defaultTTL}
+			if got := s.effectiveTTL(); got != tt.want {
+				t.Fatalf("effectiveTTL = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSwapProviderFailureKeepsProvider(t *testing.T) {
+	current := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
+	s := &certState{provider: current}
+	if _, err := s.getOrProvision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SwapProvider(context.Background(), errProvider{}); err == nil {
+		t.Fatal("expected SwapProvider error")
+	}
+	s.mu.RLock()
+	provider, cert := s.provider, s.cert
+	s.mu.RUnlock()
+	if provider != CertProvider(current) {
+		t.Fatal("failed swap replaced the provider")
+	}
+	if cert != current.cert {
+		t.Fatal("failed swap replaced the certificate")
+	}
+}
+
+func TestSwapProviderRotateAtHalvesDefaultTTL(t *testing.T) {
+	next := &mockProvider{cert: generateSimpleCert(t), ttl: 0}
+	s := &certState{provider: errProvider{}, defaultTTL: 10 * time.Hour}
+	start := time.Now()
+	if err := s.SwapProvider(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	requireRotateAtNear(t, rotateAtOf(s), start, 4*time.Hour, 6*time.Hour)
+}
+
+func TestServerTLSConfigWithoutCACertStaysRATLSOnly(t *testing.T) {
+	cfg := testServerConfig()
+	cfg.ClientPolicy = &VerifyPolicy{AttestationApiURL: "http://unused.invalid"}
+	tlsCfg, mgr, err := NewServerTLSConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caKey, caCert := generateCACert(t)
+	// No CACert/DynamicCACert configured: this must be a no-op, and a
+	// CA-signed peer must still be rejected (attestation is the only path).
+	mgr.UpdateCACerts([]*x509.Certificate{caCert})
+	if err := tlsCfg.VerifyPeerCertificate([][]byte{caSignedLeafDER(t, caKey, caCert)}, nil); err == nil {
+		t.Fatal("CA-signed peer accepted without CACert/DynamicCACert configured")
+	}
+}
+
+func TestServerTLSConfigDynamicCACertUpdate(t *testing.T) {
+	cfg := testServerConfig()
+	cfg.ClientPolicy = &VerifyPolicy{}
+	cfg.DynamicCACert = true
+	tlsCfg, mgr, err := NewServerTLSConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caKey, caCert := generateCACert(t)
+	leaf := caSignedLeafDER(t, caKey, caCert)
+	if err := tlsCfg.VerifyPeerCertificate([][]byte{leaf}, nil); err == nil {
+		t.Fatal("CA-signed peer accepted before the CA was published")
+	}
+	mgr.UpdateCACerts([]*x509.Certificate{caCert})
+	if err := tlsCfg.VerifyPeerCertificate([][]byte{leaf}, nil); err != nil {
+		t.Fatalf("CA-signed peer rejected after UpdateCACerts: %v", err)
+	}
+}
+
+func TestClientTLSConfigWithoutCACertStaysRATLSOnly(t *testing.T) {
+	tlsCfg, mgr, err := NewClientTLSConfig(&ClientConfig{
+		Policy:       &VerifyPolicy{AttestationApiURL: "http://unused.invalid"},
+		CertProvider: &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr == nil {
+		t.Fatal("CertManager is nil with a CertProvider configured")
+	}
+
+	caKey, caCert := generateCACert(t)
+	mgr.UpdateCACerts([]*x509.Certificate{caCert})
+	if err := tlsCfg.VerifyPeerCertificate([][]byte{caSignedLeafDER(t, caKey, caCert)}, nil); err == nil {
+		t.Fatal("CA-signed peer accepted without CACert/DynamicCACert configured")
+	}
+}
+
+func TestVerifyPeerCallback(t *testing.T) {
+	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
+	srv := newMockedVerifySrv(t, verifyResponse(measurement))
+	defer srv.Close()
+	cb := verifyPeerCallback(&VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}})
+
+	_, _, attested := testAttestedCert(t, nil)
+	plain := generateSimpleCert(t)
+
+	tests := []struct {
+		name     string
+		rawCerts [][]byte
+		wantErr  bool
+	}{
+		{"no certs", nil, true},
+		{"garbage cert", [][]byte{{0x01, 0x02}}, true},
+		{"unattested cert", [][]byte{plain.Leaf.Raw}, true},
+		{"attested cert", [][]byte{attested.Raw}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := cb(tt.rawCerts, nil)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("verify err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDualVerifyPeerCallbackNilPolicy(t *testing.T) {
+	caKey, caCert := generateCACert(t)
+	cb := dualVerifyPeerCallback(nil, newSharedCACerts([]*x509.Certificate{caCert}))
+	if err := cb([][]byte{caSignedLeafDER(t, caKey, caCert)}, nil); err != nil {
+		t.Fatalf("CA-signed peer rejected under nil policy: %v", err)
+	}
+}
+
+func TestDualVerifyPeerCallbackIntermediateChain(t *testing.T) {
+	newCA := func(t *testing.T, cn string, parentKey *ecdsa.PrivateKey, parent *x509.Certificate) (*ecdsa.PrivateKey, *x509.Certificate) {
+		t.Helper()
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(600),
+			Subject:               pkix.Name{CommonName: cn},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(time.Hour),
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageCertSign,
+		}
+		if parent == nil {
+			parent, parentKey = tmpl, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key, cert
+	}
+
+	rootKey, rootCert := newCA(t, "root", nil, nil)
+	interKey, interCert := newCA(t, "intermediate", rootKey, rootCert)
+	leaf := caSignedLeafDER(t, interKey, interCert)
+
+	cb := dualVerifyPeerCallback(&VerifyPolicy{}, newSharedCACerts([]*x509.Certificate{rootCert}))
+	// Peer presents leaf + intermediate; only the root is pinned locally.
+	if err := cb([][]byte{leaf, interCert.Raw}, nil); err != nil {
+		t.Fatalf("chain via intermediate rejected: %v", err)
+	}
+}
+
+func TestNewVerifyingHTTPClient(t *testing.T) {
+	if _, err := NewVerifyingHTTPClient(nil, ""); err == nil {
+		t.Fatal("expected error for empty attestation-api URL")
+	}
+
+	client, err := NewVerifyingHTTPClient(nil, "http://127.0.0.1:8400")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Timeout != 30*time.Second {
+		t.Errorf("Timeout = %v, want 30s", client.Timeout)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 10*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want 10s", tr.ResponseHeaderTimeout)
+	}
+	if tr.IdleConnTimeout != 30*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 30s", tr.IdleConnTimeout)
+	}
+	if tr.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig is nil")
+	}
+	if tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Errorf("MinVersion = %v, want TLS 1.3", tr.TLSClientConfig.MinVersion)
+	}
+	if tr.TLSClientConfig.VerifyPeerCertificate == nil {
+		t.Error("VerifyPeerCertificate is nil: peer attestation would not be checked")
+	}
+}

@@ -180,3 +180,37 @@ func TestAllowlistMergeConcurrent(t *testing.T) {
 	}
 	<-done
 }
+
+func TestAllowlistNilReceivers(t *testing.T) {
+	var a *allowlist
+	if a.Contains("sha256:" + strings.Repeat("a", 64)) {
+		t.Error("nil allowlist Contains should be false")
+	}
+	if a.Size() != 0 {
+		t.Error("nil allowlist Size should be 0")
+	}
+	if a.MergePulled([]string{"sha256:" + strings.Repeat("a", 64)}) != 0 {
+		t.Error("nil allowlist MergePulled should add 0")
+	}
+}
+
+func TestAllowlistContains_Malformed(t *testing.T) {
+	a := newSeededAllowlist(t, "sha256:"+strings.Repeat("a", 64))
+	if a.Contains("garbage") {
+		t.Error("Contains should be false for malformed input")
+	}
+	if a.Contains("") {
+		t.Error("Contains should be false for empty input")
+	}
+}
+
+func TestLoadAllowlist_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadAllowlist(path); err == nil {
+		t.Fatal("expected parse error for malformed allowlist JSON")
+	}
+}

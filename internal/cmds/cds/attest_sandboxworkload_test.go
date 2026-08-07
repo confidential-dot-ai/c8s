@@ -1,12 +1,15 @@
 package cds
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"testing"
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 const (
@@ -285,5 +288,33 @@ func TestAttest_SandboxWorkload_UnpinnedStillEnforcesAllowlist(t *testing.T) {
 	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// errStore fails every allowlist lookup, forcing the fail-closed branch.
+type errStore struct{}
+
+func (errStore) Contains(types.Digest) (bool, error) {
+	return false, errors.New("store unavailable")
+}
+
+func (errStore) LoadAll() (*pkgallowlist.Allowlist, string, error) {
+	return nil, "", errors.New("store unavailable")
+}
+
+// A store that cannot answer must not yield an unnamed-but-issued leaf: the
+// membership gate and the stamp both depend on that snapshot, so losing it has
+// to fail issuance rather than silently downgrade to no workload.
+func TestResolveSandboxWorkload_FailsClosedOnStoreError(t *testing.T) {
+	h := AttestHandler{
+		AllowlistStore: errStore{},
+		SandboxDigests: fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}},
+	}
+	_, err := h.resolveSandboxWorkload(context.Background(), workloadclaims.VerifiedSandbox{
+		SandboxID:     testSandboxID,
+		InventoryHost: testInventoryHost,
+	})
+	if err == nil {
+		t.Fatal("expected error when the allowlist store fails")
 	}
 }

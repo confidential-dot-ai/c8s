@@ -3,12 +3,17 @@
 package ratlsmesh
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 func TestHealthLive(t *testing.T) {
@@ -183,6 +188,79 @@ func TestHealthReadyGatesOnCertUsable(t *testing.T) {
 			}
 			if !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Errorf("body = %q, want it to mention %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestHealthServerServe(t *testing.T) {
+	h := newHealthServer(testMetrics(), nil, nil, 10, time.Second, time.Second)
+	h.ready.Store(true)
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- h.serve(ctx, fmt.Sprintf("127.0.0.1:%d", port)) }()
+
+	assertEventually(t, 5*time.Second, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/live", port))
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, "health serve never answered /live")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve() = %v, want nil after shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not stop on cancel")
+	}
+
+	// A second serve on an already-bound port errors immediately.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := h.serve(context.Background(), ln.Addr().String()); err == nil {
+		t.Fatal("serve on a bound port should error")
+	}
+}
+
+func TestHealthReadyCertProvisioningGates(t *testing.T) {
+	_, mgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		Platform:   "sev-snp",
+		AttestFunc: fakeAttestFunc,
+		CertTTL:    time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		server, client *ratls.CertManager
+	}{
+		{"server cert not provisioned", mgr, nil},
+		{"client cert not provisioned", nil, mgr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHealthServer(testMetrics(), tc.server, tc.client, 10, time.Second, time.Second)
+			h.ready.Store(true)
+			rec := httptest.NewRecorder()
+			h.handleReady(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+			if mgr.CertReady() {
+				t.Skip("cert manager unexpectedly pre-provisioned")
+			}
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("status = %d, want 503", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "not provisioned") {
+				t.Errorf("body = %q", rec.Body.String())
 			}
 		})
 	}

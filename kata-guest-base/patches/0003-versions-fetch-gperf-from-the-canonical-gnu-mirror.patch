@@ -1,0 +1,28 @@
+Subject: [PATCH] versions: fetch gperf from the canonical GNU mirror
+
+osbuilder builds libseccomp inside the rootfs-builder container, and that needs
+gperf from `externals.gperf.url`. The pinned URL is a UK GNU mirror that no
+longer answers on 443, so every cold rootfs build burns the curl timeout and
+then dies:
+
+    INFO: Downloading from upstream: https://ftp.gnu.org.uk/gnu/gperf//gperf-3.3.tar.gz
+    curl: (28) Failed to connect to ftp.gnu.org.uk port 443 after 133741 ms
+    ERROR: Could not download from https://ftp.gnu.org.uk/gnu/gperf//gperf-3.3.tar.gz
+
+ftp.gnu.org is GNU's own host and serves the .sig alongside the tarball, so the
+helper's signature check is unchanged, and the gperf-3.3.tar.gz it returns is
+byte-identical to the one in kata's cached-tarballs artefact. ftpmirror.gnu.org
+is the usual redirector, but it resolves to whichever mirror is nearest and was
+itself returning 502 when this was written.
+
+--- a/versions.yaml
++++ b/versions.yaml
+@@ -336,7 +336,7 @@
+
+   gperf:
+     description: "GNU gperf is a perfect hash function generator"
+-    url: "https://ftp.gnu.org.uk/gnu/gperf/"
++    url: "https://ftp.gnu.org/gnu/gperf/"
+     version: "3.3"
+
+   hadolint:
