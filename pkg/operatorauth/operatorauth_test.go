@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -358,5 +359,85 @@ func TestKeySetHashRejectsInvalidInputs(t *testing.T) {
 		if err := ValidateKeySetHash(value); err == nil {
 			t.Fatalf("ValidateKeySetHash(%q) succeeded", value)
 		}
+	}
+}
+
+// TestSignerMintsSixtySecondTokens pins the minted lifetime: one round trip
+// plus skew, nothing more.
+func TestSignerMintsSixtySecondTokens(t *testing.T) {
+	keyPEM, pub := genKey(t, elliptic.P256())
+	signer, err := NewSignerFromKeyPEM(keyPEM)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	auth, err := signer.Authorization(http.MethodPost, "/allowlist", []byte("body"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	claims := jwt.MapClaims{}
+	if _, err := jwt.ParseWithClaims(strings.TrimPrefix(auth, "Bearer "), claims,
+		func(*jwt.Token) (any, error) { return pub, nil }); err != nil {
+		t.Fatalf("parse minted token: %v", err)
+	}
+	iat, err := claims.GetIssuedAt()
+	if err != nil || iat == nil {
+		t.Fatalf("iat: %v", err)
+	}
+	exp, err := claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		t.Fatalf("exp: %v", err)
+	}
+	if got := exp.Sub(iat.Time); got != 60*time.Second {
+		t.Fatalf("token lifetime = %v, want 60s", got)
+	}
+}
+
+// TestVerifyAcceptsMaxValidityToken pins the bound as inclusive: exp-iat equal
+// to MaxTokenValidity must still authorize.
+func TestVerifyAcceptsMaxValidityToken(t *testing.T) {
+	keyPEM, pub := genKey(t, elliptic.P256())
+	body := []byte("body")
+	claims := baseClaims(body)
+	iat := time.Now().Add(-time.Minute)
+	claims["iat"] = iat.Unix()
+	claims["exp"] = iat.Add(MaxTokenValidity).Unix()
+	auth := mintCustom(t, keyPEM, claims)
+	v := Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: 30 * time.Second}
+	if err := v.Authorize(reqWith(auth), body); err != nil {
+		t.Fatalf("token with exp-iat == MaxTokenValidity rejected: %v", err)
+	}
+}
+
+// TestVerifyRejectsZeroValidityToken: exp == iat means no usable window; such
+// a token is malformed and must not authorize even inside clock-skew leeway.
+func TestVerifyRejectsZeroValidityToken(t *testing.T) {
+	keyPEM, pub := genKey(t, elliptic.P256())
+	body := []byte("body")
+	claims := baseClaims(body)
+	now := time.Now().Unix()
+	claims["iat"] = now
+	claims["exp"] = now
+	auth := mintCustom(t, keyPEM, claims)
+	v := Verifier{Keys: []*ecdsa.PublicKey{pub}, ClockSkew: time.Minute}
+	if err := v.Authorize(reqWith(auth), body); err == nil {
+		t.Fatal("expected token with exp == iat to be rejected")
+	}
+}
+
+// TestVerifyUnpinnedKeyErrorKeepsCause: the returned error must wrap the last
+// per-key verification failure, not replace it with a generic fallback.
+func TestVerifyUnpinnedKeyErrorKeepsCause(t *testing.T) {
+	keyPEM, _ := genKey(t, elliptic.P256())
+	_, otherPub := genKey(t, elliptic.P256())
+	signer, _ := NewSignerFromKeyPEM(keyPEM)
+	body := []byte("body")
+	auth, _ := signer.Authorization(http.MethodPost, "/allowlist", body)
+	v := Verifier{Keys: []*ecdsa.PublicKey{otherPub}}
+	err := v.Authorize(reqWith(auth), body)
+	if err == nil {
+		t.Fatal("expected rejection")
+	}
+	if !errors.Is(err, jwt.ErrTokenSignatureInvalid) {
+		t.Fatalf("err = %v, want it to wrap the signature failure", err)
 	}
 }

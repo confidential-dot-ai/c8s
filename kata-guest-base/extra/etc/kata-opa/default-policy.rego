@@ -128,6 +128,11 @@ CreateContainerRequest if {
 	}
 	print("CreateContainerRequest: no storage shadows the rootfs")
 
+	every m in input.OCI.Mounts {
+		mount_source_allowed(m)
+	}
+	print("CreateContainerRequest: no mount reaches outside the sandbox dirs")
+
 	pull_source_bound(pull)
 	print("CreateContainerRequest: allowed")
 }
@@ -165,6 +170,30 @@ layered_rootfs_storage(s) if {
 layered_rootfs_storage(s) if {
 	some o in s.options
 	startswith(o, "X-kata.overlay-")
+}
+
+# A bind mount's source is a guest path, and the runtime rewrites every one it
+# sends to a directory it manages: the CopyFile-seeded share, or the sandbox's
+# ephemeral/local/storage trees. Anything else — the verity root, /run/c8s,
+# another container's rootfs — is guest state the host is asking to hand a
+# container. Non-bind mounts name a filesystem type (proc, sysfs, tmpfs,
+# devpts, mqueue, cgroup) rather than a path, and carry nothing in.
+#
+# This bounds where mount CONTENT comes from, not where it lands: a destination
+# is a path inside the container, and which paths a workload may have shadowed
+# is per-image knowledge that lives in the allowlist document, not here.
+mount_source_allowed(m) if {
+	not startswith(m.source, "/")
+}
+
+mount_source_allowed(m) if {
+	some prefix in ["/run/kata-containers/shared/containers/", "/run/kata-containers/sandbox/"]
+	startswith(m.source, prefix)
+	no_traversal(m.source)
+}
+
+no_traversal(path) if {
+	not regex.match(`(^|/)\.\.(/|$)`, path)
 }
 
 # kata's own switch is io.katacontainers.pkg.oci.container_type; the guest-pull
@@ -250,6 +279,6 @@ default CopyFileRequest := false
 
 CopyFileRequest if {
 	startswith(input.path, "/run/kata-containers/shared/containers/")
-	not regex.match(`(^|/)\.\.(/|$)`, input.path)
+	no_traversal(input.path)
 	print("CopyFileRequest: allowed")
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,6 +291,102 @@ func TestLocalHandoffBootstrapRequiresDeps(t *testing.T) {
 	}
 	if _, err := NewLocalHandoffBootstrap(as, mi, ""); err == nil {
 		t.Fatal("expected constructor to reject an empty operator key-set hash")
+	}
+}
+
+// refreshStubAttestation drives RunRefresh: onAttest runs before anything
+// else (tests use it to cancel the refresh loop), and Attest fails on a done
+// context so the per-iteration deadline is honored.
+type refreshStubAttestation struct {
+	attestErr error
+	verify    types.VerifyResponse
+	onAttest  func()
+}
+
+func (s refreshStubAttestation) Attest(ctx context.Context, _ types.AttestRequest) (types.AttestResponse, error) {
+	if s.onAttest != nil {
+		s.onAttest()
+	}
+	if s.attestErr != nil {
+		return types.AttestResponse{}, s.attestErr
+	}
+	if err := ctx.Err(); err != nil {
+		return types.AttestResponse{}, err
+	}
+	return types.AttestResponse{Platform: "snp"}, nil
+}
+
+func (s refreshStubAttestation) Verify(context.Context, types.VerifyRequest) (types.VerifyResponse, error) {
+	return s.verify, nil
+}
+
+// cancellingMinter cancels the refresh loop after minting so RunRefresh
+// returns right after the first successful iteration.
+type cancellingMinter struct {
+	token  string
+	cancel context.CancelFunc
+}
+
+func (m *cancellingMinter) IssueAttestedKey(json.RawMessage, string, *ecdsa.PublicKey, string) (string, error) {
+	m.cancel()
+	return m.token, nil
+}
+
+func TestRunRefreshStoresMintedEAR(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	token := makeUnsignedJWTForTest(t, time.Now().Add(time.Hour).Unix())
+	b, err := NewLocalHandoffBootstrap(
+		refreshStubAttestation{verify: verifyOK(true, "deadbeef")},
+		&cancellingMinter{token: token, cancel: cancel},
+		testOperatorKeysHash,
+	)
+	if err != nil {
+		t.Fatalf("NewLocalHandoffBootstrap: %v", err)
+	}
+	lb := b.(*localHandoffBootstrap)
+
+	capture := &captureHandler{}
+	lb.RunRefresh(ctx, slog.New(capture))
+
+	got, err := lb.earSource.Current()
+	if err != nil {
+		t.Fatalf("Current after refresh: %v", err)
+	}
+	if got != token {
+		t.Fatalf("stored EAR = %q, want minted token", got)
+	}
+	if _, ok := capture.find("handoff EAR refreshed (local)"); !ok {
+		t.Fatal("successful refresh did not log the refreshed message")
+	}
+}
+
+func TestRunRefreshWarnsWhenBootstrapAttestFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b, err := NewLocalHandoffBootstrap(
+		refreshStubAttestation{attestErr: fmt.Errorf("attestation-api down"), onAttest: cancel},
+		&stubMinter{},
+		testOperatorKeysHash,
+	)
+	if err != nil {
+		t.Fatalf("NewLocalHandoffBootstrap: %v", err)
+	}
+	lb := b.(*localHandoffBootstrap)
+
+	capture := &captureHandler{}
+	lb.RunRefresh(ctx, slog.New(capture))
+
+	if _, err := lb.earSource.Current(); err == nil {
+		t.Fatal("failed bootstrap must not store an EAR")
+	}
+	// With no previous EAR the failure must log the bootstrap message, not the
+	// keeping-previous-EAR one.
+	if _, ok := capture.find("handoff bootstrap: local attest-key failed; will retry"); !ok {
+		t.Fatal("bootstrap failure did not log the will-retry message")
+	}
+	if _, ok := capture.find("handoff refresh: local attest-key failed; keeping previous EAR"); ok {
+		t.Fatal("bootstrap failure logged the keeping-previous-EAR message with no previous EAR")
 	}
 }
 

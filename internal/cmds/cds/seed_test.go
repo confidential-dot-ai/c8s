@@ -170,3 +170,17 @@ func TestSeedStore_FailsClosedOnMissingFile(t *testing.T) {
 		t.Fatal("seedStore accepted a missing seed file; want fail-closed error")
 	}
 }
+
+// Seeding into a closed store must fail closed.
+func TestSeedStore_FailsClosedOnStoreError(t *testing.T) {
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	_ = store.Close()
+
+	path := writeSeed(t, `{"version":"1","digests":{"`+digestA+`":"ghcr.io/x/cds:v1"}}`)
+	if err := seedStore(&store, path); err == nil {
+		t.Fatal("seedStore succeeded on a closed store; want fail-closed error")
+	}
+}

@@ -4,11 +4,14 @@ package ratlsmesh
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
 )
 
 func TestLoadInGuestConfigDefaults(t *testing.T) {
@@ -464,5 +467,92 @@ func TestReadinessCheckCommandFailsAgainstUnreachable(t *testing.T) {
 	err := cmd.ExecuteContext(ctx)
 	if err == nil {
 		t.Fatal("expected readiness-check to fail when no server is listening")
+	}
+}
+
+func TestAddrIP(t *testing.T) {
+	ipn := &net.IPNet{IP: net.ParseIP("10.0.0.1"), Mask: net.CIDRMask(24, 32)}
+	if got := addrIP(ipn); !got.Equal(net.ParseIP("10.0.0.1")) {
+		t.Errorf("addrIP(IPNet) = %v", got)
+	}
+	ipa := &net.IPAddr{IP: net.ParseIP("fd00::1")}
+	if got := addrIP(ipa); !got.Equal(net.ParseIP("fd00::1")) {
+		t.Errorf("addrIP(IPAddr) = %v", got)
+	}
+	if got := addrIP(&net.TCPAddr{IP: net.ParseIP("10.0.0.1")}); got != nil {
+		t.Errorf("addrIP(TCPAddr) = %v, want nil", got)
+	}
+}
+
+func TestInGuestResolverInvalidIPs(t *testing.T) {
+	r := &inGuestResolver{podIP: "10.42.0.5"}
+	if node, local := r.Resolve("not-an-ip"); node != "not-an-ip" || local {
+		t.Errorf("Resolve(bad) = (%q,%v)", node, local)
+	}
+	if r.ValidateLocalDest("not-an-ip") {
+		t.Error("ValidateLocalDest(bad) = true")
+	}
+}
+
+func TestRunInGuestConfigErrors(t *testing.T) {
+	valid := func() inGuestConfig {
+		c := defaultInGuestConfig()
+		c.workloadID = "wl"
+		c.cdsURL = "http://127.0.0.1:1"
+		c.attestationServiceURL = defaultInGuestAttestationServiceURL
+		c.podIP = "10.42.0.9"
+		return c
+	}
+
+	t.Run("bad log level", func(t *testing.T) {
+		c := valid()
+		c.logLevel = "shouty"
+		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), envLogLevel) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("validate failure", func(t *testing.T) {
+		c := valid()
+		c.workloadID = ""
+		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), envWorkloadID) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("bad pod IP", func(t *testing.T) {
+		c := valid()
+		c.podIP = "not-an-ip"
+		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), "resolve pod IP") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("iptables setup failure", func(t *testing.T) {
+		// PATH without any iptables binary.
+		t.Setenv("PATH", t.TempDir())
+		c := valid()
+		if err := runInGuest(context.Background(), &c); err == nil || !strings.Contains(err.Error(), "in-guest iptables setup") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestRunInGuestCDSUpgradeProviderError(t *testing.T) {
+	// A config missing NodeIP makes provider creation fail; the goroutine
+	// must log and return rather than panic or retry.
+	c := defaultInGuestConfig()
+	badCfg := &cdsclient.Config{
+		CDSURL:            "http://127.0.0.1:1",
+		AttestationApiURL: "http://127.0.0.1:1",
+		CDSCAURL:          "http://127.0.0.1:1",
+		// NodeIP intentionally missing.
+	}
+	done := make(chan struct{})
+	go func() {
+		runInGuestCDSUpgrade(context.Background(), testLogger(), &c, badCfg, nil, nil, testMetrics())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runInGuestCDSUpgrade did not return on provider error")
 	}
 }
