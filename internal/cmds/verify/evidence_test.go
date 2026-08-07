@@ -145,6 +145,27 @@ func TestEvidenceFromEndpointJSON_Malformed(t *testing.T) {
 	}
 }
 
+func TestJoinAttestationURL(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
+	got, err := joinAttestationURL("https://lb.example.com:443", nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://lb.example.com:443" + attestationPath + "?nonce=" + base64.RawURLEncoding.EncodeToString(nonce)
+	if got != want {
+		t.Errorf("joined URL = %q, want %q", got, want)
+	}
+	if _, err := joinAttestationURL("https://\x7f", nonce); err == nil {
+		t.Error("unparseable base URL must fail")
+	}
+}
+
+func TestGatherFromEndpoint_BadBaseURL(t *testing.T) {
+	if _, err := gatherFromEndpoint(context.Background(), "https://\x7f", "", time.Second); err == nil {
+		t.Fatal("unparseable base URL must fail before any dial")
+	}
+}
+
 func TestGatherFromFile(t *testing.T) {
 	t.Run("attested certificate PEM", func(t *testing.T) {
 		cert := attestedCert(t, "")

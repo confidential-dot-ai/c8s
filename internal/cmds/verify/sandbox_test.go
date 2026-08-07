@@ -269,6 +269,32 @@ func TestApplySandboxPolicyMeshCANeedsALeaf(t *testing.T) {
 	}
 }
 
+// --sandbox-id needs a leaf to read the ID from; evidence without one (a
+// discovery target) must fail the pin rather than skip it.
+func TestApplySandboxPolicyPinNeedsALeaf(t *testing.T) {
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{sandboxID: "8d9f6c2b1a0e"}, &evidence{}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("--sandbox-id silently passed with no leaf to check")
+	}
+	if !strings.Contains(oc.Error, "--sandbox-id needs the target's leaf certificate") {
+		t.Fatalf("Error = %q, want the leafless refusal", oc.Error)
+	}
+}
+
+// An unreadable --operator-keys file fails the verdict at apply time too — the
+// pin the operator asked for can never be silently dropped.
+func TestApplySandboxPolicyUnreadableOperatorKeysFile(t *testing.T) {
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{operatorKeys: filepath.Join(t.TempDir(), "absent")}, &evidence{}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("an unreadable --operator-keys file passed at apply time")
+	}
+	if !strings.Contains(oc.Error, "--operator-keys") {
+		t.Fatalf("Error = %q, want it to name --operator-keys", oc.Error)
+	}
+}
+
 // --operator-keys compares against the list the attested target serves. Each
 // way that can fail must demote the verdict, and an unfetched list must say so
 // rather than compare against nothing.
