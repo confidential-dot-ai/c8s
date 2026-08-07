@@ -109,11 +109,19 @@ func (p *Provider) Provision(ctx context.Context) (*tls.Certificate, time.Durati
 		return nil, 0, fmt.Errorf("cdsclient: parse CA cert: %w", err)
 	}
 
+	// The issued leaf must be usable now: NotBefore within the shared
+	// clock-skew allowance, NotAfter in the future. A leaf outside the window
+	// would be cached and served to peers that reject it, so fail issuance
+	// instead.
+	now := time.Now()
+	if err := certutil.CheckValidity(cert, now); err != nil {
+		return nil, 0, fmt.Errorf("cdsclient: issued certificate: %w", err)
+	}
+
 	// Verify the issued certificate against the first CA in CDS's ordered
 	// response before using it as a trust seed. Retained parents are accepted
 	// only when they directly sign an accepted CA without reusing that child
 	// CA's public key.
-	now := time.Now()
 	trustSeed, err := verifiedInitialCABundle(cert, caCerts, now)
 	if err != nil {
 		return nil, 0, fmt.Errorf("cdsclient: issued cert does not chain to CA: %w", err)

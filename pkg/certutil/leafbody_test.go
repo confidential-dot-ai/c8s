@@ -134,6 +134,42 @@ func TestAuthenticateLeafBodyForgedIssuerIsNotSelfSigned(t *testing.T) {
 	}
 }
 
+// CheckValidity is the single implementation of the shared validity window;
+// every verification path delegates to it, so its edges are pinned here once.
+func TestCheckValidity(t *testing.T) {
+	now := time.Now()
+	key := genKey(t)
+	mk := func(notBefore, notAfter time.Time) *x509.Certificate {
+		return mintLeaf(t, &key.PublicKey, key, notBefore, notAfter)
+	}
+
+	t.Run("currently valid accepted", func(t *testing.T) {
+		if err := CheckValidity(mk(now.Add(-time.Hour), now.Add(time.Hour)), now); err != nil {
+			t.Fatalf("CheckValidity: %v", err)
+		}
+	})
+
+	t.Run("NotBefore within skew accepted", func(t *testing.T) {
+		if err := CheckValidity(mk(now.Add(LeafValiditySkew-time.Minute), now.Add(2*time.Hour)), now); err != nil {
+			t.Fatalf("NotBefore within the skew allowance must pass: %v", err)
+		}
+	})
+
+	t.Run("NotBefore beyond skew rejected", func(t *testing.T) {
+		err := CheckValidity(mk(now.Add(LeafValiditySkew+time.Minute), now.Add(2*time.Hour)), now)
+		if err == nil || !strings.Contains(err.Error(), "not yet valid") {
+			t.Fatalf("want NotBefore rejection, got %v", err)
+		}
+	})
+
+	t.Run("expired rejected with no allowance", func(t *testing.T) {
+		err := CheckValidity(mk(now.Add(-2*time.Hour), now.Add(-time.Minute)), now)
+		if err == nil || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("want NotAfter rejection, got %v", err)
+		}
+	})
+}
+
 func TestAuthenticateLeafBodyValidity(t *testing.T) {
 	now := time.Now()
 	key := genKey(t)

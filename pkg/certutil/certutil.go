@@ -60,6 +60,22 @@ func (b BodyAuthentication) String() string {
 	return "ca-vouched"
 }
 
+// CheckValidity enforces the validity window every certificate-sourced trust
+// decision shares: NotBefore may sit up to LeafValiditySkew in now's future
+// (clock drift between issuer and verifier), NotAfter gets no allowance. It
+// is the single implementation of that window — call it rather than
+// re-deriving the comparison, so the skew policy cannot drift between sites.
+func CheckValidity(cert *x509.Certificate, now time.Time) error {
+	if now.Add(LeafValiditySkew).Before(cert.NotBefore) {
+		return fmt.Errorf("certificate is not yet valid: NotBefore %s is beyond the %s clock-skew allowance",
+			cert.NotBefore.Format(time.RFC3339), LeafValiditySkew)
+	}
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("certificate expired at NotAfter %s", cert.NotAfter.Format(time.RFC3339))
+	}
+	return nil
+}
+
 // AuthenticateLeafBody enforces the certificate-body checks shared by every
 // path that verifies a certificate-embedded attestation:
 //
@@ -80,13 +96,12 @@ func (b BodyAuthentication) String() string {
 // is in. BodyCAVouched is NOT a pass: it means the caller still owes the body
 // an authentication step (a verified chain, or proof of possession of the
 // attested key) before trusting anything the body says.
+//
+// The validity window is CheckValidity's, so the skew policy has one
+// implementation shared with every other certificate-sourced trust decision.
 func AuthenticateLeafBody(cert *x509.Certificate, now time.Time) (BodyAuthentication, error) {
-	if now.Add(LeafValiditySkew).Before(cert.NotBefore) {
-		return BodyCAVouched, fmt.Errorf("certificate is not yet valid: NotBefore %s is beyond the %s clock-skew allowance",
-			cert.NotBefore.Format(time.RFC3339), LeafValiditySkew)
-	}
-	if now.After(cert.NotAfter) {
-		return BodyCAVouched, fmt.Errorf("certificate expired at NotAfter %s", cert.NotAfter.Format(time.RFC3339))
+	if err := CheckValidity(cert, now); err != nil {
+		return BodyCAVouched, err
 	}
 	if !bytes.Equal(cert.RawIssuer, cert.RawSubject) {
 		return BodyCAVouched, nil

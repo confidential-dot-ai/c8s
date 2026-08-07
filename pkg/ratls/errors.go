@@ -32,4 +32,9 @@ var (
 	// ErrInvalidReport indicates a structurally invalid attestation report
 	// (e.g., wrong size for the platform, truncated, or corrupt).
 	ErrInvalidReport = errors.New("ratls: invalid attestation report")
+
+	// ErrCertValidity indicates the certificate is outside its validity
+	// window: expired, or NotBefore further in the future than the shared
+	// clock-skew allowance (certutil.LeafValiditySkew).
+	ErrCertValidity = errors.New("ratls: certificate outside its validity window")
 )

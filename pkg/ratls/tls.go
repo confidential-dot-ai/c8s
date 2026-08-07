@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
 // Logger is an optional structured logger for RA-TLS operations.
@@ -140,6 +142,19 @@ type ClientConfig struct {
 	Logger Logger
 }
 
+// defaultRotationTimeout bounds a single provisioning round-trip, background
+// or synchronous. The synchronous path needs it just as much: it runs under
+// GetCertificate, whose context comes from tls.NewListener and therefore
+// carries no deadline of its own.
+const defaultRotationTimeout = 30 * time.Second
+
+// syncProvisionCooldown is how long a failed synchronous provision is replayed
+// from the negative cache before the provider is tried again. Handshakes are
+// unbounded in number, so without a cooldown an outage past NotAfter turns
+// every inbound connection into another request aimed at the certificate
+// source that is already failing.
+const syncProvisionCooldown = 5 * time.Second
+
 // certState holds a cached certificate and its rotation deadline.
 // Rotation is non-blocking: when a cert is due for rotation, the old cert
 // is returned immediately while a background goroutine provisions the new one.
@@ -150,16 +165,59 @@ type certState struct {
 	provider        CertProvider // certificate provisioning strategy
 	logger          Logger
 	rotating        atomic.Bool   // prevents concurrent background rotations
-	rotationTimeout time.Duration // 0 = default (30s)
+	rotationTimeout time.Duration // 0 = default (defaultRotationTimeout)
 	provisioned     atomic.Bool   // true after first successful provision
 	onRotationFail  func()        // optional callback on rotation failure (for metrics)
 	defaultTTL      time.Duration // fallback TTL if provider returns 0
+
+	// syncMu guards the fail-closed provisioning path's own bookkeeping. It
+	// is deliberately not mu: mu is taken by every handshake and by the
+	// CertExpiry metrics scrape, so a provisioning round-trip must never be
+	// held under it.
+	syncMu        sync.Mutex
+	inflight      *provisionAttempt // the one synchronous attempt in progress
+	cooldownUntil time.Time         // negative cache expiry
+	cooldownErr   error             // error replayed until cooldownUntil
+	syncCooldown  time.Duration     // 0 = default (syncProvisionCooldown)
+
+	// unusableLogged rate-limits the "cached certificate is outside its
+	// validity window" warning to one line per entry into that state. It is
+	// on the handshake path, so logging per connection would flood exactly
+	// during the outage whose logs matter.
+	unusableLogged atomic.Bool
+}
+
+// provisionAttempt is one in-flight synchronous provisioning run. Handshakes
+// that find the cache unusable join the attempt already running rather than
+// each starting their own, so a down certificate source sees one request per
+// cooldown window instead of one per connection.
+type provisionAttempt struct {
+	done chan struct{}
+	cert *tls.Certificate
+	err  error
 }
 
 // CertReady returns true if a certificate has been successfully provisioned
 // at least once. Use this to gate readiness probes.
+//
+// It says nothing about whether that certificate can still be served — see
+// [certState.CertUsable].
 func (s *certState) CertReady() bool {
 	return s.provisioned.Load()
+}
+
+// CertUsable reports whether the cached certificate could be handed to a
+// handshake right now. CertReady is sticky ("provisioned at least once") and
+// since the manager stopped serving certificates outside their validity
+// window that no longer implies "can serve TLS": a pod whose certificate
+// source has been down past NotAfter fails 100% of its handshakes. Readiness
+// gates on this so such a pod leaves the endpoint list instead of
+// blackholing traffic.
+func (s *certState) CertUsable() bool {
+	s.mu.RLock()
+	cert := s.cert
+	s.mu.RUnlock()
+	return cert != nil && usableForHandshake(cert, time.Now()) == nil
 }
 
 // CertExpiry returns the NotAfter time of the current certificate, or the zero
@@ -183,76 +241,221 @@ func (s *certState) WarmUp(ctx context.Context) error {
 // getOrProvision returns a cached certificate or provisions a new one.
 // If the cached cert is past its rotation deadline but still valid, the old
 // cert is returned immediately and rotation happens in the background.
-// Only the very first call (no cert at all) blocks synchronously.
+// A cached cert outside its validity window is never returned: rotateAt only
+// schedules replacement, so when background rotation has kept failing the
+// expired cert is discarded here and provisioning happens synchronously —
+// the handshake gets a fresh cert or an error, never a stale credential.
+// Otherwise only the very first call (no cert at all) blocks synchronously.
 func (s *certState) getOrProvision(ctx context.Context) (*tls.Certificate, error) {
+	// One clock reading for the whole decision: judging the cert usable
+	// against one instant and rotation-due against another can serve a cert
+	// the very next comparison considers unusable.
+	now := time.Now()
+
 	s.mu.RLock()
-	if s.cert != nil {
-		cert := s.cert
-		needsRotation := time.Now().After(s.rotateAt)
-		currentProvider := s.provider // capture under RLock before releasing
-		s.mu.RUnlock()
-
-		if !needsRotation {
-			return cert, nil
-		}
-
-		// Cert still valid but due for rotation — return old cert,
-		// provision new one in the background.
-		if s.rotating.CompareAndSwap(false, true) {
-			go s.backgroundProvision(currentProvider)
-		}
-		return cert, nil
-	}
+	cached := s.cert
+	rotateAt := s.rotateAt
+	currentProvider := s.provider // capture under RLock before releasing
 	s.mu.RUnlock()
 
-	// No cert at all — first call, must provision synchronously.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if cached != nil {
+		err := usableForHandshake(cached, now)
+		switch {
+		case err == nil:
+			s.unusableLogged.Store(false)
+			if !now.After(rotateAt) {
+				return cached, nil
+			}
 
-	// Double-check: another goroutine may have provisioned while we waited.
-	if s.cert != nil {
-		return s.cert, nil
+			// Cert still valid but due for rotation — return old cert,
+			// provision new one in the background. rotateAt is handed to the
+			// rotation so it can tell whether a newer cert landed while it
+			// worked.
+			if s.rotating.CompareAndSwap(false, true) {
+				go s.backgroundProvision(currentProvider, rotateAt)
+			}
+			return cached, nil
+		case s.logger != nil && s.unusableLogged.CompareAndSwap(false, true):
+			s.logger.Warn("ratls: cached certificate is outside its validity window, provisioning synchronously", "err", err)
+		}
 	}
 
-	cert, ttl, err := s.provider.Provision(ctx)
+	// No cert at all, or the cached one is no longer usable — provision
+	// synchronously.
+	return s.syncProvision(ctx, now)
+}
+
+// syncProvision is the fail-closed path: nothing usable is cached, so the
+// caller gets a fresh certificate or an error, never a stale credential.
+//
+// It runs under a TLS handshake, which makes two properties load-bearing.
+// First it is single-flighted: N concurrent handshakes against an expired
+// cache would otherwise run N serialized provisioning attempts with no
+// backoff — a retry storm aimed at the source that is already failing — so
+// latecomers wait on the one attempt in progress. Second it is time-bounded,
+// by the same timeout background rotation uses, because the handshake context
+// comes from tls.NewListener and has no deadline of its own. A failure is
+// negative-cached for syncProvisionCooldown so the storm does not resume the
+// instant the attempt returns.
+func (s *certState) syncProvision(ctx context.Context, now time.Time) (*tls.Certificate, error) {
+	if ctx == nil {
+		// A zero tls.ClientHelloInfo / tls.CertificateRequestInfo carries no
+		// context; the timeout below is what actually bounds this path.
+		ctx = context.Background()
+	}
+
+	s.syncMu.Lock()
+
+	// Another goroutine may have stored a usable cert while we queued.
+	s.mu.RLock()
+	cached := s.cert
+	s.mu.RUnlock()
+	if cached != nil && usableForHandshake(cached, now) == nil {
+		s.syncMu.Unlock()
+		return cached, nil
+	}
+
+	if attempt := s.inflight; attempt != nil {
+		s.syncMu.Unlock()
+		select {
+		case <-attempt.done:
+			return attempt.cert, attempt.err
+		case <-ctx.Done():
+			// Our own handshake went away; the attempt continues for whoever
+			// is still waiting on it.
+			return nil, ctx.Err()
+		}
+	}
+
+	if now.Before(s.cooldownUntil) {
+		err := s.cooldownErr
+		s.syncMu.Unlock()
+		return nil, err
+	}
+
+	attempt := &provisionAttempt{done: make(chan struct{})}
+	s.inflight = attempt
+	s.syncMu.Unlock()
+
+	attempt.cert, attempt.err = s.provisionNow(ctx)
+
+	s.syncMu.Lock()
+	s.inflight = nil
+	// A context cancellation says the caller left, not that the provider is
+	// unhealthy, so it must not poison the cache for everyone else.
+	if attempt.err != nil && ctx.Err() == nil {
+		s.cooldownUntil = time.Now().Add(s.effectiveSyncCooldown())
+		s.cooldownErr = attempt.err
+	}
+	s.syncMu.Unlock()
+	close(attempt.done)
+
+	return attempt.cert, attempt.err
+}
+
+// provisionNow runs one bounded provisioning round-trip and, on success,
+// stores the result as the cached certificate.
+func (s *certState) provisionNow(ctx context.Context) (*tls.Certificate, error) {
+	s.mu.RLock()
+	provider := s.provider
+	s.mu.RUnlock()
+
+	pctx, cancel := context.WithTimeout(ctx, s.effectiveRotationTimeout())
+	defer cancel()
+
+	cert, ttl, err := provider.Provision(pctx)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("ratls: certificate provisioning failed", "err", err)
 		}
 		return nil, fmt.Errorf("ratls: provision certificate: %w", err)
 	}
+	if err := ensureLeaf(cert); err != nil {
+		return nil, err
+	}
 
 	if ttl == 0 {
 		ttl = s.effectiveTTL()
 	}
-	rotateAt := time.Now().Add(ttl / 2)
+	newRotateAt := time.Now().Add(ttl / 2)
+
+	s.mu.Lock()
 	s.cert = cert
-	s.rotateAt = rotateAt
+	s.rotateAt = newRotateAt
+	s.mu.Unlock()
 	s.provisioned.Store(true)
+	s.unusableLogged.Store(false)
+	s.clearCooldown()
 
 	if s.logger != nil {
-		s.logger.Info("ratls: certificate provisioned", "ttl", ttl, "rotateAt", rotateAt)
+		s.logger.Info("ratls: certificate provisioned", "ttl", ttl, "rotateAt", newRotateAt)
 	}
 
 	return cert, nil
 }
 
+// clearCooldown drops the negative cache. A success is newer evidence about
+// the provider than the failure that populated it, so leaving it in place
+// could replay a stale error at the next handshake that needs one.
+func (s *certState) clearCooldown() {
+	s.syncMu.Lock()
+	s.cooldownUntil = time.Time{}
+	s.cooldownErr = nil
+	s.syncMu.Unlock()
+}
+
+// ensureLeaf populates cert.Leaf once, at provision time. Every CertProvider
+// is required to set it (see the interface's INVARIANT), but a third-party
+// implementation that does not would otherwise cost usableForHandshake an
+// x509 parse on every single connection.
+func ensureLeaf(cert *tls.Certificate) error {
+	if cert == nil {
+		return fmt.Errorf("ratls: provider returned no certificate")
+	}
+	if cert.Leaf != nil {
+		return nil
+	}
+	if len(cert.Certificate) == 0 {
+		return fmt.Errorf("ratls: provisioned certificate has no leaf")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("ratls: parse provisioned leaf: %w", err)
+	}
+	cert.Leaf = leaf
+	return nil
+}
+
+// usableForHandshake reports whether a cached certificate may still be handed
+// to a TLS handshake: its leaf must be inside the validity window
+// (NotBefore within certutil.LeafValiditySkew, NotAfter with no allowance).
+// Leaf is populated by ensureLeaf before anything is cached, so this is a
+// field read and two time comparisons — no DER parsing on the handshake path.
+func usableForHandshake(cert *tls.Certificate, now time.Time) error {
+	if cert.Leaf == nil {
+		return fmt.Errorf("ratls: cached certificate has no parsed leaf")
+	}
+	return certutil.CheckValidity(cert.Leaf, now)
+}
+
 // backgroundProvision provisions a new certificate without blocking callers.
 // On failure, the old cert continues being served and the next handshake
-// past rotateAt will retry. The spawnProvider parameter is the provider that
-// was active when rotation was triggered — if SwapProvider replaced it since,
-// the result is discarded to avoid overwriting the new provider's cert.
-func (s *certState) backgroundProvision(spawnProvider CertProvider) {
+// past rotateAt will retry. spawnProvider and spawnRotateAt are the provider
+// and rotation deadline that were current when rotation was triggered: if
+// either moved while we worked — SwapProvider installed a new provider, or a
+// synchronous provision landed a newer cert after this one crossed NotAfter —
+// the result is discarded rather than overwriting the newer certificate with
+// an older one.
+func (s *certState) backgroundProvision(spawnProvider CertProvider, spawnRotateAt time.Time) {
 	defer s.rotating.Store(false)
 
-	timeout := s.rotationTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.effectiveRotationTimeout())
 	defer cancel()
 
 	cert, ttl, err := spawnProvider.Provision(ctx)
+	if err == nil {
+		err = ensureLeaf(cert)
+	}
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("ratls: background certificate rotation failed", "err", err)
@@ -268,17 +471,29 @@ func (s *certState) backgroundProvision(spawnProvider CertProvider) {
 	}
 	rotateAt := time.Now().Add(ttl / 2)
 	s.mu.Lock()
-	if s.provider != spawnProvider {
+	switch {
+	case s.provider != spawnProvider:
 		// Provider was swapped while we were provisioning — discard stale cert.
 		s.mu.Unlock()
 		if s.logger != nil {
 			s.logger.Info("ratls: discarding background rotation (provider changed)")
 		}
 		return
+	case s.rotateAt.After(spawnRotateAt):
+		// Something stored a newer certificate while we worked — the
+		// synchronous fail-closed path, or another rotation. Ours is the
+		// older one; dropping it keeps rotation monotonic.
+		s.mu.Unlock()
+		if s.logger != nil {
+			s.logger.Info("ratls: discarding background rotation (a newer certificate was stored)")
+		}
+		return
 	}
 	s.cert = cert
 	s.rotateAt = rotateAt
 	s.mu.Unlock()
+	s.unusableLogged.Store(false)
+	s.clearCooldown()
 
 	if s.logger != nil {
 		s.logger.Info("ratls: certificate rotated (background)", "ttl", ttl, "rotateAt", rotateAt)
@@ -293,6 +508,23 @@ func (s *certState) effectiveTTL() time.Duration {
 	return DefaultCertTTL
 }
 
+// effectiveRotationTimeout bounds one provisioning round-trip.
+func (s *certState) effectiveRotationTimeout() time.Duration {
+	if s.rotationTimeout > 0 {
+		return s.rotationTimeout
+	}
+	return defaultRotationTimeout
+}
+
+// effectiveSyncCooldown is how long a failed synchronous provision is
+// negative-cached.
+func (s *certState) effectiveSyncCooldown() time.Duration {
+	if s.syncCooldown > 0 {
+		return s.syncCooldown
+	}
+	return syncProvisionCooldown
+}
+
 // SwapProvider atomically replaces the certificate provider and triggers
 // an immediate re-provisioning. Used for runtime upgrades (e.g., self-signed
 // to CDS-issued). The old certificate continues serving until the new one
@@ -302,6 +534,15 @@ func (s *certState) SwapProvider(ctx context.Context, provider CertProvider) err
 	// readiness gap: if provisioning fails, the old cert and provider
 	// remain active (the mesh stays ready and serves traffic).
 	cert, ttl, err := provider.Provision(ctx)
+	if err == nil {
+		err = ensureLeaf(cert)
+	}
+	if err == nil {
+		// Symmetry with getOrProvision, which refuses to serve a cert outside
+		// its window: caching one here would install a credential the very
+		// next handshake discards, dropping the old cert that still works.
+		err = usableForHandshake(cert, time.Now())
+	}
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("ratls: certificate provisioning failed", "err", err)
@@ -319,8 +560,13 @@ func (s *certState) SwapProvider(ctx context.Context, provider CertProvider) err
 	s.provider = provider
 	s.cert = cert
 	s.rotateAt = rotateAt
-	s.provisioned.Store(true)
 	s.mu.Unlock()
+	s.provisioned.Store(true)
+	s.unusableLogged.Store(false)
+
+	// A new provider is a different certificate source; a failure cached
+	// against the old one says nothing about it.
+	s.clearCooldown()
 
 	if s.logger != nil {
 		s.logger.Info("ratls: certificate provisioned", "ttl", ttl, "rotateAt", rotateAt)
@@ -370,8 +616,15 @@ func (m *CertManager) WarmUp(ctx context.Context) error {
 }
 
 // CertReady returns true if a certificate has been provisioned at least once.
+// It is sticky; gate readiness on [CertManager.CertUsable] as well.
 func (m *CertManager) CertReady() bool {
 	return m.state.CertReady()
+}
+
+// CertUsable returns true if the cached certificate is inside its validity
+// window and can therefore still be served. See [certState.CertUsable].
+func (m *CertManager) CertUsable() bool {
+	return m.state.CertUsable()
 }
 
 // CertExpiry returns the NotAfter time of the current certificate, or the zero
@@ -629,11 +882,25 @@ func dualVerifyPeerCallback(policy *VerifyPolicy, shared *sharedCACerts) func([]
 				intermediates.AddCert(ic)
 			}
 		}
+		// Both branches must share one validity window. x509.Verify grants no
+		// NotBefore skew while certutil.CheckValidity (the RA-TLS branch,
+		// through VerifyCert) grants certutil.LeafValiditySkew, so without
+		// CurrentTime a CA-signed leaf minted a couple of minutes into our
+		// future fails the chain here and silently falls through to RA-TLS —
+		// where the sandbox and workload pins below are not enforced at all.
+		// Shifting CurrentTime closes that divergence; the leaf's own NotAfter
+		// is then re-checked at the true now, so the shift buys nothing at the
+		// expiry end.
+		now := time.Now()
 		_, chainErr := cert.Verify(x509.VerifyOptions{
 			Roots:         caPool,
 			Intermediates: intermediates,
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+			CurrentTime:   now.Add(certutil.LeafValiditySkew),
 		})
+		if chainErr == nil {
+			chainErr = certutil.CheckValidity(cert, now)
+		}
 		if chainErr == nil {
 			// The chain is verified here and only here, so this is the one place
 			// a sandbox-ID or workload pin can be enforced: CDS's signature over

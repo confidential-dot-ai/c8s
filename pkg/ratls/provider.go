@@ -14,6 +14,12 @@ import (
 // The returned time.Duration is the effective TTL so certState knows when to
 // schedule rotation (at 50% of the TTL). Returning 0 means the caller should
 // fall back to the configured default TTL.
+//
+// INVARIANT: implementations set tls.Certificate.Leaf on the returned
+// certificate. The manager checks the leaf's validity window on every
+// handshake, so an unset Leaf would mean an x509 parse per connection; the
+// manager parses it once at provision time rather than trusting this, but a
+// provider that already holds the parsed leaf should pass it through.
 type CertProvider interface {
 	Provision(ctx context.Context) (*tls.Certificate, time.Duration, error)
 }

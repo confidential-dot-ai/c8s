@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -28,6 +29,26 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 			cert, err := x509.ParseCertificate(rawCerts[0])
 			if err != nil {
 				return fmt.Errorf("localverify: parse peer cert: %w", err)
+			}
+			// Authenticate the certificate body before touching the evidence:
+			// validity within the shared skew window (the nonce-free evidence
+			// has no other freshness bound) and, for a self-issued leaf, its
+			// own signature under its attested key. Cheap, and it keeps an
+			// expired cert from costing an evidence verification.
+			//
+			// Peers on this path are self-signed RA-TLS leaves (this client
+			// verifies no chain and holds no CA), so the classification must
+			// come back BodySelfSigned. Assert it instead of discarding it: a
+			// CA-vouched leaf here would have had NOTHING authenticate its
+			// body — no signature is checked when issuer != subject — so its
+			// window, subject and stamps would be whatever the producer of
+			// the bytes chose, under a genuine attestation extension.
+			body, err := certutil.AuthenticateLeafBody(cert, time.Now())
+			if err != nil {
+				return fmt.Errorf("localverify: peer certificate: %w", err)
+			}
+			if body != certutil.BodySelfSigned {
+				return fmt.Errorf("localverify: peer certificate is not self-signed (issuer != subject) and this client verifies no issuing chain, so nothing authenticates its body")
 			}
 			platform, evidence, erd, err := CertEnvelope(cert)
 			if err != nil {

@@ -15,12 +15,23 @@ import (
 )
 
 // healthServer exposes /live, /ready, and /metrics on a dedicated admin port.
+// certGate is the readiness slice of [ratls.CertManager]. It is an interface
+// so /ready can be exercised without minting short-lived certificates and
+// sleeping past their expiry.
+type certGate interface {
+	// CertReady reports that a certificate was provisioned at least once.
+	CertReady() bool
+	// CertUsable reports that the cached certificate is still inside its
+	// validity window, i.e. that a handshake would actually succeed.
+	CertUsable() bool
+}
+
 type healthServer struct {
 	ready                atomic.Bool
 	metrics              *metrics
 	mux                  *http.ServeMux
-	serverCertMgr        *ratls.CertManager
-	clientCertMgr        *ratls.CertManager // nil if no mTLS
+	serverCertMgr        certGate
+	clientCertMgr        certGate // nil if no mTLS
 	acceptErrorThreshold int64
 	readTimeout          time.Duration
 	writeTimeout         time.Duration
@@ -29,11 +40,17 @@ type healthServer struct {
 func newHealthServer(m *metrics, serverCertMgr, clientCertMgr *ratls.CertManager, acceptErrorThreshold int64, readTimeout, writeTimeout time.Duration) *healthServer {
 	h := &healthServer{
 		metrics:              m,
-		serverCertMgr:        serverCertMgr,
-		clientCertMgr:        clientCertMgr,
 		acceptErrorThreshold: acceptErrorThreshold,
 		readTimeout:          readTimeout,
 		writeTimeout:         writeTimeout,
+	}
+	// Assign through the concrete type so a nil manager stays a nil interface
+	// rather than a non-nil interface holding a nil pointer.
+	if serverCertMgr != nil {
+		h.serverCertMgr = serverCertMgr
+	}
+	if clientCertMgr != nil {
+		h.clientCertMgr = clientCertMgr
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /live", h.handleLive)
@@ -54,13 +71,30 @@ func (h *healthServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	// Gate on cert provisioning: don't accept traffic until we can serve TLS.
-	if h.serverCertMgr != nil && !h.serverCertMgr.CertReady() {
-		http.Error(w, "server cert not provisioned", http.StatusServiceUnavailable)
-		return
+	// CertReady is sticky, so it only covers startup; CertUsable covers the
+	// terminal state where rotation has failed past NotAfter and the manager
+	// refuses to hand the expired cert to a handshake. Without the second
+	// gate such a pod stays in the endpoint list and blackholes every
+	// connection routed to it.
+	if h.serverCertMgr != nil {
+		if !h.serverCertMgr.CertReady() {
+			http.Error(w, "server cert not provisioned", http.StatusServiceUnavailable)
+			return
+		}
+		if !h.serverCertMgr.CertUsable() {
+			http.Error(w, "server cert outside its validity window and rotation is failing", http.StatusServiceUnavailable)
+			return
+		}
 	}
-	if h.clientCertMgr != nil && !h.clientCertMgr.CertReady() {
-		http.Error(w, "client cert not provisioned", http.StatusServiceUnavailable)
-		return
+	if h.clientCertMgr != nil {
+		if !h.clientCertMgr.CertReady() {
+			http.Error(w, "client cert not provisioned", http.StatusServiceUnavailable)
+			return
+		}
+		if !h.clientCertMgr.CertUsable() {
+			http.Error(w, "client cert outside its validity window and rotation is failing", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	// Degrade readiness if either accept loop is in sustained failure.
 	if h.metrics.acceptConsecutiveInbound.Load() >= h.acceptErrorThreshold ||

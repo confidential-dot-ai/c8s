@@ -501,7 +501,10 @@ func TestConcurrentCertProvisioning(t *testing.T) {
 func TestCertRotationTiming(t *testing.T) {
 	var callCount atomic.Int32
 	cfg := testServerConfig()
-	cfg.CertTTL = 100 * time.Millisecond
+	// Whole seconds: X.509 encodes validity at second granularity, so a
+	// sub-second TTL truncates to an already-expired NotAfter and would trip
+	// the hard expiry stop instead of exercising rotation.
+	cfg.CertTTL = 4 * time.Second
 	cfg.AttestFunc = func(ctx context.Context, customData string) (string, error) {
 		callCount.Add(1)
 		return fakeAttestFunc(ctx, customData)
@@ -521,8 +524,8 @@ func TestCertRotationTiming(t *testing.T) {
 		t.Fatalf("expected 1 attestation call, got %d", callCount.Load())
 	}
 
-	// Wait past rotation window (50% of 100ms = 50ms).
-	time.Sleep(60 * time.Millisecond)
+	// Wait past rotation window (50% of 4s = 2s) but well short of expiry.
+	time.Sleep(2100 * time.Millisecond)
 
 	// This call triggers background rotation but returns the OLD cert.
 	certOld, err := tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
@@ -558,7 +561,10 @@ func TestCertRotationTiming(t *testing.T) {
 func TestBackgroundRotationNonBlocking(t *testing.T) {
 	var callCount atomic.Int32
 	cfg := testServerConfig()
-	cfg.CertTTL = 100 * time.Millisecond
+	// Whole seconds: a sub-second TTL truncates to an already-expired
+	// NotAfter (X.509 second granularity) and would force the synchronous
+	// fail-closed path this test must not take.
+	cfg.CertTTL = 4 * time.Second
 	cfg.AttestFunc = func(ctx context.Context, customData string) (string, error) {
 		n := callCount.Add(1)
 		if n > 1 {
@@ -579,8 +585,8 @@ func TestBackgroundRotationNonBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait past rotation window.
-	time.Sleep(60 * time.Millisecond)
+	// Wait past rotation window (50% of 4s) but well short of expiry.
+	time.Sleep(2100 * time.Millisecond)
 
 	// Trigger background rotation (slow: 200ms).
 	_, _ = tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
@@ -676,7 +682,7 @@ func TestCertManagerRotationFailCallback(t *testing.T) {
 	// Trigger background rotation (which will fail).
 	state := mgr.state
 	if state.rotating.CompareAndSwap(false, true) {
-		state.backgroundProvision(state.provider)
+		state.backgroundProvision(state.provider, state.rotateAt)
 	}
 
 	// The failure callback should have been called.
@@ -1322,7 +1328,7 @@ func TestBackgroundProvisionRotationTimeout(t *testing.T) {
 			p := &deadlineProvider{cert: generateSimpleCert(t)}
 			s := &certState{provider: p, rotationTimeout: tt.timeout}
 			start := time.Now()
-			s.backgroundProvision(p)
+			s.backgroundProvision(p, s.rotateAt)
 			if !p.ok {
 				t.Fatal("provisioning context has no deadline")
 			}
@@ -1338,7 +1344,7 @@ func TestBackgroundProvisionRotateAtHalvesDefaultTTL(t *testing.T) {
 	p := &mockProvider{cert: cert, ttl: 0}
 	s := &certState{provider: p, defaultTTL: 10 * time.Hour}
 	start := time.Now()
-	s.backgroundProvision(p)
+	s.backgroundProvision(p, s.rotateAt)
 	s.mu.RLock()
 	got := s.cert
 	s.mu.RUnlock()
@@ -1352,7 +1358,7 @@ func TestBackgroundProvisionDiscardsStaleProvider(t *testing.T) {
 	current := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
 	stale := &mockProvider{cert: generateSimpleCert(t), ttl: time.Hour}
 	s := &certState{provider: current}
-	s.backgroundProvision(stale)
+	s.backgroundProvision(stale, s.rotateAt)
 	s.mu.RLock()
 	got := s.cert
 	s.mu.RUnlock()
