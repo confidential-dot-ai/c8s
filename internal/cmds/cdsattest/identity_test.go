@@ -3,6 +3,7 @@ package cdsattest
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,6 +284,159 @@ func TestLoadMeshIdentityRejectsExpiredLeaf(t *testing.T) {
 	if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
 		t.Fatal("expired mesh identity leaf was accepted")
 	}
+}
+
+// Every unusable credential configuration must refuse the load — a partial
+// identity served anyway would sign transcripts with a credential the client
+// cannot (or must not) chain.
+func TestLoadMeshIdentityRejectsUnusableCredentials(t *testing.T) {
+	t.Run("all three files are required", func(t *testing.T) {
+		identity := writeTestMeshIdentity(t)
+		for _, files := range [][3]string{
+			{"", identity.keyFile, identity.caFile},
+			{identity.certFile, "", identity.caFile},
+			{identity.certFile, identity.keyFile, ""},
+		} {
+			if _, err := loadMeshIdentity(files[0], files[1], files[2]); err == nil || !strings.Contains(err.Error(), "required") {
+				t.Fatalf("loadMeshIdentity(%q, %q, %q) = %v, want the required-files refusal", files[0], files[1], files[2], err)
+			}
+		}
+	})
+
+	t.Run("unreadable key file", func(t *testing.T) {
+		identity := writeTestMeshIdentity(t)
+		if err := os.Remove(identity.keyFile); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
+			t.Fatal("missing key file was accepted")
+		}
+	})
+
+	t.Run("unreadable CA file", func(t *testing.T) {
+		identity := writeTestMeshIdentity(t)
+		if err := os.Remove(identity.caFile); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
+			t.Fatal("missing CA file was accepted")
+		}
+	})
+
+	t.Run("non-ECDSA leaf key", func(t *testing.T) {
+		// The proof algorithm is fixed (ecdsa-sha384), so an Ed25519 credential
+		// cannot sign what clients verify and must be refused at load.
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(3),
+			Subject:      pkix.Name{CommonName: "ed25519 leaf"},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		certFile := filepath.Join(dir, "cert.pem")
+		keyFile := filepath.Join(dir, "key.pem")
+		writeTestPEM(t, certFile, "CERTIFICATE", der)
+		writeTestPEM(t, keyFile, "PRIVATE KEY", keyDER)
+		if _, err := loadMeshIdentity(certFile, keyFile, certFile); err == nil || !strings.Contains(err.Error(), "ECDSA") {
+			t.Fatalf("err = %v, want the ECDSA-only refusal", err)
+		}
+	})
+
+	t.Run("CA bundle is not PEM certificates", func(t *testing.T) {
+		identity := writeTestMeshIdentity(t)
+		if err := os.WriteFile(identity.caFile, []byte("not a certificate"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
+			t.Fatal("garbage CA bundle was accepted")
+		}
+	})
+
+	t.Run("expired issuing CA", func(t *testing.T) {
+		// The leaf window can be valid while the CA's is not; the whole chain
+		// the endpoints serve must be inside its validity, so this fails closed.
+		identity := writeExpiredCAMeshIdentity(t)
+		if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil || !strings.Contains(err.Error(), "CA") {
+			t.Fatalf("err = %v, want the expired-CA refusal", err)
+		}
+	})
+}
+
+// writeExpiredCAMeshIdentity mints a currently-valid leaf signed by a CA whose
+// own validity window has already closed.
+func writeExpiredCAMeshIdentity(t *testing.T) testMeshIdentity {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "expired mesh CA"},
+		NotBefore:             now.Add(-2 * time.Hour),
+		NotAfter:              now.Add(-time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	identity := testMeshIdentity{
+		certFile: filepath.Join(dir, "cert.pem"),
+		keyFile:  filepath.Join(dir, "key.pem"),
+		caFile:   filepath.Join(dir, "ca.pem"),
+		leaf:     leaf,
+		ca:       ca,
+		key:      leafKey,
+	}
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestPEM(t, identity.certFile, "CERTIFICATE", leafDER)
+	writeTestPEM(t, identity.keyFile, "EC PRIVATE KEY", keyDER)
+	writeTestPEM(t, identity.caFile, "CERTIFICATE", caDER)
+	return identity
 }
 
 // The endpoints take no pq or binding parameter: each path serves exactly one

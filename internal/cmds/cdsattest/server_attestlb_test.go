@@ -222,6 +222,30 @@ func TestAttestLBMissingServingCertFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAttestLBMeshIdentityUnavailableFailsClosed(t *testing.T) {
+	// The serving leaf alone is not enough: without a loadable mesh identity
+	// there is nothing to sign the transcript, so the endpoint must 503 rather
+	// than serve an unsigned binding.
+	identity := writeTestMeshIdentity(t)
+	certPath, _ := writeTestServingLeaf(t)
+	if err := os.Remove(identity.certFile); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newAttestLBServer(t, identity, certPath)
+
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 503 when the mesh identity cannot load", resp.StatusCode)
+	}
+	if e := decodeErr(t, resp); e.Error != types.ErrorCodeBindingUnavailable {
+		t.Fatalf("error code = %q, want %q", e.Error, types.ErrorCodeBindingUnavailable)
+	}
+}
+
 func TestAttestLBWrongSizeNonce(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	certPath, _ := writeTestServingLeaf(t)

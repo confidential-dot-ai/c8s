@@ -126,6 +126,46 @@ func TestInitialVersionIsOne(t *testing.T) {
 	}
 }
 
+func TestVersionMatchesListAllWithoutLoadingRows(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	version, err := store.Version()
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if version != "1" {
+		t.Fatalf("initial version: got %q, want %q", version, "1")
+	}
+
+	// Version is the ETag the worker pull carries, so it must move in lockstep
+	// with the counter ListAll reports after a write.
+	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	listVersion, _, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	version, err = store.Version()
+	if err != nil {
+		t.Fatalf("version after add: %v", err)
+	}
+	if version != listVersion {
+		t.Fatalf("Version() = %q, ListAll version = %q; the cheap read must match", version, listVersion)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := store.Version(); err == nil {
+		t.Fatal("Version on a closed store should fail, not report a stale counter")
+	}
+}
+
 func TestAddAndListRoundtrip(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {

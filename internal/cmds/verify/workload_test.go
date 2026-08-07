@@ -122,11 +122,17 @@ func TestBuildPolicyWorkloadFlagsRequireMeshCA(t *testing.T) {
 	if _, err := buildPolicy(config{allowlistFile: "whatever.json"}); err == nil {
 		t.Fatal("--allowlist accepted without --mesh-ca")
 	}
-	if _, err := buildPolicy(config{workload: "not/a/name", meshCA: "ca.pem"}); err == nil {
-		t.Fatal("--workload accepted an invalid entry name")
+	// The name checks need a loadable CA: a missing --mesh-ca file errors
+	// first and would mask them.
+	meshCA := writeMeshCAFile(t)
+	if _, err := buildPolicy(config{workload: "not/a/name", meshCA: meshCA}); err == nil || !strings.Contains(err.Error(), "--workload") {
+		t.Fatalf("err = %v, want the invalid-entry-name refusal", err)
 	}
-	if _, err := buildPolicy(config{workload: strings.Repeat("a", 64), meshCA: "ca.pem"}); err == nil {
-		t.Fatal("--workload accepted a name over the 63-byte bound")
+	if _, err := buildPolicy(config{workload: strings.Repeat("a", 64), meshCA: meshCA}); err == nil || !strings.Contains(err.Error(), "--workload") {
+		t.Fatalf("err = %v, want the over-long-name refusal", err)
+	}
+	if _, err := buildPolicy(config{workload: "api", meshCA: meshCA}); err != nil {
+		t.Fatalf("a valid name with a loadable CA must build: %v", err)
 	}
 }
 

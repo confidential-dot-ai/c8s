@@ -3,7 +3,9 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -156,6 +158,41 @@ func TestBuildPolicy_RejectsOutOfRangeMinTCB(t *testing.T) {
 	}
 }
 
+func TestBuildPolicy_SandboxIDFlag(t *testing.T) {
+	meshCA := writeMeshCAFile(t)
+
+	t.Run("invalid sandbox ID is rejected", func(t *testing.T) {
+		if _, err := buildPolicy(config{sandboxID: "not/valid!", meshCA: meshCA}); err == nil || !strings.Contains(err.Error(), "--sandbox-id") {
+			t.Fatalf("err = %v, want a --sandbox-id validation error", err)
+		}
+	})
+
+	t.Run("sandbox ID pin requires mesh-ca", func(t *testing.T) {
+		// The ID lives in the leaf's signed area; without the chain check the
+		// pin would compare a string the presenter chose.
+		if _, err := buildPolicy(config{sandboxID: "8d9f6c2b1a0e"}); err == nil || !strings.Contains(err.Error(), "--mesh-ca") {
+			t.Fatalf("err = %v, want the mesh-ca requirement", err)
+		}
+	})
+
+	t.Run("sandbox ID with mesh-ca is accepted", func(t *testing.T) {
+		if _, err := buildPolicy(config{sandboxID: "8d9f6c2b1a0e", meshCA: meshCA}); err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+	})
+}
+
+// writeMeshCAFile writes a valid CA PEM for the --mesh-ca flag.
+func writeMeshCAFile(t *testing.T) string {
+	t.Helper()
+	id := mintEndpointIdentity(t)
+	path := filepath.Join(t.TempDir(), "mesh-ca.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.ca.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestParseExpectedReportData(t *testing.T) {
 	if _, err := parseExpectedReportData(strings.Repeat("ab", 64)); err != nil {
 		t.Errorf("64-byte hex should parse: %v", err)
@@ -226,6 +263,72 @@ func mintEndpointIdentity(t *testing.T) *endpointIdentity {
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
+	return &endpointIdentity{leaf: leaf, ca: ca, key: leafKey, chainPEM: chain}
+}
+
+// ed25519Pub returns a fresh Ed25519 public key for the non-ECDSA-leaf case.
+func ed25519Pub(t *testing.T) crypto.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// mintEndpointIdentityFrom is mintEndpointIdentity with the leaf's public key
+// (nil => fresh ECDSA) and validity window chosen by the caller. The proof key
+// stays ECDSA either way, so the verifier's own checks — not a build failure —
+// decide the outcome.
+func mintEndpointIdentityFrom(t *testing.T, leafPub crypto.PublicKey, notBefore, notAfter time.Time) *endpointIdentity {
+	t.Helper()
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mesh CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leafPub == nil {
+		leafPub = &leafKey.PublicKey
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, leafPub, caKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,6 +487,60 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		mutated := mutateProof(t, "algorithm", "ecdsa-sha256")
 		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
 			t.Fatalf("expected securityError on an unknown proof algorithm, got %v", err)
+		}
+	})
+
+	t.Run("undecodable proof fields are plain errors", func(t *testing.T) {
+		// "!" is outside the base64url alphabet in every position.
+		for field, want := range map[string]string{
+			"mesh_ca_sha256": "mesh_ca_sha256",
+			"leaf_sha256":    "leaf_sha256",
+			"signature":      "signature",
+		} {
+			mutated := mutateProof(t, field, "!!!!")
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("field %s: err = %v, want a decode error naming it", field, err)
+			}
+		}
+	})
+
+	t.Run("unparseable or single-cert mesh chain rejected", func(t *testing.T) {
+		for name, chain := range map[string]string{
+			"garbage":   "not a certificate",
+			"leaf only": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.leaf.Raw})),
+		} {
+			var obj map[string]any
+			if err := json.Unmarshal(data, &obj); err != nil {
+				t.Fatal(err)
+			}
+			obj["cds_cert_pem"] = chain
+			mutated, err := json.Marshal(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "cds_cert_pem") {
+				t.Errorf("%s chain: err = %v, want a cds_cert_pem error", name, err)
+			}
+		}
+	})
+
+	t.Run("non-ECDSA mesh leaf key rejected", func(t *testing.T) {
+		// A proof over an Ed25519 leaf cannot be the sidecar's ecdsa-sha384
+		// construction, whatever the signature bytes claim.
+		other := mintEndpointIdentityFrom(t, ed25519Pub(t), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+		body := buildEndpointJSON(t, other, nonce, report, []byte("vcek"), x, m)
+		if _, err := evidenceFromEndpointJSON(body, nonce, "test"); err == nil || !strings.Contains(err.Error(), "ECDSA") {
+			t.Fatalf("err = %v, want the ECDSA-only refusal", err)
+		}
+	})
+
+	t.Run("expired committed leaf is a security error", func(t *testing.T) {
+		// The committed chain must be currently valid: a stale saved identity
+		// replayed after expiry fails closed even with a correct proof.
+		expired := mintEndpointIdentityFrom(t, nil, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
+		body := buildEndpointJSON(t, expired, nonce, report, []byte("vcek"), x, m)
+		if _, err := evidenceFromEndpointJSON(body, nonce, "test"); err == nil || !isSecurityError(err) || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("err = %v, want an expired-chain security error", err)
 		}
 	})
 
@@ -948,6 +1105,26 @@ func TestNewOutcomePlatform(t *testing.T) {
 	}
 }
 
+// A verifier verdict whose launch digest cannot be decoded must fail the
+// --measurements pin closed: an unparseable digest can never count as allowed.
+func TestNewOutcomeMalformedLaunchDigestFailsPin(t *testing.T) {
+	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
+	policy := &ratls.VerifyPolicy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}
+	for _, digest := range []string{"", "zz"} {
+		result := &teetypes.VerificationResult{
+			SignatureValid: true,
+			Claims:         teetypes.Claims{LaunchDigest: digest},
+		}
+		oc := newOutcome(config{}, ev, result, nil, policy)
+		if oc.Verified {
+			t.Fatalf("launch digest %q verified despite being unenforceable", digest)
+		}
+		if !strings.Contains(oc.Error, "cannot enforce --measurements") {
+			t.Fatalf("Error = %q, want the unenforceable-pin reason", oc.Error)
+		}
+	}
+}
+
 func TestFormatTCB(t *testing.T) {
 	u8 := func(v uint8) *uint8 { return &v }
 	cases := []struct {
@@ -1016,6 +1193,44 @@ func TestRenderTextSections(t *testing.T) {
 			if strings.Contains(got, absent) {
 				t.Errorf("output has %q without the datum:\n%s", absent, got)
 			}
+		}
+	})
+
+	t.Run("workload section carries the stamp and its provenance note", func(t *testing.T) {
+		got := renderOut(Outcome{
+			Verified:                 true,
+			Fresh:                    true,
+			Pinned:                   true,
+			Workload:                 "web",
+			WorkloadAllowlistVersion: "7",
+			WorkloadAllowlistDigest:  "abcd",
+			WorkloadNote:             "workload_verified: pinned policy satisfied",
+		})
+		for _, want := range []string{
+			"workload:     web  (allowlist version 7, digest abcd)",
+			"workload_verified: pinned policy satisfied",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("non-fresh and unpinned verdicts carry their warnings", func(t *testing.T) {
+		got := renderOut(Outcome{Verified: true})
+		if !strings.Contains(got, "freshness NOT proven") {
+			t.Errorf("missing the non-freshness note:\n%s", got)
+		}
+		if !strings.Contains(got, "no --measurements pinned") {
+			t.Errorf("missing the unpinned warning:\n%s", got)
+		}
+	})
+
+	t.Run("show-evidence prints the report data", func(t *testing.T) {
+		var out bytes.Buffer
+		renderText(config{showEvidence: true}, Outcome{Verified: true, Fresh: true, Pinned: true, ReportData: "deadbeef"}, &out)
+		if !strings.Contains(out.String(), "report_data:  deadbeef") {
+			t.Errorf("missing report_data with --show-evidence:\n%s", out.String())
 		}
 	})
 }
@@ -1184,6 +1399,27 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("no target at all is an error", func(t *testing.T) {
+		if _, err := gatherEvidence(ctx, config{}, nil); err == nil || !strings.Contains(err.Error(), "no target") {
+			t.Fatalf("err = %v, want the no-target refusal", err)
+		}
+	})
+
+	t.Run("unparseable target is an error", func(t *testing.T) {
+		if _, err := gatherEvidence(ctx, config{url: "https://\x7f"}, nil); err == nil {
+			t.Fatal("control-character target should fail to normalize")
+		}
+	})
+
+	t.Run("attest-pq mode surfaces a dial failure as a connect error", func(t *testing.T) {
+		// Port 1 refuses fast: an unreachable endpoint is exit-3 territory, not
+		// a verification verdict.
+		_, err := gatherEvidence(ctx, config{url: "https://127.0.0.1:1", mode: "attest-pq", timeout: 2 * time.Second}, nil)
+		if err == nil || !isConnectError(err) {
+			t.Fatalf("err = %v, want a connectError", err)
+		}
+	})
+
 	t.Run("auto falls through to the cert path on discovery parse failure", func(t *testing.T) {
 		// auto tries discovery first; serve a discovery doc that is not JSON so
 		// parsing fails. That failure is not a security error, so auto must fall
@@ -1236,6 +1472,19 @@ func TestRun_UsageAndGatherFailures(t *testing.T) {
 		code := run(context.Background(), config{fromFile: filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
 		if code != exitNoEvidence || !strings.Contains(errOut.String(), "could not obtain evidence") {
 			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
+
+	t.Run("unreadable allowlist file is a usage error", func(t *testing.T) {
+		meshCA := writeMeshCAFile(t)
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{
+			url:           "x",
+			meshCA:        meshCA,
+			allowlistFile: filepath.Join(t.TempDir(), "absent"),
+		}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "--allowlist") {
+			t.Errorf("code = %d, want %d with an --allowlist error; stderr: %s", code, exitUsage, errOut.String())
 		}
 	})
 }
