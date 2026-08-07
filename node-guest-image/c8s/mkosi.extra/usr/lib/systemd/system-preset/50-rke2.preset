@@ -1,0 +1,41 @@
+# Presets are processed by `systemctl preset-all` during the mkosi build.
+# Each `enable`/`disable` line creates the corresponding
+# /etc/systemd/system/... symlink at bake time so it's measured into the
+# verity root. The rke2 units live in /usr/local/lib/systemd/system (staged
+# there by this profile's mkosi.sync), which is on systemd's unit search
+# path.
+#
+# Why we need this file at all: Ubuntu's default preset policy enables
+# every unit that ships with a `[Install] WantedBy=…`. rke2's release
+# tarball ships both rke2-server.service AND rke2-agent.service, so
+# without an explicit `disable rke2-agent.service` here, both get enabled —
+# which is bad because:
+#   - rke2-agent has no `server: https://...` for a single-node cluster,
+#     so it crashes with "Error: --server is required" on every start.
+#   - It hits Restart=always → tight restart loop.
+#   - rke2-server has an `ExecCondition` that bails when rke2-agent is
+#     `is-active`. Racing between the two units leaves etcd half-started
+#     → the persistent "Failed to test etcd connection" loop in the
+#     journal.
+#
+# Single-node only for now. To convert this image to an agent later,
+# flip the last two lines (disable server, enable agent) and add a
+# `server: https://<server-ip>:9345` + `token:` to config.yaml.
+enable containerd-data-disk.service
+# Read-only weights disk (serial=confai-models). Enabled always; a no-op boot
+# when the disk isn't attached (GPU-less / no-weights launches).
+enable models-disk.service
+# Publish the node address the nri-image-policy admission inventory advertises
+# to CDS. Ordered before rke2 so the file exists when containerd launches the
+# baked plugin.
+enable nri-node-ip.service
+enable rke2-server.service
+disable rke2-agent.service
+# NTP: sync the free-running TDX guest clock so it doesn't drift behind the
+# operator and trip cred-release's JWT clock-skew check. Egress is via the
+# CVM's masquerade NAT.
+enable systemd-timesyncd.service
+# Attested operator credential release. Enabled always, but its
+# ConditionPathExists on the opkeydata disk means it only starts on operator
+# boots — a no-op on nodes launched without --operator-key.
+enable cred-release.service

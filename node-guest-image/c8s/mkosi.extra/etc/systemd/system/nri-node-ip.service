@@ -1,0 +1,22 @@
+# Publish this node's address for nri-image-policy's admission inventory.
+#
+# Must run before rke2 starts containerd, because containerd launches the
+# baked plugin as a child and the plugin reads the file during startup. See
+# nri-node-ip.sh for why a node-as-CVM has no other writer.
+[Unit]
+Description=Publish the node address for the nri-image-policy admission inventory
+Before=rke2-server.service rke2-agent.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/nri-node-ip.sh
+# Never block boot. The script exits 0 when it cannot resolve an address; the
+# plugin then fails its own advertise_host check with a message that names the
+# cause, which is a better failure than a node that will not boot.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
