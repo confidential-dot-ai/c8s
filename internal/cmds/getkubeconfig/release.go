@@ -14,19 +14,9 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 )
-
-// releaseRequest / releaseResponse mirror the cred-release handler's shapes.
-type releaseRequest struct {
-	CSRPEM string `json:"csr"`
-}
-type releaseResponse struct {
-	CertPEM string `json:"cert"`
-	CAPEM   string `json:"ca"`
-}
-
-const releasePath = "/release-credential"
 
 // clientIdentity is the kube-client keypair the operator generates locally.
 // The private key never leaves the operator; the cert binds to its public key.
@@ -66,24 +56,24 @@ func (id *clientIdentity) csrPEM() ([]byte, error) {
 // body, POSTs the CSR to the cred-release endpoint, and returns the issued
 // cert + cluster CA. httpClient is the (RA-TLS or plain) transport to :8443;
 // operatorKeyPEM is the operator PRIVATE key that authorizes the release.
-func requestCredential(ctx context.Context, httpClient *http.Client, baseURL string, operatorKeyPEM, csrPEM []byte) (*releaseResponse, error) {
+func requestCredential(ctx context.Context, httpClient *http.Client, baseURL string, operatorKeyPEM, csrPEM []byte) (*credrelease.ReleaseResponse, error) {
 	signer, err := operatorauth.NewSignerFromKeyPEM(operatorKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("operator key: %w", err)
 	}
 
-	body, err := json.Marshal(releaseRequest{CSRPEM: string(csrPEM)})
+	body, err := json.Marshal(credrelease.ReleaseRequest{CSRPEM: string(csrPEM)})
 	if err != nil {
 		return nil, err
 	}
 
 	// The JWT binds method/path/body (pbh) — must match exactly what we send.
-	authz, err := signer.Authorization(http.MethodPost, releasePath, body)
+	authz, err := signer.Authorization(http.MethodPost, credrelease.ReleasePath, body)
 	if err != nil {
 		return nil, fmt.Errorf("sign operator token: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+releasePath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+credrelease.ReleasePath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +90,7 @@ func requestCredential(ctx context.Context, httpClient *http.Client, baseURL str
 		return nil, fmt.Errorf("release HTTP %d: %s", resp.StatusCode, respBody)
 	}
 
-	var out releaseResponse
+	var out credrelease.ReleaseResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("parse release response: %w", err)
 	}

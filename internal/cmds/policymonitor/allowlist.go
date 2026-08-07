@@ -38,9 +38,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
-	"strings"
 	"sync"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // allowlist holds the parsed, normalised set of permitted digests. The
@@ -64,8 +64,6 @@ type allowlist struct {
 type bootstrapAllowlistFile struct {
 	Sha256Digests []string `json:"sha256_digests"`
 }
-
-var hex64Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // loadAllowlist parses the on-disk JSON allowlist and returns a ready-
 // to-use *allowlist. Returns a non-nil error when:
@@ -161,30 +159,10 @@ func (a *allowlist) Size() int {
 	return len(a.digests)
 }
 
-// normalizeDigest takes any of the forms we see in the wild and returns
-// the bare 64-hex string. Recognised inputs:
-//
-//   - "sha256:<64hex>" — strip the "sha256:" prefix.
-//   - "<anything>@sha256:<64hex>" — split on "@", take the suffix, strip
-//     the prefix.
-//   - "<64hex>" — return as-is (after a lowercase + length+charset check).
-//
-// Anything else returns an error; the caller treats that as "no digest".
+// normalizeDigest takes any of the forms we see in the wild
+// (types.NormalizeDigest) and returns the bare 64-hex string — this
+// package's allowlist map keys carry no "sha256:" prefix.
 func normalizeDigest(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", errors.New("empty")
-	}
-	// Strip "<image-ref>@sha256:..." down to "sha256:...".
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
-	}
-	// Lowercase first so the prefix-strip handles "SHA256:" too. Yes,
-	// upstream tooling sometimes uppercases the algorithm prefix.
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "sha256:")
-	if !hex64Re.MatchString(s) {
-		return "", fmt.Errorf("not a sha256:<64hex> digest")
-	}
-	return s, nil
+	d, err := types.NormalizeDigest(s)
+	return d.Hex(), err
 }

@@ -352,7 +352,7 @@ device fails closed — the key will not decrypt it, and verity will refuse it.`
 			if image == "" {
 				return errors.New("--image is required")
 			}
-			serial, err := a.Attach(cmdCtx(cmd), args[0], image)
+			serial, err := a.Attach(cmd.Context(), args[0], image)
 			if err != nil {
 				return err
 			}
@@ -385,7 +385,7 @@ cgroup goes away.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := a.Detach(cmdCtx(cmd), args[0]); err != nil {
+			if err := a.Detach(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "+ %s detached\n", args[0])

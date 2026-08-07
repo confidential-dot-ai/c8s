@@ -163,6 +163,14 @@ func evidenceFromCert(cert *x509.Certificate, source string) (*evidence, error) 
 	}, nil
 }
 
+// insecureClient is the HTTP client for endpoints whose trust anchor is the
+// attestation in the payload, not PKI on the hop.
+func insecureClient(serverName string, timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
+	}}
+}
+
 // gatherFromEndpoint fetches nonce-bound evidence from the attestation endpoint.
 // It generates a fresh challenge, requires the response to echo it, and binds
 // REPORTDATA to the attested session keys + nonce (a freshness proof).
@@ -176,10 +184,7 @@ func gatherFromEndpoint(ctx context.Context, base, serverName string, timeout ti
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		// Trust is the hardware attestation in the body, not PKI on the hop.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
-	}}
+	client := insecureClient(serverName, timeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err

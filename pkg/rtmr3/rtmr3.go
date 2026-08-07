@@ -31,6 +31,19 @@ func Extend(reg, event [Size]byte) [Size]byte {
 	return out
 }
 
+// ForOperatorKey computes the RTMR[3] value a guest reports after the
+// measured initrd extends the zeroed register once with SHA-384 of the
+// operator public key (the PEM bytes staged on the opkeydata disk):
+//
+//	RTMR[3] = SHA384( 0x00*48 ‖ SHA384(pubkey) )
+//
+// Both sides of the credential-release flow — the in-guest service checking
+// its own register and the operator computing the expectation offline — MUST
+// build on this function so the binding cannot drift.
+func ForOperatorKey(pubkey []byte) [Size]byte {
+	return Extend(Zero, sha512.Sum384(pubkey))
+}
+
 // FromDigests computes the expected RTMR[3] after measuring the given
 // canonical image digests in order, starting from Zero. Each DISTINCT
 // image is extended exactly once (the measurer dedups restarts/replicas

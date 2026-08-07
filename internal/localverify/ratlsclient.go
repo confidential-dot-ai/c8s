@@ -5,17 +5,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // NewRATLSHTTPClient returns an http.Client whose TLS handshake verifies the
 // peer's RA-TLS attestation extension against measurements (empty accepts any
 // attested peer — callers warn). The in-process counterpart of
-// ratls.NewVerifyingHTTPClient, with the same connection-pool and timeout
-// knobs. verify is [Verify] in production, a stub in tests; verifyTimeout
-// bounds each handshake's verification, KDS fetch included.
+// ratls.NewVerifyingHTTPClient, sharing its transport (ratls.HTTPClient).
+// verify is [Verify] in production, a stub in tests; verifyTimeout bounds
+// each handshake's verification, KDS fetch included.
 func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout time.Duration) *http.Client {
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -48,15 +49,5 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 			return nil
 		},
 	}
-	return &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-			ResponseHeaderTimeout: 10 * time.Second,
-			IdleConnTimeout:       30 * time.Second,
-			MaxIdleConns:          5,
-			MaxConnsPerHost:       2,
-			TLSClientConfig:       tlsCfg,
-		},
-	}
+	return ratls.HTTPClient(tlsCfg)
 }

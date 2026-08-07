@@ -26,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/lbdiscovery"
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -104,7 +105,7 @@ func seededAllowlistHandler(t *testing.T) http.HandlerFunc {
 // contract for measurement (the pin itself is unit-tested in localverify).
 func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
-		if len(p.Measurements) > 0 && !ratls.MeasurementAllowed(measurement, p.Measurements) {
+		if len(p.Measurements) > 0 && !attestationclient.MeasurementAllowed(measurement, p.Measurements) {
 			return nil, localverify.ErrMeasurementNotAllowed
 		}
 		match := true
