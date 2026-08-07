@@ -23,6 +23,15 @@ type Config struct {
 	// OperatorKeyPath is the operator ECDSA PRIVATE key (PEM). Its public half
 	// was bound into the node's RTMR[3] at launch.
 	OperatorKeyPath string
+	// ImageManifestPath is the build-artifact manifest carrying the expected
+	// guest image's full TDX tuple (mrtd, rtmr1, rtmr2). Required: without it
+	// the gate would rest on RTMR[3] alone, which the untrusted host can
+	// reproduce under any image it likes by staging the same operator key.
+	ImageManifestPath string
+	// WorkloadImages are the digest-pinned image refs the node's measurer is
+	// expected to have extended into RTMR[3], in first-extend order. Empty
+	// means the register must equal the bare operator-key seed.
+	WorkloadImages []string
 	// ContextName names the kubeconfig cluster/context/user.
 	ContextName string
 	// TLSServerName is emitted as the kubeconfig's tls-server-name, so cert
@@ -48,12 +57,18 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("derive operator public key: %w", err)
 	}
+	exp, err := policyFor(cfg.ImageManifestPath, pubPEM, cfg.WorkloadImages)
+	if err != nil {
+		return err
+	}
 
-	// 1. Trust gate: attest the node and confirm rtmr_3 == H(op_pub). This
-	//    proves genuine TDX + the node was launched to trust THIS key, with no
-	//    host trust and not TOFU. Everything downstream depends on it.
+	// 1. Trust gate: attest the node and enforce the full measured identity —
+	//    the image tuple (MRTD, RTMR[1], RTMR[2]) from the manifest plus the
+	//    RTMR[3] chain seeded by THIS key and extended by the expected
+	//    workload images — with no host trust and not TOFU. Everything
+	//    downstream depends on it.
 	attestCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	if err := attestAndCheckRTMR3(attestCtx, cfg.AttestURL, pubPEM); err != nil {
+	if err := attestAndVerify(attestCtx, cfg.AttestURL, exp); err != nil {
 		cancel()
 		return fmt.Errorf("attestation gate: %w", err)
 	}
@@ -72,9 +87,9 @@ func Run(ctx context.Context, cfg Config) error {
 	// 3. Exchange the CSR for a signed cert over cred-release. The :8443 dial
 	//    is RA-TLS-verified in-process by the operator's own verifier
 	//    (newRATLSClient): the serving cert's embedded quote must bind to the
-	//    cert key AND carry rtmr_3 == H(op_pub), so the host can't MITM the
-	//    channel.
-	httpClient := newRATLSClient(cfg, pubPEM)
+	//    cert key AND satisfy the same full measured-identity policy as the
+	//    attest gate, so the host can't MITM the channel.
+	httpClient := newRATLSClient(cfg, exp)
 	relCtx, cancel2 := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel2()
 	resp, err := requestCredential(relCtx, httpClient, cfg.ReleaseBaseURL, keyPEM, csrPEM)
@@ -87,7 +102,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(cfg.OutPath, kc, 0o600); err != nil {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested, operator-key-bound\n", cfg.OutPath, cfg.ContextName)
+	fmt.Fprintf(os.Stderr, "wrote %s (context %q) — attested: image tuple + operator-key chain verified\n", cfg.OutPath, cfg.ContextName)
 	return nil
 }
 

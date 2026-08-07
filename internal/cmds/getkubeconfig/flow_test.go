@@ -24,6 +24,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // tdxEnvelope is a minimal self-describing evidence envelope; the actual
@@ -101,14 +102,16 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 	})
 }
 
-// testEnv wires up a full fake node: operator key on disk, attest endpoint,
-// RA-TLS cred-release endpoint, and a stubbed verifier that accepts iff
-// rtmr_3 == H(op_pub).
+// testEnv wires up a full fake node: operator key + image manifest on disk,
+// attest endpoint, RA-TLS cred-release endpoint, and a stubbed verifier that
+// accepts iff the claims satisfy the full measured-identity policy.
 type testEnv struct {
-	keyPath    string
-	attestURL  string
-	releaseURL string
-	outPath    string
+	keyPath      string
+	manifestPath string
+	attestURL    string
+	releaseURL   string
+	outPath      string
+	exp          measuredPolicy
 }
 
 func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody string) testEnv {
@@ -127,17 +130,24 @@ func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	stubVerify(t, verifiedResult(expectedRTMR3(pub)), nil)
+	manifestPath := writeTestManifest(t)
+	exp, err := policyFor(manifestPath, pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubVerify(t, verifiedResultFor(exp), nil)
 
 	attest := httptest.NewServer(attestHandler(t, attestStatus))
 	t.Cleanup(attest.Close)
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
 
 	return testEnv{
-		keyPath:    keyPath,
-		attestURL:  attest.URL + "/attest",
-		releaseURL: release.URL,
-		outPath:    filepath.Join(dir, "kubeconfig"),
+		keyPath:      keyPath,
+		manifestPath: manifestPath,
+		attestURL:    attest.URL + "/attest",
+		releaseURL:   release.URL,
+		outPath:      filepath.Join(dir, "kubeconfig"),
+		exp:          exp,
 	}
 }
 
@@ -145,14 +155,15 @@ const goodRelease = `{"cert":"CERTPEM","ca":"CAPEM"}`
 
 func (e testEnv) config() Config {
 	return Config{
-		AttestURL:       e.attestURL,
-		ReleaseBaseURL:  e.releaseURL,
-		APIServerURL:    "https://node:6443",
-		OperatorKeyPath: e.keyPath,
-		ContextName:     "c8s",
-		TLSServerName:   "c8s-cvm",
-		OutPath:         e.outPath,
-		Timeout:         10 * time.Second,
+		AttestURL:         e.attestURL,
+		ReleaseBaseURL:    e.releaseURL,
+		APIServerURL:      "https://node:6443",
+		OperatorKeyPath:   e.keyPath,
+		ImageManifestPath: e.manifestPath,
+		ContextName:       "c8s",
+		TLSServerName:     "c8s-cvm",
+		OutPath:           e.outPath,
+		Timeout:           10 * time.Second,
 	}
 }
 
@@ -203,11 +214,13 @@ func TestRunErrors(t *testing.T) {
 }
 
 // TestRunRejectsWrongRTMR3 covers the trust gate end to end: the node's quote
-// verifies but rtmr_3 doesn't match the operator key, so Run must stop before
-// ever contacting cred-release.
+// verifies but rtmr_3 doesn't match the operator-key chain, so Run must stop
+// before ever contacting cred-release.
 func TestRunRejectsWrongRTMR3(t *testing.T) {
 	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
-	stubVerify(t, verifiedResult("00"), nil) // overrides the env's stub
+	res := verifiedResultFor(env.exp)
+	res.Claims.PlatformData["rtmr_3"] = "00"
+	stubVerify(t, res, nil) // overrides the env's stub
 
 	// Count cred-release hits on a plain-HTTP server so any request — even one
 	// that would fail the RA-TLS handshake — reaches the handler and is counted.
@@ -292,37 +305,137 @@ func TestRequestCredentialErrors(t *testing.T) {
 }
 
 func TestVerifyEvidenceErrors(t *testing.T) {
+	exp := testPolicy(t, operatorPub(t))
+
 	t.Run("bad envelope JSON", func(t *testing.T) {
-		_, err := verifyEvidence([]byte("not json"), nil)
+		_, err := verifyEvidence([]byte("not json"), nil, exp)
 		if err == nil || !strings.Contains(err.Error(), "parse evidence envelope") {
 			t.Fatalf("want parse error, got %v", err)
 		}
 	})
 
+	t.Run("empty evidence object", func(t *testing.T) {
+		_, err := verifyEvidence([]byte(`{"platform":"tdx"}`), nil, exp)
+		if err == nil || !strings.Contains(err.Error(), "no evidence object") {
+			t.Fatalf("want empty-evidence error, got %v", err)
+		}
+	})
+
+	// The envelope shape is single-wrap on both gates; a double-wrapped
+	// envelope must fail loudly rather than reach the verifier as evidence it
+	// misparses or ignores.
+	t.Run("double-wrapped envelope", func(t *testing.T) {
+		stubVerify(t, verifiedResultFor(exp), nil) // must not be reached
+		double := `{"platform":"tdx","evidence":` + tdxEnvelope + `}`
+		_, err := verifyEvidence([]byte(double), nil, exp)
+		if err == nil || !strings.Contains(err.Error(), "double-wrapped") {
+			t.Fatalf("want double-wrap rejection, got %v", err)
+		}
+	})
+
 	t.Run("verifier error", func(t *testing.T) {
 		stubVerify(t, nil, fmt.Errorf("boom"))
-		_, err := verifyEvidence([]byte(tdxEnvelope), nil)
+		_, err := verifyEvidence([]byte(tdxEnvelope), nil, exp)
 		if err == nil || !strings.Contains(err.Error(), "verify evidence: boom") {
 			t.Fatalf("want wrapped verifier error, got %v", err)
 		}
 	})
 
 	t.Run("signature invalid", func(t *testing.T) {
-		res := verifiedResult("aa")
+		res := verifiedResultFor(exp)
 		res.SignatureValid = false
 		stubVerify(t, res, nil)
-		_, err := verifyEvidence([]byte(tdxEnvelope), nil)
+		_, err := verifyEvidence([]byte(tdxEnvelope), nil, exp)
 		if err == nil || !strings.Contains(err.Error(), "quote signature invalid") {
 			t.Fatalf("want signature error, got %v", err)
 		}
 	})
 }
 
-func TestCheckRTMR3NoClaim(t *testing.T) {
-	res := verifiedResult("")
-	err := checkRTMR3(res, operatorPub(t))
+func TestCheckMeasuredIdentityNoRTMR3Claim(t *testing.T) {
+	exp := testPolicy(t, operatorPub(t))
+	res := verifiedResultFor(exp)
+	res.Claims.PlatformData["rtmr_3"] = ""
+	err := checkMeasuredIdentity(res, exp)
 	if err == nil || !strings.Contains(err.Error(), "no rtmr_3") {
 		t.Fatalf("want no-rtmr_3 error, got %v", err)
+	}
+}
+
+// --workload-image extends the expected RTMR[3] from the operator-key seed in
+// the given (first-extend) order; tags never pass, and order changes the
+// register.
+func TestPolicyForWorkloadImages(t *testing.T) {
+	pub := operatorPub(t)
+	manifest := writeTestManifest(t)
+	digA := "sha256:" + strings.Repeat("aa", 32)
+	digB := "ghcr.io/acme/api@sha256:" + strings.Repeat("bb", 32)
+
+	bare, err := policyFor(manifest, pub, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.rtmr3 != runtimemeasure.ForOperatorKey(pub) {
+		t.Error("with no workload images the expected register must equal the bare operator-key seed")
+	}
+
+	chained, err := policyFor(manifest, pub, []string{digA, digB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub),
+		[]string{digA, "sha256:" + strings.Repeat("bb", 32)})
+	if chained.rtmr3 != want {
+		t.Error("workload images must chain onto the operator-key seed via the shared convention")
+	}
+
+	reversed, err := policyFor(manifest, pub, []string{digB, digA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversed.rtmr3 == chained.rtmr3 {
+		t.Error("extend order must change the expected register — the chain is ordered")
+	}
+
+	for _, bad := range []string{"nginx:latest", "ghcr.io/acme/api:v1", "sha256:" + strings.Repeat("AB", 32)} {
+		if _, err := policyFor(manifest, pub, []string{bad}); err == nil {
+			t.Errorf("policyFor accepted non-canonical workload image %q", bad)
+		}
+	}
+}
+
+// The node's measurer extends each image once, so repeating one here would
+// extend the EXPECTED register an extra time and build a gate no node can ever
+// satisfy — a permanently red, silently wrong policy. It has to be a usage
+// error, including when the two spellings differ but the digest does not.
+func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
+	pub := operatorPub(t)
+	manifest := writeTestManifest(t)
+	dig := "sha256:" + strings.Repeat("aa", 32)
+
+	for _, tc := range []struct {
+		name string
+		refs []string
+	}{
+		{"identical refs", []string{dig, dig}},
+		{"same digest, different spelling", []string{dig, "ghcr.io/acme/api@" + dig}},
+		{"repeat separated by another image", []string{dig, "sha256:" + strings.Repeat("bb", 32), dig}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := policyFor(manifest, pub, tc.refs); err == nil {
+				t.Fatal("a repeated workload image must be rejected, not silently doubled into the chain")
+			}
+		})
+	}
+
+	// Sanity: the single-occurrence policy this rejection protects is exactly
+	// the one a node with that image can satisfy.
+	single, err := policyFor(manifest, pub, []string{dig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if single.rtmr3 != runtimemeasure.FromDigestsSeeded(runtimemeasure.ForOperatorKey(pub), []string{dig}) {
+		t.Error("the deduped, ordered set is what FromDigestsSeeded expects")
 	}
 }
 

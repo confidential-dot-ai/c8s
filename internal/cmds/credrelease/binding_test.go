@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // overrideBindingPaths points the package's sysfs/staging paths at files under
@@ -29,11 +29,11 @@ func writeFileT(t *testing.T, path string, data []byte) {
 	}
 }
 
-// expectedRTMR3ForKey adapts rtmr3.ForOperatorKey for the sysfs fixtures the
-// binding tests write. The formula and hardware vectors are pinned in
-// pkg/rtmr3.
+// expectedRTMR3ForKey adapts runtimemeasure.ForOperatorKey for the sysfs
+// fixtures the binding tests write. The formula and hardware vectors are
+// pinned in pkg/runtimemeasure.
 func expectedRTMR3ForKey(pub []byte) []byte {
-	v := rtmr3.ForOperatorKey(pub)
+	v := runtimemeasure.ForOperatorKey(pub)
 	return v[:]
 }
 

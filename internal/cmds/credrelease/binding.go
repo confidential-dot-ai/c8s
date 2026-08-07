@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -56,7 +56,13 @@ func verifyKeyMeasured(pubkey []byte) error {
 	if err != nil {
 		return err
 	}
-	want := rtmr3.ForOperatorKey(pubkey)
+	// The bare operator-key seed — no workload extends — is correct HERE, at
+	// service startup, even though remote verifiers compare against the seeded
+	// workload chain: the node image runs no workload measurer, so at this
+	// moment RTMR[3] must equal the seed exactly. Any extension beyond it means
+	// an unexpected measurer ran or the register was tampered with, and the
+	// comparison fails closed.
+	want := runtimemeasure.ForOperatorKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
 	if !bytes.Equal(own, want[:]) {
 		return fmt.Errorf(

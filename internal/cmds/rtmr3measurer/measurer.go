@@ -7,7 +7,7 @@
 // It is the measurement-only counterpart to policy-monitor (allowlist
 // enforcement); either or both may run.
 //
-// The extend convention is pinned by pkg/rtmr3 — verifiers MUST build on that
+// The extend convention is pinned by pkg/runtimemeasure — verifiers MUST build on that
 // package. Each distinct image is extended exactly once; the dedup log is
 // persisted to tmpfs so a daemon restart cannot re-extend the append-only
 // register. Design and rationale: docs/kata-guest-base.md
@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/kataspec"
-	"github.com/confidential-dot-ai/c8s/pkg/rtmr3"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // rtmr3Sysfs is the kernel TSM node backing extendSysfs/readRegisterSysfs.
@@ -59,8 +59,8 @@ type measurer struct {
 	watchDir  string
 	statePath string
 
-	extend       func(event [rtmr3.Size]byte) error // TDX sysfs write
-	readRegister func() ([rtmr3.Size]byte, error)   // TDX sysfs read
+	extend       func(event [runtimemeasure.Size]byte) error // TDX sysfs write
+	readRegister func() ([runtimemeasure.Size]byte, error)   // TDX sysfs read
 
 	// seenCids: cids already decided, so config.json isn't re-read every
 	// scan; pruned as container dirs disappear. measuredDigests is the
@@ -149,13 +149,13 @@ func (m *measurer) loadState() error {
 			"error", err)
 		return nil
 	}
-	if reg == rtmr3.FromDigests(m.measuredOrder) {
+	if reg == runtimemeasure.FromDigests(m.measuredOrder) {
 		return nil // register and log agree — clean restart
 	}
 	last := m.measuredOrder[len(m.measuredOrder)-1]
-	if reg == rtmr3.FromDigests(m.measuredOrder[:len(m.measuredOrder)-1]) {
+	if reg == runtimemeasure.FromDigests(m.measuredOrder[:len(m.measuredOrder)-1]) {
 		// Crashed between record and extend: finish the recorded extend.
-		if err := m.extend(rtmr3.Event(last)); err != nil {
+		if err := m.extend(runtimemeasure.Event(last)); err != nil {
 			return fmt.Errorf("repair extend of recorded digest %s: %w", last, err)
 		}
 		m.logger.Info("repaired interrupted measurement", "digest", last)
@@ -242,7 +242,7 @@ func (m *measurer) measure(cid, digest string) {
 			"cid", cid, "digest", digest, "error", err)
 		return
 	}
-	if err := m.extend(rtmr3.Event(digest)); err != nil {
+	if err := m.extend(runtimemeasure.Event(digest)); err != nil {
 		// Roll the log back so it keeps matching the register and a later
 		// cid with this digest can retry.
 		m.unrecordLast(digest)
@@ -319,7 +319,7 @@ func (m *measurer) readConfig(path string) (*ociSpec, error) {
 
 // extendSysfs performs TDG.MR.RTMR.EXTEND via the kernel TSM sysfs write:
 // RTMR3 = SHA384(RTMR3 ‖ event). Needs mainline >= 6.16.
-func extendSysfs(event [rtmr3.Size]byte) error {
+func extendSysfs(event [runtimemeasure.Size]byte) error {
 	if err := os.WriteFile(rtmr3Sysfs, event[:], 0); err != nil {
 		return fmt.Errorf("write %s: %w", rtmr3Sysfs, err)
 	}
@@ -327,14 +327,14 @@ func extendSysfs(event [rtmr3.Size]byte) error {
 }
 
 // readRegisterSysfs reads the current RTMR[3] value from the same node.
-func readRegisterSysfs() ([rtmr3.Size]byte, error) {
-	var reg [rtmr3.Size]byte
+func readRegisterSysfs() ([runtimemeasure.Size]byte, error) {
+	var reg [runtimemeasure.Size]byte
 	b, err := os.ReadFile(rtmr3Sysfs)
 	if err != nil {
 		return reg, err
 	}
-	if len(b) != rtmr3.Size {
-		return reg, fmt.Errorf("read %s: got %d bytes, want %d", rtmr3Sysfs, len(b), rtmr3.Size)
+	if len(b) != runtimemeasure.Size {
+		return reg, fmt.Errorf("read %s: got %d bytes, want %d", rtmr3Sysfs, len(b), runtimemeasure.Size)
 	}
 	copy(reg[:], b)
 	return reg, nil

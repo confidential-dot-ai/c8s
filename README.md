@@ -331,7 +331,7 @@ attestation and reports the operator keys it pins.
 | [`pkg/issuerapi`](pkg/issuerapi/) | Certificate issuer API types |
 | [`pkg/earsigner`](pkg/earsigner/) | EAR token-signing key lifecycle, rotation, and JWKS serving |
 | [`pkg/jwks`](pkg/jwks/) | JWKS parsing and key selection |
-| [`pkg/rtmr3`](pkg/rtmr3/) | TDX RTMR[3] measurement replay |
+| [`pkg/runtimemeasure`](pkg/runtimemeasure/) | TDX image-pin manifests and RTMR[3] measurement replay |
 | [`pkg/certutil`](pkg/certutil/) | Certificate utility functions |
 
 ## Repository layout
