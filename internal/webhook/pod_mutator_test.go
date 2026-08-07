@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/issuer"
+
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1090,5 +1092,281 @@ func TestHandleInjectsDespitePresetInjectedMarker(t *testing.T) {
 	inits := initContainersPatch(t, resp)
 	if len(inits) != 2 || inits[0].Name != "c8s-cert" || inits[1].Name != "c8s-cert-wait" {
 		t.Fatalf("initContainers patch = %+v, want injected c8s-cert + c8s-cert-wait despite the preset marker", inits)
+	}
+}
+
+func TestParseAnnotationsWatchPathsImplyNginxReload(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		wantNginx   bool
+	}{
+		{
+			name: "watch paths turn the reload on",
+			annotations: map[string]string{
+				AnnotationWorkload:             "api",
+				AnnotationReloadWatchPaths:     "/etc/nginx/certs/upstream.crt",
+				AnnotationReloadWatchVolume:    "upstream-certs",
+				AnnotationReloadWatchMountPath: "/etc/nginx/certs",
+			},
+			wantNginx: true,
+		},
+		{
+			name:        "plain opt-in leaves the reload off",
+			annotations: map[string]string{AnnotationWorkload: "api"},
+			wantNginx:   false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			inj, err := parseAnnotations(pod)
+			if err != nil {
+				t.Fatalf("parseAnnotations: %v", err)
+			}
+			if inj.Reload.Nginx != tc.wantNginx {
+				t.Fatalf("Reload.Nginx = %v, want %v", inj.Reload.Nginx, tc.wantNginx)
+			}
+		})
+	}
+}
+
+// runtimeClassPatch returns the value of the /spec/runtimeClassName patch op,
+// or "" when the response carries none.
+func runtimeClassPatch(t *testing.T, resp admission.Response) string {
+	t.Helper()
+	for _, op := range resp.Patches {
+		if op.Path != "/spec/runtimeClassName" {
+			continue
+		}
+		value, ok := op.Value.(string)
+		if !ok {
+			t.Fatalf("runtimeClassName patch value = %#v, want a string", op.Value)
+		}
+		return value
+	}
+	return ""
+}
+
+// A pod with no c8s annotations at all (nil annotation map) must still get a
+// kata runtimeClassName under enforcement, and the injected marker with it.
+func TestHandleKataOnlyPodGetsRuntimeClass(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{
+		decoder: admission.NewDecoder(scheme),
+		cfg:     Config{KataEnforce: true}.withDefaults(),
+	}
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if !resp.Allowed {
+		t.Fatalf("Handle denied: %v", resp.Result)
+	}
+	if got := runtimeClassPatch(t, resp); got != "kata-qemu" {
+		t.Fatalf("runtimeClassName patch = %q, want kata-qemu", got)
+	}
+	var marked bool
+	for _, op := range resp.Patches {
+		if strings.HasPrefix(op.Path, "/metadata/annotations") {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Fatal("kata-only mutation did not stamp the injected marker annotation")
+	}
+}
+
+// Without kata enforcement, get-cert injection must not touch runtimeClassName.
+func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{
+		decoder: admission.NewDecoder(scheme),
+		cfg: Config{
+			GetCertImage: "ghcr.io/confidential-dot-ai/c8s-operator:test",
+			CDSURL:       "http://cds.c8s-system.svc:8443",
+		}.withDefaults(),
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWorkload: "api"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	raw, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := m.Handle(context.Background(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+	})
+	if !resp.Allowed {
+		t.Fatalf("Handle denied: %v", resp.Result)
+	}
+	if len(initContainersPatch(t, resp)) != 2 {
+		t.Fatal("expected get-cert injection to run")
+	}
+	if got := runtimeClassPatch(t, resp); got != "" {
+		t.Fatalf("runtimeClassName patch = %q, want none without kata enforcement", got)
+	}
+}
+
+func TestWorkloadServiceFQDN(t *testing.T) {
+	tests := []struct {
+		name, cwID, namespace, want string
+	}{
+		{"nameable id", "api", "default", "c8s-api.default.svc.cluster.local"},
+		{"unnameable id", "api.v1", "default", ""},
+		{"empty namespace", "api", "", ""},
+		{"empty id", "", "default", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WorkloadServiceFQDN(tc.cwID, tc.namespace); got != tc.want {
+				t.Fatalf("WorkloadServiceFQDN(%q, %q) = %q, want %q", tc.cwID, tc.namespace, got, tc.want)
+			}
+		})
+	}
+}
+
+// A pod whose only containers are init containers (e.g. a run-once GPU job
+// shape) must still be classified by its init-container GPU request.
+func TestKataRuntimeClassForGpuPodWithOnlyInitContainers(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{
+				Name: "gpu-job",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/GB202GL_RTX_PRO_6000_BLACKWELL_SERVER_EDITION": resource.MustParse("1"),
+					},
+				},
+			}},
+		},
+	}
+	if got := kataRuntimeClassFor(pod, kataEnforceConfig()); got != "kata-qemu-snp-nvidia" {
+		t.Fatalf("kataRuntimeClassFor = %q, want kata-qemu-snp-nvidia", got)
+	}
+}
+
+// fsGroup 0 (root group) is a valid configuration and must still be applied;
+// only negative values disable the mutation.
+func TestMutatePodAppliesZeroFSGroup(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage: "image",
+		CertFSGroup:  int64Ptr(0),
+	})
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		t.Fatal("fsGroup 0 was not applied")
+	}
+	if got := *pod.Spec.SecurityContext.FSGroup; got != 0 {
+		t.Fatalf("fsGroup = %d, want 0", got)
+	}
+}
+
+func TestMutatePodInitializesNilAnnotationsAndLabels(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{GetCertImage: "image"})
+	if pod.Annotations[AnnotationInjected] != "true" {
+		t.Fatalf("annotations = %v, want the injected marker stamped", pod.Annotations)
+	}
+	if pod.Labels[LabelWorkload] != "api" {
+		t.Fatalf("labels = %v, want the cw label stamped", pod.Labels)
+	}
+}
+
+func TestConfigWithDefaultsPreservesExplicitValues(t *testing.T) {
+	custom := Config{CertDir: "/custom/certs"}.withDefaults()
+	if custom.CertDir != "/custom/certs" {
+		t.Fatalf("CertDir = %q, want the explicit value kept", custom.CertDir)
+	}
+
+	def := Config{}.withDefaults()
+	if def.CertDir != "/etc/c8s/certs" {
+		t.Fatalf("default CertDir = %q", def.CertDir)
+	}
+	// Pinned against the constant, not a literal: the default must stay
+	// strictly below issuer.MaxNamedLeafTTL so a named leaf always has a
+	// renewal attempt left before it expires.
+	if def.CertRenewInterval != defaultCertRenewInterval {
+		t.Fatalf("default CertRenewInterval = %v, want %v", def.CertRenewInterval, defaultCertRenewInterval)
+	}
+	if def.CertRenewInterval >= issuer.MaxNamedLeafTTL {
+		t.Fatalf("default CertRenewInterval %v must stay below issuer.MaxNamedLeafTTL %v",
+			def.CertRenewInterval, issuer.MaxNamedLeafTTL)
+	}
+}
+
+func TestEnsureSupplementalGroup(t *testing.T) {
+	const gid int64 = 4242
+	tests := []struct {
+		name     string
+		existing *corev1.PodSecurityContext
+		want     []int64
+	}{
+		{"nil security context", nil, []int64{gid}},
+		{"other groups kept", &corev1.PodSecurityContext{SupplementalGroups: []int64{7}}, []int64{7, gid}},
+		{"already present is idempotent", &corev1.PodSecurityContext{SupplementalGroups: []int64{gid}}, []int64{gid}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{SecurityContext: tc.existing}}
+			ensureSupplementalGroup(pod, gid)
+			got := pod.Spec.SecurityContext.SupplementalGroups
+			if len(got) != len(tc.want) {
+				t.Fatalf("supplementalGroups = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("supplementalGroups = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// ensureSupplementalGroup must not replace an existing pod security context;
+// mutatePod sets fsGroup first and the broker-socket group is added alongside.
+func TestMutatePodKeepsFSGroupWithWorkloadClaims(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{
+		GetCertImage:          "image",
+		WorkloadClaimsHostDir: "/run/c8s/workload-claims",
+	})
+	sc := pod.Spec.SecurityContext
+	if sc == nil || sc.FSGroup == nil || *sc.FSGroup != defaultCertFSGroup {
+		t.Fatalf("securityContext = %#v, want fsGroup %d kept", sc, defaultCertFSGroup)
+	}
+	if len(sc.SupplementalGroups) != 1 {
+		t.Fatalf("supplementalGroups = %v, want the broker socket group added", sc.SupplementalGroups)
+	}
+}
+
+// The wait gate's timeout must comfortably exceed get-cert's initial retry so
+// a slow CDS cold start is absorbed in one wait.
+func TestCertWaitContainerTimeout(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+	}
+	mutatePod(pod, &injection{WorkloadID: "api"}, Config{GetCertImage: "image"})
+	wait := pod.Spec.InitContainers[1]
+	if !hasArg(wait.Command, "--timeout=3m0s") {
+		t.Fatalf("c8s-cert-wait command %v missing --timeout=3m0s", wait.Command)
 	}
 }

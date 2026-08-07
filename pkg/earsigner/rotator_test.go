@@ -1,6 +1,7 @@
 package earsigner_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
@@ -229,6 +230,72 @@ func TestPublicKey_RetiringKeyExpires(t *testing.T) {
 
 	if _, err := r.PublicKey(initialKid); err == nil {
 		t.Error("PublicKey accepted a retiring key past its overlap deadline")
+	}
+}
+
+// firstTickIn starts Run with an already-cancelled context so it exits right
+// after logging, and returns the first_tick_in duration from the startup log
+// record (the only observable form of the computed first tick).
+func firstTickIn(t *testing.T, keyPEM []byte, cfg earsigner.RotatorConfig) time.Duration {
+	t.Helper()
+	var buf bytes.Buffer
+	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+	r, err := earsigner.NewRotator(cfg, keyPEM, func(*ecdsa.PrivateKey, string) {})
+	if err != nil {
+		t.Fatalf("NewRotator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.Run(ctx)
+
+	dec := json.NewDecoder(&buf)
+	for {
+		var rec struct {
+			Msg         string `json:"msg"`
+			FirstTickIn int64  `json:"first_tick_in"`
+		}
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("no startup log record found: %v", err)
+		}
+		if rec.Msg == "rotation loop starting" {
+			return time.Duration(rec.FirstTickIn)
+		}
+	}
+}
+
+func TestRunFirstTickWithoutJitter(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got := firstTickIn(t, keyPEM, earsigner.RotatorConfig{
+		Interval: time.Hour,
+		Overlap:  time.Minute,
+		Jitter:   0,
+	})
+	if got != time.Hour {
+		t.Fatalf("first tick = %v, want exactly the interval with zero jitter", got)
+	}
+}
+
+// TestRunFirstTickJitterBounds pins the jitter window: with Jitter=0.5 the
+// first tick lands in [Interval, Interval*1.5). Sampled repeatedly because
+// the jitter fraction is random.
+func TestRunFirstTickJitterBounds(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	const interval = time.Hour
+	for i := 0; i < 60; i++ {
+		got := firstTickIn(t, keyPEM, earsigner.RotatorConfig{
+			Interval: interval,
+			Overlap:  time.Minute,
+			Jitter:   0.5,
+		})
+		if got < interval || got >= interval+interval/2 {
+			t.Fatalf("first tick = %v, want in [%v, %v)", got, interval, interval+interval/2)
+		}
 	}
 }
 

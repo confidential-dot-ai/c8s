@@ -1,7 +1,10 @@
 # Kata image policy
 
 How c8s prevents an arbitrary container image from running inside a
-kata-qemu-snp VM. This document complements
+confidential kata guest. Both confidential shims — `kata-qemu-snp` and
+`kata-qemu-tdx` — run the same guest image and the same enforcement; the
+walkthroughs below say `kata-qemu-snp` and hold for either. This document
+complements
 [`kata-guest-base.md`](kata-guest-base.md) (the guest-image design) and
 [`kata-guest-base/README.md`](../kata-guest-base/README.md) (the recipe)
 by walking through the threat scenarios the policy defends against, and
@@ -9,10 +12,14 @@ the gaps it does not.
 
 > **Measurement model.** Wherever this doc says a file is "baked in" or
 > "part of the launch measurement", that means it sits on the dm-verity
-> root: its bytes are covered by the SNP launch digest and cannot change
-> without changing the digest. The measurement mechanics (osbuilder
-> dm-verity ext4, `kernel-hashes`, the verity root hash in the kata
-> kernel cmdline, no IGVM/UKI) live in
+> root, whose root hash rides the kata kernel cmdline. On SEV-SNP the
+> cmdline reaches the launch digest via `kernel-hashes`, so those bytes
+> cannot change without changing the value operators pin. **On TDX they
+> can** — the pinned value is MRTD, which covers TDVF only, and the kernel
+> and cmdline land in RTMR[1] and RTMR[2], which nothing verifies today.
+> See [G6](#g6--on-tdx-the-baked-bytes-are-measured-but-not-pinned). The
+> measurement mechanics (osbuilder dm-verity ext4, `kernel-hashes`, the
+> verity root hash in the kata kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
 The short version: the decision is split in two, and both halves are on the
@@ -60,13 +67,13 @@ post-start kill window — is documented in
 
 | Component | In TCB? | Notes |
 |---|---|---|
-| `kata-guest-base` guest image (`vmlinuz` + dm-verity rootfs) | yes | Launch digest verified at boot (SEV-SNP, kernel-hashes). |
+| `kata-guest-base` guest image (`vmlinuz` + dm-verity rootfs) | yes | Launch measurement verified at boot: SEV-SNP launch digest via `kernel-hashes`; on TDX only MRTD is pinned (G6). |
 | `kata-agent` inside the guest | yes | Installed into the rootfs by kata's osbuilder (version-matched) at build. |
 | `policy-monitor` inside the guest | yes | Built from this repo, baked into the dm-verity root. |
 | `/etc/c8s/bootstrap-allowlist.json` (verity root) | yes | The allowlist **seed** the monitor loads at boot. Part of the launch measurement. |
 | CDS `/allowlist` additions (pulled over RA-TLS) | yes, via attestation | Runtime additions merged on top of the seed. Trusted because the pull is RA-TLS-pinned to `cds.measurements` (the host can't substitute a fake CDS), not because they're measured into this guest. |
 | `ratls-mesh` + `attestation-service` inside the guest | yes | Same. |
-| Host (containerd, kata-runtime, kata-shim) | **no** | Adversarial. Can call kata-agent RPCs via vsock, cannot read VM memory (SEV-SNP). |
+| Host (containerd, kata-runtime, kata-shim) | **no** | Adversarial. Can call kata-agent RPCs via vsock, cannot read VM memory (SEV-SNP or TDX). |
 | Cloud-init user-data (the `C8S_*` env file) | **partially** | Host controls its contents when per-pod injected; pinned values must be verifiable inside the guest. Today this is a single fixed default baked into the rootfs, not per-pod host-injected. |
 
 ## Bootstrap order (the load-bearing piece)
@@ -120,7 +127,7 @@ Key invariants:
 - **The seed is read-only; the in-memory set only grows.**
   policy-monitor loads `/etc/c8s/bootstrap-allowlist.json` once at boot
   — the file is on the verity root, so neither the guest nor the host
-  can rewrite it, and SEV-SNP memory encryption covers the in-memory
+  can rewrite it, and CVM memory encryption covers the in-memory
   copy. The runtime CDS refresh only ever *adds* digests to the
   in-memory set (see [Allowlist sourcing](#allowlist-sourcing-baked-seed--cds-refresh));
   it cannot remove the seed or shrink the set, so a compromised or
@@ -277,15 +284,28 @@ image, run a CDS in it serving an attacker-chosen allowlist, and pass
 the attack. With the refresh disabled the guest enforces the measured
 seed alone, which is fail-closed.
 
-**Status:** no shipping path delivers this pin to guests today, so the
-refresh is disabled on every default install — operator additions reach
-the host-side enforcer but not running guests. Baking the pin is
-structurally impossible (under kata, CDS runs from this same guest
-image, so the pin's value would change the launch measurement it pins),
-and per-pod cloud-init injection is host-controlled, so a host-supplied
-pin could point at the host's own fake CDS. The candidate fix is
-operator-signed allowlist entries, verified in-guest against a baked
-operator public key.
+Baking the pin is structurally impossible — under kata, CDS runs from
+this same guest image, so the pin's value would change the launch
+measurement it pins — and a plain cloud-init value would be
+host-controlled, so a host-supplied pin could point at the host's own
+fake CDS.
+
+**Delivery: SEV-SNP init-data.** The host writes an init-data document
+the guest reads at `initdata.GuestDocumentPath`, and the shim commits
+`sha256(document)` into `HOST_DATA` at launch. policy-monitor attests
+itself against the in-guest attestation-service, reads `HOST_DATA` out
+of its own SNP report, and compares. The host still chooses the
+document, but it cannot choose one and commit another — the value is
+sealed into the measurement the operator already verifies, so a
+substituted pin changes an attested field rather than passing silently.
+On a mismatch, or with no document, the guest falls back to the baked
+seed.
+
+**TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`
+rather than `HOST_DATA`, which this code does not read, so a TDX guest
+enforces the baked seed alone. Empty `cds.measurements` (the chart
+default) also leaves the refresh disabled on every platform — operator
+additions then reach the host-side enforcer but not running guests.
 
 ## Scenarios
 
@@ -381,7 +401,7 @@ via the SignalProcessRequest RPC, but only against PIDs of
 systemd as a system service (PID is allocated by systemd at boot,
 unknown to kata-agent), not as a container; its PID is not a valid
 target for SignalProcessRequest. The host can't otherwise reach into
-the VM's process table because SEV-SNP memory encryption hides it.
+the VM's process table because CVM memory encryption hides it.
 
 **Outcome.** policy-monitor cannot be killed from the host.
 
@@ -558,8 +578,8 @@ Sketch:
 
 Practical considerations:
 
-- BTF: the kernel must be CO-RE-friendly. SEV-SNP-eligible kernels
-  (>= 6.x with the SNP guest patches) ship BTF by default.
+- BTF: the kernel must be CO-RE-friendly. The confidential guest
+  kernels (>= 6.x, SNP or TDX) ship BTF by default.
 - LSM stacking: `CONFIG_LSM=...,bpf,...` must place "bpf" before
   any LSM that fails closed if our program is unloaded. The
   kata-static kernel we use already builds with bpf+selinux
@@ -575,94 +595,6 @@ Practical considerations:
 The work is non-trivial but linear; it's captured here so a future
 contributor doesn't rediscover the option from scratch.
 
-## Known gaps
-
-### G1 — Post-start kill window
-
-policy-monitor enforces *after* kata-agent has forked the container
-init, not before — the mechanics and bounds are in
-[Post-start kill window](#post-start-kill-window) above.
-
-**Severity: low** — *provided the kill lands*. The TCB protection
-(SEV-SNP-encrypted memory) holds for the duration of the gap; the denied
-init cannot exfiltrate. But the gap is honest and called out for
-completeness. Note the bound is only "low severity" once the kill path
-matches the guest's systemd-scope cgroup naming (see the reliability caveat
-in [Post-start kill window](#post-start-kill-window) above); a matcher that
-missed it turned this bounded gap into unbounded non-enforcement.
-
-**Mitigation.** The [BPF-LSM upgrade path](#bpf-lsm-upgrade-path)
-hooks `security_bprm_check_security` to make the decision
-pre-execve. Future direction, not committed today.
-
-### G2 — Allowlist additions no longer need a guest-image rebuild
-
-Earlier baked-only versions of this design required a full guest-image
-rebuild + pod roll to add an allowed digest (the allowlist was *only*
-the measured seed). The hybrid refresh resolves that: operator
-additions land in CDS's allowlist and propagate to running guests over
-the RA-TLS pull within one refresh interval — no rebuild. The
-[Allowlist sourcing](#allowlist-sourcing-baked-seed--cds-refresh)
-section covers the mechanism and its grow-only / fail-safe properties.
-
-**What still needs a rebuild:** the *seed* itself — the bootstrap set
-(cds, get-cert) the guest enforces before its first successful CDS
-pull. That's deliberate: the seed must be measured, and a guest that
-trusted an unmeasured boot-time allowlist would defeat the point. So
-the trust pin is unchanged (the seed is in the launch measurement);
-only the day-2 *additions* are now dynamic, and they ride the same
-RA-TLS-authenticated CDS channel the host enforcer uses.
-
-**Residual note.** The refresh is pull-only and grow-only, so there is
-no in-guest *revocation* path: removing a digest from CDS does not
-retract it from a guest that already pulled it (until that guest
-restarts and reloads the seed). Image policy is an allow-list, so a
-stale-but-larger set only ever permits images the operator explicitly
-allowlisted at some point — acceptable, and called out for honesty.
-
-### G3 — Image content is visible to the host during the guest-pull
-
-The guest runs with `experimental_force_guest_pull = true` and
-`shared_fs = "none"`, so the workload's OCI image is
-[guest-pulled](kata-guest-base.md#what-guest-pull-is) inside the VM
-rather than unpacked on the host and bind-mounted in. The host no
-longer sees the unpacked rootfs.
-
-What the host still sees is the *transport*: it brokers the guest's
-outbound network, so for an anonymous pull from a public registry it
-observes which image reference and layers are fetched (a metadata
-leak, not a content-confidentiality break — the bytes are public).
-
-policy-monitor still enforces on CreateContainer (it reads the
-digest from the bundle's `config.json`). Moving the decision earlier
-— an inotify watch on the guest-pull image work dir
-(`/run/kata-containers/image/`, kata-agent's KATA_IMAGE_WORK_DIR,
-`confidential_data_hub/image.rs:22`) to reject on PullImage rather
-than CreateContainer — would shrink the G1 window further and is
-tracked as a future tightening.
-
-### G4 — BPF-LSM upgrade path
-
-The post-start kill gap (G1) is the most consequential gap the
-current design has. The [BPF-LSM upgrade path](#bpf-lsm-upgrade-path)
-above is the linear, non-controversial way to close it (and carries
-the full implementation sketch). Not on today's roadmap.
-
-### G5 — The enforced digest is bound to the pull, not reported by it
-
-policy-monitor reads the digest from a host-written annotation that the
-baked policy binds to the guest-pull source. The in-guest puller knows the
-digest it resolved first-hand, and CDH already returns it
-(`ImagePullResponse.manifest_digest`) — kata's vendored proto copy declares
-the response empty and drops it. Enforcing on that instead would take the
-annotation out of the trust path and let tag-form references work, since
-the guest would check what it actually got.
-
-It reports the *platform* manifest digest, though, where `crane digest` and
-pod `@sha256:` references name the *index* digest, so adopting it moves the
-allowlist to platform digests. That migration is why this is a follow-up and
-not part of the binding work.
-
 ## What this design does and doesn't claim
 
 **It claims:**
@@ -675,11 +607,11 @@ not part of the binding work.
   `kata-guest-base/patches/0001-agent-refuse-an-init-data-supplied-policy.patch`.
 - The host cannot inject an over-permissive allowlist. The seed
   `/etc/c8s/bootstrap-allowlist.json` is on the verity root and part of
-  the launch measurement (S4), and the runtime CDS additions arrive over
-  RA-TLS pinned to `cds.measurements`, so the host can't substitute a
-  fake CDS ("Host can't substitute a fake CDS allowlist"). At worst the
-  host blocks new additions — it can't shrink enforcement below the
-  measured seed.
+  the launch measurement on SEV-SNP (S4; on TDX see G6), and the runtime
+  CDS additions arrive over RA-TLS pinned to `cds.measurements`, so the
+  host can't substitute a fake CDS ("Host can't substitute a fake CDS
+  allowlist"). At worst the host blocks new additions — it can't shrink
+  enforcement below the measured seed.
 - The host cannot kill policy-monitor from outside the VM. (S5.)
 - The kata VM is the trust boundary (CVM memory encryption — SEV-SNP or
   TDX) and policy-monitor + ratls-mesh + attestation-service inside
@@ -698,10 +630,11 @@ not part of the binding work.
 
 **It does not claim:**
 
-- That the denied container's init *never executes any code*.
-  policy-monitor SIGKILLs the init after the kernel has forked it
-  (G1). The init has no network and no user-execve in that window,
-  but the window exists.
+- That a denied container's init is never *forked*. It is, and
+  policy-monitor SIGKILLs it. What the guest does claim is that it never
+  reaches `execve`: the agent waits for the admission verdict before
+  releasing the exec fifo (G1). The forked init runs no image code in that
+  window — it is parked on the fifo.
 - That CDS unreachability blocks the pod from booting or changes what
   policy-monitor enforces. The measured seed enforces regardless; a CDS
   outage only stops *new* additions from merging (grow-only). (Mesh-layer
@@ -711,12 +644,16 @@ not part of the binding work.
   guest-pull transport (G3).
 - That the rootfs still holds the admitted bytes at `execve`. The claim is
   that it *originates* from a digest-pinned in-guest pull. `CopyFileRequest`
-  is scoped to `/run/kata-containers/shared/containers/` so it can no longer
-  reach the container rootfs, but the argv, env and mounts a container runs
-  with are still the host's (THREAT_MODEL §5).
+  is scoped to `/run/kata-containers/shared/containers/` so it cannot reach
+  the container rootfs, and a mount's *source* must be one of the directories
+  the runtime manages — so nothing binds the verity root, `/run/c8s` or
+  another container's rootfs into a container. But a mount *destination* is
+  any path inside the container, and the host still chooses argv and env
+  (THREAT_MODEL §5). Which paths a given image may have shadowed is
+  per-image knowledge; it belongs in the allowlist document next to the argv
+  policy, not in a policy baked before any workload is known.
 
-The G1 gap (post-start kill window) is the most consequential
-honest limitation. The BPF-LSM upgrade path (G4) is the documented
-way to close it; today's design accepts it because the in-VM
-post-fork pre-execve window is short, capability-poor, and inside
-the CVM trust boundary.
+The most consequential honest limitations left are G6 (on TDX the baked
+bytes are measured but not pinned) and the host's control of argv, env and
+mount destinations (THREAT_MODEL §5). G1 is closed; G4 was its planned
+mitigation and is no longer needed for it.

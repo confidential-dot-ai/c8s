@@ -197,6 +197,63 @@ func TestPullHandoffFailsFastOnDefinitiveVerdict(t *testing.T) {
 	}
 }
 
+// failingAttestKeyClient returns err on every call, invoking onCall first so
+// tests can cancel the pull context after the first attempt.
+type failingAttestKeyClient struct {
+	err    error
+	onCall func()
+}
+
+func (f *failingAttestKeyClient) AttestKeyWithOperatorKeysHash(context.Context, string, []byte, string) (string, error) {
+	if f.onCall != nil {
+		f.onCall()
+	}
+	return "", f.err
+}
+
+// TestPullHandoffRetryInterval pins the retry cadence PullHandoff hands to
+// PullRetry, observed through the retry warning's retry_in attribute: a
+// positive override is used as-is and zero falls back to the default.
+func TestPullHandoffRetryInterval(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"override", time.Millisecond, time.Millisecond},
+		{"zero defaults", 0, 2 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			capture := &captureHandler{}
+			attest := &failingAttestKeyClient{
+				err:    &attestclient.StatusError{Status: http.StatusServiceUnavailable},
+				onCall: cancel,
+			}
+			_, err := PullHandoff(ctx, PullConfig{
+				Deps:              HandoffClientDeps{OperatorKeysHash: handoffTestOperatorKeysHash},
+				Attest:            attest,
+				PeerURL:           "http://unused",
+				AttestationApiURL: "http://unused",
+				Logger:            slog.New(capture),
+				RetryInterval:     tc.interval,
+			})
+			if err == nil {
+				t.Fatal("expected PullHandoff to fail once ctx is cancelled")
+			}
+			rec, ok := capture.find("handoff pull attempt failed; retrying")
+			if !ok {
+				t.Fatal("no retry warning logged")
+			}
+			if got := rec.attrs["retry_in"].Duration(); got != tc.want {
+				t.Fatalf("retry_in = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClassifyPullError(t *testing.T) {
 	certErr := &url.Error{Op: "Get", URL: "https://peer", Err: &tls.CertificateVerificationError{Err: errors.New("measurement not allowed")}}
 	cases := []struct {

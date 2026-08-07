@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
 	"unicode/utf8"
 )
 
@@ -662,6 +663,9 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 	})
 
 	t.Run("zero pid fails closed", func(t *testing.T) {
+		// Even with a resolvable /proc/0/cgroup: pid 0 means "no peer
+		// credential" and must never bind to a container.
+		writeCgroupFile(t, procRoot, 0, "0::/kubepods/besteffort/pod0/"+id+"\n")
 		if _, err := ContainerIDCandidatesForPID(procRoot, 0); err == nil {
 			t.Fatal("pid 0 accepted")
 		}
@@ -673,8 +677,12 @@ func TestContainerIDCandidatesForPID(t *testing.T) {
 // permission the same-process inventory tests can't exercise. Chgrp to our own gid
 // (InventorySocketGID needs root); this still proves ListenUnix applies the group.
 func TestListenUnixSetsModeAndGroup(t *testing.T) {
+	gid := os.Getgid()
+	if os.Getuid() == 0 {
+		gid = InventorySocketGID
+	}
 	sock := filepath.Join(t.TempDir(), "b.sock")
-	l, err := ListenUnix(sock, os.Getgid())
+	l, err := ListenUnix(sock, gid)
 	if err != nil {
 		t.Fatalf("ListenUnix: %v", err)
 	}
@@ -691,8 +699,58 @@ func TestListenUnixSetsModeAndGroup(t *testing.T) {
 	if !ok {
 		t.Skip("no syscall.Stat_t on this platform")
 	}
-	if int(st.Gid) != os.Getgid() {
-		t.Fatalf("socket gid = %d, want %d (ListenUnix must chgrp so a non-root caller in that group can connect)", st.Gid, os.Getgid())
+	if int(st.Gid) != gid {
+		t.Fatalf("socket gid = %d, want %d (ListenUnix must chgrp so a non-root caller in that group can connect)", st.Gid, gid)
+	}
+	if int(st.Uid) != os.Getuid() {
+		t.Fatalf("socket uid = %d, want %d (chgrp must not change the owner)", st.Uid, os.Getuid())
+	}
+}
+
+// With gid <= 0 the socket's group must be left exactly as the filesystem
+// assigned it. A setgid parent directory makes that observable even as root:
+// the socket inherits the directory's group, and any chown would change it.
+func TestListenUnixGidZeroLeavesGroup(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root to set up a setgid directory with a foreign group")
+	}
+	dir := t.TempDir()
+	if err := os.Chown(dir, -1, InventorySocketGID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o770|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "b.sock")
+	l, err := ListenUnix(sock, 0)
+	if err != nil {
+		t.Fatalf("ListenUnix: %v", err)
+	}
+	defer l.Close()
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no syscall.Stat_t on this platform")
+	}
+	if int(st.Gid) != InventorySocketGID {
+		t.Fatalf("socket gid = %d, want the setgid-inherited %d (gid 0 must mean no chgrp)", st.Gid, InventorySocketGID)
+	}
+}
+
+// A listener failing for any reason other than shutdown must surface the error.
+func TestServeSurfacesListenerError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := ServeDigests(ctx, l, &fakeResolver{}, nil); err == nil {
+		t.Fatal("ServeDigests on a closed listener returned nil")
 	}
 }
 

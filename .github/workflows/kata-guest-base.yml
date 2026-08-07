@@ -290,6 +290,9 @@ jobs:
       # silently permissive.
       - name: Setup ORAS
         uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          # Explicit pin so an action bump can't silently change the oras that resolves the allowlist digests.
+          version: "1.2.3"
 
       # Log in to GHCR for the manifest-fetch step: authenticated reads
       # dodge GHCR's anonymous rate limits. Same token as the publish
@@ -373,7 +376,8 @@ jobs:
       #
       # Key: KATA_VERSION (osbuilder + agent + toolchain pins all derive from
       # it) + build.sh itself, whose Step 2 block holds the remaining inputs
-      # (DISTRO/OS_VERSION/AGENT_*/EXTRA_PKGS). Hashing the whole script
+      # (DISTRO/OS_VERSION/AGENT_*/EXTRA_PKGS) + patches/, which osbuilder
+      # compiles into the cached kata-agent. Hashing the whole script
       # over-invalidates — any build.sh edit re-pays the ~4 min — which is the
       # safe direction; a stale hit is impossible by construction. No
       # restore-keys: a partial-input match could resurrect a rootfs built
@@ -383,7 +387,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/kata-base-rootfs.tar.zst
-          key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh') }}
+          key: kata-base-rootfs-${{ env.KATA_VERSION }}-${{ hashFiles('c8s/kata-guest-base/scripts/build.sh', 'c8s/kata-guest-base/patches/*.patch') }}
 
       # Cache the guest kernel build output (confidential-os-builder/output/kernel) — the most
       # expensive INVARIANT in this job. build.sh Step 1/5 runs `confos kernel`,
@@ -503,13 +507,9 @@ jobs:
           # an in-flight kernel change can still publish a branch-* image before
           # the snapshot is committed.
           CHECK_SNAPSHOT: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && '1' || '0' }}
-          # Re-lay toolchain gate: root_hash is reproducible only for a
-          # matching host e2fsprogs/cryptsetup (build.sh logs the runner's
-          # versions as "re-lay toolchain:" and records them in
-          # manifest.json). Uncomment with the runner's confirmed versions to
-          # make drift fatal on the publish path.
-          # REPRO_E2FSPROGS_VERSION: "1.47.0"
-          # REPRO_CRYPTSETUP_VERSION: "2.7.0"
+          # Re-lay toolchain gate (values = published artifact's relay_toolchain): a runner upgrade fails preflight instead of silently shifting root_hash; re-pin on upgrade, expecting a new measurement.
+          REPRO_E2FSPROGS_VERSION: "1.47.0"
+          REPRO_CRYPTSETUP_VERSION: "2.7.0"
           # GPU variants are mandatory in CI. build.sh Step 6 grafts the
           # NVIDIA payload from the staged kata-static artifacts
           # (KATA_NVIDIA_CONFIDENTIAL_IMG / KATA_NVIDIA_VMLINUZ, exported by

@@ -12,6 +12,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
 	"golang.org/x/time/rate"
@@ -395,6 +396,7 @@ func TestReadinessFn(t *testing.T) {
 		{"CA already expired", healthyService, expiredCA, time.Hour, false},
 		{"nil CA", healthyService, nil, time.Hour, false},
 		{"zero window disables CA check", healthyService, expiringCA, 0, true},
+		{"zero window disables CA check even when expired", healthyService, expiredCA, 0, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,4 +427,96 @@ func TestParseMeasurementAllowlist(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewRouter_PanicsOnZeroMaxRequestSize(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for zero MaxRequestSize")
+		}
+	}()
+	newRouter(dependencies{RateLimiter: newTestRateLimiter(t), MaxRequestSize: 0})
+}
+
+func TestNewRouter_PanicsOnNilRateLimiter(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for nil RateLimiter")
+		}
+	}()
+	newRouter(dependencies{RateLimiter: nil, MaxRequestSize: 1})
+}
+
+// When a HandoffHandler is wired, /handoff is mounted and reachable (a malformed
+// body proves the route exists rather than 404/405).
+func TestRouter_HandoffMountedWhenConfigured(t *testing.T) {
+	r := newStubRouterWithHandoff(t)
+	req := httptest.NewRequest(http.MethodPost, "/handoff", bytes.NewReader([]byte(`{}`)))
+	req.RemoteAddr = "10.0.0.1:1234"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("/handoff should be mounted: got %d", w.Code)
+	}
+}
+
+func newStubRouterWithHandoff(t *testing.T) http.Handler {
+	t.Helper()
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("ear key: %v", err)
+	}
+	earIss, err := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	if err != nil {
+		t.Fatalf("ear issuer: %v", err)
+	}
+	store, err := allowlist.OpenInMemory()
+	if err != nil {
+		t.Fatalf("allowlist: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("ca: %v", err)
+	}
+	cs := attestation.NewChallengeStore(time.Minute)
+
+	rotator, err := earsigner.NewRotator(earsigner.RotatorConfig{}, keyPEM, earIss.SwapKey)
+	if err != nil {
+		t.Fatalf("rotator: %v", err)
+	}
+	boot, err := issuer.NewLocalHandoffBootstrap(attestationclient.NewClient(""), earIss, testOperatorKeysHash)
+	if err != nil {
+		t.Fatalf("handoff bootstrap: %v", err)
+	}
+	hh, err := issuer.NewHandoffHandler(issuer.HandoffDeps{
+		KeyProvider:         rotator,
+		ExpectedIssuer:      "cds",
+		AllowedMeasurements: map[string]bool{"deadbeef": true},
+		OperatorKeysHash:    testOperatorKeysHash,
+		Signer:              boot.Signer(),
+		EARSource:           boot.EARSource(),
+		Snapshot: func() (issuer.CASnapshot, bool) {
+			version, digests, err := store.ListAll()
+			if err != nil {
+				return issuer.CASnapshot{}, false
+			}
+			return issuer.CASnapshot{Cert: ca.Cert, Key: ca.Key, AllowlistVersion: version, Allowlist: digests}, true
+		},
+	})
+	if err != nil {
+		t.Fatalf("handoff handler: %v", err)
+	}
+
+	deps := dependencies{
+		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		HandoffHandler:   hh,
+		ReadyFn:          func() bool { return true },
+		EarIssuer:        earIss,
+		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      newTestRateLimiter(t),
+		MaxRequestSize:   65536,
+	}
+	return newRouter(deps)
 }

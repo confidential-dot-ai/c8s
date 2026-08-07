@@ -74,6 +74,52 @@ func TestWaitForTimesOut(t *testing.T) {
 	}
 }
 
+// A non-positive interval is clamped to the 1s default, so even with a tiny
+// timeout the call sleeps a full interval before giving up: it cannot return
+// almost immediately in a busy spin.
+func TestWaitForClampsNonPositiveInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "never.pem")
+	start := time.Now()
+	if err := waitFor(path, 0, 50*time.Millisecond); err == nil {
+		t.Fatal("waitFor(missing, timeout) = nil, want error")
+	}
+	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
+		t.Fatalf("waitFor returned after %v; the clamped 1s interval must sleep at least once", elapsed)
+	}
+}
+
+// timeout 0 waits forever: waitFor must not give up on its own, and must
+// return once the file appears.
+func TestWaitForZeroTimeoutWaitsForFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cert.pem")
+
+	done := make(chan error, 1)
+	go func() { done <- waitFor(path, 10*time.Millisecond, 0) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("waitFor returned early with timeout 0: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	tmp := filepath.Join(dir, "cert.pem.tmp")
+	if err := os.WriteFile(tmp, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitFor(appeared file) = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waitFor did not return after the file appeared")
+	}
+}
+
 func TestCmdOneShot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cert.pem")

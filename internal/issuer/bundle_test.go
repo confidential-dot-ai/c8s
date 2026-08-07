@@ -2,6 +2,7 @@ package issuer
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -142,6 +143,94 @@ func TestBundleRotateDropsRetiredCAsAfterMaxTTLWindow(t *testing.T) {
 	}
 	if _, ok := bm.retiredAt[certutil.CertFingerprint(currentCert.Raw)]; !ok {
 		t.Fatalf("previous current CA was not marked retired")
+	}
+}
+
+func TestBundleRotateLogsRetainUntilForDroppedCA(t *testing.T) {
+	currentCert := mustNewCA(t)
+	retiredCert := mustNewCA(t)
+	newCert := mustNewCA(t)
+	retiredAt := time.Now().Add(-3 * time.Hour)
+
+	capture := &captureHandler{}
+	bm := NewBundleManager(time.Hour, "", testBundlePath, slog.New(capture))
+	bm.certs = []*x509.Certificate{currentCert, retiredCert}
+	bm.retiredAt = map[string]time.Time{certutil.CertFingerprint(retiredCert.Raw): retiredAt}
+
+	if err := bm.Rotate(newCert); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := capture.find("trimming expired CA from bundle")
+	if !ok {
+		t.Fatal("dropped CA was not logged")
+	}
+	if got, want := rec.attrs["retired_at"].String(), retiredAt.Format(time.RFC3339); got != want {
+		t.Fatalf("retired_at = %q, want %q", got, want)
+	}
+	// The retention window is 2*maxTTL past retirement.
+	if got, want := rec.attrs["retain_until"].String(), retiredAt.Add(2*time.Hour).Format(time.RFC3339); got != want {
+		t.Fatalf("retain_until = %q, want %q", got, want)
+	}
+}
+
+// TestBundleRotateRetainsRetiredCAsWhenMaxTTLUnset pins that maxTTL == 0
+// disables retention trimming entirely: still-valid retired CAs stay.
+func TestBundleRotateRetainsRetiredCAsWhenMaxTTLUnset(t *testing.T) {
+	currentCert := mustNewCA(t)
+	retiredCert := mustNewCA(t)
+	newCert := mustNewCA(t)
+
+	bm := NewBundleManager(0, "", testBundlePath, slog.Default())
+	bm.certs = []*x509.Certificate{currentCert, retiredCert}
+	bm.retiredAt = map[string]time.Time{certutil.CertFingerprint(retiredCert.Raw): time.Now().Add(-3 * time.Hour)}
+
+	if err := bm.Rotate(newCert); err != nil {
+		t.Fatal(err)
+	}
+	certs, err := certutil.ParsePEMCertificates(bm.BundlePEM())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(certs) != 3 {
+		t.Fatalf("bundle cert count = %d, want 3 (nothing trimmed with maxTTL unset)", len(certs))
+	}
+}
+
+// TestBundleRetirementsTrackOnlyNonCurrentCAs pins that the active CA never
+// carries a retirement timestamp, in memory and in the persisted metadata.
+func TestBundleRetirementsTrackOnlyNonCurrentCAs(t *testing.T) {
+	currentCert := mustNewCA(t)
+	oldCert := mustNewCA(t)
+	currentFP := certutil.CertFingerprint(currentCert.Raw)
+	oldFP := certutil.CertFingerprint(oldCert.Raw)
+
+	repoDir := t.TempDir()
+	bm := NewBundleManager(time.Hour, repoDir, testBundlePath, slog.Default())
+	bm.SetWithCurrent(currentCert, []*x509.Certificate{oldCert})
+
+	if _, ok := bm.retiredAt[currentFP]; ok {
+		t.Fatal("current CA has a retirement timestamp")
+	}
+	if _, ok := bm.retiredAt[oldFP]; !ok {
+		t.Fatal("retained old CA has no retirement timestamp")
+	}
+
+	if err := bm.PersistCurrent(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(bm.retirementsFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file bundleRetirementsFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := file.RetiredAt[currentFP]; ok {
+		t.Fatal("persisted retirements include the current CA")
+	}
+	if _, ok := file.RetiredAt[oldFP]; !ok {
+		t.Fatal("persisted retirements missing the retained old CA")
 	}
 }
 

@@ -17,6 +17,10 @@ on:
       - "scripts/mutation-check.sh"
       - ".gremlins.yaml"
       - ".github/workflows/ci.yml"
+      # internal/kataspec reads the baked policy and asserts the two admit the
+      # same container ids, so a policy-only change has to run this workflow.
+      - "kata-guest-base/extra/etc/kata-opa/**"
+      - "kata-guest-base/tests/**"
   pull_request:
     branches: [main, "feat/**"]
     paths: *go-paths
@@ -52,6 +56,26 @@ jobs:
           # A full major.minor.patch is resolved in-process; anything less is
           # looked up over the network before the linter runs.
           version: v2.12.2
+
+  policy:
+    name: Kata guest policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # kata-agent aborts the VM on a policy it cannot load, so a broken file
+      # costs a guest image build and an E2E run to discover. The decision
+      # tests additionally pin the rules the image binding rests on.
+      - name: Install opa
+        run: |
+          version=$(make -s print-opa-version)
+          curl -fsSL -o /usr/local/bin/opa \
+            "https://openpolicyagent.org/downloads/${version}/opa_linux_amd64_static"
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: Check and test the baked kata-agent policy
+        run: make policy-test
 
   test:
     name: Build & Test

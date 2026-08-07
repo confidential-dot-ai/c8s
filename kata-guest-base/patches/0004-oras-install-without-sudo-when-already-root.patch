@@ -1,0 +1,51 @@
+Subject: [PATCH] oras: install without sudo when already root
+
+install_libseccomp.sh prefers the ORAS cache
+(ghcr.io/kata-containers/cached-tarballs/gperf:3.3) over a source download, and
+that artefact carries the tarball, its .sig and the signing key, so the cache
+path verifies the signature offline. Reaching it means installing ORAS, and
+install_oras.sh reaches for sudo — which the rootfs-builder container does not
+have:
+
+    INFO: Installing ORAS using existing script
+    install_oras.sh: line 43: sudo: command not found
+    WARN: ORAS installation script failed
+    INFO: ORAS not available, downloading directly from upstream
+
+The container is already root, so the elevation is only needed when a developer
+runs this on their own host. Falling back to the GNU mirror still works, but it
+then depends on a keyserver round-trip to import the gperf signing key, which is
+the flakier of the two paths.
+
+--- a/tools/packaging/kata-deploy/local-build/dockerbuild/install_oras.sh
++++ b/tools/packaging/kata-deploy/local-build/dockerbuild/install_oras.sh
+@@ -11,6 +11,10 @@
+
+ install_dest="/usr/local/bin"
+
++# osbuilder's rootfs-builder container runs as root and ships no sudo binary.
++sudo_cmd=""
++[[ "$(id -u)" -eq 0 ]] || sudo_cmd="sudo"
++
+ function get_installed_oras_version() {
+ 	oras version | grep Version | sed -e s/Version:// | tr -d '[:blank:]'
+ }
+@@ -24,7 +28,7 @@
+
+ 	echo "Proceeding to cleanup the previous installed version of ORAS, and install the version specified in the versions.yaml file"
+ 	oras_system_path=$(which oras)
+-	sudo rm -f "${oras_system_path}"
++	${sudo_cmd} rm -f "${oras_system_path}"
+ fi
+
+ arch=$(uname -m)
+@@ -40,6 +44,6 @@
+ curl -OL "https://github.com/oras-project/oras/releases/download/${oras_required_version}/${oras_tarball}"
+
+ echo "Installing ORAS to ${install_dest}"
+-sudo mkdir -p "${install_dest}"
+-sudo tar -C "${install_dest}" -xzf "${oras_tarball}"
+-sudo rm -f "${oras_tarball}"
++${sudo_cmd} mkdir -p "${install_dest}"
++${sudo_cmd} tar -C "${install_dest}" -xzf "${oras_tarball}"
++${sudo_cmd} rm -f "${oras_tarball}"

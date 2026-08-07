@@ -175,3 +175,82 @@ func TestVerifyRequestError(t *testing.T) {
 		t.Fatalf("expected RequestError, got %T: %v", err, err)
 	}
 }
+
+func TestAttestSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
+		var req types.AttestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode attest request: %v", err)
+		}
+		if req.Platform != types.PlatformAuto {
+			t.Errorf("platform = %q, want auto", req.Platform)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(types.AttestResponse{
+			Platform: "snp",
+			Evidence: json.RawMessage(`{"quote":"abc"}`),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+	resp, err := c.Attest(context.Background(), types.AttestRequest{
+		ReportData: types.NewBase64Bytes([]byte("rd")),
+		Platform:   types.PlatformAuto,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Platform != "snp" {
+		t.Fatalf("platform = %q, want snp", resp.Platform)
+	}
+	if string(resp.Evidence) != `{"quote":"abc"}` {
+		t.Fatalf("evidence = %s, want the returned evidence object", resp.Evidence)
+	}
+}
+
+func TestAttestAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(types.ErrorResponse{Error: "attest_failed", Message: "boom"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+	_, err := c.Attest(context.Background(), types.AttestRequest{Platform: types.PlatformAuto})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", apiErr.Status)
+	}
+}
+
+// TestRedirectStatusIsAPIError pins the success window at [200, 300): a 300
+// response is an error, not a decodable success.
+func TestRedirectStatusIsAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMultipleChoices)
+		json.NewEncoder(w).Encode(types.ErrorResponse{Error: "redirected", Message: "no"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+	_, err := c.Health(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusMultipleChoices {
+		t.Fatalf("status = %d, want 300", apiErr.Status)
+	}
+}
