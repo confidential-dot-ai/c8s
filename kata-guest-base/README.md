@@ -108,6 +108,11 @@ shows up. For kernel version bumps see
 [base-images/rke2/README.md](https://github.com/confidential-dot-ai/base-images/blob/master/rke2/README.md)
 "Bumping versions".
 
+Every external input is digest- or commit-pinned, and moving any pin
+moves the verity root_hash. See
+[`../docs/kata-guest-base.md`](../docs/kata-guest-base.md) "Component
+pins" for the full list, locations, and bump procedure.
+
 ## How it's consumed in-cluster
 
 The `c8s-kata-image-puller` DaemonSet (`internal/helmchart/c8s/templates/
@@ -172,8 +177,16 @@ a debug image can't silently stand in for a locked one. Select it with
   kata-runtime via vsock + cloud-init, and the locked policy denies the
   host exec/stream RPCs — `kubectl exec`/`logs` work only on the `-debug`
   image variant (above).
-- **Cloud-init's user-data is host-injected** and visible to the host —
-  C8S_* values are URLs and workload IDs, not secrets.
+- **The in-guest `C8S_*` config is a baked default.** There is no per-pod
+  NoCloud datasource, so cloud-init finds nothing and
+  `c8s-cloudinit-env.service` materialises `/etc/c8s/cloudinit.env` from the
+  rootfs — one fixed identity (`C8S_WORKLOAD_ID=c8s-broker`) shared by every
+  guest. Should per-pod user-data injection land it would be host-written and
+  host-visible, which is why these values are URLs and workload IDs rather
+  than secrets. The one value that must not come from the host,
+  `C8S_CDS_MEASUREMENTS`, is delivered over SNP init-data instead and checked
+  against `HOST_DATA` (see
+  [`docs/kata-image-policy.md`](../docs/kata-image-policy.md)).
 - **kata version pin.** `scripts/build.sh` (osbuilder source tag) must
   stay in lockstep with `internal/helmchart/c8s/values.yaml` (kata-deploy
   version) — host/guest agent skew breaks the ttRPC contract.

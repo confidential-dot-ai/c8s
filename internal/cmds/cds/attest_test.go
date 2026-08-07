@@ -6,11 +6,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -427,5 +430,212 @@ func TestAttest_RejectedEvidenceReturns4xxNotUnreachable(t *testing.T) {
 	}
 	if resp.Error != types.ErrorCodeVerificationFailed {
 		t.Fatalf("error code: got %q, want %q", resp.Error, types.ErrorCodeVerificationFailed)
+	}
+}
+
+func TestClassifyVerifyError(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "signature invalid",
+			err:        fmt.Errorf("wrap: %w", attestationclient.ErrSignatureInvalid),
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "report data mismatch",
+			err:        fmt.Errorf("wrap: %w", attestationclient.ErrReportDataMismatch),
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "api 400 is client fault",
+			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "api 403 is client fault",
+			err:        &attestationclient.APIError{Status: http.StatusForbidden},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+		},
+		{
+			name:       "api 500 is upstream outage",
+			err:        &attestationclient.APIError{Status: http.StatusInternalServerError},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+		{
+			name:       "api 408 is retryable unavailability",
+			err:        &attestationclient.APIError{Status: http.StatusRequestTimeout},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+		{
+			name:       "api 429 is retryable unavailability",
+			err:        &attestationclient.APIError{Status: http.StatusTooManyRequests},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+		{
+			name:       "transport failure is unreachable",
+			err:        errors.New("dial tcp: connection refused"),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, msg := classifyVerifyError(tc.err)
+			if status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
+			}
+			if code != tc.wantCode {
+				t.Errorf("code = %q, want %q", code, tc.wantCode)
+			}
+			if msg == "" {
+				t.Error("message empty")
+			}
+		})
+	}
+}
+
+// caChainPEM has three branches: prefer CAChainPEM, fall back to CA.Cert, or
+// return nil.
+func TestAttestHandler_caChainPEM(t *testing.T) {
+	ca, err := issuer.NewCA("test ca", time.Hour)
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+
+	t.Run("prefers explicit CAChainPEM", func(t *testing.T) {
+		h := AttestHandler{CAChainPEM: []byte("explicit"), CA: ca}
+		if got := string(h.caChainPEM()); got != "explicit" {
+			t.Fatalf("got %q, want explicit", got)
+		}
+	})
+
+	t.Run("derives from CA cert when chain empty", func(t *testing.T) {
+		h := AttestHandler{CA: ca}
+		want := certutil.EncodeCertPEM(ca.Cert.Raw)
+		if !bytes.Equal(h.caChainPEM(), want) {
+			t.Fatal("derived chain does not match CA cert PEM")
+		}
+	})
+
+	t.Run("nil when no chain and no CA", func(t *testing.T) {
+		h := AttestHandler{}
+		if got := h.caChainPEM(); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("nil when CA has nil cert", func(t *testing.T) {
+		h := AttestHandler{CA: &issuer.CA{}}
+		if got := h.caChainPEM(); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+	})
+}
+
+func TestAttest_RejectsUnknownJSONFields(t *testing.T) {
+	mock := newMockAttestationApi(t, "x")
+	h := newTestAttestHandler(t, mock.URL, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader([]byte(`{"unknown":true}`)))
+	w := httptest.NewRecorder()
+	h.HandleAttest(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttest_RejectsMalformedChallengeEncoding(t *testing.T) {
+	mock := newMockAttestationApi(t, "x")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	csrPEM, _ := generateCSR(t)
+
+	body, err := json.Marshal(types.AttestRequestBody{
+		Challenge: "!!!not-base64!!!",
+		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+		CSR:       csrPEM,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.HandleAttest(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttest_RejectsValidBase64UnknownChallenge(t *testing.T) {
+	mock := newMockAttestationApi(t, "x")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	csrPEM, _ := generateCSR(t)
+
+	// Valid base64 but never issued, so Consume returns false.
+	body, err := json.Marshal(types.AttestRequestBody{
+		Challenge: "AAAAAAAAAAAAAAAAAAAAAA==",
+		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+		CSR:       csrPEM,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/attest", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.HandleAttest(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// A CSR whose public key is not ECDSA must be rejected before verification.
+func TestAttest_RejectsNonECDSACSR(t *testing.T) {
+	mock := newMockAttestationApi(t, "x")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	challenge := issueChallenge(t, h)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("gen rsa key: %v", err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "rsa-node"},
+	}, rsaKey)
+	if err != nil {
+		t.Fatalf("create rsa csr: %v", err)
+	}
+	csrPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// An unloaded CA makes in-process signing fail after all validation passed.
+// Also exercises the RequestTimeout>0 wrapping.
+func TestAttest_SignFailureReturns500(t *testing.T) {
+	mock := newMockAttestationApi(t, "x")
+	h := newTestAttestHandler(t, mock.URL, nil)
+	h.CA = &issuer.CA{} // no cert/key loaded: SignCSR fails
+	h.RequestTimeout = time.Second
+	challenge := issueChallenge(t, h)
+	csrPEM, _ := generateCSR(t)
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), types.ErrorCodeSignFailed) {
+		t.Errorf("body should mention %s; got %s", types.ErrorCodeSignFailed, w.Body.String())
 	}
 }

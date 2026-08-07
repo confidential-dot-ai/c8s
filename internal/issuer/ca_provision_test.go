@@ -5,7 +5,9 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"errors"
+	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,11 +155,12 @@ func TestProvisionCARejectsChainedOrMultiCertHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name     string
-		material *HandoffMaterial
+		name       string
+		material   *HandoffMaterial
+		wantSubstr string
 	}{
-		{"parent cert", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, ParentCert: otherCA.Cert}},
-		{"multi-cert bundle", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, Bundle: []*x509.Certificate{peerCA.Cert, otherCA.Cert}}},
+		{"parent cert", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, ParentCert: otherCA.Cert}, "parent=true"},
+		{"multi-cert bundle", &HandoffMaterial{CACert: peerCA.Cert, CAKey: peerCA.Key, Bundle: []*x509.Certificate{peerCA.Cert, otherCA.Cert}}, "parent=false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pull := func(context.Context, CAProvisionConfig, *slog.Logger) (*HandoffMaterial, error) {
@@ -172,8 +175,117 @@ func TestProvisionCARejectsChainedOrMultiCertHandoff(t *testing.T) {
 			if err == nil {
 				t.Fatal("provisionCA adopted a chained/multi-cert handoff; must refuse")
 			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Fatalf("refusal error %q does not report %q", err.Error(), tc.wantSubstr)
+			}
 			if ca != nil || adopted {
 				t.Fatalf("refusal path returned a CA (ca=%v adopted=%v)", ca, adopted)
+			}
+		})
+	}
+}
+
+// TestProvisionCAAdoptsSingleCertBundle pins the boundary of the multi-cert
+// refusal: a handoff whose bundle is exactly the active CA must be adopted.
+func TestProvisionCAAdoptsSingleCertBundle(t *testing.T) {
+	peerCA, err := NewCAWithCurve("peer-ca", time.Hour, elliptic.P256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pull := func(context.Context, CAProvisionConfig, *slog.Logger) (*HandoffMaterial, error) {
+		return &HandoffMaterial{
+			CACert:           peerCA.Cert,
+			CAKey:            peerCA.Key,
+			Bundle:           []*x509.Certificate{peerCA.Cert},
+			AllowlistVersion: "1",
+			Allowlist:        map[types.Digest]string{},
+		}, nil
+	}
+	ca, adopted, err := provisionCA(context.Background(), CAProvisionConfig{
+		PeerURL:          "https://peer:8443",
+		Measurements:     []string{"m"},
+		OperatorKeysHash: handoffTestOperatorKeysHash,
+		RestoreAllowlist: func(string, *allowlist.Allowlist) error { return nil },
+	}, slog.Default(), pull)
+	if err != nil {
+		t.Fatalf("provisionCA refused a single-cert bundle: %v", err)
+	}
+	if !adopted || ca == nil || !ca.Cert.Equal(peerCA.Cert) {
+		t.Fatalf("adoption result = (ca=%v adopted=%v)", ca, adopted)
+	}
+}
+
+func TestProvisionCADefaultsNilLoggerForPull(t *testing.T) {
+	var gotLogger *slog.Logger
+	pull := func(_ context.Context, _ CAProvisionConfig, l *slog.Logger) (*HandoffMaterial, error) {
+		gotLogger = l
+		return nil, errors.New("stop here")
+	}
+	_, _, err := provisionCA(context.Background(), CAProvisionConfig{
+		PeerURL:          "https://peer:8443",
+		Measurements:     []string{"m"},
+		OperatorKeysHash: handoffTestOperatorKeysHash,
+		RestoreAllowlist: func(string, *allowlist.Allowlist) error { return nil },
+	}, nil, pull)
+	if err == nil {
+		t.Fatal("expected the stubbed pull error")
+	}
+	if gotLogger == nil {
+		t.Fatal("nil logger must be defaulted before reaching the puller")
+	}
+}
+
+func TestAdoptFromPeerInputValidation(t *testing.T) {
+	validMeasurement := strings.Repeat("ab", 48)
+	cases := []struct {
+		name       string
+		cfg        CAProvisionConfig
+		wantSubstr string
+	}{
+		{
+			name:       "missing attestation-api URL",
+			cfg:        CAProvisionConfig{PeerURL: "https://peer:8443", Measurements: []string{validMeasurement}},
+			wantSubstr: "attestation-api URL is required",
+		},
+		{
+			name: "invalid measurement hex",
+			cfg: CAProvisionConfig{
+				PeerURL:           "https://peer:8443",
+				AttestationApiURL: "http://attest",
+				Measurements:      []string{"zz"},
+			},
+			wantSubstr: "parse handoff measurements",
+		},
+		{
+			name: "no measurements",
+			cfg: CAProvisionConfig{
+				PeerURL:           "https://peer:8443",
+				AttestationApiURL: "http://attest",
+			},
+			wantSubstr: "requires pinned peer measurements",
+		},
+		{
+			// Valid inputs but an unreachable peer: the failure must come from
+			// the pull stages, not input validation.
+			name: "unreachable peer fails in attest-key",
+			cfg: CAProvisionConfig{
+				PeerURL:           "https://127.0.0.1:1",
+				AttestationApiURL: "http://127.0.0.1:1",
+				Measurements:      []string{validMeasurement},
+				OperatorKeysHash:  handoffTestOperatorKeysHash,
+				Timeout:           100 * time.Millisecond,
+			},
+			wantSubstr: "attest-key",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := adoptFromPeer(context.Background(), tc.cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err == nil {
+				t.Fatal("expected adoptFromPeer to fail")
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSubstr)
 			}
 		})
 	}

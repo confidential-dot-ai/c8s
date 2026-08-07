@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,4 +84,29 @@ func TestHandleJWKSEmptyWhenNoKey(t *testing.T) {
 	if rec.Body.String() != `{"keys":[]}` {
 		t.Errorf("body = %q, want empty key set", rec.Body.String())
 	}
+}
+
+// A key the JWKS encoder cannot serialize is a programming error surfaced at
+// wiring time, not per-request: handler construction must panic.
+func TestHandleJWKSPanicsOnUnusableKey(t *testing.T) {
+	iss, err := ear.NewIssuer(testKeyPEM(t), "test-issuer", time.Minute)
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+	// P-224 is outside the JOSE curve set, so the thumbprint fails.
+	badKey, err := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iss.SwapKey(badKey, "kid")
+
+	defer func() {
+		r := recover()
+		msg, ok := r.(string)
+		if !ok || !strings.HasPrefix(msg, "jwks: ") {
+			t.Fatalf("panic = %v, want a jwks-prefixed message", r)
+		}
+	}()
+	HandleJWKS(iss, nil)
+	t.Fatal("HandleJWKS did not panic on an unusable key")
 }

@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -875,6 +877,149 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
+func TestNewCmdDefaults(t *testing.T) {
+	t.Run("generic", func(t *testing.T) {
+		cmd := NewCmd(Defaults{})
+		if cmd.Use != "verify [target]" {
+			t.Errorf("Use = %q, want the generic default", cmd.Use)
+		}
+		if cmd.Short != "Verify a c8s component's TEE attestation" {
+			t.Errorf("Short = %q, want the generic default", cmd.Short)
+		}
+		if !strings.HasPrefix(cmd.Long, cmd.Short+".") {
+			t.Errorf("Long must open with Short, got %q...", cmd.Long[:60])
+		}
+		for flag, want := range map[string]string{
+			"kind":    "auto",
+			"mode":    "auto",
+			"timeout": "15s",
+		} {
+			f := cmd.Flags().Lookup(flag)
+			if f == nil || f.DefValue != want {
+				t.Errorf("--%s default = %v, want %q", flag, f, want)
+			}
+		}
+	})
+
+	t.Run("preset", func(t *testing.T) {
+		cmd := NewCmd(Defaults{Use: "verify", Short: "Verify the CDS", Kind: "cds", Mode: "ratls-cert"})
+		if cmd.Use != "verify" || cmd.Short != "Verify the CDS" {
+			t.Errorf("Use/Short = %q/%q, presets not applied", cmd.Use, cmd.Short)
+		}
+		if got := cmd.Flags().Lookup("kind").DefValue; got != "cds" {
+			t.Errorf("--kind default = %q, want cds", got)
+		}
+		if got := cmd.Flags().Lookup("mode").DefValue; got != "ratls-cert" {
+			t.Errorf("--mode default = %q, want ratls-cert", got)
+		}
+	})
+}
+
+func TestDefaultPort(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config
+		want int
+	}{
+		{"preset wins over kind", config{defaults: Defaults{DefaultPort: 1234}, kind: "cds"}, 1234},
+		{"cds", config{kind: "cds"}, 8443},
+		{"lb", config{kind: "lb"}, 443},
+		{"auto", config{}, 443},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultPort(tc.cfg); got != tc.want {
+				t.Errorf("defaultPort = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The verifier-reported platform wins; the sent platform is only a fallback.
+func TestNewOutcomePlatform(t *testing.T) {
+	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
+	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("az-snp")}
+	if oc := newOutcome(config{}, ev, reported, nil, &ratls.VerifyPolicy{}); oc.Platform != "az-snp" {
+		t.Errorf("Platform = %q, want the verifier-reported az-snp", oc.Platform)
+	}
+	unreported := &teetypes.VerificationResult{SignatureValid: true}
+	if oc := newOutcome(config{}, ev, unreported, nil, &ratls.VerifyPolicy{}); oc.Platform != "snp" {
+		t.Errorf("Platform = %q, want the fallback snp", oc.Platform)
+	}
+}
+
+func TestFormatTCB(t *testing.T) {
+	u8 := func(v uint8) *uint8 { return &v }
+	cases := []struct {
+		name string
+		tcb  teetypes.TcbInfo
+		want string
+	}{
+		{"snp all components", teetypes.TcbInfo{Type: "Snp", Bootloader: u8(1), Tee: u8(2), Snp: u8(3), Microcode: u8(4)}, "bootloader=1 tee=2 snp=3 microcode=4"},
+		{"snp nil components render as zero", teetypes.TcbInfo{Type: "Snp"}, "bootloader=0 tee=0 snp=0 microcode=0"},
+		{"snp with fmc", teetypes.TcbInfo{Type: "Snp", Bootloader: u8(1), Tee: u8(2), Snp: u8(3), Microcode: u8(4), FMC: u8(7)}, "bootloader=1 tee=2 snp=3 microcode=4 fmc=7"},
+		{"tdx svn", teetypes.TcbInfo{Type: "Tdx", TCBSvn: []byte{0xAB, 0xCD}}, "svn=abcd"},
+		{"tdx without svn", teetypes.TcbInfo{Type: "Tdx"}, ""},
+		{"unknown type", teetypes.TcbInfo{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatTCB(tc.tcb); got != tc.want {
+				t.Errorf("formatTCB = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderTextSections pins which optional sections the text verdict prints:
+// each is emitted exactly when its datum is present.
+func TestRenderTextSections(t *testing.T) {
+	renderOut := func(oc Outcome) string {
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		return out.String()
+	}
+
+	t.Run("all sections present", func(t *testing.T) {
+		got := renderOut(Outcome{
+			Verified:      true,
+			Fresh:         true,
+			Pinned:        true,
+			CertSHA256:    "cert-digest-hex",
+			SandboxID:     "sandbox-1",
+			SandboxIDNote: "vouched by the mesh CA",
+			OperatorKeys:  []string{"fp-one"},
+		})
+		for _, want := range []string{
+			"cert sha256:  cert-digest-hex",
+			"sandbox id:   sandbox-1",
+			"vouched by the mesh CA",
+			"operator keys (allowlist writes; CDS-reported config, NOT covered by the measurement):",
+			"    sha256:fp-one",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("absent data prints nothing", func(t *testing.T) {
+		got := renderOut(Outcome{Verified: true, Fresh: true, Pinned: true, OperatorKeysNote: "note-xyz"})
+		if !strings.Contains(got, "operator keys: note-xyz") {
+			t.Errorf("note not printed when no keys were fetched:\n%s", got)
+		}
+		for _, absent := range []string{
+			"cert sha256",
+			"sandbox id",
+			"allowlist writes",
+		} {
+			if strings.Contains(got, absent) {
+				t.Errorf("output has %q without the datum:\n%s", absent, got)
+			}
+		}
+	})
+}
+
 // TestGatherEvidence_AutoPrefersDiscovery proves auto mode (no --kind) detects
 // an LB by fetching its discovery doc first — the bare `c8s verify <lb>` path.
 func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {
@@ -913,4 +1058,184 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	if !errors.Is(err, ratls.ErrNotAttested) {
 		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
 	}
+}
+
+func TestNormalizeTarget_Errors(t *testing.T) {
+	if _, _, err := normalizeTarget("https://\x7f", 443); err == nil {
+		t.Error("control character URL should fail to parse")
+	}
+	if _, _, err := normalizeTarget("https:///path-only", 443); err == nil {
+		t.Error("URL without a host should be rejected")
+	}
+}
+
+func TestMinTCBFromCfg(t *testing.T) {
+	if got := minTCBFromCfg(config{}); got != nil {
+		t.Errorf("all-zero flags should yield nil, got %+v", got)
+	}
+	got := minTCBFromCfg(config{minTCBBootloader: 1, minTCBTEE: 2, minTCBSNP: 3, minTCBMicrocode: 4})
+	if got == nil || got.Bootloader != 1 || got.Tee != 2 || got.Snp != 3 || got.Microcode != 4 {
+		t.Errorf("minTCBFromCfg = %+v, want 1/2/3/4", got)
+	}
+}
+
+func TestBuildPolicy_FileInputs(t *testing.T) {
+	dir := t.TempDir()
+	measHex := strings.Repeat("ab", 48)
+
+	t.Run("measurements file", func(t *testing.T) {
+		path := filepath.Join(dir, "measurements.txt")
+		if err := os.WriteFile(path, []byte(measHex+"\n\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		policy, err := buildPolicy(config{measurementsFile: path})
+		if err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+		if len(policy.Measurements) != 1 || hex.EncodeToString(policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", policy.Measurements)
+		}
+	})
+
+	t.Run("measurements file missing", func(t *testing.T) {
+		if _, err := buildPolicy(config{measurementsFile: filepath.Join(dir, "absent")}); err == nil {
+			t.Error("missing --measurements-file must fail")
+		}
+	})
+
+	t.Run("bad measurement hex", func(t *testing.T) {
+		if _, err := buildPolicy(config{measurements: []string{"zz"}}); err == nil {
+			t.Error("non-hex measurement must fail")
+		}
+	})
+
+	t.Run("operator keys PEM", func(t *testing.T) {
+		pubPEM, _ := operatorPubPEM(t)
+		path := filepath.Join(dir, "op.pub")
+		if err := os.WriteFile(path, pubPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildPolicy(config{operatorKeys: path}); err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+		digest, err := expectedOperatorKeysDigest(config{operatorKeys: path})
+		if err != nil {
+			t.Fatalf("expectedOperatorKeysDigest: %v", err)
+		}
+		if len(digest) == 0 {
+			t.Error("expected digest not derived from --operator-keys")
+		}
+	})
+
+	t.Run("operator keys missing file", func(t *testing.T) {
+		if _, err := buildPolicy(config{operatorKeys: filepath.Join(dir, "absent")}); err == nil {
+			t.Error("missing --operator-keys must fail")
+		}
+	})
+
+	t.Run("operator keys bad PEM", func(t *testing.T) {
+		path := filepath.Join(dir, "bad.pub")
+		if err := os.WriteFile(path, []byte("not pem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := buildPolicy(config{operatorKeys: path}); err == nil {
+			t.Error("unparseable --operator-keys must fail")
+		}
+	})
+
+}
+
+func TestGatherEvidence_ModesAndErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ratls-cert mode", func(t *testing.T) {
+		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
+		if err != nil {
+			t.Fatalf("ratls-cert mode: %v", err)
+		}
+		if !strings.Contains(ev.source, "RA-TLS serving certificate") {
+			t.Errorf("source = %q, want the cert path", ev.source)
+		}
+	})
+
+	t.Run("attest-pq mode", func(t *testing.T) {
+		report := bytes.Repeat([]byte{0x01}, 64)
+		x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+		m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+		id := mintEndpointIdentity(t)
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The path is the binding selector now: the retired
+			// ?pq=/?binding= query form must not be what routes this.
+			if r.URL.Path != "/.well-known/c8s/attest-pq" {
+				http.NotFound(w, r)
+				return
+			}
+			nonce, _ := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("nonce"))
+			w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
+		}))
+		defer srv.Close()
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, nil)
+		if err != nil {
+			t.Fatalf("attest-pq mode: %v", err)
+		}
+		if !ev.fresh {
+			t.Error("endpoint evidence should be fresh")
+		}
+	})
+
+	t.Run("auto falls through to the cert path on discovery parse failure", func(t *testing.T) {
+		// auto tries discovery first; serve a discovery doc that is not JSON so
+		// parsing fails. That failure is not a security error, so auto must fall
+		// through to the cert path (which then errors on the self-signed test
+		// cert) rather than aborting with a security verdict.
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("not json"))
+		}))
+		defer srv.Close()
+		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, nil)
+		if err == nil || isSecurityError(err) {
+			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
+		}
+	})
+}
+
+func TestRun_UsageAndGatherFailures(t *testing.T) {
+	t.Run("retired attestation-endpoint mode is a usage error, not an alias", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: "x", mode: "attestation-endpoint"}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "attest-pq") {
+			t.Errorf("code = %d, want %d with the valid mode list; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("unknown mode is a usage error", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		if code := run(context.Background(), config{url: "x", mode: "bogus"}, &out, &errOut); code != exitUsage {
+			t.Errorf("code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("policy error", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		if code := run(context.Background(), config{minTCBSNP: 256, url: "x"}, &out, &errOut); code != exitUsage {
+			t.Errorf("code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("bad expected-report-data", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{fromFile: "whatever", expectedRDHex: "zz"}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "expected-report-data") {
+			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
+
+	t.Run("missing from-file exits no-evidence", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{fromFile: filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
+		if code != exitNoEvidence || !strings.Contains(errOut.String(), "could not obtain evidence") {
+			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
 }

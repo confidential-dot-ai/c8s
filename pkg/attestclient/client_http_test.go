@@ -525,3 +525,69 @@ func TestMakeSNPRATLSAttestFuncAPIError(t *testing.T) {
 		t.Fatalf("error = %v, want attestation-api error", err)
 	}
 }
+
+// TestRedirectStatusIsNotSuccess pins the success window at [200, 300): a 300
+// response must be treated as a failure on every endpoint.
+func TestRedirectStatusIsNotSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+		_, _ = w.Write([]byte(`{"challenge":"x","ear":"x"}`))
+	}))
+	defer srv.Close()
+	c := NewClientWithHTTP(srv.URL, srv.Client())
+
+	assertStatus300 := func(t *testing.T, err error) {
+		t.Helper()
+		var statusErr *StatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("expected StatusError, got %T: %v", err, err)
+		}
+		if statusErr.Status != http.StatusMultipleChoices {
+			t.Fatalf("status = %d, want 300", statusErr.Status)
+		}
+	}
+	t.Run("authenticate", func(t *testing.T) {
+		_, err := c.Authenticate()
+		assertStatus300(t, err)
+	})
+	t.Run("attest", func(t *testing.T) {
+		_, err := c.Attest(attestRequest{})
+		assertStatus300(t, err)
+	})
+	t.Run("healthz", func(t *testing.T) {
+		ok, err := c.Healthz()
+		if err != nil {
+			t.Fatalf("Healthz: %v", err)
+		}
+		if ok {
+			t.Fatal("Healthz reported healthy on a 300 response")
+		}
+	})
+	t.Run("readyz", func(t *testing.T) {
+		ok, err := c.Readyz()
+		if err != nil {
+			t.Fatalf("Readyz: %v", err)
+		}
+		if ok {
+			t.Fatal("Readyz reported ready on a 300 response")
+		}
+	})
+}
+
+func TestAttestKeyRedirectStatusIsError(t *testing.T) {
+	const challenge = "dGVzdC1jaGFsbGVuZ2U="
+	cdsURL, apiURL := fullFlowServers(t, challenge, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+		_, _ = w.Write([]byte(`{"ear":"x"}`))
+	}))
+
+	c := NewClient(cdsURL)
+	_, err := c.AttestKey(context.Background(), apiURL, testPubKeyDER(t))
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected StatusError, got %T: %v", err, err)
+	}
+	if statusErr.Status != http.StatusMultipleChoices {
+		t.Fatalf("status = %d, want 300", statusErr.Status)
+	}
+}

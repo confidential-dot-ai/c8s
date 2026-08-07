@@ -3,10 +3,15 @@ package localverify
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"os"
 	"testing"
 	"time"
@@ -99,6 +104,107 @@ func TestVerify_KDSFailureIsCollateralError(t *testing.T) {
 	if !errors.As(err, &ce) {
 		t.Fatalf("KDS fetch failure must classify as CollateralError, got: %v", err)
 	}
+}
+
+// TestVerify_NoAnchorSkipsBindingCheck: with no ExpectedReportData the binding
+// defense-in-depth must not fire (ReportDataMatch stays nil), so anchor-less
+// verification of otherwise-good evidence succeeds.
+func TestVerify_NoAnchorSkipsBindingCheck(t *testing.T) {
+	platform, evidence := envelopeFixture(t, "azsnp-evidence-v1.json")
+	res, err := Verify(context.Background(), platform, evidence, Params{})
+	if err != nil {
+		t.Fatalf("anchor-less verification must succeed: %v", err)
+	}
+	if !res.SignatureValid {
+		t.Fatal("signature_valid must be true")
+	}
+}
+
+// TestVerify_InlineVcekVerifiesOffline: evidence that ships its VCEK must take
+// the offline envelope path, never the KDS-fetch path. A cancelled context
+// proves it: the KDS path would classify as CollateralError, the offline path
+// verifies instantly.
+func TestVerify_InlineVcekVerifiesOffline(t *testing.T) {
+	platform, evidence := envelopeFixture(t, "snp-evidence-genoa.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	res, err := Verify(ctx, platform, evidence, Params{})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("inline-VCEK verification took %v, want offline (no KDS fetch)", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("inline-VCEK evidence must verify offline: %v", err)
+	}
+	if !res.SignatureValid {
+		t.Fatal("signature_valid must be true")
+	}
+}
+
+func TestCertEnvelope(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("attested cert yields envelope and key-bound anchor", func(t *testing.T) {
+		att := &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: make([]byte, ratls.SNPReportSize)}
+		der, err := ratls.CreateAttestedCert(key, att, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		platform, evidence, erd, err := CertEnvelope(cert)
+		if err != nil {
+			t.Fatalf("CertEnvelope: %v", err)
+		}
+		if platform != "snp" {
+			t.Errorf("platform = %q, want snp", platform)
+		}
+		if !bytes.Contains(evidence, []byte("attestation_report")) {
+			t.Errorf("evidence object missing the report: %s", evidence)
+		}
+		rd, err := ratls.ReportDataForKey(cert.PublicKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(erd, rd[:48]) {
+			t.Errorf("erd = %x, want the unpadded key anchor %x", erd, rd[:48])
+		}
+	})
+
+	t.Run("cert without attestation extension is rejected", func(t *testing.T) {
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := CertEnvelope(cert); err == nil {
+			t.Fatal("expected an error for a plain certificate")
+		}
+	})
+
+	t.Run("raw TDX cert is rejected", func(t *testing.T) {
+		att := &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte{1}}
+		der, err := ratls.CreateAttestedCert(key, att, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := CertEnvelope(cert); err == nil {
+			t.Fatal("expected an error for a raw TDX report in a cert")
+		}
+	})
 }
 
 func TestEnvelopeFromAttestation(t *testing.T) {

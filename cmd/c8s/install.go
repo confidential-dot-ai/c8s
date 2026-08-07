@@ -819,12 +819,8 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 
-		fmt.Fprintf(os.Stdout, "+ helm %s\n", strings.Join(helmArgs, " "))
-		hc := exec.CommandContext(cmd.Context(), "helm", helmArgs...)
-		hc.Stdout = os.Stdout
-		hc.Stderr = os.Stderr
-		if err := hc.Run(); err != nil {
-			return fmt.Errorf("helm install failed: %w", err)
+		if err := runHelmWithKataHeal(cmd.Context(), os.Stdout, os.Stderr, helmArgs, installNamespace, cvmModeIsPod(installCvmMode), installWait); err != nil {
+			return err
 		}
 		for _, adoption := range adoptions {
 			if err := patchAdoptedWorkload(cmd.Context(), adoption.ref, adoption.cwID); err != nil {

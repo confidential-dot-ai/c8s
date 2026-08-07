@@ -83,6 +83,12 @@ KATA_VERSION="${KATA_VERSION:-3.30.0}"
 # (The kata-static release asset in stage-kata-conf.sh is separately
 # sha256-pinned, so that download already can't drift.)
 KATA_SRC_COMMIT="${KATA_SRC_COMMIT:-86e5975ad6a20f091ed686e492672c70496d0400}"
+# Pause image baked at /pause_bundle (Step 3b); bumping moves root_hash. Re-resolve: skopeo inspect --format '{{.Digest}}' docker://registry.k8s.io/pause:<ver>
+PAUSE_IMAGE_DIGEST="sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a"
+# The versions.yaml tag this digest was resolved for; Step 3b dies if the kata pin moves off it.
+PAUSE_PINNED_VERSION="3.10"
+# Base of osbuilder's rootfs-builder container; bumping moves root_hash. Re-resolve: skopeo inspect --format '{{.Digest}}' docker://docker.io/ubuntu:noble
+UBUNTU_BASE_DIGEST="sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea"
 # ext4, not erofs: kata 3.30.0's osbuilder only implements the dm-verity /
 # measured-rootfs path for ext4 (create_rootfs_image). Its erofs path
 # (create_erofs_rootfs_image) loop-attaches the image before creating it
@@ -104,13 +110,14 @@ OS_VERSION="${OS_VERSION:-noble}"
 # why: docs/kata-guest-base.md "Reproducible root_hash".
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"   # 2024-01-01T00:00:00Z
 VERITY_SALT="${VERITY_SALT:-c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8}"   # public; measured via the cmdline
-UBUNTU_REPO_URL="${UBUNTU_REPO_URL:-}"   # empty -> osbuilder's default archive
+# Time-pinned apt mirror for the guest debootstrap; bumping the timestamp moves root_hash.
+UBUNTU_REPO_URL="${UBUNTU_REPO_URL:-https://snapshot.ubuntu.com/ubuntu/20260801T000000Z}"
 FIXED_FS_UUID="${FIXED_FS_UUID:-c8c8c8c8-c8c8-c8c8-c8c8-c8c8c8c8c8c8}"
 FIXED_HASH_SEED="${FIXED_HASH_SEED:-d8d8d8d8-d8d8-d8d8-d8d8-d8d8d8d8d8d8}"
 # The deterministic re-lay (seal_and_assemble) runs mkfs.ext4 + veritysetup on
 # the HOST, so root_hash is reproducible only for a matching toolchain. The
 # versions found are recorded in manifest.json; set these to make a mismatch
-# fatal (the CI publish path should pin both).
+# fatal (the CI publish path pins both in kata-guest-base.yml).
 REPRO_E2FSPROGS_VERSION="${REPRO_E2FSPROGS_VERSION:-}"
 REPRO_CRYPTSETUP_VERSION="${REPRO_CRYPTSETUP_VERSION:-}"
 
@@ -222,6 +229,8 @@ done
 # Without it the host can replace the baked policy via init-data, so a guest
 # built without it enforces nothing it claims to.
 [[ -f "${PATCH_DIR}/0001-agent-refuse-an-init-data-supplied-policy.patch" ]] || die "the init-data policy patch is missing from ${PATCH_DIR}."
+# Without it policy-monitor's decision races the container's execve.
+[[ -f "${PATCH_DIR}/0002-agent-wait-for-the-admission-verdict.patch" ]] || die "the admission-verdict patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
@@ -320,6 +329,22 @@ if [[ ! -d "${OSBUILDER}" ]]; then
     shopt -u nullglob
 fi
 echo "    osbuilder: ${OSBUILDER}"
+
+# Preflight the pause pin here (versions.yaml just became readable): failing before Step 2 saves the ~4-min osbuilder debootstrap on a kata bump.
+PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
+PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
+[[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
+[[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
+# Bytes come from the digest pin; a kata bump that moves externals.pause fails here until re-resolved.
+[[ "${PAUSE_VER}" == "${PAUSE_PINNED_VERSION}" ]] || die "kata versions.yaml pins pause ${PAUSE_VER} but PAUSE_IMAGE_DIGEST was resolved for ${PAUSE_PINNED_VERSION} — re-resolve the pin (top of this script)."
+
+# Pin osbuilder's rootfs-builder base structurally: rewrite its Dockerfile FROM (mutable ubuntu tag) to the digest, so a kata bump that reshapes the line dies here instead of silently unpinning.
+UBUNTU_DOCKERFILE="${OSBUILDER}/rootfs-builder/ubuntu/Dockerfile.in"
+if grep -qF 'FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@' "${UBUNTU_DOCKERFILE}"; then
+    sed -i 's|^FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@$|FROM ${IMAGE_REGISTRY}/ubuntu@'"${UBUNTU_BASE_DIGEST}"'|' "${UBUNTU_DOCKERFILE}"
+fi
+grep -qF "FROM \${IMAGE_REGISTRY}/ubuntu@${UBUNTU_BASE_DIGEST}" "${UBUNTU_DOCKERFILE}" \
+    || die "rootfs-builder Dockerfile.in FROM line is not the expected ubuntu tag form — kata ${KATA_SRC_COMMIT} moved; re-base the UBUNTU_BASE_DIGEST rewrite."
 
 # osbuilder writes the rootfs tree and the image under paths we control,
 # so the overlay can be injected between the two phases.
@@ -483,16 +508,12 @@ done
 # The kata-agent reads /pause_bundle (config.json + rootfs) to start the
 # sandbox/pause container under guest-pull; it cannot pull the pause image.
 # We drop the bundle straight into the rootfs here so it's sealed into the
-# verity root (covered by the launch measurement) in Step 4. Version is
-# pinned from kata's own versions.yaml so the pause image tracks the kata
-# release. Same skopeo+umoci flow as kata's build-static-pause-image.sh.
-PAUSE_REPO="$(yq '.externals.pause.repo' "${KATA_SRC}/versions.yaml")"
-PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
-[[ -n "${PAUSE_REPO}" && "${PAUSE_REPO}" != "null" ]] || die "could not read externals.pause.repo from ${KATA_SRC}/versions.yaml"
-[[ -n "${PAUSE_VER}" && "${PAUSE_VER}" != "null" ]] || die "could not read externals.pause.version from ${KATA_SRC}/versions.yaml"
-log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER}) into the rootfs"
+# verity root (covered by the launch measurement) in Step 4. Bytes come
+# from PAUSE_IMAGE_DIGEST (the fetch-time preflight cross-checks it against
+# versions.yaml). Same skopeo+umoci flow as kata's build-static-pause-image.sh.
+log "Step 3b/5: baking pause bundle (${PAUSE_REPO}:${PAUSE_VER} @ ${PAUSE_IMAGE_DIGEST}) into the rootfs"
 rm -rf "${WORK_DIR}/pause-oci" "${WORK_DIR}/pause_bundle"
-skopeo copy "${PAUSE_REPO}:${PAUSE_VER}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
+skopeo copy "${PAUSE_REPO}@${PAUSE_IMAGE_DIGEST}" "oci:${WORK_DIR}/pause-oci:${PAUSE_VER}"
 umoci unpack --rootless --image "${WORK_DIR}/pause-oci:${PAUSE_VER}" "${WORK_DIR}/pause_bundle"
 [[ -f "${WORK_DIR}/pause_bundle/config.json" ]] || die "umoci did not produce pause_bundle/config.json"
 # Reproducibility: umoci emits the OCI runtime config.json with mount `options`
@@ -506,14 +527,26 @@ sudo rm -rf "${TARGET_ROOTFS}/pause_bundle"
 sudo cp -a "${WORK_DIR}/pause_bundle" "${TARGET_ROOTFS}/pause_bundle"
 
 # --- Reproducibility normalisation (must be the LAST rootfs mutation) ------
-# 1. umoci writes a *.mtree metadata manifest into the pause bundle whose bytes
-#    embed timestamps — the ONLY file that differs between two builds. It is
-#    unused at runtime (kata reads config.json + rootfs/), so drop it.
-# 2. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
+# 1. Drop the build host's /etc/resolv.conf. Docker seeds it into the rootfs
+#    from the daemon's own resolver — Azure CI hosts leave `nameserver
+#    168.63.129.16` in the sealed image. In-guest policy-monitor reads it at
+#    boot, before kata's CopyFile stamps the pod's real resolv.conf on top,
+#    tries to resolve `c8s-cds.c8s-system.svc` against that unreachable Azure
+#    DNS, fails, and latches sandbox tokens off for the guest's whole life.
+#    An empty file boots to loopback DNS for the ~seconds before kata's
+#    CopyFile lands; a symlink into /run picks up systemd-resolved's stub if
+#    it comes up first. Empty file is the safer default under kata's
+#    guest-pull shape (no /run mount at read time).
+# 2. umoci writes a *.mtree metadata manifest into the pause bundle whose
+#    bytes embed timestamps — the ONLY file that differs between two builds.
+#    It is unused at runtime (kata reads config.json + rootfs/), so drop it.
+# 3. Stamp every file's mtime to SOURCE_DATE_EPOCH so the sealed ext4's inode
 #    timestamps are deterministic (image_builder's `cp -a` preserves them).
 # Together with SOURCE_DATE_EPOCH-driven mke2fs (deterministic UUID/hash-seed/
 # created-time) and the fixed VERITY_SALT in seal_and_assemble, this makes the
 # dm-verity root_hash bit-for-bit reproducible.
+sudo rm -f "${TARGET_ROOTFS}/etc/resolv.conf"
+: | sudo tee "${TARGET_ROOTFS}/etc/resolv.conf" >/dev/null
 sudo find "${TARGET_ROOTFS}/pause_bundle" -name '*.mtree' -delete
 sudo find "${TARGET_ROOTFS}" -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
 
