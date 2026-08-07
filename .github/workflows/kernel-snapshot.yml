@@ -29,14 +29,14 @@ on:
         description: confos commit/ref to build the kernel from (default = pinned)
         required: false
         type: string
-        default: "45e19477362583d31c06b2749777498b0d4e64db" # v0.2.0
+        default: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
   workflow_call:
     inputs:
       confos_ref:
         description: confos commit/ref to build the kernel from
         required: false
         type: string
-        default: "45e19477362583d31c06b2749777498b0d4e64db" # v0.2.0
+        default: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
     outputs:
       snapshot_sha256:
         description: sha256 of the resolved kernel-config snapshot
