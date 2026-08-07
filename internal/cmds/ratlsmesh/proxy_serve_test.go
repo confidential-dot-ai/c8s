@@ -345,6 +345,31 @@ func (f *proxyRunFixture) roundTrip(t *testing.T, payload string) string {
 	return string(got)
 }
 
+// waitForConnSlots blocks until every global semaphore slot has been returned.
+//
+// A slot is released by the deferred send in Serve's per-connection goroutine,
+// which runs only after handler() returns — strictly later than the client
+// observing EOF on its own read. Dialing again the instant roundTrip returns
+// therefore races that release: at capacity the next connection is rejected
+// and closed, and the client sees a reset rather than a reply. Waiting here
+// asserts the release the test is about, instead of assuming it already
+// happened.
+func (f *proxyRunFixture) waitForConnSlots(t *testing.T) {
+	t.Helper()
+	const timeout = 5 * time.Second
+	deadline := time.Now().Add(timeout)
+	for {
+		held := len(f.p.connSem)
+		if held == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d semaphore slot(s) still held after %v; Serve must return them once the handler finishes", held, timeout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // End-to-end through Run: plain outbound listener, TLS inbound listener, and
 // the global semaphore released after every finished connection.
 func TestProxyRunEndToEnd(t *testing.T) {
@@ -365,6 +390,9 @@ func TestProxyRunEndToEnd(t *testing.T) {
 		if got := f.roundTrip(t, fmt.Sprintf("ping-%d", i)); got != want {
 			t.Fatalf("connection %d: got %q, want %q", i, got, want)
 		}
+		// Both legs must give their slots back before the next dial, or the
+		// sequential-reuse property under test cannot be observed at all.
+		f.waitForConnSlots(t)
 	}
 	if v := testutil.ToFloat64(f.p.metrics.connLimitRejected); v != 0 {
 		t.Errorf("connLimitRejected = %v after sequential connections, want 0 (slots must be released)", v)
