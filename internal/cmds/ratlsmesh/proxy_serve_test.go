@@ -376,6 +376,12 @@ func TestProxyRunEndToEnd(t *testing.T) {
 	})
 
 	for i := range 3 {
+		// Both slots release in the handlers' deferred cleanup, after the
+		// client already saw EOF. Dialing again before they drain races the
+		// release and the accept loop rejects (RSTs) the new connection at
+		// the global limit.
+		assertEventually(t, 5*time.Second, func() bool { return len(f.p.connSem) == 0 },
+			"semaphore slots not released after the previous connection")
 		want := fmt.Sprintf(`hello from run-e2e (got "ping-%d")`, i)
 		if got := f.roundTrip(t, fmt.Sprintf("ping-%d", i)); got != want {
 			t.Fatalf("connection %d: got %q, want %q", i, got, want)

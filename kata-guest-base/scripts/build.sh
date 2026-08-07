@@ -340,11 +340,12 @@ PAUSE_VER="$(yq '.externals.pause.version' "${KATA_SRC}/versions.yaml")"
 
 # Pin osbuilder's rootfs-builder base structurally: rewrite its Dockerfile FROM (mutable ubuntu tag) to the digest, so a kata bump that reshapes the line dies here instead of silently unpinning.
 UBUNTU_DOCKERFILE="${OSBUILDER}/rootfs-builder/ubuntu/Dockerfile.in"
-if grep -qF 'FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@' "${UBUNTU_DOCKERFILE}"; then
-    sed -i 's|^FROM ${IMAGE_REGISTRY}/ubuntu:@OS_VERSION@$|FROM ${IMAGE_REGISTRY}/ubuntu@'"${UBUNTU_BASE_DIGEST}"'|' "${UBUNTU_DOCKERFILE}"
+if ! grep -qF "FROM \${IMAGE_REGISTRY}/ubuntu@${UBUNTU_BASE_DIGEST}" "${UBUNTU_DOCKERFILE}"; then
+    # Tag form (pristine checkout) or a stale digest (cached checkout after a pin bump) both rewrite; anything else means kata reshaped the line.
+    grep -qE '^FROM \$\{IMAGE_REGISTRY\}/ubuntu[@:]' "${UBUNTU_DOCKERFILE}" \
+        || die "rootfs-builder Dockerfile.in FROM line is not the expected ubuntu form — kata ${KATA_SRC_COMMIT} moved; re-base the UBUNTU_BASE_DIGEST rewrite."
+    sed -i 's|^FROM ${IMAGE_REGISTRY}/ubuntu[@:].*$|FROM ${IMAGE_REGISTRY}/ubuntu@'"${UBUNTU_BASE_DIGEST}"'|' "${UBUNTU_DOCKERFILE}"
 fi
-grep -qF "FROM \${IMAGE_REGISTRY}/ubuntu@${UBUNTU_BASE_DIGEST}" "${UBUNTU_DOCKERFILE}" \
-    || die "rootfs-builder Dockerfile.in FROM line is not the expected ubuntu tag form — kata ${KATA_SRC_COMMIT} moved; re-base the UBUNTU_BASE_DIGEST rewrite."
 
 # osbuilder writes the rootfs tree and the image under paths we control,
 # so the overlay can be injected between the two phases.

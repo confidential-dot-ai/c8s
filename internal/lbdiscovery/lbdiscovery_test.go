@@ -24,6 +24,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -104,7 +105,7 @@ func fakeLB(t *testing.T, servingCert tls.Certificate, doc []byte) *httptest.Ser
 // contract for measurement (the pin itself is unit-tested in localverify).
 func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
-		if len(p.Measurements) > 0 && !ratls.MeasurementAllowed(measurement, p.Measurements) {
+		if len(p.Measurements) > 0 && !attestationclient.MeasurementAllowed(measurement, p.Measurements) {
 			return nil, localverify.ErrMeasurementNotAllowed
 		}
 		match := true

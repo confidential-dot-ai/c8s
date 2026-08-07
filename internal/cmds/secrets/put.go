@@ -52,7 +52,7 @@ reaches a running pod when that pod next restarts.`,
 			if err != nil {
 				return err
 			}
-			c, err := o.client(cmdCtx(cmd))
+			c, err := o.client(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -61,7 +61,7 @@ reaches a running pod when that pod next restarts.`,
 			// holds a value comes back refused with what is there, so the line
 			// naming what a replacement destroys is printed before it happens —
 			// the store has no versioning and no delete.
-			res, err := c.put(cmdCtx(cmd), path, value, false, signer)
+			res, err := c.put(cmd.Context(), path, value, false, signer)
 			if err != nil {
 				return err
 			}
@@ -75,7 +75,7 @@ reaches a running pod when that pod next restarts.`,
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "~ %s (replaces %s)\n", path, describe(res.Existing))
-			res, err = c.put(cmdCtx(cmd), path, value, true, signer)
+			res, err = c.put(cmd.Context(), path, value, true, signer)
 			if err != nil {
 				return err
 			}
