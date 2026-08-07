@@ -86,7 +86,7 @@ func ownRefs(ctx context.Context, api attestationclient.Client) (imageRefs, erro
 	var expected [64]byte
 	copy(expected[:], nonce)
 	resp, err := api.VerifyEvidence(ctx,
-		types.AttestationEvidence{Platform: attResp.Platform, Evidence: attResp.Evidence},
+		types.AttestationEvidence(attResp),
 		attestationclient.EvidencePolicy{ExpectedReportData: expected},
 	)
 	if err != nil {
