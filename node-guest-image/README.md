@@ -35,6 +35,10 @@ Migration state (see [#264] for the full plan):
    (its kernel cache key must hash the fragment paths here instead of
    confos's), confos deletes its copy, and profile changes become one-PR
    changes in this repo.
+4. Post-flip cleanup, so the inherited interface doesn't become canonical
+   by default: flatten the `C8S_NO_GPU`/`C8S_STOCK_ATTEST` boolean combos
+   (which silently ignore nonsense pairings) into a single variant
+   selector.
 
 [confidential-os-builder]: https://github.com/confidential-dot-ai/confidential-os-builder
 [#264]: https://github.com/confidential-dot-ai/c8s/issues/264
