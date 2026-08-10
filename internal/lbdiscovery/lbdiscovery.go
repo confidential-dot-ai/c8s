@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -197,6 +198,24 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	cert, erd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {
 		return nil, err
+	}
+	// Enforce the shared validity window before the evidence round-trip, so an
+	// honestly-stale document is refused without costing a verification.
+	//
+	// The classification is deliberately not asserted here, and the window is
+	// ADVISORY on this path: cds_tls.certificate_pem is the tls-lb's
+	// CDS-issued leaf, so RawIssuer != RawSubject and the result is
+	// BodyCAVouched — nothing checked that issuer's signature. This package
+	// cannot fix that: it is bootstrapping trust, the only CA it could reach
+	// is one this same unauthenticated document advertises, and the challenge
+	// it binds is read out of the document too, so there is no freshness
+	// anywhere on this path. A forger re-minting this body around the attested
+	// key picks its own NotAfter. The bound that actually holds is applied by
+	// the caller, NewVerifiedHTTPClient: the attested leaf must be
+	// byte-identical to the one this connection's handshake presented, which
+	// only the holder of the attested key can produce.
+	if _, err := certutil.AuthenticateLeafBody(cert, time.Now()); err != nil {
+		return nil, fmt.Errorf("discovery serving cert: %w", err)
 	}
 
 	// Empty platform defaults to bare-metal snp (pre-platform-field carriers);

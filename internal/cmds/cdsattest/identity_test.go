@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -283,6 +284,23 @@ func TestLoadMeshIdentityRejectsExpiredLeaf(t *testing.T) {
 	identity := writeTestMeshIdentityWithLeafValidity(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
 	if _, err := loadMeshIdentity(identity.certFile, identity.keyFile, identity.caFile); err == nil {
 		t.Fatal("expired mesh identity leaf was accepted")
+	}
+}
+
+// The leaf's NotBefore gets exactly the repo-wide clock-skew allowance
+// (certutil.LeafValiditySkew): a rotation-fresh leaf minted by a slightly
+// fast clock loads, anything further in the future does not.
+func TestLoadMeshIdentityLeafNotBeforeSkew(t *testing.T) {
+	now := time.Now()
+
+	beyond := writeTestMeshIdentityWithLeafValidity(t, now.Add(certutil.LeafValiditySkew+time.Minute), now.Add(3*time.Hour))
+	if _, err := loadMeshIdentity(beyond.certFile, beyond.keyFile, beyond.caFile); err == nil {
+		t.Fatal("mesh identity leaf with NotBefore beyond the skew allowance was accepted")
+	}
+
+	within := writeTestMeshIdentityWithLeafValidity(t, now.Add(certutil.LeafValiditySkew-time.Minute), now.Add(3*time.Hour))
+	if _, err := loadMeshIdentity(within.certFile, within.keyFile, within.caFile); err != nil {
+		t.Fatalf("mesh identity leaf with NotBefore within the skew allowance was refused: %v", err)
 	}
 }
 
