@@ -1262,7 +1262,7 @@ func TestChartNRIImagePolicyUsesPullMode(t *testing.T) {
 	if got, want := workerCfg.Allowlist.Pull.URL, "https://127.0.0.1:30808"; got != want {
 		t.Fatalf("worker pull URL = %q, want %q", got, want)
 	}
-	if got, want := workerCfg.Allowlist.Pull.Interval, "30s"; got != want {
+	if got, want := workerCfg.Allowlist.Pull.Interval, "5s"; got != want {
 		t.Fatalf("worker pull interval = %q, want %q", got, want)
 	}
 	if got, want := workerCfg.Allowlist.Pull.AttestationApiURL, "http://localhost:30840"; got != want {
