@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -88,6 +89,7 @@ type config struct {
 
 	measurements     []string
 	measurementsFile string
+	rtmrs            []string
 	operatorKeys     string
 	sandboxID        string
 	workload         string
@@ -171,6 +173,7 @@ unavailable (unreachable / unparseable).`,
 
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE)")
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line")
+	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). On TDX the launch measurement is MRTD, which covers the firmware only: RTMR[1] pins the guest kernel and RTMR[2] the kernel command line, which carries the dm-verity root hash. Ignored on SNP")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -383,10 +386,61 @@ func buildPolicy(cfg config) (*ratls.VerifyPolicy, error) {
 		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
 	}
 
+	rtmrs, err := parseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		return nil, err
+	}
+
 	return &ratls.VerifyPolicy{
 		Measurements: measurements,
+		RTMRs:        rtmrs,
 		AllowDebug:   cfg.allowDebug,
 	}, nil
+}
+
+// parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
+//
+// Index 0 and 3 are rejected rather than accepted-and-ignored: RTMR[0] carries
+// the TD HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin
+// would deny half the fleet, and RTMR[3] is extended by in-guest software, so
+// pinning it would look like guest identity while a substituted guest simply
+// extends it with the expected value.
+func parseRTMRPins(pins []string) (map[int][]byte, error) {
+	if len(pins) == 0 {
+		return nil, nil
+	}
+	out := make(map[int][]byte, len(pins))
+	for _, p := range pins {
+		idxStr, hexStr, ok := strings.Cut(strings.TrimSpace(p), "=")
+		if !ok {
+			return nil, fmt.Errorf("--rtmr %q: want <index>=<sha384-hex>", p)
+		}
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
+		}
+		switch idx {
+		case 1, 2:
+		case 0:
+			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
+		case 3:
+			return nil, fmt.Errorf("--rtmr 3 is not pinnable: RTMR[3] is extended by in-guest software, so it cannot vouch for the guest image")
+		default:
+			return nil, fmt.Errorf("--rtmr %q: index must be 1 or 2", p)
+		}
+		if _, dup := out[idx]; dup {
+			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
+		}
+		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
+		if err != nil {
+			return nil, fmt.Errorf("--rtmr %d: value is not hex: %w", idx, err)
+		}
+		if len(v) != sha512.Size384 {
+			return nil, fmt.Errorf("--rtmr %d: value is %d bytes, want %d", idx, len(v), sha512.Size384)
+		}
+		out[idx] = v
+	}
+	return out, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,
