@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -94,6 +95,7 @@ type config struct {
 	imageManifest    string
 	expectedRTMR3Hex string
 	operatorPubkey   string
+	rtmrs            []string
 	operatorKeys     string
 	sandboxID        string
 	workload         string
@@ -180,6 +182,7 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars — pins the runtime measurement register, i.e. the ordered operator-key/workload-event chain extended after boot (pkg/runtimemeasure). This is a deployment property, NOT a cluster identity, and cannot replace an image pin, so it requires --image-manifest. TDX evidence only — with SNP evidence this is a policy error")
 	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
+	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable), enforced by the verification engine. RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash. Use this to pin registers by hand; --image-manifest pins the same two (plus MRTD) as one provenanced tuple, so the two are mutually exclusive. Ignored on SNP")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -466,9 +469,23 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
 	}
 
+	// --rtmr and --image-manifest pin the same two registers by different
+	// routes: --rtmr is enforced by the verification engine, the manifest is
+	// compared here against the verified claims as one provenanced tuple with
+	// MRTD. Accepting both would let two sources disagree about RTMR[1]/[2],
+	// and a disagreement is a policy no guest can satisfy.
+	if len(cfg.rtmrs) > 0 && cfg.imageManifest != "" {
+		return nil, fmt.Errorf("--rtmr cannot be combined with --image-manifest: the manifest already pins RTMR[1] and RTMR[2] exactly, together with the MRTD from the same build, so a separate --rtmr can only restate that pin or contradict it. Drop --rtmr to pin the published image, or drop --image-manifest to pin registers by hand (giving up the MRTD tie to the same build)")
+	}
+	rtmrs, err := parseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		return nil, err
+	}
+
 	return &verifyPlan{
 		policy: &ratls.VerifyPolicy{
 			Measurements: measurements,
+			RTMRs:        rtmrs,
 			AllowDebug:   cfg.allowDebug,
 		},
 		pins:   pins,
@@ -579,6 +596,51 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 		return fmt.Errorf("PEM block is not a parseable PKIX public key: %w", err)
 	}
 	return nil
+}
+
+// parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
+//
+// Index 0 and 3 are rejected rather than accepted-and-ignored: RTMR[0] carries
+// the TD HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin
+// would deny half the fleet, and RTMR[3] is extended by in-guest software, so
+// pinning it would look like guest identity while a substituted guest simply
+// extends it with the expected value.
+func parseRTMRPins(pins []string) (map[int][]byte, error) {
+	if len(pins) == 0 {
+		return nil, nil
+	}
+	out := make(map[int][]byte, len(pins))
+	for _, p := range pins {
+		idxStr, hexStr, ok := strings.Cut(strings.TrimSpace(p), "=")
+		if !ok {
+			return nil, fmt.Errorf("--rtmr %q: want <index>=<sha384-hex>", p)
+		}
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
+		}
+		switch idx {
+		case 1, 2:
+		case 0:
+			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
+		case 3:
+			return nil, fmt.Errorf("--rtmr 3 is not pinnable: RTMR[3] is extended by in-guest software, so it cannot vouch for the guest image")
+		default:
+			return nil, fmt.Errorf("--rtmr %q: index must be 1 or 2", p)
+		}
+		if _, dup := out[idx]; dup {
+			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
+		}
+		v, err := hex.DecodeString(strings.TrimSpace(hexStr))
+		if err != nil {
+			return nil, fmt.Errorf("--rtmr %d: value is not hex: %w", idx, err)
+		}
+		if len(v) != sha512.Size384 {
+			return nil, fmt.Errorf("--rtmr %d: value is %d bytes, want %d", idx, len(v), sha512.Size384)
+		}
+		out[idx] = v
+	}
+	return out, nil
 }
 
 // expectedOperatorKeysDigest is the KeySetDigest of the --operator-keys bundle,

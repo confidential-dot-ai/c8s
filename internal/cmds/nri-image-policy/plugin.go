@@ -382,8 +382,11 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	}
 
 	// Floor digests admit regardless of argv; workload digests require the
-	// effective argv to satisfy some entry's entrypoint/cmd policy.
-	if !snap.index.AdmitsContainer(digest, argv) {
+	// effective argv to satisfy some entry's entrypoint/cmd policy. Mount and env
+	// policy are left unobserved here: this plugin gates images on a node CVM,
+	// where it sees the CRI container rather than a guest's mount table, and an
+	// unobserved field is not a violation (allowlist.RunningContainer).
+	if !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
 		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv)
 		p.audit.Log(audit.Event{
 			Action:    "deny",

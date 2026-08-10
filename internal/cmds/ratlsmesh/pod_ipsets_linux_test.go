@@ -5,6 +5,7 @@ package ratlsmesh
 import (
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -393,5 +394,74 @@ Header: family inet6 hashsize 1024 maxelem 1024
 				t.Fatalf("maxelem = %d; want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// Membership is what the cw guard keys on, so a set that empties is
+// enforcement that stopped. The counter is what separates that from a node
+// that never had cw pods.
+func TestRecordIPSetMembership_CountsShrinkNotSteadyState(t *testing.T) {
+	lastPodIPSetMembers.Store(0)
+	lastCWIPSetMembers.Store(0)
+	cwIPSetShrinkages.Store(0)
+	logger := slog.New(slog.DiscardHandler)
+
+	// First reconcile establishes the level; there is no predecessor to shrink
+	// from, so an initial zero must not read as a shrink.
+	recordIPSetMembership(logger, 0, 0)
+	if got := cwIPSetShrinks(); got != 0 {
+		t.Fatalf("shrinks after first reconcile = %d, want 0", got)
+	}
+
+	recordIPSetMembership(logger, 5, 3)
+	if got := cwIPSetMemberCount(); got != 3 {
+		t.Errorf("cw members = %d, want 3", got)
+	}
+	if got := podIPSetMemberCount(); got != 5 {
+		t.Errorf("pod members = %d, want 5", got)
+	}
+	if got := cwIPSetShrinks(); got != 0 {
+		t.Errorf("growth counted as a shrink: %d", got)
+	}
+
+	// The case the metric exists for: the set comes back smaller, so those pods
+	// are no longer guarded.
+	recordIPSetMembership(logger, 5, 0)
+	if got := cwIPSetShrinks(); got != 1 {
+		t.Errorf("shrinks = %d, want 1", got)
+	}
+	if got := cwIPSetMemberCount(); got != 0 {
+		t.Errorf("cw members = %d, want 0", got)
+	}
+
+	// A steady zero is not a repeated shrink — otherwise the counter climbs on
+	// every reconcile of an idle node and the signal is worthless.
+	recordIPSetMembership(logger, 5, 0)
+	if got := cwIPSetShrinks(); got != 1 {
+		t.Errorf("steady zero counted again: shrinks = %d, want 1", got)
+	}
+}
+
+// The snapshot the proxy reads must carry the membership levels, or the
+// gauges sit at zero while the sidecar knows better.
+func TestIptablesMetricsSnapshot_CarriesIPSetMembership(t *testing.T) {
+	lastPodIPSetMembers.Store(7)
+	lastCWIPSetMembers.Store(2)
+	cwIPSetShrinkages.Store(4)
+	t.Cleanup(func() {
+		lastPodIPSetMembers.Store(0)
+		lastCWIPSetMembers.Store(0)
+		cwIPSetShrinkages.Store(0)
+	})
+
+	snap := currentIptablesMetricsSnapshot()
+	if snap.PodIPSetMembers != 7 {
+		t.Errorf("PodIPSetMembers = %d, want 7", snap.PodIPSetMembers)
+	}
+	if snap.CWIPSetMembers != 2 {
+		t.Errorf("CWIPSetMembers = %d, want 2", snap.CWIPSetMembers)
+	}
+	if snap.CWIPSetShrinks != 4 {
+		t.Errorf("CWIPSetShrinks = %d, want 4", snap.CWIPSetShrinks)
 	}
 }

@@ -44,21 +44,21 @@ func (i *Index) AdmitsDigest(digest string) bool {
 	return ok
 }
 
-// AdmitsContainer reports whether a container with the given digest may run the
-// given effective argv (its OCI process.args). Floor digests are admitted
-// regardless of argv. For a workload digest, admission is the union across every
-// entry that lists it: the argv must satisfy some container's command (an exact
-// prefix) and args (the remainder) policy.
-func (i *Index) AdmitsContainer(digest string, argv []string) bool {
-	d, err := types.ParseDigest(digest)
+// AdmitsContainer reports whether an observed container may run. Floor digests
+// are admitted on the digest alone. For a workload digest, admission is the
+// union across every entry that lists it: the observation must satisfy some
+// declared container's argv, mount and env policy together.
+func (i *Index) AdmitsContainer(r RunningContainer) bool {
+	d, err := types.ParseDigest(r.Digest)
 	if err != nil {
 		return false
 	}
 	if i.floor[d.String()] {
 		return true
 	}
+	r.Digest = d.String()
 	for _, c := range i.byDigest[d.String()] {
-		if rest, ok := c.Command.matchCommand(argv); ok && c.Args.matchArgs(rest) {
+		if c.admits(r) {
 			return true
 		}
 	}

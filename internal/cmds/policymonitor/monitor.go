@@ -225,14 +225,15 @@ func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
 
 // admits reports whether a container may run. The baked floor (additive digest
 // set) admits by digest alone; otherwise the pulled overlay's Index decides on
-// digest + effective argv. With no overlay (CDS refresh disabled, or no
-// successful pull yet) only the baked floor admits — behavior from t=0.
-func (m *monitor) admits(digest string, argv []string) bool {
-	if m.allowlist.Contains(digest) {
+// the whole observation — digest, argv, bind-mount destinations and env names.
+// With no overlay (CDS refresh disabled, or no successful pull yet) only the
+// baked floor admits — behavior from t=0.
+func (m *monitor) admits(rc allowlistpkg.RunningContainer) bool {
+	if m.allowlist.Contains(rc.Digest) {
 		return true
 	}
 	if idx := m.overlay.index(); idx != nil {
-		return idx.AdmitsContainer(digest, argv)
+		return idx.AdmitsContainer(rc)
 	}
 	return false
 }
@@ -523,22 +524,32 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// Effective argv (OCI process.args): the merged entrypoint+cmd the container
-	// runs. Floor digests ignore it; workload digests are gated on it.
-	var argv []string
-	if spec.Process != nil {
-		argv = spec.Process.Args
+	// What the container actually runs, as the allowlist describes it. Floor
+	// digests ignore all of it; workload digests are gated on the whole set.
+	rc := allowlistpkg.RunningContainer{
+		Digest:     digest,
+		BindMounts: bindMountDestinations(spec.Mounts),
 	}
-	if m.admits(digest, argv) {
+	if spec.Process != nil {
+		rc.Argv = spec.Process.Args
+		rc.EnvNames = envNames(spec.Process.Env)
+	}
+	if m.admits(rc) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
 		if m.inventory != nil {
-			m.inventory.record(cid, digest, argv)
+			m.inventory.record(cid, digest, rc.Argv)
 		}
 		m.recordVerdict(dir, verdictAllow)
 		return
 	}
-	m.logger.Warn("deny container: digest/argv not allowlisted",
-		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
+	// Name every field the decision looked at: a container denied on its mounts
+	// or environment reported as "digest/argv" would send an operator hunting
+	// the wrong thing.
+	m.logger.Warn("deny container: not admitted by digest, argv, mounts or env",
+		append([]any{
+			"cid", cid, "digest", digest, "argv", rc.Argv,
+			"bind_mounts", rc.BindMounts, "env_names", rc.EnvNames,
+		}, m.frozenAttrs()...)...)
 	m.deny(ctx, dir)
 }
 
@@ -701,12 +712,50 @@ func (m *monitor) readConfigJSON(ctx context.Context, dir string) (*ociSpec, err
 type ociSpec struct {
 	Annotations map[string]string `json:"annotations"`
 	Process     *ociProcess       `json:"process"`
+	Mounts      []ociMount        `json:"mounts"`
 }
 
-// ociProcess is the process block's argv: the merged image-config + pod-spec
-// command the container actually runs, evaluated against workload argv policy.
+// ociProcess is the process block the container runs: the merged image-config +
+// pod-spec argv, evaluated against workload argv policy, and the environment it
+// starts with, evaluated by name against workload env policy.
 type ociProcess struct {
 	Args []string `json:"args"`
+	Env  []string `json:"env"`
+}
+
+// ociMount is one entry of the container's mount table. The baked kata-agent
+// policy bounds where a bind's source may be; the destination is a path inside
+// the container and is what workload mount policy gates.
+type ociMount struct {
+	Destination string `json:"destination"`
+	Source      string `json:"source"`
+}
+
+// bindMountDestinations returns the destinations of the mounts that carry guest
+// content in. A source that is not an absolute path names a filesystem type
+// (proc, sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing, so gating it
+// would only make an operator restate the OCI base set.
+func bindMountDestinations(mounts []ociMount) []string {
+	var out []string
+	for _, m := range mounts {
+		if strings.HasPrefix(m.Source, "/") {
+			out = append(out, m.Destination)
+		}
+	}
+	return out
+}
+
+// envNames returns the NAME halves of the spec's "NAME=value" environment.
+// Values never leave this function: policy matches names, because an allowlist
+// is served to every enforcer and values carry secrets.
+func envNames(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if name, _, ok := strings.Cut(e, "="); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func readOCISpec(path string) (*ociSpec, error) {

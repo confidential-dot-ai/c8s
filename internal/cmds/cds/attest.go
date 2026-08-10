@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math/big"
 	"net/http"
 	"slices"
 	"strings"
@@ -159,7 +160,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	if len(req.SandboxToken) > 0 {
 		sandbox, err = h.verifySandboxToken(ctx, req.SandboxToken, csrPubKey, challengeBytes)
 		if err != nil {
-			slog.Warn("sandbox token rejected", "error", err)
+			slog.Warn("sandbox token rejected", "error", err, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, err.Error())
 			return
 		}
@@ -183,15 +184,18 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
-		slog.Warn("attestation verification failed", "status", status, "error", err)
+		slog.Warn("attestation verification failed", "status", status, "error", err, "remote_addr", r.RemoteAddr)
 		attestation.WriteError(w, status, code, msg)
 		return
 	}
 
+	// Read outside the pinning branch: with h.Measurements empty every
+	// measurement is admitted, so the digest a leaf was issued against is the
+	// only record of what actually attested.
+	launchDigest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
 	if len(h.Measurements) > 0 {
-		digest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest)
-		if !h.Measurements[digest] {
-			slog.Warn("measurement not in allowlist", "launch_digest", digest)
+		if !h.Measurements[launchDigest] {
+			slog.Warn("measurement not in allowlist", "launch_digest", launchDigest, "remote_addr", r.RemoteAddr)
 			attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
 			return
 		}
@@ -218,7 +222,8 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		// the address CDS just dialled, so echoing what happened there would
 		// hand it a reachability oracle for CDS's network position.
 		slog.Warn("sandbox workload rejected",
-			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err)
+			"sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost, "error", err,
+			"remote_addr", r.RemoteAddr)
 		attestation.WriteError(w, http.StatusForbidden, types.ErrorCodeCSRDenied, "sandbox workload not authorized")
 		return
 	}
@@ -259,7 +264,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = issuer.CapTTL(ttl, namedTTL)
 	}
-	certPEM, _, err := h.CA.SignCSR(issuer.SignCSRParams{
+	certPEM, serial, err := h.CA.SignCSR(issuer.SignCSRParams{
 		CSR:             csr,
 		TTL:             ttl,
 		Evidence:        evidenceJSON,
@@ -278,13 +283,26 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Naming a leaf is the audit-relevant event: it is what a relying party
-	// later authorizes on. Record which name was stamped, under which policy,
-	// and for which sandbox, so a disputed identity can be reconstructed from
-	// the log alone. The unnamed cases already log their reason above.
-	issued := []any{"cn", csr.Subject.CommonName, "ttl", ttl}
+	// The issuance record is the audit-relevant event: a mesh identity is only
+	// as accountable as what was written down when it was granted, and a leaf
+	// obtained through a forged verdict still reconstructs from this line alone.
+	// serial names the certificate, the SANs name the identity it carries (the
+	// CN does not — the mesh matches on SANs), launch_digest names what attested
+	// for it, and remote_addr says where the request came from — rejections
+	// above carry it too, so a run of denials and the issuance that follows
+	// correlate. A named leaf additionally records the workload, the policy
+	// version it matched under, and the sandbox that vouched, so a disputed
+	// name reconstructs from the log alone.
+	issued := []any{
+		"cn", csr.Subject.CommonName,
+		"sans", csr.DNSNames,
+		"serial", serialHex(serial),
+		"ttl", ttl,
+		"launch_digest", launchDigest,
+		"remote_addr", r.RemoteAddr,
+	}
 	if sandbox.SandboxID != "" {
-		issued = append(issued, "sandbox_id", sandbox.SandboxID)
+		issued = append(issued, "sandbox_id", sandbox.SandboxID, "inventory_addr", sandbox.InventoryHost)
 	}
 	if matched != nil {
 		issued = append(issued,
@@ -295,6 +313,15 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("certificate issued (in-process)", issued...)
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(slices.Concat(certPEM, caChainPEM))
+}
+
+// serialHex renders a certificate serial the way `openssl x509 -serial` does,
+// so an issuance record can be matched against a leaf in hand.
+func serialHex(serial *big.Int) string {
+	if serial == nil {
+		return ""
+	}
+	return fmt.Sprintf("%X", serial)
 }
 
 // verifySandboxToken verifies an inventory-signed sandbox token and returns its

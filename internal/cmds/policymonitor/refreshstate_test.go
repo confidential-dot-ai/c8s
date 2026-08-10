@@ -42,7 +42,7 @@ func TestDenyNamesFrozenAllowlist(t *testing.T) {
 	if len(killer.snapshot()) != 1 {
 		t.Fatalf("want exactly one kill, got %+v", killer.snapshot())
 	}
-	line := findLog(t, buf, "deny container: digest/argv not allowlisted")
+	line := findLog(t, buf, denyMsg)
 	if frozen, _ := line["allowlist_frozen"].(bool); !frozen {
 		t.Fatalf("deny line does not report the frozen allowlist: %v", line)
 	}
@@ -71,7 +71,7 @@ func TestDenyOmitsFrozenAttrsWhenRefreshLive(t *testing.T) {
 	})
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
 
-	line := findLog(t, buf, "deny container: digest/argv not allowlisted")
+	line := findLog(t, buf, denyMsg)
 	if _, present := line["allowlist_frozen"]; present {
 		t.Fatalf("live refresh reported as frozen: %v", line)
 	}
@@ -108,6 +108,10 @@ func TestInventoryReportsRefreshPosture(t *testing.T) {
 }
 
 // findLog returns the first JSON log record whose msg matches.
+// denyMsg is the deny line these tests read the frozen-allowlist attributes
+// off. Kept next to them so a reworded message moves in one place.
+const denyMsg = "deny container: not admitted by digest, argv, mounts or env"
+
 func findLog(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
 	t.Helper()
 	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {

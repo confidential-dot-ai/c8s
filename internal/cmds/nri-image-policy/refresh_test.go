@@ -83,7 +83,7 @@ func TestMergeAllowlistsCarriesWorkloads(t *testing.T) {
 	if !idx.AdmitsDigest(pushDigestA) {
 		t.Fatal("floor digest not admitted after merge")
 	}
-	if !idx.AdmitsContainer(pushDigestB, []string{"anything"}) {
+	if !idx.AdmitsContainer(allowlist.RunningContainer{Digest: pushDigestB, Argv: []string{"anything"}}) {
 		t.Fatal("workload digest not admitted after merge")
 	}
 }
