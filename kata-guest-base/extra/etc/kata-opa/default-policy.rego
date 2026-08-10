@@ -41,7 +41,8 @@ import future.keywords.if
 import future.keywords.in
 
 default AddARPNeighborsRequest := true
-default AddSwapRequest := true
+# Swap never leaves TEE memory.
+default AddSwapRequest := false
 default CloseStdinRequest := true
 default DestroySandboxRequest := true
 default GetDiagnosticDataRequest := true
