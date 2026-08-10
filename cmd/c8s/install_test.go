@@ -1042,9 +1042,24 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 				"--set-string", "ratlsMesh.platform=tdx",
 			)
 		}
-		// TDX also overrides the tls-lb attestation sidecar's advertised
-		// platform (chart default snp/genoa) and blanks the AMD-only generation.
-		if platform == "tdx" {
+		// The attest sidecar's platform names the evidence shape the sidecar
+		// requests from the attestation-api: az-snp/az-tdx under aks (Azure
+		// vTPM HCL report — bare snp/tdx would probe guest devices AKS nodes
+		// do not expose), bare tdx on native TDX. sev-snp outside aks keeps
+		// the chart default (snp). Every override blanks the AMD-only
+		// generation.
+		switch {
+		case mode == "aks" && platform == "tdx":
+			out = append(out,
+				"--set-string", "tlsLb.attest.platform=az-tdx",
+				"--set-string", "tlsLb.attest.generation=",
+			)
+		case mode == "aks":
+			out = append(out,
+				"--set-string", "tlsLb.attest.platform=az-snp",
+				"--set-string", "tlsLb.attest.generation=",
+			)
+		case platform == "tdx":
 			out = append(out,
 				"--set-string", "tlsLb.attest.platform=tdx",
 				"--set-string", "tlsLb.attest.generation=",

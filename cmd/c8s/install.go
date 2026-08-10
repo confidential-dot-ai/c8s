@@ -1145,13 +1145,28 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		)
 	}
 	// The tls-lb attestation sidecar is on by default (chart default); --attest=false
-	// omits it. When on, it advertises its TEE to the browser verifier: the chart
-	// default is snp/genoa, so on TDX override both to match the hardware.
-	// generation is AMD-only (Genoa/Milan/…); on TDX it is not a meaningful
-	// field, so we blank it rather than ship a stale AMD codename.
-	if !installAttestEnabled {
+	// omits it. When on, it passes this platform straight to the attestation-api
+	// as the evidence request, so the value must name the evidence SHAPE, not just
+	// the silicon: under aks the evidence is the Azure vTPM HCL report (az-snp /
+	// az-tdx), and the bare snp/tdx values would ask for /dev/sev-guest //dev/tdx_guest
+	// evidence that Azure CVM nodes cannot produce — every attest-pq/attest-lb call
+	// then fails 502 attestation_unavailable. generation is AMD-only (Genoa/Milan/…):
+	// az-snp auto-detects it from the report CPUID and TDX has no such concept, so
+	// every override blanks it rather than ship the chart-default codename (genoa)
+	// for hardware it never checked.
+	switch {
+	case !installAttestEnabled:
 		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")
-	} else if hardwarePlatform == "tdx" {
+	case cvmMode == "aks":
+		attestPlatform := "az-snp"
+		if hardwarePlatform == "tdx" {
+			attestPlatform = "az-tdx"
+		}
+		helmArgs = append(helmArgs,
+			"--set-string", "tlsLb.attest.platform="+attestPlatform,
+			"--set-string", "tlsLb.attest.generation=",
+		)
+	case hardwarePlatform == "tdx":
 		helmArgs = append(helmArgs,
 			"--set-string", "tlsLb.attest.platform=tdx",
 			"--set-string", "tlsLb.attest.generation=",
