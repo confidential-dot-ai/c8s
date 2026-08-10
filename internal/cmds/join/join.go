@@ -1,6 +1,7 @@
 package join
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -171,8 +172,10 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 		// still, don't echo more than the status line needs.
 		return "", fmt.Errorf("join-release returned %s", resp.Status)
 	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
 	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
+	if err := dec.Decode(&tr); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if tr.Token == "" {
