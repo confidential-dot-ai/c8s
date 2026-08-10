@@ -269,3 +269,7 @@ test_host_reach_in_rpcs_denied if {
 	not ReadStreamRequest
 	not WriteStreamRequest
 }
+
+test_add_swap_denied if {
+	not AddSwapRequest
+}
