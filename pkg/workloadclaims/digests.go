@@ -31,10 +31,15 @@ import (
 // DigestsPort is the port every inventory serves its digests endpoint on, and
 // the only port CDS will dial for one. It is fixed rather than carried in the
 // token, and it is privileged (<1024, IANA-unassigned), because that is what
-// makes it an identity: binding it requires the node's own network namespace,
-// which the chart's deny-host-namespaces policy withholds from tenant pods. A
-// pod can bind any port inside its own netns, so an unprivileged port would let
-// any workload answer as the inventory.
+// makes it an identity: answering on it at the node's address requires
+// hostNetwork or a hostPort, and the chart's deny-host-namespaces policy
+// withholds BOTH from tenant pods. A pod can bind any port inside its own
+// netns, so an unprivileged port would let any workload answer as the
+// inventory.
+//
+// Both halves are load-bearing. A hostPort needs no host namespace: the CNI
+// publishes the pod on the node's address, which is enough to be dialled here
+// and have CDS accept the responder's key as the inventory's.
 const DigestsPort = 1019
 
 // dialPort and listenPort are the ports the client connects to and the endpoint
