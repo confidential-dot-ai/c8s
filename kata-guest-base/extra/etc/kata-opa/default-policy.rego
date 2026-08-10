@@ -308,5 +308,18 @@ default CopyFileRequest := false
 CopyFileRequest if {
 	startswith(input.path, "/run/kata-containers/shared/containers/")
 	no_traversal(input.path)
+	symlink_target_in_tree
 	print("CopyFileRequest: allowed")
+}
+
+# Writes through the link resolve its target; relative and traversal-free
+# keeps resolution inside the seeding tree.
+symlink_target_in_tree if {
+	input.file_type == "Symlink"
+	not startswith(input.symlink_target, "/")
+	no_traversal(input.symlink_target)
+}
+
+symlink_target_in_tree if {
+	input.file_type != "Symlink"
 }

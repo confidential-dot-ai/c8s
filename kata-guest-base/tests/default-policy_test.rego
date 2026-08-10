@@ -275,20 +275,40 @@ test_mount_allows_projected_volume_names if {
 # --- CopyFile -----------------------------------------------------------
 
 test_copyfile_scoped_to_the_seeding_dir if {
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/etc/hosts"}
-	not CopyFileRequest with input as {"path": "/run/kata-containers/foo/rootfs/bin/sh"}
-	not CopyFileRequest with input as {"path": "/etc/passwd"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/etc/hosts", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/foo/rootfs/bin/sh", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/etc/passwd", "file_type": "Regular"}
 }
 
 test_copyfile_rejects_traversal if {
-	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/../../foo/rootfs/x"}
-	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/.."}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/../../foo/rootfs/x", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/..", "file_type": "Regular"}
 }
 
 # Projected volumes legitimately carry `..data` and `..<timestamp>` names.
 test_copyfile_allows_projected_volume_names if {
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..data/token"}
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..2026_08_05_12_00_00/token"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..data/token", "file_type": "Regular"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..2026_08_05_12_00_00/token", "file_type": "Regular"}
+}
+
+symlink_input(target) := {
+	"path": "/run/kata-containers/shared/containers/pod-vol/..data",
+	"file_type": "Symlink",
+	"symlink_target": target,
+}
+
+test_copyfile_symlink_absolute_target_denied if {
+	not CopyFileRequest with input as symlink_input("/run")
+}
+
+test_copyfile_symlink_traversal_target_denied if {
+	not CopyFileRequest with input as symlink_input("../../../c8s")
+	not CopyFileRequest with input as symlink_input("sub/../../c8s/ratls-mesh.env")
+}
+
+# Projected volumes seed `..data` as a link to a `..<timestamp>` name.
+test_copyfile_symlink_relative_target_allowed if {
+	CopyFileRequest with input as symlink_input("..2026_08_10_12_00_00.123456789")
 }
 
 # --- host-as-adversary RPCs ---------------------------------------------
