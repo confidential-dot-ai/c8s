@@ -2,10 +2,14 @@ package join
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +186,27 @@ func TestRunReleaseStartupErrors(t *testing.T) {
 	}
 }
 
+// probeCert builds a self-signed tls.Certificate the readiness probe presents
+// as its client cert. The handler denies it (no RA-TLS extension); any HTTP
+// response at all proves the server is accepting requests.
+func probeCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
 func TestRunReleaseServesAndShutsDown(t *testing.T) {
 	cfg := releaseConfig(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -196,11 +221,23 @@ func TestRunReleaseServesAndShutsDown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runRelease(ctx, cfg, ln) }()
 
+	// The injected listener is bound before runRelease starts, so a raw TCP
+	// dial succeeds (accept backlog) while the startup attestation ladder is
+	// still running and cancel would race it. Probe with a full HTTPS request
+	// instead: a response only comes back once ServeTLS is accepting.
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			Certificates:       []tls.Certificate{probeCert(t)},
+		}},
+	}
+	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		conn, err := net.DialTimeout("tcp", cfg.ListenAddr, time.Second)
+		resp, err := client.Get("https://" + cfg.ListenAddr + "/join-token")
 		if err == nil {
-			_ = conn.Close()
+			resp.Body.Close()
 			break
 		}
 		select {
@@ -209,7 +246,7 @@ func TestRunReleaseServesAndShutsDown(t *testing.T) {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("server never started accepting connections")
+			t.Fatalf("server never answered a request: %v", err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
