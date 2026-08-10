@@ -186,8 +186,18 @@ test_sandbox_storage_shaped_like_a_rootfs_denied if {
 }
 
 test_sandbox_storage_elsewhere_allowed if {
-	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x"}]}
-	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y"}]}
+	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/shm", "source": "shm"}]}
+	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x", "source": ""}]}
+	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y", "source": "tmpfs"}]}
+}
+
+# The runtime only ever sends fs tokens here; a path source is host-staged
+# content the ephemeral handler would mount verbatim.
+test_sandbox_storage_with_path_source_denied if {
+	every source in ["/", "/run", "/run/kata-containers/other/rootfs", "../.."] {
+		not CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
+	}
 }
 
 # --- mounts -------------------------------------------------------------
@@ -199,7 +209,7 @@ test_sandbox_storage_elsewhere_allowed if {
 honest_mounts := [
 	{"destination": "/proc", "source": "proc", "type_": "proc", "options": []},
 	{"destination": "/sys/fs/cgroup", "source": "cgroup", "type_": "cgroup", "options": []},
-	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": []},
+	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": ["rbind"]},
 	{"destination": "/etc/resolv.conf", "source": "/run/kata-containers/shared/containers/pod-resolv.conf", "type_": "bind", "options": []},
 	{"destination": "/data", "source": "/run/kata-containers/sandbox/storage/aGk", "type_": "bind", "options": []},
 ]
@@ -231,6 +241,26 @@ test_mount_source_traversal_denied if {
 	not CreateContainerRequest with input as with_mounts(array.concat(
 		honest_mounts,
 		[bind_from("/run/kata-containers/sandbox/../../c8s/ratls-mesh.env")],
+	))
+}
+
+# A relative bind source resolves against the bundle directory, so "../.."
+# reaches /run — whether the bind is marked by type or by option.
+test_relative_bind_source_denied if {
+	every m in [
+		{"destination": "/x", "source": "../..", "type_": "bind", "options": []},
+		{"destination": "/x", "source": "../..", "type_": "tmpfs", "options": ["rbind"]},
+		{"destination": "/x", "source": "../..", "type_": "", "options": ["bind"]},
+	] {
+		not CreateContainerRequest with input as with_mounts(array.concat(honest_mounts, [m]))
+	}
+}
+
+# Filesystem mounts carry a type, not a source path.
+test_fs_mount_without_source_allowed if {
+	CreateContainerRequest with input as with_mounts(array.concat(
+		honest_mounts,
+		[{"destination": "/x", "source": "", "type_": "tmpfs", "options": []}],
 	))
 }
 
