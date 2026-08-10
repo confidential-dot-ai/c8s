@@ -5,6 +5,7 @@ import (
 	"flag"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,4 +96,31 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestCheckCDSPinned(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		count       int
+		insideGuest bool
+		wantErr     bool
+	}{
+		// Dropping --measurements is how the host redirects a sidecar at a CDS
+		// it runs; under kata it writes the argv, so this is the whole point.
+		{"unpinned inside a kata guest", 0, true, true},
+		// "no pinning" stays a supported development shape off the guest.
+		{"unpinned outside a kata guest", 0, false, false},
+		{"pinned inside a kata guest", 1, true, false},
+		{"pinned outside a kata guest", 2, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckCDSPinned(tc.count, tc.insideGuest, "warn")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("CheckCDSPinned(%d, %v) = %v, wantErr %v", tc.count, tc.insideGuest, err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "--measurements is empty") {
+				t.Errorf("error %q does not name the flag the operator has to set", err)
+			}
+		})
+	}
 }

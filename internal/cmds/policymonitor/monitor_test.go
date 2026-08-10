@@ -228,10 +228,10 @@ func TestPolicyOverlayAntiRollback(t *testing.T) {
 		t.Fatalf("version = %d, want 5 (rollback ignored)", o.version)
 	}
 	// The version-5 policy still governs: /bin/app matches, /bin/other does not.
-	if !o.index().AdmitsContainer(wl, []string{"/bin/app"}) {
+	if !o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
 		t.Fatal("version-5 argv policy dropped by rollback attempt")
 	}
-	if o.index().AdmitsContainer(wl, []string{"/bin/other"}) {
+	if o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
 		t.Fatal("rolled-back argv policy took effect")
 	}
 }
@@ -248,10 +248,10 @@ func TestPolicyOverlayIgnoresEqualVersion(t *testing.T) {
 	if o.apply(exactEntrypointOverlay(t, wl, []string{"/bin/other"}), 5) {
 		t.Fatal("replayed version 5 was applied")
 	}
-	if !o.index().AdmitsContainer(wl, []string{"/bin/app"}) {
+	if !o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/app"}}) {
 		t.Fatal("original version-5 policy dropped by equal-version replay")
 	}
-	if o.index().AdmitsContainer(wl, []string{"/bin/other"}) {
+	if o.index().AdmitsContainer(allowlistpkg.RunningContainer{Digest: wl, Argv: []string{"/bin/other"}}) {
 		t.Fatal("equal-version replay policy took effect")
 	}
 }

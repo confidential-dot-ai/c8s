@@ -14,11 +14,13 @@ the gaps it does not.
 > "part of the launch measurement", that means it sits on the dm-verity
 > root, whose root hash rides the kata kernel cmdline. On SEV-SNP the
 > cmdline reaches the launch digest via `kernel-hashes`, so those bytes
-> cannot change without changing the value operators pin. **On TDX they
-> can** — the pinned value is MRTD, which covers TDVF only, and the kernel
-> and cmdline land in RTMR[1] and RTMR[2], which nothing verifies today.
-> See [G6](#g6--on-tdx-the-baked-bytes-are-measured-but-not-pinned). The
-> measurement mechanics (osbuilder dm-verity ext4, `kernel-hashes`, the
+> cannot change without changing the value operators pin. On TDX the launch
+> measurement is MRTD, which covers TDVF only — the kernel lands in RTMR[1]
+> and the cmdline in RTMR[2] — so pinning MRTD alone leaves the guest image
+> substitutable. Those two registers are pinnable
+> (`c8s verify --rtmr 1=<hex> --rtmr 2=<hex>`, `ratls.VerifyPolicy.RTMRs`);
+> what is not yet derivable offline is their expected values, so today they
+> have to come from a known-good boot. The measurement mechanics (osbuilder dm-verity ext4, `kernel-hashes`, the
 > verity root hash in the kata kernel cmdline, no IGVM/UKI) live in
 > [`kata-guest-base/README.md`](../kata-guest-base/README.md).
 
@@ -67,7 +69,7 @@ post-start kill window — is documented in
 
 | Component | In TCB? | Notes |
 |---|---|---|
-| `kata-guest-base` guest image (`vmlinuz` + dm-verity rootfs) | yes | Launch measurement verified at boot: SEV-SNP launch digest via `kernel-hashes`; on TDX only MRTD is pinned (G6). |
+| `kata-guest-base` guest image (`vmlinuz` + dm-verity rootfs) | yes | Launch measurement verified at boot: SEV-SNP launch digest via `kernel-hashes`. On TDX MRTD covers TDVF only, so the guest image is attested only when RTMR[1] and RTMR[2] are pinned too. |
 | `kata-agent` inside the guest | yes | Installed into the rootfs by kata's osbuilder (version-matched) at build. |
 | `policy-monitor` inside the guest | yes | Built from this repo, baked into the dm-verity root. |
 | `/etc/c8s/bootstrap-allowlist.json` (verity root) | yes | The allowlist **seed** the monitor loads at boot. Part of the launch measurement. |
@@ -607,7 +609,8 @@ contributor doesn't rediscover the option from scratch.
   `kata-guest-base/patches/0001-agent-refuse-an-init-data-supplied-policy.patch`.
 - The host cannot inject an over-permissive allowlist. The seed
   `/etc/c8s/bootstrap-allowlist.json` is on the verity root and part of
-  the launch measurement on SEV-SNP (S4; on TDX see G6), and the runtime
+  the launch measurement on SEV-SNP — and on TDX when RTMR[1] and RTMR[2]
+  are pinned alongside MRTD (S4) — and the runtime
   CDS additions arrive over RA-TLS pinned to `cds.measurements`, so the
   host can't substitute a fake CDS ("Host can't substitute a fake CDS
   allowlist"). At worst the host blocks new additions — it can't shrink
@@ -653,7 +656,7 @@ contributor doesn't rediscover the option from scratch.
   per-image knowledge; it belongs in the allowlist document next to the argv
   policy, not in a policy baked before any workload is known.
 
-The most consequential honest limitations left are G6 (on TDX the baked
-bytes are measured but not pinned) and the host's control of argv, env and
-mount destinations (THREAT_MODEL §5). G1 is closed; G4 was its planned
-mitigation and is no longer needed for it.
+The most consequential honest limitations left are the host's control of
+argv, env and mount destinations (THREAT_MODEL §5), and — on TDX — that the
+RTMR values which make the guest image attested cannot yet be derived from a
+guest-image build, only read off a boot that is trusted for other reasons.

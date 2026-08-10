@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -108,14 +109,16 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParseMeasurements decodes --measurements, warning when the pin is empty.
+// ParseMeasurements decodes --measurements, refusing an empty pin inside a kata
+// guest and warning outside one.
 func (c *Config) ParseMeasurements() ([][]byte, error) {
 	measurements, err := ratls.ParseHexMeasurementsList(c.Measurements)
 	if err != nil {
 		return nil, fmt.Errorf("--measurements: %w", err)
 	}
-	if len(measurements) == 0 {
-		slog.Warn("--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development.")
+	if err := cmdsutil.CheckCDSPinned(len(measurements), c.WorkloadClaimsGuest,
+		"--measurements empty: the CDS this sidecar hands its sandbox token to is not pinned to a launch measurement. UNSAFE outside development."); err != nil {
+		return nil, err
 	}
 	return measurements, nil
 }
