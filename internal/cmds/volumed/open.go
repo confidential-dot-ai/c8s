@@ -8,9 +8,24 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 )
+
+// cleanupTimeout bounds an unwind that no longer has a caller waiting on it.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext detaches the unwind from the caller's cancellation.
+//
+// INVARIANT: every device-mapper target this daemon creates is either owned by
+// a live mount or removed. A fetcher whose request deadline expires mid-open
+// cancels ctx, and closing a mapping needs a live context to run cryptsetup —
+// so unwinding on the caller's ctx cannot remove what the open already created,
+// and the leaked mapper name fails every retry with "already exists".
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
 
 // DeviceOps are the privileged steps. Behind an interface so the orchestration
 // and every unwind path are exercised without device-mapper.
@@ -148,10 +163,12 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	}
 	defer target.Close()
 
-	var undo []func()
+	var undo []func(context.Context)
 	fail := func(err error) (*mount, error) {
+		cleanup, cancel := cleanupContext(ctx)
+		defer cancel()
 		for i := len(undo) - 1; i >= 0; i-- {
-			undo[i]()
+			undo[i](cleanup)
 		}
 		return nil, err
 	}
@@ -160,13 +177,13 @@ func (o *Opener) open(ctx context.Context, req Request, key []byte, commitment [
 	if err := o.Ops.CryptOpen(ctx, req.Device, cryptMapper, key); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-crypt: %w", err))
 	}
-	undo = append(undo, func() { _ = o.Ops.CryptClose(ctx, cryptMapper) })
+	undo = append(undo, func(ctx context.Context) { _ = o.Ops.CryptClose(ctx, cryptMapper) })
 
 	verityMapper := mapperName("verity", req.Pod.UID, req.Name)
 	if err := o.Ops.VerityOpen(ctx, devPath(cryptMapper), verityMapper, req.Blob.Verity); err != nil {
 		return fail(fmt.Errorf("volumed: open dm-verity: %w", err))
 	}
-	undo = append(undo, func() { _ = o.Ops.VerityClose(ctx, verityMapper) })
+	undo = append(undo, func(ctx context.Context) { _ = o.Ops.VerityClose(ctx, verityMapper) })
 
 	if err := o.Ops.MountRO(ctx, devPath(verityMapper), target); err != nil {
 		return fail(fmt.Errorf("volumed: mount: %w", err))
@@ -221,9 +238,11 @@ func (o *Opener) ClosePod(ctx context.Context, podUID string) int {
 // device-mapper targets hold the key, so a failed unmount must not leave them
 // behind.
 func (o *Opener) teardown(ctx context.Context, m *mount) {
-	_ = o.Ops.Unmount(ctx, m.target)
-	_ = o.Ops.VerityClose(ctx, m.verityDev)
-	_ = o.Ops.CryptClose(ctx, m.cryptDev)
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	_ = o.Ops.Unmount(cleanup, m.target)
+	_ = o.Ops.VerityClose(cleanup, m.verityDev)
+	_ = o.Ops.CryptClose(cleanup, m.cryptDev)
 }
 
 // Pods returns the distinct pods holding a volume, so teardown can ask which of

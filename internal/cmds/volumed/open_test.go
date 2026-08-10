@@ -19,6 +19,11 @@ type fakeOps struct {
 	failOn string
 
 	cryptOpen, verityOpen, mounted map[string]bool
+
+	// honorCtx makes every op fail once its context is done.
+	honorCtx bool
+	// afterCryptOpen fires once the first privileged step has landed.
+	afterCryptOpen func()
 }
 
 func newOps() *fakeOps {
@@ -27,6 +32,16 @@ func newOps() *fakeOps {
 		verityOpen: map[string]bool{},
 		mounted:    map[string]bool{},
 	}
+}
+
+// ctxErr mirrors the real ops, which shell out to cryptsetup/veritysetup and
+// so cannot do anything once their context is done. Without this the fake
+// would unwind happily on a cancelled context and hide a leak.
+func (f *fakeOps) ctxErr(ctx context.Context) error {
+	if f.honorCtx {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func (f *fakeOps) record(op string) error {
@@ -39,9 +54,12 @@ func (f *fakeOps) record(op string) error {
 	return nil
 }
 
-func (f *fakeOps) CryptOpen(_ context.Context, _, mapper string, key []byte) error {
+func (f *fakeOps) CryptOpen(ctx context.Context, _, mapper string, key []byte) error {
 	if len(key) != volume.KeyBytes {
 		return errors.New("wrong key length")
+	}
+	if err := f.ctxErr(ctx); err != nil {
+		return err
 	}
 	if err := f.record("CryptOpen"); err != nil {
 		return err
@@ -49,10 +67,16 @@ func (f *fakeOps) CryptOpen(_ context.Context, _, mapper string, key []byte) err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cryptOpen[mapper] = true
+	if f.afterCryptOpen != nil {
+		f.afterCryptOpen()
+	}
 	return nil
 }
 
-func (f *fakeOps) CryptClose(_ context.Context, mapper string) error {
+func (f *fakeOps) CryptClose(ctx context.Context, mapper string) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	if err := f.record("CryptClose"); err != nil {
 		return err
 	}
@@ -62,7 +86,10 @@ func (f *fakeOps) CryptClose(_ context.Context, mapper string) error {
 	return nil
 }
 
-func (f *fakeOps) VerityOpen(_ context.Context, _, mapper string, _ volume.Verity) error {
+func (f *fakeOps) VerityOpen(ctx context.Context, _, mapper string, _ volume.Verity) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	if err := f.record("VerityOpen"); err != nil {
 		return err
 	}
@@ -72,7 +99,10 @@ func (f *fakeOps) VerityOpen(_ context.Context, _, mapper string, _ volume.Verit
 	return nil
 }
 
-func (f *fakeOps) VerityClose(_ context.Context, mapper string) error {
+func (f *fakeOps) VerityClose(ctx context.Context, mapper string) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	if err := f.record("VerityClose"); err != nil {
 		return err
 	}
@@ -82,7 +112,10 @@ func (f *fakeOps) VerityClose(_ context.Context, mapper string) error {
 	return nil
 }
 
-func (f *fakeOps) MountRO(_ context.Context, _ string, target *os.File) error {
+func (f *fakeOps) MountRO(ctx context.Context, _ string, target *os.File) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	if err := f.record("MountRO"); err != nil {
 		return err
 	}
@@ -94,7 +127,10 @@ func (f *fakeOps) MountRO(_ context.Context, _ string, target *os.File) error {
 	return nil
 }
 
-func (f *fakeOps) Unmount(_ context.Context, target string) error {
+func (f *fakeOps) Unmount(ctx context.Context, target string) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	if err := f.record("Unmount"); err != nil {
 		return err
 	}
@@ -429,5 +465,29 @@ func TestZeroClearsTheBuffer(t *testing.T) {
 		if v != 0 {
 			t.Fatalf("byte %d = %d", i, v)
 		}
+	}
+}
+
+// A fetcher whose request deadline expires mid-open cancels the context the
+// open is running on. Unwinding on that context cannot remove what the open
+// already created — cryptsetup needs a live one — so the mapper name leaks and
+// every retry fails with "Device <name> already exists", which is terminal:
+// the fetcher retries for its whole budget and the pod never gets its volume.
+func TestOpenUnwindsAfterTheCallerContextIsCancelled(t *testing.T) {
+	ops := newOps()
+	ops.honorCtx = true
+	ops.failOn = "VerityOpen"
+	o := testOpener(t, ops)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	// Cancel the moment the first privileged step lands, the way a deadline
+	// expiring mid-open does.
+	ops.afterCryptOpen = cancel
+
+	if err := o.Open(ctx, testRequest(t)); err == nil {
+		t.Fatal("open succeeded despite a cancelled context")
+	}
+	if c, v, m := ops.leaked(); c != 0 || v != 0 || m != 0 {
+		t.Errorf("leaked crypt=%d verity=%d mounts=%d after a cancelled open", c, v, m)
 	}
 }

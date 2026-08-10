@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/kataspec"
 	allowlistpkg "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -852,5 +853,39 @@ func TestHandleNewContainer_AllowlistedImageIDDoesNotAdmit(t *testing.T) {
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, spoofedCID))
 	if calls := killer.snapshot(); len(calls) != 1 {
 		t.Fatalf("expected a kill: the allowlisted digest is not the reference the guest pulls, got %+v", calls)
+	}
+}
+
+// kata-agent's setup_bundle writes config.json and its annotations; c8s watches
+// for the file, so it can read one that parses with the annotations map still
+// empty. Deciding on that spec sees no container-type (so not the sandbox) and
+// no image reference, and denies — which for a pod's pause container kills the
+// sandbox and leaves it in containerd's SANDBOX_UNKNOWN, unrecoverable without
+// killing qemu and restarting containerd. Observed repeatedly on SEV-SNP:
+// "refused by policy-monitor: image not allowlisted" against the sandbox id.
+//
+// The wait is bounded and still ends in a denial, so withholding annotations
+// delays a deny rather than earning an allow.
+func TestReadConfigJSON_EmptyAnnotationsIsRetriedNotJudged(t *testing.T) {
+	m, _, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := testCID("emptyannotations")
+	writeConfigJSON(t, watchDir, cid, map[string]string{})
+	dir := filepath.Join(watchDir, cid)
+
+	// The populated spec lands after the first read, the way kata-agent's does.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		writeConfigJSON(t, watchDir, cid, map[string]string{
+			"io.kubernetes.cri.container-type": "sandbox",
+		})
+	}()
+
+	m.configReadDeadline = 2 * time.Second
+	spec, err := m.readConfigJSON(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("readConfigJSON: %v", err)
+	}
+	if !kataspec.IsSandbox(spec.Annotations) {
+		t.Fatalf("got annotations %v, want the sandbox spec kata wrote second", spec.Annotations)
 	}
 }

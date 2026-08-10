@@ -42,8 +42,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -530,8 +532,14 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// pull time, so there is no digest to check. The baked kata-agent
 		// policy rejects the same request earlier, so reaching here means the
 		// policy was not in force.
+		// Name the annotation keys, not just the missing reference: this denial
+		// also fires when the spec is not the one c8s expects at all (a pause
+		// container whose type marker is absent lands here and takes the whole
+		// sandbox down), and the keys are the only way to tell those apart from
+		// outside the guest. Keys only — values carry pod-identifying data.
 		m.logger.Warn("deny container: image reference is absent or not digest-pinned",
-			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey])
+			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey],
+			"annotation_keys", slices.Sorted(maps.Keys(spec.Annotations)))
 		m.deny(ctx, dir)
 		return
 	}
@@ -679,8 +687,23 @@ func (m *monitor) readConfigJSON(ctx context.Context, dir string) (*ociSpec, err
 	backedOff := false
 	for {
 		spec, err := readOCISpec(path)
-		if err == nil {
+		if err == nil && len(spec.Annotations) > 0 {
 			return spec, nil
+		}
+		if err == nil {
+			// Parses, but carries no annotations at all. Every CRI stamps
+			// several (containerd sets io.kubernetes.cri.* on every container,
+			// sandbox included), so an empty map is a spec written but not yet
+			// populated, not a container that has none — and judging it reads
+			// the pause as a workload with no image reference and kills it,
+			// which wedges the whole sandbox.
+			//
+			// Bounded exactly like a half-written file, and the caller still
+			// denies when the budget runs out, so a host that withholds
+			// annotations delays a denial rather than earning an admission. A
+			// spec with annotations but no CRI keys is a complete policy input
+			// and is decided immediately, as before.
+			err = errPartialJSON
 		}
 		if !errors.Is(err, os.ErrNotExist) && !isPartialJSON(err) {
 			// Unrecoverable: not a transient race. Return immediately.

@@ -170,7 +170,7 @@ while IFS= read -r vol; do
     if dev="$(device_for "$vol")"; then
         volume_args+=(
             -drive "file=$dev,format=raw,if=none,id=confaivol$n,readonly=on,cache=none"
-            -device "virtio-blk-pci,drive=confaivol$n,serial=$SERIAL_PREFIX$vol,read-only=on"
+            -device "virtio-blk-pci,drive=confaivol$n,serial=$SERIAL_PREFIX$vol"
         )
         n=$((n + 1))
     fi
