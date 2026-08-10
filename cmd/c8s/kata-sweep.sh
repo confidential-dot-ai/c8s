@@ -55,12 +55,14 @@ config_changed=0
 #    on RKE2 the next config regen drops it once the managed template (step 4)
 #    is gone.
 for d in config-v3.toml.d config.toml.d; do
-  f="${CONTAINERD_DIR}/${d}/kata-deploy.toml"
-  if [ -f "$f" ]; then
-    rm -f "$f"
-    config_changed=1
-    echo "containerd drop-in removed: $f"
-  fi
+  for n in kata-deploy.toml zz-c8s-kata-annotations.toml; do
+    f="${CONTAINERD_DIR}/${d}/${n}"
+    if [ -f "$f" ]; then
+      rm -f "$f"
+      config_changed=1
+      echo "containerd drop-in removed: $f"
+    fi
+  done
 done
 [ "$config_changed" = "1" ] || echo "containerd drop-in already absent"
 

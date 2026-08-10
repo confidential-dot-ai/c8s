@@ -130,4 +130,30 @@ esac
 # Always make sure the drop-in dir exists so the installers can write to it.
 mkdir -p "$DIR/${dropin_name}"
 
+# Widen the CRI pod-annotation passthrough for the kata runtimes.
+#
+# containerd copies a pod annotation into the sandbox OCI spec only if it
+# matches this runtime's pod_annotations globs, and kata-deploy hardcodes
+# ["io.katacontainers.*"] (tools/packaging/kata-deploy/binary/src/runtime/
+# containerd.rs). kata-qemu-scratch-wrapper.sh reads
+# confidential.ai/c8s-volumes off that spec to decide which encrypted volume
+# devices to attach, so without this the annotation never reaches the wrapper
+# and a pod's volumes are silently never attached — the guest daemon then
+# answers "volume device is not present on this node".
+#
+# A separate file rather than an edit of kata-deploy.toml: kata-deploy rewrites
+# its own drop-in on every DaemonSet restart. containerd merges drop-ins in
+# lexical order with later files overriding, so the zz- prefix is what makes
+# this win.
+kata_annotations="$DIR/${dropin_name}/zz-c8s-kata-annotations.toml"
+{
+  echo "# Managed by c8s containerd-prep. See internal/helmchart/c8s/files/scripts/containerd-prep.sh."
+  for rt in kata-qemu-snp kata-qemu-nvidia-gpu-snp kata-qemu-tdx kata-qemu-nvidia-gpu-tdx; do
+    echo "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.${rt}]"
+    echo 'pod_annotations = ["io.katacontainers.*", "confidential.ai/*"]'
+  done
+} > "${kata_annotations}.c8s-tmp"
+mv -f "${kata_annotations}.c8s-tmp" "${kata_annotations}"
+echo "  $(basename "${kata_annotations}"): pod_annotations widened to confidential.ai/*"
+
 echo "==> c8s containerd-prep done"
