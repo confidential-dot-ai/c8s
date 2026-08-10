@@ -442,6 +442,9 @@ folds that snapshot into the same Prometheus text output on `GET /metrics`.
 | `ratls_mesh_iptables_jump_position_violations_total` | counter | — | Watchdog confirmed and repaired a demoted base-chain jump |
 | `ratls_mesh_iptables_jump_position_check_errors_total` | counter | — | Watchdog could not read jump position and reinserted defensively |
 | `ratls_mesh_iptables_ipset_overflow_total` | counter | — | Reconcile saw more pod IPs than `--ipset-maxelem` and left the set stale |
+| `ratls_mesh_iptables_pod_ipset_members` | gauge | — | Pod IPs in the interception ipset (v4+v6). Interception is membership-driven, so a fall means those pods stopped being redirected through the proxy |
+| `ratls_mesh_iptables_cw_ipset_members` | gauge | — | Confidential-workload pod IPs in the cw guard ipset (v4+v6). The guard only drops plaintext to addresses in this set, so zero is enforcement off, not a quiet node |
+| `ratls_mesh_iptables_cw_ipset_shrink_total` | counter | — | Reconciles where the cw ipset came back smaller than the previous one. Expected on a scale-down; unexplained increments mean cw pods stopped being reported by the Kubernetes API |
 | `ratls_mesh_iptables_metrics_file_updated_at_seconds` | gauge | — | Unix-seconds timestamp of the last sidecar metrics snapshot read by the proxy |
 | `ratls_mesh_resolver_cache_entries` | gauge | — | Pod→node cache size |
 | `ratls_mesh_resolver_local_cidrs` | gauge | — | Host-discovered pod-network CIDRs guarding inbound local dials |
