@@ -512,6 +512,12 @@ func fetchSandboxToken(ctx context.Context, cfg config, pub crypto.PublicKey, no
 	case errors.Is(err, workloadclaims.ErrSandboxUnsupported):
 		slog.Info("inventory does not serve the sandbox route; issuing without a sandbox ID")
 		return nil, nil
+	case errors.Is(err, workloadclaims.ErrSandboxNotReady):
+		// Retryable, not a shape to settle for. CDS binds sandbox to inventory
+		// first-write-wins at issuance, so a leaf taken without a sandbox ID
+		// keeps that binding until it is re-issued — and the injected renewal
+		// is hours away. The caller's initial-retry loop does the waiting.
+		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	case err != nil:
 		return nil, fmt.Errorf("fetch sandbox token: %w", err)
 	}

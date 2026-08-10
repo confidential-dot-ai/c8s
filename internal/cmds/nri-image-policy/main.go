@@ -548,9 +548,13 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 	if err != nil {
 		return err
 	}
+	// The node's signer is resolved before this point, so the holder is
+	// answering from the start: a nil one means this deployment issues no
+	// tokens at all, not that one is still coming.
+	signers := workloadclaims.NewSignerHolder(signer)
 	go func() {
-		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signer != nil)
-		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
+		logger.Info("starting admission inventory", "socket", socketPath, "sandbox_tokens", signers.Ready())
+		if err := workloadclaims.ServeTokens(ctx, l, inventory, signers); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
 	}()
