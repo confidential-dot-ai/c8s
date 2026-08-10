@@ -148,7 +148,7 @@ func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 	got, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "10.2.3.4",
 		CDSURL:                      "https://cds.invalid:8443",
-	}, logger)
+	}, logger, sandboxDigestsHost)
 	if err != nil || got != "10.2.3.4" {
 		t.Fatalf("host = %q, err = %v; want 10.2.3.4 with no error", got, err)
 	}
@@ -157,29 +157,35 @@ func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 	}
 }
 
+// failingLookup fails every inference attempt instantly, so a test's retry
+// count follows from the budget rather than from resolver latency.
+func failingLookup(*Config) (string, error) {
+	return "", errors.New("no route to the CDS host")
+}
+
+func shortAdvertiseHostWait(t *testing.T, budget, interval time.Duration) {
+	t.Helper()
+	prevBudget, prevInterval := advertiseHostLateBudget, advertiseHostRetryInterval
+	advertiseHostLateBudget, advertiseHostRetryInterval = budget, interval
+	t.Cleanup(func() { advertiseHostLateBudget, advertiseHostRetryInterval = prevBudget, prevInterval })
+}
+
 // A lookup that keeps failing keeps retrying to the budget rather than latching
 // tokens off on the first failure — the whole point of running late is that the
 // network arrives after the first attempt.
 //
 // The lookup is stubbed rather than pointed at an unresolvable host: a real
 // resolver makes each attempt cost whatever the runner's DNS takes, so the
-// retries a millisecond budget affords vary by machine (CI saw one). That an
-// unresolvable CDS URL fails at all is covered by _StopsAtBudget.
+// retries a millisecond budget affords vary by machine (CI saw one). The
+// budget dwarfs the interval for the same reason: a scheduler stall must not
+// eat every retry. That an unresolvable CDS URL fails at all is covered by
+// _StopsAtBudget.
 func TestResolveSandboxDigestsHostLate_RetriesUntilBudget(t *testing.T) {
-	prevInterval, prevBudget, prevLookup := advertiseHostRetryInterval, advertiseHostLateBudget, advertiseHostLookup
-	advertiseHostRetryInterval = time.Millisecond
-	advertiseHostLateBudget = 20 * time.Millisecond
-	advertiseHostLookup = func(*Config) (string, error) { return "", errors.New("no route to the CDS host") }
-	t.Cleanup(func() {
-		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
-		advertiseHostLookup = prevLookup
-	})
+	shortAdvertiseHostWait(t, 250*time.Millisecond, time.Millisecond)
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
-	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
-		CDSURL: "https://cds.example:8443",
-	}, logger)
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{}, logger, failingLookup)
 	if err == nil {
 		t.Fatal("want an error after the budget is exhausted")
 	}
@@ -191,17 +197,11 @@ func TestResolveSandboxDigestsHostLate_RetriesUntilBudget(t *testing.T) {
 // The budget bounds the wait: a guest that never gets a network must reach
 // "no signer" rather than hold every fetcher open indefinitely.
 func TestResolveSandboxDigestsHostLate_StopsAtBudget(t *testing.T) {
-	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
-	advertiseHostRetryInterval = 5 * time.Millisecond
-	advertiseHostLateBudget = 50 * time.Millisecond
-	t.Cleanup(func() {
-		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
-	})
+	shortAdvertiseHostWait(t, 50*time.Millisecond, 5*time.Millisecond)
 
 	start := time.Now()
-	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
-		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
-	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{},
+		slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), failingLookup)
 	if err == nil {
 		t.Fatal("want an error after the budget is exhausted")
 	}
@@ -213,19 +213,13 @@ func TestResolveSandboxDigestsHostLate_StopsAtBudget(t *testing.T) {
 // A cancelled context stops the wait, so guest shutdown is not held up by a
 // lookup that will never succeed.
 func TestResolveSandboxDigestsHostLate_StopsOnContextCancel(t *testing.T) {
-	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
-	advertiseHostRetryInterval = 10 * time.Millisecond
-	advertiseHostLateBudget = time.Hour
-	t.Cleanup(func() {
-		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
-	})
+	shortAdvertiseHostWait(t, time.Hour, 10*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if _, err := resolveSandboxDigestsHostLate(ctx, &Config{
-		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
-	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))); err == nil {
+	if _, err := resolveSandboxDigestsHostLate(ctx, &Config{},
+		slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), failingLookup); err == nil {
 		t.Fatal("want an error when the context ends")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
