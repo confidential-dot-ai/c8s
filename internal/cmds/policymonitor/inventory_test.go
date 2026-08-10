@@ -5,6 +5,7 @@ package policymonitor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -156,21 +157,28 @@ func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 	}
 }
 
-// A CDS URL that does not resolve keeps retrying to the budget rather than
-// latching tokens off on the first failure — the whole point of running late is
-// that the network arrives after the first attempt.
+// A lookup that keeps failing keeps retrying to the budget rather than latching
+// tokens off on the first failure — the whole point of running late is that the
+// network arrives after the first attempt.
+//
+// The lookup is stubbed rather than pointed at an unresolvable host: a real
+// resolver makes each attempt cost whatever the runner's DNS takes, so the
+// retries a millisecond budget affords vary by machine (CI saw one). That an
+// unresolvable CDS URL fails at all is covered by _StopsAtBudget.
 func TestResolveSandboxDigestsHostLate_RetriesUntilBudget(t *testing.T) {
-	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	prevInterval, prevBudget, prevLookup := advertiseHostRetryInterval, advertiseHostLateBudget, advertiseHostLookup
 	advertiseHostRetryInterval = time.Millisecond
 	advertiseHostLateBudget = 20 * time.Millisecond
+	advertiseHostLookup = func(*Config) (string, error) { return "", errors.New("no route to the CDS host") }
 	t.Cleanup(func() {
 		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
+		advertiseHostLookup = prevLookup
 	})
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
 	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
-		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+		CDSURL: "https://cds.example:8443",
 	}, logger)
 	if err == nil {
 		t.Fatal("want an error after the budget is exhausted")

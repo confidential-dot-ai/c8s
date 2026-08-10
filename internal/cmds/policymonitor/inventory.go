@@ -219,6 +219,10 @@ var (
 	// on an answer — signing, or 404 — before the caller stops asking. Equal
 	// budgets would make which one a pod gets a race.
 	advertiseHostLateBudget = 90 * time.Second
+	// The retried lookup. A test that counts retries replaces it, so the count
+	// follows from the budget rather than from how long the runner's resolver
+	// takes to fail.
+	advertiseHostLookup = sandboxDigestsHost
 )
 
 // resolveSandboxDigestsHostLate retries the routing-table lookup until the pod
@@ -237,7 +241,7 @@ func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slo
 	deadline := time.Now().Add(advertiseHostLateBudget)
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		host, err := sandboxDigestsHost(cfg)
+		host, err := advertiseHostLookup(cfg)
 		if err == nil {
 			if attempt > 1 {
 				logger.Info("advertise-host inference recovered", "attempt", attempt, "host", host)

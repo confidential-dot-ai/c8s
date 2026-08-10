@@ -186,6 +186,9 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 	}
 	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug)
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
+	// Ahead of resolveDigests, which pins a component's image only while the
+	// effective values enable it.
+	setArgs = appendVolumedInstallArgs(setArgs, installVolumes, installCvmMode)
 	// --upstream derives a c8s-<id>.<ns>.svc.cluster.local address; the chart
 	// recognizes that headless-Service shape as mesh-wrapped and admits plaintext
 	// http. Empty means "not plumbed" so an operator's -f (or the chart's
@@ -391,6 +394,7 @@ func init() {
 	renderValuesCmd.Flags().BoolVar(&installCRDs, "install-crds", true, "emit values for chart CRDs (false sets statusMirror.enabled=false, matching install --install-crds=false)")
 	renderValuesCmd.Flags().StringVar(&renderValuesDistro, "distro", "", "host Kubernetes distro (k8s | rke2) — install autodetects this from the cluster; render-values has no cluster, so pass it explicitly when you need it pinned. Unset leaves the chart default")
 	renderValuesCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and toleration (cds.node.selector={}, cds.node.tolerations=[])")
+	renderValuesCmd.Flags().BoolVar(&installVolumes, "volumes", false, "emit volumed.enabled=true, deploying the node agent that opens encrypted volumes (docs/volumes.md). Emits nothing under --cvm-mode=pod, where volumed runs in-guest")
 	renderValuesCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod kata CVMs; disables host-side ratls-mesh/attestation-api/nri-image-policy) or node (generalized node-as-CVM native TEE device) or gke (GKE managed CVMs) or aks (vTPM /dev/tpm0)")
 	renderValuesCmd.Flags().StringVar(&installHardwarePlatform, flagHardwarePlatform, "sev-snp", "CPU-level TEE hardware (orthogonal to --cvm-mode): sev-snp (default, /dev/sev-guest) or tdx (Intel TDX, /dev/tdx-guest). Ignored when --cvm-mode=aks")
 	renderValuesCmd.Flags().StringSliceVar(&installMeasurements, "measurements", nil, "expected hex launch measurement(s) of the CVM components that speak to CDS (repeatable/comma-separated). Emits cds.measurements + ratlsMesh.measurements; empty = no pinning (UNSAFE). Under --cvm-mode=node/gke/aks this is the node image's manifest.json value; under --cvm-mode=pod it is the kata guest launch digest from `c8s kata measure`")
