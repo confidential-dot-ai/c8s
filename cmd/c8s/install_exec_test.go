@@ -838,6 +838,8 @@ func TestInstallNodeModeHappyPath(t *testing.T) {
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/ratls-mesh:main")
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/attestation-api")
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/nri-image-policy")
+	// volumed stays off without --volumes.
+	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/volumed")
 
 	// --force without operator keys must say what it is giving up.
 	if !strings.Contains(stderr, "allowlist writes DISABLED") {
@@ -885,6 +887,47 @@ func TestInstallImageTagOverridesResolveRef(t *testing.T) {
 	calls := s.f.calls(t)
 	mustContainLine(t, calls, "crane digest ghcr.io/confidential-dot-ai/c8s-operator:v9.9.9")
 	mustNotContainPrefix(t, calls, "crane digest ghcr.io/confidential-dot-ai/c8s-operator:main")
+}
+
+// --volumes must reach helm as volumed.enabled, and must do so before digest
+// resolution: the daemon's own image is pinned only for a component the
+// effective values enable, and that pin is what derives it into the NRI floor
+// that would otherwise deny it.
+func TestInstallVolumesEnablesTheNodeAgent(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	if err := runC8s(t, "install", "--cvm-mode=node", "--wait=false", "--force", "--volumes"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	mustContainLine(t, s.f.calls(t), "crane digest ghcr.io/confidential-dot-ai/volumed:main")
+
+	tree := readYAMLTree(t, s.computed)
+	if got := treeAt(t, tree, "volumed", "enabled"); got != true {
+		t.Errorf("volumed.enabled = %#v, want true", got)
+	}
+	if got := treeAt(t, tree, "volumed", "image", "digest"); got != testDigest {
+		t.Errorf("volumed.image.digest = %#v, want %s", got, testDigest)
+	}
+}
+
+// Under --cvm-mode=pod the daemon is inside the guest, so --volumes must leave
+// the host DaemonSet alone — enabling it there fails the chart render
+// (enforce_host_components).
+func TestInstallVolumesPodModeLeavesHostDaemonSetOff(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	stdout := captureStdout(t, func() {
+		if err := runC8s(t, "install", "--cvm-mode=pod", "--wait=false", "--force", "--resolve-digests=false", "--volumes"); err != nil {
+			t.Fatalf("install: %v", err)
+		}
+	})
+	volumed, _ := readYAMLTree(t, s.computed)["volumed"].(map[string]any)
+	if got, ok := volumed["enabled"]; ok {
+		t.Errorf("computed values enable the host volumed DaemonSet under --cvm-mode=pod: %#v", got)
+	}
+	if !strings.Contains(stdout, "volumed --guest") {
+		t.Errorf("stdout does not say where volumes are served:\n%s", stdout)
+	}
 }
 
 func TestInstallFailsFastWhenCDSNodeUnlabelled(t *testing.T) {

@@ -83,7 +83,8 @@ workload-agnostic: anything that runs on Kubernetes can run confidentially.
   practice — encrypted at rest on host-visible storage (erofs, dm-verity,
   dm-crypt) and opened only inside the TEE. The key travels as a secret
   through the release path above, so possession of the volume implies nothing
-  without attestation. Node-as-CVM only; `volumed` ships disabled.
+  without attestation. Node-as-CVM only; the `volumed` node agent ships
+  disabled — `c8s install --volumes` deploys it.
 
 - **Fail-closed admission.** A mutating webhook injects certificate sidecars
   and Kata RuntimeClasses; a ValidatingAdmissionPolicy rejects anything that

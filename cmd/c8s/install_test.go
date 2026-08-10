@@ -299,6 +299,26 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 	})
 }
 
+func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
+	got := appendVolumedInstallArgs([]string{"upgrade"}, false, "node")
+	assertArgsEqual(t, got, []string{"upgrade"})
+}
+
+func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
+	for _, mode := range []string{"node", "gke", "aks"} {
+		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
+		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
+	}
+}
+
+func TestAppendVolumedInstallArgsPodModeServesVolumesInGuest(t *testing.T) {
+	// kata-guest-base bakes `volumed --guest`, and the chart's
+	// enforce_host_components validation fails the render if the host DaemonSet
+	// is enabled alongside kata — so --volumes must emit nothing here.
+	got := appendVolumedInstallArgs([]string{"upgrade"}, true, "pod")
+	assertArgsEqual(t, got, []string{"upgrade"})
+}
+
 func TestParseWorkloadRef(t *testing.T) {
 	tests := []struct {
 		ref     string

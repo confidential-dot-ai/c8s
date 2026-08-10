@@ -53,6 +53,7 @@ var (
 	installCvmMode          string
 	installHardwarePlatform string
 	installSingleNode       bool
+	installVolumes          bool
 	installImagePullSecret  string
 	installImageTag         string
 	installOperatorKeys     string
@@ -611,6 +612,10 @@ the kata-guest-base artifact (override: kata.guestImage.pullerAuthSecret).
 This is the cluster-side (kubelet) credential; digest resolution runs locally
 via crane and uses your local docker login.
 
+--volumes deploys volumed, the node agent that opens a pod's encrypted volumes
+into its mount namespace (docs/volumes.md). Under --cvm-mode=pod it deploys
+nothing: volumed runs inside each guest, baked into the kata-guest-base image.
+
 To adopt already-running workloads, pass --workload-ref <id>=<namespace>/<kind>/<name>[:<port>].
 The release namespace is excluded from workload injection, so adopted workloads
 must live in a separate namespace. After the chart is ready, install patches each
@@ -700,6 +705,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		if installKataDebug {
 			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
+		}
+		if installVolumes && cvmModeIsPod(installCvmMode) {
+			fmt.Fprintln(os.Stdout, "+ encrypted volumes: served by `volumed --guest` inside each kata guest; no host DaemonSet is deployed")
 		}
 		// The sandbox-digests callback dials node addresses and nothing else.
 		// Resolve them here, where the cluster is reachable, so a default
@@ -1353,6 +1361,18 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 	)
 }
 
+// appendVolumedInstallArgs turns on the node agent that opens encrypted volumes
+// (docs/volumes.md) for --volumes. Nothing is emitted under --cvm-mode=pod:
+// there volumed runs inside the guest from the kata-guest-base image, and the
+// chart's enforce_host_components validation rejects the host DaemonSet
+// alongside kata.
+func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []string {
+	if !volumes || cvmModeIsPod(cvmMode) {
+		return setArgs
+	}
+	return append(setArgs, "--set", "volumed.enabled=true")
+}
+
 type workloadRef struct {
 	kind      string
 	name      string
@@ -1717,7 +1737,7 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 // enabledPath, given the chart defaults, the operator's -f values files, and the
 // --set overrides assembled so far — in helm's precedence order (defaults < -f
 // files in order < --set). Getting the -f files right matters for a component
-// that defaults to disabled and is turned on only through -f (e.g.
+// that defaults to disabled and is turned on through -f (e.g.
 // volumed.enabled): without them the resolver would treat it as off and skip
 // pinning its digest, and the render then fails with no image ref. The merged
 // tree is built once and shared across the per-component calls.
@@ -1865,6 +1885,7 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
+	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory. Under --cvm-mode=pod volumes are served by the in-guest volumed baked into kata-guest-base, so nothing is deployed")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
 	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod confidential VMs via the Kata runtime — every workload pod is a kata CVM, host-side attestation-api/nri/ratls-mesh served by the in-guest counterparts), node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0)")
