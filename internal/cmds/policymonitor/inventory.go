@@ -185,7 +185,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	// Before the route answers, not after: a token names this endpoint, and CDS
 	// refuses one it cannot call back on. Issuing first would hand out tokens
 	// that are guaranteed to be rejected.
-	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer); err != nil {
+	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer, measurements); err != nil {
 		logger.Error("sandbox-digests endpoint disabled; issuing without a sandbox ID rather than tokens CDS would refuse", "error", err)
 		signers.Disable()
 		return
@@ -286,11 +286,7 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 
 // startSandboxDigests serves the CDS-facing digests endpoint inside the guest
 // over mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
-func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
-	if err != nil {
-		return fmt.Errorf("parse CDS measurements: %w", err)
-	}
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, measurements [][]byte) error {
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		string(types.PlatformSnp),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),
