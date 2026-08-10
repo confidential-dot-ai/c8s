@@ -124,13 +124,15 @@ func (h InventoryHosts) Contains(host string) bool {
 // CDS is reached over loopback — which the chart's own default does, since the
 // plugin dials the CDS NodePort on 127.0.0.1 — so it fails loudly rather than
 // advertising something CDS could never dial back.
-func ResolveAdvertiseHost(host, cdsEndpoint string) (string, error) {
+// ctx bounds the lookup's name resolution, which net.Dial would otherwise
+// block on without limit.
+func ResolveAdvertiseHost(ctx context.Context, host, cdsEndpoint string) (string, error) {
 	if u, err := url.Parse(cdsEndpoint); err == nil && u.Host != "" {
 		cdsEndpoint = u.Host
 	}
 	if host == "" {
 		var err error
-		if host, err = outboundHost(cdsEndpoint); err != nil {
+		if host, err = outboundHost(ctx, cdsEndpoint); err != nil {
 			return "", fmt.Errorf("workloadclaims: infer the inventory advertise host (set it explicitly): %w", err)
 		}
 	}
@@ -140,11 +142,11 @@ func ResolveAdvertiseHost(host, cdsEndpoint string) (string, error) {
 // outboundHost reports the local IP the kernel would source from when talking
 // to target. The UDP socket is unconnected on the wire — no packet is sent —
 // so this is a routing-table lookup, not a reachability test.
-func outboundHost(target string) (string, error) {
+func outboundHost(ctx context.Context, target string) (string, error) {
 	if !strings.Contains(target, ":") {
 		target = net.JoinHostPort(target, "443")
 	}
-	conn, err := net.Dial("udp", target)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "udp", target)
 	if err != nil {
 		return "", err
 	}

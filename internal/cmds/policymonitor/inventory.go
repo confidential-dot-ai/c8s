@@ -200,8 +200,8 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
-func sandboxDigestsHost(cfg *Config) (string, error) {
-	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
+func sandboxDigestsHost(ctx context.Context, cfg *Config) (string, error) {
+	return workloadclaims.ResolveAdvertiseHost(ctx, cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
 // The wait for the guest network to reach a state where the routing-table
@@ -217,7 +217,7 @@ func sandboxDigestsHost(cfg *Config) (string, error) {
 // Overridable in tests.
 var (
 	advertiseHostRetryInterval = 2 * time.Second
-	advertiseHostLateBudget = 90 * time.Second
+	advertiseHostLateBudget    = 90 * time.Second
 	// Bounds the serial initdata wait + advertise-host lookup (90s+90s alone
 	// overshoots) under get-cert's 2m --initial-retry-timeout, so the token
 	// route settles before the caller stops asking.
@@ -235,15 +235,15 @@ var (
 //
 // lookup is sandboxDigestsHost; injected so tests can drive the retry loop
 // without the resolver.
-func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger, lookup func(*Config) (string, error)) (string, error) {
+func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger, lookup func(context.Context, *Config) (string, error)) (string, error) {
 	// Explicit host bypasses inference entirely — no reason to wait.
 	if cfg.SandboxDigestsAdvertiseHost != "" {
-		return lookup(cfg)
+		return lookup(ctx, cfg)
 	}
 	deadline := time.Now().Add(advertiseHostLateBudget)
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		host, err := lookup(cfg)
+		host, err := lookup(ctx, cfg)
 		if err == nil {
 			if attempt > 1 {
 				logger.Info("advertise-host inference recovered", "attempt", attempt, "host", host)

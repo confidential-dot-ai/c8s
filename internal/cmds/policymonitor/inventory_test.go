@@ -108,14 +108,14 @@ func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 // The advertise host CDS dials back: explicit config wins, and a host it could
 // never reach is rejected where it is configured rather than at issuance.
 func TestSandboxDigestsHost(t *testing.T) {
-	got, err := sandboxDigestsHost(&Config{
+	got, err := sandboxDigestsHost(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "10.2.3.4",
 		CDSURL:                      "https://cds.invalid:8443",
 	})
 	if err != nil || got != "10.2.3.4" {
 		t.Fatalf("host = %q, err = %v; want 10.2.3.4", got, err)
 	}
-	if _, err := sandboxDigestsHost(&Config{
+	if _, err := sandboxDigestsHost(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "127.0.0.1",
 		CDSURL:                      "https://cds.invalid:8443",
 	}); err == nil {
@@ -159,7 +159,7 @@ func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 
 // failingLookup fails every inference attempt instantly, so a test's retry
 // count follows from the budget rather than from resolver latency.
-func failingLookup(*Config) (string, error) {
+func failingLookup(context.Context, *Config) (string, error) {
 	return "", errors.New("no route to the CDS host")
 }
 
