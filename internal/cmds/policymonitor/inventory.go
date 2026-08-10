@@ -159,7 +159,7 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 // Every failure disables the route rather than leaving it pending: a caller
 // waiting on a signer that is not coming is worse than one told to proceed
 // without a sandbox ID.
-func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder) {
+func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder, settle time.Time) {
 	// A parse failure is a typo and stays fail-closed; empty is the explicit
 	// dev opt-out, so tokens still flow and the guest can still be issued a
 	// sandbox-bound leaf.
@@ -172,7 +172,9 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	host, err := resolveSandboxDigestsHostLate(ctx, cfg, logger, sandboxDigestsHost)
+	resolveCtx, cancel := context.WithDeadline(ctx, settle)
+	host, err := resolveSandboxDigestsHostLate(resolveCtx, cfg, logger, sandboxDigestsHost)
+	cancel()
 	if err != nil {
 		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
 		signers.Disable()
@@ -215,10 +217,11 @@ func sandboxDigestsHost(cfg *Config) (string, error) {
 // Overridable in tests.
 var (
 	advertiseHostRetryInterval = 2 * time.Second
-	// Under get-cert's --initial-retry-timeout (2m), so the route has settled
-	// on an answer — signing, or 404 — before the caller stops asking. Equal
-	// budgets would make which one a pod gets a race.
 	advertiseHostLateBudget = 90 * time.Second
+	// Bounds the serial initdata wait + advertise-host lookup (90s+90s alone
+	// overshoots) under get-cert's 2m --initial-retry-timeout, so the token
+	// route settles before the caller stops asking.
+	signerSettleBudget = 110 * time.Second
 )
 
 // resolveSandboxDigestsHostLate retries the routing-table lookup until the pod

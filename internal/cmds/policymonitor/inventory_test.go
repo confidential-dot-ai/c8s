@@ -254,3 +254,14 @@ func TestAdvertiseHostRunsOffTheStartupPath(t *testing.T) {
 			advertiseHostLateBudget, timeout)
 	}
 }
+
+// The settle budget must fit under get-cert's 2m --initial-retry-timeout and
+// leave the lookup time after a full initdata wait.
+func TestSignerSettleBudgetCoversTheSerialChain(t *testing.T) {
+	if signerSettleBudget >= 2*time.Minute {
+		t.Fatalf("signerSettleBudget %s must settle before get-cert's 2m --initial-retry-timeout", signerSettleBudget)
+	}
+	if signerSettleBudget <= initDataWaitBudget {
+		t.Fatalf("signerSettleBudget %s leaves the advertise-host lookup no time after a full %s initdata wait", signerSettleBudget, initDataWaitBudget)
+	}
+}

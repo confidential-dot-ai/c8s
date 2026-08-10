@@ -149,12 +149,14 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		// behind this unit's READY=1. cfg.CDSMeasurements is written only in
 		// this goroutine, after the synchronous readers above have finished
 		// with it.
+		// Before the initdata wait: the budget bounds the serial chain.
+		settle := time.Now().Add(signerSettleBudget)
 		go func() {
 			awaitInitDataMeasurements(ctx, logger, cfg)
 			// Both need the measurements the document carries, and neither may
 			// hold the other up: the signer waits on the pod network, the
 			// refresh only on CDS answering.
-			go installSandboxTokenSigner(ctx, cfg, logger, m.inventory, m.signers)
+			go installSandboxTokenSigner(ctx, cfg, logger, m.inventory, m.signers, settle)
 			runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
 		}()
 	} else {
