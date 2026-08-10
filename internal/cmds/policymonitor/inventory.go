@@ -140,15 +140,11 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 	return ""
 }
 
-// sandboxTokenSigner builds the guest's sandbox-token signer. The key needs no
-// credential of its own: CDS reads it from this guest's digests endpoint on a
-// privileged port, which is what establishes whose key it is. Config problems
-// disable tokens (nil signer) but never crash the monitor — the same
-// fail-open-to-degraded posture as runAllowlistRefresh; get-cert then issues
-// without a sandbox ID.
 // installSandboxTokenSigner resolves the address this guest's sandbox tokens
 // commit to, starts the digests endpoint CDS calls back on, and only then hands
-// the signer to the token route.
+// the signer to the token route. The key needs no credential of its own: CDS
+// reads it from that endpoint on a privileged port, which is what establishes
+// whose key it is.
 //
 // It runs after READY=1. The address comes from a routing-table lookup toward
 // CDS, and the pod network it needs is installed by kata-agent's
