@@ -157,6 +157,11 @@ func TestRunReleaseStartupErrors(t *testing.T) {
 		cfg  func(t *testing.T) ReleaseConfig
 	}{
 		{"platform required", func(t *testing.T) ReleaseConfig { return ReleaseConfig{Platform: ""} }},
+		{"verify-timeout must be positive", func(t *testing.T) ReleaseConfig {
+			cfg := releaseConfig(t)
+			cfg.VerifyTimeout = 0
+			return cfg
+		}},
 		{"attestation-api down at own-refs", func(t *testing.T) ReleaseConfig {
 			cfg := releaseConfig(t)
 			cfg.AttestationAPIURL = "http://127.0.0.1:1"

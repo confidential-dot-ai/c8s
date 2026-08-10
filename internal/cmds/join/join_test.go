@@ -18,15 +18,28 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// ramTempDir returns a tmpfs-backed temp dir; RunJoin refuses to stage the
+// token anywhere else.
+func ramTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/dev/shm", "c8s-join-")
+	if err != nil {
+		t.Skipf("no tmpfs temp dir available: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 // joinConfig returns a JoinConfig pointing at server with outputs in a temp
 // dir.
 func joinConfig(t *testing.T, apiURL, serverAddr string) JoinConfig {
 	t.Helper()
-	dir := t.TempDir()
+	dir := ramTempDir(t)
 	return JoinConfig{
 		ServerAddr:        serverAddr,
 		AttestationAPIURL: apiURL,
@@ -197,6 +210,7 @@ func TestRunJoinConfigErrors(t *testing.T) {
 			c.AttestationAPIURL = "http://127.0.0.1:1"
 			c.Timeout = time.Second
 		}},
+		{"timeout must be positive", func(c *JoinConfig) { c.Timeout = 0 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -216,9 +230,27 @@ func TestWriteStaged(t *testing.T) {
 		FragmentOut:    filepath.Join(dir, "config.yaml.d", "50-join.yaml"),
 		SupervisorPort: 9345,
 	}
+	// Pre-create both outputs world-readable: os.WriteFile's perm applies only
+	// on create, so a stale file would keep leaking the token.
+	for _, p := range []string{cfg.TokenOut, cfg.FragmentOut} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := writeStaged(cfg, "2001:db8::1", "tok"); err != nil {
 		t.Fatal(err)
 	}
+	assertMode(t, cfg.TokenOut, 0o600)
+	assertMode(t, cfg.FragmentOut, 0o600)
+	if token, err := os.ReadFile(cfg.TokenOut); err != nil {
+		t.Fatal(err)
+	} else if string(token) != "tok\n" {
+		t.Errorf("token = %q, want the fresh value", token)
+	}
+
 	var frag rke2Fragment
 	b, err := os.ReadFile(cfg.FragmentOut)
 	if err != nil {
@@ -230,6 +262,26 @@ func TestWriteStaged(t *testing.T) {
 	if frag.Server != "https://[2001:db8::1]:9345" {
 		t.Errorf("server = %q, want bracketed IPv6 URL", frag.Server)
 	}
+}
+
+// TestPrepareTokenDir: the "must be tmpfs" invariant is enforced, not merely
+// documented.
+func TestPrepareTokenDir(t *testing.T) {
+	t.Run("tmpfs accepted", func(t *testing.T) {
+		if err := prepareTokenDir(filepath.Join(ramTempDir(t), "confos", "join-token")); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("persistent storage refused", func(t *testing.T) {
+		dir := t.TempDir()
+		if fileutil.RequireRAMBacked(dir) == nil {
+			t.Skipf("%s is RAM-backed; no on-disk path to reject", dir)
+		}
+		if err := prepareTokenDir(filepath.Join(dir, "join-token")); err == nil {
+			t.Fatal("expected a token-out on persistent storage to be refused")
+		}
+	})
 }
 
 // waitForListen polls addr until it accepts a TCP connection or done yields.

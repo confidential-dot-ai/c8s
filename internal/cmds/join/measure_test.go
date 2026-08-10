@@ -120,18 +120,12 @@ func attestedLeaf(t *testing.T, envelope string) *x509.Certificate {
 	return cert
 }
 
-// plainLeaf builds a self-signed cert with no RA-TLS extension.
-func plainLeaf(t *testing.T) *x509.Certificate {
+// selfSigned signs tmpl with a fresh P-256 key and parses the result.
+func selfSigned(t *testing.T, tmpl *x509.Certificate) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "plain"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -142,6 +136,35 @@ func plainLeaf(t *testing.T) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// attestedLeafWindow builds an RA-TLS leaf with an explicit validity window
+// (CreateAttestedCert always starts at now, which the freshness check needs to
+// vary).
+func attestedLeafWindow(t *testing.T, notBefore, notAfter time.Time) *x509.Certificate {
+	t.Helper()
+	ext, err := (&ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(tdxEnvelope)}).MarshalExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selfSigned(t, &x509.Certificate{
+		SerialNumber:    big.NewInt(2),
+		Subject:         pkix.Name{CommonName: "ratls-window"},
+		NotBefore:       notBefore,
+		NotAfter:        notAfter,
+		ExtraExtensions: []pkix.Extension{ext},
+	})
+}
+
+// plainLeaf builds a self-signed cert with no RA-TLS extension.
+func plainLeaf(t *testing.T) *x509.Certificate {
+	t.Helper()
+	return selfSigned(t, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "plain"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	})
 }
 
 func TestOwnRefs(t *testing.T) {
@@ -249,6 +272,35 @@ func TestVerifyPeer(t *testing.T) {
 		api := newFakeAPI(t, staticVerify(verifyResp(strings.ToUpper(digestA), strings.ToUpper(rtmr1A), strings.ToUpper(rtmr2A), true, true)))
 		if err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), attestedLeaf(t, tdxEnvelope), own); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("validity window", func(t *testing.T) {
+		now := time.Now()
+		tests := []struct {
+			name       string
+			notBefore  time.Time
+			notAfter   time.Time
+			wantAccept bool
+		}{
+			{"current", now.Add(-time.Hour), now.Add(time.Hour), true},
+			{"expired", now.Add(-25 * time.Hour), now.Add(-time.Hour), false},
+			{"not yet valid", now.Add(time.Hour), now.Add(25 * time.Hour), false},
+			{"just issued on a fast peer clock", now.Add(time.Minute), now.Add(24 * time.Hour), true},
+			{"just expired within skew", now.Add(-24 * time.Hour), now.Add(-time.Minute), true},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				api := newFakeAPI(t, staticVerify(verifyResp(digestA, rtmr1A, rtmr2A, true, true)))
+				leaf := attestedLeafWindow(t, tc.notBefore, tc.notAfter)
+				err := verifyPeer(context.Background(), attestationclient.NewClient(api.URL), leaf, own)
+				if tc.wantAccept != (err == nil) {
+					t.Fatalf("err = %v, wantAccept %v", err, tc.wantAccept)
+				}
+				if !tc.wantAccept && api.verifyCalls.Load() != 0 {
+					t.Error("evidence was sent for verification despite a stale cert")
+				}
+			})
 		}
 	})
 
