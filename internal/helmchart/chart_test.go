@@ -609,6 +609,54 @@ func TestChartNriInstallerRendersSinglePullDaemonSet(t *testing.T) {
 	}
 }
 
+// workloadclaims.DigestsPort (1019) is the admission inventory's identity: CDS
+// resolves the inventory's signing key by dialling it at the node's address, so
+// anything that can answer there can have its own key accepted as the
+// inventory's and mint tokens naming any sandbox. hostNetwork is not the only
+// way to get there — a hostPort publishes a pod on the node's address with no
+// host namespace at all — so the VAP must deny both. PodSecurity baseline also
+// denies hostPort, but a namespace hosting CW pods cannot run at baseline (the
+// injected hostPath forces privileged), so this policy is the only control.
+func TestChartHostNamespacePolicyDeniesHostPort(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var vap admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "c8s-deny-host-namespaces", &vap) {
+		t.Fatal("ValidatingAdmissionPolicy c8s-deny-host-namespaces not rendered")
+	}
+	var expr string
+	for _, v := range vap.Spec.Validations {
+		if strings.Contains(v.Expression, "hostPort") {
+			expr = v.Expression
+		}
+	}
+	if expr == "" {
+		t.Fatal("no hostPort validation in c8s-deny-host-namespaces: a tenant pod with hostPort 1019 impersonates the admission inventory")
+	}
+	// Every container list, or the check is bypassed by putting the port on an
+	// init or ephemeral container.
+	for _, want := range []string{"spec.containers", "spec.initContainers", "spec.ephemeralContainers"} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("hostPort validation does not cover %s; expression=%q", want, expr)
+		}
+	}
+	// An ephemeral container is an UPDATE on the subresource; "pods" alone
+	// leaves it unevaluated by this policy entirely.
+	var subresource bool
+	for _, r := range vap.Spec.MatchConstraints.ResourceRules {
+		for _, res := range r.Resources {
+			if res == "pods/ephemeralcontainers" {
+				subresource = true
+			}
+		}
+	}
+	if !subresource {
+		t.Error("matchConstraints does not name pods/ephemeralcontainers, so ephemeral containers bypass this policy")
+	}
+}
+
 // The webhook injects a read-only hostPath mount of the inventory socket dir
 // (nriImagePolicy.hostPaths.runtimeDir) into every CW pod, so the
 // deny-host-namespaces VAP must carve out exactly that dir — a blanket
