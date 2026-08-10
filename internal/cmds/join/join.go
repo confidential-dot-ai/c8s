@@ -145,6 +145,11 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 			TLSClientConfig:     tlsCfg,
 			TLSHandshakeTimeout: cfg.Timeout,
 		},
+		// join-release never redirects; following one would re-target the
+		// fetch at a URL the (attested) server chose.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("join-release must not redirect")
+		},
 	}
 	url := "https://" + cfg.ServerAddr + "/join-token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
