@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
@@ -681,6 +682,25 @@ func TestCheckImage_WorkloadDigest_ArgvMismatchDenies(t *testing.T) {
 		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
 	if verdict != verdictDeny {
 		t.Fatalf("non-matching argv should deny workload digest, got %d", verdict)
+	}
+}
+
+// The two denials need different fixes — allowlist the image, versus correct the
+// entry's argv policy — so the reason has to tell them apart.
+func TestCheckImage_DenialSeparatesUnlistedFromArgvMismatch(t *testing.T) {
+	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
+		workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"}))
+
+	_, argvMismatch := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
+		"registry/repo@"+pushDigestB, []string{"/bin/evil"})
+	if !strings.Contains(argvMismatch, "satisfies no workload entry's argv policy") {
+		t.Fatalf("a listed digest denied on argv should say so, got %q", argvMismatch)
+	}
+
+	_, unlisted := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
+		"registry/repo@"+pushDigestC, []string{"/bin/app"})
+	if !strings.Contains(unlisted, "image not in allowlist") {
+		t.Fatalf("an unlisted digest should keep the floor denial, got %q", unlisted)
 	}
 }
 
