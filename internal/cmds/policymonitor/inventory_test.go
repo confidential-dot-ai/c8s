@@ -265,3 +265,26 @@ func TestSignerSettleBudgetCoversTheSerialChain(t *testing.T) {
 		t.Fatalf("signerSettleBudget %s leaves the advertise-host lookup no time after a full %s initdata wait", signerSettleBudget, initDataWaitBudget)
 	}
 }
+
+// Inference that recovers mid-budget returns the host instead of latching off.
+func TestResolveSandboxDigestsHostLate_RecoversAfterTransientFailure(t *testing.T) {
+	shortAdvertiseHostWait(t, 250*time.Millisecond, time.Millisecond)
+
+	calls := 0
+	lookup := func(context.Context, *Config) (string, error) {
+		calls++
+		if calls < 3 {
+			return "", errors.New("no route yet")
+		}
+		return "10.9.8.7", nil
+	}
+	buf := &bytes.Buffer{}
+	host, err := resolveSandboxDigestsHostLate(context.Background(), &Config{},
+		slog.New(slog.NewJSONHandler(buf, nil)), lookup)
+	if err != nil || host != "10.9.8.7" {
+		t.Fatalf("host = %q, err = %v; want recovery on attempt 3", host, err)
+	}
+	if !strings.Contains(buf.String(), `"msg":"advertise-host inference recovered"`) {
+		t.Fatalf("no recovery log line; log:\n%s", buf.String())
+	}
+}
