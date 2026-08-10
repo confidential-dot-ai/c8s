@@ -13,10 +13,18 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/netutil"
+
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
+
+// maxConcurrentConns caps accepted connections. Every request costs a verify
+// round trip to the local attestation-api; the cap bounds that load and the
+// goroutine count. Excess connections queue in the accept backlog. Joins are
+// one per booting node, so the cap is far above any legitimate burst.
+const maxConcurrentConns = 64
 
 // ReleaseConfig is the join-release service configuration.
 type ReleaseConfig struct {
@@ -123,7 +131,7 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ServeTLS(ln, "", "")
+		errCh <- srv.ServeTLS(netutil.LimitListener(ln, maxConcurrentConns), "", "")
 	}()
 
 	select {
