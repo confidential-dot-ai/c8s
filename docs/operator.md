@@ -327,7 +327,7 @@ whatever an operator adds with `c8s allowlist add`. With
 `cds.persistence.enabled=false` (the default) that store is an `emptyDir`, so a
 restart (OOM, drain, upgrade, scale) drops every operator-added digest back to
 the install seed — workloads pulling those images are denied roughly one worker
-poll interval (~30s) later. CDS logs a warning at startup when persistence is
+poll interval (~5s) later. CDS logs a warning at startup when persistence is
 off. To keep dynamic entries across restarts set `cds.persistence.enabled=true`
 (an RWO PVC); otherwise re-run `c8s allowlist add` after any CDS restart.
 Component/floor digests are unaffected — they are re-seeded and, unlike dynamic

@@ -918,8 +918,10 @@ nriImagePolicy:
     restartCommand: ""
 
   refresh:
-    # How often the worker plugin pulls the current allowlist from CDS.
-    interval: 30s
+    # How often the worker plugin pulls the current allowlist from CDS. This
+    # bounds how long a freshly applied workload entry is still refused at
+    # container start.
+    interval: 5s
 
   # --- Bootstrap allowlist (the authoritative floor) ---
   # The single source of truth for the image-digest floor. Used two ways:
