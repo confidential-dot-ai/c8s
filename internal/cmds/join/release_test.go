@@ -188,13 +188,13 @@ func TestRunReleaseServesAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
 	cfg.ListenAddr = ln.Addr().String()
-	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RunRelease(ctx, cfg) }()
+	go func() { done <- runRelease(ctx, cfg, ln) }()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {

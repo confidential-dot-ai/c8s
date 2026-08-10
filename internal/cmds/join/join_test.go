@@ -91,13 +91,13 @@ func TestJoinExchangeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
 	relCfg.ListenAddr = ln.Addr().String()
-	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RunRelease(ctx, relCfg) }()
+	go func() { done <- runRelease(ctx, relCfg, ln) }()
 	waitForListen(t, relCfg.ListenAddr, done)
 
 	cfg := joinConfig(t, api.URL, relCfg.ListenAddr)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -43,6 +44,14 @@ type ReleaseConfig struct {
 //  2. serve over an RA-TLS config that REQUIRES a client cert, so every
 //     request carries the evidence the handler verifies.
 func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
+	return runRelease(ctx, cfg, nil)
+}
+
+// runRelease is RunRelease with an optional pre-bound listener; tests inject
+// one to avoid the close-and-rebind port race. A nil ln binds cfg.ListenAddr
+// after the attestation ladder, so the production port never opens before the
+// policy is pinned.
+func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	// RA-TLS is mandatory: joining agents verify this endpoint's serving
 	// quote before presenting their own evidence, so a plain-TLS listener
 	// (empty platform in the ratls package) must never come up.
@@ -93,8 +102,15 @@ func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 		return fmt.Errorf("warm up RA-TLS serving cert: %w", err)
 	}
 
+	if ln == nil {
+		var lnErr error
+		ln, lnErr = net.Listen("tcp", cfg.ListenAddr)
+		if lnErr != nil {
+			return fmt.Errorf("listen %s: %w", cfg.ListenAddr, lnErr)
+		}
+	}
+
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -107,7 +123,7 @@ func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServeTLS("", "")
+		errCh <- srv.ServeTLS(ln, "", "")
 	}()
 
 	select {
