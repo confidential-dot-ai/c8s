@@ -256,7 +256,7 @@ func startGuestInventory(t *testing.T) {
 		t.Skipf("guest token port %d unavailable here: %v", workloadclaims.GuestTokenPort, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
+	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
 	t.Cleanup(func() { cancel(); l.Close() })
 }
 

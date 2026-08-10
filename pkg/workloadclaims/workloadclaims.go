@@ -246,47 +246,60 @@ const maxSandboxRequestBytes = 64 << 10
 // by kernel peer credentials, and in the guest by the single-pod boundary.
 // Errors from the resolver are returned as 500s — get-cert fails closed on them.
 //
-// A nil signer serves nothing (404 on the route): no signer means no CDS to
-// attest the signing key against, and an unverifiable token is worse than none.
-func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signer *SandboxTokenSigner) error {
+// The route is registered whatever state signers is in, because under kata the
+// listener has to claim 127.0.0.1:8401 before any workload container starts —
+// containers share the guest's network namespace, so a listener bound late is
+// one a workload can bind first and answer as. What the signer's state changes
+// is the answer: see SignerHolder.
+func ServeTokens(ctx context.Context, l net.Listener, resolver SandboxResolver, signers *SignerHolder) error {
 	mux := http.NewServeMux()
-	if signer != nil {
-		mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
-			var req SandboxTokenRequest
-			if err := json.NewDecoder(io.LimitReader(r.Body, maxSandboxRequestBytes)).Decode(&req); err != nil {
-				http.Error(w, fmt.Sprintf("decode sandbox token request: %v", err), http.StatusBadRequest)
-				return
-			}
-			pub, err := x509.ParsePKIXPublicKey(req.PublicKey)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("parse requester key: %v", err), http.StatusBadRequest)
-				return
-			}
-			keyDigest, err := RequesterKeyDigest(pub)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if len(req.Nonce) == 0 {
-				http.Error(w, "missing challenge nonce", http.StatusBadRequest)
-				return
-			}
-			peer := peerFromRequest(r)
-			defer peer.Close()
-			id, err := resolver.SandboxForPeer(peer)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
-				return
-			}
-			token, err := signer.Sign(id, keyDigest, req.Nonce)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("sign sandbox token: %v", err), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(token)
-		})
-	}
+	mux.HandleFunc("POST "+SandboxPath, func(w http.ResponseWriter, r *http.Request) {
+		signer, state := signers.current()
+		switch state {
+		case signerUnsupported:
+			// No CDS to attest the signing key against, and an unverifiable
+			// token is worse than none. Terminal, so the caller is told to
+			// stop asking rather than to wait.
+			http.Error(w, "inventory serves no sandbox tokens", http.StatusNotFound)
+			return
+		case signerPending:
+			http.Error(w, "sandbox-token signer not installed yet", http.StatusServiceUnavailable)
+			return
+		}
+		var req SandboxTokenRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, maxSandboxRequestBytes)).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("decode sandbox token request: %v", err), http.StatusBadRequest)
+			return
+		}
+		pub, err := x509.ParsePKIXPublicKey(req.PublicKey)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("parse requester key: %v", err), http.StatusBadRequest)
+			return
+		}
+		keyDigest, err := RequesterKeyDigest(pub)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(req.Nonce) == 0 {
+			http.Error(w, "missing challenge nonce", http.StatusBadRequest)
+			return
+		}
+		peer := peerFromRequest(r)
+		defer peer.Close()
+		id, err := resolver.SandboxForPeer(peer)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("resolve caller sandbox: %v", err), http.StatusInternalServerError)
+			return
+		}
+		token, err := signer.Sign(id, keyDigest, req.Nonce)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("sign sandbox token: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(token)
+	})
 	return serveUntil(ctx, l, mux)
 }
 
@@ -400,6 +413,14 @@ func inventoryDo(ctx context.Context, endpoint, method, route string, body io.Re
 // Callers proceed without a sandbox ID.
 var ErrSandboxUnsupported = errors.New("workloadclaims: inventory does not serve the sandbox route")
 
+// ErrSandboxNotReady reports that the inventory serves the route but has no
+// signer yet, because the address it commits to needs a pod network that is
+// still being configured. Distinct from ErrSandboxUnsupported because the
+// answer differs: this one is worth waiting for, and issuing without a sandbox
+// ID instead would bind the sandbox in CDS's ledger — first-write-wins — to a
+// leaf that has none.
+var ErrSandboxNotReady = errors.New("workloadclaims: inventory has no sandbox-token signer yet")
+
 // FetchSandboxToken asks the inventory at endpoint for a signed sandbox token
 // bound to requesterPub (the caller's CSR key) and nonce (the CDS challenge for
 // this issuance, which CDS re-checks for freshness). A 404 maps to
@@ -421,6 +442,9 @@ func FetchSandboxToken(ctx context.Context, endpoint string, timeout time.Durati
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrSandboxUnsupported
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return nil, ErrSandboxNotReady
 	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

@@ -123,19 +123,18 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	{
 		m.inventory = newAdmissionInventory()
 		m.inventory.refresh = func() workloadclaims.AllowlistRefresh { return m.refresh.report(a.Size()) }
-		signer := sandboxTokenSigner(cfg, logger)
-		if err := startAdmissionInventory(ctx, logger, m.inventory, signer); err != nil {
-			return fmt.Errorf("start admission inventory: %w", err)
+		// The listener binds here, on the startup path, even though its signer
+		// cannot exist yet: containers share the guest's network namespace, so
+		// a workload that starts before this bind could claim
+		// 127.0.0.1:8401 and answer as the inventory. Binding early and
+		// signing later is what keeps that window shut (installSandboxTokenSigner).
+		m.signers = workloadclaims.NewPendingSignerHolder()
+		if cfg.CDSURL == "" {
+			logger.Warn("sandbox tokens disabled: no CDS URL configured")
+			m.signers.Disable()
 		}
-		// Only useful alongside tokens: the address CDS dials is signed into
-		// them, so without a signer nothing can direct CDS here.
-		// Fail-soft: a missing digests endpoint degrades issuance (CDS refuses
-		// tokens it cannot check), which is cheaper than taking the guest's
-		// only image-policy enforcer down with it.
-		if signer != nil {
-			if err := startSandboxDigests(ctx, logger, cfg, m.inventory, signer); err != nil {
-				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
-			}
+		if err := startAdmissionInventory(ctx, logger, m.inventory, m.signers); err != nil {
+			return fmt.Errorf("start admission inventory: %w", err)
 		}
 	}
 
@@ -152,6 +151,10 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		// with it.
 		go func() {
 			awaitInitDataMeasurements(ctx, logger, cfg)
+			// Both need the measurements the document carries, and neither may
+			// hold the other up: the signer waits on the pod network, the
+			// refresh only on CDS answering.
+			go installSandboxTokenSigner(ctx, cfg, logger, m.inventory, m.signers)
 			runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
 		}()
 	} else {
@@ -177,8 +180,9 @@ type monitor struct {
 	overlay               *policyOverlay // latest CDS pull's workload argv policy
 	refresh               *refreshState  // whether the allowlist still tracks CDS
 	killer                containerKiller
-	inventory             *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
-	ready                 func() error        // systemd READY=1; nil outside the unit
+	inventory             *admissionInventory          // sandbox identity + digests (docs/ratls.md); always set
+	signers               *workloadclaims.SignerHolder // token signer, installed once the pod network resolves
+	ready                 func() error                 // systemd READY=1; nil outside the unit
 	readyOnce             sync.Once
 	fatal                 chan error // an enforcement failure the process must exit on
 	killEscalateAfter     time.Duration

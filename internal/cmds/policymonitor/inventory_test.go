@@ -4,6 +4,7 @@ package policymonitor
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -140,14 +141,10 @@ func TestKataInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
 
 // A configured advertise host bypasses retry entirely: the routing-table
 // lookup never happens, so the CDS URL not resolving does not matter.
-func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T) {
-	prev := advertiseHostAttempts
-	advertiseHostAttempts = 3
-	t.Cleanup(func() { advertiseHostAttempts = prev })
-
+func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
-	got, err := resolveSandboxDigestsHostWithRetry(&Config{
+	got, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "10.2.3.4",
 		CDSURL:                      "https://cds.invalid:8443",
 	}, logger)
@@ -159,70 +156,82 @@ func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T)
 	}
 }
 
-// A CDS URL that does not resolve exhausts the retry budget rather than
-// latching tokens off on the first failure.
-func TestResolveSandboxDigestsHostWithRetry_ExhaustsBudget(t *testing.T) {
-	prevAttempts := advertiseHostAttempts
-	prevBackoff := advertiseHostBackoff
-	advertiseHostAttempts = 3
-	advertiseHostBackoff = time.Millisecond
+// A CDS URL that does not resolve keeps retrying to the budget rather than
+// latching tokens off on the first failure — the whole point of running late is
+// that the network arrives after the first attempt.
+func TestResolveSandboxDigestsHostLate_RetriesUntilBudget(t *testing.T) {
+	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	advertiseHostRetryInterval = time.Millisecond
+	advertiseHostLateBudget = 20 * time.Millisecond
 	t.Cleanup(func() {
-		advertiseHostAttempts = prevAttempts
-		advertiseHostBackoff = prevBackoff
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
 	})
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
-	_, err := resolveSandboxDigestsHostWithRetry(&Config{
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
 		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
 	}, logger)
 	if err == nil {
-		t.Fatal("want an error after retry budget exhausted")
+		t.Fatal("want an error after the budget is exhausted")
 	}
-	// Every attempt but the last logs a retry line — proves we did not latch
-	// off on the first failure the way the old code did.
-	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got != advertiseHostAttempts-1 {
-		t.Fatalf("got %d retry log lines, want %d; log:\n%s", got, advertiseHostAttempts-1, buf.String())
+	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got < 2 {
+		t.Fatalf("got %d retry log lines, want repeated retries; log:\n%s", got, buf.String())
 	}
 }
 
-// The budget is the authoritative bound, not the attempt/backoff product: an
-// attempt count that would run long stops at the deadline instead.
-func TestResolveSandboxDigestsHostWithRetry_StopsAtBudget(t *testing.T) {
-	prevAttempts := advertiseHostAttempts
-	prevBackoff := advertiseHostBackoff
-	prevBudget := advertiseHostStartupBudget
-	// 100 x 50ms would be 5s of backoff; the budget must cut it far shorter.
-	advertiseHostAttempts = 100
-	advertiseHostBackoff = 50 * time.Millisecond
-	advertiseHostStartupBudget = 200 * time.Millisecond
+// The budget bounds the wait: a guest that never gets a network must reach
+// "no signer" rather than hold every fetcher open indefinitely.
+func TestResolveSandboxDigestsHostLate_StopsAtBudget(t *testing.T) {
+	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	advertiseHostRetryInterval = 5 * time.Millisecond
+	advertiseHostLateBudget = 50 * time.Millisecond
 	t.Cleanup(func() {
-		advertiseHostAttempts = prevAttempts
-		advertiseHostBackoff = prevBackoff
-		advertiseHostStartupBudget = prevBudget
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
 	})
 
-	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
 	start := time.Now()
-	if _, err := resolveSandboxDigestsHostWithRetry(&Config{
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
 		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
-	}, logger); err == nil {
-		t.Fatal("want an error once the budget is exhausted")
+	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
+	if err == nil {
+		t.Fatal("want an error after the budget is exhausted")
 	}
-	// Generous ceiling: the point is that it returns in fractions of a second
-	// rather than running all 100 attempts, not the exact stopping instant.
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("lookup blocked for %s; the budget of %s should have cut it short", elapsed, advertiseHostStartupBudget)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ran for %s, want the %s budget to stop it", elapsed, advertiseHostLateBudget)
 	}
 }
 
-// The lookup runs before policy-monitor signals READY=1, and kata-agent
-// Requires= this unit, so blocking past TimeoutStartSec fails the unit —
-// whose FailureAction=poweroff-force then takes the whole guest down. This
-// asserts the Go budget and the shipped unit file cannot drift into that
-// state again: a previous change set the product to 12 x 5s against a 30s
-// timeout, and every kata pod stopped booting.
-func TestAdvertiseHostBudgetFitsUnitStartTimeout(t *testing.T) {
+// A cancelled context stops the wait, so guest shutdown is not held up by a
+// lookup that will never succeed.
+func TestResolveSandboxDigestsHostLate_StopsOnContextCancel(t *testing.T) {
+	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	advertiseHostRetryInterval = 10 * time.Millisecond
+	advertiseHostLateBudget = time.Hour
+	t.Cleanup(func() {
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := resolveSandboxDigestsHostLate(ctx, &Config{
+		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))); err == nil {
+		t.Fatal("want an error when the context ends")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ran for %s after cancellation", elapsed)
+	}
+}
+
+// Replaces TestAdvertiseHostBudgetFitsUnitStartTimeout, which pinned this
+// lookup UNDER the unit's start timeout because it ran before READY=1. It now
+// runs after, so the budget is deliberately longer - and that is only safe
+// while it stays off the startup path. If the lookup is ever moved back,
+// systemd fails the unit at TimeoutStartSec and FailureAction=poweroff-force
+// kills the guest, which is #258 all over again.
+func TestAdvertiseHostRunsOffTheStartupPath(t *testing.T) {
 	unit := filepath.Join("..", "..", "..", "kata-guest-base", "extra", "etc", "systemd", "system", "policy-monitor.service")
 	raw, err := os.ReadFile(unit)
 	if err != nil {
@@ -237,12 +246,9 @@ func TestAdvertiseHostBudgetFitsUnitStartTimeout(t *testing.T) {
 		t.Fatalf("parse TimeoutStartSec=%q: %v", m[1], err)
 	}
 
-	// A third of the window, so the rest of startup (kill-path self-test,
-	// allowlist load, listener bind) still has room even at the budget's worst
-	// case.
-	if limit := timeout / 3; advertiseHostStartupBudget > limit {
-		t.Fatalf("advertiseHostStartupBudget = %s exceeds %s (a third of the unit's TimeoutStartSec=%s); "+
-			"blocking this long before READY=1 fails the unit and poweroff-force kills the guest",
-			advertiseHostStartupBudget, limit, timeout)
+	if advertiseHostLateBudget <= timeout {
+		t.Fatalf("advertiseHostLateBudget = %s fits inside TimeoutStartSec=%s; either the lookup moved back onto "+
+			"the startup path, or the budget shrank to where waiting for the pod network no longer works",
+			advertiseHostLateBudget, timeout)
 	}
 }
