@@ -231,6 +231,8 @@ done
 [[ -f "${PATCH_DIR}/0001-agent-refuse-an-init-data-supplied-policy.patch" ]] || die "the init-data policy patch is missing from ${PATCH_DIR}."
 # Without it policy-monitor's decision races the container's execve.
 [[ -f "${PATCH_DIR}/0002-agent-wait-for-the-admission-verdict.patch" ]] || die "the admission-verdict patch is missing from ${PATCH_DIR}."
+# Without it every pod start logs the container's env/argv to the host console.
+[[ -f "${PATCH_DIR}/0005-agent-stop-logging-the-createcontainer-spec.patch" ]] || die "the createcontainer spec-log patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
