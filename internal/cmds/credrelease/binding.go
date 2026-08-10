@@ -8,10 +8,11 @@ package credrelease
 
 import (
 	"bytes"
-	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"os"
+
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -27,19 +28,6 @@ var operatorPubkeyPath = "/etc/confai/operator-pubkey"
 // service confirm the on-disk operator pubkey is the one that was measured.
 // Var (not const) so tests can point it at a temp file.
 var rtmr3SysfsPath = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
-
-// expectedRTMR3ForKey computes the RTMR[3] value a guest reports after the
-// initrd extends the zeroed register once with SHA-384(pubkey):
-//
-//	RTMR[3] = SHA384( 0x00*48 || SHA384(pubkey) )
-//
-// This is the same value the operator computes offline from their own key, so
-// matching it proves the guest was launched to trust exactly this key.
-func expectedRTMR3ForKey(pubkey []byte) []byte {
-	keyDigest := sha512.Sum384(pubkey)
-	rtmr3 := sha512.Sum384(append(make([]byte, 48), keyDigest[:]...))
-	return rtmr3[:]
-}
 
 // readOwnRTMR3 reads the guest's current RTMR[3] from the tdx_guest sysfs.
 // Returns the raw 48 bytes.
@@ -68,12 +56,18 @@ func verifyKeyMeasured(pubkey []byte) error {
 	if err != nil {
 		return err
 	}
-	want := expectedRTMR3ForKey(pubkey)
+	// The bare operator-key seed — no workload extends — is correct HERE, at
+	// service startup, even though remote verifiers compare against the seeded
+	// workload chain: the node image runs no workload measurer, so at this
+	// moment RTMR[3] must equal the seed exactly. Any extension beyond it means
+	// an unexpected measurer ran or the register was tampered with, and the
+	// comparison fails closed.
+	want := runtimemeasure.ForOperatorKey(pubkey)
 	// Not secret (a public-key hash) — plain compare is fine.
-	if !bytes.Equal(own, want) {
+	if !bytes.Equal(own, want[:]) {
 		return fmt.Errorf(
 			"operator pubkey does not match the measured RTMR[3]: got %s, key implies %s (was the pubkey file substituted after boot?)",
-			hex.EncodeToString(own), hex.EncodeToString(want))
+			hex.EncodeToString(own), hex.EncodeToString(want[:]))
 	}
 	return nil
 }

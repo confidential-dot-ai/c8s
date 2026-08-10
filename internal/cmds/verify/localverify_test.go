@@ -66,7 +66,7 @@ func TestVerifyEvidence_TimeoutBoundsCollateralFetch(t *testing.T) {
 	cfg := config{timeout: 50 * time.Millisecond, output: "text"}
 	var out, errOut bytes.Buffer
 	start := time.Now()
-	code := verifyEvidence(context.Background(), cfg, &ratls.VerifyPolicy{}, bareSnpEvidence(t), operatorKeysReport{}, &out, &errOut)
+	code := verifyEvidence(context.Background(), cfg, &verifyPlan{policy: &ratls.VerifyPolicy{}}, bareSnpEvidence(t), nil, operatorKeysReport{}, &out, &errOut)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("verifyEvidence took %v, want the 50ms timeout enforced", elapsed)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -20,9 +21,19 @@ import (
 type VerifyPolicy struct {
 	// Measurements is the set of acceptable launch measurements (48 bytes each).
 	// If empty, any measurement is accepted (UNSAFE — use only for development).
-	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD. TDX RTMRs are not
-	// covered by this policy, including the per-workload RTMR[3].
+	// For SNP this pins LAUNCH_DIGEST; for TDX it pins MRTD.
 	Measurements [][]byte
+
+	// RTMRs pins TDX runtime measurement registers by index. MRTD covers TDVF
+	// alone, so on TDX it is these — RTMR[1] for the guest kernel, RTMR[2] for
+	// the command line carrying the dm-verity root hash — that make the guest
+	// image itself attested. Ignored on SNP, where kernel-hashes folds the
+	// command line into the launch digest. Empty pins nothing.
+	//
+	// Leave RTMR[0] unpinned: it carries the TD HOB, so it varies with the
+	// pod's vCPU and memory shape. RTMR[3] is extended by in-guest software and
+	// so cannot speak to guest identity.
+	RTMRs map[int][]byte
 
 	// MinTCBVersion is the minimum acceptable platform TCB version.
 	// This is a packed uint64 where each byte represents a component
@@ -48,6 +59,14 @@ type VerifyPolicy struct {
 	// Only [VerifyCert] can enforce it (the ID rides the certificate);
 	// [VerifyAttestation] fails closed when it is set.
 	SandboxID string
+
+	// WorkloadName, when set, is the allowlist entry name the certificate's
+	// matched-workload extension must carry (docs/ratls.md, "Matched
+	// workload"). Like SandboxID it is CA-vouched: it is enforced only on the
+	// chain-verified branch of the dual peer verifier, and VerifyAttestation /
+	// VerifyCert fail closed when it is set — neither checks a CA chain, so
+	// neither can authenticate the stamp.
+	WorkloadName string
 
 	// AttestationApiURL is the attestation-api whose /verify endpoint performs
 	// all evidence verification: hardware signature chain, REPORTDATA key
@@ -106,7 +125,7 @@ type VerifyResult struct {
 //     the TEE (and the report is fresh if nonce is set), plus the debug and
 //     minimum-TCB policy.
 //  2. The launch measurement it returns is checked against
-//     policy.Measurements here.
+//     policy.Measurements here, and any pinned TDX RTMRs against policy.RTMRs.
 func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
@@ -117,6 +136,9 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 	if policy.SandboxID != "" {
 		// The ID rides the certificate, which this path never sees.
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
+	if policy.WorkloadName != "" {
+		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
@@ -135,9 +157,35 @@ func VerifyAttestation(pub crypto.PublicKey, att *Attestation, policy *VerifyPol
 // from any certificate authority signature. A sandbox-ID pin therefore cannot
 // be enforced here: the ID rests on CDS's signature over the leaf, which this
 // path does not check (docs/ratls.md, "Sandbox identity").
+//
+// The certificate body is authenticated first (certutil.AuthenticateLeafBody):
+// the validity window (NotBefore within [certutil.LeafValiditySkew], NotAfter
+// with no allowance), because the embedded evidence carries no per-connection
+// nonce and the window is the only freshness bound this path has; and, for a
+// self-issued leaf, its signature under its own attested key, because the
+// attestation binds only the key — every other field could otherwise be
+// rewritten under a genuine extension. Doing it before the evidence
+// round-trip also keeps a bad certificate from consuming an attestation-api
+// call.
 func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*VerifyResult, error) {
 	if policy == nil {
 		policy = &VerifyPolicy{}
+	}
+
+	// Split out so a window failure keeps its own sentinel; callers
+	// (dualVerifyPeerCallback, the mesh proxies) branch on ErrCertValidity.
+	now := time.Now()
+	if err := certutil.CheckValidity(cert, now); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCertValidity, err)
+	}
+	// The classification is not actionable at this layer: both classes reach
+	// here legitimately — the self-signed mesh peer, and (via
+	// dualVerifyPeerCallback's RequireCAEvidence step) a CA-signed leaf whose
+	// chain that caller has already verified. What the call buys is the
+	// self-signature check on the self-issued case, which is the half of body
+	// authentication this path would otherwise skip.
+	if _, err := certutil.AuthenticateLeafBody(cert, now); err != nil {
+		return nil, fmt.Errorf("ratls: peer certificate body: %w", err)
 	}
 
 	att, err := ExtractAttestation(cert)
@@ -155,6 +203,9 @@ func VerifyCert(cert *x509.Certificate, policy *VerifyPolicy, nonce []byte) (*Ve
 	}
 	if policy.SandboxID != "" {
 		return nil, fmt.Errorf("%w: sandbox-ID pin requires a CA-verified certificate", ErrPolicyViolation)
+	}
+	if policy.WorkloadName != "" {
+		return nil, fmt.Errorf("%w: workload pin requires a CA-verified certificate", ErrPolicyViolation)
 	}
 
 	expectedReportData, err := ReportDataForKey(pub, nonce)
@@ -277,6 +328,7 @@ func verifyEnvelopeOnline(evidence *types.AttestationEvidence, policy *VerifyPol
 		AllowDebug:         policy.AllowDebug,
 		MinTcb:             minTcb,
 		Measurements:       policy.Measurements,
+		RTMRs:              policy.RTMRs,
 	})
 	if err != nil {
 		return nil, mapVerifyError(evidence.Platform, err)
@@ -335,15 +387,4 @@ func snpEvidence(rawReport []byte) (*types.AttestationEvidence, error) {
 		Platform: string(types.PlatformSnp),
 		Evidence: inner,
 	}, nil
-}
-
-// MeasurementAllowed reports whether measurement byte-equals one of the allowed
-// launch digests (an empty allowed set means "no pin" and is handled by callers).
-func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
-	for _, m := range allowed {
-		if bytes.Equal(measurement, m) {
-			return true
-		}
-	}
-	return false
 }

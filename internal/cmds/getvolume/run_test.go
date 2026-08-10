@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volumed"
-	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func TestParseVolumeSpec(t *testing.T) {
@@ -45,14 +45,16 @@ func TestParseVolumeSpecAcceptsTheLongestServableName(t *testing.T) {
 
 func validConfig() config {
 	return config{
-		CDSURL:            "https://cds.example",
-		AttestationApiURL: "http://127.0.0.1:8400",
-		SocketDir:         "/run/c8s/workload-claims",
-		Volumes:           []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
-		Attempts:          60,
-		RetryInterval:     5 * time.Second,
-		RequestTimeout:    10 * time.Second,
-		InventoryTimeout:  5 * time.Second,
+		Config: sidecar.Config{
+			CDSURL:            "https://cds.example",
+			AttestationApiURL: "http://127.0.0.1:8400",
+			Attempts:          60,
+			RetryInterval:     5 * time.Second,
+			RequestTimeout:    10 * time.Second,
+			InventoryTimeout:  5 * time.Second,
+		},
+		SocketDir: "/run/c8s/workload-claims",
+		Volumes:   []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
 	}
 }
 
@@ -129,18 +131,7 @@ func TestDaemonClientSelectsCompiledShape(t *testing.T) {
 	if base != "http://volumed" {
 		t.Errorf("node-CVM base = %q, want the unix-transport placeholder", base)
 	}
-	if _, guestBase := daemonClient(config{WorkloadClaimsGuest: true}); guestBase != volumed.GuestEndpoint() {
+	if _, guestBase := daemonClient(config{Config: sidecar.Config{WorkloadClaimsGuest: true}}); guestBase != volumed.GuestEndpoint() {
 		t.Errorf("guest base = %q, want the compiled %q", guestBase, volumed.GuestEndpoint())
-	}
-}
-
-// The inventory endpoint moves with the same flag: on node-CVM the guest port
-// serves nothing, and in a guest the socket cannot exist.
-func TestInventoryEndpointFollowsTheShape(t *testing.T) {
-	if got, want := (config{}).endpoint(), workloadclaims.InventoryEndpoint(); got != want {
-		t.Errorf("node-CVM endpoint = %q, want %q", got, want)
-	}
-	if got, want := (config{WorkloadClaimsGuest: true}).endpoint(), workloadclaims.GuestInventoryEndpoint(); got != want {
-		t.Errorf("kata endpoint = %q, want %q", got, want)
 	}
 }

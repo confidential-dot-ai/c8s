@@ -123,19 +123,18 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	{
 		m.inventory = newAdmissionInventory()
 		m.inventory.refresh = func() workloadclaims.AllowlistRefresh { return m.refresh.report(a.Size()) }
-		signer := sandboxTokenSigner(cfg, logger)
-		if err := startAdmissionInventory(ctx, logger, m.inventory, signer); err != nil {
-			return fmt.Errorf("start admission inventory: %w", err)
+		// The listener binds here, on the startup path, even though its signer
+		// cannot exist yet: containers share the guest's network namespace, so
+		// a workload that starts before this bind could claim
+		// 127.0.0.1:8401 and answer as the inventory. Binding early and
+		// signing later is what keeps that window shut (installSandboxTokenSigner).
+		m.signers = workloadclaims.NewPendingSignerHolder()
+		if cfg.CDSURL == "" {
+			logger.Warn("sandbox tokens disabled: no CDS URL configured")
+			m.signers.Disable()
 		}
-		// Only useful alongside tokens: the address CDS dials is signed into
-		// them, so without a signer nothing can direct CDS here.
-		// Fail-soft: a missing digests endpoint degrades issuance (CDS refuses
-		// tokens it cannot check), which is cheaper than taking the guest's
-		// only image-policy enforcer down with it.
-		if signer != nil {
-			if err := startSandboxDigests(ctx, logger, cfg, m.inventory, signer); err != nil {
-				logger.Error("sandbox-digests endpoint disabled; CDS will refuse requests carrying a sandbox token", "error", err)
-			}
+		if err := startAdmissionInventory(ctx, logger, m.inventory, m.signers); err != nil {
+			return fmt.Errorf("start admission inventory: %w", err)
 		}
 	}
 
@@ -145,13 +144,25 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 	// *allowlist with m, whose merge is mutex-guarded. No CDS URL →
 	// baked-seed-only and the network is never touched.
 	if cfg.CDSURL != "" {
-		applyInitDataMeasurements(ctx, logger, cfg)
-		go runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
+		// Both steps run here rather than on the startup path because the
+		// document they need is written by kata-agent, which systemd holds
+		// behind this unit's READY=1. cfg.CDSMeasurements is written only in
+		// this goroutine, after the synchronous readers above have finished
+		// with it.
+		go func() {
+			awaitInitDataMeasurements(ctx, logger, cfg)
+			// Both need the measurements the document carries, and neither may
+			// hold the other up: the signer waits on the pod network, the
+			// refresh only on CDS answering.
+			go installSandboxTokenSigner(ctx, cfg, logger, m.inventory, m.signers)
+			runAllowlistRefresh(ctx, logger, cfg, a, m.overlay, m.refresh)
+		}()
 	} else {
 		// Info, not Error: seed-only is the configured intent here, unlike the
 		// failure paths in runAllowlistRefresh. Still recorded, so denies and
 		// the digests endpoint report the frozen set either way.
 		m.refresh.disable(reasonNoCDSURL)
+		m.refresh.settle()
 		logger.Info("allowlist refresh disabled (no CDS URL); enforcing baked seed only", "entries", a.Size())
 	}
 
@@ -169,8 +180,9 @@ type monitor struct {
 	overlay               *policyOverlay // latest CDS pull's workload argv policy
 	refresh               *refreshState  // whether the allowlist still tracks CDS
 	killer                containerKiller
-	inventory             *admissionInventory // sandbox identity + digests (docs/ratls.md); always set
-	ready                 func() error        // systemd READY=1; nil outside the unit
+	inventory             *admissionInventory          // sandbox identity + digests (docs/ratls.md); always set
+	signers               *workloadclaims.SignerHolder // token signer, installed once the pod network resolves
+	ready                 func() error                 // systemd READY=1; nil outside the unit
 	readyOnce             sync.Once
 	fatal                 chan error // an enforcement failure the process must exit on
 	killEscalateAfter     time.Duration
@@ -225,14 +237,15 @@ func (o *policyOverlay) apply(al *allowlistpkg.Allowlist, version uint64) bool {
 
 // admits reports whether a container may run. The baked floor (additive digest
 // set) admits by digest alone; otherwise the pulled overlay's Index decides on
-// digest + effective argv. With no overlay (CDS refresh disabled, or no
-// successful pull yet) only the baked floor admits — behavior from t=0.
-func (m *monitor) admits(digest string, argv []string) bool {
-	if m.allowlist.Contains(digest) {
+// the whole observation — digest, argv, bind-mount destinations and env names.
+// With no overlay (CDS refresh disabled, or no successful pull yet) only the
+// baked floor admits — behavior from t=0.
+func (m *monitor) admits(rc allowlistpkg.RunningContainer) bool {
+	if m.allowlist.Contains(rc.Digest) {
 		return true
 	}
 	if idx := m.overlay.index(); idx != nil {
-		return idx.AdmitsContainer(digest, argv)
+		return idx.AdmitsContainer(rc)
 	}
 	return false
 }
@@ -523,22 +536,42 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// Effective argv (OCI process.args): the merged entrypoint+cmd the container
-	// runs. Floor digests ignore it; workload digests are gated on it.
-	var argv []string
-	if spec.Process != nil {
-		argv = spec.Process.Args
+	// What the container actually runs, as the allowlist describes it. Floor
+	// digests ignore all of it; workload digests are gated on the whole set.
+	rc := allowlistpkg.RunningContainer{
+		Digest:     digest,
+		BindMounts: bindMountDestinations(spec.Mounts),
 	}
-	if m.admits(digest, argv) {
+	if spec.Process != nil {
+		rc.Argv = spec.Process.Args
+		rc.EnvNames = envNames(spec.Process.Env)
+	}
+	// A container is created seconds after its guest boots, while the first
+	// CDS pull is still failing for want of a pod network, so the allowlist a
+	// first verdict sees is the baked seed. Deciding on it would refuse every
+	// operator-added digest for the life of a pod that does not retry. Wait
+	// for a landed refresh — but only when about to deny, so an admitted
+	// container never pays for it, and only up to a budget, after which the
+	// seed is the answer and the deny stands.
+	if !m.admits(rc) {
+		m.refresh.awaitSettled(ctx, refreshSettleBudget)
+	}
+	if m.admits(rc) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
 		if m.inventory != nil {
-			m.inventory.record(cid, digest, argv)
+			m.inventory.record(cid, digest, rc.Argv)
 		}
 		m.recordVerdict(dir, verdictAllow)
 		return
 	}
-	m.logger.Warn("deny container: digest/argv not allowlisted",
-		append([]any{"cid", cid, "digest", digest, "argv", argv}, m.frozenAttrs()...)...)
+	// Name every field the decision looked at: a container denied on its mounts
+	// or environment reported as "digest/argv" would send an operator hunting
+	// the wrong thing.
+	m.logger.Warn("deny container: not admitted by digest, argv, mounts or env",
+		append([]any{
+			"cid", cid, "digest", digest, "argv", rc.Argv,
+			"bind_mounts", rc.BindMounts, "env_names", rc.EnvNames,
+		}, m.frozenAttrs()...)...)
 	m.deny(ctx, dir)
 }
 
@@ -701,12 +734,50 @@ func (m *monitor) readConfigJSON(ctx context.Context, dir string) (*ociSpec, err
 type ociSpec struct {
 	Annotations map[string]string `json:"annotations"`
 	Process     *ociProcess       `json:"process"`
+	Mounts      []ociMount        `json:"mounts"`
 }
 
-// ociProcess is the process block's argv: the merged image-config + pod-spec
-// command the container actually runs, evaluated against workload argv policy.
+// ociProcess is the process block the container runs: the merged image-config +
+// pod-spec argv, evaluated against workload argv policy, and the environment it
+// starts with, evaluated by name against workload env policy.
 type ociProcess struct {
 	Args []string `json:"args"`
+	Env  []string `json:"env"`
+}
+
+// ociMount is one entry of the container's mount table. The baked kata-agent
+// policy bounds where a bind's source may be; the destination is a path inside
+// the container and is what workload mount policy gates.
+type ociMount struct {
+	Destination string `json:"destination"`
+	Source      string `json:"source"`
+}
+
+// bindMountDestinations returns the destinations of the mounts that carry guest
+// content in. A source that is not an absolute path names a filesystem type
+// (proc, sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing, so gating it
+// would only make an operator restate the OCI base set.
+func bindMountDestinations(mounts []ociMount) []string {
+	var out []string
+	for _, m := range mounts {
+		if strings.HasPrefix(m.Source, "/") {
+			out = append(out, m.Destination)
+		}
+	}
+	return out
+}
+
+// envNames returns the NAME halves of the spec's "NAME=value" environment.
+// Values never leave this function: policy matches names, because an allowlist
+// is served to every enforcer and values carry secrets.
+func envNames(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if name, _, ok := strings.Cut(e, "="); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func readOCISpec(path string) (*ociSpec, error) {

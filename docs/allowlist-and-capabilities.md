@@ -68,6 +68,34 @@ reproduces the same bytes and pins the exact format. It also makes a malformed
 or foreign body fail loud instead of parsing as an empty (and therefore deny-all
 or, worse, allow-nothing-changed) allowlist.
 
+#### Entry names
+
+An entry name must match `[A-Za-z0-9][A-Za-z0-9._-]*` — it is used verbatim as a
+URL path segment — and be at most **63 bytes**, the Kubernetes label-value
+length, so the same string can also be a `confidential.ai/cw` selector value and
+a matched-workload leaf stamp (`docs/ratls.md`).
+
+The grammar is enforced everywhere. The 63-byte bound is enforced only where
+entries are **written**: `PUT /allowlist`, `PUT /allowlist/workloads/{name}`,
+and the CLI. A document *served* by CDS is parsed leniently, because the bound
+was introduced after entries could already have been stored and one legacy name
+must not fail the whole document for every puller in the cluster. An over-long
+entry is dropped from a served parse with a warning: its digests stop being
+admitted by that consumer (fail-closed), and it could never have been stamped on
+a leaf in the first place.
+
+**Migration.** An over-long entry created before the bound is still served by
+CDS and still counts toward the document's canonical digest, but no pod can be
+named for it and every consumer ignores it. Rename it — `c8s allowlist workload
+put <new-name>` followed by a delete of the old one — and pods matching it start
+getting named leaves. The lenient served parse is a compatibility measure for
+one release; do not rely on it.
+
+The grammar is slightly wider than what the injection webhook accepts for the
+`confidential.ai/cw` label: `a-`, `a_` and `a.` are valid entry names but are
+not valid label values. It is not tightened here, because that would
+retroactively invalidate stored entries.
+
 ## Process policy: command and args
 
 An image digest already pins the image's baked `ENTRYPOINT`/`CMD` — they are in
@@ -130,6 +158,54 @@ entry widens a shared digest to `any`, because that becomes the effective
 container-level policy for the digest everywhere. The narrower, entry-scoped
 guarantee is recovered at [cert issuance](#where-its-enforced).
 
+## Mount and environment policy (`mounts`, `env`)
+
+An image digest pins the bytes, and process policy pins what runs them, but
+neither says anything about what the host lays *over* those bytes at start-up.
+With `shared_fs="none"` the runtime seeds every configmap, secret and
+serviceaccount token by copying it into the sandbox seeding directory and
+bind-mounting it in — a mechanism a pod cannot work without, and one whose
+source directory the host may write. Staging a file there and binding it over a
+path inside the image runs host code from an allowlisted digest, and every
+digest still reports as admitted.
+
+Client-side verification does not catch this, unlike a pod whose trust
+configuration was repointed: the pod keeps its genuine identity — real CDS, real
+mesh CA, correct launch measurement — and a verifying client passes it and sends
+data to a container running injected code.
+
+`mounts` constrains **bind** mounts only, by destination. The rest of a mount
+table names filesystem types (`proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`,
+`cgroup`) and carries nothing in, so pinning it would only make an operator
+restate the OCI base set to say nothing. `env` constrains variable **names**;
+values are never matched, because the allowlist is served to every enforcer and
+values carry secrets. `LD_PRELOAD` is the case that motivates it — an injected
+name is code execution inside an otherwise-allowlisted image.
+
+```json
+"mounts": { "policy": "exact", "destinations": ["/etc/hosts", "/config"] },
+"env":    { "policy": "exact", "names": ["PATH", "MODEL_DIR"] }
+```
+
+`exact` requires every observed bind destination (or name) to appear in the
+list. An `exact` destination list is what the pod's `volumeMounts` declare plus
+the handful the kubelet always adds — `/etc/hosts`, `/etc/hostname`,
+`/etc/resolv.conf`, `/dev/termination-log`, `/dev/shm`, the serviceaccount token
+— so it is written against a pod spec, not guessed.
+
+Both default to `any` when absent, unlike argv, which defaults to `deny`. A
+container always carries a mount table and an environment it never declared, so
+a `deny` default would refuse every real pod and adopting the field would mean
+adopting an outage. That makes these opt-in: a digest with no policy is
+constrained exactly as much as it was before.
+
+Two limits worth stating. They bind only digests a `workloads` entry names —
+floor digests are admitted on the digest alone, so `c8s allowlist add` does not
+produce a mount-gated image. And an enforcer that cannot observe a field leaves
+it unset, which is treated as nothing-to-refuse rather than a violation: the
+host-side NRI plugin gates images on a node CVM and never sees a guest's mount
+table.
+
 ## Secret grants (`secrets`)
 
 An entry may grant secret-store paths to the workload it names. The subject is
@@ -173,13 +249,20 @@ Three independent points enforce, at different strengths:
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
    container. It reads the digest and `process.args` and applies the same index.
 
-3. **CDS at cert issuance**, in `verifySandboxWorkload`. Before signing a leaf
+3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
    running (`docs/ratls.md`, "Sandbox identity"). Every reported digest must be
-   allowlisted (floor or workload). Membership only: issuance lands mid-lifecycle,
-   where the running set is a strict subset of the declared one, so requiring a
-   whole entry would deny ordinary states
+   allowlisted (floor or workload), checked against one atomic allowlist
+   snapshot. Membership only: issuance lands mid-lifecycle, where the running
+   set is a strict subset of the declared one, so requiring a whole entry would
+   deny ordinary states
    ([getcert-workload-binding.md](getcert-workload-binding.md), Corner 4).
+   Additionally — and without changing the membership contract — when the
+   high-water `(digest, argv)` inventory uniquely matches one workload entry,
+   the leaf is stamped with that entry's name and the snapshot's version and
+   canonical digest (OID `…1.5`, `docs/ratls.md` "Matched workload"), which is
+   what `c8s verify --workload/--allowlist` and
+   `ratls.VerifyPolicy.WorkloadName` enforce against the mesh-CA chain.
 
 ### What each layer can and cannot promise
 

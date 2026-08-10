@@ -151,6 +151,48 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+// stubCertGate stands in for a ratls.CertManager so the readiness wiring can
+// be exercised without minting short-lived certificates and sleeping past
+// their expiry.
+type stubCertGate struct{ ready, usable bool }
+
+func (g stubCertGate) CertReady() bool  { return g.ready }
+func (g stubCertGate) CertUsable() bool { return g.usable }
+
+// CertReady is sticky ("provisioned at least once"), so it no longer implies
+// "can serve TLS": once the manager refuses to hand an expired certificate to
+// a handshake, a pod whose rotation has been failing past NotAfter fails
+// every connection. /ready must take it out of the endpoint list instead of
+// letting Kubernetes keep routing to it.
+func TestHealthReadyGatesOnCertUsable(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		server, client certGate
+		wantCode       int
+		wantBody       string
+	}{
+		{"server cert provisioned but expired", stubCertGate{ready: true}, nil, http.StatusServiceUnavailable, "server cert outside its validity window"},
+		{"client cert provisioned but expired", stubCertGate{ready: true, usable: true}, stubCertGate{ready: true}, http.StatusServiceUnavailable, "client cert outside its validity window"},
+		{"both usable", stubCertGate{ready: true, usable: true}, stubCertGate{ready: true, usable: true}, http.StatusOK, "ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHealthServer(testMetrics(), nil, nil, 10, time.Second, time.Second)
+			h.serverCertMgr = tc.server
+			h.clientCertMgr = tc.client
+			h.ready.Store(true)
+
+			rec := httptest.NewRecorder()
+			h.handleReady(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("body = %q, want it to mention %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
 func TestHealthServerServe(t *testing.T) {
 	h := newHealthServer(testMetrics(), nil, nil, 10, time.Second, time.Second)
 	h.ready.Store(true)

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -21,6 +22,16 @@ import (
 // maxErrorBodyBytes caps how much of an untrusted peer's non-2xx response
 // body is read into StatusError.
 const maxErrorBodyBytes = 8 << 10
+
+// maxResponseBodyBytes caps a 2xx response body. The largest legitimate
+// payloads are evidence envelopes carrying quotes and certificate chains,
+// well under this; anything bigger is a misbehaving peer, not data.
+const maxResponseBodyBytes = 8 << 20
+
+// defaultRequestTimeout bounds each request made by a NewClient-built client.
+// Callers needing a different bound pass their own client via
+// NewClientWithHTTP (or a per-call context deadline for a tighter one).
+const defaultRequestTimeout = 60 * time.Second
 
 // Client is a high-level client for the CDS attestation flow.
 // It handles the full challenge-attest-certify flow in a single call.
@@ -47,7 +58,7 @@ type CertificateResult struct {
 func NewClient(baseURL string) Client {
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultRequestTimeout},
 	}
 }
 
@@ -228,26 +239,12 @@ func (c Client) AttestKeyWithOperatorKeysHash(ctx context.Context, attestationAp
 		return "", err
 	}
 
-	url := c.baseURL + "/attest-key"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	respBody, err := c.do(ctx, http.MethodPost, "/attest-key", body)
 	if err != nil {
 		return "", err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
-		return "", &StatusError{Status: httpResp.StatusCode, Body: string(respBody)}
-	}
-
 	var out types.AttestKeyResponseBody
-	if err := json.NewDecoder(httpResp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if out.EAR == "" {
@@ -264,25 +261,12 @@ func (c Client) Authenticate() (types.ChallengeResponse, error) {
 // AuthenticateContext requests an attestation challenge nonce with
 // caller-controlled cancellation.
 func (c Client) AuthenticateContext(ctx context.Context) (types.ChallengeResponse, error) {
-	url := c.baseURL + "/authenticate"
-	httpReq, err := http.NewRequestWithContext(contextOrBackground(ctx), http.MethodPost, url, nil)
+	body, err := c.do(ctx, http.MethodPost, "/authenticate", nil)
 	if err != nil {
 		return types.ChallengeResponse{}, err
 	}
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return types.ChallengeResponse{}, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return types.ChallengeResponse{}, &StatusError{Status: resp.StatusCode, Body: string(body)}
-	}
-
 	var result types.ChallengeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return types.ChallengeResponse{}, err
 	}
 	return result, nil
@@ -313,26 +297,7 @@ func (c Client) AttestContext(ctx context.Context, req attestRequest) (string, e
 	if err != nil {
 		return "", err
 	}
-
-	url := c.baseURL + "/attest"
-	httpReq, err := http.NewRequestWithContext(contextOrBackground(ctx), http.MethodPost, url, bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return "", &StatusError{Status: resp.StatusCode, Body: string(body)}
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.do(ctx, http.MethodPost, "/attest", data)
 	if err != nil {
 		return "", err
 	}
@@ -341,20 +306,44 @@ func (c Client) AttestContext(ctx context.Context, req attestRequest) (string, e
 
 // Healthz checks liveness of the CDS service.
 func (c Client) Healthz() (bool, error) {
-	url := c.baseURL + "/healthz"
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode >= 200 && resp.StatusCode < 300, nil
+	return c.ok("/healthz")
 }
 
 // Readyz checks readiness of the CDS service.
 func (c Client) Readyz() (bool, error) {
-	url := c.baseURL + "/readyz"
-	resp, err := c.httpClient.Get(url)
+	return c.ok("/readyz")
+}
+
+// do sends method path with an optional JSON body and returns the response
+// body on 2xx. A non-2xx response becomes a *StatusError carrying a capped
+// copy of the body.
+func (c Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(contextOrBackground(ctx), method, c.baseURL+path, reader)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return nil, &StatusError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+}
+
+// ok reports whether a GET of path returned 2xx.
+func (c Client) ok(path string) (bool, error) {
+	resp, err := c.httpClient.Get(c.baseURL + path)
 	if err != nil {
 		return false, err
 	}

@@ -186,8 +186,18 @@ test_sandbox_storage_shaped_like_a_rootfs_denied if {
 }
 
 test_sandbox_storage_elsewhere_allowed if {
-	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x"}]}
-	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y"}]}
+	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/shm", "source": "shm"}]}
+	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x", "source": ""}]}
+	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y", "source": "tmpfs"}]}
+}
+
+# The runtime only ever sends fs tokens here; a path source is host-staged
+# content the ephemeral handler would mount verbatim.
+test_sandbox_storage_with_path_source_denied if {
+	every source in ["/", "/run", "/run/kata-containers/other/rootfs", "../.."] {
+		not CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
+	}
 }
 
 # --- mounts -------------------------------------------------------------
@@ -199,7 +209,7 @@ test_sandbox_storage_elsewhere_allowed if {
 honest_mounts := [
 	{"destination": "/proc", "source": "proc", "type_": "proc", "options": []},
 	{"destination": "/sys/fs/cgroup", "source": "cgroup", "type_": "cgroup", "options": []},
-	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": []},
+	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": ["rbind"]},
 	{"destination": "/etc/resolv.conf", "source": "/run/kata-containers/shared/containers/pod-resolv.conf", "type_": "bind", "options": []},
 	{"destination": "/data", "source": "/run/kata-containers/sandbox/storage/aGk", "type_": "bind", "options": []},
 ]
@@ -234,6 +244,26 @@ test_mount_source_traversal_denied if {
 	))
 }
 
+# A relative bind source resolves against the bundle directory, so "../.."
+# reaches /run — whether the bind is marked by type or by option.
+test_relative_bind_source_denied if {
+	every m in [
+		{"destination": "/x", "source": "../..", "type_": "bind", "options": []},
+		{"destination": "/x", "source": "../..", "type_": "tmpfs", "options": ["rbind"]},
+		{"destination": "/x", "source": "../..", "type_": "", "options": ["bind"]},
+	] {
+		not CreateContainerRequest with input as with_mounts(array.concat(honest_mounts, [m]))
+	}
+}
+
+# Filesystem mounts carry a type, not a source path.
+test_fs_mount_without_source_allowed if {
+	CreateContainerRequest with input as with_mounts(array.concat(
+		honest_mounts,
+		[{"destination": "/x", "source": "", "type_": "tmpfs", "options": []}],
+	))
+}
+
 # Same names CopyFile has to keep working for.
 test_mount_allows_projected_volume_names if {
 	CreateContainerRequest with input as with_mounts(array.concat(
@@ -245,20 +275,40 @@ test_mount_allows_projected_volume_names if {
 # --- CopyFile -----------------------------------------------------------
 
 test_copyfile_scoped_to_the_seeding_dir if {
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/etc/hosts"}
-	not CopyFileRequest with input as {"path": "/run/kata-containers/foo/rootfs/bin/sh"}
-	not CopyFileRequest with input as {"path": "/etc/passwd"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/etc/hosts", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/foo/rootfs/bin/sh", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/etc/passwd", "file_type": "Regular"}
 }
 
 test_copyfile_rejects_traversal if {
-	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/../../foo/rootfs/x"}
-	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/.."}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/../../foo/rootfs/x", "file_type": "Regular"}
+	not CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/..", "file_type": "Regular"}
 }
 
 # Projected volumes legitimately carry `..data` and `..<timestamp>` names.
 test_copyfile_allows_projected_volume_names if {
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..data/token"}
-	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..2026_08_05_12_00_00/token"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..data/token", "file_type": "Regular"}
+	CopyFileRequest with input as {"path": "/run/kata-containers/shared/containers/pod/..2026_08_05_12_00_00/token", "file_type": "Regular"}
+}
+
+symlink_input(target) := {
+	"path": "/run/kata-containers/shared/containers/pod-vol/..data",
+	"file_type": "Symlink",
+	"symlink_target": target,
+}
+
+test_copyfile_symlink_absolute_target_denied if {
+	not CopyFileRequest with input as symlink_input("/run")
+}
+
+test_copyfile_symlink_traversal_target_denied if {
+	not CopyFileRequest with input as symlink_input("../../../c8s")
+	not CopyFileRequest with input as symlink_input("sub/../../c8s/ratls-mesh.env")
+}
+
+# Projected volumes seed `..data` as a link to a `..<timestamp>` name.
+test_copyfile_symlink_relative_target_allowed if {
+	CopyFileRequest with input as symlink_input("..2026_08_10_12_00_00.123456789")
 }
 
 # --- host-as-adversary RPCs ---------------------------------------------
@@ -268,4 +318,8 @@ test_host_reach_in_rpcs_denied if {
 	not ExecProcessRequest
 	not ReadStreamRequest
 	not WriteStreamRequest
+}
+
+test_add_swap_denied if {
+	not AddSwapRequest
 }

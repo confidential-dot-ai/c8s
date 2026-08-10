@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -30,10 +31,15 @@ import (
 // DigestsPort is the port every inventory serves its digests endpoint on, and
 // the only port CDS will dial for one. It is fixed rather than carried in the
 // token, and it is privileged (<1024, IANA-unassigned), because that is what
-// makes it an identity: binding it requires the node's own network namespace,
-// which the chart's deny-host-namespaces policy withholds from tenant pods. A
-// pod can bind any port inside its own netns, so an unprivileged port would let
-// any workload answer as the inventory.
+// makes it an identity: answering on it at the node's address requires
+// hostNetwork or a hostPort, and the chart's deny-host-namespaces policy
+// withholds BOTH from tenant pods. A pod can bind any port inside its own
+// netns, so an unprivileged port would let any workload answer as the
+// inventory.
+//
+// Both halves are load-bearing. A hostPort needs no host namespace: the CNI
+// publishes the pod on the node's address, which is enough to be dialled here
+// and have CDS accept the responder's key as the inventory's.
 const DigestsPort = 1019
 
 // dialPort and listenPort are the ports the client connects to and the endpoint
@@ -108,17 +114,23 @@ func (h InventoryHosts) Contains(host string) bool {
 
 // ResolveAdvertiseHost returns the node IP an inventory signs into its sandbox
 // tokens. An explicit host always wins; the chart supplies one from the
-// installer DaemonSet's downward API (status.hostIP).
+// installer DaemonSet's downward API (status.hostIP). cdsEndpoint is the
+// enforcer's pull config verbatim — a URL or a bare host[:port]; a URL's host
+// is used when it parses as one, so every enforcer derives the callback host
+// the same way.
 //
 // Inference is the fallback and is deliberately weak: it asks the routing table
-// which local address would reach cdsHost. That answer is wrong whenever CDS is
-// reached over loopback — which the chart's own default does, since the plugin
-// dials the CDS NodePort on 127.0.0.1 — so it fails loudly rather than
+// which local address would reach the CDS host. That answer is wrong whenever
+// CDS is reached over loopback — which the chart's own default does, since the
+// plugin dials the CDS NodePort on 127.0.0.1 — so it fails loudly rather than
 // advertising something CDS could never dial back.
-func ResolveAdvertiseHost(host, cdsHost string) (string, error) {
+func ResolveAdvertiseHost(host, cdsEndpoint string) (string, error) {
+	if u, err := url.Parse(cdsEndpoint); err == nil && u.Host != "" {
+		cdsEndpoint = u.Host
+	}
 	if host == "" {
 		var err error
-		if host, err = outboundHost(cdsHost); err != nil {
+		if host, err = outboundHost(cdsEndpoint); err != nil {
 			return "", fmt.Errorf("workloadclaims: infer the inventory advertise host (set it explicitly): %w", err)
 		}
 	}

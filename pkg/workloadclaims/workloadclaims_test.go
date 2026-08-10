@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -65,7 +66,7 @@ func serveTokens(t *testing.T, resolver SandboxResolver, signer *SandboxTokenSig
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = ServeTokens(ctx, l, resolver, signer) }()
+	go func() { _ = ServeTokens(ctx, l, resolver, NewSignerHolder(signer)) }()
 	return sock
 }
 
@@ -184,7 +185,7 @@ func TestTokenRouteLoopbackHasNoPeerPID(t *testing.T) {
 	resolver := &fakeResolver{pid: -1, sandboxID: "sandbox-1"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = ServeTokens(ctx, l, resolver, testSigner(t)) }()
+	go func() { _ = ServeTokens(ctx, l, resolver, NewSignerHolder(testSigner(t))) }()
 
 	requester := testRequesterKey(t)
 	pubDER, err := x509.MarshalPKIXPublicKey(&requester.PublicKey)
@@ -313,10 +314,11 @@ func TestServeDigestsServesIdentity(t *testing.T) {
 	_ = signer
 }
 
-// An inventory without a signer serves no token route; FetchSandboxToken maps
-// that to ErrSandboxUnsupported so get-cert can issue without a sandbox ID
-// instead of failing closed (an unverifiable token is worse than none).
-func TestSandboxRouteAbsentWithoutSigner(t *testing.T) {
+// An inventory constructed without a signer answers the token route 404;
+// FetchSandboxToken maps that to ErrSandboxUnsupported so get-cert can issue
+// without a sandbox ID instead of failing closed (an unverifiable token is
+// worse than none).
+func TestSandboxRouteUnsupportedWithoutSigner(t *testing.T) {
 	requester := testRequesterKey(t)
 	sock := serveTokens(t, &fakeResolver{sandboxID: "sandbox-1"}, nil)
 	if _, err := FetchSandboxToken(context.Background(), "unix://"+sock, 5*time.Second, &requester.PublicKey, testNonce); !errors.Is(err, ErrSandboxUnsupported) {
@@ -870,7 +872,7 @@ func TestGuestInventoryEndpointIsDialable(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = ServeTokens(ctx, l, &fakeResolver{sandboxID: "sandbox-1"}, testSigner(t)) }()
+	go func() { _ = ServeTokens(ctx, l, &fakeResolver{sandboxID: "sandbox-1"}, NewSignerHolder(testSigner(t))) }()
 
 	requester := testRequesterKey(t)
 	token, err := FetchSandboxToken(ctx, GuestInventoryEndpoint(), 5*time.Second, &requester.PublicKey, testNonce)
@@ -888,4 +890,127 @@ func TestGuestInventoryEndpointIsDialable(t *testing.T) {
 func testSignerKeyFor(t *testing.T, _ *SignedSandboxToken) *ecdsa.PublicKey {
 	t.Helper()
 	return testSigner(t).PublicKey()
+}
+
+// The high-water mark deduplicates on SandboxContainer.Key, so the key must be
+// injective over (digest, argv): two distinct admissions that collide onto one
+// key erase each other from the sandbox's record, and the erasure is invisible
+// to CDS because it removes the container from both the digests and the
+// containers view at once.
+func TestSandboxContainerKeyIsInjective(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const other = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	argvs := [][]string{
+		nil,
+		{},
+		{""},
+		{"", ""},
+		{"/app"},
+		{"/app", "--serve"},
+		// Separator smuggling: every byte an argv may legally carry, including
+		// the unit and record separators an earlier key used.
+		{"/app\x1f--serve"},
+		{"/app\x1f", "-serve"},
+		{"/app\x1e--serve"},
+		{"/app --serve"},
+		{"/app\t--serve"},
+		{"/app\n--serve"},
+		{"/app", "", "--serve"},
+	}
+
+	seen := map[string][]string{}
+	for _, d := range []string{digest, other} {
+		for _, argv := range argvs {
+			c := SandboxContainer{Digest: d, Argv: argv}
+			key := c.Key()
+			if prev, dup := seen[key]; dup && !slices.Equal(prev, argv) {
+				t.Fatalf("argv %q and %q collide on key %q", prev, argv, key)
+			}
+			seen[key] = argv
+		}
+	}
+	// A digest change must move the key too.
+	a := SandboxContainer{Digest: digest, Argv: []string{"/app"}}
+	b := SandboxContainer{Digest: other, Argv: []string{"/app"}}
+	if a.Key() == b.Key() {
+		t.Fatal("two digests share one key")
+	}
+	// nil and empty argv are the same admission (json omits an empty list).
+	if (SandboxContainer{Digest: digest}).Key() != (SandboxContainer{Digest: digest, Argv: []string{}}).Key() {
+		t.Fatal("nil and empty argv must key alike")
+	}
+}
+
+// serveTokensWithHolder runs the token route against a holder the test drives,
+// so the pending window can be exercised the way a booting guest hits it.
+func serveTokensWithHolder(t *testing.T, resolver SandboxResolver, signers *SignerHolder) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "wc.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = ServeTokens(ctx, l, resolver, signers) }()
+	return sock
+}
+
+// The route exists before its signer does, because under kata the listener has
+// to claim the port before any workload container could. "Not yet" must be
+// distinguishable from "never": issuing without a sandbox ID binds the sandbox
+// in CDS's ledger first-write-wins, so a caller that gives up early is stuck
+// with that binding.
+func TestPendingSignerIsRetryableNotUnsupported(t *testing.T) {
+	signers := NewPendingSignerHolder()
+	sock := serveTokensWithHolder(t, &fakeResolver{sandboxID: "sandbox-1"}, signers)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
+	if !errors.Is(err, ErrSandboxNotReady) {
+		t.Fatalf("err = %v, want ErrSandboxNotReady while the signer is pending", err)
+	}
+
+	// Once installed, the same route answers without the caller reconnecting
+	// to anything new.
+	signers.Set(testSigner(t))
+	token, err := FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
+	if err != nil {
+		t.Fatalf("after Set: %v", err)
+	}
+	if len(token.Token) == 0 {
+		t.Fatal("empty token after the signer was installed")
+	}
+}
+
+// A deployment that issues no tokens at all keeps answering 404, so a caller
+// proceeds without a sandbox ID instead of waiting for a signer that is not
+// coming. This is the node-CVM posture and must not change.
+func TestDisabledSignerStaysUnsupported(t *testing.T) {
+	signers := NewPendingSignerHolder()
+	signers.Disable()
+	sock := serveTokensWithHolder(t, &fakeResolver{sandboxID: "sandbox-1"}, signers)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FetchSandboxToken(context.Background(), "unix://"+sock, time.Second, key.Public(), []byte("nonce"))
+	if !errors.Is(err, ErrSandboxUnsupported) {
+		t.Fatalf("err = %v, want ErrSandboxUnsupported for a disabled signer", err)
+	}
+}
+
+// NewSignerHolder(nil) is the node-CVM construction path: no signer configured
+// means unsupported, never pending.
+func TestNilSignerHolderIsUnsupported(t *testing.T) {
+	if h := NewSignerHolder(nil); h.Ready() {
+		t.Fatal("nil signer reported ready")
+	} else if _, state := h.current(); state != signerUnsupported {
+		t.Fatalf("state = %v, want signerUnsupported", state)
+	}
 }

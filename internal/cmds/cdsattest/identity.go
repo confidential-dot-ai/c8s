@@ -92,10 +92,12 @@ func loadMeshIdentity(certFile, keyFile, caFile string) (*meshIdentity, error) {
 	return &meshIdentity{leaf: leaf, ca: issuer, private: private, bundlePEM: bundle}, nil
 }
 
+// checkValidity delegates to the repo-wide validity window
+// (certutil.CheckValidity: bounded NotBefore skew, hard NotAfter), adding the
+// role so a leaf failure reads differently from a CA failure.
 func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-		return fmt.Errorf("mesh identity %s is expired or not yet valid (not_before=%s not_after=%s)",
-			role, cert.NotBefore.Format(time.RFC3339), cert.NotAfter.Format(time.RFC3339))
+	if err := certutil.CheckValidity(cert, now); err != nil {
+		return fmt.Errorf("mesh identity %s: %w", role, err)
 	}
 	return nil
 }
@@ -105,15 +107,40 @@ func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types
 	if err != nil {
 		return nil, nil, err
 	}
-	// The transcript's leading version tag domain-separates this signature.
+	proof, err := m.prove(transcriptHash)
+	if err != nil {
+		return nil, nil, err
+	}
+	return transcriptHash, proof, nil
+}
+
+// bindServingLeaf is the attest-lb sibling of bind: it commits the exact outer
+// serving leaf alongside the mesh identity and signs that transcript. No
+// session key exists on this path — the TLS handshake itself proves possession
+// of the serving-leaf key.
+func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.LBTranscriptHash(nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	proof, err := m.prove(transcriptHash)
+	if err != nil {
+		return nil, nil, err
+	}
+	return transcriptHash, proof, nil
+}
+
+// prove signs a transcript hash with the mesh leaf key. The transcript's
+// leading domain tag separates the two endpoints' signatures.
+func (m *meshIdentity) prove(transcriptHash []byte) (*types.MeshIdentityProof, error) {
 	digest := sha512.Sum384(transcriptHash)
 	signature, err := ecdsa.SignASN1(rand.Reader, m.private, digest[:])
 	if err != nil {
-		return nil, nil, fmt.Errorf("sign mesh identity proof: %w", err)
+		return nil, fmt.Errorf("sign mesh identity proof: %w", err)
 	}
 	leafHash := sha256.Sum256(m.leaf.Raw)
 	caHash := sha256.Sum256(m.ca.Raw)
-	return transcriptHash, &types.MeshIdentityProof{
+	return &types.MeshIdentityProof{
 		Algorithm:    types.MeshIdentityProofECDSASHA384,
 		LeafSHA256:   base64.RawURLEncoding.EncodeToString(leafHash[:]),
 		MeshCASHA256: base64.RawURLEncoding.EncodeToString(caHash[:]),

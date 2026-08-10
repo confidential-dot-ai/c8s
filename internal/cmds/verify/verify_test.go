@@ -3,9 +3,12 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -26,7 +29,10 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // selfSignedCertPEM returns a throwaway ECDSA P-256 certificate (PEM) and its
@@ -76,7 +82,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	}
 
 	t.Run("forwards platform + evidence verbatim and binds cert key + challenge", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -103,7 +109,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("forwards a non-snp platform (e.g. tdx) rather than rejecting it", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -113,7 +119,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("rejects missing certificate", func(t *testing.T) {
-		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test"); err == nil {
+		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test", leafTrust{}); err == nil {
 			t.Fatal("expected error when certificate_pem is absent")
 		}
 	})
@@ -153,6 +159,41 @@ func TestBuildPolicy_RejectsOutOfRangeMinTCB(t *testing.T) {
 	}
 }
 
+func TestBuildPolicy_SandboxIDFlag(t *testing.T) {
+	meshCA := writeMeshCAFile(t)
+
+	t.Run("invalid sandbox ID is rejected", func(t *testing.T) {
+		if _, err := buildPolicy(config{sandboxID: "not/valid!", meshCA: meshCA}); err == nil || !strings.Contains(err.Error(), "--sandbox-id") {
+			t.Fatalf("err = %v, want a --sandbox-id validation error", err)
+		}
+	})
+
+	t.Run("sandbox ID pin requires mesh-ca", func(t *testing.T) {
+		// The ID lives in the leaf's signed area; without the chain check the
+		// pin would compare a string the presenter chose.
+		if _, err := buildPolicy(config{sandboxID: "8d9f6c2b1a0e"}); err == nil || !strings.Contains(err.Error(), "--mesh-ca") {
+			t.Fatalf("err = %v, want the mesh-ca requirement", err)
+		}
+	})
+
+	t.Run("sandbox ID with mesh-ca is accepted", func(t *testing.T) {
+		if _, err := buildPolicy(config{sandboxID: "8d9f6c2b1a0e", meshCA: meshCA}); err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+	})
+}
+
+// writeMeshCAFile writes a valid CA PEM for the --mesh-ca flag.
+func writeMeshCAFile(t *testing.T) string {
+	t.Helper()
+	id := mintEndpointIdentity(t)
+	path := filepath.Join(t.TempDir(), "mesh-ca.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.ca.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestParseExpectedReportData(t *testing.T) {
 	if _, err := parseExpectedReportData(strings.Repeat("ab", 64)); err != nil {
 		t.Errorf("64-byte hex should parse: %v", err)
@@ -176,40 +217,186 @@ func TestParseExpectedReportData(t *testing.T) {
 	}
 }
 
-func TestEndpointReportData_KnownVector(t *testing.T) {
-	x := []byte("x25519-key")
-	m := []byte("mlkem-key")
-	n := []byte("nonce")
-	h := sha512.New384()
-	h.Write(x)
-	h.Write(m)
-	h.Write(n)
-	want := h.Sum(nil)
+// endpointIdentity is a minted mesh identity (CA-signed ECDSA leaf plus its
+// issuing CA) used to build attest-pq responses whose identity transcript and
+// proof of possession actually verify.
+type endpointIdentity struct {
+	leaf     *x509.Certificate
+	ca       *x509.Certificate
+	key      *ecdsa.PrivateKey
+	chainPEM string
+}
 
-	got := endpointReportData(x, m, n)
-	if !bytes.Equal(got, want) {
-		t.Errorf("endpointReportData mismatch")
+func mintEndpointIdentity(t *testing.T) *endpointIdentity {
+	t.Helper()
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Azure vTPM verifiers compare the anchor raw against the quote's 48-byte
-	// extraData — a zero-padded 64-byte anchor fails there (the az-snp CDS
-	// verify regression).
-	if len(got) != sha512.Size384 {
-		t.Errorf("anchor is %d bytes, want unpadded SHA-384 (%d)", len(got), sha512.Size384)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mesh CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
+	return &endpointIdentity{leaf: leaf, ca: ca, key: leafKey, chainPEM: chain}
+}
+
+// ed25519Pub returns a fresh Ed25519 public key for the non-ECDSA-leaf case.
+func ed25519Pub(t *testing.T) crypto.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// mintEndpointIdentityFrom is mintEndpointIdentity with the leaf's public key
+// (nil => fresh ECDSA) and validity window chosen by the caller. The proof key
+// stays ECDSA either way, so the verifier's own checks — not a build failure —
+// decide the outcome.
+func mintEndpointIdentityFrom(t *testing.T, leafPub crypto.PublicKey, notBefore, notAfter time.Time) *endpointIdentity {
+	t.Helper()
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mesh CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leafPub == nil {
+		leafPub = &leafKey.PublicKey
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "lb.c8s-system.svc"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, leafPub, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}))
+	return &endpointIdentity{leaf: leaf, ca: ca, key: leafKey, chainPEM: chain}
+}
+
+// transcript computes the identity transcript the server would have bound for
+// this identity and session.
+func (id *endpointIdentity) transcript(t *testing.T, nonce, x25519, mlkem []byte) []byte {
+	t.Helper()
+	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return erd
+}
+
+// proofJSON builds the wire identity_proof object: ECDSA-SHA384 by the leaf
+// key over sha512.Sum384(transcript), mirroring the sidecar's prove().
+func (id *endpointIdentity) proofJSON(t *testing.T, transcript []byte) map[string]any {
+	t.Helper()
+	digest := sha512.Sum384(transcript)
+	sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafHash := sha256.Sum256(id.leaf.Raw)
+	caHash := sha256.Sum256(id.ca.Raw)
+	b64u := base64.RawURLEncoding.EncodeToString
+	return map[string]any{
+		"algorithm":      "ecdsa-sha384",
+		"leaf_sha256":    b64u(leafHash[:]),
+		"mesh_ca_sha256": b64u(caHash[:]),
+		"signature":      b64u(sig),
 	}
 }
 
-// buildEndpointJSON makes an attestation-response body with the given fields.
-func buildEndpointJSON(t *testing.T, nonce, report, vcek, x25519, mlkem []byte) []byte {
+// buildEndpointJSON makes an attest-pq attestation-response body with the
+// given fields. A nil identity omits the mesh chain and identity proof.
+func buildEndpointJSON(t *testing.T, id *endpointIdentity, nonce, report, vcek, x25519, mlkem []byte) []byte {
+	t.Helper()
+	evidence := map[string]any{
+		"attestation_report": base64.StdEncoding.EncodeToString(report),
+		"cert_chain":         map[string]any{"vcek": base64.StdEncoding.EncodeToString(vcek)},
+	}
+	return buildEndpointJSONWithEvidence(t, id, nonce, evidence, x25519, mlkem)
+}
+
+func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []byte, evidence any, x25519, mlkem []byte) []byte {
 	t.Helper()
 	b64u := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	resp := map[string]any{
-		"platform": "snp",
-		"nonce":    b64u(nonce),
-		"evidence": map[string]any{
-			"attestation_report": base64.StdEncoding.EncodeToString(report),
-			"cert_chain":         map[string]any{"vcek": base64.StdEncoding.EncodeToString(vcek)},
-		},
+		"version":        types.BindingAttestPQ,
+		"platform":       "snp",
+		"nonce":          b64u(nonce),
+		"evidence":       evidence,
 		"session_pubkey": map[string]any{"x25519": b64u(x25519), "mlkem768": b64u(mlkem)},
+	}
+	if id != nil {
+		resp["cds_cert_pem"] = id.chainPEM
+		resp["identity_proof"] = id.proofJSON(t, id.transcript(t, nonce, x25519, mlkem))
 	}
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -221,11 +408,27 @@ func buildEndpointJSON(t *testing.T, nonce, report, vcek, x25519, mlkem []byte) 
 func TestEvidenceFromEndpointJSON(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x07}, nonceSize)
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, 32)
-	m := bytes.Repeat([]byte{0x03}, 1184)
-	data := buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
+	data := buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m)
 
-	t.Run("fresh when nonce echoes", func(t *testing.T) {
+	// mutateProof rebuilds data with one identity_proof field replaced.
+	mutateProof := func(t *testing.T, field, value string) []byte {
+		t.Helper()
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["identity_proof"].(map[string]any)[field] = value
+		out, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	t.Run("fresh when nonce echoes; erd is the identity transcript", func(t *testing.T) {
 		ev, err := evidenceFromEndpointJSON(data, nonce, "test")
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
@@ -233,8 +436,165 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		if !ev.fresh {
 			t.Error("expected fresh=true when challenge echoes")
 		}
-		if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
-			t.Error("erd does not match expected report_data binding")
+		if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
+			t.Error("erd does not match the identity transcript over keys, nonce, leaf, and CA")
+		}
+		if ev.leaf == nil || !bytes.Equal(ev.leaf.Raw, id.leaf.Raw) {
+			t.Error("the transcript-committed mesh leaf should surface for the --mesh-ca/--workload paths")
+		}
+	})
+
+	t.Run("from-file (no expected nonce) verifies but stays non-fresh", func(t *testing.T) {
+		ev, err := evidenceFromEndpointJSON(data, nil, "file")
+		if err != nil {
+			t.Fatalf("unexpected: %v", err)
+		}
+		if ev.fresh {
+			t.Error("a saved response must not count as a freshness proof")
+		}
+		if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
+			t.Error("erd must still be the identity transcript")
+		}
+	})
+
+	t.Run("tampered proof signature is a security error", func(t *testing.T) {
+		sig, err := ecdsa.SignASN1(rand.Reader, id.key, bytes.Repeat([]byte{0x5C}, 48))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutated := mutateProof(t, "signature", base64.RawURLEncoding.EncodeToString(sig))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on a signature over the wrong transcript, got %v", err)
+		}
+	})
+
+	t.Run("wrong leaf hash in the proof is a security error", func(t *testing.T) {
+		otherHash := sha256.Sum256([]byte("not-the-leaf"))
+		mutated := mutateProof(t, "leaf_sha256", base64.RawURLEncoding.EncodeToString(otherHash[:]))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on leaf_sha256 mismatch, got %v", err)
+		}
+	})
+
+	t.Run("committed CA absent from the served chain is a security error", func(t *testing.T) {
+		otherHash := sha256.Sum256([]byte("not-a-served-ca"))
+		mutated := mutateProof(t, "mesh_ca_sha256", base64.RawURLEncoding.EncodeToString(otherHash[:]))
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError when no served cert matches mesh_ca_sha256, got %v", err)
+		}
+	})
+
+	t.Run("unknown proof algorithm is a security error", func(t *testing.T) {
+		mutated := mutateProof(t, "algorithm", "ecdsa-sha256")
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) {
+			t.Fatalf("expected securityError on an unknown proof algorithm, got %v", err)
+		}
+	})
+
+	t.Run("undecodable proof fields are plain errors", func(t *testing.T) {
+		// "!" is outside the base64url alphabet in every position.
+		for field, want := range map[string]string{
+			"mesh_ca_sha256": "mesh_ca_sha256",
+			"leaf_sha256":    "leaf_sha256",
+			"signature":      "signature",
+		} {
+			mutated := mutateProof(t, field, "!!!!")
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("field %s: err = %v, want a decode error naming it", field, err)
+			}
+		}
+	})
+
+	t.Run("unparseable or single-cert mesh chain rejected", func(t *testing.T) {
+		for name, chain := range map[string]string{
+			"garbage":   "not a certificate",
+			"leaf only": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.leaf.Raw})),
+		} {
+			var obj map[string]any
+			if err := json.Unmarshal(data, &obj); err != nil {
+				t.Fatal(err)
+			}
+			obj["cds_cert_pem"] = chain
+			mutated, err := json.Marshal(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "cds_cert_pem") {
+				t.Errorf("%s chain: err = %v, want a cds_cert_pem error", name, err)
+			}
+		}
+	})
+
+	t.Run("non-ECDSA mesh leaf key rejected", func(t *testing.T) {
+		// A proof over an Ed25519 leaf cannot be the sidecar's ecdsa-sha384
+		// construction, whatever the signature bytes claim.
+		other := mintEndpointIdentityFrom(t, ed25519Pub(t), time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+		body := buildEndpointJSON(t, other, nonce, report, []byte("vcek"), x, m)
+		if _, err := evidenceFromEndpointJSON(body, nonce, "test"); err == nil || !strings.Contains(err.Error(), "ECDSA") {
+			t.Fatalf("err = %v, want the ECDSA-only refusal", err)
+		}
+	})
+
+	t.Run("expired committed leaf is a security error", func(t *testing.T) {
+		// The committed chain must be currently valid: a stale saved identity
+		// replayed after expiry fails closed even with a correct proof.
+		expired := mintEndpointIdentityFrom(t, nil, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
+		body := buildEndpointJSON(t, expired, nonce, report, []byte("vcek"), x, m)
+		if _, err := evidenceFromEndpointJSON(body, nonce, "test"); err == nil || !isSecurityError(err) || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("err = %v, want an expired-chain security error", err)
+		}
+	})
+
+	t.Run("leaf not signed by the committed CA is a security error", func(t *testing.T) {
+		// Serve id's leaf with a *different* identity's CA and commit that CA
+		// honestly in the transcript and proof: everything verifies except the
+		// issuing relationship, which must fail closed.
+		other := mintEndpointIdentity(t)
+		b64u := base64.RawURLEncoding.EncodeToString
+		erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha512.Sum384(erd)
+		sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		leafHash := sha256.Sum256(id.leaf.Raw)
+		caHash := sha256.Sum256(other.ca.Raw)
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["cds_cert_pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.leaf.Raw})) +
+			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: other.ca.Raw}))
+		obj["identity_proof"] = map[string]any{
+			"algorithm":      "ecdsa-sha384",
+			"leaf_sha256":    b64u(leafHash[:]),
+			"mesh_ca_sha256": b64u(caHash[:]),
+			"signature":      b64u(sig),
+		}
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !isSecurityError(err) || !strings.Contains(err.Error(), "not signed by") {
+			t.Fatalf("expected a chain securityError, got %v", err)
+		}
+	})
+
+	t.Run("missing identity proof rejected", func(t *testing.T) {
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		delete(obj, "identity_proof")
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "identity_proof") {
+			t.Fatalf("expected a missing-proof error, got %v", err)
 		}
 	})
 
@@ -248,26 +608,49 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong or missing version rejected (cross-endpoint responses)", func(t *testing.T) {
+		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB, "c8s/attest-pq/v2"} {
+			var obj map[string]any
+			if err := json.Unmarshal(data, &obj); err != nil {
+				t.Fatal(err)
+			}
+			if version == "" {
+				delete(obj, "version")
+			} else {
+				obj["version"] = version
+			}
+			mutated, err := json.Marshal(obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "version") {
+				t.Errorf("version %q should be rejected, got %v", version, err)
+			}
+		}
+	})
+
 	t.Run("missing session keys rejected", func(t *testing.T) {
-		bare := buildEndpointJSON(t, nonce, report, []byte("vcek"), nil, nil)
+		bare := buildEndpointJSON(t, nil, nonce, report, []byte("vcek"), nil, nil)
 		if _, err := evidenceFromEndpointJSON(bare, nonce, "test"); err == nil {
 			t.Fatal("expected error when session_pubkey is absent")
 		}
 	})
 
-	t.Run("non-canonical session-key length is accepted (lengths not policed)", func(t *testing.T) {
-		// 16 bytes is not the PROTOCOL.md-canonical x25519 length, but the verifier
-		// does not enforce lengths — the binding (REPORTDATA == SHA-384 over these
-		// exact bytes) is what the hardware-signed report is checked against
-		// downstream, so a wrong length just produces a binding that won't match.
-		shortX16 := bytes.Repeat([]byte{0x02}, 16)
-		data := buildEndpointJSON(t, nonce, report, []byte("vcek"), shortX16, m)
-		ev, err := evidenceFromEndpointJSON(data, nonce, "test")
-		if err != nil {
-			t.Fatalf("non-canonical key length should be accepted: %v", err)
+	t.Run("wrong-size session key rejected", func(t *testing.T) {
+		// The transcript is length-framed; IdentityTranscriptHash refuses a
+		// non-canonical key size outright rather than producing a binding that
+		// fails report-data match downstream.
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
 		}
-		if !bytes.Equal(ev.erd, endpointReportData(shortX16, m, nonce)) {
-			t.Error("erd must bind the session-key bytes as provided")
+		obj["session_pubkey"].(map[string]any)["x25519"] = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x02}, 16))
+		mutated, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mutated, nonce, "test"); err == nil || !strings.Contains(err.Error(), "X25519") {
+			t.Fatalf("expected a key-size error from the transcript, got %v", err)
 		}
 	})
 
@@ -293,24 +676,40 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 // wouldn't notice.
 func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0xA1}, nonceSize)
-	x := bytes.Repeat([]byte{0xB2}, x25519PubLen)
-	m := bytes.Repeat([]byte{0xC3}, mlkem768EncapLen)
+	x := bytes.Repeat([]byte{0xB2}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0xC3}, overenc.MLKEM768EKBytes)
 	report := bytes.Repeat([]byte{0xD4}, 64)
 	b64u := base64.RawURLEncoding.EncodeToString
 
+	id := mintEndpointIdentity(t)
+	erd := id.transcript(t, nonce, x, m)
+	digest := sha512.Sum384(erd)
+	sig, err := ecdsa.SignASN1(rand.Reader, id.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafHash := sha256.Sum256(id.leaf.Raw)
+	caHash := sha256.Sum256(id.ca.Raw)
+
 	payload := fmt.Sprintf(`{
+  "version": %q,
   "platform": "snp",
   "nonce": %q,
   "evidence": {
     "attestation_report": %q,
     "cert_chain": { "vcek": %q }
   },
-  "session_pubkey": { "x25519": %q, "mlkem768": %q }
+  "cds_cert_pem": %q,
+  "session_pubkey": { "x25519": %q, "mlkem768": %q },
+  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q }
 }`,
+		types.BindingAttestPQ,
 		b64u(nonce),
 		base64.StdEncoding.EncodeToString(report),
 		base64.StdEncoding.EncodeToString([]byte("vcek-der")),
+		id.chainPEM,
 		b64u(x), b64u(m),
+		b64u(leafHash[:]), b64u(caHash[:]), b64u(sig),
 	)
 
 	ev, err := evidenceFromEndpointJSON([]byte(payload), nonce, "endpoint")
@@ -323,8 +722,8 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	if ev.platform != "snp" {
 		t.Errorf("platform = %q, want snp", ev.platform)
 	}
-	if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
-		t.Error("erd does not match SHA-384(x25519‖mlkem768‖nonce)")
+	if !bytes.Equal(ev.erd, erd) {
+		t.Error("erd does not match the identity transcript")
 	}
 	// The platform-specific evidence object is forwarded verbatim.
 	if !bytes.Contains(ev.rawEvidence, []byte("attestation_report")) {
@@ -363,23 +762,28 @@ func TestParseRealSNPEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonce := bytes.Repeat([]byte{0x5A}, nonceSize)
-	x := bytes.Repeat([]byte{0xB2}, x25519PubLen)
-	m := bytes.Repeat([]byte{0xC3}, mlkem768EncapLen)
-	b64u := base64.RawURLEncoding.EncodeToString
-	resp := fmt.Sprintf(`{"platform":"snp","nonce":%q,"evidence":%s,"session_pubkey":{"x25519":%q,"mlkem768":%q}}`,
-		b64u(nonce), string(env.Evidence), b64u(x), b64u(m))
+	x := bytes.Repeat([]byte{0xB2}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0xC3}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
+	resp := buildEndpointJSONWithEvidence(t, id, nonce, env.Evidence, x, m)
 
-	ev, err := evidenceFromEndpointJSON([]byte(resp), nonce, "endpoint")
+	ev, err := evidenceFromEndpointJSON(resp, nonce, "endpoint")
 	if err != nil {
 		t.Fatalf("evidenceFromEndpointJSON on the real-evidence response: %v", err)
 	}
 	if !ev.fresh {
 		t.Error("expected fresh=true when the challenge echoes")
 	}
-	if !bytes.Equal(ev.rawEvidence, env.Evidence) {
-		t.Error("real evidence object should round-trip verbatim through the endpoint parser")
+	// json.Marshal compacts an embedded RawMessage, so compare against the
+	// compacted fixture bytes: the value must round-trip unchanged.
+	var wantEvidence bytes.Buffer
+	if err := json.Compact(&wantEvidence, env.Evidence); err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(ev.erd, endpointReportData(x, m, nonce)) {
+	if !bytes.Equal(ev.rawEvidence, wantEvidence.Bytes()) {
+		t.Error("real evidence object should round-trip unchanged through the endpoint parser")
+	}
+	if !bytes.Equal(ev.erd, id.transcript(t, nonce, x, m)) {
 		t.Error("erd binding mismatch")
 	}
 }
@@ -395,7 +799,7 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture")
+	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,8 +823,9 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 
 func TestGatherFromEndpoint_Integration(t *testing.T) {
 	report := bytes.Repeat([]byte{0x01}, 64)
-	x := bytes.Repeat([]byte{0x02}, 32)
-	m := bytes.Repeat([]byte{0x03}, 1184)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != attestationPath {
@@ -430,7 +835,7 @@ func TestGatherFromEndpoint_Integration(t *testing.T) {
 		nb := r.URL.Query().Get("nonce")
 		nonce, _ := base64.RawURLEncoding.DecodeString(nb)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m))
+		w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 	}))
 	defer srv.Close()
 
@@ -472,19 +877,20 @@ func TestRenderOutcome(t *testing.T) {
 	measHex := "ab" + strings.Repeat("00", 47) // 48-byte launch digest
 	result := &teetypes.VerificationResult{SignatureValid: true, Claims: teetypes.Claims{LaunchDigest: measHex}}
 
-	pinnedPolicy := func(t *testing.T) *ratls.VerifyPolicy {
+	pinnedPlan := func(t *testing.T) *verifyPlan {
 		t.Helper()
 		m, err := ratls.ParseHexMeasurementsList([]string{measHex})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &ratls.VerifyPolicy{Measurements: m}
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: m}}
 	}
+	emptyPlan := func() *verifyPlan { return &verifyPlan{policy: &ratls.VerifyPolicy{}} }
 
 	t.Run("verified + pinned -> no UNSAFE warning", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, result, nil, pinnedPolicy(t))
+		oc := newOutcome(cfg, ev, result, nil, pinnedPlan(t))
 		render(cfg, oc, &out)
 		if !oc.Verified {
 			t.Fatalf("expected verified; oc=%+v", oc)
@@ -497,7 +903,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("unpinned warns UNSAFE", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		if !strings.Contains(out.String(), "UNSAFE") {
 			t.Errorf("expected UNSAFE warning when no measurements pinned: %s", out.String())
 		}
@@ -506,7 +912,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("json output", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "json"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		var oc Outcome
 		if err := json.Unmarshal(out.Bytes(), &oc); err != nil {
 			t.Fatalf("output is not valid JSON: %v", err)
@@ -519,7 +925,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("verdict error -> NOT VERIFIED", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, &ratls.VerifyPolicy{})
+		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, emptyPlan())
 		render(cfg, oc, &out)
 		if oc.Verified || !strings.Contains(out.String(), "NOT VERIFIED") {
 			t.Errorf("unexpected output: %s", out.String())
@@ -533,7 +939,7 @@ func TestRenderOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		oc := newOutcome(config{}, ev, result, nil, &ratls.VerifyPolicy{Measurements: other})
+		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: other}})
 		if oc.Verified || !strings.Contains(oc.Error, "not in --measurements allowlist") {
 			t.Errorf("expected allowlist rejection, got %+v", oc)
 		}
@@ -544,8 +950,29 @@ func TestGatherFromFile_RejectsExpectedReportDataOnCert(t *testing.T) {
 	// A certificate's binding is its key; an override would silently replace a
 	// real binding while still reporting "binds the certificate public key".
 	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("does-not-matter")})
-	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file"); err == nil {
+	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file", leafTrust{}); err == nil {
 		t.Fatal("expected --expected-report-data to be rejected for a certificate file")
+	}
+}
+
+// A gather-time security failure is a verdict (exit 2), not an unavailability
+// (exit 3). The exit codes are a CI contract: a gate that retries on 3 and
+// pages on 2 must not quietly retry against an actively tampered certificate.
+func TestRun_SecurityFailureDuringGatherExitsFailed(t *testing.T) {
+	holder := testKey(t)
+	forged := mintForgedIssuerLeaf(t, &holder.PublicKey, time.Now().Add(500000*time.Hour))
+	path := filepath.Join(t.TempDir(), "leaf.pem")
+	if err := os.WriteFile(path, certutil.EncodeCertPEM(forged.Raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), config{fromFile: path, output: "text"}, &out, &errOut)
+	if code != exitFailed {
+		t.Errorf("code = %d, want %d (evidence obtained, security check failed)", code, exitFailed)
+	}
+	if !strings.Contains(out.String(), "NOT VERIFIED") {
+		t.Errorf("a security failure must render as a verdict, got:\n%s%s", out.String(), errOut.String())
 	}
 }
 
@@ -618,7 +1045,7 @@ func TestResolveMode(t *testing.T) {
 		{"auto kind, auto mode", "auto", "auto", "auto"},
 		{"empty kind, empty mode", "", "", "auto"},
 		{"explicit mode overrides lb kind", "lb", "ratls-cert", "ratls-cert"},
-		{"explicit mode overrides cds kind", "cds", "attestation-endpoint", "attestation-endpoint"},
+		{"explicit mode overrides cds kind", "cds", "attest-pq", "attest-pq"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -692,12 +1119,32 @@ func TestDefaultPort(t *testing.T) {
 func TestNewOutcomePlatform(t *testing.T) {
 	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
 	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("az-snp")}
-	if oc := newOutcome(config{}, ev, reported, nil, &ratls.VerifyPolicy{}); oc.Platform != "az-snp" {
+	if oc := newOutcome(config{}, ev, reported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "az-snp" {
 		t.Errorf("Platform = %q, want the verifier-reported az-snp", oc.Platform)
 	}
 	unreported := &teetypes.VerificationResult{SignatureValid: true}
-	if oc := newOutcome(config{}, ev, unreported, nil, &ratls.VerifyPolicy{}); oc.Platform != "snp" {
+	if oc := newOutcome(config{}, ev, unreported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "snp" {
 		t.Errorf("Platform = %q, want the fallback snp", oc.Platform)
+	}
+}
+
+// A verifier verdict whose launch digest cannot be decoded must fail the
+// --measurements pin closed: an unparseable digest can never count as allowed.
+func TestNewOutcomeMalformedLaunchDigestFailsPin(t *testing.T) {
+	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
+	plan := &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}}
+	for _, digest := range []string{"", "zz"} {
+		result := &teetypes.VerificationResult{
+			SignatureValid: true,
+			Claims:         teetypes.Claims{LaunchDigest: digest},
+		}
+		oc := newOutcome(config{}, ev, result, nil, plan)
+		if oc.Verified {
+			t.Fatalf("launch digest %q verified despite being unenforceable", digest)
+		}
+		if !strings.Contains(oc.Error, "cannot enforce the measurement policy") {
+			t.Fatalf("Error = %q, want the unenforceable-pin reason", oc.Error)
+		}
 	}
 }
 
@@ -771,6 +1218,44 @@ func TestRenderTextSections(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("workload section carries the stamp and its provenance note", func(t *testing.T) {
+		got := renderOut(Outcome{
+			Verified:                 true,
+			Fresh:                    true,
+			Pinned:                   true,
+			Workload:                 "web",
+			WorkloadAllowlistVersion: "7",
+			WorkloadAllowlistDigest:  "abcd",
+			WorkloadNote:             "workload_verified: pinned policy satisfied",
+		})
+		for _, want := range []string{
+			"workload:     web  (allowlist version 7, digest abcd)",
+			"workload_verified: pinned policy satisfied",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("non-fresh and unpinned verdicts carry their warnings", func(t *testing.T) {
+		got := renderOut(Outcome{Verified: true})
+		if !strings.Contains(got, "freshness NOT proven") {
+			t.Errorf("missing the non-freshness note:\n%s", got)
+		}
+		if !strings.Contains(got, "no --measurements pinned") {
+			t.Errorf("missing the unpinned warning:\n%s", got)
+		}
+	})
+
+	t.Run("show-evidence prints the report data", func(t *testing.T) {
+		var out bytes.Buffer
+		renderText(config{showEvidence: true}, Outcome{Verified: true, Fresh: true, Pinned: true, ReportData: "deadbeef"}, &out)
+		if !strings.Contains(out.String(), "report_data:  deadbeef") {
+			t.Errorf("missing report_data with --show-evidence:\n%s", out.String())
+		}
+	})
 }
 
 // TestGatherEvidence_AutoPrefersDiscovery proves auto mode (no --kind) detects
@@ -787,7 +1272,7 @@ func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {
 	}))
 	defer lb.Close()
 
-	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, nil)
+	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if err != nil {
 		t.Fatalf("auto mode should reach the discovery doc, got: %v", err)
 	}
@@ -807,7 +1292,7 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, nil)
+	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if !errors.Is(err, ratls.ErrNotAttested) {
 		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
 	}
@@ -841,12 +1326,12 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err := os.WriteFile(path, []byte(measHex+"\n\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		policy, err := buildPolicy(config{measurementsFile: path})
+		plan, err := buildPolicy(config{measurementsFile: path})
 		if err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(policy.Measurements) != 1 || hex.EncodeToString(policy.Measurements[0]) != measHex {
-			t.Errorf("measurements = %v", policy.Measurements)
+		if len(plan.policy.Measurements) != 1 || hex.EncodeToString(plan.policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", plan.policy.Measurements)
 		}
 	})
 
@@ -903,7 +1388,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 
 	t.Run("ratls-cert mode", func(t *testing.T) {
 		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
 			t.Fatalf("ratls-cert mode: %v", err)
 		}
@@ -912,21 +1397,49 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("attestation-endpoint mode", func(t *testing.T) {
+	t.Run("attest-pq mode", func(t *testing.T) {
 		report := bytes.Repeat([]byte{0x01}, 64)
-		x := bytes.Repeat([]byte{0x02}, 32)
-		m := bytes.Repeat([]byte{0x03}, 1184)
+		x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+		m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+		id := mintEndpointIdentity(t)
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The path is the binding selector now: the retired
+			// ?pq=/?binding= query form must not be what routes this.
+			if r.URL.Path != "/.well-known/c8s/attest-pq" {
+				http.NotFound(w, r)
+				return
+			}
 			nonce, _ := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("nonce"))
-			w.Write(buildEndpointJSON(t, nonce, report, []byte("vcek"), x, m))
+			w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 		}))
 		defer srv.Close()
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attestation-endpoint", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
-			t.Fatalf("attestation-endpoint mode: %v", err)
+			t.Fatalf("attest-pq mode: %v", err)
 		}
 		if !ev.fresh {
 			t.Error("endpoint evidence should be fresh")
+		}
+	})
+
+	t.Run("no target at all is an error", func(t *testing.T) {
+		if _, err := gatherEvidence(ctx, config{}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil); err == nil || !strings.Contains(err.Error(), "no target") {
+			t.Fatalf("err = %v, want the no-target refusal", err)
+		}
+	})
+
+	t.Run("unparseable target is an error", func(t *testing.T) {
+		if _, err := gatherEvidence(ctx, config{url: "https://\x7f"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil); err == nil {
+			t.Fatal("control-character target should fail to normalize")
+		}
+	})
+
+	t.Run("attest-pq mode surfaces a dial failure as a connect error", func(t *testing.T) {
+		// Port 1 refuses fast: an unreachable endpoint is exit-3 territory, not
+		// a verification verdict.
+		_, err := gatherEvidence(ctx, config{url: "https://127.0.0.1:1", mode: "attest-pq", timeout: 2 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
+		if err == nil || !isConnectError(err) {
+			t.Fatalf("err = %v, want a connectError", err)
 		}
 	})
 
@@ -939,7 +1452,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			w.Write([]byte("not json"))
 		}))
 		defer srv.Close()
-		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, nil)
+		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err == nil || isSecurityError(err) {
 			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
 		}
@@ -947,6 +1460,21 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 }
 
 func TestRun_UsageAndGatherFailures(t *testing.T) {
+	t.Run("retired attestation-endpoint mode is a usage error, not an alias", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: "x", mode: "attestation-endpoint"}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "attest-pq") {
+			t.Errorf("code = %d, want %d with the valid mode list; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
+	t.Run("unknown mode is a usage error", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		if code := run(context.Background(), config{url: "x", mode: "bogus"}, &out, &errOut); code != exitUsage {
+			t.Errorf("code = %d, want %d; stderr: %s", code, exitUsage, errOut.String())
+		}
+	})
+
 	t.Run("policy error", func(t *testing.T) {
 		var out, errOut bytes.Buffer
 		if code := run(context.Background(), config{minTCBSNP: 256, url: "x"}, &out, &errOut); code != exitUsage {
@@ -967,6 +1495,19 @@ func TestRun_UsageAndGatherFailures(t *testing.T) {
 		code := run(context.Background(), config{fromFile: filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
 		if code != exitNoEvidence || !strings.Contains(errOut.String(), "could not obtain evidence") {
 			t.Errorf("code = %d, stderr: %s", code, errOut.String())
+		}
+	})
+
+	t.Run("unreadable allowlist file is a usage error", func(t *testing.T) {
+		meshCA := writeMeshCAFile(t)
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{
+			url:           "x",
+			meshCA:        meshCA,
+			allowlistFile: filepath.Join(t.TempDir(), "absent"),
+		}, &out, &errOut)
+		if code != exitUsage || !strings.Contains(errOut.String(), "--allowlist") {
+			t.Errorf("code = %d, want %d with an --allowlist error; stderr: %s", code, exitUsage, errOut.String())
 		}
 	})
 }

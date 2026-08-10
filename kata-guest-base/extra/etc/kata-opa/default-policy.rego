@@ -41,7 +41,8 @@ import future.keywords.if
 import future.keywords.in
 
 default AddARPNeighborsRequest := true
-default AddSwapRequest := true
+# Swap never leaves TEE memory.
+default AddSwapRequest := false
 default CloseStdinRequest := true
 default DestroySandboxRequest := true
 default GetDiagnosticDataRequest := true
@@ -184,6 +185,7 @@ layered_rootfs_storage(s) if {
 # is per-image knowledge that lives in the allowlist document, not here.
 mount_source_allowed(m) if {
 	not startswith(m.source, "/")
+	not bind_mount(m)
 }
 
 mount_source_allowed(m) if {
@@ -194,6 +196,23 @@ mount_source_allowed(m) if {
 
 no_traversal(path) if {
 	not regex.match(`(^|/)\.\.(/|$)`, path)
+}
+
+# rustjail resolves a bind source against the bundle directory, and the kernel
+# binds whenever MS_BIND is set — a bind/rbind option marks a bind regardless
+# of the declared type.
+bind_mount(m) if {
+	m.type_ == "bind"
+}
+
+bind_mount(m) if {
+	some o in m.options
+	o == "bind"
+}
+
+bind_mount(m) if {
+	some o in m.options
+	o == "rbind"
 }
 
 # kata's own switch is io.katacontainers.pkg.oci.container_type; the guest-pull
@@ -246,6 +265,7 @@ default CreateSandboxRequest := false
 CreateSandboxRequest if {
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
+		sandbox_storage_source_allowed(s)
 	}
 	print("CreateSandboxRequest: allowed")
 }
@@ -255,12 +275,20 @@ default UpdateEphemeralMountsRequest := false
 UpdateEphemeralMountsRequest if {
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
+		sandbox_storage_source_allowed(s)
 	}
 	print("UpdateEphemeralMountsRequest: allowed")
 }
 
 container_rootfs_shaped(mount_point) if {
 	regex.match("^/run/kata-containers/[^/]+/rootfs(/.*)?$", mount_point)
+}
+
+# The storages the runtime sends here mount guest-local tmpfs instances (the
+# sandbox shm, emptyDir resizes); their source is a filesystem token.
+sandbox_storage_source_allowed(s) if {
+	some token in ["", "shm", "tmpfs"]
+	s.source == token
 }
 
 # --- CopyFile ----------------------------------------------------------
@@ -280,5 +308,18 @@ default CopyFileRequest := false
 CopyFileRequest if {
 	startswith(input.path, "/run/kata-containers/shared/containers/")
 	no_traversal(input.path)
+	symlink_target_in_tree
 	print("CopyFileRequest: allowed")
+}
+
+# Writes through the link resolve its target; relative and traversal-free
+# keeps resolution inside the seeding tree.
+symlink_target_in_tree if {
+	input.file_type == "Symlink"
+	not startswith(input.symlink_target, "/")
+	no_traversal(input.symlink_target)
+}
+
+symlink_target_in_tree if {
+	input.file_type != "Symlink"
 }

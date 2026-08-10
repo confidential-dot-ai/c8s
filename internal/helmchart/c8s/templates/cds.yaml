@@ -200,6 +200,7 @@ spec:
             - --ca-cert-validity={{ .Values.cds.ca.certValidity }}
             - --min-ca-validity={{ .Values.cds.ca.minValidity }}
             - --cert-ttl={{ .Values.cds.certTTL }}
+            - --named-cert-ttl={{ .Values.cds.namedCertTTL }}
             - --max-ttl={{ .Values.cds.maxTTL }}
             - --challenge-ttl={{ .Values.cds.challengeTTL }}
             - --request-timeout={{ .Values.cds.requestTimeout }}

@@ -20,8 +20,10 @@ package allowlist
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
@@ -66,6 +68,8 @@ type Container struct {
 	Image   string       `json:"image,omitempty"`
 	Command ArgvPolicy   `json:"command"`
 	Args    ArgvPolicy   `json:"args"`
+	Mounts  MountPolicy  `json:"mounts,omitempty"`
+	Env     EnvPolicy    `json:"env,omitempty"`
 }
 
 // ArgvPolicy governs part of a container's effective argv (the OCI process.args
@@ -76,6 +80,34 @@ type Container struct {
 type ArgvPolicy struct {
 	Policy string   `json:"policy"`
 	Argv   []string `json:"argv,omitempty"`
+}
+
+// MountPolicy governs where the host may bind content into the container.
+//
+// It constrains BIND mounts only — a mount whose source is an absolute guest
+// path. The rest of a container's mount table names filesystem types (proc,
+// sysfs, tmpfs, devpts, mqueue, cgroup) and carries nothing in, so pinning it
+// would make an operator restate the OCI base set to say nothing.
+//
+// Exact requires every bind destination to appear in Destinations, which is the
+// set an operator recognises: it is what the pod spec's volumeMounts declare,
+// plus the handful the kubelet always adds (/etc/hosts, /etc/hostname,
+// /etc/resolv.conf, /dev/termination-log, /dev/shm, the serviceaccount token).
+// Any leaves them unconstrained, and is what an absent policy means — unlike
+// argv, a Deny default would refuse every real pod, since the base set is never
+// empty.
+type MountPolicy struct {
+	Policy       string   `json:"policy"`
+	Destinations []string `json:"destinations,omitempty"`
+}
+
+// EnvPolicy governs the environment variable NAMES a container may run with.
+// Values are not matched: they carry secrets, and an allowlist is served to
+// every enforcer. Exact requires every name to appear in Names; Any, the
+// default, leaves them unconstrained.
+type EnvPolicy struct {
+	Policy string   `json:"policy"`
+	Names  []string `json:"names,omitempty"`
 }
 
 // SecretsPolicy grants secret-store read/write globs to a whole workload entry.
@@ -115,7 +147,7 @@ func parseJSON(data []byte, strict bool) (*Allowlist, error) {
 	if err := dec.Decode(&a); err != nil {
 		return nil, fmt.Errorf("decode allowlist: %w", err)
 	}
-	if err := a.normalize(); err != nil {
+	if err := a.normalize(strict); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -164,7 +196,25 @@ func (a *Allowlist) Canonical() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-func (a *Allowlist) normalize() error {
+// CanonicalDigest returns SHA-256 over Canonical() — the policy digest clients
+// pin and the matched-workload stamp carries (docs/ratls.md).
+func (a *Allowlist) CanonicalDigest() ([]byte, error) {
+	canonical, err := a.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return sum[:], nil
+}
+
+// normalize canonicalizes the document. strict is the write/ingest posture
+// (ParseJSON): it enforces MaxWorkloadNameLen, so no entry that the cw selector
+// or the leaf stamp cannot represent ever enters the store. A served document
+// (ParseServedJSON) is not ours to reject over that bound — it arrived after
+// entries could already have been written, and failing the whole document would
+// break every allowlist pull in the cluster over one legacy name — so an
+// over-long entry is dropped instead. See docs/allowlist-and-capabilities.md.
+func (a *Allowlist) normalize(strict bool) error {
 	if a.Schema != Schema {
 		return fmt.Errorf("allowlist: unknown schema %q (expected %q)", a.Schema, Schema)
 	}
@@ -183,8 +233,23 @@ func (a *Allowlist) normalize() error {
 		a.Digests = canon
 	}
 	for name, w := range a.Workloads {
-		if !validWorkloadName(name) {
+		// The grammar is not negotiable on either path: the name is used
+		// verbatim as a URL path segment.
+		if !workloadNameGrammarOK(name) {
 			return fmt.Errorf("workload name %q must match [A-Za-z0-9][A-Za-z0-9._-]* (it is a URL path segment)", name)
+		}
+		if len(name) > MaxWorkloadNameLen {
+			if strict {
+				return fmt.Errorf("workload name %q is %d bytes; the maximum is %d (it is mirrored as a Kubernetes label value)", name, len(name), MaxWorkloadNameLen)
+			}
+			// Dropping is fail-closed: the entry's digests stop being admitted
+			// by this consumer. It could never have been named on a leaf either
+			// (ratls.MatchedWorkload.Validate applies the same bound), so
+			// nothing that depended on it is lost.
+			slog.Warn("allowlist: dropping a served workload entry whose name exceeds the label-value bound",
+				"name", name, "bytes", len(name), "max", MaxWorkloadNameLen)
+			delete(a.Workloads, name)
+			continue
 		}
 		if err := normalizeContainers(name, "initContainers", w.InitContainers); err != nil {
 			return err
@@ -214,8 +279,84 @@ func normalizeContainers(workload, field string, cs []Container) error {
 		if err := normalizeArgv(&c.Args); err != nil {
 			return fmt.Errorf("workload %q %s %s args: %w", workload, field, c.Digest, err)
 		}
+		if err := normalizeMounts(&c.Mounts); err != nil {
+			return fmt.Errorf("workload %q %s %s mounts: %w", workload, field, c.Digest, err)
+		}
+		if err := normalizeEnv(&c.Env); err != nil {
+			return fmt.Errorf("workload %q %s %s env: %w", workload, field, c.Digest, err)
+		}
 	}
 	return nil
+}
+
+// normalizeMounts validates a mount policy. An absent policy canonicalizes to
+// Any: every container has a mount table it did not ask for (the OCI base set,
+// /etc/hosts, the serviceaccount token), so Deny would refuse every real pod and
+// an operator adopting this field would be opting into an outage.
+func normalizeMounts(p *MountPolicy) error {
+	switch p.Policy {
+	case PolicyAny, "":
+		if len(p.Destinations) != 0 {
+			return fmt.Errorf("any policy takes no destinations")
+		}
+		p.Policy = PolicyAny
+		p.Destinations = nil
+	case PolicyExact:
+		if len(p.Destinations) == 0 {
+			return fmt.Errorf("exact policy requires at least one destination")
+		}
+		for _, d := range p.Destinations {
+			if !path.IsAbs(d) {
+				return fmt.Errorf("destination %q is not an absolute path", d)
+			}
+		}
+		p.Destinations = sortedUnique(p.Destinations)
+	default:
+		return fmt.Errorf("unknown mount policy %q (want any or exact)", p.Policy)
+	}
+	return nil
+}
+
+// normalizeEnv validates an env policy, canonicalizing an absent policy to Any
+// for the same reason as mounts: a container inherits names it did not declare.
+func normalizeEnv(p *EnvPolicy) error {
+	switch p.Policy {
+	case PolicyAny, "":
+		if len(p.Names) != 0 {
+			return fmt.Errorf("any policy takes no names")
+		}
+		p.Policy = PolicyAny
+		p.Names = nil
+	case PolicyExact:
+		if len(p.Names) == 0 {
+			return fmt.Errorf("exact policy requires at least one name")
+		}
+		for _, n := range p.Names {
+			if n == "" || strings.ContainsRune(n, '=') {
+				return fmt.Errorf("environment name %q is empty or contains '='", n)
+			}
+		}
+		p.Names = sortedUnique(p.Names)
+	default:
+		return fmt.Errorf("unknown env policy %q (want any or exact)", p.Policy)
+	}
+	return nil
+}
+
+// sortedUnique makes a list a function of its content, so Canonical does not
+// churn on the order an operator happened to write.
+func sortedUnique(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // normalizeArgv validates an argv policy and canonicalizes an absent policy to
@@ -330,9 +471,17 @@ func policyKey(c Container) string {
 	return string(b)
 }
 
-// validWorkloadName restricts entry names to a URL-safe segment so a name can be
-// used verbatim as a path parameter without escaping ambiguity.
-func validWorkloadName(name string) bool {
+// MaxWorkloadNameLen bounds an entry name to the Kubernetes label-value length,
+// so the confidential.ai/cw selector, an allowlist entry name, and the
+// matched-workload leaf stamp (pkg/ratls) can all represent it. It is enforced
+// where entries are written, not where a served document is read — see
+// normalize.
+const MaxWorkloadNameLen = 63
+
+// workloadNameGrammarOK restricts entry names to a URL-safe segment so a name
+// can be used verbatim as a path parameter without escaping ambiguity. It does
+// not apply MaxWorkloadNameLen; ValidWorkloadName is the bounded form.
+func workloadNameGrammarOK(name string) bool {
 	if name == "" {
 		return false
 	}
@@ -346,4 +495,18 @@ func validWorkloadName(name string) bool {
 		}
 	}
 	return true
+}
+
+// ValidWorkloadName reports whether name is a legal workload entry name: the
+// URL-path-segment grammar, bounded to MaxWorkloadNameLen. It is the check the
+// write path, the admission selector, and the matched-workload certificate
+// stamp share.
+//
+// It is not identical to what every consumer accepts: a name may end in '.',
+// '_' or '-' here and still fail k8s validation.IsValidLabelValue, which the
+// injection webhook applies to the cw label. Tightening the grammar to close
+// that gap would retroactively invalidate stored entries, so the narrower rule
+// stays where it is enforced.
+func ValidWorkloadName(name string) bool {
+	return workloadNameGrammarOK(name) && len(name) <= MaxWorkloadNameLen
 }

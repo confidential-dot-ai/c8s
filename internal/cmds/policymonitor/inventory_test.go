@@ -4,7 +4,12 @@ package policymonitor
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -118,16 +123,29 @@ func TestSandboxDigestsHost(t *testing.T) {
 	}
 }
 
+// The guest inventory keys its high-water mark the same way, and must not lose
+// an admission to a separator byte in argv either.
+func TestKataInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("a"), pmDigestApp, []string{"/app\x1f--serve"})
+	b.record(testCID("b"), pmDigestApp, []string{"/app", "--serve"})
+
+	_, containers, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers = %+v, want both admissions recorded", containers)
+	}
+}
+
 // A configured advertise host bypasses retry entirely: the routing-table
 // lookup never happens, so the CDS URL not resolving does not matter.
-func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T) {
-	prev := advertiseHostAttempts
-	advertiseHostAttempts = 3
-	t.Cleanup(func() { advertiseHostAttempts = prev })
-
+func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
-	got, err := resolveSandboxDigestsHostWithRetry(&Config{
+	got, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "10.2.3.4",
 		CDSURL:                      "https://cds.invalid:8443",
 	}, logger)
@@ -139,29 +157,106 @@ func TestResolveSandboxDigestsHostWithRetry_ExplicitHostSkipsRetry(t *testing.T)
 	}
 }
 
-// A CDS URL that does not resolve exhausts the retry budget rather than
-// latching tokens off on the first failure.
-func TestResolveSandboxDigestsHostWithRetry_ExhaustsBudget(t *testing.T) {
-	prevAttempts := advertiseHostAttempts
-	prevBackoff := advertiseHostBackoff
-	advertiseHostAttempts = 3
-	advertiseHostBackoff = time.Millisecond
+// A lookup that keeps failing keeps retrying to the budget rather than latching
+// tokens off on the first failure — the whole point of running late is that the
+// network arrives after the first attempt.
+//
+// The lookup is stubbed rather than pointed at an unresolvable host: a real
+// resolver makes each attempt cost whatever the runner's DNS takes, so the
+// retries a millisecond budget affords vary by machine (CI saw one). That an
+// unresolvable CDS URL fails at all is covered by _StopsAtBudget.
+func TestResolveSandboxDigestsHostLate_RetriesUntilBudget(t *testing.T) {
+	prevInterval, prevBudget, prevLookup := advertiseHostRetryInterval, advertiseHostLateBudget, advertiseHostLookup
+	advertiseHostRetryInterval = time.Millisecond
+	advertiseHostLateBudget = 20 * time.Millisecond
+	advertiseHostLookup = func(*Config) (string, error) { return "", errors.New("no route to the CDS host") }
 	t.Cleanup(func() {
-		advertiseHostAttempts = prevAttempts
-		advertiseHostBackoff = prevBackoff
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
+		advertiseHostLookup = prevLookup
 	})
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
-	_, err := resolveSandboxDigestsHostWithRetry(&Config{
-		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
+		CDSURL: "https://cds.example:8443",
 	}, logger)
 	if err == nil {
-		t.Fatal("want an error after retry budget exhausted")
+		t.Fatal("want an error after the budget is exhausted")
 	}
-	// Every attempt but the last logs a retry line — proves we did not latch
-	// off on the first failure the way the old code did.
-	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got != advertiseHostAttempts-1 {
-		t.Fatalf("got %d retry log lines, want %d; log:\n%s", got, advertiseHostAttempts-1, buf.String())
+	if got := strings.Count(buf.String(), `"msg":"advertise-host inference failed; retrying"`); got < 2 {
+		t.Fatalf("got %d retry log lines, want repeated retries; log:\n%s", got, buf.String())
+	}
+}
+
+// The budget bounds the wait: a guest that never gets a network must reach
+// "no signer" rather than hold every fetcher open indefinitely.
+func TestResolveSandboxDigestsHostLate_StopsAtBudget(t *testing.T) {
+	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	advertiseHostRetryInterval = 5 * time.Millisecond
+	advertiseHostLateBudget = 50 * time.Millisecond
+	t.Cleanup(func() {
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
+	})
+
+	start := time.Now()
+	_, err := resolveSandboxDigestsHostLate(context.Background(), &Config{
+		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
+	if err == nil {
+		t.Fatal("want an error after the budget is exhausted")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ran for %s, want the %s budget to stop it", elapsed, advertiseHostLateBudget)
+	}
+}
+
+// A cancelled context stops the wait, so guest shutdown is not held up by a
+// lookup that will never succeed.
+func TestResolveSandboxDigestsHostLate_StopsOnContextCancel(t *testing.T) {
+	prevInterval, prevBudget := advertiseHostRetryInterval, advertiseHostLateBudget
+	advertiseHostRetryInterval = 10 * time.Millisecond
+	advertiseHostLateBudget = time.Hour
+	t.Cleanup(func() {
+		advertiseHostRetryInterval, advertiseHostLateBudget = prevInterval, prevBudget
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := resolveSandboxDigestsHostLate(ctx, &Config{
+		CDSURL: "https://this.host.does.not.resolve.invalid:8443",
+	}, slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))); err == nil {
+		t.Fatal("want an error when the context ends")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ran for %s after cancellation", elapsed)
+	}
+}
+
+// Replaces TestAdvertiseHostBudgetFitsUnitStartTimeout, which pinned this
+// lookup UNDER the unit's start timeout because it ran before READY=1. It now
+// runs after, so the budget is deliberately longer - and that is only safe
+// while it stays off the startup path. If the lookup is ever moved back,
+// systemd fails the unit at TimeoutStartSec and FailureAction=poweroff-force
+// kills the guest, which is #258 all over again.
+func TestAdvertiseHostRunsOffTheStartupPath(t *testing.T) {
+	unit := filepath.Join("..", "..", "..", "kata-guest-base", "extra", "etc", "systemd", "system", "policy-monitor.service")
+	raw, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatalf("read %s: %v", unit, err)
+	}
+	m := regexp.MustCompile(`(?m)^TimeoutStartSec=(\S+)$`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("no TimeoutStartSec= in %s; if the unit no longer bounds startup, this test needs rewriting rather than deleting", unit)
+	}
+	timeout, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse TimeoutStartSec=%q: %v", m[1], err)
+	}
+
+	if advertiseHostLateBudget <= timeout {
+		t.Fatalf("advertiseHostLateBudget = %s fits inside TimeoutStartSec=%s; either the lookup moved back onto "+
+			"the startup path, or the budget shrank to where waiting for the pod network no longer works",
+			advertiseHostLateBudget, timeout)
 	}
 }

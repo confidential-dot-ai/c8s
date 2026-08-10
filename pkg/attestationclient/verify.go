@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -31,6 +33,10 @@ var (
 	// that is not hex or not measurement-sized — a malformed result, distinct
 	// from a policy miss.
 	ErrInvalidLaunchDigest = errors.New("attestationclient: launch digest malformed")
+
+	// ErrRTMRNotAllowed: a pinned TDX runtime measurement register is absent,
+	// malformed, or does not match the value the policy pins.
+	ErrRTMRNotAllowed = errors.New("attestationclient: RTMR not allowed")
 
 	// ErrUnsupportedPlatform: [Client.VerifyEvidence] has no verification
 	// rules for the envelope's platform and fails closed.
@@ -92,9 +98,22 @@ type EvidencePolicy struct {
 	// Measurements is the set of acceptable launch measurements; empty
 	// accepts any (callers are expected to warn). The attestation-api
 	// normalizes both the SNP LAUNCH_DIGEST and the TDX MRTD into
-	// claims.launch_digest. This policy does not pin TDX RTMRs, including the
-	// per-workload RTMR[3].
+	// claims.launch_digest.
 	Measurements [][]byte
+
+	// RTMRs pins TDX runtime measurement registers by index, and is what makes
+	// a TDX guest's own bytes attested rather than just its firmware's. MRTD
+	// covers TDVF alone: TDVF measures the guest kernel into RTMR[1] and the
+	// kernel command line — which carries the dm-verity root hash — into
+	// RTMR[2], so without these a host can boot a different guest image and
+	// still produce the pinned MRTD.
+	//
+	// Ignored on SNP, where the command line reaches the launch digest through
+	// kernel-hashes. Absent indices are unpinned; RTMR[0] should stay that way,
+	// as it carries the TD HOB and so varies with the pod's vCPU and memory
+	// shape. RTMR[3] is extended by in-guest software and cannot speak to guest
+	// identity — a substituted guest extends it with whatever it likes.
+	RTMRs map[int][]byte
 }
 
 // VerifyEvidence verifies an attestation evidence envelope against policy via
@@ -143,10 +162,10 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 		reportData = policy.ExpectedReportData[:sha512.Size384]
 	}
 
-	// The attestation-api surfaces MRTD as claims.launch_digest. Enforce it
-	// client-side just like SNP's LAUNCH_DIGEST. RTMR pinning is deliberately
-	// separate and not yet represented by EvidencePolicy. MinTcb is also
-	// omitted because the c8s TDX request has no minimum-TCB policy field.
+	// The attestation-api surfaces MRTD as claims.launch_digest, and the raw
+	// RTMRs as hex in claims.platform_data. Both are enforced client-side, so
+	// the policy stays here rather than being asserted by the verifier. MinTcb
+	// is omitted because the c8s TDX request has no minimum-TCB policy field.
 	resp, err := c.VerifyEnforced(ctx, verifyRequest(evidence, reportData, policy.AllowDebug, nil))
 	if err != nil {
 		return types.VerifyResponse{}, err
@@ -154,7 +173,63 @@ func (c Client) verifyTDXEvidence(ctx context.Context, evidence types.Attestatio
 	if err := enforceLaunchMeasurement(resp, policy.Measurements); err != nil {
 		return types.VerifyResponse{}, err
 	}
+	if err := enforceRTMRs(resp, policy.RTMRs); err != nil {
+		return types.VerifyResponse{}, err
+	}
 	return resp, nil
+}
+
+// enforceRTMRs requires each pinned register to byte-equal the value the
+// verifier reported. A pinned register the evidence does not carry is a
+// refusal, not a pass: that is what an SNP quote (or a verifier that stopped
+// reporting them) looks like, and neither says the guest is the expected one.
+func enforceRTMRs(resp types.VerifyResponse, pinned map[int][]byte) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	var platform struct {
+		RTMR0 string `json:"rtmr_0"`
+		RTMR1 string `json:"rtmr_1"`
+		RTMR2 string `json:"rtmr_2"`
+		RTMR3 string `json:"rtmr_3"`
+	}
+	if len(resp.Result.Claims.PlatformData) > 0 {
+		if err := json.Unmarshal(resp.Result.Claims.PlatformData, &platform); err != nil {
+			return fmt.Errorf("%w: platform data unreadable: %w", ErrRTMRNotAllowed, err)
+		}
+	}
+	reported := [4]string{platform.RTMR0, platform.RTMR1, platform.RTMR2, platform.RTMR3}
+
+	for _, idx := range sortedRTMRIndices(pinned) {
+		want := pinned[idx]
+		if idx < 0 || idx >= len(reported) {
+			return fmt.Errorf("%w: RTMR[%d] does not exist", ErrRTMRNotAllowed, idx)
+		}
+		if reported[idx] == "" {
+			return fmt.Errorf("%w: RTMR[%d] pinned but not reported", ErrRTMRNotAllowed, idx)
+		}
+		got, err := hex.DecodeString(reported[idx])
+		if err != nil {
+			return fmt.Errorf("%w: RTMR[%d] is not hex: %w", ErrRTMRNotAllowed, idx, err)
+		}
+		if len(got) != launchMeasurementSize {
+			return fmt.Errorf("%w: RTMR[%d] is %d bytes, expected %d", ErrRTMRNotAllowed, idx, len(got), launchMeasurementSize)
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("%w: RTMR[%d] does not match", ErrRTMRNotAllowed, idx)
+		}
+	}
+	return nil
+}
+
+// sortedRTMRIndices keeps the error an operator sees stable across runs.
+func sortedRTMRIndices(pinned map[int][]byte) []int {
+	idx := make([]int, 0, len(pinned))
+	for i := range pinned {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	return idx
 }
 
 // enforceLaunchMeasurement validates the verifier's normalized launch digest
@@ -176,7 +251,7 @@ func enforceLaunchMeasurement(resp types.VerifyResponse, allowed [][]byte) error
 	if len(measurement) != launchMeasurementSize {
 		return fmt.Errorf("%w: launch digest is %d bytes, expected %d", ErrInvalidLaunchDigest, len(measurement), launchMeasurementSize)
 	}
-	if len(allowed) > 0 && !measurementAllowed(measurement, allowed) {
+	if len(allowed) > 0 && !MeasurementAllowed(measurement, allowed) {
 		return fmt.Errorf("%w: launch measurement not in allowed set", ErrMeasurementNotAllowed)
 	}
 	return nil
@@ -193,8 +268,10 @@ func verifyRequest(evidence types.AttestationEvidence, reportData []byte, allowD
 	}, false)
 }
 
-// measurementAllowed reports whether measurement byte-equals one of allowed.
-func measurementAllowed(measurement []byte, allowed [][]byte) bool {
+// MeasurementAllowed reports whether measurement byte-equals one of the
+// allowed launch digests (an empty allowed set means "no pin" and is handled
+// by callers).
+func MeasurementAllowed(measurement []byte, allowed [][]byte) bool {
 	for _, m := range allowed {
 		if bytes.Equal(measurement, m) {
 			return true

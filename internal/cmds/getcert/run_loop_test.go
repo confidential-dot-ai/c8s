@@ -171,7 +171,7 @@ func TestObtainCertLogsTokenFreeRequest(t *testing.T) {
 		SAN:               "host.example.com",
 		OutPath:           filepath.Join(t.TempDir(), "cert.pem"),
 	}
-	if err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
+	if _, err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL)); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
 
@@ -200,7 +200,10 @@ func TestRunRenewalLoopLogsFailedRenewal(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run(cfg) }()
 
-	c.waitFor(t, "certificate renewal failed, will retry next interval")
+	// A failed renewal no longer sleeps a whole interval: it backs off from
+	// renewalRetryBase, so the pod re-attempts long before the leaf it is
+	// still serving expires.
+	c.waitFor(t, "certificate renewal failed, retrying")
 	terminateRun(t, done)
 }
 

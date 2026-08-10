@@ -245,6 +245,7 @@ func validRunConfig(t *testing.T, attestationURL string) config {
 		jwtClockSkew:             30,
 		maxTTL:                   time.Hour,
 		certTTL:                  time.Hour,
+		namedCertTTL:             issuer.MaxNamedLeafTTL,
 		challengeTTL:             time.Minute,
 		requestTimeout:           time.Second,
 		maxRequestSize:           65536,

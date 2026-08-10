@@ -369,8 +369,12 @@ func TestSentinelErrors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A currently valid certificate, so the missing extension — not the
+		// validity window — is what VerifyCert rejects.
 		template := &x509.Certificate{
 			SerialNumber: big.NewInt(1),
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
 		}
 		certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 		if err != nil {

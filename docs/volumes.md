@@ -189,7 +189,9 @@ Where volumed runs, and how the sidecar reaches it, depends on the shape:
 
 The node-CVM DaemonSet is **off by default**: it runs privileged, with `hostPID`
 and a writable bind of the kubelet directory. Turn it on with
-`volumed.enabled=true` where volumes are served. A pod requesting a volume on a
+`c8s install --volumes` where volumes are served, or `volumed.enabled=true` for a
+chart consumer. Under kata the flag deploys nothing — the guest image carries the
+daemon — so it is safe to pass in either shape. A pod requesting a volume on a
 cluster with neither shape — `nri-image-policy` disabled and not kata — is
 refused at admission rather than left waiting on a mount that can never land.
 

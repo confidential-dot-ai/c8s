@@ -3,12 +3,8 @@ package verify
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,12 +23,17 @@ const defaultDiscoveryPath = "/v1/discovery"
 // from the embedded attestation, bound to the CDS cert key + the issuance
 // challenge. The challenge is fixed at issuance time, so this is NOT a freshness
 // proof (fresh=false) — but it ships the VCEK, so it verifies offline.
-func gatherFromDiscovery(ctx context.Context, base, path, serverName string, timeout time.Duration) (*evidence, error) {
+func gatherFromDiscovery(ctx context.Context, base, path, serverName string, timeout time.Duration, trust leafTrust) (*evidence, error) {
 	data, src, err := fetchDiscoveryDoc(ctx, base, path, serverName, timeout)
 	if err != nil {
 		return nil, err
 	}
-	return evidenceFromDiscovery(data, src)
+	// No keyProven here, deliberately: fetchDiscoveryDoc dials with
+	// InsecureSkipVerify and no VerifyPeerCertificate, so nothing binds the
+	// certificate INSIDE the document to the leaf that served it. The document
+	// is unauthenticated public bytes — anyone who once fetched a genuine one
+	// can replay it with the certificate re-minted. See authorizeLeafBody.
+	return evidenceFromDiscovery(data, src, trust)
 }
 
 // fetchDiscoveryDoc GETs the discovery document from a component's
@@ -50,9 +51,7 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 	u.Path = path
 	u.RawQuery = ""
 
-	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
-	}}
+	client := insecureClient(serverName, timeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, "", err
@@ -75,39 +74,47 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 
 // evidenceFromDiscovery parses a discovery document into verifiable evidence.
 // REPORTDATA = SHA-384(cert pubkey ‖ challenge), matching get-cert's issuance
-// binding (reportDataForCSR → ratls.ReportDataForKey).
-func evidenceFromDiscovery(data []byte, source string) (*evidence, error) {
+// binding (reportDataForCSR → ratls.ReportDataForKey). The parsed certificate
+// gets the same body authentication as every other cert-sourced path, and is
+// retained as the evidence leaf so the --mesh-ca / --sandbox-id / --workload
+// pins work against discovery targets too. A CDS-issued (CA-vouched) cert in
+// the document is authenticated only by a --mesh-ca chain check; without one
+// the document is rejected rather than verified against a body nothing signed
+// for (authorizeLeafBody).
+func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*evidence, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
 	}
-	if len(d.Attestation.Evidence) == 0 {
-		return nil, fmt.Errorf("discovery document carries no attestation.evidence")
-	}
-	block, _ := pem.Decode([]byte(d.CDSTLS.CertificatePEM))
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("discovery cds_tls.certificate_pem is not a PEM certificate")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, rd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {
-		return nil, fmt.Errorf("parse cds cert: %w", err)
+		return nil, err
 	}
-	challenge, err := base64.StdEncoding.DecodeString(d.Attestation.Challenge)
+	body, err := authenticateLeafBody(cert)
 	if err != nil {
-		return nil, fmt.Errorf("decode challenge: %w", err)
+		return nil, err
 	}
-	rd, err := ratls.ReportDataForKey(cert.PublicKey, challenge)
+	chainVerified, err := authorizeLeafBody(cert, body, trust)
 	if err != nil {
-		return nil, fmt.Errorf("compute expected REPORTDATA: %w", err)
+		return nil, err
 	}
+	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
+	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
 	return &evidence{
-		platform:    platformOrDefault(d.Attestation.Platform),
-		rawEvidence: d.Attestation.Evidence,
-		erd:         keyAnchor(rd),
-		fresh:       false,
-		source:      source,
-		certSHA256:  hex.EncodeToString(sum[:]),
-		bindingNote: "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; not a per-request nonce)",
+		platform:          platformOrDefault(d.Attestation.Platform),
+		rawEvidence:       d.Attestation.Evidence,
+		erd:               keyAnchor(rd),
+		fresh:             false,
+		source:            source,
+		certSHA256:        hex.EncodeToString(sum[:]),
+		bindingNote:       "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)",
+		leaf:              cert,
+		leafBody:          body,
+		leafChainVerified: chainVerified,
+		sandboxID:         sandboxID,
+		sandboxErr:        sandboxErr,
+		workload:          workload,
+		workloadErr:       workloadErr,
 	}, nil
 }

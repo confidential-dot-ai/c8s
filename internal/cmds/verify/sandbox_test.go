@@ -69,7 +69,7 @@ func reissueWithSandboxID(t *testing.T, key *ecdsa.PrivateKey, sandboxID string)
 
 func TestEvidenceFromCertReadsSandboxID(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
-	ev, err := evidenceFromCert(attestedCert(t, id), "test")
+	ev, err := evidenceFromCert(attestedCert(t, id), "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestEvidenceFromCertReadsSandboxID(t *testing.T) {
 // would read as attested, which it is not.
 func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
-	ev, err := evidenceFromCert(attestedCert(t, id), "test")
+	ev, err := evidenceFromCert(attestedCert(t, id), "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestApplySandboxPolicyReportsProvenance(t *testing.T) {
 func TestApplySandboxPolicySelfSignedFailsMeshCA(t *testing.T) {
 	const id = "8d9f6c2b1a0e"
 	cert := attestedCert(t, id)
-	ev, err := evidenceFromCert(cert, "test")
+	ev, err := evidenceFromCert(cert, "test", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +266,32 @@ func TestApplySandboxPolicyMeshCANeedsALeaf(t *testing.T) {
 	applySandboxPolicy(&oc, config{meshCA: caPath}, &evidence{}, operatorKeysReport{})
 	if oc.Verified {
 		t.Fatal("--mesh-ca silently passed with no leaf to check")
+	}
+}
+
+// --sandbox-id needs a leaf to read the ID from; evidence without one (a
+// discovery target) must fail the pin rather than skip it.
+func TestApplySandboxPolicyPinNeedsALeaf(t *testing.T) {
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{sandboxID: "8d9f6c2b1a0e"}, &evidence{}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("--sandbox-id silently passed with no leaf to check")
+	}
+	if !strings.Contains(oc.Error, "--sandbox-id needs the target's leaf certificate") {
+		t.Fatalf("Error = %q, want the leafless refusal", oc.Error)
+	}
+}
+
+// An unreadable --operator-keys file fails the verdict at apply time too — the
+// pin the operator asked for can never be silently dropped.
+func TestApplySandboxPolicyUnreadableOperatorKeysFile(t *testing.T) {
+	oc := Outcome{Verified: true}
+	applySandboxPolicy(&oc, config{operatorKeys: filepath.Join(t.TempDir(), "absent")}, &evidence{}, operatorKeysReport{})
+	if oc.Verified {
+		t.Fatal("an unreadable --operator-keys file passed at apply time")
+	}
+	if !strings.Contains(oc.Error, "--operator-keys") {
+		t.Fatalf("Error = %q, want it to name --operator-keys", oc.Error)
 	}
 }
 

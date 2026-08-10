@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/audit"
 	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -382,18 +382,29 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	}
 
 	// Floor digests admit regardless of argv; workload digests require the
-	// effective argv to satisfy some entry's entrypoint/cmd policy.
-	if !snap.index.AdmitsContainer(digest, argv) {
-		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv)
+	// effective argv to satisfy some entry's entrypoint/cmd policy. Mount and env
+	// policy are left unobserved here: this plugin gates images on a node CVM,
+	// where it sees the CRI container rather than a guest's mount table, and an
+	// unobserved field is not a violation (allowlist.RunningContainer).
+	if !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
+		// INVARIANT: the returned reason reaches a namespace-readable kubelet
+		// event, so it names only the image — argv can carry credentials and
+		// stays in the node-local log.
+		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
+		if listed := snap.index.AdmitsDigest(digest); listed {
+			reason = "argv_not_admitted"
+			denial = fmt.Sprintf("image %s is allowlisted, but its command satisfies no workload entry's argv policy", imageRef)
+		}
+		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
 		p.audit.Log(audit.Event{
 			Action:    "deny",
-			Reason:    "not_in_allowlist",
+			Reason:    reason,
 			Namespace: namespace,
 			Pod:       podName,
 			Container: containerName,
 			Image:     imageRef,
 		})
-		return verdictDeny, fmt.Sprintf("image not in allowlist: %s", imageRef)
+		return verdictDeny, denial
 	}
 
 	// All checks passed
@@ -604,12 +615,14 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	return nil, nil, nil
 }
 
-// extractDigest extracts the digest from an image reference.
-// Returns empty string if no digest is present.
+// extractDigest returns the canonical "sha256:<64hex>" digest from an image
+// reference pulled by digest (registry/repo@sha256:... in any accepted form).
+// Returns empty string when the reference carries no valid digest; the caller
+// treats that as "no digest" and resolves via containerd or denies.
 func extractDigest(imageRef string) string {
-	// Format: registry/repo@sha256:abc123 or registry/repo:tag@sha256:abc123
-	if idx := strings.LastIndex(imageRef, "@"); idx != -1 {
-		return imageRef[idx+1:]
+	d, err := types.NormalizeDigest(imageRef)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return d.String()
 }

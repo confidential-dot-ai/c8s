@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +69,7 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce
 
 func fetchBundle(t *testing.T, base string, nonce []byte) types.AttestationBundle {
 	t.Helper()
-	resp, err := http.Get(base + "/.well-known/c8s/attestation?nonce=" + b64url(nonce))
+	resp, err := http.Get(base + "/.well-known/c8s/attest-pq?nonce=" + b64url(nonce))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	rand.Read(nonce)
 	bundle := fetchBundle(t, ts.URL, nonce)
 
-	if bundle.Version != types.ProtocolVersion || bundle.Platform != "snp" || bundle.Generation != "genoa" {
+	if bundle.Version != types.BindingAttestPQ || bundle.Platform != "snp" || bundle.Generation != "genoa" {
 		t.Fatalf("unexpected bundle header: %+v", bundle)
 	}
 	if bundle.IdentityProof == nil {
@@ -410,11 +412,12 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 	}{
 		{"missing nonce", ""},
 		{"nonce not base64url", "?nonce=%21%40%23"},
-		{"nonce too short", "?nonce=" + b64url(make([]byte, minNonceBytes-1))},
+		{"nonce too short", "?nonce=" + b64url(make([]byte, nonceBytes-1))},
+		{"nonce too long", "?nonce=" + b64url(make([]byte, nonceBytes+1))},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation" + tc.query)
+			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq" + tc.query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -425,30 +428,6 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 				t.Fatalf("error code = %q", e.Error)
 			}
 		})
-	}
-}
-
-// TestAttestationAcceptsMinimumNonce: on the tls-cert binding (pq=false), a
-// nonce of exactly minNonceBytes is the smallest accepted freshness input; the
-// default identity-bound PQ binding requires exactly 32 bytes instead.
-func TestAttestationAcceptsMinimumNonce(t *testing.T) {
-	certPath, _ := writeTestLeaf(t)
-	srv := NewServer(Config{
-		Evidence: FixtureEvidenceProvider{
-			Raw:      json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
-			Platform: "snp",
-		},
-		ServingCertFile: certPath,
-	})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation?pq=false&nonce=" + b64url(make([]byte, minNonceBytes)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200 for a %d-byte nonce", resp.StatusCode, minNonceBytes)
 	}
 }
 
@@ -468,24 +447,16 @@ func TestCDSCertRouteAbsentWithoutCert(t *testing.T) {
 	}
 }
 
-// TestReportDataBindings pins the exact report_data constructions, including
-// nonces larger than the key material they are hashed with.
-func TestReportDataBindings(t *testing.T) {
-	t.Run("tls cert binding", func(t *testing.T) {
-		spki := bytes.Repeat([]byte{4}, 16)
-		nonce := bytes.Repeat([]byte{5}, 64)
-		want := sha512.Sum384(append(append([]byte{}, spki...), nonce...))
-		if got := reportDataForCert(spki, nonce); !bytes.Equal(got, want[:]) {
-			t.Fatalf("reportDataForCert = %x, want %x", got, want)
-		}
-	})
-}
-
+// An evidence provider that cannot produce a quote is a 502 with the versioned
+// unavailable code on both split endpoints. This used to drive the single
+// /attestation endpoint through its two query selectors; the split retired
+// that endpoint, so the two cases are now the two paths.
 func TestAttestationEvidenceUnavailable(t *testing.T) {
-	certPath, _ := writeTestLeaf(t)
+	certPath, _ := writeTestServingLeaf(t)
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
 		Evidence:             failingProvider{},
+		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      certPath,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -497,19 +468,17 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
 
-	for _, query := range []string{
-		"?nonce=" + b64url(nonce),               // over-encryption binding
-		"?nonce=" + b64url(nonce) + "&pq=false", // tls-cert binding
-	} {
-		resp, err := http.Get(ts.URL + "/.well-known/c8s/attestation" + query)
+	for _, path := range []string{"/attest-pq", "/attest-lb"} {
+		resp, err := http.Get(ts.URL + "/.well-known/c8s" + path + "?nonce=" + b64url(nonce))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if resp.StatusCode != http.StatusBadGateway {
-			t.Fatalf("%s: status = %d, want 502", query, resp.StatusCode)
+			resp.Body.Close()
+			t.Fatalf("%s: status = %d, want 502", path, resp.StatusCode)
 		}
 		if e := decodeErr(t, resp); e.Error != types.ErrorCodeAttestationUnavailable {
-			t.Fatalf("%s: error code = %q", query, e.Error)
+			t.Fatalf("%s: error code = %q", path, e.Error)
 		}
 	}
 }
@@ -672,5 +641,45 @@ func TestTunnelSealsBackendErrorAs502(t *testing.T) {
 	resp := tunnel(t, ts.URL, channel, sessionID, types.TunnelRequest{Method: "GET", Path: "/v1/x"})
 	if resp.Status != http.StatusBadGateway {
 		t.Fatalf("sealed status = %d, want 502", resp.Status)
+	}
+}
+
+func TestServingLeafErrors(t *testing.T) {
+	dir := t.TempDir()
+	notCert := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(notCert, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1, 2, 3}}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badDER := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(badDER, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"missing file", filepath.Join(dir, "nope.pem")},
+		{"not a certificate PEM", notCert},
+		{"garbage certificate DER", badDER},
+	}
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS, ServingCertFile: tc.file})
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", resp.StatusCode)
+			}
+			if e := decodeErr(t, resp); e.Error != types.ErrorCodeBindingUnavailable {
+				t.Fatalf("error code = %q", e.Error)
+			}
+		})
 	}
 }

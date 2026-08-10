@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/confidential-dot-ai/c8s/internal/crane"
 	"github.com/confidential-dot-ai/c8s/internal/helmchart"
 	"github.com/confidential-dot-ai/c8s/internal/version"
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
@@ -52,6 +53,7 @@ var (
 	installCvmMode          string
 	installHardwarePlatform string
 	installSingleNode       bool
+	installVolumes          bool
 	installImagePullSecret  string
 	installImageTag         string
 	installOperatorKeys     string
@@ -610,6 +612,10 @@ the kata-guest-base artifact (override: kata.guestImage.pullerAuthSecret).
 This is the cluster-side (kubelet) credential; digest resolution runs locally
 via crane and uses your local docker login.
 
+--volumes deploys volumed, the node agent that opens a pod's encrypted volumes
+into its mount namespace (docs/volumes.md). Under --cvm-mode=pod it deploys
+nothing: volumed runs inside each guest, baked into the kata-guest-base image.
+
 To adopt already-running workloads, pass --workload-ref <id>=<namespace>/<kind>/<name>[:<port>].
 The release namespace is excluded from workload injection, so adopted workloads
 must live in a separate namespace. After the chart is ready, install patches each
@@ -699,6 +705,9 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		}
 		if installKataDebug {
 			fmt.Fprintln(os.Stdout, "+ kata guest image: DEBUG variant — container logs/exec are host-readable; SNP launch measurement differs from the locked image")
+		}
+		if installVolumes && cvmModeIsPod(installCvmMode) {
+			fmt.Fprintln(os.Stdout, "+ encrypted volumes: served by `volumed --guest` inside each kata guest; no host DaemonSet is deployed")
 		}
 		// The sandbox-digests callback dials node addresses and nothing else.
 		// Resolve them here, where the cluster is reachable, so a default
@@ -1136,13 +1145,28 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		)
 	}
 	// The tls-lb attestation sidecar is on by default (chart default); --attest=false
-	// omits it. When on, it advertises its TEE to the browser verifier: the chart
-	// default is snp/genoa, so on TDX override both to match the hardware.
-	// generation is AMD-only (Genoa/Milan/…); on TDX it is not a meaningful
-	// field, so we blank it rather than ship a stale AMD codename.
-	if !installAttestEnabled {
+	// omits it. When on, it passes this platform straight to the attestation-api
+	// as the evidence request, so the value must name the evidence SHAPE, not just
+	// the silicon: under aks the evidence is the Azure vTPM HCL report (az-snp /
+	// az-tdx), and the bare snp/tdx values would ask for /dev/sev-guest //dev/tdx_guest
+	// evidence that Azure CVM nodes cannot produce — every attest-pq/attest-lb call
+	// then fails 502 attestation_unavailable. generation is AMD-only (Genoa/Milan/…):
+	// az-snp auto-detects it from the report CPUID and TDX has no such concept, so
+	// every override blanks it rather than ship the chart-default codename (genoa)
+	// for hardware it never checked.
+	switch {
+	case !installAttestEnabled:
 		helmArgs = append(helmArgs, "--set", "tlsLb.attest.enabled=false")
-	} else if hardwarePlatform == "tdx" {
+	case cvmMode == "aks":
+		attestPlatform := "az-snp"
+		if hardwarePlatform == "tdx" {
+			attestPlatform = "az-tdx"
+		}
+		helmArgs = append(helmArgs,
+			"--set-string", "tlsLb.attest.platform="+attestPlatform,
+			"--set-string", "tlsLb.attest.generation=",
+		)
+	case hardwarePlatform == "tdx":
 		helmArgs = append(helmArgs,
 			"--set-string", "tlsLb.attest.platform=tdx",
 			"--set-string", "tlsLb.attest.generation=",
@@ -1323,12 +1347,12 @@ func preflightOperatorImage(ctx context.Context, components []c8sComponent, tag 
 	if repo == "" {
 		return nil
 	}
-	if _, err := exec.LookPath("crane"); err != nil {
+	if !crane.Available() {
 		fmt.Fprintf(os.Stderr, "warning: cannot verify operator image %s:%s exists (crane not on PATH); a missing tag surfaces only as ImagePullBackOff after install\n", repo, tag)
 		return nil
 	}
-	if _, err := craneDigest(ctx, repo+":"+tag); err != nil {
-		if isImageNotFound(err) {
+	if _, err := crane.Digest(ctx, repo+":"+tag); err != nil {
+		if crane.IsNotFound(err) {
 			return fmt.Errorf("operator image %s:%s is not published — %s: %w", repo, tag, tagCouplingHint(repo, tag), err)
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not verify operator image %s:%s exists (%v); continuing\n", repo, tag, err)
@@ -1350,6 +1374,18 @@ func appendSingleNodeInstallArgs(helmArgs []string, singleNode bool) []string {
 		"--set", "cds.node.selector=null",
 		"--set", "cds.node.tolerations=null",
 	)
+}
+
+// appendVolumedInstallArgs turns on the node agent that opens encrypted volumes
+// (docs/volumes.md) for --volumes. Nothing is emitted under --cvm-mode=pod:
+// there volumed runs inside the guest from the kata-guest-base image, and the
+// chart's enforce_host_components validation rejects the host DaemonSet
+// alongside kata.
+func appendVolumedInstallArgs(setArgs []string, volumes bool, cvmMode string) []string {
+	if !volumes || cvmModeIsPod(cvmMode) {
+		return setArgs
+	}
+	return append(setArgs, "--set", "volumed.enabled=true")
 }
 
 type workloadRef struct {
@@ -1626,7 +1662,7 @@ func podTemplateImages(template corev1.PodTemplateSpec) []string {
 
 func appendResolvedWorkloadImageArgs(ctx context.Context, helmArgs []string, images []string) ([]string, error) {
 	return buildWorkloadImageArgs(helmArgs, images, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1678,20 +1714,6 @@ func workloadImageAllowlistEntry(image string, resolve func(ref string) (string,
 	return parsed.String(), repo + "@" + parsed.String(), nil
 }
 
-// isImageNotFound reports whether a resolve error means the reference does
-// not exist in the registry (as opposed to auth/network trouble). crane
-// surfaces the registry's OCI error codes verbatim: MANIFEST_UNKNOWN for a
-// missing tag, NAME_UNKNOWN for a missing repository. Matching them lets the
-// callers attach the tag-coupling guidance only when the tag is genuinely
-// absent — a 401 or a DNS failure gets the raw error instead.
-func isImageNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "MANIFEST_UNKNOWN") || strings.Contains(msg, "NAME_UNKNOWN")
-}
-
 // tagCouplingHint explains a missing component image in terms of the c8s
 // publish model, so the operator lands on the right knob instead of retrying
 // tags. The c8s component images (operator, cds, …) publish in lockstep
@@ -1704,39 +1726,18 @@ func tagCouplingHint(repo, tag string) string {
 	return fmt.Sprintf("every c8s component image must be published at the install tag (they publish in lockstep; a mismatched older operator would silently lack webhook features the chart expects). If %q is a kata-guest-base guest-image tag, that is a separate axis: keep --image-tag on a published component tag and set kata.guestImage.tag=%s via -f instead. Verify with: crane ls %s", tag, tag, repo)
 }
 
-// craneDigest resolves an image reference to its registry digest by shelling
-// out to `crane digest <ref>`. crane handles registry auth (docker config),
-// manifest lists, and the v2 protocol — reimplementing that in-process would
-// pull a heavyweight registry client for one lookup. The returned value is a
-// bare "sha256:<hex>".
-func craneDigest(ctx context.Context, ref string) (string, error) {
-	out, err := exec.CommandContext(ctx, "crane", "digest", ref).Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("crane digest %q: %w: %s", ref, err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", fmt.Errorf("crane digest %q: %w", ref, err)
-	}
-	digest := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(digest, "sha256:") {
-		return "", fmt.Errorf("crane digest %q returned unexpected value %q", ref, digest)
-	}
-	return digest, nil
-}
-
 // appendResolvedDigestArgs resolves each chart component's repo:tag to its
 // registry digest (via crane) and appends the helm --set flags that pin it.
 func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []string, tag string, components []c8sComponent) ([]string, error) {
-	if _, err := exec.LookPath("crane"); err != nil {
-		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f: %w", err)
+	if !crane.Available() {
+		return nil, fmt.Errorf("digest resolution needs the 'crane' CLI on PATH; install it or pass --resolve-digests=false and supply digests via -f")
 	}
 	enabled, err := componentEnabledPredicate(ctx, chartPath, helmArgs)
 	if err != nil {
 		return nil, err
 	}
 	return buildDigestArgs(helmArgs, tag, components, func(ref string) (string, error) {
-		digest, err := craneDigest(ctx, ref)
+		digest, err := crane.Digest(ctx, ref)
 		if err != nil {
 			return "", err
 		}
@@ -1751,7 +1752,7 @@ func appendResolvedDigestArgs(ctx context.Context, chartPath string, helmArgs []
 // enabledPath, given the chart defaults, the operator's -f values files, and the
 // --set overrides assembled so far — in helm's precedence order (defaults < -f
 // files in order < --set). Getting the -f files right matters for a component
-// that defaults to disabled and is turned on only through -f (e.g.
+// that defaults to disabled and is turned on through -f (e.g.
 // volumed.enabled): without them the resolver would treat it as off and skip
 // pinning its digest, and the render then fails with no image ref. The merged
 // tree is built once and shared across the per-component calls.
@@ -1869,7 +1870,7 @@ func buildDigestArgs(helmArgs []string, tag string, components []c8sComponent, r
 		repo := c.repository
 		digest, err := resolve(repo + ":" + tag)
 		if err != nil {
-			if isImageNotFound(err) {
+			if crane.IsNotFound(err) {
 				return nil, fmt.Errorf("component %s: image %s:%s is not published — %s: %w", c.valuePrefix, repo, tag, tagCouplingHint(repo, tag), err)
 			}
 			return nil, err
@@ -1899,6 +1900,7 @@ func init() {
 	installCmd.Flags().Int64Var(&installGetCertRunAsGroup, "webhook-get-cert-run-as-group", 65532, "runAsGroup for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installGetCertRunAsNonRoot, "webhook-get-cert-run-as-non-root", true, "set runAsNonRoot for injected get-cert containers")
 	installCmd.Flags().BoolVar(&installSingleNode, "single-node", false, "single-node / single-CVM cluster: clear the dedicated-CDS-node selector and taint toleration so every node is CDS-eligible (no role=cds label or dedicated node needed). Sets cds.node.selector={} and cds.node.tolerations=[]")
+	installCmd.Flags().BoolVar(&installVolumes, "volumes", false, "serve encrypted volumes (docs/volumes.md): deploy volumed, the node agent that opens a pod's volume devices, and pin its image into the NRI allowlist. Off by default — it runs privileged, with hostPID and a writable bind of the kubelet directory. Under --cvm-mode=pod volumes are served by the in-guest volumed baked into kata-guest-base, so nothing is deployed")
 	installCmd.Flags().StringSliceVar(&installWorkloadRefs, flagWorkloadRef, nil, "existing workload to adopt as a c8s confidential workload, as <cw-id>=<namespace>/<kind>/<name>[:<port>]; repeatable. Kind is any resource exposing a pod template at spec.template (deployment, statefulset, daemonset, or an operator CRD such as <kind>.<group>). The optional :<port> is the tls-lb upstream port, needed on the ref --upstream selects")
 	installCmd.Flags().StringVar(&installUpstream, flagUpstream, "", "confidential.ai/cw id of the adopted --workload-ref workload tls-lb routes its catch-all to; derives the mesh-wrapped upstream c8s-<id>.<ns>.svc.cluster.local:<port> from that ref's :<port>. Without this or a verified-https tlsLb.upstream, tls-lb renders no catch-all route until one is attached")
 	installCmd.Flags().StringVar(&installCvmMode, flagCvmMode, "", "CVM deployment shape (REQUIRED; orthogonal to --hardware-platform): pod (per-pod confidential VMs via the Kata runtime — every workload pod is a kata CVM, host-side attestation-api/nri/ratls-mesh served by the in-guest counterparts), node (generalized node-as-CVM: our own TDX/SNP nodes are themselves confidential VMs, pods run as ordinary processes, attestation-api + nri baked into the node image), gke (GKE managed confidential VMs), or aks (vTPM /dev/tpm0)")

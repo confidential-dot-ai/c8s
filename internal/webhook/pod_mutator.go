@@ -33,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -100,7 +101,12 @@ var errInvalidInjectionAnnotation = errors.New("invalid c8s injection annotation
 // the distroless nonroot UID/GID 65532, and get-cert writes tls.key 0640.
 const defaultCertFSGroup int64 = 65532
 const defaultCertKeyMode = "0640"
-const defaultCertRenewInterval = 6 * time.Hour
+
+// defaultCertRenewInterval must stay strictly below issuer.MaxNamedLeafTTL, the
+// shortest TTL CDS issues: a leaf carrying a matched-workload stamp is capped
+// there and its NotBefore is not backdated, so an equal interval would only
+// renew once the installed leaf had already expired.
+const defaultCertRenewInterval = 2 * time.Hour
 const defaultGetCertRunAsUser int64 = 65532
 const defaultGetCertRunAsGroup int64 = 65532
 const defaultGetCertRunAsNonRoot = true
@@ -510,8 +516,44 @@ func (inj *injection) validate() error {
 	if err := inj.Discovery.validate(); err != nil {
 		return err
 	}
+	if err := inj.Secrets.validate(); err != nil {
+		return err
+	}
 	if err := inj.Volumes.validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validate checks each NAME=/store/path pair against the rules get-secret
+// enforces, so a spec the fetcher could never satisfy is a rejected manifest
+// rather than a Running pod whose fetcher crash-loops. The name becomes a
+// filename in the secret dir.
+func (s secretsSpec) validate() error {
+	seen := map[string]bool{}
+	for _, spec := range s.Specs {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok {
+			return fmt.Errorf("%w: %s entry %q must be NAME=/store/path",
+				errInvalidInjectionAnnotation, AnnotationSecrets, spec)
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+			return fmt.Errorf("%w: %s name %q must be non-empty and not a path",
+				errInvalidInjectionAnnotation, AnnotationSecrets, name)
+		}
+		if seen[name] {
+			return fmt.Errorf("%w: %s names %q twice; each names a distinct file",
+				errInvalidInjectionAnnotation, AnnotationSecrets, name)
+		}
+		seen[name] = true
+		if _, err := pkgallowlist.CanonicalSecretPath(strings.TrimSpace(path)); err != nil {
+			return fmt.Errorf("%w: %s %q: %s", errInvalidInjectionAnnotation, AnnotationSecrets, name, err)
+		}
+	}
+	if s.Dir != "" && !strings.HasPrefix(s.Dir, "/") {
+		return fmt.Errorf("%w: %s must be an absolute path",
+			errInvalidInjectionAnnotation, AnnotationSecretDir)
 	}
 	return nil
 }
@@ -680,6 +722,15 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// marker: an author cannot skip injection by pre-setting it.
 	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
 	kataClass := kataRuntimeClassFor(pod, m.cfg)
+
+	// Covers a pod that set its own runtimeClassName too: injection skips it,
+	// but the shim still honors the annotations. Host-namespace pods are
+	// exempt like they are from class injection (kataIncompatible).
+	if m.cfg.KataEnforce && !kataIncompatible(pod) {
+		if err := rejectKataHypervisorAnnotations(pod); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
 
 	if inj == nil && kataClass == "" {
 		return admission.Allowed("no c8s annotation — passthrough")
@@ -954,7 +1005,7 @@ func mutatePod(pod *corev1.Pod, inj *injection, cfg Config) {
 	})
 
 	if effective.Reload.Nginx {
-		pod.Spec.ShareProcessNamespace = boolPtr(true)
+		pod.Spec.ShareProcessNamespace = ptr.To(true)
 	}
 
 	injected := []corev1.Container{certContainer(&effective, cfg), certWaitContainer(&effective, cfg)}
@@ -1034,6 +1085,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
+	// get-cert names this one --cds-measurements and takes it comma-joined,
+	// where the secret and volume fetchers take a repeatable --measurements.
+	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
+		args = append(args, "--cds-measurements="+joined)
+	}
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1205,7 +1261,7 @@ func (cfg Config) withDefaults() Config {
 		cfg.CertDir = "/etc/c8s/certs"
 	}
 	if cfg.CertFSGroup == nil {
-		cfg.CertFSGroup = int64Ptr(defaultCertFSGroup)
+		cfg.CertFSGroup = ptr.To(defaultCertFSGroup)
 	}
 	if cfg.CertKeyMode == "" {
 		cfg.CertKeyMode = defaultCertKeyMode
@@ -1214,13 +1270,13 @@ func (cfg Config) withDefaults() Config {
 		cfg.CertRenewInterval = defaultCertRenewInterval
 	}
 	if cfg.GetCertRunAsUser == nil {
-		cfg.GetCertRunAsUser = int64Ptr(defaultGetCertRunAsUser)
+		cfg.GetCertRunAsUser = ptr.To(defaultGetCertRunAsUser)
 	}
 	if cfg.GetCertRunAsGroup == nil {
-		cfg.GetCertRunAsGroup = int64Ptr(defaultGetCertRunAsGroup)
+		cfg.GetCertRunAsGroup = ptr.To(defaultGetCertRunAsGroup)
 	}
 	if cfg.GetCertRunAsNonRoot == nil {
-		cfg.GetCertRunAsNonRoot = boolPtr(defaultGetCertRunAsNonRoot)
+		cfg.GetCertRunAsNonRoot = ptr.To(defaultGetCertRunAsNonRoot)
 	}
 	if cfg.HardwarePlatform == "" {
 		cfg.HardwarePlatform = HardwarePlatformSNP
@@ -1242,14 +1298,6 @@ func getCertSecurityContext(inj *injection) *corev1.SecurityContext {
 		},
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func int64Ptr(v int64) *int64 {
-	return &v
 }
 
 // secretsVolume is the memory-backed volume released values are written to.

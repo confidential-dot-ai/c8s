@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/volume"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -47,12 +48,10 @@ func startInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, signer)
+	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	prev := inventoryEndpoint
-	inventoryEndpoint = func() string { return "unix://" + sock }
-	t.Cleanup(func() { inventoryEndpoint = prev })
+	sidecar.SetInventoryEndpointForTest(t, func() string { return "unix://" + sock })
 }
 
 // fakeCDS records what it was asked and answers from a scripted sequence.
@@ -147,13 +146,15 @@ func testBlobJSON(t *testing.T) []byte {
 func flowConfig(t *testing.T, url string) config {
 	t.Helper()
 	return config{
-		CDSURL:           url,
-		SocketDir:        t.TempDir(),
-		Volumes:          []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
-		Attempts:         3,
-		RetryInterval:    time.Millisecond,
-		RequestTimeout:   5 * time.Second,
-		InventoryTimeout: 5 * time.Second,
+		Config: sidecar.Config{
+			CDSURL:           url,
+			Attempts:         3,
+			RetryInterval:    time.Millisecond,
+			RequestTimeout:   5 * time.Second,
+			InventoryTimeout: 5 * time.Second,
+		},
+		SocketDir: t.TempDir(),
+		Volumes:   []volumeRequest{{Name: "weights", Path: "/tenant-a/volumes/weights"}},
 	}
 }
 
@@ -254,51 +255,3 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 		t.Error("the same sandbox token was presented twice")
 	}
 }
-
-func TestOpenWithRetryRecoversOnceReleased(t *testing.T) {
-	cfg := flowConfig(t, "https://cds.example")
-	var calls int
-	err := openWithRetry(context.Background(), cfg, func(context.Context) error {
-		calls++
-		if calls < 3 {
-			return errNotYet
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if calls != 3 {
-		t.Fatalf("attempted %d times, want 3", calls)
-	}
-}
-
-func TestOpenWithRetryGivesUp(t *testing.T) {
-	cfg := flowConfig(t, "https://cds.example")
-	var calls int
-	err := openWithRetry(context.Background(), cfg, func(context.Context) error {
-		calls++
-		return errNotYet
-	})
-	if err == nil {
-		t.Fatal("retry never gave up")
-	}
-	if calls != cfg.Attempts {
-		t.Fatalf("attempted %d times, want %d", calls, cfg.Attempts)
-	}
-}
-
-func TestOpenWithRetryStopsWhenTheContextIsDone(t *testing.T) {
-	cfg := flowConfig(t, "https://cds.example")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := openWithRetry(ctx, cfg, func(context.Context) error { return errNotYet }); err == nil {
-		t.Fatal("retry ignored a cancelled context")
-	}
-}
-
-var errNotYet = &notYetError{}
-
-type notYetError struct{}
-
-func (*notYetError) Error() string { return "not released yet" }

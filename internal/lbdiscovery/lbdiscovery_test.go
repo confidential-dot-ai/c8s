@@ -24,6 +24,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -104,7 +105,7 @@ func fakeLB(t *testing.T, servingCert tls.Certificate, doc []byte) *httptest.Ser
 // contract for measurement (the pin itself is unit-tested in localverify).
 func approvingVerify(measurement []byte) localverify.VerifyFunc {
 	return func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
-		if len(p.Measurements) > 0 && !ratls.MeasurementAllowed(measurement, p.Measurements) {
+		if len(p.Measurements) > 0 && !attestationclient.MeasurementAllowed(measurement, p.Measurements) {
 			return nil, localverify.ErrMeasurementNotAllowed
 		}
 		match := true
@@ -342,5 +343,52 @@ func TestNewVerifiedHTTPClient_RequiresVerifier(t *testing.T) {
 	_, err := NewVerifiedHTTPClient(context.Background(), "https://cds.example", nil, nil)
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("verifier is required")) {
 		t.Fatalf("want a nil-verifier error, got: %v", err)
+	}
+}
+
+// TestNewVerifiedHTTPClient_RejectsExpiredServingCert proves the attested
+// serving cert must be inside its validity window: the issuance-time evidence
+// has no other freshness bound, so an expired cert fails closed — before the
+// evidence verifier is even consulted — and never signals ErrNoDiscovery.
+func TestNewVerifiedHTTPClient_RejectsExpiredServingCert(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "tls-lb"},
+		NotBefore:    time.Now().Add(-2 * time.Hour),
+		NotAfter:     time.Now().Add(-time.Hour),
+		DNSNames:     []string{"127.0.0.1", "localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servingCert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
+
+	doc := discoveryDoc(t, leaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
+	lb := fakeLB(t, servingCert, doc)
+
+	verifyCalls := 0
+	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		verifyCalls++
+		return approvingVerify(nil)(ctx, platform, evidence, p)
+	}
+
+	_, err = NewVerifiedHTTPClient(context.Background(), lb.URL, nil, verify)
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("expired")) {
+		t.Fatalf("want an expiry rejection of the attested serving cert, got: %v", err)
+	}
+	if errors.Is(err, ErrNoDiscovery) {
+		t.Fatal("validity failure must not signal ErrNoDiscovery (would allow fallback)")
+	}
+	if verifyCalls != 0 {
+		t.Fatalf("an expired serving cert consumed %d evidence verification(s), want 0", verifyCalls)
 	}
 }

@@ -108,6 +108,11 @@ shows up. For kernel version bumps see
 [base-images/rke2/README.md](https://github.com/confidential-dot-ai/base-images/blob/master/rke2/README.md)
 "Bumping versions".
 
+Every external input is digest- or commit-pinned, and moving any pin
+moves the verity root_hash. See
+[`../docs/kata-guest-base.md`](../docs/kata-guest-base.md) "Component
+pins" for the full list, locations, and bump procedure.
+
 ## How it's consumed in-cluster
 
 The `c8s-kata-image-puller` DaemonSet (`internal/helmchart/c8s/templates/

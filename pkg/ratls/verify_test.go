@@ -25,6 +25,22 @@ func TestSandboxPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
 	}
 }
 
+// A workload pin is CA-vouched exactly like the sandbox ID, so the same two
+// evidence-only paths refuse it rather than silently ignoring it.
+func TestWorkloadPinFailsClosedOnEvidenceOnlyPaths(t *testing.T) {
+	policy := &VerifyPolicy{AttestationApiURL: "http://127.0.0.1:1", WorkloadName: "api"}
+
+	if _, err := VerifyAttestation(nil, &Attestation{TEEType: TEETypeSEVSNP}, policy, nil); err == nil {
+		t.Fatal("VerifyAttestation accepted a workload pin it cannot authenticate")
+	} else if !errors.Is(err, ErrPolicyViolation) {
+		t.Fatalf("err = %v, want ErrPolicyViolation", err)
+	}
+
+	if _, err := VerifyCert(&x509.Certificate{}, policy, nil); err == nil {
+		t.Fatal("VerifyCert accepted a workload pin it cannot authenticate")
+	}
+}
+
 // Both paths also require an attestation-api: there is no in-process verifier,
 // so without one they must fail rather than accept unverified evidence.
 func TestVerifyRequiresAttestationApi(t *testing.T) {

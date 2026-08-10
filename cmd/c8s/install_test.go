@@ -299,6 +299,26 @@ func TestAppendSingleNodeInstallArgsClearsCDSNodePinning(t *testing.T) {
 	})
 }
 
+func TestAppendVolumedInstallArgsDisabledIsNoOp(t *testing.T) {
+	got := appendVolumedInstallArgs([]string{"upgrade"}, false, "node")
+	assertArgsEqual(t, got, []string{"upgrade"})
+}
+
+func TestAppendVolumedInstallArgsEnablesTheNodeAgent(t *testing.T) {
+	for _, mode := range []string{"node", "gke", "aks"} {
+		got := appendVolumedInstallArgs([]string{"upgrade"}, true, mode)
+		assertArgsEqual(t, got, []string{"upgrade", "--set", "volumed.enabled=true"})
+	}
+}
+
+func TestAppendVolumedInstallArgsPodModeServesVolumesInGuest(t *testing.T) {
+	// kata-guest-base bakes `volumed --guest`, and the chart's
+	// enforce_host_components validation fails the render if the host DaemonSet
+	// is enabled alongside kata — so --volumes must emit nothing here.
+	got := appendVolumedInstallArgs([]string{"upgrade"}, true, "pod")
+	assertArgsEqual(t, got, []string{"upgrade"})
+}
+
 func TestParseWorkloadRef(t *testing.T) {
 	tests := []struct {
 		ref     string
@@ -1022,9 +1042,24 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 				"--set-string", "ratlsMesh.platform=tdx",
 			)
 		}
-		// TDX also overrides the tls-lb attestation sidecar's advertised
-		// platform (chart default snp/genoa) and blanks the AMD-only generation.
-		if platform == "tdx" {
+		// The attest sidecar's platform names the evidence shape the sidecar
+		// requests from the attestation-api: az-snp/az-tdx under aks (Azure
+		// vTPM HCL report — bare snp/tdx would probe guest devices AKS nodes
+		// do not expose), bare tdx on native TDX. sev-snp outside aks keeps
+		// the chart default (snp). Every override blanks the AMD-only
+		// generation.
+		switch {
+		case mode == "aks" && platform == "tdx":
+			out = append(out,
+				"--set-string", "tlsLb.attest.platform=az-tdx",
+				"--set-string", "tlsLb.attest.generation=",
+			)
+		case mode == "aks":
+			out = append(out,
+				"--set-string", "tlsLb.attest.platform=az-snp",
+				"--set-string", "tlsLb.attest.generation=",
+			)
+		case platform == "tdx":
 			out = append(out,
 				"--set-string", "tlsLb.attest.platform=tdx",
 				"--set-string", "tlsLb.attest.generation=",
@@ -1348,30 +1383,6 @@ func TestBuildDigestArgsLeavesOtherResolveErrorsUnhinted(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "kata.guestImage.tag") {
 		t.Errorf("non-not-found error must not carry the tag-coupling hint: %v", err)
-	}
-}
-
-// isImageNotFound keys the tag-coupling guidance to the registry's own
-// missing-reference error codes, so auth and network failures never
-// masquerade as a missing tag.
-func TestIsImageNotFound(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "missing tag", err: errors.New("crane digest: MANIFEST_UNKNOWN: manifest unknown"), want: true},
-		{name: "missing repository", err: errors.New("crane digest: NAME_UNKNOWN: repository name not known to registry"), want: true},
-		{name: "auth failure", err: errors.New("crane digest: UNAUTHORIZED: authentication required"), want: false},
-		{name: "network failure", err: errors.New("dial tcp: lookup ghcr.io: no such host"), want: false},
-		{name: "nil", err: nil, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isImageNotFound(tt.err); got != tt.want {
-				t.Fatalf("isImageNotFound(%v) = %t, want %t", tt.err, got, tt.want)
-			}
-		})
 	}
 }
 

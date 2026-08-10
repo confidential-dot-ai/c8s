@@ -126,6 +126,46 @@ func TestInitialVersionIsOne(t *testing.T) {
 	}
 }
 
+func TestVersionMatchesListAllWithoutLoadingRows(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	version, err := store.Version()
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if version != "1" {
+		t.Fatalf("initial version: got %q, want %q", version, "1")
+	}
+
+	// Version is the ETag the worker pull carries, so it must move in lockstep
+	// with the counter ListAll reports after a write.
+	if err := store.Add(mustParseDigest(t, digestA), "image-a"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	listVersion, _, err := store.ListAll()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	version, err = store.Version()
+	if err != nil {
+		t.Fatalf("version after add: %v", err)
+	}
+	if version != listVersion {
+		t.Fatalf("Version() = %q, ListAll version = %q; the cheap read must match", version, listVersion)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := store.Version(); err == nil {
+		t.Fatal("Version on a closed store should fail, not report a stale counter")
+	}
+}
+
 func TestAddAndListRoundtrip(t *testing.T) {
 	store, err := OpenInMemory()
 	if err != nil {
@@ -741,5 +781,67 @@ func TestListAllSkipsCorruptRows(t *testing.T) {
 	}
 	if digests[dA] != "good:v1" {
 		t.Fatalf("valid row lost: %#v", digests)
+	}
+}
+
+// Generation is the snapshot-cache invalidation signal: it moves on every
+// committed mutation, including a RestoreSnapshot that deliberately moves the
+// version string backwards, and never on a read.
+func TestGenerationMovesOnEveryMutation(t *testing.T) {
+	store, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	gen := store.Generation()
+	step := func(name string, mutate func() error) {
+		t.Helper()
+		if err := mutate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		next := store.Generation()
+		if next <= gen {
+			t.Fatalf("%s left the generation at %d", name, next)
+		}
+		gen = next
+	}
+
+	step("Add", func() error { return store.Add(mustParseDigest(t, digestA), "img-a") })
+	step("PutWorkload", func() error {
+		return store.PutWorkload("w", oneContainerWorkload(mustParseDigest(t, digestB)))
+	})
+	step("DeleteWorkload", func() error { _, err := store.DeleteWorkload("w"); return err })
+	step("ReplaceAll", func() error {
+		return store.ReplaceAll(&pkgallowlist.Allowlist{Schema: pkgallowlist.Schema})
+	})
+	step("Delete", func() error {
+		if err := store.Add(mustParseDigest(t, digestC), "img-c"); err != nil {
+			return err
+		}
+		gen = store.Generation()
+		_, err := store.Delete([]types.Digest{mustParseDigest(t, digestC)})
+		return err
+	})
+	// A restore rewinds the version string; the generation must not rewind with
+	// it, or a cache keyed on the version would serve a stale document.
+	before := store.Generation()
+	if err := store.RestoreSnapshot("1", &pkgallowlist.Allowlist{Schema: pkgallowlist.Schema}); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	if store.Generation() <= before {
+		t.Fatal("RestoreSnapshot did not move the generation")
+	}
+
+	// Reads never move it.
+	steady := store.Generation()
+	if _, _, err := store.LoadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Contains(mustParseDigest(t, digestA)); err != nil {
+		t.Fatal(err)
+	}
+	if store.Generation() != steady {
+		t.Fatal("a read moved the generation")
 	}
 }

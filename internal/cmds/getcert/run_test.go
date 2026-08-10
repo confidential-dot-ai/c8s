@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
 func TestCDSHTTPClientRejectsPlainHTTP(t *testing.T) {
@@ -926,7 +928,7 @@ func TestObtainCertEndToEnd(t *testing.T) {
 		OutPath:           filepath.Join(dir, "cert.pem"),
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCert: %v", err)
 	}
 	got, err := os.ReadFile(cfg.OutPath)
@@ -950,7 +952,7 @@ func TestObtainCertCDSError(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com"}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCert(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCert(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCert succeeded, want error when CDS fails")
 	}
 }
@@ -976,7 +978,7 @@ func TestObtainCertAttestationExtensionError(t *testing.T) {
 		AttestationApiURL: att.URL,
 		SAN:               "host.example.com",
 	}
-	err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL))
+	_, err := obtainCert(context.Background(), cfg, plaintextCDSClient(cfg.CDSURL))
 	if err == nil {
 		t.Fatal("obtainCert succeeded, want attestation extension error")
 	}
@@ -1023,7 +1025,7 @@ func TestObtainCertWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 		InitialRetryInterval: time.Millisecond,
 	}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err != nil {
 		t.Fatalf("obtainCertWithRetry: %v", err)
 	}
 	if calls < 2 {
@@ -1045,7 +1047,7 @@ func TestObtainCertWithRetryNoTimeoutTriesOnce(t *testing.T) {
 
 	cfg := config{CDSURL: cds.URL, AttestationApiURL: att.URL, SAN: "host.example.com", InitialRetryTimeout: 0}
 	client := plaintextCDSClient(cfg.CDSURL)
-	if err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
+	if _, err := obtainCertWithRetry(context.Background(), cfg, client); err == nil {
 		t.Fatal("obtainCertWithRetry succeeded, want error")
 	}
 	if calls != 1 {
@@ -1094,6 +1096,88 @@ func TestRunOnceReturnsInitialError(t *testing.T) {
 	if err == nil {
 		t.Fatal("run succeeded, want initial certificate request error")
 	}
+}
+
+// serveSandboxRoute runs an inventory-shaped HTTP server on a unix socket and
+// points the package's inventoryEndpoint at it for the test's lifetime.
+func serveSandboxRoute(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "inv.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(workloadclaims.SandboxPath, handler)
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	old := inventoryEndpoint
+	inventoryEndpoint = func() string { return "unix://" + sock }
+	t.Cleanup(func() { inventoryEndpoint = old })
+}
+
+func TestFetchSandboxToken(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := []byte("challenge-nonce")
+	baseCfg := config{WorkloadClaims: true, WorkloadClaimsTimeout: 5 * time.Second}
+
+	t.Run("disabled returns no token and no fetch", func(t *testing.T) {
+		serveSandboxRoute(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Error("the inventory must not be consulted without --workload-claims")
+		})
+		raw, err := fetchSandboxToken(context.Background(), config{}, &key.PublicKey, nonce)
+		if err != nil || raw != nil {
+			t.Fatalf("= %v, %v; want nil, nil", raw, err)
+		}
+	})
+
+	t.Run("route absent issues without a sandbox ID", func(t *testing.T) {
+		serveSandboxRoute(t, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		raw, err := fetchSandboxToken(context.Background(), baseCfg, &key.PublicKey, nonce)
+		if err != nil {
+			t.Fatalf("a 404 route must degrade to tokenless issuance, got %v", err)
+		}
+		if raw != nil {
+			t.Fatalf("token = %s, want none", raw)
+		}
+	})
+
+	t.Run("any other inventory failure is fail-closed", func(t *testing.T) {
+		serveSandboxRoute(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		})
+		if _, err := fetchSandboxToken(context.Background(), baseCfg, &key.PublicKey, nonce); err == nil {
+			t.Fatal("a 500 from the inventory must abort issuance, not drop the binding")
+		}
+	})
+
+	t.Run("served token is forwarded as raw JSON", func(t *testing.T) {
+		serveSandboxRoute(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(workloadclaims.SignedSandboxToken{
+				Token:     []byte("token-der"),
+				Signature: []byte("signature"),
+			})
+		})
+		raw, err := fetchSandboxToken(context.Background(), baseCfg, &key.PublicKey, nonce)
+		if err != nil {
+			t.Fatalf("fetchSandboxToken: %v", err)
+		}
+		var got workloadclaims.SignedSandboxToken
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("returned token is not the JSON CDS expects: %v", err)
+		}
+		if string(got.Token) != "token-der" || string(got.Signature) != "signature" {
+			t.Fatalf("token roundtrip = %+v", got)
+		}
+	})
 }
 
 // testIssuedChainPEM builds a two-cert PEM chain (leaf + one issuer) that parses

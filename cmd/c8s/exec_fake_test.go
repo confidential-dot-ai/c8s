@@ -108,7 +108,7 @@ func resetCLIState(t *testing.T) {
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug       bool
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled bool
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce    bool
-		uninstallDeleteCRDs, uninstallDeleteNamespace                                bool
+		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes                bool
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup        int64
 		installGetCertRenewInterval                                                  time.Duration
 	}{
@@ -121,7 +121,7 @@ func resetCLIState(t *testing.T) {
 		installWait, installCRDs, installGetCertRunAsNonRoot, installKataDebug,
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled,
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce,
-		uninstallDeleteCRDs, uninstallDeleteNamespace,
+		uninstallDeleteCRDs, uninstallDeleteNamespace, installVolumes,
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup,
 		installGetCertRenewInterval,
 	}
@@ -136,6 +136,7 @@ func resetCLIState(t *testing.T) {
 		installSingleNode, installForce, installResolveDigests, installAttestEnabled = saved.installSingleNode, saved.installForce, saved.installResolveDigests, saved.installAttestEnabled
 		uninstallWait, uninstallKataSweep, uninstallHostSweepOnly, uninstallForce = saved.uninstallWait, saved.uninstallKataSweep, saved.uninstallHostSweepOnly, saved.uninstallForce
 		uninstallDeleteCRDs, uninstallDeleteNamespace = saved.uninstallDeleteCRDs, saved.uninstallDeleteNamespace
+		installVolumes = saved.installVolumes
 		installCertFSGroup, installGetCertRunAsUser, installGetCertRunAsGroup = saved.installCertFSGroup, saved.installGetCertRunAsUser, saved.installGetCertRunAsGroup
 		installGetCertRenewInterval = saved.installGetCertRenewInterval
 	})
@@ -147,6 +148,7 @@ func resetCLIState(t *testing.T) {
 	installGetCertRunAsUser, installGetCertRunAsGroup, installGetCertRunAsNonRoot = 65532, 65532, true
 	installKataDebug, installCvmMode, installHardwarePlatform = false, "", "sev-snp"
 	installSingleNode, installImagePullSecret, installImageTag = false, "", ""
+	installVolumes = false
 	installOperatorKeys, installForce = "", false
 	installUpstream, installWorkloadRefs = "", nil
 	installResolveDigests, installAttestEnabled, installMeasurements = true, true, nil

@@ -18,4 +18,8 @@ const (
 	ErrorCodeInternal                  = "internal"
 	ErrorCodeAttestationUnavailable    = "attestation_unavailable"
 	ErrorCodeBindingUnavailable        = "binding_unavailable"
+	// ErrorCodeUnsupportedFrontDoor: attest-lb was requested on a WebPKI-secret
+	// front door, whose host-visible serving key cannot support transport
+	// binding; that deployment shape is attest-pq-only.
+	ErrorCodeUnsupportedFrontDoor = "unsupported_front_door"
 )

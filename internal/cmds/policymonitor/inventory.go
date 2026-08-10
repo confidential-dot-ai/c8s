@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -60,7 +58,8 @@ func (b *admissionInventory) record(cid, digest string, argv []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.containers[cid] = digest
-	b.admitted[digest+"\x1f"+strings.Join(argv, "\x1f")] = workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
+	b.admitted[c.Key()] = c
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
@@ -115,12 +114,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		containers = append(containers, c)
 	}
 	slices.Sort(digests)
-	slices.SortFunc(containers, func(x, y workloadclaims.SandboxContainer) int {
-		if x.Digest != y.Digest {
-			return strings.Compare(x.Digest, y.Digest)
-		}
-		return strings.Compare(strings.Join(x.Argv, "\x1f"), strings.Join(y.Argv, "\x1f"))
-	})
+	slices.SortFunc(containers, workloadclaims.SandboxContainer.Compare)
 	return slices.Compact(digests), containers, true, nil
 }
 
@@ -152,80 +146,118 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 // disable tokens (nil signer) but never crash the monitor — the same
 // fail-open-to-degraded posture as runAllowlistRefresh; get-cert then issues
 // without a sandbox ID.
-func sandboxTokenSigner(cfg *Config, logger *slog.Logger) *workloadclaims.SandboxTokenSigner {
-	if cfg.CDSURL == "" {
-		logger.Warn("sandbox tokens disabled: no CDS URL configured")
-		return nil
-	}
+// installSandboxTokenSigner resolves the address this guest's sandbox tokens
+// commit to, starts the digests endpoint CDS calls back on, and only then hands
+// the signer to the token route.
+//
+// It runs after READY=1. The address comes from a routing-table lookup toward
+// CDS, and the pod network it needs is installed by kata-agent's
+// UpdateInterface RPC — a unit systemd holds behind this one. Resolving on the
+// startup path therefore cannot succeed, and blocking there is what
+// TimeoutStartSec + FailureAction=poweroff-force turns into a dead guest.
+//
+// Every failure disables the route rather than leaving it pending: a caller
+// waiting on a signer that is not coming is worse than one told to proceed
+// without a sandbox ID.
+func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder) {
 	// A parse failure is a typo and stays fail-closed; empty is the explicit
 	// dev opt-out, so tokens still flow and the guest can still be issued a
-	// sandbox-bound leaf. Unlike runAllowlistRefresh, disabling here does not
-	// degrade to a stricter state — it blocks issuance outright.
+	// sandbox-bound leaf.
 	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
 	if err != nil {
 		logger.Error("sandbox tokens disabled: C8S_CDS_MEASUREMENTS invalid", "error", err)
-		return nil
+		signers.Disable()
+		return
 	}
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	host, err := resolveSandboxDigestsHostWithRetry(cfg, logger)
+	host, err := resolveSandboxDigestsHostLate(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
-		return nil
+		signers.Disable()
+		return
 	}
 	signer, err := workloadclaims.NewSandboxTokenSigner(host)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: create signer failed", "error", err)
-		return nil
+		signers.Disable()
+		return
 	}
+	// Before the route answers, not after: a token names this endpoint, and CDS
+	// refuses one it cannot call back on. Issuing first would hand out tokens
+	// that are guaranteed to be rejected.
+	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer); err != nil {
+		logger.Error("sandbox-digests endpoint disabled; issuing without a sandbox ID rather than tokens CDS would refuse", "error", err)
+		signers.Disable()
+		return
+	}
+	signers.Set(signer)
 	logger.Info("sandbox tokens enabled", "digests_host", host, "digests_port", workloadclaims.DigestsPort)
-	return signer
 }
 
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
 func sandboxDigestsHost(cfg *Config) (string, error) {
-	cdsHost := cfg.CDSURL
-	if u, err := url.Parse(cdsHost); err == nil && u.Host != "" {
-		cdsHost = u.Host
-	}
-	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cdsHost)
+	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
-// advertiseHostRetryBudget bounds the wait for the guest network to reach a
-// state where the routing-table lookup for CDS returns a real local IP. Kata
-// brings the pod network up after policy-monitor starts, so the first attempts
-// hit `network is unreachable`; that must not permanently latch tokens off.
+// The wait for the guest network to reach a state where the routing-table
+// lookup for CDS returns a real local IP.
+//
+// INVARIANT: advertiseHostLateBudget is deliberately LONGER than
+// policy-monitor.service's TimeoutStartSec, which is only survivable because
+// this lookup runs after READY=1. Moving it back onto the startup path would
+// let systemd fail the unit at TimeoutStartSec, and FailureAction=poweroff-force
+// turns that into a dead guest for every kata pod (#258).
+// TestAdvertiseHostRunsOffTheStartupPath pins the two apart.
+//
 // Overridable in tests.
 var (
-	advertiseHostAttempts = 12
-	advertiseHostBackoff  = 5 * time.Second
+	advertiseHostRetryInterval = 2 * time.Second
+	// Under get-cert's --initial-retry-timeout (2m), so the route has settled
+	// on an answer — signing, or 404 — before the caller stops asking. Equal
+	// budgets would make which one a pod gets a race.
+	advertiseHostLateBudget = 90 * time.Second
+	// The retried lookup. A test that counts retries replaces it, so the count
+	// follows from the budget rather than from how long the runner's resolver
+	// takes to fail.
+	advertiseHostLookup = sandboxDigestsHost
 )
 
-// resolveSandboxDigestsHostWithRetry keeps retrying the routing-table lookup
-// while the guest's network is still being configured. It returns the last
-// error only when every attempt in the budget failed — the caller then falls
-// back to the same "sandbox tokens disabled" posture it always had.
-func resolveSandboxDigestsHostWithRetry(cfg *Config, logger *slog.Logger) (string, error) {
+// resolveSandboxDigestsHostLate retries the routing-table lookup until the pod
+// network exists. Unlike the startup-path version it replaced, waiting here can
+// actually succeed: kata-agent installs the network from a unit ordered behind
+// this one, so the route appears shortly after READY=1.
+//
+// It gives up at advertiseHostLateBudget so a guest that never gets a network
+// degrades to "issues without a sandbox ID" instead of holding every fetcher
+// open forever.
+func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger) (string, error) {
 	// Explicit host bypasses inference entirely — no reason to wait.
 	if cfg.SandboxDigestsAdvertiseHost != "" {
 		return sandboxDigestsHost(cfg)
 	}
+	deadline := time.Now().Add(advertiseHostLateBudget)
 	var lastErr error
-	for i := 1; i <= advertiseHostAttempts; i++ {
-		host, err := sandboxDigestsHost(cfg)
+	for attempt := 1; ; attempt++ {
+		host, err := advertiseHostLookup(cfg)
 		if err == nil {
-			if i > 1 {
-				logger.Info("advertise-host inference recovered", "attempt", i, "host", host)
+			if attempt > 1 {
+				logger.Info("advertise-host inference recovered", "attempt", attempt, "host", host)
 			}
 			return host, nil
 		}
 		lastErr = err
-		if i < advertiseHostAttempts {
-			logger.Warn("advertise-host inference failed; retrying",
-				"attempt", i, "of", advertiseHostAttempts, "retry_in", advertiseHostBackoff, "error", err)
-			time.Sleep(advertiseHostBackoff)
+		if !time.Now().Add(advertiseHostRetryInterval).Before(deadline) {
+			break
+		}
+		logger.Warn("advertise-host inference failed; retrying",
+			"attempt", attempt, "retry_in", advertiseHostRetryInterval, "error", err)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(advertiseHostRetryInterval):
 		}
 	}
 	return "", lastErr
@@ -239,15 +271,15 @@ func resolveSandboxDigestsHostWithRetry(cfg *Config, logger *slog.Logger) (strin
 //
 // Loopback is sound here for the reason peer credentials are unnecessary: a
 // kata guest holds exactly one pod, so there is no caller to tell apart.
-func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
+func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder) error {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(workloadclaims.GuestTokenPort))
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	go func() {
-		logger.Info("starting admission inventory", "addr", addr, "sandbox_tokens", signer != nil)
-		if err := workloadclaims.ServeTokens(ctx, l, inventory, signer); err != nil {
+		logger.Info("starting admission inventory", "addr", addr, "sandbox_tokens", signers.Ready())
+		if err := workloadclaims.ServeTokens(ctx, l, inventory, signers); err != nil {
 			logger.Error("admission inventory error", "error", err)
 		}
 	}()
