@@ -1,0 +1,28 @@
+Subject: [PATCH] agent: stop logging the createcontainer spec and storages
+
+do_create_container logged the full OCI spec and the request's storage list
+at info level, the agent's default log level is info, and the shipped unit
+sends stdout to the guest console. The spec carries the container's argv and
+env -- including values sourced from Kubernetes secrets -- so every pod start
+wrote the workload's configuration to the console, which on a confidential
+guest is wired to the host.
+
+Log the container id instead. The full request remains available at trace
+level via trace_rpc_call!.
+
+--- a/src/agent/src/rpc.rs
++++ b/src/agent/src/rpc.rs
+@@ -230,11 +230,8 @@ impl AgentService {
+ 
+         let container_name = k8s::container_name(&oci);
+ 
+-        info!(sl(), "receive createcontainer, spec: {:?}", &oci);
+-        info!(
+-            sl(),
+-            "receive createcontainer, storages: {:?}", &req.storages
+-        );
++        // c8s: the guest console is host-visible; the spec carries env/argv.
++        info!(sl(), "receive createcontainer, cid: {}", &cid);
+ 
+         // Some devices need some extra processing (the ones invoked with
+         // --device for instance), and that's what this call is doing. It
