@@ -45,20 +45,21 @@ RKE2_IMAGES_CILIUM_SHA256="1ab41422cc16f5d030b8f62889133dff5d9dce985fbf13360c160
 # The baked c8s components — the nri plugin binary AND the CDS digest in the NRI
 # floor — resolve from a single c8s ref, so they never drift from each other or
 # from the images the chart later deploys. C8S_REF pins a specific commit (short
-# SHA) for testing an unmerged build; it arrives via $SRCDIR/mkosi.local/c8s-ref
-# (written by bin/build-c8s — an exported var never reaches this sandbox: mkosi
-# runs under sudo, stripping the env). Empty = the pinned default below. The
-# tag must be published (c8s docker.yml on main, or workflow_dispatch for a
-# feature branch).
+# SHA) for testing an unmerged build; it arrives via
+# `confos build --sync-input c8s-ref=...` (passed by bin/build-c8s — an
+# exported var never reaches this sandbox: mkosi runs under sudo, stripping
+# the env). Empty = the pinned default below. The tag must be published (c8s
+# docker.yml on main, or workflow_dispatch for a feature branch).
 # The registry the two component images resolve from. Overridable via
-# $SRCDIR/mkosi.local/c8s-registry (written by bin/build-c8s from C8S_REGISTRY)
+# `--sync-input c8s-registry=...` (passed by bin/build-c8s from C8S_REGISTRY)
 # so an unmerged or air-gapped build can bake components from a local registry
 # without publishing them. Defaults to the published org.
-C8S_REGISTRY=$(cat "$SRCDIR/mkosi.local/c8s-registry" 2>/dev/null || true)
+SYNC_INPUTS="$SRCDIR/mkosi.local/.confos-sync-inputs"
+C8S_REGISTRY=$(cat "$SYNC_INPUTS/c8s-registry" 2>/dev/null || true)
 C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
-C8S_REF=$(cat "$SRCDIR/mkosi.local/c8s-ref" 2>/dev/null || true)
+C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned published c8s commit matching the deployed CLI/node release (confidential-metal c8s_operator role, c8s#177 branch head); re-pin to main once #177 merges.
 C8S_REF="${C8S_REF:-3a2517b}"
 echo "c8s sync: resolving nri-image-policy + cds at c8s ref ${C8S_REF}"

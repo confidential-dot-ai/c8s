@@ -25,7 +25,7 @@ Layout:
 
 Migration state (see [#264] for the full plan):
 
-1. Content here is a verbatim copy of confos main at v0.3.0 (`3e6f858`);
+1. Content here is a verbatim copy of confos main at `01539a8` (post-v0.3.0: the merged --profile-dir/--sync-input revision);
    nothing consumes it yet. While both copies exist, the
    `node-guest-image sync` workflow (PR-triggered + weekly) fails on any
    byte drift between this dir and confos at the pinned `CONFOS_REF` —
