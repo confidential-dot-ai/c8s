@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1218,6 +1219,111 @@ func TestHandleGetCertOnlyLeavesRuntimeClassUnset(t *testing.T) {
 	if got := runtimeClassPatch(t, resp); got != "" {
 		t.Fatalf("runtimeClassName patch = %q, want none without kata enforcement", got)
 	}
+}
+
+// The kata shim applies io.katacontainers.config.hypervisor.* pod annotations
+// to the guest on every kata class, so under kata enforcement the webhook
+// rejects them — on the injection path and the explicit-runtimeClassName path
+// alike. cc_init_data stays governed by stampInitData alone.
+func TestHandleRejectsKataHypervisorAnnotations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	m := &podMutator{
+		decoder: admission.NewDecoder(scheme),
+		cfg: Config{
+			GetCertImage:    "ghcr.io/confidential-dot-ai/c8s-operator:test",
+			CDSURL:          "http://cds.c8s-system.svc:8443",
+			KataEnforce:     true,
+			CDSMeasurements: testMeasurements,
+		}.withDefaults(),
+	}
+	handle := func(t *testing.T, pod *corev1.Pod) admission.Response {
+		t.Helper()
+		raw, err := json.Marshal(pod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Handle(context.Background(), admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}},
+		})
+	}
+	podWith := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		}
+	}
+
+	for _, key := range []string{
+		"io.katacontainers.config.hypervisor.kernel_params",
+		"io.katacontainers.config.hypervisor.enable_iommu",
+		"io.katacontainers.config.hypervisor.default_vcpus",
+		"io.katacontainers.config.hypervisor.kernel_verity_params",
+	} {
+		t.Run("rejects "+key, func(t *testing.T) {
+			resp := handle(t, podWith(map[string]string{key: "1"}))
+			if resp.Allowed {
+				t.Fatalf("Handle admitted a pod setting %s; want denial", key)
+			}
+			if resp.Result == nil || !strings.Contains(resp.Result.Message, key) {
+				t.Fatalf("denial message = %+v, want it to name %s", resp.Result, key)
+			}
+		})
+	}
+
+	// A pod requesting its own kata class skips injection (and stampInitData)
+	// but still runs under the shim: same rejection.
+	t.Run("rejects on explicit runtimeClassName", func(t *testing.T) {
+		pod := podWith(map[string]string{"io.katacontainers.config.hypervisor.kernel_params": "agent.debug_console"})
+		pod.Spec.RuntimeClassName = ptr.To(kataSnpRuntimeClass)
+		if resp := handle(t, pod); resp.Allowed {
+			t.Fatal("Handle admitted an explicit-class pod setting kernel_params; want denial")
+		}
+	})
+
+	// cc_init_data is unchanged: the webhook's own stamp passes, an
+	// author-chosen document is still rejected by stampInitData.
+	t.Run("accepts the stamped cc_init_data value", func(t *testing.T) {
+		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pod := podWith(map[string]string{AnnotationWorkload: "api", initdata.AnnotationKey: want})
+		if resp := handle(t, pod); !resp.Allowed {
+			t.Fatalf("Handle denied a pod carrying the webhook's own cc_init_data stamp: %+v", resp.Result)
+		}
+	})
+	t.Run("rejects an author-supplied cc_init_data value", func(t *testing.T) {
+		pod := podWith(map[string]string{AnnotationWorkload: "api", initdata.AnnotationKey: "rogue"})
+		if resp := handle(t, pod); resp.Allowed {
+			t.Fatal("Handle admitted an author-supplied cc_init_data document; want denial")
+		}
+	})
+
+	t.Run("allows an annotation-free pod", func(t *testing.T) {
+		if resp := handle(t, podWith(nil)); !resp.Allowed {
+			t.Fatalf("Handle denied an annotation-free pod: %+v", resp.Result)
+		}
+	})
+	t.Run("allows an explicit-class pod with no hypervisor annotations", func(t *testing.T) {
+		pod := podWith(nil)
+		pod.Spec.RuntimeClassName = ptr.To(kataSnpRuntimeClass)
+		if resp := handle(t, pod); !resp.Allowed {
+			t.Fatalf("Handle denied an explicit-class pod: %+v", resp.Result)
+		}
+	})
+
+	// Host-namespace pods are exempt like they are from class injection: the
+	// shim never launches them, so the annotations are inert.
+	t.Run("allows a host-namespace pod", func(t *testing.T) {
+		pod := podWith(map[string]string{"io.katacontainers.config.hypervisor.kernel_params": "quiet"})
+		pod.Spec.HostNetwork = true
+		if resp := handle(t, pod); !resp.Allowed {
+			t.Fatalf("Handle denied an exempt host-namespace pod: %+v", resp.Result)
+		}
+	})
 }
 
 func TestWorkloadServiceFQDN(t *testing.T) {

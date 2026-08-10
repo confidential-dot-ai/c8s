@@ -46,6 +46,25 @@ func stampInitData(pod *corev1.Pod, kataClass string, measurements []string) err
 	return nil
 }
 
+// kataHypervisorAnnotationPrefix is the pod-annotation family the kata shim
+// turns into hypervisor settings (kernel_params, default_vcpus, enable_iommu,
+// kernel_verity_params, ...).
+const kataHypervisorAnnotationPrefix = "io.katacontainers.config.hypervisor."
+
+// rejectKataHypervisorAnnotations denies a pod carrying any annotation under
+// kataHypervisorAnnotationPrefix other than the cc_init_data document
+// stampInitData manages: the shim applies them to the guest on every kata
+// class, so a pod author must not set them.
+func rejectKataHypervisorAnnotations(pod *corev1.Pod) error {
+	for key := range pod.Annotations {
+		if key != initdata.AnnotationKey && strings.HasPrefix(key, kataHypervisorAnnotationPrefix) {
+			return fmt.Errorf("%w: %s configures the kata hypervisor and must not be supplied by the pod author",
+				errInvalidInjectionAnnotation, key)
+		}
+	}
+	return nil
+}
+
 // initDataAnnotation renders the value, or "" when the shape carries none.
 func initDataAnnotation(kataClass string, measurements []string) (string, error) {
 	if _, ok := confidentialKataClasses[kataClass]; !ok {
