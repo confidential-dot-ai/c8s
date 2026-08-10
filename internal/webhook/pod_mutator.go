@@ -723,6 +723,15 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 	getCertNeeded := inj != nil && m.cfg.GetCertImage != ""
 	kataClass := kataRuntimeClassFor(pod, m.cfg)
 
+	// Covers a pod that set its own runtimeClassName too: injection skips it,
+	// but the shim still honors the annotations. Host-namespace pods are
+	// exempt like they are from class injection (kataIncompatible).
+	if m.cfg.KataEnforce && !kataIncompatible(pod) {
+		if err := rejectKataHypervisorAnnotations(pod); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
+
 	if inj == nil && kataClass == "" {
 		return admission.Allowed("no c8s annotation — passthrough")
 	}
