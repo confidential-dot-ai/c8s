@@ -172,7 +172,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	host, err := resolveSandboxDigestsHostLate(ctx, cfg, logger)
+	host, err := resolveSandboxDigestsHostLate(ctx, cfg, logger, sandboxDigestsHost)
 	if err != nil {
 		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
 		signers.Disable()
@@ -219,10 +219,6 @@ var (
 	// on an answer — signing, or 404 — before the caller stops asking. Equal
 	// budgets would make which one a pod gets a race.
 	advertiseHostLateBudget = 90 * time.Second
-	// The retried lookup. A test that counts retries replaces it, so the count
-	// follows from the budget rather than from how long the runner's resolver
-	// takes to fail.
-	advertiseHostLookup = sandboxDigestsHost
 )
 
 // resolveSandboxDigestsHostLate retries the routing-table lookup until the pod
@@ -233,15 +229,18 @@ var (
 // It gives up at advertiseHostLateBudget so a guest that never gets a network
 // degrades to "issues without a sandbox ID" instead of holding every fetcher
 // open forever.
-func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger) (string, error) {
+//
+// lookup is sandboxDigestsHost; injected so tests can drive the retry loop
+// without the resolver.
+func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger, lookup func(*Config) (string, error)) (string, error) {
 	// Explicit host bypasses inference entirely — no reason to wait.
 	if cfg.SandboxDigestsAdvertiseHost != "" {
-		return sandboxDigestsHost(cfg)
+		return lookup(cfg)
 	}
 	deadline := time.Now().Add(advertiseHostLateBudget)
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		host, err := advertiseHostLookup(cfg)
+		host, err := lookup(cfg)
 		if err == nil {
 			if attempt > 1 {
 				logger.Info("advertise-host inference recovered", "attempt", attempt, "host", host)
