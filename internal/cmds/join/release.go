@@ -20,10 +20,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-// maxConcurrentConns caps accepted connections. Every request costs a verify
-// round trip to the local attestation-api; the cap bounds that load and the
-// goroutine count. Excess connections queue in the accept backlog. Joins are
-// one per booting node, so the cap is far above any legitimate burst.
+// maxConcurrentConns caps accepted connections: each request costs a local
+// attestation-api verify; excess connections queue in the accept backlog.
 const maxConcurrentConns = 64
 
 // ReleaseConfig is the join-release service configuration.
@@ -55,10 +53,8 @@ func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 	return runRelease(ctx, cfg, nil)
 }
 
-// runRelease is RunRelease with an optional pre-bound listener; tests inject
-// one to avoid the close-and-rebind port race. A nil ln binds cfg.ListenAddr
-// after the attestation ladder, so the production port never opens before the
-// policy is pinned.
+// runRelease serves on ln when non-nil (test injection); nil binds
+// cfg.ListenAddr after the attestation ladder, never before policy is pinned.
 func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	// RA-TLS is mandatory: joining agents verify this endpoint's serving
 	// quote before presenting their own evidence, so a plain-TLS listener
@@ -122,9 +118,7 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		Handler:           handler,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
-		// The response is a few hundred bytes and agents reconnect per
-		// attempt: a slow reader or parked keep-alive must not hold a
-		// goroutine open.
+		// A slow reader or parked keep-alive must not hold a goroutine open.
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
