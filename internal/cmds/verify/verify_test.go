@@ -29,6 +29,7 @@ import (
 
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
+	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -81,7 +82,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	}
 
 	t.Run("forwards platform + evidence verbatim and binds cert key + challenge", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -108,7 +109,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("forwards a non-snp platform (e.g. tdx) rather than rejecting it", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test")
+		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test", leafTrust{})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -118,7 +119,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("rejects missing certificate", func(t *testing.T) {
-		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test"); err == nil {
+		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test", leafTrust{}); err == nil {
 			t.Fatal("expected error when certificate_pem is absent")
 		}
 	})
@@ -798,7 +799,7 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture")
+	ev, err := gatherFromFile(fixture, []byte("challenge"), "fixture", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,19 +877,20 @@ func TestRenderOutcome(t *testing.T) {
 	measHex := "ab" + strings.Repeat("00", 47) // 48-byte launch digest
 	result := &teetypes.VerificationResult{SignatureValid: true, Claims: teetypes.Claims{LaunchDigest: measHex}}
 
-	pinnedPolicy := func(t *testing.T) *ratls.VerifyPolicy {
+	pinnedPlan := func(t *testing.T) *verifyPlan {
 		t.Helper()
 		m, err := ratls.ParseHexMeasurementsList([]string{measHex})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &ratls.VerifyPolicy{Measurements: m}
+		return &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: m}}
 	}
+	emptyPlan := func() *verifyPlan { return &verifyPlan{policy: &ratls.VerifyPolicy{}} }
 
 	t.Run("verified + pinned -> no UNSAFE warning", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, result, nil, pinnedPolicy(t))
+		oc := newOutcome(cfg, ev, result, nil, pinnedPlan(t))
 		render(cfg, oc, &out)
 		if !oc.Verified {
 			t.Fatalf("expected verified; oc=%+v", oc)
@@ -901,7 +903,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("unpinned warns UNSAFE", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		if !strings.Contains(out.String(), "UNSAFE") {
 			t.Errorf("expected UNSAFE warning when no measurements pinned: %s", out.String())
 		}
@@ -910,7 +912,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("json output", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "json"}
-		render(cfg, newOutcome(cfg, ev, result, nil, &ratls.VerifyPolicy{}), &out)
+		render(cfg, newOutcome(cfg, ev, result, nil, emptyPlan()), &out)
 		var oc Outcome
 		if err := json.Unmarshal(out.Bytes(), &oc); err != nil {
 			t.Fatalf("output is not valid JSON: %v", err)
@@ -923,7 +925,7 @@ func TestRenderOutcome(t *testing.T) {
 	t.Run("verdict error -> NOT VERIFIED", func(t *testing.T) {
 		var out bytes.Buffer
 		cfg := config{output: "text"}
-		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, &ratls.VerifyPolicy{})
+		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, emptyPlan())
 		render(cfg, oc, &out)
 		if oc.Verified || !strings.Contains(out.String(), "NOT VERIFIED") {
 			t.Errorf("unexpected output: %s", out.String())
@@ -937,7 +939,7 @@ func TestRenderOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		oc := newOutcome(config{}, ev, result, nil, &ratls.VerifyPolicy{Measurements: other})
+		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: other}})
 		if oc.Verified || !strings.Contains(oc.Error, "not in --measurements allowlist") {
 			t.Errorf("expected allowlist rejection, got %+v", oc)
 		}
@@ -948,8 +950,29 @@ func TestGatherFromFile_RejectsExpectedReportDataOnCert(t *testing.T) {
 	// A certificate's binding is its key; an override would silently replace a
 	// real binding while still reporting "binds the certificate public key".
 	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("does-not-matter")})
-	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file"); err == nil {
+	if _, err := gatherFromFile(pemCert, make([]byte, 48), "file", leafTrust{}); err == nil {
 		t.Fatal("expected --expected-report-data to be rejected for a certificate file")
+	}
+}
+
+// A gather-time security failure is a verdict (exit 2), not an unavailability
+// (exit 3). The exit codes are a CI contract: a gate that retries on 3 and
+// pages on 2 must not quietly retry against an actively tampered certificate.
+func TestRun_SecurityFailureDuringGatherExitsFailed(t *testing.T) {
+	holder := testKey(t)
+	forged := mintForgedIssuerLeaf(t, &holder.PublicKey, time.Now().Add(500000*time.Hour))
+	path := filepath.Join(t.TempDir(), "leaf.pem")
+	if err := os.WriteFile(path, certutil.EncodeCertPEM(forged.Raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), config{fromFile: path, output: "text"}, &out, &errOut)
+	if code != exitFailed {
+		t.Errorf("code = %d, want %d (evidence obtained, security check failed)", code, exitFailed)
+	}
+	if !strings.Contains(out.String(), "NOT VERIFIED") {
+		t.Errorf("a security failure must render as a verdict, got:\n%s%s", out.String(), errOut.String())
 	}
 }
 
@@ -1096,11 +1119,11 @@ func TestDefaultPort(t *testing.T) {
 func TestNewOutcomePlatform(t *testing.T) {
 	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
 	reported := &teetypes.VerificationResult{SignatureValid: true, Platform: teetypes.PlatformType("az-snp")}
-	if oc := newOutcome(config{}, ev, reported, nil, &ratls.VerifyPolicy{}); oc.Platform != "az-snp" {
+	if oc := newOutcome(config{}, ev, reported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "az-snp" {
 		t.Errorf("Platform = %q, want the verifier-reported az-snp", oc.Platform)
 	}
 	unreported := &teetypes.VerificationResult{SignatureValid: true}
-	if oc := newOutcome(config{}, ev, unreported, nil, &ratls.VerifyPolicy{}); oc.Platform != "snp" {
+	if oc := newOutcome(config{}, ev, unreported, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}}); oc.Platform != "snp" {
 		t.Errorf("Platform = %q, want the fallback snp", oc.Platform)
 	}
 }
@@ -1109,17 +1132,17 @@ func TestNewOutcomePlatform(t *testing.T) {
 // --measurements pin closed: an unparseable digest can never count as allowed.
 func TestNewOutcomeMalformedLaunchDigestFailsPin(t *testing.T) {
 	ev := &evidence{platform: "snp", source: "t", bindingNote: "b"}
-	policy := &ratls.VerifyPolicy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}
+	plan := &verifyPlan{policy: &ratls.VerifyPolicy{Measurements: [][]byte{bytes.Repeat([]byte{0xAB}, 48)}}}
 	for _, digest := range []string{"", "zz"} {
 		result := &teetypes.VerificationResult{
 			SignatureValid: true,
 			Claims:         teetypes.Claims{LaunchDigest: digest},
 		}
-		oc := newOutcome(config{}, ev, result, nil, policy)
+		oc := newOutcome(config{}, ev, result, nil, plan)
 		if oc.Verified {
 			t.Fatalf("launch digest %q verified despite being unenforceable", digest)
 		}
-		if !strings.Contains(oc.Error, "cannot enforce --measurements") {
+		if !strings.Contains(oc.Error, "cannot enforce the measurement policy") {
 			t.Fatalf("Error = %q, want the unenforceable-pin reason", oc.Error)
 		}
 	}
@@ -1249,7 +1272,7 @@ func TestGatherEvidence_AutoPrefersDiscovery(t *testing.T) {
 	}))
 	defer lb.Close()
 
-	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, nil)
+	ev, err := gatherEvidence(context.Background(), config{url: lb.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if err != nil {
 		t.Fatalf("auto mode should reach the discovery doc, got: %v", err)
 	}
@@ -1269,7 +1292,7 @@ func TestGatherEvidence_AutoFallsBackToServingCert(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, nil)
+	_, err := gatherEvidence(context.Background(), config{url: srv.URL, kind: "auto"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 	if !errors.Is(err, ratls.ErrNotAttested) {
 		t.Fatalf("want fall-through to the serving-cert path (ErrNotAttested), got: %v", err)
 	}
@@ -1303,12 +1326,12 @@ func TestBuildPolicy_FileInputs(t *testing.T) {
 		if err := os.WriteFile(path, []byte(measHex+"\n\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		policy, err := buildPolicy(config{measurementsFile: path})
+		plan, err := buildPolicy(config{measurementsFile: path})
 		if err != nil {
 			t.Fatalf("buildPolicy: %v", err)
 		}
-		if len(policy.Measurements) != 1 || hex.EncodeToString(policy.Measurements[0]) != measHex {
-			t.Errorf("measurements = %v", policy.Measurements)
+		if len(plan.policy.Measurements) != 1 || hex.EncodeToString(plan.policy.Measurements[0]) != measHex {
+			t.Errorf("measurements = %v", plan.policy.Measurements)
 		}
 	})
 
@@ -1365,7 +1388,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 
 	t.Run("ratls-cert mode", func(t *testing.T) {
 		srv := attestedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "ratls-cert", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
 			t.Fatalf("ratls-cert mode: %v", err)
 		}
@@ -1390,7 +1413,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			w.Write(buildEndpointJSON(t, id, nonce, report, []byte("vcek"), x, m))
 		}))
 		defer srv.Close()
-		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, nil)
+		ev, err := gatherEvidence(ctx, config{url: srv.URL, mode: "attest-pq", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err != nil {
 			t.Fatalf("attest-pq mode: %v", err)
 		}
@@ -1400,13 +1423,13 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 	})
 
 	t.Run("no target at all is an error", func(t *testing.T) {
-		if _, err := gatherEvidence(ctx, config{}, nil); err == nil || !strings.Contains(err.Error(), "no target") {
+		if _, err := gatherEvidence(ctx, config{}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil); err == nil || !strings.Contains(err.Error(), "no target") {
 			t.Fatalf("err = %v, want the no-target refusal", err)
 		}
 	})
 
 	t.Run("unparseable target is an error", func(t *testing.T) {
-		if _, err := gatherEvidence(ctx, config{url: "https://\x7f"}, nil); err == nil {
+		if _, err := gatherEvidence(ctx, config{url: "https://\x7f"}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil); err == nil {
 			t.Fatal("control-character target should fail to normalize")
 		}
 	})
@@ -1414,7 +1437,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 	t.Run("attest-pq mode surfaces a dial failure as a connect error", func(t *testing.T) {
 		// Port 1 refuses fast: an unreachable endpoint is exit-3 territory, not
 		// a verification verdict.
-		_, err := gatherEvidence(ctx, config{url: "https://127.0.0.1:1", mode: "attest-pq", timeout: 2 * time.Second}, nil)
+		_, err := gatherEvidence(ctx, config{url: "https://127.0.0.1:1", mode: "attest-pq", timeout: 2 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err == nil || !isConnectError(err) {
 			t.Fatalf("err = %v, want a connectError", err)
 		}
@@ -1429,7 +1452,7 @@ func TestGatherEvidence_ModesAndErrors(t *testing.T) {
 			w.Write([]byte("not json"))
 		}))
 		defer srv.Close()
-		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, nil)
+		_, err := gatherEvidence(ctx, config{url: srv.URL, kind: "auto", timeout: 5 * time.Second}, &verifyPlan{policy: &ratls.VerifyPolicy{}}, nil)
 		if err == nil || isSecurityError(err) {
 			t.Fatalf("parse failure should fall through to the cert path, got %v", err)
 		}

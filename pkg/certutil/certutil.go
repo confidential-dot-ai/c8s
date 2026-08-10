@@ -3,6 +3,7 @@
 package certutil
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,81 @@ import (
 
 // serialNumberLimit is 2^128, the upper bound for X.509 serial numbers.
 var serialNumberLimit = new(big.Int).Lsh(big.NewInt(1), 128)
+
+// LeafValiditySkew is the single bounded clock-skew allowance every
+// certificate-sourced verification path grants NotBefore: a leaf issued up to
+// this long in the verifier's future is accepted, anything further is not.
+// NotAfter gets no allowance — an expired certificate is expired. 5 minutes
+// covers realistic clock drift between an issuing TEE and a verifying
+// operator machine without meaningfully extending a stolen-cert window.
+const LeafValiditySkew = 5 * time.Minute
+
+// BodyAuthentication classifies what AuthenticateLeafBody proved about a
+// certificate's body fields. It is a named type rather than a bool because
+// the zero value — "nothing here authenticated it" — is the one a caller must
+// never treat as a pass: x509.ParseCertificate verifies no signature at all,
+// so an Issuer DN that differs from the Subject by one byte is enough to skip
+// the self-signature check with an arbitrary Signature field.
+type BodyAuthentication int
+
+const (
+	// BodyCAVouched means the certificate is not self-issued: its body is
+	// vouched only by whoever signed it, and NOTHING in AuthenticateLeafBody
+	// checked that signature. Until the caller verifies the issuing chain (or
+	// holds live proof the presenter controls the attested key), every body
+	// field — subject, serial, NotAfter, the CA-vouched extensions — is
+	// attacker-choosable under a genuine attestation extension. This is the
+	// zero value so a discarded classification fails closed.
+	BodyCAVouched BodyAuthentication = iota
+	// BodySelfSigned means the certificate is self-issued and its body
+	// verified under its own embedded (attested) key, so the attestation that
+	// binds the key transitively covers the whole body.
+	BodySelfSigned
+)
+
+func (b BodyAuthentication) String() string {
+	if b == BodySelfSigned {
+		return "self-signed"
+	}
+	return "ca-vouched"
+}
+
+// AuthenticateLeafBody enforces the certificate-body checks shared by every
+// path that verifies a certificate-embedded attestation:
+//
+//   - validity: NotBefore within LeafValiditySkew, NotAfter with no
+//     allowance. A nonce-free attested certificate is replayable for as long
+//     as it validates, so once the body is authenticated the validity window
+//     is the only freshness bound these paths have — skipping it would make
+//     the replay window unbounded. Note the ordering: the window bounds
+//     nothing on its own, since an unauthenticated body's NotAfter is chosen
+//     by whoever wrote the bytes.
+//   - self-issued certificates (RawIssuer == RawSubject) must verify their
+//     own signature with their embedded key. The attestation extension binds
+//     only the public key, so without this check any field outside the key —
+//     subject, serial, validity, other extensions — could be rewritten under
+//     a genuine attestation and still verify.
+//
+// The returned BodyAuthentication says which of those two states the caller
+// is in. BodyCAVouched is NOT a pass: it means the caller still owes the body
+// an authentication step (a verified chain, or proof of possession of the
+// attested key) before trusting anything the body says.
+func AuthenticateLeafBody(cert *x509.Certificate, now time.Time) (BodyAuthentication, error) {
+	if now.Add(LeafValiditySkew).Before(cert.NotBefore) {
+		return BodyCAVouched, fmt.Errorf("certificate is not yet valid: NotBefore %s is beyond the %s clock-skew allowance",
+			cert.NotBefore.Format(time.RFC3339), LeafValiditySkew)
+	}
+	if now.After(cert.NotAfter) {
+		return BodyCAVouched, fmt.Errorf("certificate expired at NotAfter %s", cert.NotAfter.Format(time.RFC3339))
+	}
+	if !bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+		return BodyCAVouched, nil
+	}
+	if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+		return BodyCAVouched, fmt.Errorf("self-signed certificate body does not verify with its own key (altered or re-signed body): %w", err)
+	}
+	return BodySelfSigned, nil
+}
 
 // OIDAttestationDigest marks issued certificates with a SHA-256 of the
 // attestation evidence that authorized issuance — an audit-trail extension

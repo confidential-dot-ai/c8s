@@ -316,8 +316,20 @@ What it does **not** guarantee:
   service (pod-as-CVM). Do not point it across a trust boundary.
 - **Per-handshake measurement of CA-verified peers.** See "Dual verification"
   above: after the CDS upgrade, mesh peers are verified by CA chain only.
-- **Full TDX runtime measurement.** Policy pins MRTD; RTMR[0..3] are not yet
-  pinned, and `MinTCBVersion` is dropped on the TDX path.
+- **Full TDX runtime measurement, in-cluster.** The mesh `VerifyPolicy` pins
+  MRTD only — the TDVF firmware, not the guest kernel/rootfs — RTMR[0..3] are
+  not pinned on that path, and `MinTCBVersion` is dropped on the TDX path
+  (GAPS). Operator-side, `c8s verify --image-manifest` pins the full
+  MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
+  `--measurements` rather than combining with it — and `--expected-rtmr3`
+  (or `--operator-pkey`, which derives the same value from the operator public
+  key) pins the runtime register, requiring the image pin because the host
+  chooses the image and the runtime chain alone identifies nothing;
+  `c8s get-kubeconfig` requires the
+  full tuple plus the operator-key/workload RTMR[3] chain. `c8s verify` does
+  not silently drop `--min-tcb-*` on TDX the way the mesh policy does: an
+  SNP-shaped floor against TDX evidence is a policy failure naming the
+  platform, and on SNP the floor is re-checked against the verified claims.
 - **Workload-granular identity beyond the TEE boundary.** The unit of
   hardware attestation is the TEE: the whole node in node-as-CVM, one pod under
   pod-as-CVM. The sandbox ID narrows this — a leaf names the pod sandbox CDS

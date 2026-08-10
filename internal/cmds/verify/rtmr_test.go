@@ -58,7 +58,7 @@ func TestBuildPolicyCarriesRTMRPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildPolicy: %v", err)
 	}
-	if len(p.RTMRs) != 1 || hex.EncodeToString(p.RTMRs[2]) != sha384Hex(0x22) {
-		t.Fatalf("policy RTMRs = %v, want RTMR[2] pinned", p.RTMRs)
+	if len(p.policy.RTMRs) != 1 || hex.EncodeToString(p.policy.RTMRs[2]) != sha384Hex(0x22) {
+		t.Fatalf("policy RTMRs = %v, want RTMR[2] pinned", p.policy.RTMRs)
 	}
 }

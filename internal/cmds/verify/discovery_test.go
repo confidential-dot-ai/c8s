@@ -15,7 +15,7 @@ import (
 func TestEvidenceFromDiscovery_Malformed(t *testing.T) {
 	certPEM, _ := selfSignedCertPEM(t)
 
-	if _, err := evidenceFromDiscovery([]byte("not json"), "t"); err == nil {
+	if _, err := evidenceFromDiscovery([]byte("not json"), "t", leafTrust{}); err == nil {
 		t.Error("non-JSON must fail")
 	}
 
@@ -30,7 +30,7 @@ func TestEvidenceFromDiscovery_Malformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := evidenceFromDiscovery(noEvidence, "t"); err == nil || !strings.Contains(err.Error(), "no attestation.evidence") {
+	if _, err := evidenceFromDiscovery(noEvidence, "t", leafTrust{}); err == nil || !strings.Contains(err.Error(), "no attestation.evidence") {
 		t.Errorf("missing evidence should fail, got %v", err)
 	}
 	if err := json.Unmarshal(good, &obj); err != nil {
@@ -41,12 +41,12 @@ func TestEvidenceFromDiscovery_Malformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := evidenceFromDiscovery(badChallenge, "t"); err == nil || !strings.Contains(err.Error(), "decode challenge") {
+	if _, err := evidenceFromDiscovery(badChallenge, "t", leafTrust{}); err == nil || !strings.Contains(err.Error(), "decode challenge") {
 		t.Errorf("bad challenge base64 should fail, got %v", err)
 	}
 
 	garbageCert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("garbage")}))
-	if _, err := evidenceFromDiscovery(discoveryDocWith(t, garbageCert, []byte("c"), `{"attestation_report":"AAAA"}`), "t"); err == nil || !strings.Contains(err.Error(), "parse cds cert") {
+	if _, err := evidenceFromDiscovery(discoveryDocWith(t, garbageCert, []byte("c"), `{"attestation_report":"AAAA"}`), "t", leafTrust{}); err == nil || !strings.Contains(err.Error(), "parse cds cert") {
 		t.Errorf("unparseable cert DER should fail, got %v", err)
 	}
 }
@@ -64,7 +64,7 @@ func TestEvidenceFromDiscovery_DefaultsPlatformToSNP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev, err := evidenceFromDiscovery(data, "t")
+	ev, err := evidenceFromDiscovery(data, "t", leafTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
