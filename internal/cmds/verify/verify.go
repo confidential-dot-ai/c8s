@@ -498,6 +498,11 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 // optional runtime-register pin (--expected-rtmr3, or --operator-pkey, which
 // derives the same register from the operator public key). Any non-nil pin
 // against non-TDX evidence is a policy error, never an ignored option.
+//
+// These are enforced here, against the verified claims. The other route to
+// RTMR[1]/[2] — --rtmr, parsed by parseRTMRPins into ratls.VerifyPolicy.RTMRs
+// — is enforced by the verification engine instead. buildPolicy refuses the
+// two together, so exactly one of the two paths is ever live.
 type rtmrPins struct {
 	image *runtimemeasure.ImagePins
 	rtmr3 []byte
@@ -600,11 +605,20 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 
 // parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
 //
-// Index 0 and 3 are rejected rather than accepted-and-ignored: RTMR[0] carries
+// Index 0 and 3 are rejected rather than accepted-and-ignored. RTMR[0] carries
 // the TD HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin
-// would deny half the fleet, and RTMR[3] is extended by in-guest software, so
-// pinning it would look like guest identity while a substituted guest simply
-// extends it with the expected value.
+// would deny half the fleet. RTMR[3] is extended by in-guest software, so on
+// its own it cannot vouch for the guest image: a substituted guest simply
+// extends the register with the expected value.
+//
+// That last argument is about RTMR[3] *alone*, which is why --expected-rtmr3
+// and --operator-pkey are not a contradiction of it. They pin the same
+// register, but only alongside --image-manifest (resolveRTMRPins enforces
+// that), so the image is already pinned by MRTD + RTMR[1] + RTMR[2] from one
+// provenanced tuple and RTMR[3] adds the runtime operator-key/workload chain
+// on top. Here there is no such anchor to lean on — --rtmr pins registers
+// individually — so an RTMR[3] pin would read as guest identity while proving
+// nothing, and it is refused.
 func parseRTMRPins(pins []string) (map[int][]byte, error) {
 	if len(pins) == 0 {
 		return nil, nil
@@ -624,7 +638,7 @@ func parseRTMRPins(pins []string) (map[int][]byte, error) {
 		case 0:
 			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
 		case 3:
-			return nil, fmt.Errorf("--rtmr 3 is not pinnable: RTMR[3] is extended by in-guest software, so it cannot vouch for the guest image")
+			return nil, fmt.Errorf("--rtmr 3 is not pinnable: RTMR[3] is extended by in-guest software, so on its own it cannot vouch for the guest image — a substituted guest just extends it with the value you pinned. To pin the runtime chain, use --expected-rtmr3 or --operator-pkey, which require --image-manifest so the image is anchored first")
 		default:
 			return nil, fmt.Errorf("--rtmr %q: index must be 1 or 2", p)
 		}
