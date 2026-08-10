@@ -50,6 +50,11 @@ func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 	if cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join release)")
 	}
+	// Non-positive: every request's verification context is already expired,
+	// so the service comes up healthy and denies the entire cluster.
+	if cfg.VerifyTimeout <= 0 {
+		return fmt.Errorf("--verify-timeout must be positive (got %s)", cfg.VerifyTimeout)
+	}
 
 	api := attestationclient.NewClient(cfg.AttestationAPIURL)
 	refsCtx, cancelRefs := context.WithTimeout(ctx, 30*time.Second)

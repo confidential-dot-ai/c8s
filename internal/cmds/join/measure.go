@@ -15,7 +15,7 @@
 // (ratls.ReportDataForKey), so evidence lifted from another live CVM cannot
 // be replayed by a client that does not hold the leaf key inside a TEE.
 // Freshness comes from TLS 1.3 proof of possession of that key, not from
-// wall-clock nonces.
+// wall-clock nonces, and is bounded by the leaf's validity window.
 package join
 
 import (
@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -39,6 +40,14 @@ var ErrPolicyMismatch = errors.New("join: peer measurement does not match this i
 
 // measurementHexLen is the hex length of a SHA-384 register (MRTD, RTMRs).
 const measurementHexLen = 96
+
+// certSkew tolerates clock drift when checking a peer leaf's validity window.
+// That window is all that bounds replay of a stolen leaf key: neither
+// direction validates the leaf through PKI (InsecureSkipVerify on the client,
+// RequireAnyClientCert on the server) and the quote carries no nonce. RA-TLS
+// certs are issued with NotBefore = now, so no backdating cushions it.
+// CLOCK ASSUMPTION: the guest's own clock, host-influenced in a CVM.
+const certSkew = 5 * time.Minute
 
 // imageRefs are the registers the same-image policy compares. All values are
 // public measurements, safe to log.
@@ -125,12 +134,19 @@ func refsFromClaims(claims types.Claims) (imageRefs, error) {
 }
 
 // verifyPeer runs the full same-image check on a peer's RA-TLS leaf cert:
-// extract the embedded TDX evidence, require it to bind the leaf's own public
-// key (channel binding), verify it via the local attestation-api with the
-// verdict enforced and MRTD pinned to our own, then compare RTMR[1]/RTMR[2].
-// This is the single verification path for both directions of the join
-// exchange; nothing is cached between calls.
+// require the leaf to be inside its validity window, extract the embedded TDX
+// evidence, require it to bind the leaf's own public key (channel binding),
+// verify it via the local attestation-api with the verdict enforced and MRTD
+// pinned to our own, then compare RTMR[1]/RTMR[2]. This is the single
+// verification path for both directions of the join exchange; nothing is
+// cached between calls.
 func verifyPeer(ctx context.Context, api attestationclient.Client, leaf *x509.Certificate, own imageRefs) error {
+	now := time.Now()
+	if now.Add(certSkew).Before(leaf.NotBefore) || now.Add(-certSkew).After(leaf.NotAfter) {
+		return fmt.Errorf("join: peer cert outside its validity window (%s .. %s)",
+			leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+
 	att, err := ratls.ExtractAttestation(leaf)
 	if err != nil {
 		return fmt.Errorf("join: peer cert: %w", err)

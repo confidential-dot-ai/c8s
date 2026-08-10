@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -35,17 +36,18 @@ type JoinConfig struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx").
 	Platform string
-	// TokenOut is where the received token is written (tmpfs; the token must
-	// never touch persistent storage).
+	// TokenOut is where the received token is written. Must be on a RAM-backed
+	// filesystem — enforced, see prepareTokenDir.
 	TokenOut string
 	// FragmentOut is the rke2 config drop-in to write (server + token-file).
 	FragmentOut string
 	// SupervisorPort is the rke2 supervisor port on the server node, used in
 	// the fragment's server URL.
 	SupervisorPort int
-	// Timeout bounds each network step (own attestation, TLS verification
-	// round trip, token fetch). One attempt per invocation; retries belong to
-	// the systemd unit.
+	// Timeout bounds each network step separately (own attestation, cert
+	// provisioning, handshake incl. peer verification, token fetch), so a slow
+	// verifier cannot eat a later step's budget. Must be positive. One attempt
+	// per invocation; retries belong to the systemd unit.
 	Timeout time.Duration
 }
 
@@ -63,9 +65,18 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	if cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join)")
 	}
+	// A non-positive timeout expires every step's context before it starts.
+	if cfg.Timeout <= 0 {
+		return fmt.Errorf("--timeout must be positive (got %s)", cfg.Timeout)
+	}
 	host, _, err := net.SplitHostPort(cfg.ServerAddr)
 	if err != nil {
 		return fmt.Errorf("--server must be host:port: %w", err)
+	}
+	// Before any network work: discovering an on-disk --token-out after
+	// join-release has already handed over the token is too late.
+	if err := prepareTokenDir(cfg.TokenOut); err != nil {
+		return err
 	}
 
 	api := attestationclient.NewClient(cfg.AttestationAPIURL)
@@ -99,7 +110,7 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		if err != nil {
 			return fmt.Errorf("join: parse server cert: %w", err)
 		}
-		vctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+		vctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
 		return verifyPeer(vctx, api, leaf, own)
 	}
@@ -124,11 +135,16 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 }
 
 // fetchToken performs the GET /join-token exchange over the mutually
-// attested channel.
+// attested channel. TLSHandshakeTimeout keeps verifyPeer's round trip to the
+// local attestation-api on its own clock, so a slow verifier cannot leave the
+// GET no time and make the server look responsible for the deadline.
 func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string, error) {
 	httpClient := &http.Client{
-		Timeout:   cfg.Timeout,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout: 2 * cfg.Timeout, // handshake + request
+		Transport: &http.Transport{
+			TLSClientConfig:     tlsCfg,
+			TLSHandshakeTimeout: cfg.Timeout,
+		},
 	}
 	url := "https://" + cfg.ServerAddr + "/join-token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -160,17 +176,33 @@ func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string
 	return tr.Token, nil
 }
 
-// writeStaged writes the token (tmpfs) and the rke2 config fragment. Order
-// matters only for partial-failure cleanliness: the fragment references the
-// token file, so the token lands first. A failed run is retried whole by the
-// unit; both writes are idempotent overwrites.
+// prepareTokenDir creates TokenOut's directory and enforces that it is
+// RAM-backed: the join token is a bearer secret and must never reach
+// persistent storage, which the host reads at will.
+func prepareTokenDir(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	if err := fileutil.RequireRAMBacked(dir); err != nil {
+		return fmt.Errorf("--token-out: %w", err)
+	}
+	return nil
+}
+
+// writeStaged writes the token and the rke2 config fragment. Order matters
+// only for partial-failure cleanliness: the fragment references the token
+// file, so the token lands first. A failed run is retried whole by the unit;
+// both writes are idempotent replaces.
 func writeStaged(cfg JoinConfig, host, token string) error {
 	for _, p := range []string{cfg.TokenOut, cfg.FragmentOut} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Dir(p), err)
 		}
 	}
-	if err := os.WriteFile(cfg.TokenOut, []byte(token+"\n"), 0o600); err != nil {
+	// WriteAtomic renames a fresh 0600 file over the destination; os.WriteFile
+	// would leave a pre-existing world-readable file's mode untouched.
+	if err := fileutil.WriteAtomic(cfg.TokenOut, []byte(token+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write token: %w", err)
 	}
 
@@ -181,7 +213,7 @@ func writeStaged(cfg JoinConfig, host, token string) error {
 	if err != nil {
 		return fmt.Errorf("marshal rke2 fragment: %w", err)
 	}
-	if err := os.WriteFile(cfg.FragmentOut, frag, 0o600); err != nil {
+	if err := fileutil.WriteAtomic(cfg.FragmentOut, frag, 0o600); err != nil {
 		return fmt.Errorf("write rke2 fragment: %w", err)
 	}
 	return nil
