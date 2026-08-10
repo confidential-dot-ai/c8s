@@ -294,11 +294,14 @@ func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
 	path := pointInitDataAt(t)
 	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
 
-	// Written a beat late, the way kata-agent does.
+	// Written a beat late, in place, the way kata-agent does.
+	written := make(chan struct{})
 	go func() {
+		defer close(written)
 		time.Sleep(50 * time.Millisecond)
 		_ = os.WriteFile(path, raw, 0o644)
 	}()
+	t.Cleanup(func() { <-written })
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
 	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
@@ -308,8 +311,38 @@ func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
 	}
 }
 
+// kata-agent writes the document in place, so a poll can catch it half-written.
+// That short file's digest cannot match the launch-committed one, which is also
+// what tampering looks like — the wait has to outlast it rather than call it a
+// verdict on the first read.
+func TestAwaitInitDataMeasurementsOutlastsAPartialWrite(t *testing.T) {
+	raw := testDocument(t, "aabb,ccdd")
+	digest := initdata.Digest(raw)
+	path := pointInitDataAt(t)
+	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
+
+	// The half-written document is already there; the whole one lands a beat later.
+	if err := os.WriteFile(path, raw[:len(raw)/2], 0o644); err != nil {
+		t.Fatalf("seed a half-written document: %v", err)
+	}
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		time.Sleep(50 * time.Millisecond)
+		_ = os.WriteFile(path, raw, 0o644)
+	}()
+	t.Cleanup(func() { <-written })
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "aabb,ccdd" {
+		t.Fatalf("CDSMeasurements = %q, want the wait to outlast a half-written document", cfg.CDSMeasurements)
+	}
+}
+
 // A document HOST_DATA does not commit is a verdict, not a timing problem, so
-// the wait must abandon it immediately rather than retry until the budget runs
+// the wait must abandon it promptly rather than retry until the budget runs
 // out — otherwise a tampering host delays every guest's refresh.
 func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))

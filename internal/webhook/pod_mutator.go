@@ -516,8 +516,44 @@ func (inj *injection) validate() error {
 	if err := inj.Discovery.validate(); err != nil {
 		return err
 	}
+	if err := inj.Secrets.validate(); err != nil {
+		return err
+	}
 	if err := inj.Volumes.validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validate checks each NAME=/store/path pair against the rules get-secret
+// enforces, so a spec the fetcher could never satisfy is a rejected manifest
+// rather than a Running pod whose fetcher crash-loops. The name becomes a
+// filename in the secret dir.
+func (s secretsSpec) validate() error {
+	seen := map[string]bool{}
+	for _, spec := range s.Specs {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok {
+			return fmt.Errorf("%w: %s entry %q must be NAME=/store/path",
+				errInvalidInjectionAnnotation, AnnotationSecrets, spec)
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+			return fmt.Errorf("%w: %s name %q must be non-empty and not a path",
+				errInvalidInjectionAnnotation, AnnotationSecrets, name)
+		}
+		if seen[name] {
+			return fmt.Errorf("%w: %s names %q twice; each names a distinct file",
+				errInvalidInjectionAnnotation, AnnotationSecrets, name)
+		}
+		seen[name] = true
+		if _, err := pkgallowlist.CanonicalSecretPath(strings.TrimSpace(path)); err != nil {
+			return fmt.Errorf("%w: %s %q: %s", errInvalidInjectionAnnotation, AnnotationSecrets, name, err)
+		}
+	}
+	if s.Dir != "" && !strings.HasPrefix(s.Dir, "/") {
+		return fmt.Errorf("%w: %s must be an absolute path",
+			errInvalidInjectionAnnotation, AnnotationSecretDir)
 	}
 	return nil
 }

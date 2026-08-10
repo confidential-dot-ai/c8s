@@ -20,9 +20,11 @@ import (
 var errNoInitData = errors.New("policy-monitor: no init-data document")
 
 // The in-guest attestation service has not answered yet. Like errNoInitData
-// this is a "too early" condition rather than a verdict, so the caller waits
-// on it; a digest mismatch or an unparseable document is neither and stops the
-// wait immediately.
+// this is a "too early" condition rather than a verdict.
+//
+// applyInitDataMeasurements reads once and treats every other error as a
+// verdict. awaitInitDataMeasurements re-reads a few times first, because a
+// document still being written presents as one (initDataSettleReads).
 var errAttestUnavailable = errors.New("policy-monitor: attestation service unavailable")
 
 // Bounds the self-attestation; on expiry the caller falls back to the seed.
@@ -101,6 +103,14 @@ var (
 	initDataWaitInterval = 2 * time.Second
 )
 
+// A digest mismatch is re-read this many times, this far apart, before it counts
+// as a verdict. Covers a document caught mid-write without letting a genuinely
+// uncommitted one hold the guest off its seed for the whole budget.
+const (
+	initDataSettleReads = 3
+	initDataSettleDelay = 100 * time.Millisecond
+)
+
 // awaitInitDataMeasurements is applyInitDataMeasurements for a caller running
 // after READY=1: it waits for the document rather than reading once.
 //
@@ -118,6 +128,7 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 	}
 	deadline := time.Now().Add(initDataWaitBudget)
 	var lastErr error
+	settling := 0
 	for {
 		measurements, err := resolveInitDataMeasurements(ctx, cfg)
 		switch {
@@ -127,20 +138,37 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 				"key", initdata.KeyCDSMeasurements)
 			return
 		case err == nil:
+			// The digest matched, so this is the launch-committed document
+			// itself: it carries no measurements and a later read cannot
+			// change that.
 			logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
 				"key", initdata.KeyCDSMeasurements)
 			return
-		case !errors.Is(err, errNoInitData) && !errors.Is(err, errAttestUnavailable):
-			// A verdict, not a timing problem: host tampering or a document we
-			// cannot parse. Waiting cannot change either.
-			logger.Error("init-data rejected; enforcing the baked seed alone", "error", err)
-			return
 		}
 		lastErr = err
-		if !time.Now().Add(initDataWaitInterval).Before(deadline) {
+
+		wait := initDataWaitInterval
+		if errors.Is(err, errNoInitData) || errors.Is(err, errAttestUnavailable) {
+			settling = 0
+		} else {
+			// kata-agent writes the document in place, so a read that lands
+			// mid-write sees a short file whose digest cannot match the
+			// launch-committed one — the same shape as a document the host
+			// tampered with. Re-read after a beat: a write in flight resolves,
+			// tampering reproduces. The grace is its own short delay so a real
+			// verdict still lands promptly instead of costing the whole budget.
+			settling++
+			if settling > initDataSettleReads {
+				logger.Error("init-data rejected; enforcing the baked seed alone", "error", err)
+				return
+			}
+			wait = initDataSettleDelay
+		}
+
+		if !time.Now().Add(wait).Before(deadline) {
 			break
 		}
-		time.Sleep(initDataWaitInterval)
+		time.Sleep(wait)
 	}
 	logger.Warn("no init-data document within the wait budget; CDS measurements unset, so allowlist refresh will stay disabled",
 		"path", initdata.GuestDocumentPath, "waited", initDataWaitBudget, "error", lastErr)

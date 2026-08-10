@@ -387,16 +387,24 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	// where it sees the CRI container rather than a guest's mount table, and an
 	// unobserved field is not a violation (allowlist.RunningContainer).
 	if !snap.index.AdmitsContainer(allowlist.RunningContainer{Digest: digest, Argv: argv}) {
-		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv)
+		// INVARIANT: the returned reason reaches a namespace-readable kubelet
+		// event, so it names only the image — argv can carry credentials and
+		// stays in the node-local log.
+		reason, denial := "not_in_allowlist", fmt.Sprintf("image not in allowlist: %s", imageRef)
+		if listed := snap.index.AdmitsDigest(digest); listed {
+			reason = "argv_not_admitted"
+			denial = fmt.Sprintf("image %s is allowlisted, but its command satisfies no workload entry's argv policy", imageRef)
+		}
+		log.Warn("image not admitted by allowlist", "digest", digest, "argv", argv, "reason", reason)
 		p.audit.Log(audit.Event{
 			Action:    "deny",
-			Reason:    "not_in_allowlist",
+			Reason:    reason,
 			Namespace: namespace,
 			Pod:       podName,
 			Container: containerName,
 			Image:     imageRef,
 		})
-		return verdictDeny, fmt.Sprintf("image not in allowlist: %s", imageRef)
+		return verdictDeny, denial
 	}
 
 	// All checks passed

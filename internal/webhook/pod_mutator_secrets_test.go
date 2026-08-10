@@ -285,3 +285,38 @@ func TestEphemeralContainerCannotMountReservedVolumes(t *testing.T) {
 		})
 	}
 }
+
+// get-secret enforces these at pod start. Admission enforces them here too, so a
+// typo in the annotation is a rejected manifest rather than a Running pod whose
+// c8s-secret container crash-loops.
+func TestSecretsSpecValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		specs   []string
+		dir     string
+		wantErr bool
+	}{
+		{name: "pair", specs: []string{"DB=/tenant-a/db", "HF=/tenant-a/hf-token"}},
+		{name: "absolute dir", specs: []string{"DB=/tenant-a/db"}, dir: "/run/secrets"},
+		{name: "no equals", specs: []string{"DB"}, wantErr: true},
+		{name: "name with separator", specs: []string{"sub/DB=/tenant-a/db"}, wantErr: true},
+		{name: "name is dotdot", specs: []string{"..=/tenant-a/db"}, wantErr: true},
+		{name: "empty name", specs: []string{"=/tenant-a/db"}, wantErr: true},
+		{name: "repeated name", specs: []string{"DB=/tenant-a/db", "DB=/tenant-a/other"}, wantErr: true},
+		{name: "relative path", specs: []string{"DB=tenant-a/db"}, wantErr: true},
+		{name: "trailing slash", specs: []string{"DB=/tenant-a/db/"}, wantErr: true},
+		{name: "wildcard path", specs: []string{"DB=/tenant-a/*"}, wantErr: true},
+		{name: "uncanonical path", specs: []string{"DB=/tenant-a/../db"}, wantErr: true},
+		{name: "relative dir", specs: []string{"DB=/tenant-a/db"}, dir: "run/secrets", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := secretsSpec{Specs: tc.specs, Dir: tc.dir}.validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("admitted a spec get-secret would reject")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("rejected a valid spec: %v", err)
+			}
+		})
+	}
+}
