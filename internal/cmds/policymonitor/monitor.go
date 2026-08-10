@@ -159,6 +159,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		// failure paths in runAllowlistRefresh. Still recorded, so denies and
 		// the digests endpoint report the frozen set either way.
 		m.refresh.disable(reasonNoCDSURL)
+		m.refresh.settle()
 		logger.Info("allowlist refresh disabled (no CDS URL); enforcing baked seed only", "entries", a.Size())
 	}
 
@@ -540,6 +541,16 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	if spec.Process != nil {
 		rc.Argv = spec.Process.Args
 		rc.EnvNames = envNames(spec.Process.Env)
+	}
+	// A container is created seconds after its guest boots, while the first
+	// CDS pull is still failing for want of a pod network, so the allowlist a
+	// first verdict sees is the baked seed. Deciding on it would refuse every
+	// operator-added digest for the life of a pod that does not retry. Wait
+	// for a landed refresh — but only when about to deny, so an admitted
+	// container never pays for it, and only up to a budget, after which the
+	// seed is the answer and the deny stands.
+	if !m.admits(rc) {
+		m.refresh.awaitSettled(ctx, refreshSettleBudget)
 	}
 	if m.admits(rc) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)

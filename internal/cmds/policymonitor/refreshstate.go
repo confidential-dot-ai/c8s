@@ -13,7 +13,9 @@ package policymonitor
 // deny decision, and the CDS-facing digests endpoint.
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -42,6 +44,48 @@ type refreshState struct {
 	mu      sync.RWMutex
 	enabled bool
 	reason  string
+
+	settleOnce sync.Once
+	settled    chan struct{}
+}
+
+// settle marks the first refresh outcome known: a pull has landed, or the loop
+// has given up for a reason that will not change. Idempotent — later polls do
+// not re-signal.
+func (s *refreshState) settle() {
+	if s == nil {
+		return
+	}
+	s.settleOnce.Do(func() { close(s.settledCh()) })
+}
+
+// settledCh lazily allocates the channel so the zero value stays usable, and
+// hands back the same one to every caller.
+func (s *refreshState) settledCh() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled == nil {
+		s.settled = make(chan struct{})
+	}
+	return s.settled
+}
+
+// awaitSettled blocks until the first refresh outcome is known, ctx ends, or
+// the budget runs out. It reports nothing: the caller re-reads the allowlist
+// either way, so a timeout simply means the decision is made on what the guest
+// has — the baked seed. Once settled it returns immediately, so this costs a
+// wait only for containers created during the startup window.
+func (s *refreshState) awaitSettled(ctx context.Context, budget time.Duration) {
+	if s == nil {
+		return
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-s.settledCh():
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 // disable records why the refresh loop will not run. Terminal: every caller is

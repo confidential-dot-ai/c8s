@@ -1040,6 +1040,11 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 		args = append(args, "--reload-watch="+path)
 	}
 	args = append(args, discoveryArgs(inj.Discovery)...)
+	// get-cert names this one --cds-measurements and takes it comma-joined,
+	// where the secret and volume fetchers take a repeatable --measurements.
+	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
+		args = append(args, "--cds-measurements="+joined)
+	}
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.

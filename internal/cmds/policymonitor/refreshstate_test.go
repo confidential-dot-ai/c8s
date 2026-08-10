@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
@@ -125,4 +126,63 @@ func findLog(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
 	}
 	t.Fatalf("no log record with msg %q in:\n%s", msg, buf.String())
 	return nil
+}
+
+// A verdict formed before the first CDS pull lands would decide on the baked
+// seed, refusing every operator-added digest for the life of a pod that does
+// not retry. awaitSettled is what holds that decision open.
+func TestAwaitSettledBlocksUntilFirstPullLands(t *testing.T) {
+	s := &refreshState{}
+	done := make(chan struct{})
+	go func() {
+		s.awaitSettled(context.Background(), time.Minute)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("returned before a pull landed; a first verdict would decide on the seed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.settle()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("did not return after the pull landed")
+	}
+}
+
+// The wait is a budget, not a block: a guest whose CDS never answers must still
+// reach a verdict, on the seed, inside the agent's own timeout.
+func TestAwaitSettledGivesUpOnBudget(t *testing.T) {
+	s := &refreshState{}
+	start := time.Now()
+	s.awaitSettled(context.Background(), 30*time.Millisecond)
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("returned after %s, want at least the 30ms budget", elapsed)
+	}
+}
+
+// Settling is one-shot, so later polls neither re-close the channel (a panic)
+// nor reopen the window.
+func TestSettleIsIdempotent(t *testing.T) {
+	s := &refreshState{}
+	s.settle()
+	s.settle()
+	s.awaitSettled(context.Background(), time.Second)
+}
+
+// A guest that will never refresh — no CDS URL, unpinned measurements — must
+// not make every deny serve out the budget.
+func TestDisabledRefreshSettlesImmediately(t *testing.T) {
+	s := &refreshState{}
+	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	disableRefresh(logger, s, reasonNoMeasurements, &allowlist{})
+
+	start := time.Now()
+	s.awaitSettled(context.Background(), time.Minute)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("waited %s on a refresh that will never run", elapsed)
+	}
 }

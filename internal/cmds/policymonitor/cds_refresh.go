@@ -65,17 +65,42 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 	}
 
 	logger.Info("allowlist refresh enabled", "cds_url", cfg.CDSURL, "interval", cfg.RefreshInterval, "call_timeout", callTimeout)
-	ticker := time.NewTicker(cfg.RefreshInterval)
-	defer ticker.Stop()
 	for {
-		refreshOnce(ctx, logger, client, a, overlay, callTimeout)
+		landed := refreshOnce(ctx, logger, client, a, overlay, callTimeout)
+		if landed {
+			// The first pull runs before kata-agent has configured the pod
+			// network, so it usually fails; a verdict waits for one that
+			// lands rather than for the first attempt (see awaitSettled).
+			state.settle()
+		}
+		// Until a pull has landed the network is still coming up, and a
+		// container created meanwhile is blocked on that first success. Retry
+		// on a short interval so it arrives inside the agent's verdict
+		// timeout; drop to the configured cadence once the guest is current.
+		delay := cfg.RefreshInterval
+		if !landed {
+			delay = refreshRetryInterval
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
+
+const (
+	// refreshRetryInterval paces retries before the first pull lands.
+	refreshRetryInterval = time.Second
+
+	// refreshSettleBudget bounds how long a would-be deny waits for that
+	// first pull. Under the agent's own 30s verdict timeout
+	// (kata-guest-base/patches/0002-*), so the wait resolves into a real
+	// verdict rather than the agent's fail-closed deadline.
+	refreshSettleBudget = 20 * time.Second
+)
 
 // refreshCallTimeoutMax bounds a single CDS round-trip. The refresh loop
 // further clamps to half the configured interval so the call can never
@@ -87,6 +112,9 @@ const refreshCallTimeoutMax = 15 * time.Second
 // only the cause.
 func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *allowlist, args ...any) {
 	state.disable(reason)
+	// Terminal, so the seed is the final answer: settling here keeps a guest
+	// that will never refresh from making every deny serve out the budget.
+	state.settle()
 	logger.Error("allowlist refresh disabled; enforcement frozen at the baked seed",
 		append([]any{"reason", reason, "entries", a.Size()}, args...)...)
 }
@@ -97,13 +125,16 @@ func disableRefresh(logger *slog.Logger, state *refreshState, reason string, a *
 // policy overlay is replaced only when the pulled version advances the epoch.
 // A failed pull is logged and skipped — the existing allowlist and overlay keep
 // enforcing, so a CDS outage degrades to "stale but no smaller", never "open".
-func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclient.Client, a *allowlist, overlay *policyOverlay, callTimeout time.Duration) {
+//
+// Reports whether the pull landed, which is what tells a waiting verdict the
+// allowlist is CDS-current rather than still the baked seed.
+func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclient.Client, a *allowlist, overlay *policyOverlay, callTimeout time.Duration) bool {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	resp, version, err := client.List(callCtx)
 	if err != nil {
 		logger.Warn("allowlist refresh from CDS failed (keeping current allowlist)", "error", err)
-		return
+		return false
 	}
 
 	pulled := make([]string, 0, len(resp.Digests))
@@ -115,13 +146,14 @@ func refreshOnce(ctx context.Context, logger *slog.Logger, client allowlistclien
 	v, verr := strconv.ParseUint(version, 10, 64)
 	if verr != nil {
 		logger.Warn("allowlist refresh: unparseable CDS version; keeping current overlay", "version", version, "error", verr)
-		return
+		return false
 	}
 	if overlay.apply(resp, v) {
 		logger.Info("allowlist refreshed from CDS", "version", v, "workloads", len(resp.Workloads), "floor_added", added, "floor_total", a.Size())
 	} else {
 		logger.Warn("allowlist refresh: ignoring rolled-back CDS version; keeping current overlay", "version", v, "floor_added", added, "floor_total", a.Size())
 	}
+	return true
 }
 
 // splitCSV trims and splits a comma-separated env value into non-empty

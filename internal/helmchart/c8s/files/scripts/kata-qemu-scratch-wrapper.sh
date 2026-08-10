@@ -111,6 +111,34 @@ volume_names() {
     done
 }
 
+# serial_of prints a block device's serial, from whichever sysfs spelling its
+# transport provides: virtio-blk publishes <dev>/serial, SCSI publishes VPD
+# page 0x80 at <dev>/device/vpd_pg80. `c8s volume attach` drives LIO, so a
+# host that cannot set a virtio serial reaches the guest only through the
+# latter. Prints nothing when the device has no serial at all.
+# Mirrors SerialDevices.serialOf in internal/cmds/volumed.
+serial_of() {
+    local d="$1"
+    if [ -r "$d/serial" ]; then
+        tr -d '[:space:]' <"$d/serial"
+        return 0
+    fi
+    [ -r "$d/device/vpd_pg80" ] || return 0
+    # Device type, page code 0x80, big-endian uint16 length, then the serial
+    # padded to a fixed width. sysfs reports size 0, so the declared length is
+    # the only bound; it is trusted only as far as the bytes actually read.
+    od -An -tu1 -v "$d/device/vpd_pg80" 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) b[n++] = $i }
+        END {
+            if (n < 4) exit
+            end = 4 + b[2] * 256 + b[3]
+            if (end <= 4 || end > n) end = n
+            s = ""
+            for (i = 4; i < end; i++) if (b[i] != 0) s = s sprintf("%c", b[i])
+            print s
+        }' | tr -d '[:space:]'
+}
+
 # device_for prints the block device carrying serial $SERIAL_PREFIX$1.
 #
 # A serial matching more than one device is refused rather than resolved to
@@ -120,8 +148,8 @@ volume_names() {
 device_for() {
     local want="$SERIAL_PREFIX$1" found=() d serial
     for d in "$SYSBLOCK"/*; do
-        [ -r "$d/serial" ] || continue
-        serial="$(tr -d '[:space:]' <"$d/serial")"
+        serial="$(serial_of "$d")"
+        [ -n "$serial" ] || continue
         [ "$serial" = "$want" ] && found+=("$(basename "$d")")
     done
     if [ "${#found[@]}" -ne 1 ]; then

@@ -1371,3 +1371,45 @@ func TestCertWaitContainerTimeout(t *testing.T) {
 		t.Fatalf("c8s-cert-wait command %v missing --timeout=3m0s", wait.Command)
 	}
 }
+
+// get-cert refuses to reach an unpinned CDS from inside a kata guest
+// (cmdsutil.CheckCDSPinned), so the guest shape must carry the pin. It spells
+// the flag --cds-measurements and takes it comma-joined, where the secret and
+// volume fetchers take a repeatable --measurements.
+func TestCertContainerCarriesCDSMeasurements(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		measurements []string
+		guest        bool
+		want         string
+	}{
+		{"guest shape pins CDS", []string{"aa", "bb"}, true, "--cds-measurements=aa,bb"},
+		{"node shape pins CDS", []string{"aa"}, false, "--cds-measurements=aa"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := podWithApp()
+			cfg := secretsConfig()
+			cfg.CDSMeasurements = tc.measurements
+			cfg.WorkloadClaimsGuest = tc.guest
+			mutatePod(pod, &injection{WorkloadID: "api"}, cfg)
+
+			args := containerNamed(pod, reservedCertContainerName).Args
+			if !hasArg(args, tc.want) {
+				t.Fatalf("c8s-cert args %v missing %q", args, tc.want)
+			}
+		})
+	}
+}
+
+// An unset pin emits no flag at all: get-cert reads "" as "accept any attested
+// CDS", which an empty --cds-measurements= would also mean but by a longer road.
+func TestCertContainerOmitsEmptyCDSMeasurements(t *testing.T) {
+	pod := podWithApp()
+	mutatePod(pod, &injection{WorkloadID: "api"}, secretsConfig())
+
+	for _, arg := range containerNamed(pod, reservedCertContainerName).Args {
+		if strings.HasPrefix(arg, "--cds-measurements") {
+			t.Fatalf("c8s-cert carries %q with no measurements configured", arg)
+		}
+	}
+}
