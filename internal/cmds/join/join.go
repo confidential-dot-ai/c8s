@@ -203,10 +203,9 @@ func prepareTokenDir(path string) error {
 // file, so the token lands first. A failed run is retried whole by the unit;
 // both writes are idempotent replaces.
 func writeStaged(cfg JoinConfig, host, token string) error {
-	for _, p := range []string{cfg.TokenOut, cfg.FragmentOut} {
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", filepath.Dir(p), err)
-		}
+	// TokenOut's dir already exists: prepareTokenDir created and vetted it.
+	if err := os.MkdirAll(filepath.Dir(cfg.FragmentOut), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(cfg.FragmentOut), err)
 	}
 	// WriteAtomic renames a fresh 0600 file over the destination; os.WriteFile
 	// would leave a pre-existing world-readable file's mode untouched.
