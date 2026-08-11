@@ -188,7 +188,7 @@ func TestOperatorPkeyFlagErrors(t *testing.T) {
 		// the operator gets a verdict on neither.
 		{"mutually exclusive with --expected-rtmr3",
 			config{imageManifest: manifest, operatorPubkey: pubPath, expectedRTMR3Hex: testRTMR3},
-			[]string{"--operator-pkey", "--expected-rtmr3", "not both"}},
+			[]string{"--expected-rtmr3", "--operator-pkey", "name the register once"}},
 		// Same rule as --expected-rtmr3, from one check: the host stages the
 		// operator key, so it can reproduce this register under any image.
 		{"requires --image-manifest",

@@ -27,12 +27,13 @@ func TestParseRTMRPins(t *testing.T) {
 		}
 	})
 
-	// Rejected rather than ignored: accepting them would look like a guest
-	// identity pin while providing none.
+	// Rejected rather than ignored: accepting them would look like a pin while
+	// providing none. Index 3 is NOT among them — the parser takes it and
+	// resolveRTMRPins gates it on --image-manifest, because the anchor rule is
+	// the opposite of RTMR[1]/[2]'s.
 	for _, tc := range []struct{ name, pin, want string }{
 		{"RTMR[0] tracks pod shape", "0=" + sha384Hex(0), "TD HOB"},
-		{"RTMR[3] is guest-extended", "3=" + sha384Hex(3), "in-guest software"},
-		{"index out of range", "9=" + sha384Hex(9), "must be 1 or 2"},
+		{"index out of range", "9=" + sha384Hex(9), "must be 1, 2 or 3"},
 		{"missing =", sha384Hex(1), "<index>=<sha384-hex>"},
 		{"index not a number", "x=" + sha384Hex(1), "not a number"},
 		{"value not hex", "1=zzzz", "not hex"},
@@ -114,6 +115,68 @@ func TestRTMRFlagIsEnforcedNotJustCarried(t *testing.T) {
 	t.Run("pins.any reports the flag, so the TDX platform gate runs", func(t *testing.T) {
 		if !plan.pins.any() {
 			t.Fatal("rtmrPins.any() must see --rtmr, or a pin against SNP evidence is silently ignored")
+		}
+	})
+}
+
+// --rtmr 3= is the same pin --expected-rtmr3 gives, under the same rules, so
+// there is one flag for every register. What it is NOT is interchangeable with
+// --rtmr 1=/2=: registers 1 and 2 are the image, so a by-hand pin conflicts
+// with a manifest, while 3 records events inside whatever image the host
+// booted and therefore requires one.
+func TestRTMRIndexRulesAreOpposite(t *testing.T) {
+	manifest := writeTestManifest(t)
+
+	t.Run("--rtmr 3= requires an image anchor", func(t *testing.T) {
+		_, err := buildPolicy(config{rtmrs: []string{"3=" + testRTMR3}})
+		if err == nil || !strings.Contains(err.Error(), "requires --image-manifest") {
+			t.Fatalf("error = %v, want the image-anchor requirement", err)
+		}
+		if !strings.Contains(err.Error(), "--rtmr 3=") {
+			t.Fatalf("error = %v, want it to name the flag that was used", err)
+		}
+	})
+
+	t.Run("--rtmr 3= with a manifest is accepted and pins the register", func(t *testing.T) {
+		plan, err := buildPolicy(config{imageManifest: manifest, rtmrs: []string{"3=" + testRTMR3}})
+		if err != nil {
+			t.Fatalf("buildPolicy: %v", err)
+		}
+		if hex.EncodeToString(plan.pins.rtmr3) != testRTMR3 {
+			t.Fatalf("rtmr3 = %x, want it filled from --rtmr 3=", plan.pins.rtmr3)
+		}
+		// It lands in the RTMR[3] slot, not the by-hand set, so it is not also
+		// subjected to the conflict rule that governs 1 and 2.
+		if len(plan.pins.manual) != 0 {
+			t.Fatalf("manual = %v, want index 3 moved to the rtmr3 slot", plan.pins.manual)
+		}
+	})
+
+	t.Run("--rtmr 1= conflicts with the same manifest that 3= requires", func(t *testing.T) {
+		_, err := buildPolicy(config{imageManifest: manifest, rtmrs: []string{"1=" + testRTMR1}})
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined with --image-manifest") {
+			t.Fatalf("error = %v, want the conflict", err)
+		}
+	})
+
+	t.Run("--rtmr 3= and --expected-rtmr3 name one register twice", func(t *testing.T) {
+		_, err := buildPolicy(config{
+			imageManifest:    manifest,
+			rtmrs:            []string{"3=" + testRTMR3},
+			expectedRTMR3Hex: testRTMR3,
+		})
+		if err == nil || !strings.Contains(err.Error(), "name the register once") {
+			t.Fatalf("error = %v, want the duplicate-source refusal", err)
+		}
+	})
+
+	t.Run("the deprecated spelling still pins", func(t *testing.T) {
+		plan, err := buildPolicy(config{imageManifest: manifest, expectedRTMR3Hex: testRTMR3})
+		if err != nil {
+			t.Fatalf("--expected-rtmr3 must keep working: %v", err)
+		}
+		if hex.EncodeToString(plan.pins.rtmr3) != testRTMR3 {
+			t.Fatalf("rtmr3 = %x, want the deprecated flag to fill the same slot", plan.pins.rtmr3)
 		}
 	})
 }
