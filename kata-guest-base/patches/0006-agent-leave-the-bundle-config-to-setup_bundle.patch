@@ -1,0 +1,27 @@
+Subject: [PATCH] agent: leave the container bundle's config.json to setup_bundle
+
+unpack_pause_image copied /pause_bundle/config.json into the container's
+bundle at CONTAINER_BASE/<cid>/config.json, and setup_bundle writes the
+spec the container actually runs to the same path moments later. In-guest
+admission readers (c8s's policy-monitor, rtmr3-measurer) watch the bundle
+dir and read config.json as soon as it appears, so they race the
+overwrite: judged on the pause image's config -- three OCI image
+annotations, no CRI container-type marker, no image reference -- the
+pause container is denied as an unallowlisted workload, and the sandbox
+dies with it.
+
+Nothing in the agent reads the planted copy: the container is created
+from the in-memory spec, and the pause process comes from get_process.
+Drop the copy so the bundle's config.json has a single writer and always
+carries the spec the container runs.
+
+--- a/src/agent/src/confidential_data_hub/image.rs
++++ b/src/agent/src/confidential_data_hub/image.rs
+@@ -108,7 +108,6 @@
+     fs::create_dir_all(&pause_rootfs)?;
+     info!(sl(), "pause_rootfs {:?}", pause_rootfs);
+ 
+-    copy_if_not_exists(&guest_pause_config, &pause_bundle.join(CONFIG_JSON))?;
+     let arg_path = Path::new(&args[0]).strip_prefix("/")?;
+     copy_if_not_exists(
+         &guest_pause_bundle.join("rootfs").join(arg_path),

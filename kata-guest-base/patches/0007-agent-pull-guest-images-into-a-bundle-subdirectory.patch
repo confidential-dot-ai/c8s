@@ -1,0 +1,65 @@
+Subject: [PATCH] agent: keep the pulled image config out of the bundle's config path
+
+CDH unpacks the pulled image at the bundle path it is given, including
+the image's own config.json. Handing it CONTAINER_BASE/<cid> therefore
+planted the image config at <cid>/config.json until setup_bundle wrote
+the real spec to the same path. In-guest admission readers (c8s's
+policy-monitor, rtmr3-measurer) read that file as soon as the bundle dir
+appears; judged on the image config -- OCI image annotations, no CRI
+container-type, no pull reference -- a workload container could be
+denied as unallowlisted, the denial racing the real spec.
+
+Pull into <cid>/images instead, then answer the bundle's rootfs path
+with a bind of the unpacked rootfs, detaching the original mount (a move
+is unsupported: /run is a shared mount). The bundle's config.json keeps
+its single writer, and the rest of the pull stays out of the watched
+path.
+
+--- a/src/agent/src/storage/image_pull_handler.rs
++++ b/src/agent/src/storage/image_pull_handler.rs
+@@ -13,6 +13,7 @@
+ use kata_types::mount::{ImagePullVolume, StorageDevice};
+ use protocols::agent::Storage;
+ use safe_path::scoped_join;
++use std::fs;
+ use std::sync::Arc;
+ use tracing::instrument;
+ 
+@@ -66,9 +67,11 @@
+             return new_device(mount_path);
+         }
+ 
+-        // generated bundles with rootfs and config.json will store under CONTAINER_BASE/cid/images.
+-        let bundle_path = scoped_join(CONTAINER_BASE, &cid)?;
+-        let bundle_path = match confidential_data_hub::pull_image(image_name, bundle_path).await {
++        // Pull into CONTAINER_BASE/cid/images: the image's own config.json
++        // must never occupy the bundle's config.json path, whose single
++        // writer is setup_bundle.
++        let bundle_path = scoped_join(CONTAINER_BASE, &cid)?.join("images");
++        let pulled_rootfs = match confidential_data_hub::pull_image(image_name, bundle_path).await {
+             Ok(path) => {
+                 info!(
+                     ctx.logger,
+@@ -86,7 +89,21 @@
+             }
+         };
+ 
+-        new_device(bundle_path)
++        // Answer the bundle's rootfs path with a bind of the pulled
++        // rootfs, detaching the original (a move is unsupported under
++        // /run's shared mount); the rest of the pull stays under images/.
++        let rootfs_path = scoped_join(CONTAINER_BASE, &cid)?.join("rootfs");
++        fs::create_dir_all(&rootfs_path)?;
++        nix::mount::mount(
++            Some(pulled_rootfs.as_str()),
++            &rootfs_path,
++            None::<&str>,
++            nix::mount::MsFlags::MS_BIND,
++            None::<&str>,
++        )?;
++        nix::mount::umount2(pulled_rootfs.as_str(), nix::mount::MntFlags::MNT_DETACH)?;
++
++        new_device(rootfs_path.display().to_string())
+     }
+ }
+ 

@@ -313,6 +313,13 @@ func TestCryptOpenReportsAFailedTool(t *testing.T) {
 	}
 }
 
+func TestExecRunnerDisablesUdevSync(t *testing.T) {
+	out, err := execRunner(context.Background(), "printenv", nil, "DM_DISABLE_UDEV")
+	if err != nil || strings.TrimSpace(string(out)) != "1" {
+		t.Fatalf("DM_DISABLE_UDEV = %q, err = %v", out, err)
+	}
+}
+
 func TestExecRunnerWiresOutputAndFailure(t *testing.T) {
 	out, err := execRunner(context.Background(), "sh", nil, "-c", "echo hello")
 	if err != nil || strings.TrimSpace(string(out)) != "hello" {
