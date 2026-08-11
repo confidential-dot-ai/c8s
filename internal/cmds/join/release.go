@@ -37,8 +37,13 @@ type ReleaseConfig struct {
 	// AttestationAPIURL is the local attestation-api base URL, used both for
 	// the RA-TLS serving cert's quote and for verifying callers' quotes.
 	AttestationAPIURL string
-	// Platform is the TEE platform ("tdx").
+	// Platform is the TEE platform ("tdx"). It is the legacy TDX-only
+	// setting. When PolicyFile is set, local verified evidence selects the
+	// platform instead.
 	Platform string
+	// PolicyFile is a versioned registry of approved native node platforms.
+	// Empty preserves the legacy same-image TDX policy.
+	PolicyFile string
 	// TokenPath is the agent-only rke2 join token file (the full-format
 	// K10<ca-hash>::node:... token rke2-server writes once initialised).
 	TokenPath string
@@ -62,11 +67,15 @@ func RunRelease(ctx context.Context, cfg ReleaseConfig) error {
 // runRelease serves on ln when non-nil (test injection); nil binds
 // cfg.ListenAddr after the attestation ladder, never before policy is pinned.
 func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
+	policies, err := loadNodePolicyFile(cfg.PolicyFile)
+	if err != nil {
+		return err
+	}
 	// RA-TLS is mandatory: joining agents verify this endpoint's serving
 	// quote before presenting their own evidence, so a plain-TLS listener
 	// (empty platform in the ratls package) must never come up.
 	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
-	if cfg.Platform == "" {
+	if policies == nil && cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join release)")
 	}
 	// Non-positive: every request's verification context is already expired,
@@ -77,7 +86,16 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 
 	api := attestationclient.NewClient(cfg.AttestationAPIURL)
 	refsCtx, cancelRefs := context.WithTimeout(ctx, 30*time.Second)
-	own, err := ownRefs(refsCtx, api)
+	var own imageRefs
+	var identity nodeIdentity
+	if policies == nil {
+		own, err = ownRefs(refsCtx, api)
+	} else {
+		var identityErr error
+		identity, identityErr = ownNodeIdentity(refsCtx, api, policies)
+		err = identityErr
+		cfg.Platform = identity.platform
+	}
 	cancelRefs()
 	if err != nil {
 		return err
@@ -90,6 +108,8 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		verifyTimeout: cfg.VerifyTimeout,
 		verifySlots:   make(chan struct{}, maxConcurrentVerifications),
 		logger:        slog.Default(),
+		policies:      policies,
+		identity:      identity,
 	}
 
 	attestFunc := attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationAPIURL)
@@ -160,6 +180,8 @@ type releaseHandler struct {
 	verifyTimeout time.Duration
 	verifySlots   chan struct{}
 	logger        *slog.Logger
+	policies      *nodePolicyRegistry
+	identity      nodeIdentity
 }
 
 func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +212,13 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.verifyTimeout)
 	defer cancel()
-	if err := verifyPeer(ctx, h.api, r.TLS.PeerCertificates[0], h.own); err != nil {
+	var err error
+	if h.policies != nil {
+		err = verifyRegisteredPeer(ctx, h.api, r.TLS.PeerCertificates[0], h.identity, h.policies)
+	} else {
+		err = verifyPeer(ctx, h.api, r.TLS.PeerCertificates[0], h.own)
+	}
+	if err != nil {
 		h.logger.Warn("join denied", "remote", r.RemoteAddr, "err", err)
 		http.Error(w, "join denied", http.StatusForbidden)
 		return

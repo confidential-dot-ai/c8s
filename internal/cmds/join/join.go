@@ -36,7 +36,14 @@ type JoinConfig struct {
 	// this node's client-cert quote and for verifying the server's quote.
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx").
+	//
+	// Deprecated when PolicyFile is set: the verified local evidence selects
+	// the RA-TLS platform in that mode. It remains required for the legacy
+	// TDX-only path so existing node images keep their exact behavior.
 	Platform string
+	// PolicyFile is a versioned registry of approved native node platforms.
+	// Empty preserves the legacy same-image TDX policy.
+	PolicyFile string
 	// TokenOut is where the received token is written. Must be on a RAM-backed
 	// filesystem — enforced, see prepareTokenDir.
 	TokenOut string
@@ -62,8 +69,12 @@ type rke2Fragment struct {
 // same-image TDX guest (RA-TLS + register comparison), present this node's
 // own quote-bound client cert, fetch the token, and stage it for rke2-agent.
 func RunJoin(ctx context.Context, cfg JoinConfig) error {
+	policies, err := loadNodePolicyFile(cfg.PolicyFile)
+	if err != nil {
+		return err
+	}
 	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
-	if cfg.Platform == "" {
+	if policies == nil && cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for join)")
 	}
 	// A non-positive timeout expires every step's context before it starts.
@@ -82,7 +93,16 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 
 	api := attestationclient.NewClient(cfg.AttestationAPIURL)
 	refsCtx, cancelRefs := context.WithTimeout(ctx, cfg.Timeout)
-	own, err := ownRefs(refsCtx, api)
+	var own imageRefs
+	var identity nodeIdentity
+	if policies == nil {
+		own, err = ownRefs(refsCtx, api)
+	} else {
+		var identityErr error
+		identity, identityErr = ownNodeIdentity(refsCtx, api, policies)
+		err = identityErr
+		cfg.Platform = identity.platform
+	}
 	cancelRefs()
 	if err != nil {
 		return err
@@ -117,6 +137,9 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 		}
 		vctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
+		if policies != nil {
+			return verifyRegisteredPeer(vctx, api, leaf, identity, policies)
+		}
 		return verifyPeer(vctx, api, leaf, own)
 	}
 

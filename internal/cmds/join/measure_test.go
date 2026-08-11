@@ -37,6 +37,8 @@ var (
 // certs; verdicts come from the fake attestation-api, nothing parses it.
 const tdxEnvelope = `{"platform":"tdx","evidence":{}}`
 
+const snpEnvelope = `{"platform":"snp","evidence":{}}`
+
 // fakeAPI is a stand-in local attestation-api: POST /attest returns a TDX
 // envelope, POST /verify answers via verifyFn keyed by call number (1-based),
 // so tests can serve different claims to ownRefs and verifyPeer.
@@ -75,12 +77,16 @@ func newFakeAPI(t *testing.T, verifyFn func(call int, req types.VerifyRequest) t
 
 // verifyResp builds a /verify response with the given claims and verdicts.
 func verifyResp(digest, r1, r2 string, sigValid, rdMatch bool) types.VerifyResponse {
+	return verifyRespPlatform(types.PlatformTdx, digest, r1, r2, sigValid, rdMatch)
+}
+
+func verifyRespPlatform(platform types.Platform, digest, r1, r2 string, sigValid, rdMatch bool) types.VerifyResponse {
 	pd, err := json.Marshal(map[string]string{"rtmr_1": r1, "rtmr_2": r2})
 	if err != nil {
 		panic(err)
 	}
 	return types.VerifyResponse{Result: types.VerificationResult{
-		Platform:        string(types.PlatformTdx),
+		Platform:        string(platform),
 		SignatureValid:  sigValid,
 		Claims:          types.Claims{LaunchDigest: digest, PlatformData: pd},
 		ReportDataMatch: &rdMatch,
@@ -104,12 +110,37 @@ func mustRefs(t *testing.T, digest, r1, r2 string) imageRefs {
 
 // attestedLeaf builds a genuine RA-TLS leaf cert embedding envelope.
 func attestedLeaf(t *testing.T, envelope string) *x509.Certificate {
+	return attestedLeafPlatform(t, ratls.TEETypeTDX, envelope)
+}
+
+func attestedLeafPlatform(t *testing.T, teeType ratls.TEEType, envelope string) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{TEEType: ratls.TEETypeTDX, Report: []byte(envelope)}, nil)
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{TEEType: teeType, Report: []byte(envelope)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+// rawSNPLeaf matches the native bare-metal RA-TLS wire form. The report is
+// deliberately not signed: tests use fake attestation-api verdicts, while the
+// production verifier checks its signature through that service.
+func rawSNPLeaf(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := make([]byte, 1184) // AMD SEV-SNP ATTESTATION_REPORT size.
+	der, err := ratls.CreateAttestedCert(key, &ratls.Attestation{TEEType: ratls.TEETypeSEVSNP, Report: report}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
