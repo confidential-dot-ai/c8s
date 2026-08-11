@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -481,8 +483,12 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	if err != nil {
 		return nil, err
 	}
+	pins.manual = rtmrs
 
 	return &verifyPlan{
+		// RTMRs is still set: it is what enforces the pin if this policy is
+		// ever verified through the delegated attestation-api path. It is not
+		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
 			Measurements: measurements,
 			RTMRs:        rtmrs,
@@ -493,22 +499,33 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}, nil
 }
 
-// rtmrPins are the TDX register pins resolved from the flags: the image tuple
-// (--image-manifest; MRTD, RTMR[1] and RTMR[2] all compare exactly) and the
+// rtmrPins are every TDX register pin resolved from the flags: the image tuple
+// (--image-manifest; MRTD, RTMR[1] and RTMR[2] all compare exactly), the
 // optional runtime-register pin (--expected-rtmr3, or --operator-pkey, which
-// derives the same register from the operator public key). Any non-nil pin
-// against non-TDX evidence is a policy error, never an ignored option.
+// derives the same register from the operator public key), and the by-hand
+// pins (--rtmr <index>=<hex>). Any non-nil pin against non-TDX evidence is a
+// policy error, never an ignored option.
 //
-// These are enforced here, against the verified claims. The other route to
-// RTMR[1]/[2] — --rtmr, parsed by parseRTMRPins into ratls.VerifyPolicy.RTMRs
-// — is enforced by the verification engine instead. buildPolicy refuses the
-// two together, so exactly one of the two paths is ever live.
+// All of them are enforced in one place — applyRTMRPins, against the verified
+// claims — so a pin cannot be accepted by the CLI and then enforced by nobody.
+// buildPolicy still refuses --rtmr together with --image-manifest, because the
+// two would otherwise pin RTMR[1]/[2] from different sources and a
+// disagreement is a policy no guest can satisfy.
 type rtmrPins struct {
 	image *runtimemeasure.ImagePins
 	rtmr3 []byte
+	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
+	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
+	// read only by pkg/attestationclient, on the delegated attestation-api
+	// path, and `c8s verify` always verifies in process (verifyInProcess ->
+	// localverify.Verify, whose Params carries no registers). Setting the
+	// policy field alone made the flag a silent no-op.
+	manual map[int][]byte
 }
 
-func (p rtmrPins) any() bool { return p.image != nil || p.rtmr3 != nil }
+func (p rtmrPins) any() bool {
+	return p.image != nil || p.rtmr3 != nil || len(p.manual) > 0
+}
 
 // allowlistFlagsUsed names the launch-measurement allowlist flags the operator
 // actually passed, so the --image-manifest conflict blames what was typed.
@@ -1217,7 +1234,30 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
 		return false
 	}
+	// Ascending index, so a target missing several pinned registers always
+	// names the same one first and a failing verdict is reproducible.
+	for _, idx := range slices.Sorted(maps.Keys(pins.manual)) {
+		if !check(idx, rtmrMeaning(idx), pins.manual[idx]) {
+			return false
+		}
+	}
 	return true
+}
+
+// rtmrMeaning labels a register in operator-facing output. parseRTMRPins
+// admits only 1 and 2; the default keeps this total rather than printing an
+// empty meaning if that ever widens.
+func rtmrMeaning(idx int) string {
+	switch idx {
+	case 1:
+		return "guest kernel"
+	case 2:
+		return "guest command line / dm-verity root hash"
+	case 3:
+		return "runtime operator-key/workload chain"
+	default:
+		return "runtime measurement register"
+	}
 }
 
 // describeCertBody says what stands behind the leaf's body fields. Validity
