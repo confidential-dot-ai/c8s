@@ -80,6 +80,7 @@ fi
 KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
 bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
+    --module-signing-cert "$NGI_DIR/module-signing.crt" \
     --kernel-builder-package "$KB_PKGS"
 if [ "${C8S_NO_GPU:-0}" = 1 ]; then
     PROFILES=(--profile attest --profile c8s)
