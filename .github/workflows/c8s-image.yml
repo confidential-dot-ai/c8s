@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      gate_intree:
+        description: "Gate helper: build via confos's in-tree bin/build-c8s instead of node-guest-image/build (needs a confos_ref that still ships the c8s profile). Pair with gate=true; the A/B against the staged path shares this branch's kernel cache, isolating the profile mechanism as the only variable."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,7 +57,8 @@ concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
     }}-${{ github.event.inputs.c8s_ref }}-${{ github.event.inputs.dev
-    }}-${{ github.event.inputs.confos_ref }}-${{ github.event.inputs.gate }}
+    }}-${{ github.event.inputs.confos_ref }}-${{ github.event.inputs.gate
+    }}-${{ github.event.inputs.gate_intree }}
   cancel-in-progress: false
 
 env:
@@ -234,7 +240,11 @@ jobs:
           # it to rebuild a published release. Definition lives in this repo:
           # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+          if [ "${{ github.event.inputs.gate_intree }}" = "true" ]; then
+            C8S_NAME="$VARIANT" bin/build-c8s
+          else
+            C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+          fi
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
