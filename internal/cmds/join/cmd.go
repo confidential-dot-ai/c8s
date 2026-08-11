@@ -14,9 +14,9 @@ func NewReleaseCmd() *cobra.Command {
 	var cfg ReleaseConfig
 	cmd := &cobra.Command{
 		Use:   "join-release",
-		Short: "Release the rke2 join token to attested same-image nodes",
+		Short: "Release the rke2 agent join token to attested same-image nodes",
 		Long: "join-release serves an RA-TLS endpoint that hands the rke2 join\n" +
-			"token to a caller whose TDX quote proves it booted the same measured\n" +
+			"agent token to a caller whose TDX quote proves it booted the same measured\n" +
 			"image (MRTD, RTMR[1], RTMR[2] equal to this node's own). The token\n" +
 			"is a bearer secret: gating it on attestation is what keeps a host\n" +
 			"that can read every unmeasured disk from joining a rogue node into\n" +
@@ -29,7 +29,7 @@ func NewReleaseCmd() *cobra.Command {
 	f.StringVar(&cfg.ListenAddr, "listen", ":8444", "HTTPS (RA-TLS) bind address")
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (serving-cert quote source and peer-quote verifier)")
 	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (the same-image policy is TDX-only)")
-	f.StringVar(&cfg.TokenPath, "token-path", "/var/lib/rancher/rke2/server/node-token", "rke2 join token file (appears once rke2-server has initialised)")
+	f.StringVar(&cfg.TokenPath, "token-path", "/var/lib/rancher/rke2/server/agent-token", "rke2 agent-only join token file (appears once rke2-server has initialised)")
 	f.DurationVar(&cfg.VerifyTimeout, "verify-timeout", 10*time.Second, "per-request peer verification timeout")
 	return cmd
 }

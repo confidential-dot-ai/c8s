@@ -20,9 +20,15 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
-// maxConcurrentConns caps accepted connections: each request costs a local
-// attestation-api verify; excess connections queue in the accept backlog.
-const maxConcurrentConns = 64
+const (
+	// maxConcurrentConns caps accepted sockets and protects the HTTP server
+	// from connection-level resource exhaustion.
+	maxConcurrentConns = 64
+	// maxConcurrentVerifications independently caps expensive attestation-api
+	// calls. A single HTTP/2 connection can carry many concurrent requests, so
+	// the listener limit alone is not an admission bound.
+	maxConcurrentVerifications = 64
+)
 
 // ReleaseConfig is the join-release service configuration.
 type ReleaseConfig struct {
@@ -33,8 +39,8 @@ type ReleaseConfig struct {
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx").
 	Platform string
-	// TokenPath is the rke2 join token file (the full-format
-	// K10<ca-hash>::... token rke2-server writes once initialised).
+	// TokenPath is the agent-only rke2 join token file (the full-format
+	// K10<ca-hash>::node:... token rke2-server writes once initialised).
 	TokenPath string
 	// VerifyTimeout bounds the per-request peer verification round trip to
 	// the attestation-api.
@@ -82,6 +88,7 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 		own:           own,
 		tokenPath:     cfg.TokenPath,
 		verifyTimeout: cfg.VerifyTimeout,
+		verifySlots:   make(chan struct{}, maxConcurrentVerifications),
 		logger:        slog.Default(),
 	}
 
@@ -148,6 +155,7 @@ type releaseHandler struct {
 	own           imageRefs
 	tokenPath     string
 	verifyTimeout time.Duration
+	verifySlots   chan struct{}
 	logger        *slog.Logger
 }
 
@@ -168,6 +176,15 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	select {
+	case h.verifySlots <- struct{}{}:
+		defer func() { <-h.verifySlots }()
+	default:
+		h.logger.Warn("join delayed: verification capacity exhausted", "remote", r.RemoteAddr)
+		http.Error(w, "join verification busy", http.StatusServiceUnavailable)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), h.verifyTimeout)
 	defer cancel()
 	if err := verifyPeer(ctx, h.api, r.TLS.PeerCertificates[0], h.own); err != nil {
@@ -185,6 +202,13 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "join token not ready", http.StatusServiceUnavailable)
 		return
 	}
+	if !isSecureAgentToken(trimmed) {
+		// INVARIANT: the admission endpoint must never release a credential
+		// that can add an RKE2 server/control-plane node.
+		h.logger.Error("join token has unexpected role", "path", h.tokenPath)
+		http.Error(w, "join token not ready", http.StatusServiceUnavailable)
+		return
+	}
 
 	h.logger.Info("join token released",
 		"remote", r.RemoteAddr,
@@ -193,4 +217,15 @@ func (h *releaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(tokenResponse{Token: trimmed}); err != nil {
 		h.logger.Warn("write response", "remote", r.RemoteAddr, "err", err)
 	}
+}
+
+func isSecureAgentToken(token string) bool {
+	// RKE2 names the agent-only basic-auth identity "node"; the privileged
+	// server token uses the distinct "server" identity.
+	caHash, credentials, ok := strings.Cut(token, "::")
+	if !ok || !strings.HasPrefix(caHash, "K10") || len(caHash) == len("K10") || strings.ContainsRune(caHash, ':') {
+		return false
+	}
+	username, secret, ok := strings.Cut(credentials, ":")
+	return ok && username == "node" && secret != ""
 }

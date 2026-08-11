@@ -84,7 +84,7 @@ func TestJoinExchangeE2E(t *testing.T) {
 
 	relCfg := releaseConfig(t)
 	relCfg.AttestationAPIURL = api.URL
-	if err := os.WriteFile(relCfg.TokenPath, []byte("K10cafe::server:secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(relCfg.TokenPath, []byte("K10cafe::node:secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -109,7 +109,7 @@ func TestJoinExchangeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(token) != "K10cafe::server:secret\n" {
+	if string(token) != "K10cafe::node:secret\n" {
 		t.Errorf("staged token = %q", token)
 	}
 	assertMode(t, cfg.TokenOut, 0o600)
