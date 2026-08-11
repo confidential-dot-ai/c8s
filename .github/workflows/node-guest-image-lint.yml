@@ -26,7 +26,10 @@ jobs:
       - name: Resolve pinned CONFOS_REF
         id: ref
         run: |
-          ref=$(grep -oE 'CONFOS_REF: "[0-9a-f]{40}"' .github/workflows/c8s-image.yml | grep -oE '[0-9a-f]{40}')
+          # The pin line is either a bare quoted sha or an expression whose
+          # fallback carries the sha ("inputs.confos_ref || '<sha>'"); take
+          # the 40-hex value off the CONFOS_REF line either way.
+          ref=$(grep -m1 'CONFOS_REF:' .github/workflows/c8s-image.yml | grep -oE '[0-9a-f]{40}' | head -1)
           [ -n "$ref" ] || { echo "::error::could not extract CONFOS_REF from c8s-image.yml"; exit 1; }
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
