@@ -18,7 +18,7 @@ When your organization is created, you receive:
 Export both values before running the examples:
 
 ```bash
-export API_BASE="https://api.confidential.ai"
+export API_BASE="https://agents.api.confidential.ai"
 export ORGANIZATION_SLUG="acme"
 export CA_API_KEY="confai_live_replace_with_your_key"
 ```
@@ -137,7 +137,7 @@ curl -sS -X DELETE "$API_BASE/v1/instances/$INSTANCE_NAME" \
 
 ## Endpoints
 
-All endpoints are served from `https://api.confidential.ai` and versioned under `/v1`.
+All endpoints are served from `https://agents.api.confidential.ai` and versioned under `/v1`.
 
 ### Create Instance
 
