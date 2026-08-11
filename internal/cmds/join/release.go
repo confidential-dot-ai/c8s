@@ -96,7 +96,10 @@ func runRelease(ctx context.Context, cfg ReleaseConfig, ln net.Listener) error {
 	tlsCfg, certMgr, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
 		Platform:   cfg.Platform,
 		AttestFunc: attestFunc,
-		Logger:     slog.Default(),
+		// Short-lived serving cert: the validity window is the replay bound
+		// for a stolen leaf key (see certSkew). Rotation is automatic.
+		CertTTL: releaseServerCertTTL,
+		Logger:  slog.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("build RA-TLS config: %w", err)

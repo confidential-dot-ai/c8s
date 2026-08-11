@@ -321,6 +321,12 @@ func TestRunReleaseServesAndShutsDown(t *testing.T) {
 		resp, err := client.Get("https://" + cfg.ListenAddr + "/join-token")
 		if err == nil {
 			resp.Body.Close()
+			// The serving cert's validity window is the replay bound for a
+			// stolen leaf key; pin it so a TTL change can't widen it silently.
+			leaf := resp.TLS.PeerCertificates[0]
+			if window := leaf.NotAfter.Sub(leaf.NotBefore); window > releaseServerCertTTL+time.Minute {
+				t.Errorf("serving cert validity window = %s, want <= %s", window, releaseServerCertTTL)
+			}
 			break
 		}
 		select {

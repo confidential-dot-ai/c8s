@@ -94,7 +94,11 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
 		Platform:   cfg.Platform,
 		AttestFunc: attestFunc,
-		Logger:     slog.Default(),
+		// The cert only has to survive this one exchange; the validity window
+		// is the replay bound for a stolen leaf key (see certSkew), so keep it
+		// as tight as clock skew allows.
+		CertTTL: joinClientCertTTL,
+		Logger:  slog.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("build RA-TLS client config: %w", err)
@@ -136,15 +140,16 @@ func RunJoin(ctx context.Context, cfg JoinConfig) error {
 }
 
 // fetchToken performs the GET /join-token exchange over the mutually
-// attested channel. TLSHandshakeTimeout keeps verifyPeer's round trip to the
-// local attestation-api on its own clock, so a slow verifier cannot leave the
-// GET no time and make the server look responsible for the deadline.
+// attested channel. The handshake budget is strictly larger than the
+// verifyPeer budget nested inside it (cfg.Timeout, armed in the
+// VerifyPeerCertificate callback), so a slow local verifier hits its own
+// deadline first and the error names the attestation-api, not the server.
 func fetchToken(ctx context.Context, cfg JoinConfig, tlsCfg *tls.Config) (string, error) {
 	httpClient := &http.Client{
-		Timeout: 2 * cfg.Timeout, // handshake + request
+		Timeout: 3 * cfg.Timeout, // handshake budget + request
 		Transport: &http.Transport{
 			TLSClientConfig:     tlsCfg,
-			TLSHandshakeTimeout: cfg.Timeout,
+			TLSHandshakeTimeout: 2 * cfg.Timeout,
 		},
 		// join-release never redirects.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
