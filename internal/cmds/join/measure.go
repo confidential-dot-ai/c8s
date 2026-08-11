@@ -49,6 +49,16 @@ const measurementHexLen = 96
 // CLOCK ASSUMPTION: the guest's own clock, host-influenced in a CVM.
 const certSkew = 5 * time.Minute
 
+// Join-side cert TTLs. The ratls default (24h) would make the replay window
+// for a stolen leaf key a day wide; the join certs only have to cover the
+// exchange itself (client) or one rotation period (server, rotated at 50%
+// TTL), so the window is TTL + certSkew instead. If this bound ever needs to
+// go to zero, ReportDataForKeyWithContext supports a nonce-bound challenge.
+const (
+	joinClientCertTTL    = 10 * time.Minute
+	releaseServerCertTTL = time.Hour
+)
+
 // imageRefs are the registers the same-image policy compares. All values are
 // public measurements, safe to log.
 type imageRefs struct {
