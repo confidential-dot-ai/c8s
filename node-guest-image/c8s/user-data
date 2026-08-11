@@ -1,0 +1,26 @@
+#cloud-config
+# c8s node image — node-as-CVM, single-node cluster.
+#
+# This payload is BAKED INTO the verity root at build time (via
+# bin/build-c8s passing --cloud-init) and therefore measured into the
+# launch digest. Anything per-host (hostname, secrets, IPs) that needs to
+# differ between deployments belongs in NoCloud `meta-data` (which lives
+# outside the measurement) or in a config drop-in on a data disk.
+#
+# The bulk of node setup is baked rather than scripted at first boot — see
+# this profile's mkosi.extra/ tree. rke2-server is started by the
+# 50-rke2.preset (via WantedBy=multi-user.target); cloud-init does NOT need
+# to enable/start it. The only thing left for cloud-init is per-instance
+# setup — currently just the hostname.
+#
+# If a deployment needs to override rke2 config, the operator drops a
+# /etc/rancher/rke2/config.yaml.d/*.yaml fragment at runtime — rke2 merges
+# drop-ins on top of the baked /etc/rancher/rke2/config.yaml without
+# rebuilding the image.
+
+# Hostname is settable per-deployment via NoCloud meta-data's
+# `local-hostname`. Default below applies when meta-data doesn't override.
+preserve_hostname: false
+hostname: c8s-node
+
+final_message: "c8s node cloud-init complete. rke2-server was started by the preset at boot; give it ~60s, then `kubectl get nodes` should report Ready."

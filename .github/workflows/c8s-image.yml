@@ -50,7 +50,7 @@ env:
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main.
-  CONFOS_REF: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
+  CONFOS_REF: "01539a8c8e139228918b76215a1d5168bc22f9a6" # post-v0.3.0 main: --profile-dir/--sync-input (#81 in confos)
 
 jobs:
   build-and-push:

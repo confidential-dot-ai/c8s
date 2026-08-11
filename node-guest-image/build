@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Build the c8s node image from THIS repo's profile, using a
+# confidential-os-builder checkout purely as the builder (c8s#264).
+# Drop-in replacement for confos's bin/build-c8s: same env contract and
+# profile stack/order — only the c8s profile content (./c8s, staged via
+# --profile-dir) and the kernel fragments (./kernel) come from here, and
+# C8S_REF / C8S_REGISTRY reach the profile's mkosi.sync via --sync-input
+# (an exported var never reaches the sync: mkosi runs under sudo, which
+# strips the env).
+#
+# The full GPU node image is base + gpu + attest-gpu + c8s. That takes
+# four ordered steps because all host-side staging must precede one
+# `confos build` (the Rust driver wipes mkosi.local on build exit) and the
+# NVIDIA modules must compile against the already-built kernel tree:
+#
+#   1. confos kernel          — build/cache the kernel with kernel/c8s.config
+#   2. bin/steep-fetch-gpu    — build+sign NVIDIA modules, stage userspace
+#   3. bin/steep-fetch-attest-gpu — pre-stage the GPU attestation-api binary
+#      + libnvat into mkosi.local (set ATTEST_GPU_BIN + LIBNVAT; CI builds the
+#      binary with --features nvidia-gpu-attest against a vendored libnvat)
+#   4. confos build           — the c8s profile's own mkosi.sync fetches
+#      rke2 + airgap bundles + nri-image-policy during this step
+#
+# The final build hits the kernel cache (same fragment fingerprint — the
+# fingerprint hashes the fragment's content, wherever it lives) so it does
+# not rebuild and clobber the tree the modules were built against.
+#
+# Knobs:
+#   C8S_NO_GPU=1       GPU-less validation image: `attest` + `c8s` profiles
+#                      only (attestation-api still baked; compose ssh/dev
+#                      manually via extra args). Validation-only, never
+#                      publish: without the gpu profile nothing latches
+#                      kernel.modules_disabled=1, so module loading stays
+#                      enabled for the whole boot.
+#   C8S_STOCK_ATTEST=1 compose the stock `attest` profile instead of
+#                      `attest-gpu`: same attestation-api service on :8400,
+#                      TDX+SNP quotes, but no GPU (SPDM) evidence collection.
+#                      Use when a build environment lacks libnvat / can't build
+#                      the nvidia-gpu-attest binary. The default (this var
+#                      unset) composes attest-gpu, which CI supports via a
+#                      vendored libnvat + steep-fetch-attest-gpu pre-stage.
+#   C8S_DEV=1          demo/debug build: kernel/c8s-dev.config fragment
+#                      (8250 serial re-enabled) + the dev profile
+#                      (console=ttyS0, passwordless serial autologin).
+#                      Different measurement, root shell on the host-visible
+#                      serial socket — never ship. Default name: c8s-dev.
+#   C8S_NAME=...       output name (default c8s → output/c8s/)
+#   C8S_MEMORY=...     default-memory recorded in the manifest / used by
+#                      `confos run` (default 16G — etcd OOMs at the 4G default)
+#   C8S_REF=...        bake the c8s components (nri plugin + the CDS digest in
+#                      the NRI floor) from a specific c8s COMMIT (short SHA)
+#                      instead of the pin in the c8s profile's mkosi.sync,
+#                      which resolves nri-image-policy:<ref> and cds:<ref> to
+#                      digests. The images must be published first (c8s
+#                      docker.yml on main, or workflow_dispatch for a branch).
+#                      Use to test an unmerged c8s build end-to-end.
+#   CONFOS_DIR=...     confos checkout to build with (default: sibling of this
+#                      repo's checkout).
+#
+# Extra args are passed through to `confos build`, e.g.:
+#   node-guest-image/build --profile ssh          # + SSH for bring-up debugging
+#   C8S_NO_GPU=1 node-guest-image/build --profile dev
+set -euo pipefail
+NGI_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFOS_DIR=${CONFOS_DIR:-"$NGI_DIR/../../confidential-os-builder"}
+[ -x "$CONFOS_DIR/bin/confos" ] || { echo "node-guest-image/build: confos checkout not found at $CONFOS_DIR (set CONFOS_DIR)" >&2; exit 1; }
+cd "$CONFOS_DIR"
+FRAGMENT="$NGI_DIR/kernel/c8s.config"
+DEV_PROFILE=()
+if [ "${C8S_DEV:-0}" = 1 ]; then
+    FRAGMENT="$NGI_DIR/kernel/c8s-dev.config"
+    DEV_PROFILE=(--profile dev)
+    : "${C8S_NAME:=c8s-dev}"
+fi
+KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
+bin/confos kernel \
+    --kernel-config-fragment "$FRAGMENT" \
+    --kernel-builder-package "$KB_PKGS"
+if [ "${C8S_NO_GPU:-0}" = 1 ]; then
+    PROFILES=(--profile attest --profile c8s)
+elif [ "${C8S_STOCK_ATTEST:-0}" = 1 ]; then
+    PROFILES=(--profile gpu --profile attest --profile c8s)
+    bin/steep-fetch-gpu
+else
+    PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
+    bin/steep-fetch-gpu
+    bin/steep-fetch-attest-gpu
+fi
+exec bin/confos build "${C8S_NAME:-c8s}" \
+    "${PROFILES[@]}" \
+    ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
+    --profile-dir "$NGI_DIR/c8s" \
+    --sync-input "c8s-ref=${C8S_REF:-}" \
+    --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
+    --kernel-config-fragment "$FRAGMENT" \
+    --kernel-builder-package "$KB_PKGS" \
+    --cloud-init "$NGI_DIR/c8s/user-data" \
+    --platform tdx \
+    --memory "${C8S_MEMORY:-16G}" \
+    "$@"

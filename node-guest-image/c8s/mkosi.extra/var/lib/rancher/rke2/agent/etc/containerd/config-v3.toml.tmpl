@@ -1,0 +1,4 @@
+{{/* c8s-containerd-prep:managed-template */}}
+imports = ["/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/*.toml"]
+
+{{ template "base" . }}

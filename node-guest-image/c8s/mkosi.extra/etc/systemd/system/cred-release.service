@@ -1,0 +1,54 @@
+[Unit]
+Description=Attested RKE2 operator credential release
+Documentation=https://github.com/confidential-dot-ai/c8s
+# Bound restart storms: a persistent failure (e.g. RTMR[3] mismatch — the
+# on-disk pubkey doesn't match the measurement) should fail closed and stop,
+# not spin. 5 tries in 5 min, then give up until the next boot.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Needs the RKE2 client-CA (to sign operator certs) and the attestation-api
+# (to fetch the RA-TLS serving cert's TDX quote from :8400). rke2-server
+# creates /var/lib/rancher/rke2/server/tls/client-ca.* only once it has
+# initialised, so we order after it and gate on the key existing (the Exec
+# startpre below), rather than racing a half-initialised control plane.
+After=network-online.target rke2-server.service attestation-api.service
+Wants=network-online.target
+Requires=attestation-api.service
+# Only run on operator boots. A VM launched without --operator-key has no
+# opkeydata disk; the condition makes systemd SKIP the unit (not fail it), so
+# there's no restart-loop on non-operator nodes. The launcher attaches the
+# disk with ISO label "opkeydata".
+ConditionPathExists=/dev/disk/by-label/opkeydata
+
+[Service]
+Type=simple
+# The operator key is bound into RTMR[3] at launch; this service verifies the
+# on-disk pubkey against RTMR[3] at startup and refuses (exits non-zero) if it
+# was substituted — fail closed. Non-operator boots never reach here (the
+# ConditionPathExists above skips the unit).
+# Waits bounded (10 min) rather than failing fast: on a slow first boot the
+# CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart
+# would exhaust StartLimitBurst in under a minute and give up until reboot.
+ExecStartPre=/bin/sh -c 'for _ in $(seq 1 120); do [ -r /var/lib/rancher/rke2/server/tls/client-ca.key ] && exit 0; sleep 5; done; exit 1'
+TimeoutStartSec=630
+ExecStart=/usr/local/bin/c8s cred-release \
+    --listen :8443 \
+    --attestation-api-url http://127.0.0.1:8400 \
+    --platform tdx \
+    --cert-ttl 24h \
+    --cert-org system:masters \
+    --cert-cn operator
+Restart=on-failure
+RestartSec=10
+# TDX runtime measurement (RTMR[3]) is read via the tdx_guest misc device.
+DeviceAllow=/dev/tdx_guest rwm
+# Reads two files: the initrd-staged operator pubkey (/etc/confai) and the
+# RKE2 client-CA key. No mount needed. Keep the rest of the FS read-only.
+ProtectSystem=strict
+ReadOnlyPaths=/etc/confai /var/lib/rancher/rke2/server/tls
+ReadWritePaths=/run
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
