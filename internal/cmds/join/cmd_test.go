@@ -40,3 +40,14 @@ func TestReleaseCmdRequiresPlatform(t *testing.T) {
 		t.Fatal("expected error for empty platform")
 	}
 }
+
+func TestReleaseCmdDefaultsToAgentToken(t *testing.T) {
+	flag := NewReleaseCmd().Flags().Lookup("token-path")
+	if flag == nil {
+		t.Fatal("token-path flag not found")
+	}
+	const want = "/var/lib/rancher/rke2/server/agent-token"
+	if flag.DefValue != want {
+		t.Errorf("token-path default = %q, want %q", flag.DefValue, want)
+	}
+}
