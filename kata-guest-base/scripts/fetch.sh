@@ -27,9 +27,11 @@
 # This script also materialises /etc/c8s/bootstrap-allowlist.json — the
 # in-VM policy-monitor's image-digest allowlist — from the template at
 # extra/etc/c8s/bootstrap-allowlist.json.template by substituting the
-# SHA-256 digests of three container images: the c8s-repo images cds,
+# SHA-256 digests of four container images: the c8s-repo images cds,
 # get-cert and c8s-operator (resolved at IMAGE_TAG, this commit's short
-# SHA). The digests are resolved against GHCR via
+# SHA), plus tls-lb's nginx (the chart's pin — chart pods get no
+# initdata, so the seed is the only allowlist their guests ever see).
+# The c8s digests are resolved against GHCR via
 # `oras manifest fetch`; a missing/unfetchable image is fatal — we never
 # proceed with an empty or placeholder-bearing allowlist, because that
 # would silently lock kata-qemu-snp pods out of every CDS bootstrap
@@ -281,6 +283,15 @@ echo "    get-cert:     ${GET_CERT_DIGEST}"
 C8S_OPERATOR_DIGEST="${C8S_OPERATOR_DIGEST:-$(resolve_digest "${IMAGE_REGISTRY}/c8s-operator:${IMAGE_TAG}")}"
 echo "    c8s-operator: ${C8S_OPERATOR_DIGEST}"
 
+# tls-lb's nginx digest is the chart's pin, not a registry lookup: the seed
+# must cover exactly what the chart deploys.
+TLS_LB_NGINX_DIGEST="${TLS_LB_NGINX_DIGEST:-$(yq '.tlsLb.nginx.image.digest' "${C8S_DIR}/internal/helmchart/c8s/values.yaml")}"
+[[ "${TLS_LB_NGINX_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+    echo "FATAL: tls-lb nginx digest '${TLS_LB_NGINX_DIGEST}' is not a sha256 pin — check .tlsLb.nginx.image.digest in the chart values" >&2
+    exit 1
+}
+echo "    tls-lb nginx: ${TLS_LB_NGINX_DIGEST}"
+
 # Substitute placeholders into the template. We use sed with explicit
 # delimiters and `--` so a digest-like value can never be misparsed as
 # a regex metacharacter. Atomic via temp-file + mv so the build step
@@ -292,6 +303,7 @@ sed \
     -e "s|@@CDS_DIGEST@@|${CDS_DIGEST}|g" \
     -e "s|@@GET_CERT_DIGEST@@|${GET_CERT_DIGEST}|g" \
     -e "s|@@C8S_OPERATOR_DIGEST@@|${C8S_OPERATOR_DIGEST}|g" \
+    -e "s|@@TLS_LB_NGINX_DIGEST@@|${TLS_LB_NGINX_DIGEST}|g" \
     "${ALLOWLIST_TEMPLATE}" > "${TMP_ALLOWLIST}"
 
 # Belt-and-braces: refuse to ship a file that still has a placeholder.
@@ -314,6 +326,7 @@ echo "==> bootstrap allowlist: ${ALLOWLIST_DST}"
     printf 'allowlist_cds_digest: %s\n' "${CDS_DIGEST}"
     printf 'allowlist_get_cert_digest: %s\n' "${GET_CERT_DIGEST}"
     printf 'allowlist_c8s_operator_digest: %s\n' "${C8S_OPERATOR_DIGEST}"
+    printf 'allowlist_tls_lb_nginx_digest: %s\n' "${TLS_LB_NGINX_DIGEST}"
 } >> "${EXTRA_DIR}/usr/local/share/c8s/.kata-guest-base-baked"
 
 echo "==> Done. Run scripts/build.sh next."

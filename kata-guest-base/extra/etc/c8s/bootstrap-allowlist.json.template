@@ -3,6 +3,7 @@
   "sha256_digests": [
     "@@CDS_DIGEST@@",
     "@@GET_CERT_DIGEST@@",
-    "@@C8S_OPERATOR_DIGEST@@"
+    "@@C8S_OPERATOR_DIGEST@@",
+    "@@TLS_LB_NGINX_DIGEST@@"
   ]
 }

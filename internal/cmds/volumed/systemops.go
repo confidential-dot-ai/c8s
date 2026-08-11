@@ -218,5 +218,7 @@ func (s SystemOps) run(ctx context.Context, name string, extra []*os.File, args 
 func execRunner(ctx context.Context, name string, extra []*os.File, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.ExtraFiles = extra
+	// No udev services dm events in the guest; without this the dm handshake blocks forever (see scratch-setup.sh).
+	cmd.Env = append(os.Environ(), "DM_DISABLE_UDEV=1")
 	return cmd.CombinedOutput()
 }
