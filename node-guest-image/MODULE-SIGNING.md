@@ -11,22 +11,19 @@ lockdown plumbing.
 
 ## How it is split
 
-- **Public certificate — `node-guest-image/module-signing.crt`, committed
-  here.** `node-guest-image/build` passes it to confos as
-  `--module-signing-cert`; confos stages it into the kernel tree and this
-  image's fragment (`kernel/c8s.config`) builds it into the system keyring
-  via `CONFIG_SYSTEM_TRUSTED_KEYS`. It is measured — its sha256 is a kernel
-  fingerprint input. Owning it here is the point: the trust anchor for the
-  modules this image loads is an image decision, not a builder decision
-  (confos#85, c8s#264).
-- **Private key — never in any repo.** It exists only where modules are
-  signed: `bin/steep-fetch-gpu` reads it from `MODULE_SIG_KEY` (a path) or
-  `MODULE_SIG_KEY_PEM` (contents, for CI). `CONFIG_MODULE_SIG_ALL` is off,
-  so the kernel build itself never needs it.
+The mechanism — which flags carry what, and why `CONFIG_MODULE_SIG_ALL`
+stays off — is documented once in confos's
+[`docs/module-signing.md`](https://github.com/confidential-dot-ai/confidential-os-builder/blob/main/docs/module-signing.md).
+What is specific to this image:
 
-The build fails closed if the private key is missing, and refuses to sign if
-its public half does not match the committed certificate — a mismatch would
-otherwise surface as a GPU node that boots without a driver.
+- **`node-guest-image/module-signing.crt`** — the public certificate, ours,
+  committed here. `node-guest-image/build` passes it to confos as
+  `--module-signing-cert` and to `steep-fetch-gpu` as `MODULE_SIG_CERT`.
+  It is measured, so rotating it changes the image measurement.
+- **The private key** is a CI secret (`MODULE_SIG_KEY_PEM`), never committed.
+
+Owning the certificate here is the point: which key may sign modules that
+load in this image is an image decision, not a builder decision (#264).
 
 ## Generating the keypair
 
