@@ -25,24 +25,20 @@ Layout:
 
 Migration state (see [#264] for the full plan):
 
-1. Content here is a verbatim copy of confos main at `01539a8` (post-v0.3.0: the merged --profile-dir/--sync-input revision);
-   nothing consumes it yet. While both copies exist, the
-   `node-guest-image sync` workflow (PR-triggered + weekly) fails on any
-   byte drift between this dir and confos at the pinned `CONFOS_REF` —
-   delete that workflow in the flip PR. The `node-guest-image lint`
-   workflow is permanent: it carries the four invariants that moved here
-   from confos `bin/lint` (fragment supersets vs confos's gpu/dev
-   fragments at the pinned ref, the NRI floor template's no-hardcoded-
-   digest rule, and the nested RKE2/Cilium pod-CIDR match).
-2. `--profile-dir` refuses to shadow an in-tree profile, so building from
-   here requires a confos ref with `mkosi.profiles/c8s` deleted (the
-   phase-1 confos PR). The switch gate: build the same c8s ref both ways
-   and require identical `manifest.json` measurements.
-3. After the gate passes, `c8s-image.yml` flips to `node-guest-image/build`
-   (its kernel cache key must hash the fragment paths here instead of
-   confos's), confos deletes its copy, and profile changes become one-PR
-   changes in this repo.
-4. Post-flip cleanup, so the inherited interface doesn't become canonical
+1. This directory is the canonical definition: `c8s-image.yml` builds via
+   `node-guest-image/build`, which stages `c8s/` into a confos checkout
+   with `--profile-dir` and passes the kernel fragment and
+   `c8s-ref`/`c8s-registry` sync inputs explicitly. The
+   `node-guest-image lint` workflow is permanent: it carries the four
+   invariants that moved here from confos `bin/lint` (fragment supersets
+   vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
+   floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
+   pod-CIDR match).
+2. The switch was gated on building the same c8s ref both ways (confos
+   in-tree vs staged from here) with identical `manifest.json`
+   measurements; `c8s-image.yml`'s `gate=true` dispatch input reruns that
+   A/B check against any confos ref.
+3. Remaining cleanup, so the inherited interface doesn't become canonical
    by default: flatten the `C8S_NO_GPU`/`C8S_STOCK_ATTEST` boolean combos
    (which silently ignore nonsense pairings) into a single variant
    selector.
