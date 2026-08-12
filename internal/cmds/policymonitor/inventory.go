@@ -140,15 +140,11 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 	return ""
 }
 
-// sandboxTokenSigner builds the guest's sandbox-token signer. The key needs no
-// credential of its own: CDS reads it from this guest's digests endpoint on a
-// privileged port, which is what establishes whose key it is. Config problems
-// disable tokens (nil signer) but never crash the monitor — the same
-// fail-open-to-degraded posture as runAllowlistRefresh; get-cert then issues
-// without a sandbox ID.
 // installSandboxTokenSigner resolves the address this guest's sandbox tokens
 // commit to, starts the digests endpoint CDS calls back on, and only then hands
-// the signer to the token route.
+// the signer to the token route. The key needs no credential of its own: CDS
+// reads it from that endpoint on a privileged port, which is what establishes
+// whose key it is.
 //
 // It runs after READY=1. The address comes from a routing-table lookup toward
 // CDS, and the pod network it needs is installed by kata-agent's
@@ -159,7 +155,7 @@ func sandboxIDFromAnnotations(annotations map[string]string) string {
 // Every failure disables the route rather than leaving it pending: a caller
 // waiting on a signer that is not coming is worse than one told to proceed
 // without a sandbox ID.
-func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder) {
+func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Logger, inventory *admissionInventory, signers *workloadclaims.SignerHolder, settle time.Time) {
 	// A parse failure is a typo and stays fail-closed; empty is the explicit
 	// dev opt-out, so tokens still flow and the guest can still be issued a
 	// sandbox-bound leaf.
@@ -172,7 +168,9 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	if len(measurements) == 0 {
 		logger.Warn("C8S_CDS_MEASUREMENTS not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE that can reach this guest can read what it runs. UNSAFE outside development.")
 	}
-	host, err := resolveSandboxDigestsHostLate(ctx, cfg, logger, sandboxDigestsHost)
+	resolveCtx, cancel := context.WithDeadline(ctx, settle)
+	host, err := resolveSandboxDigestsHostLate(resolveCtx, cfg, logger, sandboxDigestsHost)
+	cancel()
 	if err != nil {
 		logger.Error("sandbox tokens disabled: no reachable digests host", "error", err)
 		signers.Disable()
@@ -187,7 +185,7 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 	// Before the route answers, not after: a token names this endpoint, and CDS
 	// refuses one it cannot call back on. Issuing first would hand out tokens
 	// that are guaranteed to be rejected.
-	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer); err != nil {
+	if err := startSandboxDigests(ctx, logger, cfg, inventory, signer, measurements); err != nil {
 		logger.Error("sandbox-digests endpoint disabled; issuing without a sandbox ID rather than tokens CDS would refuse", "error", err)
 		signers.Disable()
 		return
@@ -198,8 +196,8 @@ func installSandboxTokenSigner(ctx context.Context, cfg *Config, logger *slog.Lo
 
 // sandboxDigestsHost is the guest IP every sandbox token names for CDS's
 // digests callback.
-func sandboxDigestsHost(cfg *Config) (string, error) {
-	return workloadclaims.ResolveAdvertiseHost(cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
+func sandboxDigestsHost(ctx context.Context, cfg *Config) (string, error) {
+	return workloadclaims.ResolveAdvertiseHost(ctx, cfg.SandboxDigestsAdvertiseHost, cfg.CDSURL)
 }
 
 // The wait for the guest network to reach a state where the routing-table
@@ -215,10 +213,11 @@ func sandboxDigestsHost(cfg *Config) (string, error) {
 // Overridable in tests.
 var (
 	advertiseHostRetryInterval = 2 * time.Second
-	// Under get-cert's --initial-retry-timeout (2m), so the route has settled
-	// on an answer — signing, or 404 — before the caller stops asking. Equal
-	// budgets would make which one a pod gets a race.
-	advertiseHostLateBudget = 90 * time.Second
+	advertiseHostLateBudget    = 90 * time.Second
+	// Bounds the serial initdata wait + advertise-host lookup (90s+90s alone
+	// overshoots) under get-cert's 2m --initial-retry-timeout, so the token
+	// route settles before the caller stops asking.
+	signerSettleBudget = 110 * time.Second
 )
 
 // resolveSandboxDigestsHostLate retries the routing-table lookup until the pod
@@ -232,15 +231,15 @@ var (
 //
 // lookup is sandboxDigestsHost; injected so tests can drive the retry loop
 // without the resolver.
-func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger, lookup func(*Config) (string, error)) (string, error) {
+func resolveSandboxDigestsHostLate(ctx context.Context, cfg *Config, logger *slog.Logger, lookup func(context.Context, *Config) (string, error)) (string, error) {
 	// Explicit host bypasses inference entirely — no reason to wait.
 	if cfg.SandboxDigestsAdvertiseHost != "" {
-		return lookup(cfg)
+		return lookup(ctx, cfg)
 	}
 	deadline := time.Now().Add(advertiseHostLateBudget)
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		host, err := lookup(cfg)
+		host, err := lookup(ctx, cfg)
 		if err == nil {
 			if attempt > 1 {
 				logger.Info("advertise-host inference recovered", "attempt", attempt, "host", host)
@@ -287,11 +286,7 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 
 // startSandboxDigests serves the CDS-facing digests endpoint inside the guest
 // over mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
-func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner) error {
-	measurements, err := ratls.ParseHexMeasurementsList(splitCSV(cfg.CDSMeasurements))
-	if err != nil {
-		return fmt.Errorf("parse CDS measurements: %w", err)
-	}
+func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, measurements [][]byte) error {
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		string(types.PlatformSnp),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),

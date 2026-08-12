@@ -108,14 +108,14 @@ func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 // The advertise host CDS dials back: explicit config wins, and a host it could
 // never reach is rejected where it is configured rather than at issuance.
 func TestSandboxDigestsHost(t *testing.T) {
-	got, err := sandboxDigestsHost(&Config{
+	got, err := sandboxDigestsHost(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "10.2.3.4",
 		CDSURL:                      "https://cds.invalid:8443",
 	})
 	if err != nil || got != "10.2.3.4" {
 		t.Fatalf("host = %q, err = %v; want 10.2.3.4", got, err)
 	}
-	if _, err := sandboxDigestsHost(&Config{
+	if _, err := sandboxDigestsHost(context.Background(), &Config{
 		SandboxDigestsAdvertiseHost: "127.0.0.1",
 		CDSURL:                      "https://cds.invalid:8443",
 	}); err == nil {
@@ -159,7 +159,7 @@ func TestResolveSandboxDigestsHostLate_ExplicitHostSkipsRetry(t *testing.T) {
 
 // failingLookup fails every inference attempt instantly, so a test's retry
 // count follows from the budget rather than from resolver latency.
-func failingLookup(*Config) (string, error) {
+func failingLookup(context.Context, *Config) (string, error) {
 	return "", errors.New("no route to the CDS host")
 }
 
@@ -252,5 +252,39 @@ func TestAdvertiseHostRunsOffTheStartupPath(t *testing.T) {
 		t.Fatalf("advertiseHostLateBudget = %s fits inside TimeoutStartSec=%s; either the lookup moved back onto "+
 			"the startup path, or the budget shrank to where waiting for the pod network no longer works",
 			advertiseHostLateBudget, timeout)
+	}
+}
+
+// The settle budget must fit under get-cert's 2m --initial-retry-timeout and
+// leave the lookup time after a full initdata wait.
+func TestSignerSettleBudgetCoversTheSerialChain(t *testing.T) {
+	if signerSettleBudget >= 2*time.Minute {
+		t.Fatalf("signerSettleBudget %s must settle before get-cert's 2m --initial-retry-timeout", signerSettleBudget)
+	}
+	if signerSettleBudget <= initDataWaitBudget {
+		t.Fatalf("signerSettleBudget %s leaves the advertise-host lookup no time after a full %s initdata wait", signerSettleBudget, initDataWaitBudget)
+	}
+}
+
+// Inference that recovers mid-budget returns the host instead of latching off.
+func TestResolveSandboxDigestsHostLate_RecoversAfterTransientFailure(t *testing.T) {
+	shortAdvertiseHostWait(t, 250*time.Millisecond, time.Millisecond)
+
+	calls := 0
+	lookup := func(context.Context, *Config) (string, error) {
+		calls++
+		if calls < 3 {
+			return "", errors.New("no route yet")
+		}
+		return "10.9.8.7", nil
+	}
+	buf := &bytes.Buffer{}
+	host, err := resolveSandboxDigestsHostLate(context.Background(), &Config{},
+		slog.New(slog.NewJSONHandler(buf, nil)), lookup)
+	if err != nil || host != "10.9.8.7" {
+		t.Fatalf("host = %q, err = %v; want recovery on attempt 3", host, err)
+	}
+	if !strings.Contains(buf.String(), `"msg":"advertise-host inference recovered"`) {
+		t.Fatalf("no recovery log line; log:\n%s", buf.String())
 	}
 }

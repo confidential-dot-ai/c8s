@@ -242,7 +242,7 @@ func (e errTest) Error() string { return string(e) }
 // lookup, not a reachability test, so it answers for an address nothing is
 // listening on — and fails for one that cannot be parsed.
 func TestOutboundHost(t *testing.T) {
-	got, err := outboundHost("192.0.2.1:9")
+	got, err := outboundHost(context.Background(), "192.0.2.1:9")
 	if err != nil {
 		t.Fatalf("outboundHost: %v", err)
 	}
@@ -250,10 +250,10 @@ func TestOutboundHost(t *testing.T) {
 		t.Fatalf("outboundHost returned %q, want an IP", got)
 	}
 	// A bare host gets the default port appended rather than erroring.
-	if _, err := outboundHost("192.0.2.1"); err != nil {
+	if _, err := outboundHost(context.Background(), "192.0.2.1"); err != nil {
 		t.Fatalf("bare host: %v", err)
 	}
-	if _, err := outboundHost("not a host:::"); err == nil {
+	if _, err := outboundHost(context.Background(), "not a host:::"); err == nil {
 		t.Fatal("unparseable target accepted")
 	}
 }
@@ -261,7 +261,7 @@ func TestOutboundHost(t *testing.T) {
 // With no explicit host, ResolveAdvertiseHost falls back to the route lookup
 // and still validates the result.
 func TestResolveAdvertiseHostInfers(t *testing.T) {
-	got, err := ResolveAdvertiseHost("", "192.0.2.1:9")
+	got, err := ResolveAdvertiseHost(context.Background(), "", "192.0.2.1:9")
 	if err != nil {
 		t.Fatalf("ResolveAdvertiseHost: %v", err)
 	}
