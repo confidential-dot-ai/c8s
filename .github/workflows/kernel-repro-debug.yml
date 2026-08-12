@@ -1,0 +1,91 @@
+# THROWAWAY debugging workflow (#85). Builds the confos kernel TWICE at the
+# same ref, back to back, on the same self-hosted host, each with --force so
+# neither hits the kernel cache. If the two vmlinuz hashes differ, the kernel
+# build is nondeterministic in-process (same host, same inputs). If they
+# match, the earlier cross-runner gate difference was host/toolchain drift.
+# Delete once #85 is understood.
+name: kernel repro debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      confos_ref:
+        description: confos commit to build the kernel from (full SHA)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CONFOS_REF: ${{ inputs.confos_ref }}
+
+jobs:
+  repro:
+    name: Build the confos kernel twice, same host, same ref
+    runs-on: the-machine
+    steps:
+      - name: Checkout c8s
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: c8s
+
+      - name: Checkout confidential-os-builder
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: confidential-dot-ai/confidential-os-builder
+          ref: ${{ env.CONFOS_REF }}
+          path: confidential-os-builder
+
+      - name: Setup uv (mkosi v26 toolchain)
+        uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+
+      - name: Setup mkosi
+        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+
+      - name: Install systemd-container
+        run: sudo apt-get update && sudo apt-get install -y systemd-container diffoscope
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
+
+      - name: Build confos
+        working-directory: confidential-os-builder
+        run: cargo build --release
+
+      - name: Build the kernel twice and compare
+        run: |
+          set -euo pipefail
+          frag="${GITHUB_WORKSPACE}/c8s/kata-guest-base/kernel/container.config"
+          confos=confidential-os-builder/target/release/confos
+          nproc
+
+          build() {  # $1 = output dir suffix
+            ( cd confidential-os-builder && ./target/release/confos kernel \
+                --force --kernel-config-fragment "${frag}" --output "output/kernel-$1" )
+            cp "confidential-os-builder/output/kernel-$1/vmlinuz" "vmlinuz-$1"
+          }
+
+          build A
+          build B
+
+          shaA=$(sha256sum vmlinuz-A | awk '{print $1}')
+          shaB=$(sha256sum vmlinuz-B | awk '{print $1}')
+          echo "vmlinuz A: $shaA"
+          echo "vmlinuz B: $shaB"
+          {
+            echo "### kernel repro (#85)"
+            echo "host: same self-hosted runner, ref \`${CONFOS_REF}\`, nproc=$(nproc)"
+            echo "- A: \`$shaA\`"
+            echo "- B: \`$shaB\`"
+            if [ "$shaA" = "$shaB" ]; then
+              echo "- **REPRODUCIBLE on this host** — earlier gate difference was cross-runner drift."
+            else
+              echo "- **NONDETERMINISTIC in-process** — same host, same inputs, different output."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$shaA" != "$shaB" ]; then
+            echo "=== diffoscope vmlinuz-A vmlinuz-B (first 200 lines) ==="
+            diffoscope vmlinuz-A vmlinuz-B 2>&1 | head -200 || true
+          fi
