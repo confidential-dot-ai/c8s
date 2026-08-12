@@ -232,6 +232,11 @@ jobs:
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          # Private half of the module signing certificate (org secret) — the
+          # fetch script signs the NVIDIA modules with it and fails closed
+          # without it. Signatures are deterministic (sign-file uses no
+          # authenticated attributes), so identical inputs sign identically.
+          MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
         run: |
           set -euo pipefail
           # Short SHA matches docker.yml's component tags. The build script
