@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -180,9 +182,9 @@ unavailable (unreachable / unparseable).`,
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "allowed SHA-384 hex launch measurement(s) (repeatable / comma-separated); empty = no pinning (UNSAFE). On TDX this pins MRTD only, which covers just the TDVF firmware — use --image-manifest to pin the whole guest image instead (the two are mutually exclusive: the manifest already pins MRTD exactly)")
 	f.StringVar(&cfg.measurementsFile, "measurements-file", "", "file of allowed launch measurements, one hex digest per line; feeds the same allowlist as --measurements and is likewise mutually exclusive with --image-manifest")
 	f.StringVar(&cfg.imageManifest, "image-manifest", "", "build-artifact manifest of the expected TDX guest image (JSON object with mrtd, rtmr1, rtmr2, each 96 lowercase hex chars, published with the image build); all three registers are pinned exactly against this one manifest, so the guest kernel and rootfs are verified rather than only the firmware. Since it pins MRTD exactly it replaces --measurements/--measurements-file rather than combining with them. TDX evidence only — with SNP evidence this is a policy error")
-	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "expected TDX RTMR[3] as 96 hex chars — pins the runtime measurement register, i.e. the ordered operator-key/workload-event chain extended after boot (pkg/runtimemeasure). This is a deployment property, NOT a cluster identity, and cannot replace an image pin, so it requires --image-manifest. TDX evidence only — with SNP evidence this is a policy error")
+	f.StringVar(&cfg.expectedRTMR3Hex, "expected-rtmr3", "", "DEPRECATED, prefer --rtmr 3=<sha384-hex>: identical pin under identical rules, one flag for every register. Retained so existing invocations keep working")
 	f.StringVar(&cfg.operatorPubkey, "operator-pkey", "", "path to the operator PUBLIC key PEM (the verbatim file bytes the guest initrd hashed, as written by `openssl ec -pubout`) — derives and pins RTMR[3] as the bare operator-key seed, SHA-384(0x00*48 ‖ SHA-384(pubkey)), so the register need not be computed by hand. Mutually exclusive with --expected-rtmr3, and like it a deployment property, NOT a cluster identity, so it requires --image-manifest. The bare seed is the value a node with no per-workload RTMR[3] extends reports, which today is every node (the workload measurer ships only inside the kata guest image). TDX evidence only — with SNP evidence this is a policy error")
-	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable), enforced by the verification engine. RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash. Use this to pin registers by hand; --image-manifest pins the same two (plus MRTD) as one provenanced tuple, so the two are mutually exclusive. Ignored on SNP")
+	f.StringSliceVar(&cfg.rtmrs, "rtmr", nil, "expected TDX runtime measurement register(s) as <index>=<sha384-hex> (repeatable). RTMR[1] pins the guest kernel and RTMR[2] the kernel command line carrying the dm-verity root hash: these ARE the image, so pinning them by hand cannot be combined with --image-manifest, which pins the same two plus the MRTD from one provenanced build. RTMR[3] is the operator-key/workload chain extended inside whatever image the host booted, so --rtmr 3= REQUIRES --image-manifest — alone it would read as proof of identity while proving none. RTMR[0] is not pinnable. TDX evidence only — with SNP evidence any pin here is a policy error")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of expected operator public keys; verification fails unless the key set the attested target serves at /operator-keys matches it (kind=cds targets)")
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
@@ -469,23 +471,13 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
 	}
 
-	// --rtmr and --image-manifest pin the same two registers by different
-	// routes: --rtmr is enforced by the verification engine, the manifest is
-	// compared here against the verified claims as one provenanced tuple with
-	// MRTD. Accepting both would let two sources disagree about RTMR[1]/[2],
-	// and a disagreement is a policy no guest can satisfy.
-	if len(cfg.rtmrs) > 0 && cfg.imageManifest != "" {
-		return nil, fmt.Errorf("--rtmr cannot be combined with --image-manifest: the manifest already pins RTMR[1] and RTMR[2] exactly, together with the MRTD from the same build, so a separate --rtmr can only restate that pin or contradict it. Drop --rtmr to pin the published image, or drop --image-manifest to pin registers by hand (giving up the MRTD tie to the same build)")
-	}
-	rtmrs, err := parseRTMRPins(cfg.rtmrs)
-	if err != nil {
-		return nil, err
-	}
-
 	return &verifyPlan{
+		// RTMRs is still set: it is what enforces the pin if this policy is
+		// ever verified through the delegated attestation-api path. It is not
+		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
 			Measurements: measurements,
-			RTMRs:        rtmrs,
+			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
 		},
 		pins:   pins,
@@ -493,22 +485,33 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}, nil
 }
 
-// rtmrPins are the TDX register pins resolved from the flags: the image tuple
-// (--image-manifest; MRTD, RTMR[1] and RTMR[2] all compare exactly) and the
+// rtmrPins are every TDX register pin resolved from the flags: the image tuple
+// (--image-manifest; MRTD, RTMR[1] and RTMR[2] all compare exactly), the
 // optional runtime-register pin (--expected-rtmr3, or --operator-pkey, which
-// derives the same register from the operator public key). Any non-nil pin
-// against non-TDX evidence is a policy error, never an ignored option.
+// derives the same register from the operator public key), and the by-hand
+// pins (--rtmr <index>=<hex>). Any non-nil pin against non-TDX evidence is a
+// policy error, never an ignored option.
 //
-// These are enforced here, against the verified claims. The other route to
-// RTMR[1]/[2] — --rtmr, parsed by parseRTMRPins into ratls.VerifyPolicy.RTMRs
-// — is enforced by the verification engine instead. buildPolicy refuses the
-// two together, so exactly one of the two paths is ever live.
+// All of them are enforced in one place — applyRTMRPins, against the verified
+// claims — so a pin cannot be accepted by the CLI and then enforced by nobody.
+// buildPolicy still refuses --rtmr together with --image-manifest, because the
+// two would otherwise pin RTMR[1]/[2] from different sources and a
+// disagreement is a policy no guest can satisfy.
 type rtmrPins struct {
 	image *runtimemeasure.ImagePins
 	rtmr3 []byte
+	// manual holds --rtmr <index>=<hex>. It is enforced here, next to the
+	// other two, rather than left to ratls.VerifyPolicy.RTMRs: that field is
+	// read only by pkg/attestationclient, on the delegated attestation-api
+	// path, and `c8s verify` always verifies in process (verifyInProcess ->
+	// localverify.Verify, whose Params carries no registers). Setting the
+	// policy field alone made the flag a silent no-op.
+	manual map[int][]byte
 }
 
-func (p rtmrPins) any() bool { return p.image != nil || p.rtmr3 != nil }
+func (p rtmrPins) any() bool {
+	return p.image != nil || p.rtmr3 != nil || len(p.manual) > 0
+}
 
 // allowlistFlagsUsed names the launch-measurement allowlist flags the operator
 // actually passed, so the --image-manifest conflict blames what was typed.
@@ -526,22 +529,42 @@ func allowlistFlagsUsed(cfg config) string {
 // rtmr3FlagUsed names whichever flag supplied the RTMR[3] pin. Both feed one
 // slot, so the shared rules must be able to blame the right one.
 func rtmr3FlagUsed(cfg config) string {
-	if cfg.operatorPubkey != "" {
+	switch {
+	case cfg.operatorPubkey != "":
 		return "--operator-pkey"
+	case cfg.expectedRTMR3Hex != "":
+		return "--expected-rtmr3"
+	default:
+		return "--rtmr 3="
 	}
-	return "--expected-rtmr3"
 }
 
 // resolveRTMRPins parses --image-manifest and the RTMR[3] pin. Called exactly
 // once, from buildPolicy, so a bad flag is a usage error and the manifest's
 // three registers can never come from two different reads of the file.
 func resolveRTMRPins(cfg config) (rtmrPins, error) {
-	// Both RTMR[3] flags write one slot, so accepting both would silently let
-	// one win. The operator asking for two different expected values wants a
-	// verdict on neither.
-	if cfg.operatorPubkey != "" && cfg.expectedRTMR3Hex != "" {
-		return rtmrPins{}, fmt.Errorf("--operator-pkey and --expected-rtmr3 both pin RTMR[3]: pass the operator public key OR the precomputed register value, not both")
+	manual, err := parseRTMRPins(cfg.rtmrs)
+	if err != nil {
+		return rtmrPins{}, err
 	}
+	// RTMR[3] has three spellings — --rtmr 3=, --expected-rtmr3, and
+	// --operator-pkey (which derives the value) — and they write one slot, so
+	// accepting two would silently let one win. An operator naming two
+	// expected values wants a verdict on neither.
+	var rtmr3Flags []string
+	if _, ok := manual[3]; ok {
+		rtmr3Flags = append(rtmr3Flags, "--rtmr 3=")
+	}
+	if cfg.expectedRTMR3Hex != "" {
+		rtmr3Flags = append(rtmr3Flags, "--expected-rtmr3")
+	}
+	if cfg.operatorPubkey != "" {
+		rtmr3Flags = append(rtmr3Flags, "--operator-pkey")
+	}
+	if len(rtmr3Flags) > 1 {
+		return rtmrPins{}, fmt.Errorf("%s all pin RTMR[3]: name the register once", strings.Join(rtmr3Flags, " and "))
+	}
+
 	var pins rtmrPins
 	if cfg.imageManifest != "" {
 		img, err := runtimemeasure.LoadImageManifest(cfg.imageManifest)
@@ -577,7 +600,45 @@ func resolveRTMRPins(cfg config) (rtmrPins, error) {
 		seed := runtimemeasure.ForOperatorKey(pubPEM)
 		pins.rtmr3 = seed[:]
 	}
+	if v, ok := manual[3]; ok {
+		pins.rtmr3 = v
+		// rtmr3 owns index 3 from here; manual is the by-hand 1/2 set, which
+		// is the half that conflicts with a manifest rather than requiring it.
+		delete(manual, 3)
+	}
+
+	// The two halves relate to the image pin in opposite directions, so the
+	// rules cannot be one rule.
+	//
+	// RTMR[1] and [2] ARE the image — guest kernel, and the command line
+	// carrying the dm-verity root hash. A manifest pins both, tied to the MRTD
+	// from the same build, so a by-hand pin beside it can only restate that or
+	// contradict it, and a contradiction is a policy no guest satisfies.
+	if len(manual) > 0 && pins.image != nil {
+		return rtmrPins{}, fmt.Errorf("--rtmr %s cannot be combined with --image-manifest: the manifest already pins RTMR[1] and RTMR[2] exactly, together with the MRTD from the same build. Drop --rtmr to pin the published image, or drop --image-manifest to pin registers by hand (giving up the MRTD tie to the same build)", manualIndexList(manual))
+	}
+	// RTMR[3] is the opposite: it records events extended inside a guest whose
+	// image the untrusted host selects, so without an image pin the host boots
+	// anything and reproduces the chain. A lone RTMR[3] verdict then reads as
+	// proof of identity while proving none — the same reason get-kubeconfig
+	// makes the manifest mandatory.
+	if pins.rtmr3 != nil && pins.image == nil {
+		return rtmrPins{}, fmt.Errorf("%s requires --image-manifest: RTMR[3] records events extended into a guest whose image the untrusted host selects, so pinning it without pinning the image proves nothing about what is running", rtmr3FlagUsed(cfg))
+	}
+
+	pins.manual = manual
 	return pins, nil
+}
+
+// manualIndexList renders the by-hand indices in ascending order, so the
+// conflict names what was actually typed.
+func manualIndexList(manual map[int][]byte) string {
+	idx := slices.Sorted(maps.Keys(manual))
+	parts := make([]string, len(idx))
+	for i, n := range idx {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, "/")
 }
 
 // checkOperatorPublicKeyPEM rejects a file that is not a PKIX public key before
@@ -605,20 +666,17 @@ func checkOperatorPublicKeyPEM(pemBytes []byte) error {
 
 // parseRTMRPins parses repeated --rtmr <index>=<sha384-hex> flags.
 //
-// Index 0 and 3 are rejected rather than accepted-and-ignored. RTMR[0] carries
-// the TD HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin
-// would deny half the fleet. RTMR[3] is extended by in-guest software, so on
-// its own it cannot vouch for the guest image: a substituted guest simply
-// extends the register with the expected value.
+// Index 0 is refused rather than accepted-and-ignored: RTMR[0] carries the TD
+// HOB, so it tracks the pod's vCPU and memory shape and a fleet-wide pin would
+// deny half the fleet.
 //
-// That last argument is about RTMR[3] *alone*, which is why --expected-rtmr3
-// and --operator-pkey are not a contradiction of it. They pin the same
-// register, but only alongside --image-manifest (resolveRTMRPins enforces
-// that), so the image is already pinned by MRTD + RTMR[1] + RTMR[2] from one
-// provenanced tuple and RTMR[3] adds the runtime operator-key/workload chain
-// on top. Here there is no such anchor to lean on — --rtmr pins registers
-// individually — so an RTMR[3] pin would read as guest identity while proving
-// nothing, and it is refused.
+// 1, 2 and 3 are all accepted here, but they are not interchangeable and
+// resolveRTMRPins applies opposite rules to them. RTMR[1] and [2] ARE the
+// image, so pinning them by hand conflicts with --image-manifest. RTMR[3]
+// records events extended inside whatever image the untrusted host chose, so
+// pinning it REQUIRES --image-manifest — alone it would read as proof of
+// identity while proving none, since the host can boot any image and
+// reproduce the chain.
 func parseRTMRPins(pins []string) (map[int][]byte, error) {
 	if len(pins) == 0 {
 		return nil, nil
@@ -634,13 +692,11 @@ func parseRTMRPins(pins []string) (map[int][]byte, error) {
 			return nil, fmt.Errorf("--rtmr %q: index is not a number: %w", p, err)
 		}
 		switch idx {
-		case 1, 2:
+		case 1, 2, 3:
 		case 0:
 			return nil, fmt.Errorf("--rtmr 0 is not pinnable: RTMR[0] carries the TD HOB, so it varies with the pod's vCPU and memory shape")
-		case 3:
-			return nil, fmt.Errorf("--rtmr 3 is not pinnable: RTMR[3] is extended by in-guest software, so on its own it cannot vouch for the guest image — a substituted guest just extends it with the value you pinned. To pin the runtime chain, use --expected-rtmr3 or --operator-pkey, which require --image-manifest so the image is anchored first")
 		default:
-			return nil, fmt.Errorf("--rtmr %q: index must be 1 or 2", p)
+			return nil, fmt.Errorf("--rtmr %q: index must be 1, 2 or 3", p)
 		}
 		if _, dup := out[idx]; dup {
 			return nil, fmt.Errorf("--rtmr %d given more than once", idx)
@@ -1217,7 +1273,30 @@ func applyRTMRPins(oc *Outcome, pins rtmrPins, result *teetypes.VerificationResu
 	if pins.rtmr3 != nil && !check(3, "runtime operator-key/workload chain", pins.rtmr3) {
 		return false
 	}
+	// Ascending index, so a target missing several pinned registers always
+	// names the same one first and a failing verdict is reproducible.
+	for _, idx := range slices.Sorted(maps.Keys(pins.manual)) {
+		if !check(idx, rtmrMeaning(idx), pins.manual[idx]) {
+			return false
+		}
+	}
 	return true
+}
+
+// rtmrMeaning labels a register in operator-facing output. parseRTMRPins
+// admits only 1 and 2; the default keeps this total rather than printing an
+// empty meaning if that ever widens.
+func rtmrMeaning(idx int) string {
+	switch idx {
+	case 1:
+		return "guest kernel"
+	case 2:
+		return "guest command line / dm-verity root hash"
+	case 3:
+		return "runtime operator-key/workload chain"
+	default:
+		return "runtime measurement register"
+	}
 }
 
 // describeCertBody says what stands behind the leaf's body fields. Validity

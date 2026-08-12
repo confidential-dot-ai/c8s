@@ -333,7 +333,7 @@ What it does **not** guarantee:
   not pinned on that path, and `MinTCBVersion` is dropped on the TDX path
   (GAPS). Operator-side, `c8s verify --image-manifest` pins the full
   MRTD+RTMR[1]+RTMR[2] image tuple exactly — which is why it replaces
-  `--measurements` rather than combining with it — and `--expected-rtmr3`
+  `--measurements` rather than combining with it — and `--rtmr 3=`
   (or `--operator-pkey`, which derives the same value from the operator public
   key) pins the runtime register, requiring the image pin because the host
   chooses the image and the runtime chain alone identifies nothing;

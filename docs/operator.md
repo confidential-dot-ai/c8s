@@ -475,11 +475,14 @@ attestation failure rather than the typo it is. Pin this image and drop
 images, drop `--image-manifest` and give up its RTMR[1]/RTMR[2] kernel and
 rootfs pins with it.
 
-`--expected-rtmr3` can additionally pin the runtime register — the ordered
+`--rtmr 3=<sha384-hex>` can additionally pin the runtime register — the ordered
 operator-key/workload extend chain (`pkg/runtimemeasure`) — which is a
 deployment property, not a cluster identity, and therefore requires
 `--image-manifest`: the untrusted host picks the guest image, so it can boot
-anything and reproduce that chain. `--operator-pkey <file>` is the same pin
+anything and reproduce that chain. (`--expected-rtmr3` is the former spelling of
+the same pin and still works, but `--rtmr` now covers every register: 1 and 2
+conflict with `--image-manifest` because they *are* the image, while 3
+requires it.) `--operator-pkey <file>` is the same pin
 without the arithmetic: point it at the operator **public** key PEM (the
 verbatim bytes the guest initrd hashed, as written by `openssl ec -pubout`)
 and `verify` derives the bare operator-key seed,
