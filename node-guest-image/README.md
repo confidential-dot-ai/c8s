@@ -18,8 +18,8 @@ Layout:
   baselines stay in confos: a fragment request that conflicts with them
   fails the build (see the balloon catch in #263).
 - `build` — drop-in replacement for confos's `bin/build-c8s`: same env
-  contract (`C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NO_GPU`,
-  `C8S_STOCK_ATTEST`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
+  contract (`C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_VARIANT`,
+  `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
 
@@ -39,8 +39,6 @@ Migration state (see [#264] for the full plan):
    measurements; `c8s-image.yml`'s `gate=true` dispatch input reruns that
    A/B check against any confos ref.
 3. Remaining cleanup, so the inherited interface doesn't become canonical
-   by default: flatten the `C8S_NO_GPU`/`C8S_STOCK_ATTEST` boolean combos
-   (which silently ignore nonsense pairings) into a single variant
    selector.
 
 [confidential-os-builder]: https://github.com/confidential-dot-ai/confidential-os-builder
