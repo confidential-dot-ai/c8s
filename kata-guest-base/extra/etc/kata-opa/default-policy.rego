@@ -120,6 +120,9 @@ CreateContainerRequest if {
 	pull := sole_guest_pull_storage
 	print("CreateContainerRequest: one image_guest_pull storage")
 
+	not crio_pull_metadata(pull)
+	print("CreateContainerRequest: no foreign marker in the pull metadata")
+
 	# add_storages skips a handler whose mount point is already registered
 	# sandbox-wide, and setup_bundle bind-mounts the host's spec.root.path
 	# when nothing is mounted at the rootfs. Pinning the mount point to this
@@ -221,8 +224,9 @@ bind_mount(m) if {
 
 # kata's own switch is io.katacontainers.pkg.oci.container_type; the guest-pull
 # handler's is the container-type copied into the storage's driver_options
-# metadata; policy-monitor's is the CRI annotation. A container runs what all
-# three agree on, or it does not run.
+# metadata; policy-monitor's is this same sandbox_annotations pair (a Go
+# lockstep test machine-compares them). A container runs what all three agree
+# on, or it does not run.
 pull_source_bound(pull) if {
 	sandbox_annotations
 	sandbox_pull_metadata(pull)
@@ -254,6 +258,14 @@ sandbox_pull_metadata(pull) if {
 	some opt in pull.driver_options
 	startswith(opt, "image_guest_pull=")
 	contains(opt, "\"io.kubernetes.cri.container-type\":\"sandbox\"")
+}
+
+# containerd never writes the CRI-O key, so an honest request cannot carry it
+# in the serialised pull metadata either.
+crio_pull_metadata(pull) if {
+	some opt in pull.driver_options
+	startswith(opt, "image_guest_pull=")
+	contains(opt, "io.kubernetes.cri-o.ContainerType")
 }
 
 # --- Sandbox and ephemeral storages ------------------------------------
