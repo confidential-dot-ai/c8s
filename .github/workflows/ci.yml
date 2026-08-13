@@ -95,6 +95,19 @@ jobs:
       - name: Build macOS CLI
         run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /tmp/c8s-darwin ./cmd/c8s
 
+      # testing must stay out of the measured binaries. c8s_node changes the
+      # graph, so it is listed separately.
+      - name: Guard testing out of shipped binaries
+        run: |
+          if go list -deps ./cmd/... | grep -qx testing; then
+            echo "testing is in the dep graph of a shipped binary" >&2
+            exit 1
+          fi
+          if go list -tags c8s_node -deps ./cmd/c8s | grep -qx testing; then
+            echo "testing is in the dep graph of the c8s_node binary" >&2
+            exit 1
+          fi
+
       - name: Test
         run: make test
 

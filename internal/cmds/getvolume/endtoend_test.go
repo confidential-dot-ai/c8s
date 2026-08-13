@@ -103,7 +103,7 @@ func startDaemon(t *testing.T, dir string) *recordingOps {
 // inventory, reads the blob from CDS, and hands it to a real volumed, which
 // opens the device and mounts it into the pod's own emptyDir.
 func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
 	})
@@ -114,7 +114,7 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 	cfg := flowConfig(t, url)
 	cfg.SocketDir = socketDir
 	daemon, daemonBase := daemonClient(cfg)
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestSidecarOpensAVolumeEndToEnd(t *testing.T) {
 // A restarted sidecar re-sends its request; the daemon must not open a second
 // mapping for it.
 func TestSidecarRepeatIsIdempotent(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {
 			{status: http.StatusOK, value: testBlobJSON(t)},
@@ -172,7 +172,7 @@ func TestSidecarRepeatIsIdempotent(t *testing.T) {
 	cfg.SocketDir = socketDir
 	for i := 0; i < 2; i++ {
 		daemon, daemonBase := daemonClient(cfg)
-		if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
+		if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err != nil {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 	}
@@ -187,7 +187,7 @@ func TestSidecarRepeatIsIdempotent(t *testing.T) {
 // The daemon's refusal reaches the sidecar as a failure rather than being
 // mistaken for success.
 func TestSidecarReportsADaemonRefusal(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
 	})
@@ -200,7 +200,7 @@ func TestSidecarReportsADaemonRefusal(t *testing.T) {
 	// A volume the pod has no emptyDir for: the daemon has nowhere to mount it.
 	cfg.Volumes = []volumeRequest{{Name: "absent", Path: "/tenant-a/volumes/weights"}}
 	daemon, daemonBase := daemonClient(cfg)
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err == nil {
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, daemon, daemonBase); err == nil {
 		t.Fatal("a refused open was reported as success")
 	}
 }
@@ -244,7 +244,7 @@ func startGuestDaemon(t *testing.T) *recordingOps {
 }
 
 // startGuestInventory serves the token route on the compiled guest loopback
-// port, which is where the sidecar redeems under kata and is not overridable.
+// port, which is where the sidecar redeems under kata.
 func startGuestInventory(t *testing.T) {
 	t.Helper()
 	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
@@ -276,7 +276,7 @@ func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
 	cfg.SocketDir = "" // nothing is mounted in a guest
 
 	daemon, daemonBase := daemonClient(cfg)
-	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), daemon, daemonBase); err != nil {
+	if err := openAllWith(context.Background(), cfg, http.DefaultClient, testKey(t), cfg.Endpoint(), daemon, daemonBase); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 

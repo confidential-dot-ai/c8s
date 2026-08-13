@@ -14,10 +14,10 @@ import (
 // an address, so a wrong setting fails closed against a port nothing serves
 // rather than redirecting redemption to a rogue inventory.
 func TestEndpointSelectsCompiledShape(t *testing.T) {
-	if got, want := (Config{}).endpoint(), workloadclaims.InventoryEndpoint(); got != want {
+	if got, want := (Config{}).Endpoint(), workloadclaims.InventoryEndpoint(); got != want {
 		t.Errorf("node-CVM endpoint = %q, want the compiled unix socket %q", got, want)
 	}
-	guest := Config{WorkloadClaimsGuest: true}.endpoint()
+	guest := Config{WorkloadClaimsGuest: true}.Endpoint()
 	if want := workloadclaims.GuestInventoryEndpoint(); guest != want {
 		t.Errorf("kata endpoint = %q, want the compiled guest loopback %q", guest, want)
 	}

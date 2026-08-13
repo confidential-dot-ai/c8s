@@ -28,9 +28,9 @@ func (stubResolver) DigestsForSandbox(string) ([]string, []workloadclaims.Sandbo
 	return nil, nil, false, nil
 }
 
-// startInventory serves the real token route on a unix socket and points the
-// sidecar at it.
-func startInventory(t *testing.T) {
+// startInventory serves the real token route on a unix socket and returns its
+// endpoint.
+func startInventory(t *testing.T) string {
 	t.Helper()
 	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
 	if err != nil {
@@ -45,7 +45,7 @@ func startInventory(t *testing.T) {
 	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	SetInventoryEndpointForTest(t, func() string { return "unix://" + sock })
+	return "unix://" + sock
 }
 
 func testPubKey(t *testing.T) *ecdsa.PublicKey {
@@ -67,7 +67,7 @@ func TestSecretResponseMustBeDecodable(t *testing.T) {
 		{"value not base64", `{"value":"!!!"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			startInventory(t)
+			endpoint := startInventory(t)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/secrets" {
 					w.Write([]byte(`{"challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`))
@@ -76,7 +76,7 @@ func TestSecretResponseMustBeDecodable(t *testing.T) {
 				w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			_, _, err := Do(context.Background(), testConfig(srv.URL), http.DefaultClient, testPubKey(t), http.MethodGet, "/api/db")
+			_, _, err := Do(context.Background(), testConfig(srv.URL), http.DefaultClient, testPubKey(t), endpoint, http.MethodGet, "/api/db")
 			if err == nil {
 				t.Fatal("an undecodable body was accepted as a secret")
 			}
@@ -87,13 +87,13 @@ func TestSecretResponseMustBeDecodable(t *testing.T) {
 // The inventory is where the sandbox token comes from; without it there is no
 // request to make.
 func TestUnreachableInventoryFails(t *testing.T) {
-	SetInventoryEndpointForTest(t, func() string { return "unix://" + filepath.Join(t.TempDir(), "absent.sock") })
+	endpoint := "unix://" + filepath.Join(t.TempDir(), "absent.sock")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`))
 	}))
 	defer srv.Close()
-	_, _, err := Do(context.Background(), testConfig(srv.URL), http.DefaultClient, testPubKey(t), http.MethodGet, "/api/db")
+	_, _, err := Do(context.Background(), testConfig(srv.URL), http.DefaultClient, testPubKey(t), endpoint, http.MethodGet, "/api/db")
 	if err == nil || !strings.Contains(err.Error(), "sandbox token") {
 		t.Fatalf("err = %v, want a sandbox-token failure", err)
 	}
