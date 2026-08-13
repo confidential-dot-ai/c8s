@@ -60,8 +60,9 @@ C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
-# Pinned published c8s commit (#177 merged; images published by docker.yml on main).
-C8S_REF="${C8S_REF:-78c034a}"
+# Pinned c8s release: bakes the same component versions the CLI ships as.
+# docker.yml publishes images under v* tags, so the tag itself is the ref.
+C8S_REF="${C8S_REF:-v0.1.0-rc2}"
 echo "c8s sync: resolving nri-image-policy + cds at c8s ref ${C8S_REF}"
 resolve_digest() {  # <repo> <ref> -> prints sha256:... or FATALs
     local d
