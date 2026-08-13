@@ -84,3 +84,33 @@ func TestValidateVerifierSocket(t *testing.T) {
 		t.Error("symlink accepted; want rejection")
 	}
 }
+
+// A unix:// URL must use the socket transport even when the caller supplies a
+// custom (TCP-dialing) HTTP client — e.g. attestclient passes its CDS client
+// through, which could never reach a Unix socket.
+func TestNewClientWithHTTPUnixSocketTransport(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "attest.sock")
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer ln.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	// The custom client dials nothing: if it were used, every request would
+	// fail, so a successful call proves the socket transport took over.
+	c := NewClientWithHTTP("unix://"+sock, &http.Client{})
+	if _, err := c.Attest(context.Background(), types.AttestRequest{}); err != nil {
+		t.Fatalf("Attest over unix socket with custom client failed: %v", err)
+	}
+}

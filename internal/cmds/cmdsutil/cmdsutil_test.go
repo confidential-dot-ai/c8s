@@ -124,3 +124,27 @@ func TestCheckCDSPinned(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateAttestationAPIURL(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"http://localhost:8400", false},
+		{"https://attestation-api:8400", false},
+		{"unix:///var/run/nri-image-policy/attestation-api.sock", false},
+		{"unix://relative.sock", true},
+		{"unix://", true},
+		{"ftp://example.com", true},
+		{"", true},
+	}
+	for _, c := range cases {
+		err := ValidateAttestationAPIURL("--attestation-api-url", c.url)
+		if (err != nil) != c.wantErr {
+			t.Errorf("ValidateAttestationAPIURL(%q) err = %v, wantErr = %v", c.url, err, c.wantErr)
+		}
+		if err != nil && !contains(err.Error(), "--attestation-api-url") {
+			t.Errorf("error %q should mention flag name", err.Error())
+		}
+	}
+}

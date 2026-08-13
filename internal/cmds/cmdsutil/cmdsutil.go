@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -34,6 +35,19 @@ func ValidateHTTPURL(flagName, u string) error {
 		return fmt.Errorf("%s %q must start with http:// or https://", flagName, u)
 	}
 	return nil
+}
+
+// ValidateAttestationAPIURL returns an error if u is not an attestation-api
+// URL: http(s):// for a network endpoint, or unix:// plus an absolute socket
+// path for the node-local socket the chart wires in every non-kata mode.
+func ValidateAttestationAPIURL(flagName, u string) error {
+	if socket, ok := strings.CutPrefix(u, "unix://"); ok {
+		if !path.IsAbs(socket) {
+			return fmt.Errorf("%s %q must name an absolute socket path after unix://", flagName, u)
+		}
+		return nil
+	}
+	return ValidateHTTPURL(flagName, u)
 }
 
 // ParseFlags is the standard fs.Parse(args) call used by every Run-style

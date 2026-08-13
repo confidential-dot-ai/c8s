@@ -1072,7 +1072,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--san=" + inj.SAN,
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key-out=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
@@ -1501,7 +1501,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-volume",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 	}
@@ -1543,7 +1543,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-secret",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 		"--out-dir=" + inj.Secrets.Dir,
@@ -1609,6 +1609,17 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 			HostPath: &corev1.HostPathVolumeSource{Path: cfg.WorkloadClaimsHostDir, Type: &hpType},
 		},
 	}, true
+}
+
+// sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
+// the inventory's host directory onto the sidecar's mount of that directory
+// (workloadClaimsMounts); every other shape passes through verbatim.
+func (cfg Config) sidecarAttestationApiURL() string {
+	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
+	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
+		return cfg.AttestationApiURL
+	}
+	return "unix://" + workloadclaims.SidecarSocketDir + "/" + strings.TrimPrefix(cfg.AttestationApiURL, hostPrefix)
 }
 
 // workloadClaimsMounts returns the sidecar mount for the inventory socket

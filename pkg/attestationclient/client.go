@@ -88,8 +88,13 @@ func validateVerifierSocket(socketPath string) error {
 	return nil
 }
 
-// NewClientWithHTTP creates a new client with a custom HTTP client.
+// NewClientWithHTTP creates a new client with a custom HTTP client. A
+// "unix://" baseURL always gets the socket transport from NewClient: a custom
+// TCP-dialing client cannot reach a Unix socket, so it is ignored there.
 func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
+	if strings.HasPrefix(baseURL, "unix://") {
+		return NewClient(baseURL)
+	}
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: httpClient,
