@@ -80,6 +80,25 @@ read -r cds_svc cds_svc_port < <(kget get svc -n "$cds_ns" -l "$cds_selector" \
 [ -n "${cds_svc_port:-}" ] || fail "cds Service $cds_ns/$cds_svc has no port named http"
 peer_url="https://${cds_svc}.${cds_ns}.svc:${cds_svc_port}"
 
+# When cds reaches the attestation-api over its node-local Unix socket, the
+# probe can only follow it with the socket directory mounted at the host path.
+socket_mount=""
+socket_volume=""
+case "$attest_url" in
+  unix://*/*)
+    socket_dir=$(dirname "${attest_url#unix://}")
+    socket_mount="
+        - name: attestation-api-socket
+          mountPath: $socket_dir
+          readOnly: true"
+    socket_volume="
+    - name: attestation-api-socket
+      hostPath:
+        path: $socket_dir
+        type: Directory"
+    ;;
+esac
+
 # --- probe pod: deployed cds image, pinned to the cds node -------------------
 
 # kubectl-only (no jq dependency, matching the sibling e2e scripts). Each
@@ -157,12 +176,12 @@ spec:
       volumeMounts:
         - name: operator-keys
           mountPath: /etc/cds-operator-keys
-          readOnly: true
+          readOnly: true$socket_mount
       securityContext: $ctr_sec_ctx
   volumes:
     - name: operator-keys
       configMap:
-        name: $operator_keys_cm
+        name: $operator_keys_cm$socket_volume
 EOF
 
 # --- await verdict ------------------------------------------------------------

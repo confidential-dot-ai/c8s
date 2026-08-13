@@ -306,34 +306,88 @@ and CDS. Three shapes:
   - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
     on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
     INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
-  - cvmMode=node: the node image bakes a HOST attestation-api on the node's
-    loopback :8400 (no in-cluster Service). Pod-netns consumers cannot reach host
-    loopback, so they dial the node's own IP via the $(HOST_IP) downward-API env
-    var (c8s.attestationApiHostIPEnv), which the kubelet expands per-node before
-    the process sees the arg. The operator forwards this string verbatim to the
-    tenant get-cert sidecars it injects, so it must stay unexpanded there (the
-    operator container deliberately omits HOST_IP); each tenant pod expands it
-    against its own node.
-  - otherwise: the in-cluster host Service DNS.
+  - otherwise, when attestationApi.enabled (every non-kata shape where the
+    chart DaemonSet renders — gke/aks, and raw values without a mode): the
+    on-node Unix socket its attest-proxy sidecar serves
+    (c8s.attestationApiSocket). Evidence generation is never published on a
+    routable address: the API binds pod loopback, and only on-node callers —
+    host processes, and pods the socket directory is mounted into — can
+    reach it. Chart components mount the directory at its host path, so this
+    URL is verbatim everywhere; the webhook rebases it for injected sidecars,
+    which see the directory at workloadclaims.SidecarSocketDir.
+  - otherwise (attestationApi.enabled=false outside kata, i.e. cvmMode=node —
+    require_attestation_api forbids it elsewhere): the node image bakes a HOST
+    attestation-api on the node's loopback :8400. Pod-netns consumers cannot
+    reach host loopback, so they dial the node's own IP via the $(HOST_IP)
+    downward-API env var (c8s.attestationApiHostIPEnv), which the kubelet
+    expands per-node before the process sees the arg. The operator forwards
+    this string verbatim to the tenant get-cert sidecars it injects, so it
+    must stay unexpanded there (the operator container deliberately omits
+    HOST_IP); each tenant pod expands it against its own node.
 */ -}}
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
 http://127.0.0.1:{{ .Values.attestationApi.port }}
-{{- else if eq .Values.attestationApi.cvmMode "node" -}}
-http://$(HOST_IP):{{ .Values.attestationApi.port }}
+{{- else if .Values.attestationApi.enabled -}}
+unix://{{ include "c8s.attestationApiSocket" . }}
 {{- else -}}
-http://{{ include "c8s.attestationApiName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.attestationApi.port }}
+http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- end -}}
 {{- end -}}
 
 {{- /*
+c8s.attestationApiSocket — the node-local socket the attest-proxy sidecar
+serves the attestation-api on. It lives in the admission inventory's socket
+directory: that dir is already the one hostPath the deny-host-namespaces
+policy admits into a cw pod (read-only) and the one the webhook mounts into
+get-cert sidecars, so a second directory would only add a second carve-out.
+*/ -}}
+{{- define "c8s.attestationApiSocket" -}}
+{{ .Values.nriImagePolicy.hostPaths.runtimeDir }}/attestation-api.sock
+{{- end -}}
+
+{{- /*
+c8s.attestationApiHostSocket — "true" when consumers reach the chart-managed
+attestation-api over the on-node Unix socket, i.e. the DaemonSet renders and
+the in-guest (kata) endpoint does not apply.
+*/ -}}
+{{- define "c8s.attestationApiHostSocket" -}}
+{{- if and .Values.attestationApi.enabled (not .Values.kata.enabled) -}}true{{- end -}}
+{{- end -}}
+
+{{- /*
+c8s.attestationApiSocketVolume / Mount — the hostPath pair a chart component
+pod needs to reach the on-node socket. Mounted at the host path so
+c8s.attestationApiURL is verbatim in-container. ReadOnly on the mount;
+DirectoryOrCreate so a consumer scheduled before the DaemonSet does not wedge
+(the socket file's own mode gates connect, not the dir's).
+*/ -}}
+{{- define "c8s.attestationApiSocketVolume" -}}
+{{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+- name: attestation-api-socket
+  hostPath:
+    path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+    type: DirectoryOrCreate
+{{- end }}
+{{- end -}}
+
+{{- define "c8s.attestationApiSocketMount" -}}
+{{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+- name: attestation-api-socket
+  mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- /*
 c8s.attestationApiHostIPEnv — the HOST_IP downward-API env var that expands the
-$(HOST_IP) placeholder in c8s.attestationApiURL. Rendered only under
-cvmMode=node, where pod-netns consumers reach the node-baked host attestation-api
-via the node's own IP. Empty in every other mode.
+$(HOST_IP) placeholder in c8s.attestationApiURL. Rendered only when that URL
+carries the placeholder: cvmMode=node with the chart DaemonSet off, where
+pod-netns consumers reach the node-baked host attestation-api via the node's
+own IP. Empty in every other shape.
 */ -}}
 {{- define "c8s.attestationApiHostIPEnv" -}}
-{{- if and (not .Values.kata.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
+{{- if and (not .Values.kata.enabled) (not .Values.attestationApi.enabled) (eq .Values.attestationApi.cvmMode "node") -}}
 - name: HOST_IP
   valueFrom:
     fieldRef:
@@ -505,11 +559,23 @@ seccompProfile:
 {{- define "c8s.attestationApiConfig" -}}
 {{- $root := .root -}}
 [server]
+{{- if ne (int $root.Values.attestationApi.service.nodePort) 0 }}
+# Routable by operator opt-in (attestationApi.service.nodePort); the [auth]
+# block is mandatory in this shape — see validations.yaml.
 bind = "0.0.0.0:{{ $root.Values.attestationApi.port }}"
-mode = "hosted"
+{{- else }}
+# Pod loopback only: consumers enter through the attest-proxy sidecar's
+# node-local Unix socket; nothing routable can reach /attest.
+bind = "127.0.0.1:{{ $root.Values.attestationApi.port }}"
+{{- end }}
 
 [server.tls]
 enabled = false
+{{- with $root.Values.attestationApi.auth.apiKey }}
+
+[auth]
+api_keys = [{{ . | quote }}]
+{{- end }}
 
 [attestation]
 enabled = true

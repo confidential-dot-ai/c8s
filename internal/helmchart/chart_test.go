@@ -22,9 +22,11 @@ import (
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
@@ -156,9 +158,9 @@ func containerArgValue(args []string, flag string) (string, bool) {
 }
 
 func TestChartDefaultRendersReplacementStack(t *testing.T) {
-	// gke keeps the host-side attestation-api enabled and reachable at its
-	// in-cluster Service DNS (node disables it and points components at the
-	// baked host attestation-api via HOST_IP; that path is covered separately).
+	// gke keeps the host-side attestation-api enabled, reachable only via the
+	// on-node Unix socket (node disables it and points components at the baked
+	// host attestation-api via HOST_IP; that path is covered separately).
 	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -181,7 +183,7 @@ func TestChartDefaultRendersReplacementStack(t *testing.T) {
 	assertContainerArgs(t, cert,
 		"get-cert",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
-		"--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400",
+		"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock",
 		"--san=c8s-tls-lb.c8s-system.svc",
 		"--out=/tls/cert.pem",
 		"--key-out=/tls/key.pem",
@@ -286,8 +288,10 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		}
 	}
 
-	if kinds := renderedKinds(t, out); kinds["NetworkPolicy"] > 0 {
-		t.Errorf("ratls host routing must not render NetworkPolicy for hostNetwork pods; got %d", kinds["NetworkPolicy"])
+	// The only NetworkPolicy in a default render is the attestation-api
+	// default-deny; nothing may select the hostNetwork mesh pods.
+	if kinds := renderedKinds(t, out); kinds["NetworkPolicy"] != 1 || !renderedManifestHasNamedKind(t, out, "NetworkPolicy", "c8s-attestation-api") {
+		t.Errorf("default render must carry exactly the attestation-api default-deny NetworkPolicy (none may select the hostNetwork mesh pods); got %d", kinds["NetworkPolicy"])
 	}
 }
 
@@ -1313,7 +1317,7 @@ func TestChartNRIImagePolicyUsesPullMode(t *testing.T) {
 	if got, want := workerCfg.Allowlist.Pull.Interval, "5s"; got != want {
 		t.Fatalf("worker pull interval = %q, want %q", got, want)
 	}
-	if got, want := workerCfg.Allowlist.Pull.AttestationApiURL, "http://localhost:30840"; got != want {
+	if got, want := workerCfg.Allowlist.Pull.AttestationApiURL, "unix:///var/run/nri-image-policy/attestation-api.sock"; got != want {
 		t.Fatalf("runtime attestation-api URL = %q, want %q", got, want)
 	}
 	if want := []string{measurement}; !slices.Equal(workerCfg.Allowlist.Pull.CDSMeasurements, want) {
@@ -1325,26 +1329,77 @@ func TestChartNRIImagePolicyUsesPullMode(t *testing.T) {
 	}
 }
 
-func TestChartAttestationApiNodePortEnabledWithNRI(t *testing.T) {
+// The default attestation-api shape publishes nothing routable: no Service at
+// all, the API bound to pod loopback, a default-deny NetworkPolicy on the
+// DaemonSet pods, and the attest-proxy sidecar serving the on-node Unix
+// socket every consumer dials.
+func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
-	svc := renderedService(t, out, "c8s-attestation-api")
-	if svc.Spec.Type != corev1.ServiceTypeNodePort {
-		t.Fatalf("attestation-api Service type = %q by default, want NodePort", svc.Spec.Type)
+	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") {
+		t.Fatalf("default render must not create an attestation-api Service (evidence generation is node-local only)\n%s", out)
 	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
-		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
+
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-attestation-api", &np) {
+		t.Fatalf("default render missing the attestation-api default-deny NetworkPolicy\n%s", out)
 	}
-	if got := svc.Spec.Ports[0].NodePort; got != 30840 {
-		t.Fatalf("attestation-api nodePort = %d by default, want 30840", got)
+	if len(np.Spec.Ingress) != 0 {
+		t.Fatalf("default NetworkPolicy must deny all ingress; got rules %+v", np.Spec.Ingress)
+	}
+	if !slices.Contains(np.Spec.PolicyTypes, networkingv1.PolicyTypeIngress) {
+		t.Fatalf("NetworkPolicy policyTypes = %v, want Ingress", np.Spec.PolicyTypes)
+	}
+
+	cm := renderedConfigMap(t, out, "c8s-attestation-api")
+	cfg := cm.Data["config.toml"]
+	if !strings.Contains(cfg, `bind = "127.0.0.1:8400"`) {
+		t.Fatalf("default config must bind pod loopback; got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "[auth]") {
+		t.Fatalf("default config must not render [auth] (nothing routable to protect); got:\n%s", cfg)
+	}
+
+	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
+	assertContainerArgs(t, proxy,
+		"attest-proxy",
+		"--socket=/var/run/nri-image-policy/attestation-api.sock",
+		"--upstream=http://127.0.0.1:8400",
+	)
+	if proxy.ReadinessProbe == nil || proxy.ReadinessProbe.Exec == nil {
+		t.Fatalf("attest-proxy must carry an exec readiness probe (the API's loopback bind is not kubelet-dialable); got %+v", proxy.ReadinessProbe)
+	}
+	// The API container's old httpGet probes would never pass against a
+	// loopback bind, so the proxy's exec probe is the only health signal.
+	api := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
+	if api.ReadinessProbe != nil || api.LivenessProbe != nil {
+		t.Fatalf("attestation-api container must not carry kubelet probes against its loopback bind; got %+v / %+v", api.ReadinessProbe, api.LivenessProbe)
 	}
 }
 
-func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
+// The host NRI plugin is a host process: it reaches the attestation-api over
+// the node-local Unix socket, never the pod network.
+func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	cfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
+	if got, want := cfg.Allowlist.Pull.AttestationApiURL, "unix:///var/run/nri-image-policy/attestation-api.sock"; got != want {
+		t.Fatalf("runtime attestation-api URL = %q, want %q", got, want)
+	}
+}
+
+// Deliberate re-exposure: nodePort set WITH an API key renders the
+// authenticated routable shape — NodePort Service, 0.0.0.0 bind, [auth] in the
+// rendered config, the key file the proxy injects for on-node callers, and a
+// NetworkPolicy opening exactly the API port.
+func TestChartAttestationApiNodePortWithAuthRenders(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "attestationApi.service.nodePort=31040",
+		"--set-string", "attestationApi.auth.apiKey=test-key",
 	)
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
@@ -1360,9 +1415,26 @@ func TestChartAttestationApiNodePortWiresNRI(t *testing.T) {
 		t.Fatalf("attestation-api nodePort = %d, want 31040", got)
 	}
 
-	cfg := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker")
-	if got, want := cfg.Allowlist.Pull.AttestationApiURL, "http://localhost:31040"; got != want {
-		t.Fatalf("runtime attestation-api URL = %q, want %q", got, want)
+	cm := renderedConfigMap(t, out, "c8s-attestation-api")
+	cfg := cm.Data["config.toml"]
+	if !strings.Contains(cfg, `bind = "0.0.0.0:8400"`) {
+		t.Fatalf("exposed config must bind 0.0.0.0 for the NodePort to forward to; got:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `api_keys = ["test-key"]`) {
+		t.Fatalf("exposed config must carry the API key; got:\n%s", cfg)
+	}
+	if got := cm.Data["auth-key"]; got != "test-key" {
+		t.Fatalf("ConfigMap auth-key = %q, want the injected key for the proxy", got)
+	}
+	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
+	assertContainerArgs(t, proxy, "--api-key-file=/etc/attestation-api/auth-key")
+
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-attestation-api", &np) {
+		t.Fatalf("exposed render missing the attestation-api NetworkPolicy\n%s", out)
+	}
+	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].Ports) != 1 || np.Spec.Ingress[0].Ports[0].Port == nil || *np.Spec.Ingress[0].Ports[0].Port != intstr.FromInt32(8400) {
+		t.Fatalf("exposed NetworkPolicy must allow exactly TCP 8400; got %+v", np.Spec.Ingress)
 	}
 }
 
@@ -1410,14 +1482,48 @@ func TestChartRejectsPlaintextNRIAllowlist(t *testing.T) {
 	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the allowlist over RA-TLS`)
 }
 
-func TestChartRejectsInvalidAttestationApiNodePortWithNRI(t *testing.T) {
+func TestChartRejectsInvalidAttestationApiNodePort(t *testing.T) {
 	out, err := helmTemplate(t,
-		"--set", "attestationApi.service.nodePort=0",
+		"--set", "attestationApi.service.nodePort=29999",
+		"--set-string", "attestationApi.auth.apiKey=test-key",
 	)
 	if err == nil {
-		t.Fatalf("helm template succeeded, want invalid attestation-api host nodePort failure\n%s", out)
+		t.Fatalf("helm template succeeded, want invalid attestation-api nodePort failure\n%s", out)
 	}
-	assertHelmFailMessage(t, out, "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 when nriImagePolicy.enabled=true (got 0)")
+	assertHelmFailMessage(t, out, "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 (got 29999)")
+}
+
+// The render guard the whole hardening rests on: a routable evidence
+// listener without authentication must be impossible to render, and the
+// failure must name the value that fixes it.
+func TestChartRejectsExposedUnauthenticatedAttestationApi(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "attestationApi.service.nodePort=30840",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with a routable unauthenticated attestation-api, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "attestation_api_exposed_unauthenticated" {
+		t.Fatalf("validation error kind = %q, want attestation_api_exposed_unauthenticated\n%s", kind, out)
+	}
+	if msg := helmFailMessage(t, out); !strings.Contains(msg, "attestationApi.auth.apiKey") {
+		t.Fatalf("fail message must name the value to fix (attestationApi.auth.apiKey); got %q", msg)
+	}
+}
+
+// Off kata and node mode the host DaemonSet is the only evidence source, so
+// disabling it must fail like disabling the image policy does.
+func TestChartRejectsAttestationApiOffOnNonKata(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=gke",
+		"--set", "attestationApi.enabled=false",
+	)
+	if err == nil {
+		t.Fatalf("helm template succeeded with attestationApi disabled on a non-kata, non-node cluster, want failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "require_attestation_api" {
+		t.Fatalf("validation error kind = %q, want require_attestation_api\n%s", kind, out)
+	}
 }
 
 // parseValidationErrorKind extracts kind=<id> from helm's stderr when the
@@ -1774,7 +1880,15 @@ func hasHostIPEnv(c corev1.Container) bool {
 // tenant pod expands it against its own node.
 func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
-	out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode=node", "--set", "tlsLb.attest.enabled=true")
+	// The exact shape `c8s install --cvm-mode=node` produces: the node image
+	// bakes attestation-api and nri-image-policy, so both chart components
+	// are off and consumers dial the baked host service via $(HOST_IP).
+	out, err := helmTemplate(t,
+		"--set-string", "attestationApi.cvmMode=node",
+		"--set", "attestationApi.enabled=false",
+		"--set", "nriImagePolicy.enabled=false",
+		"--set", "tlsLb.attest.enabled=true",
+	)
 	if err != nil {
 		t.Fatalf("helm template (cvmMode=node): %v\n%s", err, out)
 	}
@@ -1828,10 +1942,12 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	}
 }
 
-// TestChartNonNodeModeKeepsServiceDNS proves the node-mode wiring does not leak
-// into the other cvmModes: pod/gke/aks still dial the in-cluster host
-// Service DNS and render no HOST_IP env anywhere.
-func TestChartNonNodeModeKeepsServiceDNS(t *testing.T) {
+// TestChartNonNodeModeUsesAttestationSocket proves the node-mode wiring does
+// not leak into the other cvmModes: pod/gke/aks dial the on-node Unix socket
+// and render no HOST_IP env anywhere. The consumers that must carry both the
+// socket URL and the socket-directory mount are asserted per shape.
+func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
+	const socketURL = "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock"
 	for _, mode := range []string{"pod", "gke", "aks"} {
 		t.Run(mode, func(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
@@ -1839,7 +1955,30 @@ func TestChartNonNodeModeKeepsServiceDNS(t *testing.T) {
 				t.Fatalf("helm template (cvmMode=%s): %v\n%s", mode, err, out)
 			}
 			cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
-			assertContainerArgs(t, cds, "--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400")
+			assertContainerArgs(t, cds, socketURL)
+			// Every consumer of the socket URL must also mount the socket
+			// directory (read-only), at the host path so the URL is verbatim.
+			assertHasSocketMount := func(c corev1.Container) {
+				t.Helper()
+				for _, m := range c.VolumeMounts {
+					if m.Name == "attestation-api-socket" && m.MountPath == "/var/run/nri-image-policy" && m.ReadOnly {
+						return
+					}
+				}
+				t.Errorf("container %s carries the socket URL but no attestation-api-socket mount; mounts %+v", c.Name, c.VolumeMounts)
+			}
+			assertHasSocketMount(cds)
+			mesh := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh")
+			if !slices.Contains(mesh.Args, "unix:///var/run/nri-image-policy/attestation-api.sock") {
+				t.Errorf("ratls-mesh missing the socket URL arg; have %v", mesh.Args)
+			}
+			assertHasSocketMount(mesh)
+			if sc := renderedDaemonSet(t, out, "c8s-ratls-mesh").Spec.Template.Spec.SecurityContext; sc == nil || !slices.Contains(sc.SupplementalGroups, int64(65532)) {
+				t.Errorf("ratls-mesh pod must carry supplementalGroups [65532] to connect to the socket; got %+v", sc)
+			}
+			assertHasSocketMount(tlsLBGetCertContainer(t, out, "c8s-cert"))
+			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest"))
+			assertHasSocketMount(renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy"))
 			for _, w := range renderedPodSpecs(t, out) {
 				for _, c := range append(append([]corev1.Container{}, w.spec.InitContainers...), w.spec.Containers...) {
 					for _, e := range c.Env {
@@ -2237,7 +2376,7 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		// the mTLS args render only for an https upstream.
 		"--upstream=http://c8s-infer.c8s-system.svc.cluster.local:8000",
 	)
-	assertContainerHasArgPrefix(t, "cds-attest", sidecar.Args, "--attestation-api-url=http://")
+	assertContainerHasArgPrefix(t, "cds-attest", sidecar.Args, "--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock")
 	for _, banned := range []string{"--upstream-ca", "--upstream-cert", "--upstream-key", "--upstream-server-name"} {
 		assertContainerNoArgPrefix(t, "cds-attest", sidecar.Args, banned)
 	}
@@ -2627,15 +2766,16 @@ func TestTLSLBExposesAllowlistThroughCDSByDefault(t *testing.T) {
 		"--host=127.0.0.1",
 		"--port=8801",
 		"--cds-url=https://c8s-cds.c8s-system.svc:8443",
-		"--attestation-api-url=http://$(HOST_IP):8400",
+		"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock",
 	} {
 		assertContainerHasArg(t, "allowlist-proxy", proxy.Args, want)
 	}
-	if len(proxy.VolumeMounts) != 0 {
-		t.Fatalf("allowlist-proxy must not receive TLS or operator private keys: mounts=%v", proxy.VolumeMounts)
-	}
-	if !hasHostIPEnv(proxy) {
-		t.Fatalf("allowlist-proxy missing HOST_IP downward-API env: env=%v", proxy.Env)
+	// No TLS or operator key material: the only mount is the read-only
+	// attestation socket directory.
+	for _, m := range proxy.VolumeMounts {
+		if m.Name != "attestation-api-socket" || !m.ReadOnly {
+			t.Fatalf("allowlist-proxy must not receive TLS or operator private keys: mounts=%v", proxy.VolumeMounts)
+		}
 	}
 }
 
@@ -4616,16 +4756,16 @@ func TestChartPointsClientsAtCDS(t *testing.T) {
 // (no Secret/ca-cert flag), the allowlist DB, and the in-process JWKS (no
 // --jwks-url, since signing happens in the same binary).
 func TestChartCDSWiresInProcessTrustRoot(t *testing.T) {
-	// gke: host-side attestation-api at its Service DNS. node points CDS at the
-	// baked host attestation-api via HOST_IP (covered separately), so pin the
-	// Service-URL mode here.
+	// gke: host-side attestation-api over the on-node Unix socket. node points
+	// CDS at the baked host attestation-api via HOST_IP (covered separately),
+	// so pin the socket mode here.
 	out, err := helmTemplate(t, "--set", "attestationApi.cvmMode=gke")
 	if err != nil {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
 	for _, want := range []string{
-		"--attestation-api-url=http://c8s-attestation-api.c8s-system.svc:8400",
+		"--attestation-api-url=unix:///var/run/nri-image-policy/attestation-api.sock",
 		"--allowlist-db=/data/allowlist.db",
 		"--ca-common-name=c8s Mesh CA",
 		"--ca-cert-validity=8760h",

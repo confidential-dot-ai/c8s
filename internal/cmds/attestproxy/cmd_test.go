@@ -67,7 +67,7 @@ func TestProxyForwardsOverSocket(t *testing.T) {
 	}))
 	sock := serveProxy(t, config{upstream: upstream, socketGID: 0})
 
-	if _, err := attestationclient.NewClient("unix://" + sock).Attest(context.Background(), types.AttestRequest{}); err != nil {
+	if _, err := attestationclient.NewClient("unix://"+sock).Attest(context.Background(), types.AttestRequest{}); err != nil {
 		t.Fatalf("Attest over proxy socket: %v", err)
 	}
 }

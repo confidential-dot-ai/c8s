@@ -315,9 +315,10 @@ restart-fragility window above applies until the operator fixes the
 underlying issue. On a node-as-CVM (non-kata) cluster, `make
 test-e2e-ca-handoff` proves the full path end to end: it runs an attested
 in-cluster probe (`c8s cds request-handoff`) that pulls the CA over `/handoff`
-and verifies it against the served `/ca`. (The probe pod dials the local
-attestation-api Service; under kata that service is in-guest loopback, so the
-script does not support kata mode.)
+and verifies it against the served `/ca`. (The probe pod reuses CDS's own
+`--attestation-api-url` — the node-local Unix socket on node-as-CVM, mounted
+from the host; under kata that endpoint is in-guest loopback, so the script
+does not support kata mode.)
 
 ### Operator-added allowlist entries across restarts
 

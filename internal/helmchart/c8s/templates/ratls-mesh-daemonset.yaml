@@ -70,6 +70,12 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+        # workloadclaims.InventorySocketGID: the attest-proxy's socket is
+        # group-owned by it; the mesh runs as uid 1337 and needs the group to
+        # connect.
+        supplementalGroups: [65532]
+        {{- end }}
       {{- include "c8s.imagePullSecrets" (dict "root" $ "local" .Values.ratlsMesh.imagePullSecrets) | nindent 6 }}
       tolerations:
         - operator: "Exists"
@@ -85,6 +91,7 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
       initContainers:
         # Native sidecar (K8s 1.29+): cleanup runs last on shutdown because
         # sidecars stop in reverse initContainer order.
@@ -219,6 +226,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
           args:
             - --platform
             - {{ .Values.ratlsMesh.platform | quote }}

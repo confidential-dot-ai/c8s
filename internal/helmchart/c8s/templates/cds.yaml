@@ -294,6 +294,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
             {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - name: allowlist-seed
               mountPath: /etc/cds
@@ -325,6 +326,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
         {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
         - name: allowlist-seed
           configMap:
