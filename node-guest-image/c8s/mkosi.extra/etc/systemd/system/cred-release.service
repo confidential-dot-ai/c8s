@@ -11,14 +11,16 @@ StartLimitBurst=5
 # creates /var/lib/rancher/rke2/server/tls/client-ca.* only once it has
 # initialised, so we order after it and gate on the key existing (the Exec
 # startpre below), rather than racing a half-initialised control plane.
-After=network-online.target rke2-server.service attestation-api.service
+After=network-online.target rke2-role.service rke2-server.service attestation-api.service
 Wants=network-online.target
-Requires=attestation-api.service
+Requires=rke2-role.service attestation-api.service
 # Only run on operator boots. A VM launched without --operator-key has no
 # opkeydata disk; the condition makes systemd SKIP the unit (not fail it), so
 # there's no restart-loop on non-operator nodes. The launcher attaches the
 # disk with ISO label "opkeydata".
 ConditionPathExists=/dev/disk/by-label/opkeydata
+# Server role only: agent nodes have no client CA to sign with.
+ConditionPathExists=/run/confos/role-server
 
 [Service]
 Type=simple
