@@ -26,13 +26,6 @@
 # not rebuild and clobber the tree the modules were built against.
 #
 # Knobs:
-#   C8S_VARIANT=...    profile stack, one of:
-#                      gpu (default)  — gpu + attest-gpu + c8s: the published
-#                        image; GPU driver stack and GPU (SPDM) evidence.
-#                      nogpu          — attest + c8s: GPU-less validation
-#                        image. Never publish: without the gpu profile nothing
-#                        latches kernel.modules_disabled=1, so module loading
-#                        stays enabled for the whole boot.
 #   C8S_DEV=1          demo/debug build: kernel/c8s-dev.config fragment
 #                      (8250 serial re-enabled) + the dev profile
 #                      (console=ttyS0, passwordless serial autologin).
@@ -58,7 +51,6 @@
 #
 # Extra args are passed through to `confos build`, e.g.:
 #   node-guest-image/build --profile ssh          # + SSH for bring-up debugging
-#   C8S_VARIANT=nogpu node-guest-image/build --profile dev
 set -euo pipefail
 NGI_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFOS_DIR=${CONFOS_DIR:-"$NGI_DIR/../../confidential-os-builder"}
@@ -76,20 +68,9 @@ bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
     --module-signing-cert "$NGI_DIR/module-signing.crt" \
     --kernel-builder-package "$KB_PKGS"
-case "${C8S_VARIANT:-gpu}" in
-    gpu)
-        PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
-        MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
-        bin/confos-fetch-attest-gpu
-        ;;
-    nogpu)
-        PROFILES=(--profile attest --profile c8s)
-        ;;
-    *)
-        echo "node-guest-image/build: unknown C8S_VARIANT='${C8S_VARIANT}' (gpu|nogpu)" >&2
-        exit 1
-        ;;
-esac
+PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
+MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
+bin/confos-fetch-attest-gpu
 exec bin/confos build "${C8S_NAME:-c8s}" \
     "${PROFILES[@]}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \

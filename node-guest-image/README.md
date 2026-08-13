@@ -18,8 +18,7 @@ Layout:
   baselines stay in confos: a fragment request that conflicts with them
   fails the build (see the balloon catch in #263).
 - `build` — drop-in replacement for confos's `bin/build-c8s`: same env
-  contract (`C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_VARIANT`,
-  `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
+  contract (`C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
 
