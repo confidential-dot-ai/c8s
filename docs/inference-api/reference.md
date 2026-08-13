@@ -1,34 +1,13 @@
-# Confidential Inference API
+# Inference API Specification
 
 The Confidential Inference API provides OpenAI-compatible chat completions at
 `https://api.confidential.ai`. The gateway validates the caller key at the
 public boundary. It does not forward that key to the inference node.
 
+New here? [Get started](README.md) sends a first completion.
+
 All endpoints use HTTPS. Every response contains an `x-request-id` header.
 Save this value when you need to fetch a completion receipt.
-
-## Quickstart
-
-Set your API key and read the available model list. Use a model ID from that
-list in a completion request.
-
-```bash
-export CONFIDENTIAL_API_KEY='replace-with-your-api-key'
-export CONFIDENTIAL_API_BASE='https://api.confidential.ai'
-
-curl --fail --silent "$CONFIDENTIAL_API_BASE/v1/models" | jq .
-```
-
-```bash
-curl --fail --silent "$CONFIDENTIAL_API_BASE/v1/chat/completions" \
-  -H "Authorization: Bearer $CONFIDENTIAL_API_KEY" \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "model": "MODEL_ID_FROM_V1_MODELS",
-    "messages": [{"role": "user", "content": "Reply with one word: ready."}],
-    "stream": false
-  }' | jq .
-```
 
 ## Authentication
 
@@ -47,7 +26,17 @@ All JSON errors use this shape:
 {"error":{"code":"machine_readable_code"}}
 ```
 
-## Endpoints
+## Endpoint index
+
+| Endpoint | Purpose | Authentication |
+| --- | --- | --- |
+| [`POST /v1/chat/completions`](#post-v1chatcompletions) | Generate an OpenAI-compatible completion. | Bearer API key |
+| [`GET /v1/models`](#get-v1models) | Read the configured model catalog. | None |
+| [Attestation](#get-v1aciattestationnoncebase64url) | Verify the gateway and linked inference node. | None |
+| [`GET /v1/aci/receipts/{request_id}`](#get-v1acireceiptsrequest_id) | Read signed evidence for one completed request. | None |
+| [`GET /health`](#get-health) | Read gateway readiness. | None |
+
+## API reference
 
 ### `GET /health`
 

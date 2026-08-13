@@ -15,7 +15,7 @@ const SECTIONS: { title: string; href: string; file: string }[] = [
   { title: "Kettle: Attested Builds", href: "/docs/kettle-whitepaper", file: "kettle-whitepaper.md" },
   { title: "Attestable Builds", href: "/docs/attestable-builds", file: "attestable-builds/README.md" },
   { title: "Zero Knowledge", href: "/docs/zk", file: "zk.md" },
-  { title: "Confidential Inference API", href: "/docs/inference-api", file: "inference-api.md" },
+  { title: "Inference API", href: "/docs/inference-api", file: "inference-api/README.md" },
 ];
 
 function buildDocsToc(): TocItem[] {
