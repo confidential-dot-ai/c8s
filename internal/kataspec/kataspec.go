@@ -42,11 +42,8 @@ const (
 )
 
 // IsSandbox reports whether the annotations mark this as the pod's sandbox
-// (pause) container. It mirrors the baked kata-agent policy's
-// sandbox_annotations rule, and the lockstep is load-bearing: in guest-pull
-// mode kata runs the pause baked into the dm-verity rootfs for any container
-// that rule accepts, so the set c8s exempts from digest enforcement must not
-// be wider. policy_lockstep_test.go machine-compares the two predicates.
+// (pause) container, mirroring the baked kata-agent policy's
+// sandbox_annotations rule; policy_lockstep_test.go machine-compares the two.
 func IsSandbox(annotations map[string]string) bool {
 	return annotations[kataContainerTypeKey] == "pod_sandbox" &&
 		annotations[criContainerTypeKey] == "sandbox"

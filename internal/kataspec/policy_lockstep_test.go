@@ -92,11 +92,77 @@ func TestPullDigestAgreesWithBakedPolicy(t *testing.T) {
 	}
 }
 
+// ruleBodies extracts the bodies of the policy's top-level definitions of
+// name. The read is deliberately strict, and the lockstep tests below rely on
+// it: definitions are counted at column 0 so a second rule counts however it
+// is indented, each definition must be the braced, tab-indented shape these
+// tests parse, and an else chain after a body fails the test rather than
+// going unread.
+func ruleBodies(t *testing.T, policy, name string) []string {
+	t.Helper()
+	defs := regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(name)+`\b`).FindAllStringIndex(policy, -1)
+	if len(defs) == 0 {
+		t.Fatalf("baked policy defines no %s rule", name)
+	}
+	body := regexp.MustCompile(regexp.QuoteMeta(name) + `[^\n{]*\{\n((?:\t[^\n]*\n|\n)+)\}`)
+	elseChain := regexp.MustCompile(`^\s*else\b`)
+	var bodies []string
+	for _, def := range defs {
+		m := body.FindStringSubmatchIndex(policy[def[0]:])
+		if m == nil || m[0] != 0 {
+			t.Fatalf("%s is not the braced, tab-indented rule this test reads", name)
+		}
+		if elseChain.MatchString(policy[def[0]+m[1]:]) {
+			t.Fatalf("%s continues in an else chain this test does not read", name)
+		}
+		bodies = append(bodies, policy[def[0]+m[2]:def[0]+m[3]])
+	}
+	return bodies
+}
+
 // containerd is the only CRI in this shape, so an honest CreateContainerRequest
-// never carries the CRI-O container-type key; the policy denies one that does.
+// never carries the CRI-O container-type key; the policy denies one that does,
+// in the OCI annotations and in the guest-pull metadata kata's handler reads
+// the marker from. The guards are pinned as lines of the CreateContainerRequest
+// body itself — a commented-out or relocated line would still contain the
+// substring.
 func TestBakedPolicyRejectsCRIOContainerTypeMarker(t *testing.T) {
-	if !strings.Contains(readPolicy(t), `not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]`) {
-		t.Error("baked policy does not reject the CRI-O container-type marker")
+	bodies := ruleBodies(t, readPolicy(t), "CreateContainerRequest")
+	if len(bodies) != 1 {
+		t.Fatalf("baked policy has %d CreateContainerRequest rules, want exactly one", len(bodies))
+	}
+	for _, guard := range []string{
+		`not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]`,
+		`not crio_pull_metadata(pull)`,
+	} {
+		line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta(guard) + `$`)
+		if !line.MatchString(bodies[0]) {
+			t.Errorf("CreateContainerRequest does not carry the guard line %q", guard)
+		}
+	}
+}
+
+// pull_source_bound decides what kata runs for an admitted request; its
+// sandbox branch is what makes it safe for policy-monitor to exempt the pause
+// from digest enforcement. Pin the admission shape that safety rests on:
+// exactly two branches, exactly one keyed on sandbox_annotations, and that
+// branch bound to the measured pause.
+func TestBakedPolicyBindsSandboxPullToPause(t *testing.T) {
+	bodies := ruleBodies(t, readPolicy(t), "pull_source_bound")
+	if len(bodies) != 2 {
+		t.Fatalf("baked policy has %d pull_source_bound branches, want exactly two (another would OR a second source binding past the admission contract)", len(bodies))
+	}
+	var sandbox []int
+	for i, b := range bodies {
+		if strings.Contains(b, "\tsandbox_annotations\n") {
+			sandbox = append(sandbox, i)
+		}
+	}
+	if len(sandbox) != 1 {
+		t.Fatalf("want exactly one pull_source_bound branch keyed on sandbox_annotations, got %d", len(sandbox))
+	}
+	if !strings.Contains(bodies[sandbox[0]], "\tpull.source == \"pause\"\n") {
+		t.Error("the sandbox branch of pull_source_bound does not bind pull.source to the measured pause")
 	}
 }
 
@@ -106,15 +172,13 @@ func TestBakedPolicyRejectsCRIOContainerTypeMarker(t *testing.T) {
 // predicate.
 func sandboxConjuncts(t *testing.T, policy string) map[string]string {
 	t.Helper()
-	rule := regexp.MustCompile(`sandbox_annotations if \{\n(?:\t[^\n]+\n)+\}`)
-	blocks := rule.FindAllString(policy, -1)
-	if len(blocks) != 1 {
-		t.Fatalf("baked policy has %d sandbox_annotations rules, want exactly one (a second one would OR another predicate past this test)", len(blocks))
+	bodies := ruleBodies(t, policy, "sandbox_annotations")
+	if len(bodies) != 1 {
+		t.Fatalf("baked policy has %d sandbox_annotations rules, want exactly one (a second one would OR another predicate past this test)", len(bodies))
 	}
-	block := regexp.MustCompile(`\{\n((?:\t[^\n]+\n)+)\}`).FindStringSubmatch(blocks[0])
 	equality := regexp.MustCompile(`^input\.OCI\.Annotations\["([^"]+)"\] == "([^"]+)"$`)
 	pairs := map[string]string{}
-	for _, l := range strings.Split(strings.TrimRight(block[1], "\n"), "\n") {
+	for _, l := range strings.Split(strings.TrimRight(bodies[0], "\n"), "\n") {
 		m := equality.FindStringSubmatch(strings.TrimPrefix(l, "\t"))
 		if m == nil {
 			t.Fatalf("sandbox_annotations carries a line the lockstep test cannot read: %q", l)
@@ -135,6 +199,20 @@ func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
 	conjuncts := sandboxConjuncts(t, readPolicy(t))
 	const crioKey = "io.kubernetes.cri-o.ContainerType"
 
+	check := func(annotations map[string]string) {
+		t.Helper()
+		policy := true
+		for key, want := range conjuncts {
+			if annotations[key] != want {
+				policy = false
+				break
+			}
+		}
+		if got := IsSandbox(annotations); got != policy {
+			t.Errorf("annotations %v: IsSandbox = %v, sandbox_annotations = %v", annotations, got, policy)
+		}
+	}
+
 	kataValues := []string{"", "pod_sandbox", "pod_container", "bogus"}
 	criValues := []string{"", "sandbox", "container", "SANDBOX"}
 	crioValues := []string{"", "sandbox", "container"}
@@ -152,18 +230,21 @@ func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
 						annotations[key] = value
 					}
 				}
-				policy := true
-				for key, want := range conjuncts {
-					if annotations[key] != want {
-						policy = false
-						break
-					}
-				}
-				if got := IsSandbox(annotations); got != policy {
-					t.Errorf("annotations %v: IsSandbox = %v, sandbox_annotations = %v", annotations, got, policy)
-				}
+				check(annotations)
 			}
 		}
+	}
+
+	// "" is the absent sentinel above; a marker present with an empty value
+	// is a distinct row the host can write.
+	for _, annotations := range []map[string]string{
+		{kataContainerTypeKey: ""},
+		{criContainerTypeKey: ""},
+		{kataContainerTypeKey: "", criContainerTypeKey: "sandbox"},
+		{kataContainerTypeKey: "pod_sandbox", criContainerTypeKey: ""},
+		{kataContainerTypeKey: "", criContainerTypeKey: "", crioKey: ""},
+	} {
+		check(annotations)
 	}
 }
 
