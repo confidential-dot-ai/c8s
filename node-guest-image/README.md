@@ -1,6 +1,6 @@
 # node-guest-image
 
-The c8s node image (`c8s-base`, `rke2[-cdi]-*` tags), defined in THIS repo
+The c8s node image (`node-guest-base`, `rke2[-cdi]-*` tags), defined in THIS repo
 and built by [confidential-os-builder] acting purely as a builder — the same
 ownership split `kata-guest-base/` already has with confos as a pinned tool.
 Tracking issue: [#264].

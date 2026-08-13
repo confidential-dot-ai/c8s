@@ -1,7 +1,8 @@
 # Build + publish the c8s confidential node image (TDX-measured RKE2 + NRI +
 # attestation-api + NVIDIA stack in the verity rootfs). confos is the build
 # tree (pinned CONFOS_REF); the trigger, baked commit, and publish live here.
-# Output: ghcr.io/confidential-dot-ai/c8s-base, tags :rke2-cdi / :rke2-cdi-<sha>
+# Output: ghcr.io/confidential-dot-ai/node-guest-base, tags :rke2-cdi / :rke2-cdi-<sha>
+# (named to match kata-guest-base; pre-flip images stay frozen under c8s-base)
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
 on:
@@ -106,7 +107,7 @@ jobs:
       - name: Set image ref and variant
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
         run: |
-          echo "IMAGE=${REGISTRY}/confidential-dot-ai/c8s-base" >> "$GITHUB_ENV"
+          echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base" >> "$GITHUB_ENV"
           if [ "${{ github.event.inputs.dev }}" = "true" ]; then
             echo "VARIANT=rke2-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
