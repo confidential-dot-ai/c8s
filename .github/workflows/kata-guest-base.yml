@@ -86,7 +86,7 @@ env:
   # new pin means a new guest kernel and therefore a new SNP launch
   # measurement, and the committed kernel/config-x86_64.snapshot lockfile must
   # be refreshed in the same PR (kernel-snapshot.yml produces it).
-  CONFOS_REF: "3e6f858f93e1b85c6d1473aa4a031fdefb387710" # v0.3.0
+  CONFOS_REF: "f7d03b74c1d6a740d0dc2478ee127245da567249" # v0.4.1 — reproducible kernel (confos#85); rolls the kata kernel measurement once
 
 jobs:
   build:
