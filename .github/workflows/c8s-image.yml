@@ -32,11 +32,6 @@ on:
         required: false
         type: boolean
         default: false
-      gate_intree:
-        description: "Gate helper: build via confos's in-tree bin/build-c8s instead of node-guest-image/build (needs a confos_ref that still ships the c8s profile). Pair with gate=true; the A/B against the staged path shares this branch's kernel cache, isolating the profile mechanism as the only variable."
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -69,7 +64,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ github.event.inputs.confos_ref || '01539a8c8e139228918b76215a1d5168bc22f9a6' }} # pin: post-v0.3.0 main, --profile-dir/--sync-input (confos#81)
+  CONFOS_REF: ${{ github.event.inputs.confos_ref || '5cc90e4dd333b70d2c9e2022e6f80f87d1681330' }} # TODO(pre-merge): bump to the v0.4.0 tag commit (needs confos#84+#89+#92 merged — script renames + profile deletion)
 
 jobs:
   build-and-push:
@@ -180,9 +175,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/gpu/cache
-          key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/steep-fetch-gpu') }}
+          key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/confos-fetch-gpu') }}
 
-      # attest-gpu: build-c8s runs steep-fetch-attest-gpu, which needs a
+      # attest-gpu: the build runs confos-fetch-attest-gpu, which needs a
       # prebuilt ATTEST_GPU_BIN + LIBNVAT. Vendor libnvat (Apache-2.0, digest-
       # pinned) and build the binary with NVAT_USE_SYSTEM_LIB=1.
       - name: Setup ORAS
@@ -245,11 +240,7 @@ jobs:
           # it to rebuild a published release. Definition lives in this repo:
           # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          if [ "${{ github.event.inputs.gate_intree }}" = "true" ]; then
-            C8S_NAME="$VARIANT" bin/build-c8s
-          else
-            C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
-          fi
+          C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
