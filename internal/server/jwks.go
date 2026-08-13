@@ -8,9 +8,9 @@ import (
 )
 
 // HandleJWKS returns a handler that serves a JWKS document.
-// If jwksFunc is provided, it returns the pre-serialized JSON on each request
-// (for rotation mode with multiple keys). Otherwise it serves a static JWKS
-// built from the Issuer's current key.
+// If jwksFunc is provided, it supplies the body on each request (for rotation
+// mode with multiple keys). Otherwise it serves a static JWKS built from the
+// Issuer's current key.
 func HandleJWKS(iss ear.Issuer, jwksFunc func() []byte) http.HandlerFunc {
 	if jwksFunc != nil {
 		return func(w http.ResponseWriter, r *http.Request) {
