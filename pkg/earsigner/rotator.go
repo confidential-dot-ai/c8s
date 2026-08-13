@@ -34,6 +34,11 @@ type managedKey struct {
 	notAfterT time.Time
 }
 
+// expired reports whether now is at or past the key's deadline.
+func (k *managedKey) expired(now time.Time) bool {
+	return !now.Before(k.notAfterT)
+}
+
 // SwapKeyFunc is called when the active signing key changes.
 type SwapKeyFunc func(key *ecdsa.PrivateKey, kid string)
 
@@ -94,7 +99,7 @@ func (r *Rotator) JWKSetJSON() []byte {
 	// Retiring keys are served until their overlap deadline, as in PublicKey.
 	now := time.Now()
 	for _, k := range r.retiring {
-		if !now.Before(k.notAfterT) {
+		if k.expired(now) {
 			continue
 		}
 		if jwk, err := jwks.FromPublicKey(&k.key.PublicKey); err == nil {
@@ -134,7 +139,7 @@ func (r *Rotator) PublicKey(kid string) (*ecdsa.PublicKey, error) {
 	now := time.Now()
 	for _, k := range r.retiring {
 		if k.kid == kid {
-			if !now.Before(k.notAfterT) {
+			if k.expired(now) {
 				return nil, fmt.Errorf("token-signer key for kid %q is retired (past overlap deadline)", kid)
 			}
 			return &k.key.PublicKey, nil
@@ -194,7 +199,7 @@ func (r *Rotator) rotate() {
 	// Evict expired retiring keys.
 	live := r.retiring[:0]
 	for _, k := range r.retiring {
-		if k.notAfterT.After(now) {
+		if !k.expired(now) {
 			live = append(live, k)
 		} else {
 			r.cfg.Logger.Info("evicted expired key", "kid", k.kid)

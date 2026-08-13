@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -98,7 +100,7 @@ func TestJWKSetJSON_HasActiveKey(t *testing.T) {
 }
 
 // TestRun_Rotation drives the rotation loop with a tiny interval to exercise
-// rotate(), the swap callback, and JWKS rebuild including a retiring key.
+// rotate(), the swap callback, and JWKS serving of a retiring key.
 func TestRun_Rotation(t *testing.T) {
 	keyPEM, err := earsigner.Generate()
 	if err != nil {
@@ -357,8 +359,6 @@ func TestJWKSAgreesWithPublicKeyAcrossSchedule(t *testing.T) {
 		t.Helper()
 		select {
 		case kid := <-swaps:
-			// Let rotate() finish before sampling its observable state.
-			time.Sleep(25 * time.Millisecond)
 			return kid
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for rotation")
@@ -384,6 +384,85 @@ func TestJWKSAgreesWithPublicKeyAcrossSchedule(t *testing.T) {
 	assertAgree(k0, false, "after next rotate")
 	assertAgree(k1, true, "after next rotate")
 	assertAgree(k2, true, "after next rotate")
+}
+
+// TestJWKSetJSONConcurrentWithRotation hammers JWKSetJSON and PublicKey from
+// concurrent readers while the rotation loop runs, asserting every served
+// body is a complete valid JWKS and lookups stay correct mid-rotation.
+func TestJWKSetJSONConcurrentWithRotation(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Overlap is long compared to the reader run time, so the initial key
+	// must resolve via PublicKey throughout.
+	r, err := earsigner.NewRotator(earsigner.RotatorConfig{
+		Interval: 5 * time.Millisecond,
+		Overlap:  time.Second,
+		Jitter:   0,
+		Logger:   discardLogger(),
+	}, keyPEM, func(*ecdsa.PrivateKey, string) {})
+	if err != nil {
+		t.Fatalf("NewRotator: %v", err)
+	}
+	initialKid := firstKid(t, r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	const readers = 8
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				var set struct {
+					Keys []jwkEntry `json:"keys"`
+				}
+				if err := json.Unmarshal(r.JWKSetJSON(), &set); err != nil {
+					errs <- fmt.Errorf("unmarshal served JWKS: %w", err)
+					return
+				}
+				if len(set.Keys) == 0 {
+					errs <- errors.New("served JWKS has no keys")
+					return
+				}
+				for _, k := range set.Keys {
+					if k.Kid == "" || k.Kty == "" || k.Crv == "" {
+						errs <- fmt.Errorf("served incomplete JWK entry: %+v", k)
+						return
+					}
+				}
+				if _, err := r.PublicKey(initialKid); err != nil {
+					errs <- fmt.Errorf("PublicKey(retiring kid) mid-rotation: %w", err)
+					return
+				}
+				if _, err := r.PublicKey("never-issued"); err == nil {
+					errs <- errors.New("PublicKey resolved an unknown kid")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
+	}
 }
 
 // firstTickIn starts Run with an already-cancelled context so it exits right
