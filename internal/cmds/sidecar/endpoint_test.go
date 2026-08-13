@@ -21,9 +21,9 @@ func TestEndpointSelectsCompiledShape(t *testing.T) {
 	if want := workloadclaims.GuestInventoryEndpoint(); guest != want {
 		t.Errorf("kata endpoint = %q, want the compiled guest loopback %q", guest, want)
 	}
-	// workloadclaims refuses anything that is not one of the two compiled
-	// endpoints, so a shape it rejects would fail every redemption. Use a real
-	// key: a nil one fails at marshalling, short of the endpoint check.
+	// workloadclaims only accepts a unix socket or the compiled guest loopback,
+	// so a shape it refuses would fail every redemption. Use a real key: a nil
+	// one fails at marshalling, short of the endpoint check.
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

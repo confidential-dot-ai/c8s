@@ -262,8 +262,8 @@ func startGuestInventory(t *testing.T) {
 
 // The kata path end to end, with nothing mounted: the sidecar redeems its token
 // on guest loopback, reads the blob from CDS, and hands it to an in-guest
-// volumed that mounts into kata's ephemeral directory. This is the whole of
-// what the host unix socket used to carry.
+// volumed that mounts into kata's ephemeral directory — the same delivery the
+// node path runs over the host unix sockets.
 func TestSidecarOpensAVolumeInGuestEndToEnd(t *testing.T) {
 	startGuestInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
