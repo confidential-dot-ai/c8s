@@ -14,8 +14,8 @@
 # NVIDIA modules must compile against the already-built kernel tree:
 #
 #   1. confos kernel          — build/cache the kernel with kernel/c8s.config
-#   2. bin/steep-fetch-gpu    — build+sign NVIDIA modules, stage userspace
-#   3. bin/steep-fetch-attest-gpu — pre-stage the GPU attestation-api binary
+#   2. bin/confos-fetch-gpu    — build+sign NVIDIA modules, stage userspace
+#   3. bin/confos-fetch-attest-gpu — pre-stage the GPU attestation-api binary
 #      + libnvat into mkosi.local (set ATTEST_GPU_BIN + LIBNVAT; CI builds the
 #      binary with --features nvidia-gpu-attest against a vendored libnvat)
 #   4. confos build           — the c8s profile's own mkosi.sync fetches
@@ -38,7 +38,7 @@
 #                      Use when a build environment lacks libnvat / can't build
 #                      the nvidia-gpu-attest binary. The default (this var
 #                      unset) composes attest-gpu, which CI supports via a
-#                      vendored libnvat + steep-fetch-attest-gpu pre-stage.
+#                      vendored libnvat + confos-fetch-attest-gpu pre-stage.
 #   C8S_DEV=1          demo/debug build: kernel/c8s-dev.config fragment
 #                      (8250 serial re-enabled) + the dev profile
 #                      (console=ttyS0, passwordless serial autologin).
@@ -56,6 +56,11 @@
 #                      Use to test an unmerged c8s build end-to-end.
 #   CONFOS_DIR=...     confos checkout to build with (default: sibling of this
 #                      repo's checkout).
+#   MODULE_SIG_KEY_PEM / MODULE_SIG_KEY
+#                      private half of node-guest-image/module-signing.crt,
+#                      used to sign the NVIDIA modules. Required for GPU
+#                      builds; CI supplies it from a secret. The public half
+#                      is committed and measured — see MODULE-SIGNING.md.
 #
 # Extra args are passed through to `confos build`, e.g.:
 #   node-guest-image/build --profile ssh          # + SSH for bring-up debugging
@@ -75,21 +80,23 @@ fi
 KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
 bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
+    --module-signing-cert "$NGI_DIR/module-signing.crt" \
     --kernel-builder-package "$KB_PKGS"
 if [ "${C8S_NO_GPU:-0}" = 1 ]; then
     PROFILES=(--profile attest --profile c8s)
 elif [ "${C8S_STOCK_ATTEST:-0}" = 1 ]; then
     PROFILES=(--profile gpu --profile attest --profile c8s)
-    bin/steep-fetch-gpu
+    MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
 else
     PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
-    bin/steep-fetch-gpu
-    bin/steep-fetch-attest-gpu
+    MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
+    bin/confos-fetch-attest-gpu
 fi
 exec bin/confos build "${C8S_NAME:-c8s}" \
     "${PROFILES[@]}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
     --profile-dir "$NGI_DIR/c8s" \
+    --module-signing-cert "$NGI_DIR/module-signing.crt" \
     --sync-input "c8s-ref=${C8S_REF:-}" \
     --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
     --kernel-config-fragment "$FRAGMENT" \

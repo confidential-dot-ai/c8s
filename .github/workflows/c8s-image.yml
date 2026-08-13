@@ -1,7 +1,8 @@
 # Build + publish the c8s confidential node image (TDX-measured RKE2 + NRI +
 # attestation-api + NVIDIA stack in the verity rootfs). confos is the build
 # tree (pinned CONFOS_REF); the trigger, baked commit, and publish live here.
-# Output: ghcr.io/confidential-dot-ai/c8s-base, tags :rke2-cdi / :rke2-cdi-<sha>
+# Output: ghcr.io/confidential-dot-ai/node-guest-base, tags :rke2-cdi / :rke2-cdi-<sha>
+# (named to match kata-guest-base; pre-flip images stay frozen under c8s-base)
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
 on:
@@ -22,6 +23,16 @@ on:
         required: false
         type: string
         default: ""
+      confos_ref:
+        description: "Build with this confos commit instead of the pinned CONFOS_REF. For A/B measurement checks (pair with gate=true); a different confos can mean a different measurement."
+        required: false
+        type: string
+        default: ""
+      gate:
+        description: "Build only — skip the publish and upload manifest.json + roothash as a run artifact, for measurement comparison against a published build."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,16 +52,20 @@ concurrency:
   # path, so the auto path groups exactly as before.
   group: >-
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
-    }}-${{ github.event.inputs.c8s_ref }}-${{ github.event.inputs.dev }}
+    }}-${{ github.event.inputs.c8s_ref }}-${{ github.event.inputs.dev
+    }}-${{ github.event.inputs.confos_ref }}-${{ github.event.inputs.gate
+    }}-${{ github.event.inputs.gate_intree }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
-  # confos build tree (kernel, rootfs, #82 firmware, measurement logic). Full
+  # confos build tree (kernel, base rootfs machinery, #82 firmware, measurement
+  # logic — the c8s profile itself lives in this repo, node-guest-image/). Full
   # SHA (checkout fetches it as a ref). Pinned, not main: bumping it changes
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
-  # refresh. Must be on confos origin/main.
-  CONFOS_REF: "01539a8c8e139228918b76215a1d5168bc22f9a6" # post-v0.3.0 main: --profile-dir/--sync-input (#81 in confos)
+  # refresh. Must be on confos origin/main. The confos_ref dispatch input
+  # overrides it for A/B measurement checks.
+  CONFOS_REF: ${{ github.event.inputs.confos_ref || 'f7d03b74c1d6a740d0dc2478ee127245da567249' }} # pin: v0.4.1 — MODULE_SIG_KEY="" (no per-build GENKEY cert), fragment kernels bit-reproducible
 
 jobs:
   build-and-push:
@@ -92,7 +107,7 @@ jobs:
       - name: Set image ref and variant
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
         run: |
-          echo "IMAGE=${REGISTRY}/confidential-dot-ai/c8s-base" >> "$GITHUB_ENV"
+          echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base" >> "$GITHUB_ENV"
           if [ "${{ github.event.inputs.dev }}" = "true" ]; then
             echo "VARIANT=rke2-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
@@ -137,7 +152,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/kernel
-          key: ${{ runner.os }}-kernel-${{ env.VARIANT }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/kernel/c8s.config','confidential-os-builder/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/version','confidential-os-builder/bin/build-c8s') }}
+          key: ${{ runner.os }}-kernel-${{ env.VARIANT }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/version','c8s/node-guest-image/build') }}
 
       - name: Cache base image tools
         uses: actions/cache@v5
@@ -145,14 +160,14 @@ jobs:
           path: |
             confidential-os-builder/mkosi/base/mkosi.tools
             confidential-os-builder/mkosi/base/mkosi.tools.manifest
-          key: ${{ runner.os }}-c8s-tools-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf.d/tools.conf','confidential-os-builder/mkosi/base/mkosi.profiles/*/mkosi.conf') }}
+          key: ${{ runner.os }}-c8s-tools-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf.d/tools.conf','confidential-os-builder/mkosi/base/mkosi.profiles/*/mkosi.conf','c8s/node-guest-image/c8s/mkosi.conf') }}
 
       - name: Cache c8s artifact downloads
         # ~3.5G rke2 tarball + airgap bundles, sha256-verified on reuse.
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/mkosi/base/mkosi.pkgcache/c8s
-          key: ${{ runner.os }}-c8s-artifacts-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.profiles/c8s/mkosi.sync') }}
+          key: ${{ runner.os }}-c8s-artifacts-${{ hashFiles('c8s/node-guest-image/c8s/mkosi.sync') }}
           restore-keys: |
             ${{ runner.os }}-c8s-artifacts-
 
@@ -161,9 +176,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/gpu/cache
-          key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/steep-fetch-gpu') }}
+          key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/confos-fetch-gpu') }}
 
-      # attest-gpu: build-c8s runs steep-fetch-attest-gpu, which needs a
+      # attest-gpu: the build runs confos-fetch-attest-gpu, which needs a
       # prebuilt ATTEST_GPU_BIN + LIBNVAT. Vendor libnvat (Apache-2.0, digest-
       # pinned) and build the binary with NVAT_USE_SYSTEM_LIB=1.
       - name: Setup ORAS
@@ -213,15 +228,34 @@ jobs:
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          # Private half of the module signing certificate (org secret) — the
+          # fetch script signs the NVIDIA modules with it and fails closed
+          # without it. Signatures are deterministic (sign-file uses no
+          # authenticated attributes), so identical inputs sign identically.
+          MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
         run: |
           set -euo pipefail
-          # Short SHA matches docker.yml's component tags. build-c8s hands
-          # C8S_REF to mkosi.sync via a file (can't cross mkosi's sandbox).
-          # The c8s_ref input overrides it to rebuild a published release.
+          # Short SHA matches docker.yml's component tags. The build script
+          # hands C8S_REF to mkosi.sync via confos --sync-input (can't cross
+          # mkosi's sudo sandbox as an env var). The c8s_ref input overrides
+          # it to rebuild a published release. Definition lives in this repo:
+          # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          C8S_NAME="$VARIANT" bin/build-c8s
+          C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+
+      - name: Upload measurement evidence (gate)
+        # Gate mode ends here: evidence out, nothing published.
+        if: github.event.inputs.gate == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-${{ env.VARIANT }}-${{ github.run_id }}
+          path: |
+            confidential-os-builder/output/${{ env.VARIANT }}/manifest.json
+            confidential-os-builder/output/${{ env.VARIANT }}/roothash
+          if-no-files-found: error
 
       - name: Check whether the rootfs changed
+        if: github.event.inputs.gate != 'true'
         # Skip the multi-GB push when the roothash matches what's published.
         id: changed
         working-directory: confidential-os-builder
@@ -249,7 +283,7 @@ jobs:
           fi
 
       - name: Push to GHCR
-        if: steps.changed.outputs.skip != 'true'
+        if: github.event.inputs.gate != 'true' && steps.changed.outputs.skip != 'true'
         working-directory: confidential-os-builder
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
