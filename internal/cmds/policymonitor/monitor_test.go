@@ -406,10 +406,10 @@ func TestHandleNewContainer_SandboxSkippedEvenWithUnallowlistedDigest(t *testing
 }
 
 func TestHandleNewContainer_CRIOSandboxMarkerDoesNotExempt(t *testing.T) {
-	// containerd never writes the CRI-O container-type key, and the baked
-	// kata-agent policy reads only the containerd one: a workload marker
-	// pair plus a CRI-O "sandbox" marker is a workload to kata, so
-	// policy-monitor must digest-check it, not exempt it.
+	// The baked policy classifies on the containerd container-type marker
+	// and denies any request carrying the CRI-O one; if such a bundle ever
+	// reaches the guest anyway, policy-monitor must digest-check it, not
+	// exempt it.
 	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	cid := testCID("crionly-sb")

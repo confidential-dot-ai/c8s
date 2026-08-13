@@ -505,15 +505,15 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		return
 	}
 
-	// The pod sandbox (pause) container is out of allowlist scope. In
-	// guest-pull mode (which c8s forces) kata-agent runs the pause baked
-	// into the dm-verity rootfs for any container it deems a sandbox (see
-	// isSandbox), so the sandbox's integrity comes from the launch
-	// measurement, not a digest on the allowlist — and the host can't
-	// substitute it. Skip it, identified exactly the way kata does so a
-	// mislabelled workload can't slip through (kata would run the measured
-	// pause for it, not the host's image). Checked before extractDigest
-	// because the pause carries no image-name annotation.
+	// The pod sandbox (pause) container is out of allowlist scope: in
+	// guest-pull mode kata-agent runs the pause baked into the dm-verity
+	// rootfs for any container the baked policy's sandbox_annotations rule
+	// accepts, so its integrity comes from the launch measurement, not a
+	// digest on the allowlist — and the host can't substitute it.
+	// IsSandbox mirrors that rule (policy_lockstep_test.go machine-compares
+	// the two), so a mislabelled workload gains nothing: kata runs the
+	// measured pause for it, not the host's image. Checked before
+	// PullDigest because the pause carries no image-name annotation.
 	// Every container (the pause included) names its pod sandbox in the CRI
 	// annotations; capture it for the inventory's sandbox-identity surface.
 	if m.inventory != nil {
