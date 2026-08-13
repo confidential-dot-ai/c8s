@@ -113,6 +113,10 @@ CreateContainerRequest if {
 	count(input.shared_mounts) == 0
 	print("CreateContainerRequest: no shared_mounts")
 
+	# containerd is the only CRI in this shape and never sets the CRI-O key.
+	not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]
+	print("CreateContainerRequest: no foreign container-type marker")
+
 	pull := sole_guest_pull_storage
 	print("CreateContainerRequest: one image_guest_pull storage")
 

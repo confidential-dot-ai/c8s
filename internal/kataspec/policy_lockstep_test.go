@@ -92,6 +92,14 @@ func TestPullDigestAgreesWithBakedPolicy(t *testing.T) {
 	}
 }
 
+// containerd is the only CRI in this shape, so an honest CreateContainerRequest
+// never carries the CRI-O container-type key; the policy denies one that does.
+func TestBakedPolicyRejectsCRIOContainerTypeMarker(t *testing.T) {
+	if !strings.Contains(readPolicy(t), `not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]`) {
+		t.Error("baked policy does not reject the CRI-O container-type marker")
+	}
+}
+
 // A rule that silently reverts to `default … := true` is a no-op with no
 // symptom, so pin the decisions the guest's integrity rests on.
 func TestBakedPolicyKeepsItsFailClosedDefaults(t *testing.T) {

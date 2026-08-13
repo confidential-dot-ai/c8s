@@ -178,6 +178,27 @@ test_sandbox_source_must_be_pause if {
 	)
 }
 
+# object.union is shallow, so merge at each level to keep the rest of the
+# fixture — with the base fixtures admitted, only the override can deny.
+with_annotations(base, extra) := object.union(base, {"OCI": object.union(
+	base.OCI,
+	{"Annotations": object.union(base.OCI.Annotations, extra)},
+)})
+
+# containerd never sets the CRI-O marker; a request carrying one is denied
+# rather than classified, whatever the honest markers say.
+test_crio_container_type_marker_denied if {
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": "sandbox"})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": "container"})
+	not CreateContainerRequest with input as with_annotations(sandbox_input, {"io.kubernetes.cri-o.ContainerType": "sandbox"})
+}
+
+# The two type markers the policy conjoins must agree with each other.
+test_conflicting_container_type_markers_denied if {
+	not CreateContainerRequest with input as with_annotations(sandbox_input, {"io.kubernetes.cri.container-type": "container"})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.katacontainers.pkg.oci.container_type": "pod_sandbox"})
+}
+
 # --- sandbox and ephemeral storages -------------------------------------
 
 test_sandbox_storage_shaped_like_a_rootfs_denied if {
