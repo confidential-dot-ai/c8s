@@ -29,9 +29,6 @@
 #   C8S_VARIANT=...    profile stack, one of:
 #                      gpu (default)  — gpu + attest-gpu + c8s: the published
 #                        image; GPU driver stack and GPU (SPDM) evidence.
-#                      stock-attest   — gpu + attest + c8s: same attestation-api
-#                        on :8400 (TDX+SNP quotes) but no GPU evidence. Use
-#                        when the build env lacks libnvat.
 #                      nogpu          — attest + c8s: GPU-less validation
 #                        image. Never publish: without the gpu profile nothing
 #                        latches kernel.modules_disabled=1, so module loading
@@ -85,15 +82,11 @@ case "${C8S_VARIANT:-gpu}" in
         MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
         bin/confos-fetch-attest-gpu
         ;;
-    stock-attest)
-        PROFILES=(--profile gpu --profile attest --profile c8s)
-        MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
-        ;;
     nogpu)
         PROFILES=(--profile attest --profile c8s)
         ;;
     *)
-        echo "node-guest-image/build: unknown C8S_VARIANT='${C8S_VARIANT}' (gpu|stock-attest|nogpu)" >&2
+        echo "node-guest-image/build: unknown C8S_VARIANT='${C8S_VARIANT}' (gpu|nogpu)" >&2
         exit 1
         ;;
 esac
