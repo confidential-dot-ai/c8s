@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 )
 
 // fakeAttestFunc returns an AttestFunc that parses hex-encoded REPORTDATA
@@ -794,12 +797,12 @@ func TestDualVerifyPeerCallback_RATLSSelfSigned(t *testing.T) {
 	_, _, ratlsCert := testAttestedCert(t, &CertOptions{TTL: 1 * time.Hour})
 
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	srv := newMockedVerifySrv(t, verifyResponse(measurement))
-	defer srv.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 
 	_, caCert := generateCACert(t)
 	verifyFunc := dualVerifyPeerCallback(
-		&VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}},
+		&VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}},
 		newSharedCACerts([]*x509.Certificate{caCert}),
 	)
 
@@ -1031,8 +1034,8 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 	caKey, caCert := generateCACert(t)
 	shared := newSharedCACerts([]*x509.Certificate{caCert})
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	srv := newMockedVerifySrv(t, verifyResponse(measurement))
-	defer srv.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 
 	// caSignedLeaf builds a CA-signed leaf over key, optionally carrying the
 	// RA-TLS .1.1 evidence extension.
@@ -1073,14 +1076,14 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 	leafWithEvidence := caSignedLeaf(t, key, &ext)
 
 	t.Run("accepts CA leaf with re-verifiable evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{leafWithEvidence}, nil); err != nil {
 			t.Fatalf("valid CA leaf with embedded evidence rejected: %v", err)
 		}
 	})
 
 	t.Run("rejects CA leaf without embedded evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}, RequireCAEvidence: true}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{caSignedLeaf(t, freshKey(t), nil)}, nil); err == nil {
 			t.Fatal("CA leaf without embedded evidence accepted in production mode")
 		}
@@ -1088,14 +1091,14 @@ func TestDualVerifyPeerCallback_RequireCAEvidence(t *testing.T) {
 
 	t.Run("rejects CA leaf whose measurement is not pinned", func(t *testing.T) {
 		other := bytes.Repeat([]byte{0x99}, SNPMeasurementSize)
-		policy := &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{other}, RequireCAEvidence: true}
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{other}, RequireCAEvidence: true}
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{leafWithEvidence}, nil); err == nil {
 			t.Fatal("CA leaf with an unpinned launch measurement accepted in production mode")
 		}
 	})
 
 	t.Run("legacy mode still accepts CA leaf without evidence", func(t *testing.T) {
-		policy := &VerifyPolicy{AttestationApiURL: srv.URL} // RequireCAEvidence: false
+		policy := &VerifyPolicy{AttestationApiURL: stub.URL} // RequireCAEvidence: false
 		if err := dualVerifyPeerCallback(policy, shared)([][]byte{caSignedLeaf(t, freshKey(t), nil)}, nil); err != nil {
 			t.Fatalf("legacy CA-only mode rejected a CA-signed leaf: %v", err)
 		}
@@ -1474,9 +1477,9 @@ func TestClientTLSConfigWithoutCACertStaysRATLSOnly(t *testing.T) {
 
 func TestVerifyPeerCallback(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	srv := newMockedVerifySrv(t, verifyResponse(measurement))
-	defer srv.Close()
-	cb := verifyPeerCallback(&VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}})
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+	cb := verifyPeerCallback(&VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}})
 
 	_, _, attested := testAttestedCert(t, nil)
 	plain := generateSimpleCert(t)

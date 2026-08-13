@@ -9,15 +9,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 )
 
@@ -49,53 +48,39 @@ func attestedCertWithWindow(t *testing.T, notBefore, notAfter time.Time) *x509.C
 	return cert
 }
 
-// countingVerifySrv is an attestation-api stub that records whether it was
-// consulted at all — the validity window is checked before the evidence
-// round-trip, so a cert outside it must never cost a /verify call.
-func countingVerifySrv(t *testing.T) (*httptest.Server, *atomic.Int32) {
-	t.Helper()
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &calls
-}
-
 func TestVerifyCertEnforcesValidity(t *testing.T) {
 	now := time.Now()
 
 	t.Run("expired rejected before the evidence round-trip", func(t *testing.T) {
-		srv, calls := countingVerifySrv(t)
+		stub := testattest.New(t)
 		cert := attestedCertWithWindow(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
 		if !errors.Is(err, ErrCertValidity) {
 			t.Fatalf("err = %v, want errors.Is ErrCertValidity", err)
 		}
-		if got := calls.Load(); got != 0 {
+		if got := len(stub.VerifyRequests()); got != 0 {
 			t.Fatalf("an expired certificate consumed %d attestation-api call(s), want 0", got)
 		}
 	})
 
 	t.Run("not yet valid beyond skew rejected", func(t *testing.T) {
-		srv, calls := countingVerifySrv(t)
+		stub := testattest.New(t)
 		cert := attestedCertWithWindow(t, now.Add(certutil.LeafValiditySkew+time.Minute), now.Add(2*time.Hour))
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
 		if !errors.Is(err, ErrCertValidity) {
 			t.Fatalf("err = %v, want errors.Is ErrCertValidity", err)
 		}
-		if got := calls.Load(); got != 0 {
+		if got := len(stub.VerifyRequests()); got != 0 {
 			t.Fatalf("a not-yet-valid certificate consumed %d attestation-api call(s), want 0", got)
 		}
 	})
 
 	t.Run("NotBefore within skew accepted", func(t *testing.T) {
 		measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-		srv := newMockedVerifySrv(t, verifyResponse(measurement))
-		defer srv.Close()
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 		cert := attestedCertWithWindow(t, now.Add(certutil.LeafValiditySkew-time.Minute), now.Add(2*time.Hour))
-		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}}, nil); err != nil {
+		if _, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}}, nil); err != nil {
 			t.Fatalf("NotBefore within the skew allowance must pass: %v", err)
 		}
 	})
@@ -106,19 +91,19 @@ func TestVerifyCertEnforcesValidity(t *testing.T) {
 // evidence has, so an expired peer must be refused — and cheaply, before any
 // attestation-api round-trip.
 func TestDualVerifyPeerCallbackRejectsExpiredSelfSigned(t *testing.T) {
-	srv, calls := countingVerifySrv(t)
+	stub := testattest.New(t)
 	cert := attestedCertWithWindow(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
 	_, caCert := generateCACert(t)
 
 	verify := dualVerifyPeerCallback(
-		&VerifyPolicy{AttestationApiURL: srv.URL},
+		&VerifyPolicy{AttestationApiURL: stub.URL},
 		newSharedCACerts([]*x509.Certificate{caCert}),
 	)
 	err := verify([][]byte{cert.Raw}, nil)
 	if !errors.Is(err, ErrCertValidity) {
 		t.Fatalf("err = %v, want errors.Is ErrCertValidity", err)
 	}
-	if got := calls.Load(); got != 0 {
+	if got := len(stub.VerifyRequests()); got != 0 {
 		t.Fatalf("an expired peer consumed %d attestation-api call(s), want 0", got)
 	}
 }
@@ -301,7 +286,7 @@ func TestDualVerifyPeerCallbackSharesTheSkewWindow(t *testing.T) {
 // rewritable under a genuine attestation. That check belongs here, not only
 // in the callers that happen to run certutil.AuthenticateLeafBody themselves.
 func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
-	srv, calls := countingVerifySrv(t)
+	stub := testattest.New(t)
 	now := time.Now()
 
 	// Same attested key, body signed by a different key: a self-issued leaf
@@ -331,11 +316,11 @@ func TestVerifyCertAuthenticatesTheLeafBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not verify with its own key") {
 		t.Fatalf("err = %v, want the self-signature rejection", err)
 	}
-	if got := calls.Load(); got != 0 {
+	if got := len(stub.VerifyRequests()); got != 0 {
 		t.Fatalf("a re-signed body consumed %d attestation-api call(s), want 0", got)
 	}
 }
