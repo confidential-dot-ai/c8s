@@ -64,7 +64,7 @@ func TestValidateSandboxID(t *testing.T) {
 			t.Errorf("ValidateSandboxID(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "with space", "slash/id", "semi;colon", strings.Repeat("a", 129)} {
+	for _, bad := range []string{"", "with space", "slash/id", "semi;colon", strings.Repeat("a", 129), "sandbox-🙂"} {
 		if err := ValidateSandboxID(bad); err == nil {
 			t.Errorf("ValidateSandboxID(%q) accepted", bad)
 		}
