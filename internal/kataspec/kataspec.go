@@ -34,25 +34,22 @@ func PullDigest(annotations map[string]string) (string, bool) {
 	return "sha256:" + m[1], true
 }
 
-// containerTypeKeys mirrors kata-agent's K8S_CONTAINER_TYPE_KEYS: the
-// annotation keys a CRI runtime marks a container's type with.
-var containerTypeKeys = []string{
-	"io.kubernetes.cri.container-type",  // containerd CRI
-	"io.kubernetes.cri-o.ContainerType", // CRI-O
-}
+// The container-type markers the baked kata-agent policy conjoins in its
+// sandbox_annotations rule.
+const (
+	kataContainerTypeKey = "io.katacontainers.pkg.oci.container_type"
+	criContainerTypeKey  = "io.kubernetes.cri.container-type"
+)
 
 // IsSandbox reports whether the annotations mark this as the pod's sandbox
-// (pause) container. It mirrors kata-agent's own is_sandbox() exactly, and that
-// lockstep is load-bearing: in guest-pull mode kata runs the pause baked into
-// the dm-verity rootfs for any container it deems a sandbox, so the set c8s
-// exempts from digest enforcement must not be wider than kata's.
+// (pause) container. It mirrors the baked kata-agent policy's
+// sandbox_annotations rule, and the lockstep is load-bearing: in guest-pull
+// mode kata runs the pause baked into the dm-verity rootfs for any container
+// that rule accepts, so the set c8s exempts from digest enforcement must not
+// be wider. policy_lockstep_test.go machine-compares the two predicates.
 func IsSandbox(annotations map[string]string) bool {
-	for _, key := range containerTypeKeys {
-		if annotations[key] == "sandbox" {
-			return true
-		}
-	}
-	return false
+	return annotations[kataContainerTypeKey] == "pod_sandbox" &&
+		annotations[criContainerTypeKey] == "sandbox"
 }
 
 // containerID is the id set the baked kata-agent policy admits: the 32 random

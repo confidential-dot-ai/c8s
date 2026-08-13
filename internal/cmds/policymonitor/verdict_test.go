@@ -50,7 +50,8 @@ func TestVerdict_AllowedContainer(t *testing.T) {
 func TestVerdict_SandboxContainer(t *testing.T) {
 	m, _, watchDir := newTestMonitor(t, []string{"sha256:" + strings.Repeat("a", 64)})
 	writeConfigJSON(t, watchDir, "sandbox-ctr", map[string]string{
-		"io.kubernetes.cri.container-type": "sandbox",
+		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+		"io.kubernetes.cri.container-type":         "sandbox",
 	})
 	dir := filepath.Join(watchDir, "sandbox-ctr")
 	m.handleNewContainer(context.Background(), dir)

@@ -197,7 +197,8 @@ func TestSandboxContainerNotMeasured(t *testing.T) {
 	m := newTestMeasurer(t, watch, state, tdx)
 
 	writeConfigJSON(t, watch, cid1, map[string]string{
-		"io.kubernetes.cri.container-type": "sandbox",
+		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+		"io.kubernetes.cri.container-type":         "sandbox",
 	})
 	m.scanOnce()
 	if tdx.extends != 0 {

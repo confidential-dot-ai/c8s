@@ -100,6 +100,73 @@ func TestBakedPolicyRejectsCRIOContainerTypeMarker(t *testing.T) {
 	}
 }
 
+// sandboxConjuncts extracts the annotation equalities the baked policy's
+// sandbox_annotations rule conjoins. The read is deliberately strict: a rule
+// edited into any other shape fails here rather than comparing a partial
+// predicate.
+func sandboxConjuncts(t *testing.T, policy string) map[string]string {
+	t.Helper()
+	rule := regexp.MustCompile(`sandbox_annotations if \{\n(?:\t[^\n]+\n)+\}`)
+	blocks := rule.FindAllString(policy, -1)
+	if len(blocks) != 1 {
+		t.Fatalf("baked policy has %d sandbox_annotations rules, want exactly one (a second one would OR another predicate past this test)", len(blocks))
+	}
+	block := regexp.MustCompile(`\{\n((?:\t[^\n]+\n)+)\}`).FindStringSubmatch(blocks[0])
+	equality := regexp.MustCompile(`^input\.OCI\.Annotations\["([^"]+)"\] == "([^"]+)"$`)
+	pairs := map[string]string{}
+	for _, l := range strings.Split(strings.TrimRight(block[1], "\n"), "\n") {
+		m := equality.FindStringSubmatch(strings.TrimPrefix(l, "\t"))
+		if m == nil {
+			t.Fatalf("sandbox_annotations carries a line the lockstep test cannot read: %q", l)
+		}
+		pairs[m[1]] = m[2]
+	}
+	return pairs
+}
+
+// IsSandbox decides which containers policy-monitor exempts from digest
+// enforcement, and the baked policy's sandbox_annotations decides which
+// containers kata runs the measured pause for; the two predicates must accept
+// identical annotation sets. Machine-compare them over every combination of
+// the type markers a host can write — including the CRI-O key, so a predicate
+// that reads it disagrees with the side that does not. A one-sided edit to
+// either predicate flips at least one row.
+func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
+	conjuncts := sandboxConjuncts(t, readPolicy(t))
+	const crioKey = "io.kubernetes.cri-o.ContainerType"
+
+	kataValues := []string{"", "pod_sandbox", "pod_container", "bogus"}
+	criValues := []string{"", "sandbox", "container", "SANDBOX"}
+	crioValues := []string{"", "sandbox", "container"}
+
+	for _, kata := range kataValues {
+		for _, cri := range criValues {
+			for _, crio := range crioValues {
+				annotations := map[string]string{}
+				for key, value := range map[string]string{
+					kataContainerTypeKey: kata,
+					criContainerTypeKey:  cri,
+					crioKey:              crio,
+				} {
+					if value != "" {
+						annotations[key] = value
+					}
+				}
+				policy := true
+				for key, want := range conjuncts {
+					if annotations[key] != want {
+						policy = false
+						break
+					}
+				}
+				if got := IsSandbox(annotations); got != policy {
+					t.Errorf("annotations %v: IsSandbox = %v, sandbox_annotations = %v", annotations, got, policy)
+				}
+			}
+		}
+	}
+}
+
 // A rule that silently reverts to `default … := true` is a no-op with no
 // symptom, so pin the decisions the guest's integrity rests on.
 func TestBakedPolicyKeepsItsFailClosedDefaults(t *testing.T) {

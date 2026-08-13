@@ -95,9 +95,21 @@ func TestIsSandbox(t *testing.T) {
 		annotations map[string]string
 		want        bool
 	}{
-		{"containerd cri sandbox", map[string]string{"io.kubernetes.cri.container-type": "sandbox"}, true},
-		{"cri-o sandbox", map[string]string{"io.kubernetes.cri-o.ContainerType": "sandbox"}, true},
-		{"workload container", map[string]string{"io.kubernetes.cri.container-type": "container"}, false},
+		{"sandbox carries both markers", map[string]string{
+			kataContainerTypeKey: "pod_sandbox",
+			criContainerTypeKey:  "sandbox",
+		}, true},
+		{"kata marker alone", map[string]string{kataContainerTypeKey: "pod_sandbox"}, false},
+		{"containerd marker alone", map[string]string{criContainerTypeKey: "sandbox"}, false},
+		{"cri-o marker is not read", map[string]string{"io.kubernetes.cri-o.ContainerType": "sandbox"}, false},
+		{"workload container", map[string]string{
+			kataContainerTypeKey: "pod_container",
+			criContainerTypeKey:  "container",
+		}, false},
+		{"conflicting markers", map[string]string{
+			kataContainerTypeKey: "pod_sandbox",
+			criContainerTypeKey:  "container",
+		}, false},
 		{"no container-type annotation", map[string]string{PullReferenceKey: "ghcr.io/x:latest"}, false},
 		{"nil annotations", nil, false},
 	} {
