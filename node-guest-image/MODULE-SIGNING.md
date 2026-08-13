@@ -18,7 +18,7 @@ What is specific to this image:
 
 - **`node-guest-image/module-signing.crt`** — the public certificate, ours,
   committed here. `node-guest-image/build` passes it to confos as
-  `--module-signing-cert` and to `steep-fetch-gpu` as `MODULE_SIG_CERT`.
+  `--module-signing-cert` and to `confos-fetch-gpu` as `MODULE_SIG_CERT`.
   It is measured, so rotating it changes the image measurement.
 - **The private key** is a CI secret (`MODULE_SIG_KEY_PEM`), never committed.
 
