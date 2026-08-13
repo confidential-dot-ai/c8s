@@ -37,6 +37,15 @@ on:
         required: false
         type: boolean
         default: false
+      gate_both:
+        description: "Definitive same-runner A/B: checkout confos twice (confos_ref = in-tree ref, gate_ref_b = deleted-profile ref), build in-tree and staged in ONE job with cold kernel builds (kernel cache disabled), and diff the manifests. Publishes nothing."
+        required: false
+        type: boolean
+        default: false
+      gate_ref_b:
+        description: "gate_both only: confos ref for the staged (B) build — the phase-1 tree with the c8s profile deleted."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -83,7 +92,7 @@ jobs:
         github.event.workflow_run.event == 'workflow_dispatch') &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 330
     steps:
       # Layout: ./c8s ./attestation-rs ./confidential-os-builder (sibling repos).
       - name: Checkout c8s
@@ -107,6 +116,14 @@ jobs:
           repository: confidential-dot-ai/confidential-os-builder
           ref: ${{ env.CONFOS_REF }}
           path: confidential-os-builder
+
+      - name: Checkout confidential-os-builder B (gate_both, staged tree)
+        if: github.event.inputs.gate_both == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: confidential-dot-ai/confidential-os-builder
+          ref: ${{ github.event.inputs.gate_ref_b }}
+          path: confos-b
 
       - name: Set image ref and variant
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
@@ -152,7 +169,9 @@ jobs:
 
       - name: Cache kernel
         # Every input of confos's kernel fingerprint, or the cache is rejected
-        # and rebuilt (hashFiles has no brace expansion).
+        # and rebuilt (hashFiles has no brace expansion). Disabled for
+        # gate_both: the A/B must build both kernels cold.
+        if: github.event.inputs.gate_both != 'true'
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/kernel
@@ -245,15 +264,41 @@ jobs:
           # it to rebuild a published release. Definition lives in this repo:
           # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          if [ "${{ github.event.inputs.gate_intree }}" = "true" ]; then
+          if [ "${{ github.event.inputs.gate_both }}" = "true" ]; then
+            # A: in-tree, from the confos checkout that still ships the profile.
+            C8S_NAME=rke2-intree bin/build-c8s
+            # B: staged from c8s, against the deleted-profile confos checkout.
+            ( cd "$GITHUB_WORKSPACE/confos-b" && cargo build --release )
+            CONFOS_DIR="$GITHUB_WORKSPACE/confos-b" C8S_NAME=rke2-staged               "$GITHUB_WORKSPACE/c8s/node-guest-image/build"
+          elif [ "${{ github.event.inputs.gate_intree }}" = "true" ]; then
             C8S_NAME="$VARIANT" bin/build-c8s
           else
             C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
           fi
 
+      - name: Compare same-runner A/B (gate_both)
+        if: github.event.inputs.gate_both == 'true'
+        run: |
+          set -euo pipefail
+          MA=confidential-os-builder/output/rke2-intree/manifest.json
+          MB=confos-b/output/rke2-staged/manifest.json
+          fail=0
+          for f in .tdx.mrtd .tdx.rtmr1 .tdx.rtmr2 .outputs.uki.sha256 .outputs.disk_image.sha256 .inputs.kernel.vmlinuz_sha256; do
+            a=$(jq -r "$f" "$MA"); b=$(jq -r "$f" "$MB")
+            if [ "$a" = "$b" ]; then echo "MATCH  $f"; else echo "DIFFER $f"; echo "  intree=$a"; echo "  staged=$b"; fail=1; fi
+          done
+          ra=$(cat confidential-os-builder/output/rke2-intree/roothash)
+          rb=$(cat confos-b/output/rke2-staged/roothash)
+          if [ "$ra" = "$rb" ]; then echo "MATCH  roothash"; else echo "DIFFER roothash intree=$ra staged=$rb"; fail=1; fi
+          {
+            echo "### same-runner A/B: in-tree vs staged-from-c8s (cold kernels)"
+            if [ "$fail" = 0 ]; then echo "**IDENTICAL — migration is byte-transparent.**"; else echo "**DIFFERS.**"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$fail"
+
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
-        if: github.event.inputs.gate == 'true'
+        if: github.event.inputs.gate == 'true' && github.event.inputs.gate_both != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: gate-${{ env.VARIANT }}-${{ github.run_id }}
