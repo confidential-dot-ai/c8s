@@ -1341,6 +1341,7 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") {
 		t.Fatalf("default render must not create an attestation-api Service (evidence generation is node-local only)\n%s", out)
 	}
+	assertNoLegacyAttestationStrings(t, out)
 
 	var np networkingv1.NetworkPolicy
 	if !findDoc(t, out, "NetworkPolicy", "c8s-attestation-api", &np) {
@@ -1353,8 +1354,13 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		t.Fatalf("NetworkPolicy policyTypes = %v, want Ingress", np.Spec.PolicyTypes)
 	}
 
-	cm := renderedConfigMap(t, out, "c8s-attestation-api")
-	cfg := cm.Data["config.toml"]
+	// The config is a Secret, not a ConfigMap: with the nodePort opt-in it
+	// carries the [auth] Bearer key (TestChartAttestationApiNodePortWithAuthRenders).
+	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-attestation-api") {
+		t.Fatalf("attestation-api config must render as a Secret, not a ConfigMap\n%s", out)
+	}
+	sec := renderedSecret(t, out, "c8s-attestation-api")
+	cfg := sec.StringData["config.toml"]
 	if !strings.Contains(cfg, `bind = "127.0.0.1:8400"`) {
 		t.Fatalf("default config must bind pod loopback; got:\n%s", cfg)
 	}
@@ -1362,21 +1368,75 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		t.Fatalf("default config must not render [auth] (nothing routable to protect); got:\n%s", cfg)
 	}
 
+	ds := renderedDaemonSet(t, out, "c8s-attestation-api")
 	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
 	assertContainerArgs(t, proxy,
 		"attest-proxy",
 		"--socket=/var/run/nri-image-policy/attestation-api.sock",
 		"--upstream=http://127.0.0.1:8400",
 	)
+	// The proxy publishes into the socket-dir hostPath, and both it and the
+	// API read their config from the Secret — dropping either renders fine
+	// and only fails at runtime.
+	assertPodVolume(t, &ds.Spec.Template.Spec, "socket-dir", func(v corev1.Volume) bool {
+		return v.HostPath != nil && v.HostPath.Path == "/var/run/nri-image-policy"
+	})
+	assertPodVolume(t, &ds.Spec.Template.Spec, "config", func(v corev1.Volume) bool {
+		return v.Secret != nil && v.Secret.SecretName == "c8s-attestation-api"
+	})
+	assertContainerMount(t, proxy, "socket-dir", "/var/run/nri-image-policy")
 	if proxy.ReadinessProbe == nil || proxy.ReadinessProbe.Exec == nil {
 		t.Fatalf("attest-proxy must carry an exec readiness probe (the API's loopback bind is not kubelet-dialable); got %+v", proxy.ReadinessProbe)
 	}
-	// The API container's old httpGet probes would never pass against a
-	// loopback bind, so the proxy's exec probe is the only health signal.
+	if proxy.LivenessProbe == nil || proxy.LivenessProbe.Exec == nil {
+		t.Fatalf("attest-proxy must carry an exec liveness probe (it is the evidence path's only liveness signal); got %+v", proxy.LivenessProbe)
+	}
+	// Kubelet's 1s default probe timeout would flap the healthcheck's 3s
+	// internal budget.
+	if proxy.ReadinessProbe.TimeoutSeconds != 5 || proxy.LivenessProbe.TimeoutSeconds != 5 {
+		t.Fatalf("exec probes must set timeoutSeconds=5; got readiness %d / liveness %d", proxy.ReadinessProbe.TimeoutSeconds, proxy.LivenessProbe.TimeoutSeconds)
+	}
+	// An httpGet probe would never pass against the loopback bind, so the
+	// proxy's exec probe is the only health signal.
 	api := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attestation-api")
 	if api.ReadinessProbe != nil || api.LivenessProbe != nil {
 		t.Fatalf("attestation-api container must not carry kubelet probes against its loopback bind; got %+v / %+v", api.ReadinessProbe, api.LivenessProbe)
 	}
+}
+
+// assertNoLegacyAttestationStrings keeps the routable shapes the hardening
+// removed out of every render: the old NodePort, a wildcard bind, and the
+// deleted Service's DNS name.
+func assertNoLegacyAttestationStrings(t *testing.T, manifest string) {
+	t.Helper()
+	for _, legacy := range []string{"30840", "0.0.0.0", "c8s-attestation-api.c8s-system.svc"} {
+		if strings.Contains(manifest, legacy) {
+			t.Fatalf("render must not contain legacy routable-attestation string %q", legacy)
+		}
+	}
+}
+
+func assertPodVolume(t *testing.T, spec *corev1.PodSpec, name string, ok func(corev1.Volume) bool) {
+	t.Helper()
+	for _, v := range spec.Volumes {
+		if v.Name == name {
+			if !ok(v) {
+				t.Fatalf("volume %q has the wrong source: %+v", name, v.VolumeSource)
+			}
+			return
+		}
+	}
+	t.Fatalf("pod spec missing volume %q; volumes %+v", name, spec.Volumes)
+}
+
+func assertContainerMount(t *testing.T, c corev1.Container, name, mountPath string) {
+	t.Helper()
+	for _, m := range c.VolumeMounts {
+		if m.Name == name && m.MountPath == mountPath {
+			return
+		}
+	}
+	t.Fatalf("container %s missing mount of volume %q at %q; mounts %+v", c.Name, name, mountPath, c.VolumeMounts)
 }
 
 // The host NRI plugin is a host process: it reaches the attestation-api over
@@ -1415,16 +1475,16 @@ func TestChartAttestationApiNodePortWithAuthRenders(t *testing.T) {
 		t.Fatalf("attestation-api nodePort = %d, want 31040", got)
 	}
 
-	cm := renderedConfigMap(t, out, "c8s-attestation-api")
-	cfg := cm.Data["config.toml"]
+	sec := renderedSecret(t, out, "c8s-attestation-api")
+	cfg := sec.StringData["config.toml"]
 	if !strings.Contains(cfg, `bind = "0.0.0.0:8400"`) {
 		t.Fatalf("exposed config must bind 0.0.0.0 for the NodePort to forward to; got:\n%s", cfg)
 	}
 	if !strings.Contains(cfg, `api_keys = ["test-key"]`) {
 		t.Fatalf("exposed config must carry the API key; got:\n%s", cfg)
 	}
-	if got := cm.Data["auth-key"]; got != "test-key" {
-		t.Fatalf("ConfigMap auth-key = %q, want the injected key for the proxy", got)
+	if got := sec.StringData["auth-key"]; got != "test-key" {
+		t.Fatalf("Secret auth-key = %q, want the injected key for the proxy", got)
 	}
 	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
 	assertContainerArgs(t, proxy, "--api-key-file=/etc/attestation-api/auth-key")
@@ -1508,6 +1568,58 @@ func TestChartRejectsExposedUnauthenticatedAttestationApi(t *testing.T) {
 	}
 	if msg := helmFailMessage(t, out); !strings.Contains(msg, "attestationApi.auth.apiKey") {
 		t.Fatalf("fail message must name the value to fix (attestationApi.auth.apiKey); got %q", msg)
+	}
+}
+
+// The guard must also catch the empty-key shapes a plain `eq … ""` check
+// misses: a YAML null (values file, or --set-json) coalesces to "key
+// absent", and a whitespace-only key is unusable. Each must fail the render
+// naming the value to fix — nodePort + null key is byte-for-byte the
+// unauthenticated routable shape otherwise.
+func TestChartRejectsExposedAttestationApiNullOrBlankKey(t *testing.T) {
+	nullValues := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(nullValues, []byte("attestationApi:\n  service:\n    nodePort: 30840\n  auth:\n    apiKey: null\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"null key via values file", []string{"-f", nullValues}},
+		{"null key via --set-json", []string{"--set", "attestationApi.service.nodePort=30840", "--set-json", "attestationApi.auth.apiKey=null"}},
+		{"whitespace-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=  "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err == nil {
+				t.Fatalf("helm template succeeded with a routable unauthenticated attestation-api, want failure\n%s", out)
+			}
+			if kind := parseValidationErrorKind(out); kind != "attestation_api_exposed_unauthenticated" {
+				t.Fatalf("validation error kind = %q, want attestation_api_exposed_unauthenticated\n%s", kind, out)
+			}
+			if msg := helmFailMessage(t, out); !strings.Contains(msg, "attestationApi.auth.apiKey") {
+				t.Fatalf("fail message must name the value to fix (attestationApi.auth.apiKey); got %q", msg)
+			}
+		})
+	}
+}
+
+// The key is normalized (trimmed) before render, so the key the proxy
+// injects is byte-identical to the one the API's [auth] list requires.
+func TestChartTrimsAttestationApiKey(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "attestationApi.service.nodePort=31040",
+		"--set-string", "attestationApi.auth.apiKey= test-key ",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	sec := renderedSecret(t, out, "c8s-attestation-api")
+	if got := sec.StringData["auth-key"]; got != "test-key" {
+		t.Fatalf("Secret auth-key = %q, want the trimmed key", got)
+	}
+	if cfg := sec.StringData["config.toml"]; !strings.Contains(cfg, `api_keys = ["test-key"]`) {
+		t.Fatalf("config must carry the trimmed key; got:\n%s", cfg)
 	}
 }
 
@@ -1878,6 +1990,14 @@ func hasHostIPEnv(c corev1.Container) bool {
 // the tenant get-cert sidecars it injects, so the placeholder must stay
 // UNEXPANDED there — the operator container deliberately omits HOST_IP so each
 // tenant pod expands it against its own node.
+// KNOWN-GAP (ATTEST-ORACLE, node mode): the http://$(HOST_IP):8400 wiring
+// this test pins reaches the node image's baked attestation-api, which still
+// binds 0.0.0.0:8400 with no auth — the oracle shape this branch removes
+// everywhere the chart controls. Closing node mode needs the
+// confidential-os-builder companion (loopback bind + baked attest-proxy
+// systemd unit + image-policy socket URL), tracked cross-repo; when it
+// lands, the chart's node-mode branch and this test flip to the socket shape
+// together.
 func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	const hostIPURL = "--attestation-api-url=http://$(HOST_IP):8400"
 	// The exact shape `c8s install --cvm-mode=node` produces: the node image
@@ -1891,6 +2011,12 @@ func TestChartNodeModeAttestationApiURLUsesHostIP(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("helm template (cvmMode=node): %v\n%s", err, out)
+	}
+
+	// No chart-managed evidence source renders in this shape at all.
+	if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") ||
+		renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-attestation-api") {
+		t.Fatalf("cvmMode=node install shape renders no attestation-api Service or DaemonSet\n%s", out)
 	}
 
 	// cds: pod-netns, dials the host attestation-api via $(HOST_IP).
@@ -1953,6 +2079,17 @@ func TestChartNonNodeModeUsesAttestationSocket(t *testing.T) {
 			out, err := helmTemplate(t, "--set-string", "attestationApi.cvmMode="+mode, "--set", "tlsLb.attest.enabled=true")
 			if err != nil {
 				t.Fatalf("helm template (cvmMode=%s): %v\n%s", mode, err, out)
+			}
+			// The acceptance criteria are per-mode: no routable path to
+			// evidence generation, and the default-deny NetworkPolicy on the
+			// DaemonSet.
+			if renderedManifestHasNamedKind(t, out, "Service", "c8s-attestation-api") {
+				t.Fatalf("cvmMode=%s renders no attestation-api Service (evidence generation is node-local only)\n%s", mode, out)
+			}
+			assertNoLegacyAttestationStrings(t, out)
+			var np networkingv1.NetworkPolicy
+			if !findDoc(t, out, "NetworkPolicy", "c8s-attestation-api", &np) || len(np.Spec.Ingress) != 0 {
+				t.Fatalf("cvmMode=%s renders the attestation-api default-deny NetworkPolicy; got %+v", mode, np.Spec.Ingress)
 			}
 			cds := renderedDeploymentContainer(t, out, "c8s-cds", "cds")
 			assertContainerArgs(t, cds, socketURL)
@@ -5354,6 +5491,15 @@ func renderedConfigMap(t *testing.T, manifest, name string) corev1.ConfigMap {
 	return cm
 }
 
+func renderedSecret(t *testing.T, manifest, name string) corev1.Secret {
+	t.Helper()
+	var sec corev1.Secret
+	if !findDoc(t, manifest, "Secret", name, &sec) {
+		t.Fatalf("rendered manifest missing Secret %q\n%s", name, manifest)
+	}
+	return sec
+}
+
 func renderedService(t *testing.T, manifest, name string) corev1.Service {
 	t.Helper()
 	var svc corev1.Service
@@ -6235,8 +6381,8 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 	}
 	const secretName = "ghcr-secret"
 
-	if kinds := renderedKinds(t, out); kinds["Secret"] > 0 {
-		t.Errorf("imagePullSecret mode rendered %d Secret(s), want 0 (the Secret pre-exists)", kinds["Secret"])
+	if renderedManifestHasNamedKind(t, out, "Secret", secretName) {
+		t.Errorf("imagePullSecret mode rendered Secret %q — it pre-exists; the chart must not create it", secretName)
 	}
 
 	sasWithSecret := map[string]bool{}

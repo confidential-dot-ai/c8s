@@ -340,17 +340,10 @@ attestationApi:
   port: 8400
   ## Evidence generation is node-local only: the API binds pod loopback and
   ## the attest-proxy sidecar serves it on a hostPath Unix socket in
-  ## nriImagePolicy.hostPaths.runtimeDir (0660, root-owned, group 65532 —
-  ## the same directory and reachability model as the admission inventory
-  ## socket). Consumers — the host NRI plugin, ratls-mesh, CDS, tls-lb, and
-  ## webhook-injected get-cert sidecars — dial that socket; nothing routable
-  ## can reach /attest, so a party in no TEE cannot mint evidence over
-  ## caller-chosen REPORTDATA and redeem it at CDS for a mesh leaf.
+  ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
   auth:
-    ## Bearer key the attestation-api requires when the listener is exposed.
-    ## Empty with the default node-local shape: the socket needs no key. The
-    ## render fails if nodePort is set without a key — an unauthenticated
-    ## routable /attest is an evidence oracle for any host with L3 reach.
+    ## Bearer key, required when service.nodePort exposes the listener
+    ## (enforced at render).
     apiKey: ""
   service:
     ## Opt-in re-exposure for debugging: renders a NodePort Service and binds

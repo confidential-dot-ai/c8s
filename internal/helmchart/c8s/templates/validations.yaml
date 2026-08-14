@@ -109,7 +109,7 @@
 {{- if or (lt $attestationNodePort 30000) (gt $attestationNodePort 32767) -}}
 {{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 (got %d)" $attestationNodePort) -}}
 {{- end -}}
-{{- if eq .Values.attestationApi.auth.apiKey "" -}}
+{{- if empty (include "c8s.attestationApiKey" .) -}}
 {{- fail "VALIDATION_ERROR kind=attestation_api_exposed_unauthenticated: attestationApi.service.nodePort publishes evidence generation on every node IP, but attestationApi.auth.apiKey is empty — an unauthenticated routable /attest lets any host with L3 reach mint genuine node evidence over caller-chosen REPORTDATA and redeem it at CDS for a mesh leaf. Set attestationApi.auth.apiKey, or set nodePort back to 0 (the default: node-local Unix socket only)." -}}
 {{- end -}}
 {{- end -}}

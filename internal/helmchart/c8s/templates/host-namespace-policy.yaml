@@ -77,7 +77,7 @@ spec:
              c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true)))) &&
            (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.all(c, !has(c.volumeMounts) ||
              c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly == true))))))
-      message: "hostPath volumes are denied, except a read-only mount of the admission inventory socket directory (the webhook-injected claims volume): a writable mount of the node filesystem could swap the inventory's socket (docs/getcert-workload-binding.md, Corner 7)."
+      message: "hostPath volumes are denied, except a read-only mount of the admission inventory socket directory (the webhook-injected claims volume; it also holds the attestation-api socket): a writable mount of the node filesystem could swap those sockets (docs/getcert-workload-binding.md, Corner 7)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

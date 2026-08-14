@@ -365,9 +365,7 @@ spec:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
             type: Directory
         {{- end }}
-        # The attestation socket shares the inventory's directory; get-cert,
-        # cds-attest, and the allowlist proxy all dial it. Mounted at the host
-        # path so c8s.attestationApiURL is verbatim in-container.
+        {{- /* Shares the admission inventory's socket directory — see c8s.attestationApiSocket. */}}
         {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}

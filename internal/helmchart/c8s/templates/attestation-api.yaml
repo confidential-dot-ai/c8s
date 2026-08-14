@@ -10,20 +10,21 @@ metadata:
     app.kubernetes.io/component: attestation-api
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
+# config.toml carries the [auth] Bearer key under the nodePort opt-in, so
+# the config renders as a Secret; auth-key feeds the same key to the proxy.
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
   name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: attestation-api
-data:
+stringData:
   config.toml: |
 {{ include "c8s.attestationApiConfig" (dict "root" .) | indent 4 }}
-  {{- with .Values.attestationApi.auth.apiKey }}
-  # Bearer key the attest-proxy injects for on-node socket callers; rendered
-  # only with attestationApi.service.nodePort (the render guard gates on it).
+  {{- with include "c8s.attestationApiKey" . }}
+  # Bearer key the attest-proxy injects for on-node socket callers.
   auth-key: {{ . | quote }}
   {{- end }}
 ---
@@ -113,9 +114,8 @@ spec:
             {{- else }}
 {{ fail (printf "attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
-          # No kubelet probes here: the API binds pod loopback, which kubelet
-          # cannot dial. The attest-proxy's exec probe covers the whole chain
-          # (socket, proxy, upstream /health).
+          # The API's health signal is the attest-proxy's exec probe: the API
+          # binds pod loopback, which kubelet cannot dial.
           volumeMounts:
             - name: config
               mountPath: /etc/attestation-api
@@ -158,7 +158,7 @@ spec:
             - attest-proxy
             - --socket={{ include "c8s.attestationApiSocket" . }}
             - --upstream=http://127.0.0.1:{{ .Values.attestationApi.port }}
-            {{- with .Values.attestationApi.auth.apiKey }}
+            {{- with include "c8s.attestationApiKey" . }}
             - --api-key-file=/etc/attestation-api/auth-key
             {{- end }}
           # uid 0 so the socket is root-owned (callers reject a socket owned
@@ -177,10 +177,13 @@ spec:
             exec:
               command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
             initialDelaySeconds: 2
+            # Above the healthcheck's internal 3s budget (kubelet default is 1s).
+            timeoutSeconds: 5
           livenessProbe:
             exec:
               command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
             periodSeconds: 30
+            timeoutSeconds: 5
           volumeMounts:
             - name: config
               mountPath: /etc/attestation-api
@@ -191,8 +194,8 @@ spec:
 {{ toYaml .Values.attestationApi.proxy.resources | indent 12 }}
       volumes:
         - name: config
-          configMap:
-            name: {{ include "c8s.attestationApiName" . }}
+          secret:
+            secretName: {{ include "c8s.attestationApiName" . }}
         # hostPath.type=CharDevice forces a hard failure on nodes that
         # lack the device, instead of silently mounting an empty file —
         # attestation evidence would then be silently bogus. Toggle each
@@ -225,9 +228,7 @@ spec:
             path: /dev/tpmrm0
             type: CharDevice
         {{- end }}
-        # The socket directory is shared with the admission inventory: it is
-        # the one hostPath the deny-host-namespaces policy admits into cw
-        # pods, and the one the webhook mounts into get-cert sidecars.
+        # Shared with the admission inventory — see c8s.attestationApiSocket.
         - name: socket-dir
           hostPath:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}

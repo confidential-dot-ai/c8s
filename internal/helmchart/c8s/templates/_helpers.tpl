@@ -306,9 +306,9 @@ and CDS. Three shapes:
   - kata.enabled: the kata-guest-base image bakes an in-guest attestation-service
     on loopback, and the consumers (the operator's get-cert sidecars and CDS) run
     INSIDE the CVM, so they dial 127.0.0.1 — not the (absent) host Service.
-  - otherwise, when attestationApi.enabled (every non-kata shape where the
-    chart DaemonSet renders — gke/aks, and raw values without a mode): the
-    on-node Unix socket its attest-proxy sidecar serves
+  - otherwise, when attestationApi.enabled=true (the chart DaemonSet shape —
+    the raw-values default, kept by gke/aks installs): the on-node Unix socket
+    its attest-proxy sidecar serves
     (c8s.attestationApiSocket). Evidence generation is never published on a
     routable address: the API binds pod loopback, and only on-node callers —
     host processes, and pods the socket directory is mounted into — can
@@ -317,13 +317,13 @@ and CDS. Three shapes:
     which see the directory at workloadclaims.SidecarSocketDir.
   - otherwise (attestationApi.enabled=false outside kata, i.e. cvmMode=node —
     require_attestation_api forbids it elsewhere): the node image bakes a HOST
-    attestation-api on the node's loopback :8400. Pod-netns consumers cannot
-    reach host loopback, so they dial the node's own IP via the $(HOST_IP)
-    downward-API env var (c8s.attestationApiHostIPEnv), which the kubelet
-    expands per-node before the process sees the arg. The operator forwards
-    this string verbatim to the tenant get-cert sidecars it injects, so it
-    must stay unexpanded there (the operator container deliberately omits
-    HOST_IP); each tenant pod expands it against its own node.
+    attestation-api serving :8400 in the host network namespace. Pod-netns
+    consumers dial the node's own IP via the $(HOST_IP) downward-API env var
+    (c8s.attestationApiHostIPEnv), which the kubelet expands per-node before
+    the process sees the arg. The operator forwards this string verbatim to
+    the tenant get-cert sidecars it injects, so it must stay unexpanded there
+    (the operator container deliberately omits HOST_IP); each tenant pod
+    expands it against its own node.
 */ -}}
 {{- define "c8s.attestationApiURL" -}}
 {{- if .Values.kata.enabled -}}
@@ -338,12 +338,21 @@ http://$(HOST_IP):{{ .Values.attestationApi.port }}
 {{- /*
 c8s.attestationApiSocket — the node-local socket the attest-proxy sidecar
 serves the attestation-api on. It lives in the admission inventory's socket
-directory: that dir is already the one hostPath the deny-host-namespaces
-policy admits into a cw pod (read-only) and the one the webhook mounts into
-get-cert sidecars, so a second directory would only add a second carve-out.
+directory: the one hostPath the deny-host-namespaces policy admits into a cw
+pod (read-only) and the one the webhook mounts into get-cert sidecars.
 */ -}}
 {{- define "c8s.attestationApiSocket" -}}
 {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}/attestation-api.sock
+{{- end -}}
+
+{{- /*
+c8s.attestationApiKey — the configured Bearer key, normalized: a YAML null
+coalesces to "key absent" (nil) and a whitespace-only key is unusable, so
+null/empty/whitespace all read as "no key" everywhere (render guard, [auth]
+block, proxy key file).
+*/ -}}
+{{- define "c8s.attestationApiKey" -}}
+{{- .Values.attestationApi.auth.apiKey | default "" | toString | trimAll " \t" -}}
 {{- end -}}
 
 {{- /*
@@ -571,7 +580,7 @@ bind = "127.0.0.1:{{ $root.Values.attestationApi.port }}"
 
 [server.tls]
 enabled = false
-{{- with $root.Values.attestationApi.auth.apiKey }}
+{{- with include "c8s.attestationApiKey" $root }}
 
 [auth]
 api_keys = [{{ . | quote }}]
