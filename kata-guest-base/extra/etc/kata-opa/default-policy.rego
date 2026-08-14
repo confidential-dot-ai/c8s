@@ -49,8 +49,6 @@ default CloseStdinRequest := true
 
 default DestroySandboxRequest := true
 
-default GetDiagnosticDataRequest := true
-
 default GetMetricsRequest := true
 
 default GetOOMEventRequest := true
@@ -93,6 +91,12 @@ default ExecProcessRequest := false
 default ReadStreamRequest := false
 
 default WriteStreamRequest := false
+
+# The termination-log branch reads the guest file behind the OCI mount whose
+# destination equals the terminationMessagePath annotation, and returns 4 KiB of
+# it over vsock. Both fields are host-written, so this reads any guest path a
+# mount may name — the injected certs and secrets tmpfs included.
+default GetDiagnosticDataRequest := false
 
 default SignalProcessRequest := true
 
@@ -161,8 +165,9 @@ CreateContainerRequest if {
 	every s in input.storages {
 		storage_outside_rootfs(s)
 		not layered_rootfs_storage(s)
+		container_storage_allowed(s)
 	}
-	print("CreateContainerRequest: no storage shadows the rootfs")
+	print("CreateContainerRequest: every storage is the guest pull or guest-local scratch")
 
 	every m in input.OCI.Mounts {
 		mount_source_allowed(m)
@@ -182,6 +187,9 @@ sole_guest_pull_storage := s if {
 }
 
 # Anything mounted at or under the rootfs replaces part of the pulled image.
+# Unreachable while container_storage_allowed holds every mount point to the
+# runtime trees and the id shape keeps `shared` and `sandbox` out of a rootfs
+# path; kept so widening either cannot silently uncover the rootfs.
 storage_outside_rootfs(s) if {
 	s.driver == "image_guest_pull"
 }
@@ -191,9 +199,11 @@ storage_outside_rootfs(s) if {
 	not startswith(s.mount_point, concat("", [container_rootfs, "/"]))
 }
 
-# The multi-layer EROFS path is dispatched on a mount option before the driver
-# is looked at, and assembles a rootfs out of host block devices. c8s guests
-# are guest-pull only.
+# The multi-layer EROFS path assembles a rootfs out of host block devices, and
+# is_multi_layer_storage dispatches on the options before the driver is looked
+# at — so the option forms below are the live guard. c8s guests are guest-pull
+# only. The driver form is unreachable while container_storage_allowed pins the
+# driver; kept so widening that rule cannot silently uncover this path.
 layered_rootfs_storage(s) if {
 	s.driver == "erofs.multi-layer"
 }
@@ -208,25 +218,85 @@ layered_rootfs_storage(s) if {
 	startswith(o, "X-kata.overlay-")
 }
 
+# A container's storages are the guest pull — its rootfs, whose source
+# pull_source_bound binds — and scratch the guest builds for itself.
+container_storage_allowed(s) if {
+	s.driver == "image_guest_pull"
+	print("storage: guest pull", s.mount_point)
+}
+
+container_storage_allowed(s) if {
+	guest_local_storage(s)
+	storage_mount_point_allowed(s)
+}
+
+container_storage_allowed(s) if {
+	encrypted_block_storage(s)
+	storage_mount_point_allowed(s)
+}
+
+# The driver selects the handler and the handler decides what the storage is
+# made of, so the driver is pinned: the ephemeral handler mounts the filesystem
+# `fstype` names, which is pinned with it.
+guest_local_storage(s) if {
+	s.driver == "ephemeral"
+	s.fstype == "tmpfs"
+	print("storage: guest tmpfs", s.mount_point)
+}
+
+# A default-medium emptyDir under emptydir_mode="block-encrypted". The marker
+# routes the device to CDH, which LUKS2-formats it under a key the guest
+# generates. An absolute source is the `/dev` form block_handler resolves
+# directly, and this branch formats what it resolves, so the source is held to
+# the relative forms the runtime writes — a PCI path, a devno, a SCSI address.
+#
+# Reached only from container_storage_allowed: a sandbox storage names a
+# filesystem, never a device.
+encrypted_block_storage(s) if {
+	some driver in ["blk", "blk-ccw", "scsi"]
+	s.driver == driver
+	not startswith(s.source, "/")
+	some opt in s.driver_options
+	opt == "encryption_key=ephemeral"
+	print("storage: CDH-encrypted block device", s.mount_point)
+}
+
+storage_mount_point_allowed(s) if {
+	in_runtime_tree(s.mount_point)
+	print("storage: mount point in a runtime tree", s.mount_point)
+}
+
+# The trees the runtime manages: the CopyFile-seeded share, and the sandbox's
+# ephemeral/local/storage dirs. A plain component has to follow the prefix — the
+# prefix alone is the tree, and a leading `.` or `/` component resolves back to
+# it.
+in_runtime_tree(path) if {
+	some prefix in ["/run/kata-containers/shared/containers/", "/run/kata-containers/sandbox/"]
+	startswith(path, prefix)
+	regex.match(`^[^/.]`, trim_prefix(path, prefix))
+	no_traversal(path)
+}
+
 # A bind mount's source is a guest path, and the runtime rewrites every one it
 # sends to a directory it manages: the CopyFile-seeded share, or the sandbox's
 # ephemeral/local/storage trees. Anything else — the verity root, /run/c8s,
 # another container's rootfs — is guest state the host is asking to hand a
-# container. Non-bind mounts name a filesystem type (proc, sysfs, tmpfs,
-# devpts, mqueue, cgroup) rather than a path, and carry nothing in.
+# container. A non-bind mount names its filesystem instead of a path; the
+# pseudo-filesystems below carry nothing in.
 #
 # This bounds where mount CONTENT comes from, not where it lands: a destination
 # is a path inside the container, and which paths a workload may have shadowed
 # is per-image knowledge that lives in the allowlist document, not here.
 mount_source_allowed(m) if {
+	some fstype in ["cgroup", "cgroup2", "devpts", "mqueue", "proc", "sysfs", "tmpfs"]
+	m.type_ == fstype
 	not startswith(m.source, "/")
 	not bind_mount(m)
 }
 
 mount_source_allowed(m) if {
-	some prefix in ["/run/kata-containers/shared/containers/", "/run/kata-containers/sandbox/"]
-	startswith(m.source, prefix)
-	no_traversal(m.source)
+	bind_mount(m)
+	in_runtime_tree(m.source)
 }
 
 no_traversal(path) if {
@@ -312,7 +382,10 @@ default CreateSandboxRequest := false
 CreateSandboxRequest if {
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
+		not layered_rootfs_storage(s)
 		sandbox_storage_source_allowed(s)
+		guest_local_storage(s)
+		storage_mount_point_allowed(s)
 	}
 	print("CreateSandboxRequest: allowed")
 }
@@ -322,7 +395,10 @@ default UpdateEphemeralMountsRequest := false
 UpdateEphemeralMountsRequest if {
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
+		not layered_rootfs_storage(s)
 		sandbox_storage_source_allowed(s)
+		guest_local_storage(s)
+		storage_mount_point_allowed(s)
 	}
 	print("UpdateEphemeralMountsRequest: allowed")
 }

@@ -117,17 +117,228 @@ test_two_guest_pulls_denied if {
 	)})
 }
 
+# is_multi_layer_storage reads the options before the driver, so the option forms
+# are carried by a storage the driver and mount-point rules admit — on any other
+# carrier those rules deny first and this test reads nothing.
 test_layered_rootfs_denied if {
 	every layered in [
-		{"driver": "erofs.multi-layer", "mount_point": "/elsewhere", "options": []},
-		{"driver": "local", "mount_point": "/elsewhere", "options": ["X-kata.multi-layer=1"]},
-		{"driver": "local", "mount_point": "/elsewhere", "options": ["X-kata.overlay-lower=1"]},
+		{"driver": "ephemeral", "fstype": "tmpfs", "mount_point": "/run/kata-containers/sandbox/storage/aGk", "options": ["X-kata.multi-layer=1"]},
+		{"driver": "ephemeral", "fstype": "tmpfs", "mount_point": "/run/kata-containers/sandbox/storage/aGk", "options": ["X-kata.overlay-lower=/run/c8s"]},
 	] {
 		not CreateContainerRequest with input as object.union(
 			workload_input,
 			{"storages": array.concat(workload_input.storages, [layered])},
 		)
 	}
+}
+
+# --- container storages -------------------------------------------------
+#
+# Under the shipped emptydir_mode="block-encrypted", a container carries the
+# guest pull plus two emptyDir shapes: a memory-backed one as a guest tmpfs, and
+# a default-medium one as a LUKS2 device CDH opens under a guest-generated key.
+# `local` and `hugetlbfs` storages need emptydir_mode="shared-fs", which is the
+# only mode that sets the mount type handleLocalStorage and handleHugepages
+# both key on, so neither is admitted.
+
+memory_emptydir := {
+	"driver": "ephemeral",
+	"mount_point": "/run/kata-containers/sandbox/ephemeral/aGk",
+	"source": "tmpfs",
+	"fstype": "tmpfs",
+	"options": [],
+	"driver_options": [],
+}
+
+encrypted_emptydir := {
+	"driver": "blk",
+	"mount_point": "/run/kata-containers/sandbox/storage/aGk",
+	"source": "0000:00:04.0",
+	"fstype": "ext4",
+	"options": [],
+	"driver_options": ["encryption_key=ephemeral"],
+}
+
+with_storages(ss) := object.union(workload_input, {"storages": array.concat(workload_input.storages, ss)})
+
+test_guest_local_container_storages_allowed if {
+	CreateContainerRequest with input as with_storages([memory_emptydir, encrypted_emptydir])
+}
+
+# Which of the three block drivers carries the device is the shim's choice of
+# BlockDeviceDriver, and each has its own source form.
+test_encrypted_block_drivers_allowed if {
+	every s in [
+		{"driver": "blk", "source": "0000:00:04.0"},
+		{"driver": "blk-ccw", "source": "0.0.0004"},
+		{"driver": "scsi", "source": "0:0:0:4"},
+	] {
+		CreateContainerRequest with input as with_storages([object.union(encrypted_emptydir, s)])
+	}
+}
+
+# The runtime merges every container annotation into the driver options, so the
+# marker arrives among entries the policy does not read. Pinned, so tightening to
+# an exact list would fail here rather than in a cluster.
+test_encrypted_block_with_extra_driver_options_allowed if {
+	CreateContainerRequest with input as with_storages([object.union(
+		encrypted_emptydir,
+		{"driver_options": ["fsGroup=2000", "encryption_key=ephemeral"]},
+	)])
+}
+
+# cdh_secure_mount LUKS2-formats what it is handed, and the block handler takes
+# any /dev path that stats as a block device — the verity backing device or a
+# volumed-opened mapper node included.
+test_encrypted_block_with_a_device_path_source_denied if {
+	every source in ["/dev/vda", "/dev/mapper/c8s-vol-weights", "/"] {
+		not CreateContainerRequest with input as with_storages([object.union(
+			encrypted_emptydir,
+			{"source": source},
+		)])
+	}
+}
+
+# The mode option is what a local storage chmods its mount point with.
+test_local_driver_denied if {
+	not CreateContainerRequest with input as with_storages([{
+		"driver": "local",
+		"mount_point": "/run/kata-containers/shared/containers/x/rootfs/local/aGk",
+		"source": "local",
+		"fstype": "local",
+		"options": ["mode=0777"],
+		"driver_options": [],
+	}])
+	not CreateSandboxRequest with input as {"storages": [{"driver": "local", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "local"}]}
+}
+
+# CDS's own /data volume is a default-medium emptyDir when persistence is off,
+# so the encrypted block shape is on the boot path of the cluster's own service.
+test_cds_data_volume_allowed if {
+	CreateContainerRequest with input as object.union(
+		with_storages([encrypted_emptydir]),
+		{"OCI": {"Mounts": array.concat(honest_mounts, [{
+			"destination": "/data",
+			"source": encrypted_emptydir.mount_point,
+			"type_": "bind",
+			"options": ["rbind"],
+		}])}},
+	)
+}
+
+# The matrix crosses driver and fstype in both directions: here a host-backed
+# driver wearing the guest-local fstype, below the reverse. The source is one the
+# watchable-bind copy loop would carry out to a path the container binds.
+test_host_backed_driver_denied if {
+	every driver in ["blk", "blk-ccw", "erofs.multi-layer", "mmioblk", "nvdimm", "overlayfs", "scsi", "virtio-fs", "watchable-bind"] {
+		not CreateContainerRequest with input as with_storages([{
+			"driver": driver,
+			"mount_point": "/run/kata-containers/shared/containers/watchable/leak",
+			"source": "/run/c8s",
+			"fstype": "tmpfs",
+			"options": [],
+			"driver_options": [],
+		}])
+	}
+}
+
+# The overlay handler rewrites fstype to "overlay" on this option and assembles
+# the mount from a host-named lowerdir. The option prefix is not the
+# X-kata.overlay- one layered_rootfs_storage reads.
+test_overlay_rw_option_denied if {
+	not CreateContainerRequest with input as with_storages([{
+		"driver": "overlayfs",
+		"mount_point": "/run/kata-containers/sandbox/storage/aGk",
+		"source": "none",
+		"fstype": "tmpfs",
+		"options": ["io.katacontainers.fs-opt.overlay-rw", "lowerdir=/run/c8s"],
+		"driver_options": [],
+	}])
+}
+
+test_unencrypted_block_storage_denied if {
+	every driver_options in [[], ["encryption_key=none"], ["mentions encryption_key=ephemeral"]] {
+		not CreateContainerRequest with input as with_storages([object.union(
+			encrypted_emptydir,
+			{"driver_options": driver_options},
+		)])
+	}
+}
+
+# mmioblk and nvdimm never route to the CDH branch, so the marker must not carry
+# them either.
+test_encryption_marker_on_a_plaintext_driver_denied if {
+	every driver in ["mmioblk", "nvdimm"] {
+		not CreateContainerRequest with input as with_storages([object.union(
+			encrypted_emptydir,
+			{"driver": driver},
+		)])
+	}
+}
+
+# The ephemeral handler hands fstype to mount(2), so a guest-local driver naming
+# a host-attached filesystem mounts one.
+test_host_backed_fstype_on_a_guest_driver_denied if {
+	every fstype in ["9p", "erofs", "ext4", "hugetlbfs", "iso9660", "overlay", "vfat", "virtiofs"] {
+		not CreateContainerRequest with input as with_storages([object.union(memory_emptydir, {"fstype": fstype})])
+	}
+}
+
+# A storage's mount point is a guest path the host names. /run/c8s holds the
+# pod's mesh leaf key and its released secrets, /etc/c8s the allowlist seed. A
+# mount point that is the prefix, or resolves back to it, covers the seeded tree
+# and every sibling emptyDir.
+test_container_storage_on_a_guest_path_denied if {
+	every mount_point in [
+		"/run/c8s",
+		"/run/c8s/certs",
+		"/run/c8s/secrets",
+		"/etc/c8s",
+		"/run/kata-containers/sandbox",
+		"/run/kata-containers/sandbox/",
+		"/run/kata-containers/sandbox//",
+		"/run/kata-containers/sandbox/.",
+		"/run/kata-containers/shared/containers",
+		"/run/kata-containers/shared/containers/",
+		"/run/kata-containers/shared/containers/./x",
+		"/run/kata-containers/sandbox/../../c8s/secrets",
+		"/run/kata-containers/sandbox/ephemeral/../../../c8s/secrets",
+		"//run/kata-containers/sandbox/x",
+	] {
+		not CreateContainerRequest with input as with_storages([object.union(memory_emptydir, {"mount_point": mount_point})])
+		not CreateContainerRequest with input as with_storages([object.union(encrypted_emptydir, {"mount_point": mount_point})])
+	}
+}
+
+# A host-backed storage at a path the runtime manages, which an OCI mount then
+# binds over the credential directory the c8s sidecar writes into.
+test_host_backed_storage_bound_over_a_credential_path_denied if {
+	block := object.union(encrypted_emptydir, {"driver_options": []})
+	every destination in ["/run/c8s/certs", "/run/c8s/secrets"] {
+		not CreateContainerRequest with input as object.union(
+			with_storages([block]),
+			{"OCI": {"Mounts": array.concat(honest_mounts, [{
+				"destination": destination,
+				"source": block.mount_point,
+				"type_": "bind",
+				"options": ["rbind"],
+			}])}},
+		)
+	}
+}
+
+# The same paths carry the injected memory-backed emptyDirs, which is how the
+# sidecar and the workload share them.
+test_credential_path_from_a_guest_tmpfs_allowed if {
+	CreateContainerRequest with input as object.union(
+		with_storages([memory_emptydir]),
+		{"OCI": {"Mounts": array.concat(honest_mounts, [{
+			"destination": "/run/c8s/certs",
+			"source": memory_emptydir.mount_point,
+			"type_": "bind",
+			"options": ["rbind"],
+		}])}},
+	)
 }
 
 test_shared_mounts_denied if {
@@ -279,24 +490,90 @@ test_conflicting_container_type_markers_denied if {
 }
 
 # --- sandbox and ephemeral storages -------------------------------------
+#
+# The shm tmpfs, and the resize of an unbounded memory emptyDir. Both land in
+# the trees a container binds from, so both carry a container storage's
+# constraints.
 
+# The fixture is otherwise admissible, so only the rootfs shape can deny it. A
+# sandbox-tree path can be rootfs-shaped too, which is the case that isolates
+# this rule from the mount-point prefix rule.
 test_sandbox_storage_shaped_like_a_rootfs_denied if {
-	not CreateSandboxRequest with input as {"storages": [{"mount_point": rootfs}]}
-	not UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": rootfs}]}
+	every mount_point in [rootfs, "/run/kata-containers/sandbox/rootfs"] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "shm", "fstype": "tmpfs"}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
+	}
 }
 
 test_sandbox_storage_elsewhere_allowed if {
-	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/shm", "source": "shm"}]}
-	CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/shared/containers/x", "source": ""}]}
-	UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/y", "source": "tmpfs"}]}
+	CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}]}
+	CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "tmpfs"}]}
+	UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/y", "source": "tmpfs", "fstype": "tmpfs"}]}
+}
+
+# A source token says nothing about the filesystem the handler mounts: the
+# sandbox shm and the seeding tree are what every container binds from, so a
+# storage claiming a host-attached filesystem there is host bytes for the pod.
+test_sandbox_storage_with_host_backed_fstype_denied if {
+	every fstype in ["9p", "erofs", "ext4", "hugetlbfs", "iso9660", "overlay", "vfat", "virtiofs"] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": fstype}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/ephemeral/x", "source": "tmpfs", "fstype": fstype}]}
+	}
+}
+
+# A sandbox storage names a filesystem, so the encrypted-block shape has no
+# business here — and the source tokens are not what excludes it: "shm" is no
+# more absolute than a PCI path. Only container_storage_allowed reaches that rule.
+test_sandbox_encrypted_block_storage_denied if {
+	every source in ["", "shm", "tmpfs"] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": "blk", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "ext4", "driver_options": ["encryption_key=ephemeral"]}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "blk", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "ext4", "driver_options": ["encryption_key=ephemeral"]}]}
+	}
+}
+
+# is_multi_layer_storage reads the options alone, so the option forms reach the
+# sandbox path too — add_storages dispatches on them for a storage carrying no
+# container id. An overlay assembled out of host block devices at the seeding
+# tree is what every container then binds from.
+test_sandbox_layered_storage_denied if {
+	every options in [["X-kata.multi-layer=true"], ["X-kata.overlay-lower=/run/c8s"], ["X-kata.overlay-rw"]] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/hijack", "source": "tmpfs", "fstype": "tmpfs", "options": options}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/ephemeral/hijack", "source": "tmpfs", "fstype": "tmpfs", "options": options}]}
+	}
+}
+
+# The same both ways round: a host-backed driver carrying a guest-local fstype.
+# The seeding tree is the sandbox-time prize — every container binds from it.
+test_sandbox_storage_with_host_backed_driver_denied if {
+	every driver in ["blk", "blk-ccw", "erofs.multi-layer", "mmioblk", "nvdimm", "overlayfs", "scsi", "virtio-fs", "watchable-bind"] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": driver, "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": "tmpfs"}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": driver, "mount_point": "/run/kata-containers/sandbox/ephemeral/x", "source": "tmpfs", "fstype": "tmpfs"}]}
+	}
+}
+
+test_sandbox_storage_outside_the_runtime_dirs_denied if {
+	every mount_point in [
+		"/run/c8s",
+		"/run/c8s/certs",
+		"/etc/c8s",
+		"/run/kata-containers/sandbox",
+		"/run/kata-containers/sandbox/",
+		"/run/kata-containers/sandbox/.",
+		"/run/kata-containers/shared/containers/",
+		"/run/kata-containers/sandbox/../../c8s",
+		"/run/kata-containers/sandbox/ephemeral/../../../c8s",
+	] {
+		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
+	}
 }
 
 # The runtime only ever sends fs tokens here; a path source is host-staged
 # content the ephemeral handler would mount verbatim.
 test_sandbox_storage_with_path_source_denied if {
 	every source in ["/", "/run", "/run/kata-containers/other/rootfs", "../.."] {
-		not CreateSandboxRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
-		not UpdateEphemeralMountsRequest with input as {"storages": [{"mount_point": "/run/kata-containers/sandbox/x", "source": source}]}
+		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "tmpfs"}]}
+		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "tmpfs"}]}
 	}
 }
 
@@ -308,7 +585,11 @@ test_sandbox_storage_with_path_source_denied if {
 
 honest_mounts := [
 	{"destination": "/proc", "source": "proc", "type_": "proc", "options": []},
+	{"destination": "/sys", "source": "sysfs", "type_": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"]},
 	{"destination": "/sys/fs/cgroup", "source": "cgroup", "type_": "cgroup", "options": []},
+	{"destination": "/sys/fs/cgroup", "source": "cgroup", "type_": "cgroup2", "options": ["nsdelegate"]},
+	{"destination": "/dev/pts", "source": "devpts", "type_": "devpts", "options": ["newinstance", "ptmxmode=0666"]},
+	{"destination": "/dev/mqueue", "source": "mqueue", "type_": "mqueue", "options": ["nosuid", "noexec", "nodev"]},
 	{"destination": "/dev/shm", "source": "/run/kata-containers/sandbox/shm", "type_": "bind", "options": ["rbind"]},
 	{"destination": "/etc/resolv.conf", "source": "/run/kata-containers/shared/containers/pod-resolv.conf", "type_": "bind", "options": []},
 	{"destination": "/data", "source": "/run/kata-containers/sandbox/storage/aGk", "type_": "bind", "options": []},
@@ -344,13 +625,29 @@ test_mount_source_traversal_denied if {
 	))
 }
 
-# A relative bind source resolves against the bundle directory, so "../.."
-# reaches /run — whether the bind is marked by type or by option.
+# A bind source is held to the same shape a storage mount point is: a tree with
+# a plain component after it. The tree itself carries every seeded file and every
+# sibling emptyDir.
+test_bind_source_at_the_tree_denied if {
+	every source in [
+		"/run/kata-containers/sandbox/",
+		"/run/kata-containers/sandbox//",
+		"/run/kata-containers/shared/containers/",
+		"/run/kata-containers/shared/containers/./x",
+	] {
+		not CreateContainerRequest with input as with_mounts(array.concat(honest_mounts, [bind_from(source)]))
+	}
+}
+
+# A relative bind source resolves against the bundle directory: "../.." reaches
+# /run, and a plain name reaches the bundle itself. The runtime builds every
+# source it sends with filepath.Join, so all of these are host-composed.
 test_relative_bind_source_denied if {
 	every m in [
 		{"destination": "/x", "source": "../..", "type_": "bind", "options": []},
+		{"destination": "/x", "source": "rootfs/etc", "type_": "bind", "options": []},
 		{"destination": "/x", "source": "../..", "type_": "tmpfs", "options": ["rbind"]},
-		{"destination": "/x", "source": "../..", "type_": "", "options": ["bind"]},
+		{"destination": "/x", "source": "../..", "type_": "proc", "options": ["bind"]},
 	] {
 		not CreateContainerRequest with input as with_mounts(array.concat(honest_mounts, [m]))
 	}
@@ -362,6 +659,27 @@ test_fs_mount_without_source_allowed if {
 		honest_mounts,
 		[{"destination": "/x", "source": "", "type_": "tmpfs", "options": []}],
 	))
+}
+
+# rustjail passes a non-bind mount's type straight to mount(2), so a filesystem
+# name is the second way to reach host bytes: virtiofs and 9p mount a device the
+# host attached to the VM, and a disk filesystem mounts a disk it attached. The
+# destination is the host's to choose, credential paths included.
+test_host_backed_fs_mount_denied if {
+	every m in [
+		{"destination": "/run/c8s/certs", "source": "kataShared", "type_": "virtiofs", "options": []},
+		{"destination": "/run/c8s/secrets", "source": "kataShared", "type_": "9p", "options": ["trans=virtio"]},
+		{"destination": "/x", "source": "vda", "type_": "ext4", "options": []},
+		{"destination": "/x", "source": "none", "type_": "overlay", "options": ["lowerdir=/run/kata-containers/sandbox/x"]},
+		{"destination": "/x", "source": "none", "type_": "erofs", "options": []},
+		{"destination": "/x", "source": "", "type_": "", "options": []},
+		# A virtiofs or 9p source is the tag the host gave the device, not a
+		# path, so it may be spelled as one of the sandbox directories.
+		{"destination": "/run/c8s/certs", "source": "/run/kata-containers/sandbox/x", "type_": "virtiofs", "options": []},
+		{"destination": "/run/c8s/secrets", "source": "/run/kata-containers/shared/containers/x", "type_": "9p", "options": ["trans=virtio"]},
+	] {
+		not CreateContainerRequest with input as with_mounts(array.concat(honest_mounts, [m]))
+	}
 }
 
 # Same names CopyFile has to keep working for.
@@ -418,6 +736,24 @@ test_host_reach_in_rpcs_denied if {
 	not ExecProcessRequest
 	not ReadStreamRequest
 	not WriteStreamRequest
+}
+
+# The mount this reads through is itself admissible, so the RPC is what denies.
+test_termination_log_read_denied if {
+	not GetDiagnosticDataRequest with input as {
+		"container_id": cid,
+		"log_type": "termination_log",
+	}
+
+	CreateContainerRequest with input as object.union(
+		with_annotations(workload_input, {"io.kubernetes.container.terminationMessagePath": "/dev/termination-log"}),
+		{"OCI": {"Mounts": [{
+			"destination": "/dev/termination-log",
+			"source": "/run/kata-containers/sandbox/ephemeral/c8s-certs/tls.key",
+			"type_": "bind",
+			"options": ["rbind", "ro"],
+		}]}},
+	)
 }
 
 test_add_swap_denied if {
