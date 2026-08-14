@@ -44,6 +44,10 @@ func secretsRouter(t *testing.T, enabled bool) http.Handler {
 		deps.SecretsChallenges = &secretsCS
 		deps.SecretsOperator = &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)}
 		deps.SecretsExplain = &secrets.ExplainHandler{}
+		deps.SecretsExternal = &secrets.ExternalConfigHandler{
+			Backend: secrets.NewExternalBackend(nil, nil, 64),
+			Mem:     secrets.NewMemoryStore(8, 64),
+		}
 	}
 	return newRouter(deps)
 }
@@ -108,6 +112,7 @@ func TestRouter_SecretsChallengePoolIsSeparate(t *testing.T) {
 		SecretsChallenges: &secretsCS,
 		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)},
 		SecretsExplain:    &secrets.ExplainHandler{},
+		SecretsExternal:   &secrets.ExternalConfigHandler{Backend: secrets.NewExternalBackend(nil, nil, 64), Mem: secrets.NewMemoryStore(8, 64)},
 	}
 	_ = newRouter(deps)
 
@@ -154,6 +159,7 @@ func TestRouter_SecretsPutUsesTheAllowlistWriteCap(t *testing.T) {
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Authorize:    func(_ *http.Request, body []byte) error { seen = len(body); return nil },
 		},
+		SecretsExternal: &secrets.ExternalConfigHandler{Backend: secrets.NewExternalBackend(nil, nil, 64), Mem: secrets.NewMemoryStore(8, 64)},
 	}
 	r := newRouter(deps)
 
@@ -238,6 +244,7 @@ func TestRouter_SecretRoutesRateLimitPerSandbox(t *testing.T) {
 		SecretsChallenges: &secretsCS,
 		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)},
 		SecretsExplain:    &secrets.ExplainHandler{},
+		SecretsExternal:   &secrets.ExternalConfigHandler{Backend: secrets.NewExternalBackend(nil, nil, 64), Mem: secrets.NewMemoryStore(8, 64)},
 	})
 
 	send := func(leaf *x509.Certificate) int {
@@ -267,5 +274,36 @@ func TestRouter_SecretRoutesRateLimitPerSandbox(t *testing.T) {
 	// The co-tenant on the same address still gets through.
 	if code := send(victim); code == http.StatusTooManyRequests {
 		t.Fatal("one pod exhausted a co-tenant's bucket: the limiter is keyed on the address")
+	}
+}
+
+// The external config route is a static segment under the secrets wildcard:
+// chi routes it ahead of the wildcard, and "/external" is a reserved store path.
+func TestRouter_ExternalConfigRoutedWithSecrets(t *testing.T) {
+	r := secretsRouter(t, true)
+	// Reaches the handler, which refuses: no client certificate and no
+	// operator token.
+	if code := get(t, r, http.MethodPut, "/secrets/external"); code == http.StatusNotFound {
+		t.Fatal("PUT /secrets/external = 404: the route did not reach the external config handler")
+	}
+	if code := get(t, r, http.MethodGet, "/secrets/external"); code != http.StatusUnauthorized {
+		t.Fatalf("GET /secrets/external = %d, want 401 from the external config handler", code)
+	}
+	// POST is routed to the config handler too (405 after auth), so the
+	// reserved path never reaches the workload handler as a store path: that
+	// would answer 400 for want of a challenge.
+	if code := get(t, r, http.MethodPost, "/secrets/external"); code != http.StatusUnauthorized {
+		t.Fatalf("POST /secrets/external = %d, want 401 from the external config handler", code)
+	}
+	// The wildcard still covers paths below /secrets.
+	if code := get(t, r, http.MethodGet, "/secrets/other"); code == http.StatusNotFound {
+		t.Fatal("GET /secrets/other = 404: the wildcard no longer covers it")
+	}
+}
+
+func TestRouter_ExternalConfigUnroutedWhenSecretsDisabled(t *testing.T) {
+	r := secretsRouter(t, false)
+	if code := get(t, r, http.MethodPut, "/secrets/external"); code != http.StatusNotFound {
+		t.Fatalf("PUT /secrets/external = %d, want 404 with --secrets off", code)
 	}
 }

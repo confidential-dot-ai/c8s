@@ -771,3 +771,22 @@ func TestMeasurementDigests(t *testing.T) {
 		t.Fatalf("empty allowlist: got %v, %v", empty, err)
 	}
 }
+
+// A corrupt external-mappings file fails startup loud rather than silently
+// un-backing mapped paths.
+func TestRun_CorruptExternalMappingsFailsClosed(t *testing.T) {
+	api := newHealthyAttestationApi(t)
+	cfg := validRunConfig(t, api.URL)
+	cfg.ratlsPlatform = "snp"
+	cfg.measurements = []string{"deadbeef"}
+	cfg.inventoryCIDRs = []string{"10.0.0.0/24"}
+	dir := t.TempDir()
+	cfg.allowlistDB = filepath.Join(dir, "allowlist.db")
+	if err := os.WriteFile(filepath.Join(dir, "external-mappings.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(cfg)
+	if err == nil || !strings.Contains(err.Error(), "external-mappings.json") {
+		t.Fatalf("run = %v, want an external-mappings parse error", err)
+	}
+}

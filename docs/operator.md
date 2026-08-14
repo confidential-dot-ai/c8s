@@ -246,7 +246,10 @@ CDS verifies EAR JWTs against its own in-process signer; there is no JWKS
 fetch to a separate component. The chart does not render a CA private key into
 a Kubernetes Secret. CDS generates its mesh CA key inside the process, keeps it
 in memory, and persists only the public CA bundle in the configured
-public-bundle PVC.
+public-bundle PVC. The same in-memory rule covers any external KMS
+credential an operator applies with `c8s secrets external` (docs/secrets.md): it
+arrives over the attested channel, lives in CDS memory, and is never rendered
+into a Kubernetes resource.
 
 Minimal allowlist-write values (pin operator public keys):
 

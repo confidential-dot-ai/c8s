@@ -128,3 +128,54 @@ func (c client) explain(ctx context.Context, sandboxID string, auth authorizer) 
 // maxResponseBytes bounds a CDS reply. The largest is an explain report over
 // every workload entry; anything approaching this is a wrong endpoint.
 const maxResponseBytes = 1 << 20
+
+// putExternal replaces the Azure backend config, returning the resulting status.
+func (c client) putExternal(ctx context.Context, doc []byte, auth authorizer) (intsecrets.ExternalStatus, error) {
+	var st intsecrets.ExternalStatus
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+intsecrets.ExternalRoute, bytes.NewReader(doc))
+	if err != nil {
+		return st, err
+	}
+	authz, err := auth.Authorization(http.MethodPut, req.URL.Path, doc)
+	if err != nil {
+		return st, fmt.Errorf("authorize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authz)
+	return st, c.doExternal(req, &st)
+}
+
+// getExternal reads the Azure backend status.
+func (c client) getExternal(ctx context.Context, auth authorizer) (intsecrets.ExternalStatus, error) {
+	var st intsecrets.ExternalStatus
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+intsecrets.ExternalRoute, nil)
+	if err != nil {
+		return st, err
+	}
+	authz, err := auth.Authorization(http.MethodGet, req.URL.Path, nil)
+	if err != nil {
+		return st, fmt.Errorf("authorize request: %w", err)
+	}
+	req.Header.Set("Authorization", authz)
+	return st, c.doExternal(req, &st)
+}
+
+// doExternal runs one config-endpoint request and decodes the status reply.
+func (c client) doExternal(req *http.Request, st *intsecrets.ExternalStatus) error {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("cds returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if err := json.Unmarshal(raw, st); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
