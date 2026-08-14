@@ -89,24 +89,32 @@ func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Pa
 		// reachable-but-rejected outcome, i.e. a security verdict.
 		return nil, err
 	}
-	// Defense in depth: a nil error already implies these, but never report a
-	// success the result contradicts.
-	if !res.SignatureValid {
-		return nil, fmt.Errorf("verifier returned signature_valid=false")
+	if err := enforceResult(res, p); err != nil {
+		return nil, err
 	}
-	if params.ExpectedReportData != nil && (res.ReportDataMatch == nil || !*res.ReportDataMatch) {
-		return nil, fmt.Errorf("REPORTDATA does not match the expected binding (report_data_match not true)")
+	return res, nil
+}
+
+// enforceResult re-checks the verdict against p on the verifier's own claims.
+// Defense in depth: a nil dispatch error already implies these, but never
+// report a success the result contradicts.
+func enforceResult(res *teetypes.VerificationResult, p Params) error {
+	if !res.SignatureValid {
+		return fmt.Errorf("verifier returned signature_valid=false")
+	}
+	if p.ExpectedReportData != nil && (res.ReportDataMatch == nil || !*res.ReportDataMatch) {
+		return fmt.Errorf("REPORTDATA does not match the expected binding (report_data_match not true)")
 	}
 	if len(p.Measurements) > 0 {
 		mb, err := hex.DecodeString(res.Claims.LaunchDigest)
 		if err != nil || len(mb) == 0 {
-			return nil, fmt.Errorf("cannot enforce the measurement pin: launch digest missing or malformed (%q)", res.Claims.LaunchDigest)
+			return fmt.Errorf("cannot enforce the measurement pin: launch digest missing or malformed (%q)", res.Claims.LaunchDigest)
 		}
 		if !attestationclient.MeasurementAllowed(mb, p.Measurements) {
-			return nil, fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
+			return fmt.Errorf("%w (launch digest %s)", ErrMeasurementNotAllowed, res.Claims.LaunchDigest)
 		}
 	}
-	return res, nil
+	return nil
 }
 
 // dispatch routes evidence to attestation-go. The envelope path
