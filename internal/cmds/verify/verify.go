@@ -879,12 +879,13 @@ type Outcome struct {
 	Platform    string    `json:"platform,omitempty"`
 	Measurement string    `json:"measurement,omitempty"`
 	ReportData  string    `json:"report_data,omitempty"`
-	Debug       bool      `json:"debug,omitempty"`
-	SMT         bool      `json:"smt,omitempty"`
-	CurrentTCB  string    `json:"current_tcb,omitempty"`
-	CertSHA256  string    `json:"cert_sha256,omitempty"`
-	Pinned      bool      `json:"measurement_pinned"`
-	Error       string    `json:"error,omitempty"`
+	// Debug and SMT always serialize, even when false: an absent key reads as false to a CI gate.
+	Debug      bool   `json:"debug"`
+	SMT        bool   `json:"smt"`
+	CurrentTCB string `json:"current_tcb,omitempty"`
+	CertSHA256 string `json:"cert_sha256,omitempty"`
+	Pinned     bool   `json:"measurement_pinned"`
+	Error      string `json:"error,omitempty"`
 
 	// RTMRsPinned lists the TDX runtime measurement registers this verdict
 	// enforced, as "<index>:<hex>". On TDX the --measurements pin covers only
@@ -1113,6 +1114,8 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	oc.Measurement = result.Claims.LaunchDigest
 	oc.CurrentTCB = formatTCB(result.Claims.TCB)
+	oc.ReportData = hex.EncodeToString(result.Claims.ReportData)
+	oc.Debug, oc.SMT = reportFlags(oc.Platform, result.Claims.PlatformData)
 
 	// The TDX-only gate runs before any register is compared: on non-TDX
 	// evidence an MRTD/RTMR pin cannot be enforced at all, and reporting a
@@ -1330,6 +1333,24 @@ func minTCBFromCfg(cfg config) *teetypes.SnpTcb {
 		Snp:        byte(cfg.minTCBSNP),
 		Microcode:  byte(cfg.minTCBMicrocode),
 	}
+}
+
+// reportFlags reads the debug and SMT state the verifier extracted into the
+// platform-specific claims: SNP carries them under policy/platform_info, TDX
+// attests debug under td_attributes_parsed and carries no SMT state (smt:false
+// means unattested, not off). attestation-go routes all six supported platforms
+// through one of these two claim layouts, so the non-TDX branch is SNP-shaped
+// by exhaustion.
+func reportFlags(platform string, pd map[string]any) (debug, smt bool) {
+	nested := func(section, key string) bool {
+		m, _ := pd[section].(map[string]any)
+		v, _ := m[key].(bool)
+		return v
+	}
+	if isTDX(platform) {
+		return nested("td_attributes_parsed", "debug"), false
+	}
+	return nested("policy", "debug_allowed"), nested("platform_info", "smt_enabled")
 }
 
 // formatTCB renders the verified TCB for display: SNP shows its components, TDX

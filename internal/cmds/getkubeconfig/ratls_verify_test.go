@@ -1,6 +1,7 @@
 package getkubeconfig
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,16 +100,47 @@ func attestedCert(t *testing.T, envelope types.AttestationEvidence) *x509.Certif
 	return cert
 }
 
+// capturedVerify records one call to the stubbed verifier: the evidence
+// envelope and the params production code asked it to enforce.
+type capturedVerify struct {
+	envelope []byte
+	params   teetypes.VerifyParams
+}
+
+// verifyRecorder collects verifier calls; the RA-TLS dial can invoke the
+// verifier off the test goroutine, so reads and writes go through the mutex.
+type verifyRecorder struct {
+	mu    sync.Mutex
+	calls []capturedVerify
+}
+
+func (r *verifyRecorder) add(envelope []byte, params teetypes.VerifyParams) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, capturedVerify{envelope, params})
+}
+
+func (r *verifyRecorder) all() []capturedVerify {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]capturedVerify(nil), r.calls...)
+}
+
 // stubVerify replaces the in-process attestation-go verifier with one that
-// returns the given result/error. Lets the tests drive verifyServerCert's
-// post-verification logic deterministically without real hardware.
-func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) {
+// returns the given result/error and records what it was asked to check, so
+// tests can pin the request side (the report_data binding), not just the
+// verdict. Lets the tests drive verifyServerCert's post-verification logic
+// deterministically without real hardware.
+func stubVerify(t *testing.T, res *teetypes.VerificationResult, err error) *verifyRecorder {
 	t.Helper()
+	rec := &verifyRecorder{}
 	orig := verifyEnvelope
-	verifyEnvelope = func([]byte, teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
+	verifyEnvelope = func(envelope []byte, params teetypes.VerifyParams) (*teetypes.VerificationResult, error) {
+		rec.add(envelope, params)
 		return res, err
 	}
 	t.Cleanup(func() { verifyEnvelope = orig })
+	return rec
 }
 
 // verifiedResultFor builds a passing VerificationResult whose claims satisfy
@@ -220,11 +253,24 @@ func TestVerifyServerCertRejectsEachMismatchedRegister(t *testing.T) {
 func TestVerifyServerCertAccepts(t *testing.T) {
 	// Genuine quote, bound to the cert key, full measured identity: accept.
 	exp := testPolicy(t, operatorPub(t))
-	stubVerify(t, verifiedResultFor(exp), nil)
+	rec := stubVerify(t, verifiedResultFor(exp), nil)
 	cert := attestedCert(t, types.AttestationEvidence{Platform: "tdx", Evidence: json.RawMessage(`{}`)})
 
 	if err := verifyServerCert(cert, exp); err != nil {
 		t.Fatalf("want accept, got %v", err)
+	}
+	// The verifier must be asked to bind the quote to THIS cert's public key —
+	// the check that ties the RA-TLS channel to the attested guest.
+	want, err := ratls.ReportDataForKey(cert.PublicKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := rec.all()
+	if len(calls) != 1 {
+		t.Fatalf("verifier calls = %d, want 1", len(calls))
+	}
+	if !bytes.Equal(calls[0].params.ExpectedReportData, want[:]) {
+		t.Errorf("report_data binding = %x, want SHA-384(cert key) %x", calls[0].params.ExpectedReportData, want[:])
 	}
 }
 

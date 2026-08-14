@@ -1,6 +1,7 @@
 package getkubeconfig
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -23,8 +24,10 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/credrelease"
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // tdxEnvelope is a minimal self-describing evidence envelope; the actual
@@ -52,27 +55,25 @@ func newAttestedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
-// attestHandler serves POST /attest with the given status; on 200 it returns
-// the TDX evidence envelope after checking the request shape.
-func attestHandler(t *testing.T, status int) http.Handler {
+// newAttestStub starts the shared fake attestation-api (internal/testattest)
+// reporting the TDX platform the trust gate requires; the recorded requests
+// let tests pin what production code sent.
+func newAttestStub(t *testing.T) *testattest.Stub {
 	t.Helper()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("attest method = %s, want POST", r.Method)
-		}
-		var req map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("attest body: %v", err)
-		}
-		if nonce, err := base64.StdEncoding.DecodeString(req["report_data"]); err != nil || len(nonce) != 32 {
-			t.Errorf("attest report_data = %q, want base64 32-byte nonce", req["report_data"])
-		}
-		if status != http.StatusOK {
-			http.Error(w, "attest boom", status)
-			return
-		}
-		fmt.Fprint(w, tdxEnvelope)
-	})
+	stub := testattest.New(t)
+	stub.SetPlatform(types.PlatformTdx)
+	return stub
+}
+
+// failingAttest serves POST /attest with the given status — the attest gate's
+// HTTP failure path.
+func failingAttest(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "attest boom", status)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // releaseHandler serves POST /release-credential with the given status; on 200
@@ -103,8 +104,9 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 }
 
 // testEnv wires up a full fake node: operator key + image manifest on disk,
-// attest endpoint, RA-TLS cred-release endpoint, and a stubbed verifier that
-// accepts iff the claims satisfy the full measured-identity policy.
+// the caller's attest endpoint URL, RA-TLS cred-release endpoint, and a
+// stubbed verifier that accepts iff the claims satisfy the full
+// measured-identity policy.
 type testEnv struct {
 	keyPath      string
 	manifestPath string
@@ -114,7 +116,7 @@ type testEnv struct {
 	exp          measuredPolicy
 }
 
-func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody string) testEnv {
+func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody string) testEnv {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -137,14 +139,12 @@ func newTestEnv(t *testing.T, attestStatus, releaseStatus int, releaseBody strin
 	}
 	stubVerify(t, verifiedResultFor(exp), nil)
 
-	attest := httptest.NewServer(attestHandler(t, attestStatus))
-	t.Cleanup(attest.Close)
 	release := newAttestedTLSServer(t, releaseHandler(t, releaseStatus, releaseBody))
 
 	return testEnv{
 		keyPath:      keyPath,
 		manifestPath: manifestPath,
-		attestURL:    attest.URL + "/attest",
+		attestURL:    attestURL,
 		releaseURL:   release.URL,
 		outPath:      filepath.Join(dir, "kubeconfig"),
 		exp:          exp,
@@ -171,7 +171,7 @@ func (e testEnv) config() Config {
 // gate, RA-TLS dial (verified via the stub), operator-signed CSR exchange, and
 // kubeconfig assembly on disk.
 func TestRunEndToEnd(t *testing.T) {
-	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
 
 	if err := Run(context.Background(), env.config()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -193,9 +193,44 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAttestNonceIsFreshPerRun pins the attest gate's freshness: each run
+// sends a fresh random nonce to /attest and asks the verifier to bind exactly
+// those bytes. Replacing rand.Read(nonce) with a constant fails this — the
+// gate would accept one recorded genuine quote replayed forever.
+func TestAttestNonceIsFreshPerRun(t *testing.T) {
+	attest := newAttestStub(t)
+	exp := testPolicy(t, operatorPub(t))
+	rec := stubVerify(t, verifiedResultFor(exp), nil)
+
+	for i := 0; i < 2; i++ {
+		if err := attestAndVerify(context.Background(), attest.URL+"/attest", exp); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+
+	reqs := attest.AttestRequests()
+	calls := rec.all()
+	if len(reqs) != 2 || len(calls) != 2 {
+		t.Fatalf("attest requests = %d, verifier calls = %d, want 2 each", len(reqs), len(calls))
+	}
+	for i := range reqs {
+		nonce := reqs[i].ReportData.Bytes()
+		if len(nonce) != 32 {
+			t.Errorf("run %d: /attest nonce is %d bytes, want 32", i, len(nonce))
+		}
+		if !bytes.Equal(calls[i].params.ExpectedReportData, nonce) {
+			t.Errorf("run %d: verifier asked to bind %x, but /attest was sent %x",
+				i, calls[i].params.ExpectedReportData, nonce)
+		}
+	}
+	if bytes.Equal(reqs[0].ReportData.Bytes(), reqs[1].ReportData.Bytes()) {
+		t.Error("the attest nonce is constant across runs — a recorded genuine quote replays forever")
+	}
+}
+
 func TestRunErrors(t *testing.T) {
 	t.Run("attest gate HTTP failure", func(t *testing.T) {
-		cfg := newTestEnv(t, http.StatusInternalServerError, http.StatusOK, goodRelease).config()
+		cfg := newTestEnv(t, failingAttest(t, http.StatusInternalServerError).URL+"/attest", http.StatusOK, goodRelease).config()
 		err := Run(context.Background(), cfg)
 		if err == nil || !strings.Contains(err.Error(), "attestation gate") ||
 			!strings.Contains(err.Error(), "attest HTTP 500") {
@@ -204,7 +239,7 @@ func TestRunErrors(t *testing.T) {
 	})
 
 	t.Run("release failure", func(t *testing.T) {
-		cfg := newTestEnv(t, http.StatusOK, http.StatusForbidden, goodRelease).config()
+		cfg := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusForbidden, goodRelease).config()
 		err := Run(context.Background(), cfg)
 		if err == nil || !strings.Contains(err.Error(), "credential release") ||
 			!strings.Contains(err.Error(), "release HTTP 403") {
@@ -217,7 +252,7 @@ func TestRunErrors(t *testing.T) {
 // verifies but rtmr_3 doesn't match the operator-key chain, so Run must stop
 // before ever contacting cred-release.
 func TestRunRejectsWrongRTMR3(t *testing.T) {
-	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
 	res := verifiedResultFor(env.exp)
 	res.Claims.PlatformData["rtmr_3"] = "00"
 	stubVerify(t, res, nil) // overrides the env's stub
@@ -245,7 +280,7 @@ func TestRunRejectsWrongRTMR3(t *testing.T) {
 // TestRATLSClientRejectsPlainCert confirms the RA-TLS dial fails closed
 // against a server whose cert carries no attestation envelope (a host MITM).
 func TestRATLSClientRejectsPlainCert(t *testing.T) {
-	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
 	plain := httptest.NewTLSServer(releaseHandler(t, http.StatusOK, goodRelease))
 	t.Cleanup(plain.Close)
 
