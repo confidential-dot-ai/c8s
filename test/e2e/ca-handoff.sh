@@ -2,9 +2,11 @@
 # Live-cluster verification that attested mesh-CA handoff works end to end:
 # an attested probe pod (the deployed cds image running `request-handoff`)
 # pulls the CA over /handoff and proves the material is the live trust root
-# served on /ca. Proves on a real cluster what unit tests cannot: real TEE
-# evidence, a real EAR minted by the live CDS, the real measurement gate,
-# and the transfer over the cluster network.
+# served on /ca, and a second probe with a wrong --measurements pin proves a
+# mismatched peer is refused. Proves on a real cluster what unit tests
+# cannot: real TEE evidence, a real EAR minted by the live CDS, the real
+# measurement gate on the probe's own pin (accept and refuse), and the
+# transfer over the cluster network.
 #
 # Needs: kubectl pointed at a node-as-CVM (non-kata) cluster with the c8s
 # chart installed, cds.handoff.enabled=true, and a deployed cds image that
@@ -12,7 +14,8 @@
 #
 # Env:
 #   CDS_NS                 namespace of the cds deployment (default: discover)
-#   PROBE_TIMEOUT_SECONDS  wait for the probe pod to finish (default 180)
+#   PROBE_TIMEOUT_SECONDS  wait for the accept probe pod to finish (default
+#                          180); the wrong-pin probe gets a fixed 30s budget
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -21,15 +24,16 @@ cds_selector="app.kubernetes.io/name=c8s-operator,app.kubernetes.io/component=cd
 
 cds_ns=""
 pod=""
+bad_pod=""
 kget_err=$(mktemp)
 cleanup() {
   rm -f "$kget_err"
   if [ -n "$cds_ns" ] && [ -n "$pod" ]; then
-    kubectl delete pod "$pod" -n "$cds_ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl delete pod "$pod" "$bad_pod" -n "$cds_ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
 }
-# INT/TERM as well as EXIT: a Ctrl-C during the up-to-3-minute wait must not
-# leave the probe pod (with the cds SA and pull rights) parked on the node.
+# INT/TERM as well as EXIT: a Ctrl-C during a probe wait must not leave a
+# probe pod (with the cds SA and pull rights) parked on the node.
 trap cleanup EXIT INT TERM
 
 # kget runs kubectl and, on failure, surfaces the real error instead of
@@ -119,22 +123,27 @@ ctr_sec_ctx=$(sed -n 6p <<<"$pod_fields"); [ -n "$ctr_sec_ctx" ] || ctr_sec_ctx=
 [ -n "$cds_image" ] || fail "cds pod $cds_ns/$cds_pod has no container named cds"
 
 pod="ca-handoff-probe-$$"
+bad_pod="$pod-bad"
 operator_keys_cm="${cds_deploy}-operator-keys"
 kubectl get configmap "$operator_keys_cm" -n "$cds_ns" >/dev/null 2>&1 ||
   fail "CDS handoff requires operator keys, but ConfigMap $cds_ns/$operator_keys_cm is missing"
 echo "cds: $cds_ns/$cds_deploy on $cds_node; peer $peer_url"
 
-# Release namespace + cds ServiceAccount: image pull secrets ride along and
-# the image digest is already in the allowlist floor. nodeName pins the probe
-# to cds's node so its launch measurement matches --handoff-measurements and
-# the node-local attestation-api attests the right node. The probe's --timeout
-# tracks PROBE_TIMEOUT_SECONDS so raising the env actually extends the in-pod
-# retry window (leave the pod-watch a little longer to observe the verdict).
-kubectl apply -f - >/dev/null <<EOF
+# run_probe <name> <measurements> [timeout-seconds]: launch the probe pod and
+# print its terminal phase on stdout. Release namespace + cds ServiceAccount:
+# image pull secrets ride along and the image digest is already in the
+# allowlist floor. nodeName pins the probe to cds's node so its launch
+# measurement matches --handoff-measurements and the node-local
+# attestation-api attests the right node. The in-pod --timeout defaults to
+# PROBE_TIMEOUT_SECONDS; the pod-watch runs 30s past it to observe the
+# verdict.
+run_probe() {
+  local name=$1 meas=$2 timeout=${3:-$probe_timeout}
+  kubectl apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
-  name: $pod
+  name: $name
   namespace: $cds_ns
 spec:
   restartPolicy: Never
@@ -146,7 +155,7 @@ spec:
   containers:
     - name: probe
       image: $cds_image
-      # The copied --attestation-api-url keeps the chart's $(HOST_IP) form
+      # The copied --attestation-api-url keeps the chart's \$(HOST_IP) form
       # under cvmMode=node; kubelet expands it only if the pod defines the env.
       env:
         - name: HOST_IP
@@ -157,10 +166,10 @@ spec:
         - request-handoff
         - --peer-url=$peer_url
         - --attestation-api-url=$attest_url
-        - --measurements=$handoff_meas
+        - --measurements=$meas
         - --operator-keys=/etc/cds-operator-keys/keys.pem
         - --expected-issuer=$ear_issuer
-        - --timeout=${probe_timeout}s
+        - --timeout=${timeout}s
       volumeMounts:
         - name: operator-keys
           mountPath: /etc/cds-operator-keys
@@ -171,26 +180,43 @@ spec:
       configMap:
         name: $operator_keys_cm
 EOF
+  local deadline=$((SECONDS + timeout + 30)) phase=""
+  while :; do
+    phase=$(kubectl get pod "$name" -n "$cds_ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break ;; esac
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kubectl describe pod "$name" -n "$cds_ns" >&2 || true
+      fail "probe $name did not reach a terminal phase in $((timeout + 30))s (phase=${phase:-unknown})"
+    fi
+    sleep 3
+  done
+  printf '%s\n' "$phase"
+}
 
-# --- await verdict ------------------------------------------------------------
+# --- accept: the pinned probe pulls the live trust root -----------------------
 
-# Watch a little past the probe's own --timeout so the pod reaches a terminal
-# phase before we give up.
-deadline=$((SECONDS + probe_timeout + 30))
-phase=""
-while :; do
-  phase=$(kubectl get pod "$pod" -n "$cds_ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-  case "$phase" in Succeeded|Failed) break ;; esac
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    kubectl describe pod "$pod" -n "$cds_ns" >&2 || true
-    fail "probe did not reach a terminal phase in $((probe_timeout + 30))s (phase=${phase:-unknown})"
-  fi
-  sleep 3
-done
-
+phase=$(run_probe "$pod" "$handoff_meas")
 kubectl logs "$pod" -n "$cds_ns" || true
 
 # Pod phase is the verdict: Succeeded means the probe exited 0, which by
 # construction requires the pulled CA to match the served trust root.
 [ "$phase" = Succeeded ] || fail "handoff probe failed (see logs above)"
-echo "PASS: mesh CA handoff verified end-to-end (EAR-gated transfer, served-CA match)"
+echo "ok: pinned probe pulled the CA over /handoff and matched the served trust root"
+
+# --- negative: a wrong --measurements pin is refused --------------------------
+
+# 48 zero bytes: well-formed SHA-384 hex no launch produces. The refusal is
+# the probe's own RA-TLS client rejecting the peer cert, which surfaces as a
+# plain *url.Error, so ClassifyPullError calls it PullTransient: the probe
+# retries the settled verdict until --timeout and exits 3 — still Failed,
+# with the mismatch text logged on every attempt. Hence the short 30s budget.
+bad_meas=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+phase=$(run_probe "$bad_pod" "$bad_meas" 30)
+bad_logs=$(kubectl logs "$bad_pod" -n "$cds_ns" 2>/dev/null || true)
+printf '%s\n' "$bad_logs"
+[ "$phase" = Failed ] || fail "probe with a wrong --measurements pin was not refused (phase=${phase:-unknown}; logs above)"
+grep -q "launch measurement not in allowed set" <<<"$bad_logs" \
+  || fail "refused probe's log names no measurement mismatch (see above)"
+echo "ok: wrong --measurements pin refused (log names the measurement mismatch)"
+
+echo "PASS: mesh CA handoff verified end-to-end (EAR-gated transfer, served-CA match, wrong-pin refusal)"
