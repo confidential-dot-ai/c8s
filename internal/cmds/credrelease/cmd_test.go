@@ -2,6 +2,8 @@ package credrelease
 
 import (
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestNewCmdDefaultsAndHelp(t *testing.T) {
@@ -16,7 +18,7 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 	}{
 		{"listen", ":8443"},
 		{"attestation-api-url", "http://127.0.0.1:8400"},
-		{"platform", "tdx"},
+		{"platform", ""},
 		{"client-ca-cert", defaultClientCACert},
 		{"client-ca-key", defaultClientCAKey},
 		{"server-ca-cert", defaultServerCACert},
@@ -34,5 +36,11 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 		if flag.DefValue != tt.want {
 			t.Errorf("flag %q default = %q, want %q", tt.name, flag.DefValue, tt.want)
 		}
+	}
+
+	// Omitting --platform is a usage error, not a tdx default.
+	pf := flags.Lookup("platform")
+	if pf == nil || pf.Annotations[cobra.BashCompOneRequiredFlag] == nil {
+		t.Errorf("--platform is not marked required")
 	}
 }

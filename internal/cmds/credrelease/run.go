@@ -19,7 +19,7 @@ type Config struct {
 	// serving cert's TDX quote is fetched from (the same :8400 service the
 	// rest of the stack uses).
 	AttestationAPIURL string
-	// Platform is the TEE platform ("tdx").
+	// Platform is the TEE platform ("tdx" or "snp"; no default).
 	Platform string
 	// ClientCACert / ClientCAKey locate the cluster's client-signing CA
 	// (defaults: the RKE2 paths; kubeadm works via /etc/kubernetes/pki/ca.{crt,key}).
@@ -52,6 +52,10 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.Platform = ratls.NormalizePlatform(cfg.Platform)
 	if cfg.Platform == "" {
 		return fmt.Errorf("--platform is required (RA-TLS is mandatory for credential release)")
+	}
+	// Fail on a bad value here, before the RTMR and cluster-CA reads below.
+	if err := ratls.ValidatePlatform(cfg.Platform); err != nil {
+		return fmt.Errorf("--platform: %w", err)
 	}
 
 	operatorPub, err := LoadMeasuredOperatorKey()

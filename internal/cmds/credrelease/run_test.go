@@ -98,6 +98,12 @@ func TestRunStartupErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "platform value validated before privileged reads",
+			cfg: func(t *testing.T) Config {
+				return Config{Platform: "foo"}
+			},
+		},
+		{
 			name: "operator key not staged",
 			cfg: func(t *testing.T) Config {
 				overrideBindingPaths(t) // paths exist, files do not
