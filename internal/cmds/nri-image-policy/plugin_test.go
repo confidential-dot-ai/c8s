@@ -22,20 +22,33 @@ func newTestPlugin(cfg *config) *plugin {
 	if err := validateLabelRules(cfg.Policy.LabelRules); err != nil {
 		panic(err)
 	}
-	p := &plugin{
-		cfg:    cfg,
-		audit:  audit.NewLogger(),
-		logger: slog.Default(),
+	return &plugin{
+		cfg:        cfg,
+		audit:      audit.NewLogger(),
+		logger:     slog.Default(),
+		containerd: &fakeContainerd{},
 	}
-	noContainerd(p)
-	return p
 }
 
-// noContainerd makes any containerd call a named panic. Tests that need one
-// rebind the field; the rest must stay on digest-bearing references.
-func noContainerd(p *plugin) {
-	p.resolve = func(context.Context, string) (string, error) { panic("unexpected containerd resolve") }
-	p.stopContainer = func(context.Context, string) error { panic("unexpected container kill") }
+// fakeContainerd is the containerdOps a test drives. An unset hook panics, so a
+// test that reaches containerd without arranging for it names the call it made.
+type fakeContainerd struct {
+	resolve func(ctx context.Context, imageRef string) (string, error)
+	stop    func(ctx context.Context, containerID string) error
+}
+
+func (f *fakeContainerd) Resolve(ctx context.Context, imageRef string) (string, error) {
+	if f.resolve == nil {
+		panic("unexpected containerd resolve")
+	}
+	return f.resolve(ctx, imageRef)
+}
+
+func (f *fakeContainerd) StopContainer(ctx context.Context, containerID string) error {
+	if f.stop == nil {
+		panic("unexpected container kill")
+	}
+	return f.stop(ctx, containerID)
 }
 
 func TestCheckImage_MissingAnnotation_DenyEnabled(t *testing.T) {
@@ -311,11 +324,11 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 				ExemptNamespaces:      []string{"kube-system"},
 			},
 		},
-		audit:  audit.NewLogger(),
-		logger: slog.Default(),
-		policy: newPolicyStore(floorAllowlist(map[string]string{})),
+		audit:      audit.NewLogger(),
+		logger:     slog.Default(),
+		policy:     newPolicyStore(floorAllowlist(map[string]string{})),
+		containerd: &fakeContainerd{},
 	}
-	noContainerd(p)
 	p.SetReady()
 
 	// Container with no image annotation and deny_missing_annotation=true
@@ -612,12 +625,12 @@ func newCachedPlugin(cfg *config, wl *allowlist.Allowlist) (*plugin, *policyStor
 	store := newPolicyStore(floorAllowlist(map[string]string{}))
 	store.apply(wl, 1)
 	p := &plugin{
-		cfg:    cfg,
-		policy: store,
-		audit:  audit.NewLogger(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:        cfg,
+		policy:     store,
+		audit:      audit.NewLogger(),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		containerd: &fakeContainerd{},
 	}
-	noContainerd(p)
 	return p, store
 }
 
@@ -889,7 +902,7 @@ func TestRunDeferredCheck_AuditMode_NoKill(t *testing.T) {
 	p.deferredCtrs = []*api.Container{ctr}
 	p.deferredMu.Unlock()
 
-	// Should run the check without reaching containerd (noContainerd panics).
+	// Should run the check without reaching containerd (fakeContainerd panics).
 	p.RunDeferredCheck(context.Background())
 	assertDeferredCleared(t, p)
 }
@@ -950,7 +963,7 @@ func TestSynchronize_EnforceExistingDisabled_BrokerRecordsWithoutKilling(t *test
 	denied := makeCtrWithImage(pod.Id, "ctr2", "registry/repo@"+pushDigestB)
 
 	// Fail-closed, but enforce_existing off: the denied container must not reach
-	// stopContainer (noContainerd panics).
+	// StopContainer (fakeContainerd panics).
 	if _, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{allowed, denied}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1016,7 +1029,7 @@ func TestSynchronize_Ready_AuditMode_ChecksWithoutEnforcing(t *testing.T) {
 	denied := makeCtrWithImage(pod.Id, "ctr2", "registry/repo@"+pushDigestB)
 
 	// Audit mode must run the check without enforcement: a denied container
-	// reaching stopContainer would panic (noContainerd).
+	// reaching StopContainer would panic (fakeContainerd).
 	updates, err := p.Synchronize(context.Background(), []*api.PodSandbox{pod}, []*api.Container{allowed, denied})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1286,7 +1299,7 @@ func TestCheckContainer_NamespaceNearMissesAreNotExempt(t *testing.T) {
 	}
 }
 
-// noContainerd panics if this path reaches the image store.
+// fakeContainerd panics if this path reaches the image store.
 func TestCreateContainer_NotReady_RecordsWithoutResolving(t *testing.T) {
 	p := exemptPlugin(t) // not ready
 	pod := makePod("kube-system", "pod1")
@@ -1344,11 +1357,11 @@ func TestCheckExisting_RecordsBeforeAttemptingTheKill(t *testing.T) {
 
 	var killed []string
 	var recordedAtKill bool
-	p.stopContainer = func(_ context.Context, id string) error {
+	p.containerd = &fakeContainerd{stop: func(_ context.Context, id string) error {
 		killed = append(killed, id)
 		_, recordedAtKill = p.inventory.containers[denied.Id]
 		return errors.New("kill not delivered")
-	}
+	}}
 
 	p.checkExisting(context.Background(), p.cfg, []*api.PodSandbox{pod}, []*api.Container{denied})
 
@@ -1398,10 +1411,10 @@ func TestCheckExisting_ResolvesTagOnlyReference(t *testing.T) {
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
 	p.inventory = newAdmissionInventory("/proc")
 	var resolved []string
-	p.resolve = func(_ context.Context, ref string) (string, error) {
+	p.containerd = &fakeContainerd{resolve: func(_ context.Context, ref string) (string, error) {
 		resolved = append(resolved, ref)
 		return "registry/repo@" + pushDigestA, nil
-	}
+	}}
 	p.SetReady()
 
 	pod := makePod("default", "pod1")

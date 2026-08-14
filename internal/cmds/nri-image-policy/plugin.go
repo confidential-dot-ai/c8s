@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
-	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -90,19 +89,22 @@ func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 	return true
 }
 
+// containerdOps is the containerd surface admission drives; internal/containerd's
+// *Resolver satisfies it.
+type containerdOps interface {
+	Resolve(ctx context.Context, imageRef string) (string, error)
+	StopContainer(ctx context.Context, containerID string) error
+}
+
 // plugin implements the NRI plugin interface for image policy enforcement.
 type plugin struct {
-	stub   stub.Stub
-	cfg    *config
-	policy *policyStore
-	audit  *audit.Logger
-	logger *slog.Logger
-	ready  atomic.Bool
-
-	// The containerd operations, bound by newPlugin; func fields so tests reach
-	// the resolve and kill paths without a socket.
-	resolve       func(ctx context.Context, imageRef string) (string, error)
-	stopContainer func(ctx context.Context, containerID string) error
+	stub       stub.Stub
+	cfg        *config
+	policy     *policyStore
+	audit      *audit.Logger
+	logger     *slog.Logger
+	ready      atomic.Bool
+	containerd containerdOps
 
 	// inventory serves the sandbox-identity flow (docs/ratls.md). nil ⇔ the flow
 	// is disabled (no workload_claims.socket_dir) — configuration, not a
@@ -120,18 +122,17 @@ type plugin struct {
 
 func newPlugin(
 	cfg *config,
-	resolver *ctrdresolver.Resolver,
+	ctrd containerdOps,
 	store *policyStore,
 	auditLogger *audit.Logger,
 	logger *slog.Logger,
 ) (*plugin, error) {
 	p := &plugin{
-		cfg:           cfg,
-		policy:        store,
-		audit:         auditLogger,
-		logger:        logger,
-		resolve:       resolver.Resolve,
-		stopContainer: resolver.StopContainer,
+		cfg:        cfg,
+		policy:     store,
+		audit:      auditLogger,
+		logger:     logger,
+		containerd: ctrd,
 	}
 	if cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
@@ -249,7 +250,7 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 	}
 	digest := extractDigest(imageRef)
 	if digest == "" && imageRef != "" {
-		if resolved, err := p.resolve(ctx, imageRef); err == nil {
+		if resolved, err := p.containerd.Resolve(ctx, imageRef); err == nil {
 			digest = extractDigest(resolved)
 		} else {
 			p.logger.Error("cannot resolve the image digest of a running container; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
@@ -349,7 +350,7 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	digest := extractDigest(imageRef)
 	if digest == "" {
 		// No digest in reference — resolve tag via containerd image store
-		resolved, err := p.resolve(ctx, imageRef)
+		resolved, err := p.containerd.Resolve(ctx, imageRef)
 		if err != nil {
 			log.Warn("cannot resolve image digest via containerd", "error", err)
 			p.audit.Log(audit.Event{
@@ -534,7 +535,7 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 			continue
 		}
 
-		if err := p.stopContainer(ctx, ctr.GetId()); err != nil {
+		if err := p.containerd.StopContainer(ctx, ctr.GetId()); err != nil {
 			p.logger.Error("sync: failed to kill container", "container", ctr.GetName(), "error", err)
 			failed++
 		} else {

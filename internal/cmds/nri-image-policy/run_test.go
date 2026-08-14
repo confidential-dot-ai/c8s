@@ -25,8 +25,9 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 )
 
-// bindDeadResolver points the plugin's containerd operations at a socket nobody
-// listens on: construction is lazy, every RPC fails fast with a connection error.
+// bindDeadResolver points the plugin at a real *ctrdresolver.Resolver on a socket
+// nobody listens on: construction is lazy, every RPC fails fast with a connection
+// error.
 func bindDeadResolver(t *testing.T, p *plugin) {
 	t.Helper()
 	r, err := ctrdresolver.NewResolver(filepath.Join(t.TempDir(), "ctr.sock"), "k8s.io")
@@ -34,7 +35,7 @@ func bindDeadResolver(t *testing.T, p *plugin) {
 		t.Fatalf("NewResolver: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	p.resolve, p.stopContainer = r.Resolve, r.StopContainer
+	p.containerd = r
 }
 
 // --- plugin.Run via a fake stub ---
@@ -417,7 +418,7 @@ func TestNewPlugin_WorkloadClaimsWiring(t *testing.T) {
 				Policy:         policyConfig{Mode: ModeFailClosed},
 				WorkloadClaims: workloadClaimsConfig{SocketDir: tc.socketDir, ProcRoot: tc.procRoot},
 			}
-			p, err := newPlugin(cfg, &ctrdresolver.Resolver{}, store, audit.NewLogger(), discardLogger())
+			p, err := newPlugin(cfg, &fakeContainerd{}, store, audit.NewLogger(), discardLogger())
 			if err != nil {
 				t.Fatalf("newPlugin: %v", err)
 			}

@@ -865,9 +865,8 @@ nriImagePolicy:
     # Secure by default: match the plugin binary's own default and reject images
     # not on the allowlist. Set to `audit` only for bring-up — it logs would-be
     # denials to journald and creates the container anyway, so you can populate
-    # the allowlist and review the audit log before enforcing. With
-    # workloadClaims on, the admitted image still lands in the node's /digests
-    # answer, so the pod it runs in gets no workload certificate.
+    # the allowlist and review the audit log before enforcing. Its effect on the
+    # pod's certificate: docs/getcert-workload-binding.md, Corner 4.
     # Don't ship `audit` to production: a permissive default that only docs tell
     # you to harden leaks.
     mode: fail-closed  # fail-closed | audit
