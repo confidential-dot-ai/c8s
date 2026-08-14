@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -52,8 +53,7 @@ func TestNewClientDefaultTransport(t *testing.T) {
 }
 
 func TestCreateCSRDNSSAN(t *testing.T) {
-	as := fakeASEvidence(t)
-	defer as.Close()
+	as := testattest.New(t)
 
 	tests := []struct {
 		name   string

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
@@ -39,17 +40,7 @@ func mockServersWithLeafValidity(t *testing.T, caKey *ecdsa.PrivateKey, caCert *
 		caBundle = []*x509.Certificate{caCert}
 	}
 
-	// attestation-api: returns mock evidence for any request.
-	attestSvc = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/attest" {
-			http.NotFound(w, r)
-			return
-		}
-		json.NewEncoder(w).Encode(types.AttestResponse{
-			Platform: "snp",
-			Evidence: testSNPEvidence(t),
-		})
-	}))
+	attestSvc = testattest.New(t).Server
 
 	// CDS: authenticate returns challenge, attest verifies and returns cert.
 	// These tests cover the cdsclient HTTP plumbing in isolation; the
@@ -130,18 +121,6 @@ func mockServersWithLeafValidity(t *testing.T, caKey *ecdsa.PrivateKey, caCert *
 	}))
 
 	return cdsSrv, attestSvc, issuer
-}
-
-func testSNPEvidence(t *testing.T) json.RawMessage {
-	t.Helper()
-	report := make([]byte, ratls.SNPReportSize)
-	data, err := json.Marshal(map[string]string{
-		"attestation_report": base64.StdEncoding.EncodeToString(report),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
 }
 
 func hasExtension(cert *x509.Certificate, oid asn1.ObjectIdentifier) bool {
@@ -722,17 +701,7 @@ func TestProviderProvisionRejectsBundleWhoseFirstCADoesNotSignLeaf(t *testing.T)
 func TestProviderProvisionRejectsLeafForDifferentKey(t *testing.T) {
 	caKey, caCert := testCA(t)
 
-	attestSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/attest" {
-			http.NotFound(w, r)
-			return
-		}
-		json.NewEncoder(w).Encode(types.AttestResponse{
-			Platform: "snp",
-			Evidence: testSNPEvidence(t),
-		})
-	}))
-	defer attestSvc.Close()
+	attestSvc := testattest.New(t)
 
 	cdsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
