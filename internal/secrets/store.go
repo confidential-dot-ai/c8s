@@ -13,6 +13,17 @@ import (
 // ErrNotFound reports a path the store does not hold.
 var ErrNotFound = errors.New("secrets: no such path")
 
+// The two refusals a write that grows the path map can meet.
+var (
+	ErrHolderQuota = errors.New("secrets: holder path quota")
+	ErrStoreFull   = errors.New("secrets: store path ceiling")
+)
+
+// bounded reports whether err is a bound refusing a write.
+func bounded(err error) bool {
+	return errors.Is(err, ErrHolderQuota) || errors.Is(err, ErrStoreFull)
+}
+
 // Origin records what put a value at a path.
 type Origin string
 
@@ -23,6 +34,25 @@ const (
 	// OriginOperator marks a value an operator supplied over PUT /secrets/*.
 	OriginOperator Origin = "operator"
 )
+
+// Holder is the party a stored path is charged to. Origin and name together are
+// the key, so an allowlist entry named "operator" is a different holder from
+// the operator.
+type Holder struct {
+	origin Origin
+	name   string
+}
+
+// WorkloadHolder charges a path to the allowlist entry whose grant authorized
+// the write.
+func WorkloadHolder(workload string) Holder {
+	return Holder{origin: OriginWorkload, name: workload}
+}
+
+// OperatorHolder charges a path to the operator key, which holds one bucket.
+func OperatorHolder() Holder {
+	return Holder{origin: OriginOperator}
+}
 
 // Held describes what a path already contained when a write arrived. It carries
 // the origin and never the value: the operator write path reports what it is
@@ -44,10 +74,10 @@ type Store interface {
 	// PutIfAbsent stores value at path if nothing is there, returning what the
 	// path holds afterwards and what was already there. held.Exists reports that
 	// the write did not happen.
-	PutIfAbsent(ctx context.Context, path string, value []byte, by Origin) (current []byte, held Held, err error)
+	PutIfAbsent(ctx context.Context, path string, value []byte, by Holder) (current []byte, held Held, err error)
 	// Put stores value at path, replacing anything already there, and reports
 	// what it displaced.
-	Put(ctx context.Context, path string, value []byte, by Origin) (Held, error)
+	Put(ctx context.Context, path string, value []byte, by Holder) (Held, error)
 }
 
 // GeneratedValueBytes is the size of a value CDS mints for a workload that
@@ -64,31 +94,43 @@ func Generate() ([]byte, error) {
 	return b, nil
 }
 
+// DefaultMaxPathsPerHolder is the shipped per-holder path quota.
+const DefaultMaxPathsPerHolder = 64
+
 // MemoryStore keeps secrets in the CDS process and nowhere else. They do not
 // survive a restart — see docs/secrets.md, "Restarts".
 //
-// Both bounds are fail-closed. CDS is a single in-memory process holding the
-// mesh CA, so a workload able to grow this map without limit could OOM it and
-// take every certificate in the cluster with it.
+// A bound refuses the write: an entry is the only copy of its value.
 type MemoryStore struct {
-	mu       sync.RWMutex
-	values   map[string]entry
-	maxPaths int
-	maxValue int
+	mu     sync.RWMutex
+	values map[string]entry
+	// holders counts each holder's paths. Its sum is len(values).
+	holders map[Holder]int
+
+	maxPaths     int
+	maxPerHolder int
+	maxValue     int
 }
 
 type entry struct {
 	value  []byte
-	origin Origin
+	holder Holder
 }
 
-// NewMemoryStore builds the store. maxPaths bounds distinct paths; maxValue
-// bounds one value.
-func NewMemoryStore(maxPaths, maxValue int) *MemoryStore {
+// NewMemoryStore builds the store. maxPaths bounds distinct paths across every
+// holder, maxPerHolder bounds one holder's, and maxValue bounds one value.
+// Operator writes count against maxPaths only. A quota above the ceiling is
+// inert — the ceiling answers first — so it is a wiring error.
+func NewMemoryStore(maxPaths, maxPerHolder, maxValue int) *MemoryStore {
+	if maxPerHolder > maxPaths {
+		panic(fmt.Sprintf("secrets: maxPerHolder %d exceeds maxPaths %d", maxPerHolder, maxPaths))
+	}
 	return &MemoryStore{
-		values:   make(map[string]entry),
-		maxPaths: maxPaths,
-		maxValue: maxValue,
+		values:       make(map[string]entry),
+		holders:      make(map[Holder]int),
+		maxPaths:     maxPaths,
+		maxPerHolder: maxPerHolder,
+		maxValue:     maxValue,
 	}
 }
 
@@ -104,23 +146,23 @@ func (s *MemoryStore) Get(_ context.Context, path string) ([]byte, error) {
 	return append([]byte(nil), e.value...), nil
 }
 
-func (s *MemoryStore) PutIfAbsent(_ context.Context, path string, value []byte, by Origin) ([]byte, Held, error) {
+func (s *MemoryStore) PutIfAbsent(_ context.Context, path string, value []byte, by Holder) ([]byte, Held, error) {
 	if err := s.checkValue(value); err != nil {
 		return nil, Held{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e, ok := s.values[path]; ok {
-		return append([]byte(nil), e.value...), Held{Exists: true, Origin: e.origin}, nil
+		return append([]byte(nil), e.value...), Held{Exists: true, Origin: e.holder.origin}, nil
 	}
-	if err := s.checkRoom(); err != nil {
+	if err := s.checkRoomLocked(by); err != nil {
 		return nil, Held{}, err
 	}
-	s.values[path] = entry{value: append([]byte(nil), value...), origin: by}
+	s.storeLocked(path, value, by)
 	return append([]byte(nil), value...), Held{}, nil
 }
 
-func (s *MemoryStore) Put(_ context.Context, path string, value []byte, by Origin) (Held, error) {
+func (s *MemoryStore) Put(_ context.Context, path string, value []byte, by Holder) (Held, error) {
 	if err := s.checkValue(value); err != nil {
 		return Held{}, err
 	}
@@ -128,12 +170,12 @@ func (s *MemoryStore) Put(_ context.Context, path string, value []byte, by Origi
 	defer s.mu.Unlock()
 	prior, existed := s.values[path]
 	if !existed {
-		if err := s.checkRoom(); err != nil {
+		if err := s.checkRoomLocked(by); err != nil {
 			return Held{}, err
 		}
 	}
-	s.values[path] = entry{value: append([]byte(nil), value...), origin: by}
-	return Held{Exists: existed, Origin: prior.origin}, nil
+	s.storeLocked(path, value, by)
+	return Held{Exists: existed, Origin: prior.holder.origin}, nil
 }
 
 func (s *MemoryStore) checkValue(value []byte) error {
@@ -143,12 +185,32 @@ func (s *MemoryStore) checkValue(value []byte) error {
 	return nil
 }
 
-// checkRoom guards the path bound. Callers hold the lock and have established
-// the path is absent, so this is only ever asked about a write that grows the
-// map.
-func (s *MemoryStore) checkRoom() error {
+// storeLocked writes the entry and moves the path's charge to by, so replacing
+// another holder's value returns that holder's quota.
+func (s *MemoryStore) storeLocked(path string, value []byte, by Holder) {
+	if prior, ok := s.values[path]; ok {
+		if s.holders[prior.holder] <= 1 {
+			delete(s.holders, prior.holder)
+		} else {
+			s.holders[prior.holder]--
+		}
+	}
+	s.values[path] = entry{value: append([]byte(nil), value...), holder: by}
+	s.holders[by]++
+}
+
+// checkRoomLocked guards the path bounds. Callers hold the lock and have
+// established the path is absent, so this is only ever asked about a write that
+// grows the map. The holder's quota answers first, so a flood meets the bound
+// on its own writer.
+func (s *MemoryStore) checkRoomLocked(by Holder) error {
+	if by.origin != OriginOperator {
+		if held := s.holders[by]; held >= s.maxPerHolder {
+			return fmt.Errorf("%w: %s %q holds %d paths, limit is %d", ErrHolderQuota, by.origin, by.name, held, s.maxPerHolder)
+		}
+	}
 	if len(s.values) >= s.maxPaths {
-		return fmt.Errorf("secrets: store holds %d paths, limit is %d", len(s.values), s.maxPaths)
+		return fmt.Errorf("%w: store holds %d paths, limit is %d", ErrStoreFull, len(s.values), s.maxPaths)
 	}
 	return nil
 }

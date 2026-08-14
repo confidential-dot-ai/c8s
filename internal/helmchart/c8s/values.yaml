@@ -230,6 +230,9 @@ cds:
   # (evidence ~2 KiB) but rejects every TDX request with HTTP 422
   # `http: request body too large`.
   maxRequestSize: 262144
+  # -- Max secret paths one allowlist entry may hold. Must stay below the store
+  # ceiling (--secrets-max-paths, 1024) or CDS refuses to start.
+  secretsMaxPathsPerWorkload: 64
   readinessInterval: 10s
   ## /sign-csr CSRs arrive without a matching TCP source IP under chart routing,
   ## so leave sanValidation off and pin DNS SAN / CN patterns instead.

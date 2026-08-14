@@ -386,14 +386,15 @@ func TestNewHTTPServerSetsTimeouts(t *testing.T) {
 
 func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 	valid := config{
-		maxHeaderBytes:       1,
-		maxTTL:               time.Hour,
-		namedCertTTL:         issuer.MaxNamedLeafTTL,
-		maxRequestSize:       1,
-		secretsMaxPaths:      1024,
-		secretsMaxValueBytes: 4096,
-		sandboxLedgerMax:     10000,
-		readinessInterval:    time.Second,
+		maxHeaderBytes:             1,
+		maxTTL:                     time.Hour,
+		namedCertTTL:               issuer.MaxNamedLeafTTL,
+		maxRequestSize:             1,
+		secretsMaxPaths:            1024,
+		secretsMaxPathsPerWorkload: 64,
+		secretsMaxValueBytes:       4096,
+		sandboxLedgerMax:           10000,
+		readinessInterval:          time.Second,
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatalf("valid config rejected: %v", err)

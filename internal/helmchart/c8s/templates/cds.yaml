@@ -203,6 +203,7 @@ spec:
             - --challenge-ttl={{ .Values.cds.challengeTTL }}
             - --request-timeout={{ .Values.cds.requestTimeout }}
             - --max-request-size={{ .Values.cds.maxRequestSize }}
+            - --secrets-max-paths-per-workload={{ .Values.cds.secretsMaxPathsPerWorkload }}
             - --readiness-interval={{ .Values.cds.readinessInterval }}
             - --san-validation={{ .Values.cds.sanValidation }}
             {{- /* Always allow in-cluster Service SANs so the mesh's own
