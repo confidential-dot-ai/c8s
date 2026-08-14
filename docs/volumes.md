@@ -195,9 +195,11 @@ daemon — so it is safe to pass in either shape. A pod requesting a volume on a
 cluster with neither shape — `nri-image-policy` disabled and not kata — is
 refused at admission rather than left waiting on a mount that can never land.
 
-Under kata the device must also reach the guest. kata-agent always mounts a
-block storage it is handed and cannot mount ciphertext, so direct-volume
-assignment is not usable; the qemu wrapper
+Under kata the device must also reach the guest. A c8s volume carries ciphertext
+under a key CDS releases to the pod, and the only block storage kata-agent opens
+rather than mounts is one marked `encryption_key=ephemeral`, which CDH formats
+under a key the guest generates — so direct-volume assignment is not usable; the
+qemu wrapper
 (`kata-guest-base/scripts/kata-qemu-scratch-wrapper.sh`) attaches this pod's
 volume devices to its VM instead, read-only and with the serial preserved. Which
 volumes it attaches comes from the pod's annotation — a selector, not a trust
