@@ -38,7 +38,11 @@ inbound posture from the always-on cw guard: the mesh drops FORWARD-path
 traffic to their pod IPs, so Service-VIP dials and excluded-namespace sources
 are blocked instead of reaching the workload in plaintext.
 `ratlsMesh.cwInboundEnforcement.passthrough` (default `udp:53,tcp:53`) is the
-reply allowlist that keeps DNS working; an empty list is strict drop-all.
+reply allowlist that keeps DNS working; an empty list is strict drop-all. It
+admits replies only on the stock ephemeral window (32768-60999), which costs a
+cw pod its DNS if the pod moves `net.ipv4.ip_local_port_range` *and* the
+dataplane breaks the reply's conntrack tuple — see the
+`RATLSMeshCWInboundDrops` alert description for the triage path.
 Only mesh-delivered traffic and node-local host processes
 (kubelet probes) reach cw pods.
 

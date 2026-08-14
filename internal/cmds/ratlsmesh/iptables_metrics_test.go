@@ -73,6 +73,8 @@ func TestMetricsRefreshesIptablesSidecarCounters(t *testing.T) {
 		JumpPositionViolations:  11,
 		JumpPositionCheckErrors: 5,
 		IPSetOverflows:          4,
+		CWInboundDrops:          9,
+		CWPassthroughReturns:    13,
 		UpdatedAtUnixNano:       stamp.UnixNano(),
 	}); err != nil {
 		t.Fatalf("writeIptablesMetricsFile: %v", err)
@@ -91,6 +93,12 @@ func TestMetricsRefreshesIptablesSidecarCounters(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.iptablesIPSetOverflows); got != 4 {
 		t.Errorf("iptablesIPSetOverflows = %v, want 4", got)
+	}
+	if got := testutil.ToFloat64(m.iptablesCWInboundDrops); got != 9 {
+		t.Errorf("iptablesCWInboundDrops = %v, want 9", got)
+	}
+	if got := testutil.ToFloat64(m.iptablesCWPassthroughReturns); got != 13 {
+		t.Errorf("iptablesCWPassthroughReturns = %v, want 13", got)
 	}
 	if got := testutil.ToFloat64(m.iptablesMetricsTimestamp); got != float64(stamp.Unix()) {
 		t.Errorf("iptablesMetricsTimestamp = %v, want %d", got, stamp.Unix())

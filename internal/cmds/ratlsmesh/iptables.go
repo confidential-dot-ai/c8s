@@ -4,7 +4,9 @@ package ratlsmesh
 
 import (
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -222,16 +224,34 @@ func makeDNATRule(spec dnatRuleSpec) iptablesRule {
 }
 
 // cwPassthrough is one entry in the cw guard's inbound allowlist: traffic to a
-// cw pod from this protocol+source-port is RETURNed before the drop, WITHOUT a
-// conntrack-state match — the whole point is to admit replies the dataplane
-// failed to track as ESTABLISHED (see defaultCWPassthrough), so a state match
-// would defeat it. The trade-off: this admits any packet with that source
-// port, tracked reply or not. Matching source port (never destination) keeps
-// an entry from reaching a cw pod's own listening ports; keep the list to
-// well-known service source ports (DNS) so the widened surface stays narrow.
+// cw pod from this protocol+source-port is RETURNed before the drop WITHOUT a
+// conntrack-state match, which is what admits replies the dataplane failed to
+// track as ESTABLISHED (see defaultCWPassthrough).
 type cwPassthrough struct {
 	protocol   string // "udp" or "tcp"
 	sourcePort int
+}
+
+// cwPassthroughProtocols maps each protocol the allowlist accepts to its IANA
+// number. parseCWPassthrough validates against the names; the guard's counter
+// reader matches the iptables protocol column, which renders as either form.
+var cwPassthroughProtocols = map[string]string{
+	"tcp": "6",
+	"udp": "17",
+}
+
+// cwPassthroughDportRange is the stock Linux ephemeral port window: where a
+// reply lands when the pod has not moved net.ipv4.ip_local_port_range.
+const cwPassthroughDportRange = "32768:60999"
+
+// cwTCPReplyFlags are the TCP segment shapes an exemption admits: the handshake
+// reply, and every segment with SYN clear.
+var cwTCPReplyFlags = []struct {
+	suffix string
+	args   []string
+}{
+	{"synack", []string{"--tcp-flags", "SYN,RST,ACK,FIN", "SYN,ACK"}},
+	{"nonsyn", []string{"--tcp-flags", "SYN", "NONE"}},
 }
 
 // defaultCWPassthrough is the built-in allowlist: DNS replies (udp+tcp 53).
@@ -276,8 +296,9 @@ func parseCWPassthrough(raw string) ([]cwPassthrough, error) {
 			return nil, fmt.Errorf("invalid cw-inbound-passthrough entry %q: want proto:port", part)
 		}
 		proto = strings.TrimSpace(proto)
-		if proto != "udp" && proto != "tcp" {
-			return nil, fmt.Errorf("invalid cw-inbound-passthrough protocol %q: want udp or tcp", proto)
+		if _, ok := cwPassthroughProtocols[proto]; !ok {
+			want := strings.Join(slices.Sorted(maps.Keys(cwPassthroughProtocols)), " or ")
+			return nil, fmt.Errorf("invalid cw-inbound-passthrough protocol %q: want %s", proto, want)
 		}
 		port, err := strconv.Atoi(strings.TrimSpace(portStr))
 		if err != nil || port < 1 || port > 65535 {
@@ -305,8 +326,9 @@ func parseCWPassthrough(raw string) ([]cwPassthrough, error) {
 // only TCP, so non-TCP inbound to a cw pod is unmeshed by definition.
 //
 // passthrough entries are RETURNed before the drop for dataplanes that break a
-// reply's conntrack tuple (see defaultCWPassthrough). An empty passthrough is
-// the strict fail-closed posture (conntrack RETURN + drop-all).
+// reply's conntrack tuple (see defaultCWPassthrough), bounded to
+// cwPassthroughDportRange and, for TCP, to cwTCPReplyFlags. An empty
+// passthrough is the strict fail-closed posture (conntrack RETURN + drop-all).
 func buildCWGuardRules(passthrough []cwPassthrough) []iptablesRule {
 	var rules []iptablesRule
 	for _, spec := range []struct {
@@ -328,17 +350,32 @@ func buildCWGuardRules(passthrough []cwPassthrough) []iptablesRule {
 			},
 		})
 		for _, pt := range passthrough {
-			rules = append(rules, iptablesRule{
-				table:  "filter",
-				chain:  cwChainName,
-				label:  fmt.Sprintf("cw-passthrough-%s-%d", pt.protocol, pt.sourcePort),
-				family: spec.family,
-				args: []string{
-					"-p", pt.protocol, "--sport", strconv.Itoa(pt.sourcePort),
-					"-m", "set", "--match-set", spec.setName, "dst",
-					"-j", "RETURN",
-				},
-			})
+			match := []string{
+				"-p", pt.protocol,
+				"--sport", strconv.Itoa(pt.sourcePort),
+				"--dport", cwPassthroughDportRange,
+			}
+			target := []string{"-m", "set", "--match-set", spec.setName, "dst", "-j", "RETURN"}
+			label := fmt.Sprintf("cw-passthrough-%s-%d", pt.protocol, pt.sourcePort)
+			if pt.protocol != "tcp" {
+				rules = append(rules, iptablesRule{
+					table:  "filter",
+					chain:  cwChainName,
+					label:  label,
+					family: spec.family,
+					args:   slices.Concat(match, target),
+				})
+				continue
+			}
+			for _, flags := range cwTCPReplyFlags {
+				rules = append(rules, iptablesRule{
+					table:  "filter",
+					chain:  cwChainName,
+					label:  label + "-" + flags.suffix,
+					family: spec.family,
+					args:   slices.Concat(match, flags.args, target),
+				})
+			}
 		}
 		rules = append(rules, iptablesRule{
 			table:  "filter",

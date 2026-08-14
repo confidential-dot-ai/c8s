@@ -234,31 +234,80 @@ func iptablesJumpPositionCheckErrors() int64 {
 	return jumpPositionCheckErrors.Load()
 }
 
-// cwInboundDrops mirrors the kernel packet counters of the cw guard chain's
-// DROP rules. Absolute values, reset when the chain is flushed on restart —
-// same reset semantics as the other sidecar counters, which the proxy
-// exposes as gauges for that reason.
-var cwInboundDrops atomic.Int64
+// cwInboundDrops and cwPassthroughReturns mirror the kernel packet counters of
+// the cw guard chain's DROP rules and of its passthrough exemptions, summed
+// over families from each family's last successful read. The kernel counters
+// restart at zero when the chain is flushed, which is why the proxy exposes
+// these as gauges rather than counters.
+var (
+	cwInboundDrops       atomic.Int64
+	cwPassthroughReturns atomic.Int64
+)
+
+// cwGuardCounts is one family's contribution to those totals.
+type cwGuardCounts struct {
+	drops   uint64
+	returns uint64
+}
+
+// cwGuardLastRead holds the most recent successful read per family, so a read
+// failure never steps a published total down. A chain flush does, legitimately:
+// both families then read zero.
+var cwGuardLastRead = map[iptablesFamily]cwGuardCounts{}
 
 func iptablesCWInboundDrops() int64 {
 	return cwInboundDrops.Load()
 }
 
-func refreshCWInboundDrops() error {
-	var total uint64
+func iptablesCWPassthroughReturns() int64 {
+	return cwPassthroughReturns.Load()
+}
+
+// cwExemptionProtocolColumn holds every rendering of an exemption row's
+// protocol column: go-iptables always lists with -n, under which the nf_tables
+// backend prints IANA numbers and the legacy backend prints names.
+var cwExemptionProtocolColumn = func() map[string]bool {
+	m := make(map[string]bool, 2*len(cwPassthroughProtocols))
+	for name, number := range cwPassthroughProtocols {
+		m[name] = true
+		m[number] = true
+	}
+	return m
+}()
+
+// refreshCWGuardCounters reads the cw guard chain's per-rule packet counters
+// and republishes the cross-family totals from cwGuardLastRead.
+//
+// INVARIANT: the passthrough exemptions are the chain's only protocol-scoped
+// rules (buildCWGuardRules), so a RETURN row carrying a protocol is an
+// exemption hit and the conntrack RETURN — which has no -p — is not.
+func refreshCWGuardCounters() error {
+	var errs []error
 	for _, ipt := range iptablesClients() {
 		stats, err := ipt.StructuredStats("filter", cwChainName)
 		if err != nil {
-			return fmt.Errorf("read %s stats on %s: %w", cwChainName, iptablesLabel(ipt), err)
+			errs = append(errs, fmt.Errorf("read %s stats on %s: %w", cwChainName, iptablesLabel(ipt), err))
+			continue
 		}
+		var counts cwGuardCounts
 		for _, s := range stats {
-			if s.Target == "DROP" {
-				total += s.Packets
+			switch {
+			case s.Target == "DROP":
+				counts.drops += s.Packets
+			case s.Target == "RETURN" && cwExemptionProtocolColumn[s.Protocol]:
+				counts.returns += s.Packets
 			}
 		}
+		cwGuardLastRead[familyForIPT(ipt)] = counts
 	}
-	cwInboundDrops.Store(int64(total))
-	return nil
+	var drops, returns uint64
+	for _, c := range cwGuardLastRead {
+		drops += c.drops
+		returns += c.returns
+	}
+	cwInboundDrops.Store(int64(drops))
+	cwPassthroughReturns.Store(int64(returns))
+	return errors.Join(errs...)
 }
 
 func runIptablesCleanup() error {

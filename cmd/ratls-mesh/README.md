@@ -70,14 +70,20 @@ Cilium) do not track a reply as `ESTABLISHED` on `FORWARD`, the guard also
 RETURNs replies from a configurable source-port allowlist
 (`--cw-inbound-passthrough`, chart `ratlsMesh.cwInboundEnforcement.passthrough`,
 default `udp:53,tcp:53` so DNS resolves); an empty list is the strict
-drop-all posture.
+drop-all posture. An exemption is bounded to reply traffic: the destination
+port must fall in the stock ephemeral window (32768-60999), and a TCP
+exemption additionally matches only the handshake reply and segments with
+SYN clear, so no TCP exemption can open a connection to a cw pod's own
+listening ports. UDP has no equivalent gate, so a UDP exemption still admits
+any datagram from the allowlisted source port into that window.
 
 Every legitimate delivery path avoids `FORWARD` and is unaffected: mesh
 delivery is a host-originated `OUTPUT` dial from the proxy UID, kubelet
 probes and host daemons are `OUTPUT`, and meshed pod-to-pod egress is
 DNAT'd to the node's outbound listener (`INPUT`) in `PREROUTING` before
 `FORWARD`. Dropped packets are counted in
-`ratls_mesh_iptables_cw_inbound_drops_total`.
+`ratls_mesh_iptables_cw_inbound_drops_total`, and packets admitted by an
+exemption in `ratls_mesh_iptables_cw_passthrough_returns_total`.
 
 The guard has two structural preconditions: kube-proxy must be in
 iptables mode (so a Service VIP is DNAT'd to the cw pod IP *before*
@@ -150,7 +156,7 @@ it intercepts. The flags below tune that loop.
 | `--resync-period` | `30s` | Periodic full ipset reconciliation interval |
 | `--watchdog-period` | `2s` | Interval for re-asserting base-chain jumps at position 1 |
 | `--ipset-maxelem` | `262144` | Maximum members per managed ipset |
-| `--cw-inbound-passthrough` | `udp:53,tcp:53` | Comma-separated `proto:source-port` replies RETURNed before the always-on cw inbound guard's drop (see "Confidential-workload inbound guard"). Empty = strict drop-all; DNS is the default so get-cert can resolve |
+| `--cw-inbound-passthrough` | `udp:53,tcp:53` | Comma-separated `proto:source-port` replies RETURNed before the always-on cw inbound guard's drop. Each entry matches only a destination port in 32768-60999 and, for TCP, a reply segment shape (see "Confidential-workload inbound guard"). Empty = strict drop-all; DNS is the default so get-cert can resolve |
 | `--ready-file` | `""` | Path written after the first successful pod cache, ipset, and iptables sync |
 | `--iptables-metrics-file` | `/tmp/ratls-iptables-metrics.json` | Shared file where `iptables-sync` publishes iptables/ipset counters for the proxy `/metrics` endpoint |
 | `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
@@ -252,7 +258,7 @@ are starting points; tune to your scrape interval and pod churn.
 | `rate(ratls_mesh_iptables_jump_position_violations_total[5m])` | Watchdog confirmed our PREROUTING/OUTPUT jump was demoted out of position 1 — typically kube-proxy reinserting `KUBE-SERVICES` ahead of us. Occasional events are normal; a steady positive rate indicates a fight with kube-proxy. | Warn when rate > 1/min sustained for 10 min; tune `--watchdog-period` (default 2s) downward if necessary. |
 | `rate(ratls_mesh_iptables_jump_position_check_errors_total[5m])` | `iptables -S` failed during a watchdog tick. Watchdog reinserts defensively, so this is environmental noise, not a kube-proxy race. | Warn at a sustained rate to flag a stuck or busy `xtables.lock`. |
 | `rate(ratls_mesh_outbound_dest_rejected_total{reason="host_addr"}[5m])` | The host-network listener was reached with the node IP or loopback as the original destination — only possible by dialing `:15001` outside the iptables REDIRECT path. This is the security signal; there is no legitimate cause. | Warn on any sustained rate. |
-| `rate(ratls_mesh_iptables_cw_inbound_drops_total[5m]) > 0` | The cw inbound guard dropped packets: something dialed a confidential-workload pod outside the mesh — a Service VIP selecting cw pods, an excluded-namespace source, or a direct cross-node pod-IP dial. The workload is protected; the signal identifies a misconfigured or hostile client. | Warn on a sustained rate; investigate the source. |
+| `rate(ratls_mesh_iptables_cw_inbound_drops_total[5m]) > 0` | The cw inbound guard dropped packets: something reached a confidential-workload pod outside the mesh. Most security-relevant first — a dial crafted from an allowlisted reply source port (53) aimed at a cw pod's listening port, an attempt to ride the passthrough exemption into the pod; a Service VIP selecting cw pods; an excluded-namespace source; a direct cross-node pod-IP dial. In all of these the workload is protected and the signal identifies the client. One benign cause exists, and only where replies depend on the exemption at all (a dataplane that does not track the reply as `ESTABLISHED`): a pod that moved `net.ipv4.ip_local_port_range` outside the exemption window blackholes its own DNS here. The `RATLSMeshCWInboundDrops` alert description carries the triage path. | Warn on a sustained rate; investigate the source. |
 | `rate(ratls_mesh_outbound_dest_rejected_total{reason="unknown_pod"}[5m])` | The outbound listener saw a destination that is not in the resolver's podMap — usually informer skew during pod churn, or a kube-proxy DNAT race after jump demotion. A small steady rate is normal. | Warn only on sustained spikes correlated with pod churn or `iptables_jump_position_violations_total`. |
 | `time() - ratls_mesh_iptables_metrics_file_updated_at_seconds` | Seconds since the proxy last read a fresh snapshot from the iptables-sync sidecar. The sidecar's own watchdog/violation counters cannot signal a wedge after they stop being published; this gauge does. Gauge stays at 0 until the first successful read so cold-start alerts can filter on `> 0`. | Warn when `gauge > 0 and time() - gauge > 3 * <resync-period>` (default `> 90s`). |
 

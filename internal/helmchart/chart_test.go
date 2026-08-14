@@ -344,7 +344,7 @@ func TestChartCWInboundPassthrough(t *testing.T) {
 	const pt = "ratlsMesh.cwInboundEnforcement.passthrough"
 	for _, bad := range [][]string{
 		{"--set", pt + "[0].protocol=udp"},                                       // missing sourcePort
-		{"--set", pt + "[0].protocol=sctp", "--set", pt + "[0].sourcePort=53"},   // bad protocol
+		{"--set", pt + "[0].protocol=icmp", "--set", pt + "[0].sourcePort=53"},   // bad protocol
 		{"--set", pt + "[0].protocol=udp", "--set", pt + "[0].sourcePort=70000"}, // out-of-range port
 	} {
 		if out, err := helmTemplate(t, bad...); err == nil {
