@@ -1072,7 +1072,7 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-cert",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--san=" + inj.SAN,
 		"--out=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key-out=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
@@ -1207,11 +1207,12 @@ func getCertEnv(inj *injection) []corev1.EnvVar {
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 		}},
 		// cvmMode=node: the chart passes the operator a verbatim
-		// --attestation-api-url=http://$(HOST_IP):8400, forwarded unexpanded into
-		// this arg (certContainer). The kubelet expands $(HOST_IP) against THIS
-		// tenant pod's node, so the sidecar reaches the node-baked host
-		// attestation-api on whichever node it lands. Unused (harmless) in modes
-		// whose URL has no $(HOST_IP).
+		// --attestation-api-url=http://$(HOST_IP):8400, which reaches this arg
+		// (certContainer) through sidecarAttestationApiURL — its pass-through of
+		// non-unix URLs is what keeps $(HOST_IP) unexpanded. The kubelet expands
+		// $(HOST_IP) against THIS tenant pod's node, so the sidecar reaches the
+		// node-baked host attestation-api on whichever node it lands. Unused
+		// (harmless) in modes whose URL has no $(HOST_IP).
 		{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"},
 		}},
@@ -1501,7 +1502,7 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-volume",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 	}
@@ -1543,7 +1544,7 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	args := []string{
 		"get-secret",
 		"--cds-url=" + cfg.CDSURL,
-		"--attestation-api-url=" + cfg.AttestationApiURL,
+		"--attestation-api-url=" + cfg.sidecarAttestationApiURL(),
 		"--cert=" + certPath(inj.Cert.Dir, inj.Cert.CertFile),
 		"--key=" + certPath(inj.Cert.Dir, inj.Cert.KeyFile),
 		"--out-dir=" + inj.Secrets.Dir,
@@ -1609,6 +1610,17 @@ func workloadClaimsVolume(cfg Config) (corev1.Volume, bool) {
 			HostPath: &corev1.HostPathVolumeSource{Path: cfg.WorkloadClaimsHostDir, Type: &hpType},
 		},
 	}, true
+}
+
+// sidecarAttestationApiURL rebases a unix:// attestation-api endpoint under
+// the inventory's host directory onto the sidecar's mount of that directory
+// (workloadClaimsMounts); every other shape passes through verbatim.
+func (cfg Config) sidecarAttestationApiURL() string {
+	hostPrefix := "unix://" + cfg.WorkloadClaimsHostDir + "/"
+	if cfg.WorkloadClaimsHostDir == "" || !strings.HasPrefix(cfg.AttestationApiURL, hostPrefix) {
+		return cfg.AttestationApiURL
+	}
+	return "unix://" + workloadclaims.SidecarSocketDir + "/" + strings.TrimPrefix(cfg.AttestationApiURL, hostPrefix)
 }
 
 // workloadClaimsMounts returns the sidecar mount for the inventory socket

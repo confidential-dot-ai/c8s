@@ -46,9 +46,8 @@ jobs:
     # the trailing @main tag is a human label only.
     uses: ./.github/workflows/e2e-c8s.yml
     with:
-      # Test the merge head. The pin existed because cvmMode=node (#88) dials a
-      # node-baked attestation-api on $(HOST_IP):8400 that the staged rke2 image
-      # does not bake; e2e-c8s.yml now aligns the AA port with the NodePort the
-      # chart already publishes, so $(HOST_IP) reaches the node's own AA pod and
-      # no baked-AA image is required.
+      # Test the merge head. The metal lane installs the chart's own
+      # attestation-api DaemonSet + attest-proxy socket as the node-local
+      # endpoint, so the staged rke2 image needs no baked AA for cvmMode=node
+      # (#88).
       c8s_ref: ${{ inputs.c8s_ref || github.event.workflow_run.head_sha }}

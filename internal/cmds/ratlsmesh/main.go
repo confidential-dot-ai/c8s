@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -619,8 +620,8 @@ func validateConfig(attestationApiURL string, outboundPort, inboundPort, healthP
 	if attestationApiURL == "" {
 		return fmt.Errorf("--attestation-api-url is required")
 	}
-	if !strings.HasPrefix(attestationApiURL, "http://") && !strings.HasPrefix(attestationApiURL, "https://") {
-		return fmt.Errorf("--attestation-api-url %q must start with http:// or https://", attestationApiURL)
+	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", attestationApiURL); err != nil {
+		return err
 	}
 	if err := validatePort("--outbound-port", outboundPort); err != nil {
 		return err

@@ -261,6 +261,7 @@ spec:
             - name: tls-certs
               mountPath: {{ .Values.tlsLb.tlsMountPath }}
               readOnly: true
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
             {{- if .Values.tlsLb.publicTLS.secretName }}
             # cds-attest reads the same public leaf nginx serves
             # (--serving-cert-file).
@@ -301,6 +302,10 @@ spec:
           # attestation-api, reached from this pod via its node IP.
           env:
             {{- . | nindent 12 }}
+          {{- end }}
+          {{- if eq (include "c8s.attestationApiHostSocket" .) "true" }}
+          volumeMounts:
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -360,15 +365,18 @@ spec:
             path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
             type: Directory
         {{- end }}
+        {{- /* Shares the admission inventory's socket directory — see c8s.attestationApiSocket. */}}
+        {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
       securityContext:
         runAsNonRoot: {{ .Values.tlsLb.nginx.runAsNonRoot }}
         fsGroup: {{ include "c8s.int" .Values.tlsLb.nginx.runAsGroup }}
-        {{- if eq (include "tls-lb.mountInventorySocket" .) "true" }}
-        # workloadclaims.InventorySocketGID: the inventory chgrps its socket to
-        # this group so the non-root get-cert sidecar can connect. get-cert
-        # itself must stay on the nginx uid — it SIGHUPs nginx on renewal, and
-        # a different uid gets "operation not permitted", after which nginx
-        # serves a stale leaf that every exact-DER client correctly refuses.
+        {{- if or (eq (include "tls-lb.mountInventorySocket" .) "true") (eq (include "c8s.attestationApiHostSocket" .) "true") }}
+        # workloadclaims.InventorySocketGID: the inventory and attest-proxy
+        # chgrp their sockets to this group so the non-root get-cert sidecar
+        # (on the nginx uid) can connect. get-cert must stay on the nginx uid —
+        # it SIGHUPs nginx on renewal, and a different uid gets "operation not
+        # permitted", after which nginx serves a stale leaf that every
+        # exact-DER client correctly refuses.
         supplementalGroups: [65532]
         {{- end }}
         seccompProfile:

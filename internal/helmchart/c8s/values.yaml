@@ -324,7 +324,7 @@ cds:
 
 ## DaemonSet running the attestation-api image from github.com/confidential-dot-ai/attestation-rs.
 attestationApi:
-  ## Render the host-side attestation-api DaemonSet/Service. Disable on
+  ## Render the host-side attestation-api DaemonSet. Disable on
   ## clusters where every workload pod runs as a kata-qemu-snp CVM — the
   ## in-guest attestation-service is baked into kata-guest-base on loopback,
   ## so the host DaemonSet is redundant (and crashloops on bare-metal nodes
@@ -338,10 +338,17 @@ attestationApi:
     digest: ""
     pullPolicy: IfNotPresent
   port: 8400
-  service:
-    ## NodePort used by host-process components such as nri-image-policy.
-    ## Rendered only when nri-image-policy.enabled=true.
-    nodePort: 30840
+  ## Evidence generation is node-local only: the API binds pod loopback and
+  ## the attest-proxy sidecar serves it on a hostPath Unix socket in
+  ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
+  proxy:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
   ## Per-device hostPath mounts. hostPath.type=CharDevice fails the pod if
   ## the device node doesn't exist on the host, so disable for nodes that
   ## lack the corresponding hardware.

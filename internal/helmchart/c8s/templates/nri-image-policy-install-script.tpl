@@ -178,7 +178,6 @@ install image + CDS digest so chart upgrades can roll.
 */}}
 {{- define "nri-image-policy.bootConfig" -}}
 {{- $root := .root -}}
-{{- $attestationNodePort := int $root.Values.attestationApi.service.nodePort -}}
 {{/* Must stay the value CDS runs with: the two ends of one mutually-attested connection. */}}
 platform: {{ $root.Values.cds.ratlsPlatform | quote }}
 plugin:
@@ -194,7 +193,8 @@ allowlist:
     url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}
     interval: {{ $root.Values.nriImagePolicy.refresh.interval | quote }}
     timeout: "30s"
-    attestation_api_url: {{ printf "http://localhost:%d" $attestationNodePort | quote }}
+    # Node-local socket served by the DaemonSet's attest-proxy sidecar.
+    attestation_api_url: {{ printf "unix://%s" (include "c8s.attestationApiSocket" $root) | quote }}
     cds_measurements:
 {{- range $root.Values.cds.measurements }}
       - {{ . | quote }}

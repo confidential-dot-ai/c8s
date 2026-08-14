@@ -47,7 +47,7 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := cmdsutil.ValidateHTTPURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
+	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", cfg.attestationApiURL); err != nil {
 		return err
 	}
 	if err := validateConfig(cfg); err != nil {

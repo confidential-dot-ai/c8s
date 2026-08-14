@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
+	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1516,6 +1518,89 @@ func TestCertContainerOmitsEmptyCDSMeasurements(t *testing.T) {
 	for _, arg := range containerNamed(pod, reservedCertContainerName).Args {
 		if strings.HasPrefix(arg, "--cds-measurements") {
 			t.Fatalf("c8s-cert carries %q with no measurements configured", arg)
+		}
+	}
+}
+
+// The chart points the operator at the attestation proxy's Unix socket inside
+// the inventory's host directory; an injected sidecar sees that directory at
+// workloadclaims.SidecarSocketDir, so the endpoint must be rebased onto the
+// mount — and only there (every other shape passes through untouched).
+func TestSidecarAttestationApiURLRebase(t *testing.T) {
+	const hostDir = "/var/run/nri-image-policy"
+	for _, tc := range []struct {
+		name    string
+		hostDir string
+		url     string
+		want    string
+	}{
+		{"socket rebased onto the sidecar mount", hostDir,
+			"unix://" + hostDir + "/attestation-api.sock",
+			"unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"},
+		{"no inventory mount leaves the URL alone", "",
+			"unix://" + hostDir + "/attestation-api.sock",
+			"unix://" + hostDir + "/attestation-api.sock"},
+		{"http endpoint passes through", hostDir,
+			"http://attestation-api.c8s-system.svc:8400",
+			"http://attestation-api.c8s-system.svc:8400"},
+		{"socket outside the inventory dir passes through", hostDir,
+			"unix:///elsewhere/attest.sock",
+			"unix:///elsewhere/attest.sock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := secretsConfig()
+			cfg.WorkloadClaimsHostDir = tc.hostDir
+			cfg.AttestationApiURL = tc.url
+			if got := cfg.sidecarAttestationApiURL(); got != tc.want {
+				t.Fatalf("sidecarAttestationApiURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The rebased endpoint must be what the injected containers actually receive.
+func TestCertContainerGetsRebasedAttestationURL(t *testing.T) {
+	cfg := secretsConfig()
+	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
+	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
+	pod := podWithApp()
+	mutatePod(pod, &injection{WorkloadID: "api"}, cfg)
+
+	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
+	if args := containerNamed(pod, reservedCertContainerName).Args; !hasArg(args, want) {
+		t.Fatalf("c8s-cert args %v missing %q", args, want)
+	}
+}
+
+// Every injected fetcher (cert, secret, volume) must carry the rebased
+// socket URL AND the mount that makes it reachable in the same container —
+// a rebased URL without the c8s-workload-claims mount dials a path nothing
+// serves.
+func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
+	cfg := secretsConfig()
+	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
+	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
+	pod := podWithApp()
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
+	for _, name := range []string{reservedCertContainerName, reservedSecretContainerName, reservedVolumeContainerName} {
+		c := containerNamed(pod, name)
+		if c == nil {
+			t.Fatalf("injected pod missing container %q", name)
+		}
+		if !hasArg(c.Args, want) {
+			t.Errorf("%s args %v missing rebased %q", name, c.Args, want)
+		}
+		hasMount := slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.Name == workloadClaimsVolumeName && m.MountPath == workloadclaims.SidecarSocketDir
+		})
+		if !hasMount {
+			t.Errorf("%s carries the rebased socket URL but no %s mount at %s; mounts %+v", name, workloadClaimsVolumeName, workloadclaims.SidecarSocketDir, c.VolumeMounts)
 		}
 	}
 }

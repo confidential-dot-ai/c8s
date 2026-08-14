@@ -323,9 +323,10 @@ What it does **not** guarantee:
 - **A trustworthy verdict from an untrusted verifier.** The attestation-api's
   `/verify` response is **unsigned**; whoever can impersonate the configured
   `AttestationApiURL` forges "valid". Every deployment therefore keeps the
-  verifier in the same TCB as the verifying component: a same-node DaemonSet
-  behind `internalTrafficPolicy: Local` (node-as-CVM) or an in-guest loopback
-  service (pod-as-CVM). Do not point it across a trust boundary.
+  verifier in the same TCB as the verifying component: the node-local Unix
+  socket the DaemonSet's attest-proxy serves (node-as-CVM — the client checks
+  the socket's owner and mode on every dial) or an in-guest loopback service
+  (pod-as-CVM). Do not point it across a trust boundary.
 - **Per-handshake measurement of CA-verified peers.** See "Dual verification"
   above: after the CDS upgrade, mesh peers are verified by CA chain only.
 - **Full TDX runtime measurement, in-cluster.** The mesh `VerifyPolicy` pins
@@ -769,9 +770,11 @@ confidentiality.)
 
 - **Evidence source:** the per-node attestation-api DaemonSet mounts the host
   TEE interface (`/dev/sev-guest`; TSM ConfigFS reports on TDX hosts; vTPM on
-  AKS). Its Service uses `internalTrafficPolicy: Local` so `/attest` always
-  produces evidence for the *caller's own node* — and so `/verify` verdicts
-  never cross a node boundary.
+  AKS). The API binds pod loopback and its attest-proxy sidecar serves it on a
+  node-local Unix socket, so `/attest` is reachable only by on-node callers
+  and always produces evidence for the *caller's own node* — nothing
+  routable can request evidence, and `/verify` verdicts never cross a node
+  boundary.
 - **RA-TLS endpoints:** ratls-mesh runs as a host-network DaemonSet
   (outbound :15001, inbound :15006). iptables/ipset interception DNATs
   pod-to-pod TCP through it; the node-to-node leg is attested mTLS; the final

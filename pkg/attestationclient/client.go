@@ -81,15 +81,32 @@ func validateVerifierSocket(socketPath string) error {
 		return fmt.Errorf("attestationclient: verifier socket %q is world-writable (mode %#o)", socketPath, fi.Mode().Perm())
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		if st.Uid != 0 && int(st.Uid) != os.Getuid() {
+		if !socketOwnerAllowed(st.Uid) {
 			return fmt.Errorf("attestationclient: verifier socket %q is owned by uid %d (want root or the verifier's own uid)", socketPath, st.Uid)
 		}
 	}
 	return nil
 }
 
-// NewClientWithHTTP creates a new client with a custom HTTP client.
+// socketOwnerAllowed reports whether a socket owned by uid may be dialed:
+// root-owned, or owned by the calling process.
+func socketOwnerAllowed(uid uint32) bool {
+	return uid == 0 || int(uid) == os.Getuid()
+}
+
+// NewClientWithHTTP creates a new client with a custom HTTP client. A
+// "unix://" baseURL keeps the caller's client — its Timeout still bounds each
+// request — with only the transport swapped for the socket dialer: a custom
+// TCP transport cannot reach a Unix socket.
 func NewClientWithHTTP(baseURL string, httpClient *http.Client) Client {
+	if socket, ok := strings.CutPrefix(baseURL, "unix://"); ok {
+		c := *httpClient
+		c.Transport = unixSocketTransport(socket)
+		return Client{
+			baseURL:    "http://unix",
+			httpClient: &c,
+		}
+	}
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: httpClient,

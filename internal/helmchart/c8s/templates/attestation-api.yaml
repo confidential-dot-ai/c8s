@@ -1,6 +1,4 @@
 {{- if .Values.attestationApi.enabled }}
-{{- $nri := .Values.nriImagePolicy -}}
-{{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -22,35 +20,6 @@ metadata:
 data:
   config.toml: |
 {{ include "c8s.attestationApiConfig" (dict "root" .) | indent 4 }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "c8s.attestationApiName" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-{{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-api
-spec:
-  {{- if $nri.enabled }}
-  type: NodePort
-  externalTrafficPolicy: Local
-  {{- end }}
-  selector:
-    app.kubernetes.io/name: c8s-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: attestation-api
-  # Local: pods always hit their same-node attestation-api replica.
-  # /attest generates evidence for the LOCAL TEE, so a cross-node hop
-  # would produce evidence against the wrong node.
-  internalTrafficPolicy: Local
-  ports:
-    - name: http
-      port: {{ .Values.attestationApi.port }}
-      targetPort: http
-      {{- if $nri.enabled }}
-      nodePort: {{ $attestationNodePort }}
-      {{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -109,6 +78,8 @@ spec:
             {{- else }}
 {{ fail (printf "attestationApi.cvmMode must be one of pod, node, gke, aks (got %q)" .Values.attestationApi.cvmMode) }}
             {{- end }}
+          # The API's health signal is the attest-proxy's exec probe: the API
+          # binds pod loopback, which kubelet cannot dial.
           volumeMounts:
             - name: config
               mountPath: /etc/attestation-api
@@ -138,14 +109,50 @@ spec:
             - name: tpmrm
               mountPath: /dev/tpmrm0
             {{- end }}
-          readinessProbe:
-            httpGet: { path: /health, port: http }
-            initialDelaySeconds: 2
-          livenessProbe:
-            httpGet: { path: /health, port: http }
-            periodSeconds: 30
           resources:
 {{ toYaml .Values.attestationApi.resources | indent 12 }}
+        # The on-node front door: publishes the pod-loopback API on a
+        # hostPath Unix socket next to the admission inventory's socket, so
+        # exactly host processes and pods the socket dir is mounted into can
+        # request evidence.
+        - name: attest-proxy
+          image: {{ include "c8s.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - attest-proxy
+            - --socket={{ include "c8s.attestationApiSocket" . }}
+            - --upstream=http://127.0.0.1:{{ .Values.attestationApi.port }}
+          # uid 0 so the socket is root-owned (callers reject a socket owned
+          # by anyone but root or themselves); runAsGroup is the socket's
+          # group so the chgrp needs no CAP_CHOWN.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          readinessProbe:
+            exec:
+              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
+            initialDelaySeconds: 2
+            # Above the healthcheck's internal 3s budget (kubelet default is 1s).
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: [/c8s, attest-proxy, healthcheck, --socket, {{ include "c8s.attestationApiSocket" . }}]
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/attestation-api
+              readOnly: true
+            - name: socket-dir
+              mountPath: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+          resources:
+{{ toYaml .Values.attestationApi.proxy.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
@@ -182,4 +189,28 @@ spec:
             path: /dev/tpmrm0
             type: CharDevice
         {{- end }}
+        # Shared with the admission inventory — see c8s.attestationApiSocket.
+        - name: socket-dir
+          hostPath:
+            path: {{ .Values.nriImagePolicy.hostPaths.runtimeDir }}
+            type: DirectoryOrCreate
+---
+# The API binds pod loopback, so nothing on the pod network can reach it; this
+# policy is the second line, keeping even an accidental rebind pod-unreachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "c8s.attestationApiName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "c8s.commonLabels" . | indent 4 }}
+    app.kubernetes.io/component: attestation-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: attestation-api
+  policyTypes:
+    - Ingress
 {{- end }}

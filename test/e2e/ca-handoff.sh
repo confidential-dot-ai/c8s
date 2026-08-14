@@ -6,9 +6,12 @@
 # evidence, a real EAR minted by the live CDS, the real measurement gate,
 # and the transfer over the cluster network.
 #
-# Needs: kubectl pointed at a node-as-CVM (non-kata) cluster with the c8s
-# chart installed, cds.handoff.enabled=true, and a deployed cds image that
-# includes the request-handoff subcommand.
+# Needs: kubectl pointed at a node-as-CVM cluster running the chart's
+# attestation-api DaemonSet (gke/aks-style installs) with
+# cds.handoff.enabled=true, and a deployed cds image that includes the
+# request-handoff subcommand. Kata (in-guest endpoint) and cvmMode=node
+# (CDS's URL carries an unexpanded $(HOST_IP) the probe pod cannot resolve)
+# are unsupported.
 #
 # Env:
 #   CDS_NS                 namespace of the cds deployment (default: discover)
@@ -79,6 +82,25 @@ read -r cds_svc cds_svc_port < <(kget get svc -n "$cds_ns" -l "$cds_selector" \
 [ -n "${cds_svc:-}" ] || fail "no cds Service in $cds_ns"
 [ -n "${cds_svc_port:-}" ] || fail "cds Service $cds_ns/$cds_svc has no port named http"
 peer_url="https://${cds_svc}.${cds_ns}.svc:${cds_svc_port}"
+
+# When cds reaches the attestation-api over its node-local Unix socket, the
+# probe can only follow it with the socket directory mounted at the host path.
+socket_mount=""
+socket_volume=""
+case "$attest_url" in
+  unix://*/*)
+    socket_dir=$(dirname "${attest_url#unix://}")
+    socket_mount="
+        - name: attestation-api-socket
+          mountPath: $socket_dir
+          readOnly: true"
+    socket_volume="
+    - name: attestation-api-socket
+      hostPath:
+        path: $socket_dir
+        type: Directory"
+    ;;
+esac
 
 # --- probe pod: deployed cds image, pinned to the cds node -------------------
 
@@ -157,12 +179,12 @@ spec:
       volumeMounts:
         - name: operator-keys
           mountPath: /etc/cds-operator-keys
-          readOnly: true
+          readOnly: true$socket_mount
       securityContext: $ctr_sec_ctx
   volumes:
     - name: operator-keys
       configMap:
-        name: $operator_keys_cm
+        name: $operator_keys_cm$socket_volume
 EOF
 
 # --- await verdict ------------------------------------------------------------

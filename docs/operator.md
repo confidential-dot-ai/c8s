@@ -315,9 +315,11 @@ restart-fragility window above applies until the operator fixes the
 underlying issue. On a node-as-CVM (non-kata) cluster, `make
 test-e2e-ca-handoff` proves the full path end to end: it runs an attested
 in-cluster probe (`c8s cds request-handoff`) that pulls the CA over `/handoff`
-and verifies it against the served `/ca`. (The probe pod dials the local
-attestation-api Service; under kata that service is in-guest loopback, so the
-script does not support kata mode.)
+and verifies it against the served `/ca`. (The probe pod reuses CDS's own
+`--attestation-api-url`, mounting the socket directory from the host when it
+is a `unix://` one — the gke/aks-style install shape. Under kata the endpoint
+is in-guest loopback and under cvmMode=node the URL is an unexpanded
+$(HOST_IP) one, so the script supports neither.)
 
 ### Operator-added allowlist entries across restarts
 
@@ -413,6 +415,24 @@ approaches the same expiry wall. CDS reports `not_after` at startup and
 not shipped. Plan a deliberate re-bootstrap (and workload re-provisioning)
 before expiry, and choose `cds.ca.certValidity` with that maintenance horizon
 in mind on the initial cold start.
+
+## Attestation-api
+
+The attestation-api DaemonSet binds pod loopback and is served to on-node
+consumers by its attest-proxy sidecar over a Unix socket in
+`nriImagePolicy.hostPaths.runtimeDir`; no Service renders.
+
+Two operational notes:
+
+- **Upgrading from a release that rendered the attestation-api Service
+  deletes it.** Already-running cw pods keep their old
+  `--attestation-api-url`, and their get-cert renewals fail once the Service
+  is gone — roll cw-annotated workload pods after the upgrade so the webhook
+  re-injects the socket URL. New pods are unaffected.
+- **A wedged attestation-api does not self-restart.** Its health signal is
+  the attest-proxy's exec probe, so a hung (not crashed) API process shows as
+  a NotReady `c8s-attestation-api` pod with a crash-looping attest-proxy
+  container; delete the pod to restart the pair.
 
 ## Verifying attestation after install
 

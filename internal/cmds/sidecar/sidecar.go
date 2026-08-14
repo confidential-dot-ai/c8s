@@ -84,6 +84,9 @@ func (c *Config) Validate() error {
 	if c.AttestationApiURL == "" {
 		return fmt.Errorf("--attestation-api-url is required to verify CDS")
 	}
+	if err := cmdsutil.ValidateAttestationAPIURL("--attestation-api-url", c.AttestationApiURL); err != nil {
+		return err
+	}
 	if c.Attempts <= 0 {
 		return fmt.Errorf("--attempts must be positive")
 	}

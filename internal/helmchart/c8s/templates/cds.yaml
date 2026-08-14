@@ -182,9 +182,7 @@ spec:
           args:
             - --port={{ .Values.cds.port }}
             - --log-level={{ .Values.cds.logLevel }}
-            # c8s.attestationApiURL resolves to the in-guest loopback endpoint
-            # under kata.enabled (CDS runs inside the CVM where the baked
-            # attestation-service listens) and to the host Service otherwise.
+            # Per-mode resolution: see c8s.attestationApiURL.
             - --attestation-api-url={{ include "c8s.attestationApiURL" . }}
             - --allowlist-db={{ .Values.cds.allowlistDB }}
             - --allowlist-persistent={{ .Values.cds.persistence.enabled }}
@@ -294,6 +292,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- include "c8s.attestationApiSocketMount" . | nindent 12 }}
             {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
             - name: allowlist-seed
               mountPath: /etc/cds
@@ -325,6 +324,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- include "c8s.attestationApiSocketVolume" . | nindent 8 }}
         {{- if eq (include "c8s.serveAllowlistSeed" .) "true" }}
         - name: allowlist-seed
           configMap:

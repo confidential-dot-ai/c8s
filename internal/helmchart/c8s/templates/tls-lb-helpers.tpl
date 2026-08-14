@@ -520,6 +520,9 @@ list.
 {{- if .Values.tlsLb.discovery.enabled -}}
 {{- $mounts = append $mounts (printf "- name: discovery\n  mountPath: %s" .Values.tlsLb.discovery.mountPath) -}}
 {{- end -}}
+{{- if eq (include "c8s.attestationApiHostSocket" .) "true" -}}
+{{- $mounts = append $mounts (printf "- name: attestation-api-socket\n  mountPath: %s\n  readOnly: true" .Values.nriImagePolicy.hostPaths.runtimeDir) -}}
+{{- end -}}
 {{- $extraArgs := include "tls-lb.getCertCommonArgs" . | fromYamlArray -}}
 {{- if .Values.tlsLb.attest.expectedWorkload -}}
 {{- /* The readiness gate (cds-attest /readyz) demands a matched-workload

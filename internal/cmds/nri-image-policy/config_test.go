@@ -1,11 +1,16 @@
 package nriimagepolicy
 
 import (
+	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 )
 
 func validConfig() config {
@@ -345,6 +350,52 @@ func TestValidate_LabelRuleRejectsInvalidKubernetesLabelValue(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected Kubernetes label selector validation to reject invalid value")
+	}
+}
+
+// The chart's rendered boot config points attestation_api_url at the
+// attest-proxy's node-local socket; pin that exact string loading through
+// validation and driving the evidence client over a real socket (the
+// construction path main.go uses for the CDS pull handshake).
+func TestLoadConfig_UnixAttestationAPIURL(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "attestation-api.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/attest", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"platform":"snp","evidence":{}}`))
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	yaml := `
+allowlist:
+  always_allow:
+    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+  pull:
+    url: https://127.0.0.1:30808
+    attestation_api_url: unix://` + sock + `
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("unix attestation_api_url must load and validate: %v", err)
+	}
+	resp, err := attestclient.NewClient("").GenerateEvidenceContext(
+		context.Background(), cfg.Allowlist.Pull.AttestationApiURL, make([]byte, 48))
+	if err != nil {
+		t.Fatalf("evidence request over the configured unix socket: %v", err)
+	}
+	if resp.Platform != "snp" {
+		t.Fatalf("evidence platform = %q, want snp (fake upstream)", resp.Platform)
 	}
 }
 
