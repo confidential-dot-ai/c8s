@@ -2315,10 +2315,13 @@ func TestChartTLSLBServiceType(t *testing.T) {
 		{name: "default is ClusterIP", wantType: corev1.ServiceTypeClusterIP},
 		{name: "explicit LoadBalancer", args: []string{"--set", "tlsLb.service.type=LoadBalancer"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
 		{name: "explicit NodePort", args: []string{"--set", "tlsLb.service.type=NodePort"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
-		// Without the built-in allowlist route there is no source-IP-keyed
-		// limiter, so the default policy must not regress reachability
-		// through nodes that do not run the tls-lb pod.
-		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
+		// The attestation sidecar keys its limiter on the same public peer
+		// address, so it holds the policy on its own.
+		{name: "LoadBalancer without allowlist route", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyLocal},
+		// With neither, nothing keys on the source address, so the default
+		// must not regress reachability through nodes that do not run the
+		// tls-lb pod.
+		{name: "LoadBalancer with neither limiter", args: []string{"--set", "tlsLb.service.type=LoadBalancer", "--set", "tlsLb.allowlist.enabled=false", "--set", "tlsLb.attest.enabled=false"}, wantType: corev1.ServiceTypeLoadBalancer, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 		{name: "explicit policy override wins", args: []string{"--set", "tlsLb.service.type=NodePort", "--set", "tlsLb.service.externalTrafficPolicy=Cluster"}, wantType: corev1.ServiceTypeNodePort, wantPolicy: corev1.ServiceExternalTrafficPolicyCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2411,6 +2414,12 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	renderedTLSLBNginxConfig(t, out).
 		location(t, "prefix", "/.well-known/c8s/").
 		assertDirective(t, "proxy_pass", "http://127.0.0.1:8800")
+	renderedTLSLBNginxConfig(t, out).
+		location(t, "prefix", "/.well-known/c8s/").
+		assertDirective(t, "proxy_set_header", "X-Real-IP", "$remote_addr")
+	renderedTLSLBNginxConfig(t, out).
+		location(t, "exact", "/readyz").
+		assertDirective(t, "proxy_set_header", "X-Real-IP", "$remote_addr")
 
 	// An https upstream: the sidecar presents the CDS client cert and
 	// verifies the upstream against the CA chain get-cert writes to

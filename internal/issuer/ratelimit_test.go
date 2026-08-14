@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -89,18 +90,14 @@ func TestRateLimiterMaxEntries(t *testing.T) {
 	rl.getLimiter("10.0.0.2")
 	rl.getLimiter("10.0.0.3")
 
-	rl.mu.Lock()
-	if len(rl.limiters) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(rl.limiters))
+	if got := rl.Len(); got != 3 {
+		t.Fatalf("expected 3 entries, got %d", got)
 	}
-	rl.mu.Unlock()
 
 	rl.getLimiter("10.0.0.4")
 
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if len(rl.limiters) != 3 {
-		t.Errorf("expected 3 entries after cap, got %d", len(rl.limiters))
+	if got := rl.Len(); got != 3 {
+		t.Errorf("expected 3 entries after cap, got %d", got)
 	}
 }
 
@@ -263,5 +260,120 @@ func TestRateLimitKeyNamespacesDoNotCollide(t *testing.T) {
 	// A sandbox whose ID is that same address string is a different bucket.
 	if code := send("sandbox:10.0.0.7"); code != http.StatusOK {
 		t.Fatalf("an address-shaped sandbox ID shares the address bucket: %d", code)
+	}
+}
+
+// TestClientPrefixChargesAnIPv6PrefixOnce pins the unit a public client is
+// charged to. A client delegated a /64 would otherwise hold 2^64 budgets.
+func TestClientPrefixChargesAnIPv6PrefixOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, addr, want string
+	}{
+		{"IPv4 address", "203.0.113.7", "203.0.113.7"},
+		{"IPv6 address", "2001:db8:1:2::1", "2001:db8:1:2::/64"},
+		{"another address in that /64", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"},
+		{"the neighbouring /64", "2001:db8:1:3::1", "2001:db8:1:3::/64"},
+		{"IPv4 mapped into IPv6", "::ffff:203.0.113.7", "203.0.113.7"},
+		{"not an address", "/run/cds.sock", "/run/cds.sock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClientPrefix(tc.addr); got != tc.want {
+				t.Fatalf("ClientPrefix(%q) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSourceAddrKeyKeepsAddressesApart pins the other half of that split: CDS
+// is reached by nodes and pods, which sit densely inside one subnet, so two of
+// them must not land in one bucket.
+func TestSourceAddrKeyKeepsAddressesApart(t *testing.T) {
+	rl, err := NewIPRateLimiter(rate.Limit(0.001), 1, 10)
+	if err != nil {
+		t.Fatalf("NewIPRateLimiter: %v", err)
+	}
+	h := RateLimitMiddleware(rl, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	code := func(remoteAddr string) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remoteAddr
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := code("[2001:db8:1:2::1]:1111"); got != http.StatusOK {
+		t.Fatalf("first node: got %d, want 200", got)
+	}
+	if got := code("[2001:db8:1:2::2]:2222"); got != http.StatusOK {
+		t.Fatalf("a second node in the same /64: got %d, want its own budget", got)
+	}
+	if got := code("[2001:db8:1:2::1]:3333"); got != http.StatusTooManyRequests {
+		t.Fatalf("the first node past its burst: got %d, want 429", got)
+	}
+}
+
+// meterableClients is how many distinct callers one limiter must meter at
+// once, stated here rather than derived from any caller's constant. Past the
+// map a caller is still served, so this is what the limiter's accuracy costs,
+// not what its availability costs.
+const meterableClients = 50000
+
+// TestALimiterMetersItsWholeCapacity pins that relationship: capacity is the
+// number of distinct callers metered, not an approximation of it.
+func TestALimiterMetersItsWholeCapacity(t *testing.T) {
+	rl, err := NewIPRateLimiter(rate.Limit(0.001), 1, meterableClients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < meterableClients; i++ {
+		rl.getLimiter("client-" + strconv.Itoa(i))
+	}
+	if got := rl.Len(); got != meterableClients {
+		t.Fatalf("the limiter meters %d callers, want %d", got, meterableClients)
+	}
+
+	// The first caller is the quietest, so it is the bucket the next one takes.
+	rl.getLimiter("one-too-many")
+	if got := rl.Len(); got != meterableClients {
+		t.Fatalf("the limiter holds %d buckets past its capacity, want %d", got, meterableClients)
+	}
+	rl.mu.Lock()
+	_, quietestKept := rl.limiters["client-0"]
+	_, newcomerKept := rl.limiters["one-too-many"]
+	rl.mu.Unlock()
+	if quietestKept {
+		t.Fatal("a full map kept the quietest caller instead of making room")
+	}
+	if !newcomerKept {
+		t.Fatal("a full map did not meter a new caller")
+	}
+}
+
+// TestEvictionLoopReclaimsQuietCallers pins the loop that keeps the map from
+// sitting at capacity: without it every new caller costs another its bucket,
+// so the limiter meters a smaller and smaller share of its traffic.
+func TestEvictionLoopReclaimsQuietCallers(t *testing.T) {
+	rl, err := NewIPRateLimiter(rate.Limit(0.001), 1, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		rl.getLimiter("client-" + strconv.Itoa(i))
+	}
+	if got := rl.Len(); got != 8 {
+		t.Fatalf("the limiter meters %d callers, want 8", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rl.EvictionLoop(ctx, time.Millisecond, 10*time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rl.Len() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the limiter still meters %d callers that have gone quiet", rl.Len())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

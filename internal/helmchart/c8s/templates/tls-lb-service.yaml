@@ -14,12 +14,14 @@ spec:
   type: {{ $svc.type }}
   {{- if or (eq $svc.type "LoadBalancer") (eq $svc.type "NodePort") }}
   {{- $renderAllowlistRoute := eq (include "tls-lb.renderAllowlistRoute" .) "true" }}
-  {{- $policy := default (ternary "Local" "Cluster" $renderAllowlistRoute) $svc.externalTrafficPolicy }}
+  {{- $perClientLimits := or $renderAllowlistRoute .Values.tlsLb.attest.enabled }}
+  {{- $policy := default (ternary "Local" "Cluster" $perClientLimits) $svc.externalTrafficPolicy }}
   {{- if not (or (eq $policy "Local") (eq $policy "Cluster")) }}
   {{- fail (printf "tlsLb.service.externalTrafficPolicy must be Local or Cluster, got: %s" $policy) }}
   {{- end }}
-  # Local (the default while the built-in /allowlist route renders) preserves
-  # the public source IP its per-client limiters key on; see values.yaml.
+  # Local (the default while the /allowlist route or the attestation sidecar
+  # renders) preserves the public source IP their per-client limiters key on;
+  # see values.yaml.
   externalTrafficPolicy: {{ $policy }}
   {{- end }}
   ports:

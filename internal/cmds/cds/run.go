@@ -59,6 +59,10 @@ func run(cfg config) error {
 	// var; set it before any /sign-csr request can be served.
 	issuer.JWTClockSkew = time.Duration(cfg.jwtClockSkew) * time.Second
 
+	challengeLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
+	if err != nil {
+		return fmt.Errorf("challenge rate limiter: %w", err)
+	}
 	rateLimiter, err := issuer.NewIPRateLimiter(rate.Limit(cfg.rateLimit), cfg.rateBurst, cfg.rateLimiterMax)
 	if err != nil {
 		return fmt.Errorf("init rate limiter: %w", err)
@@ -344,6 +348,7 @@ func run(cfg config) error {
 		CACertPEM:         caChainPEM,
 		OperatorKeysPEM:   operatorKeysPEM,
 		RateLimiter:       rateLimiter,
+		ChallengeLimiter:  challengeLimiter,
 		MaxRequestSize:    cfg.maxRequestSize,
 		SecretsHandler:    secretsHandler,
 		SecretsChallenges: &secretsChallenges,
@@ -354,6 +359,7 @@ func run(cfg config) error {
 		go rotator.Run(ctx)
 	}
 	go rateLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
+	go challengeLimiter.EvictionLoop(ctx, cfg.rateLimiterEvictInterval, cfg.rateLimiterIdleTimeout)
 
 	router := newRouter(deps)
 
