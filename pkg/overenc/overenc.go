@@ -1,7 +1,7 @@
 // Package overenc implements the c8s-verify post-quantum over-encryption channel
-// that terminates inside the Load Balancer's TEE. It is the Go counterpart of the
-// browser library's keyagreement.js + channel.js and is wire-compatible with it
-// (see c8s-verify-js/PROTOCOL.md).
+// that terminates inside the Load Balancer's TEE. This package's key schedule is
+// the canonical contract (pinned by TestChannelKeyGoldenVector); the c8s-verify-js
+// client and its PROTOCOL.md follow it.
 //
 // Hybrid KEM = X25519 (crypto/ecdh) + ML-KEM-768 (crypto/mlkem), combined per the
 // TLS X25519MLKEM768 convention, run through HKDF-SHA256 to an AES-256-GCM key.

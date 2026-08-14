@@ -2,6 +2,8 @@ package overenc
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
@@ -243,6 +245,7 @@ func TestChannelKeyGoldenVector(t *testing.T) {
 	mlkemSS := mustHex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	x25519SS := mustHex(t, "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
 	salt := mustHex(t, "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f")
+	const wantKey = "f631405a5e117f1ff53e36c527782a3a1b97186007f277bd494db5d825dc08ab"
 
 	t.Run("info string", func(t *testing.T) {
 		if hkdfInfo != "c8s-verify/v1/over-encryption" {
@@ -250,7 +253,7 @@ func TestChannelKeyGoldenVector(t *testing.T) {
 		}
 	})
 
-	t.Run("salt is the identity transcript hash", func(t *testing.T) {
+	t.Run("salt is transcript-hash-shaped and load-bearing", func(t *testing.T) {
 		if len(salt) != sha512.Size384 {
 			t.Fatalf("vector salt = %d bytes, want the %d-byte identity transcript hash", len(salt), sha512.Size384)
 		}
@@ -273,9 +276,32 @@ func TestChannelKeyGoldenVector(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		const want = "f631405a5e117f1ff53e36c527782a3a1b97186007f277bd494db5d825dc08ab"
-		if got := hex.EncodeToString(key); got != want {
-			t.Fatalf("channel key = %s, want %s", got, want)
+		if got := hex.EncodeToString(key); got != wantKey {
+			t.Fatalf("channel key = %s, want %s", got, wantKey)
+		}
+	})
+
+	// The vector must hold through the production funnel, not only deriveKey.
+	t.Run("key through deriveChannel", func(t *testing.T) {
+		ch, err := deriveChannel(mlkemSS, x25519SS, salt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aad := RequestAAD()
+		rec, err := ch.Seal([]byte("m"), aad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, err := aes.NewCipher(mustHex(t, wantKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aead, err := cipher.NewGCM(block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := aead.Open(nil, rec.IV, rec.CT, aad); err != nil {
+			t.Fatalf("golden key cannot open a record sealed through deriveChannel: %v", err)
 		}
 	})
 }
@@ -319,23 +345,45 @@ func TestOpenRejectsMalformedRecord(t *testing.T) {
 			}
 		})
 	}
+
+	// A forgery reusing the genuine record's IV must not poison the anti-replay
+	// set: the genuine record still opens.
+	forged := Record{IV: valid.IV, CT: bytes.Clone(valid.CT)}
+	forged.CT[0] ^= 0xff
+	if _, err := server.Open(forged, aad); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("Open(forged) = %v, want %v", err, ErrAuthenticationFailed)
+	}
+	if _, err := server.Open(valid, aad); err != nil {
+		t.Fatalf("genuine record rejected after a forgery reused its IV: %v", err)
+	}
 }
 
 func TestSealUsesAFreshIV(t *testing.T) {
-	server, _ := channelPair(t)
+	server, client := channelPair(t)
+	// Both ends share one key, so IVs must be unique across the union of both
+	// ends' records.
+	ends := []struct {
+		name string
+		ch   *Channel
+	}{
+		{"server", server},
+		{"client", client},
+	}
 	const seals = 1024
-	seen := make(map[string]struct{}, seals)
+	seen := make(map[string]struct{}, 2*seals)
 	for i := 0; i < seals; i++ {
-		rec, err := server.Seal([]byte("m"), RequestAAD())
-		if err != nil {
-			t.Fatalf("seal %d: %v", i, err)
+		for _, end := range ends {
+			rec, err := end.ch.Seal([]byte("m"), RequestAAD())
+			if err != nil {
+				t.Fatalf("%s seal %d: %v", end.name, i, err)
+			}
+			if len(rec.IV) != ivBytes {
+				t.Fatalf("%s seal %d: IV = %d bytes, want %d", end.name, i, len(rec.IV), ivBytes)
+			}
+			if _, dup := seen[string(rec.IV)]; dup {
+				t.Fatalf("%s seal %d reused an IV", end.name, i)
+			}
+			seen[string(rec.IV)] = struct{}{}
 		}
-		if len(rec.IV) != ivBytes {
-			t.Fatalf("seal %d: IV = %d bytes, want %d", i, len(rec.IV), ivBytes)
-		}
-		if _, dup := seen[string(rec.IV)]; dup {
-			t.Fatalf("seal %d reused an IV", i)
-		}
-		seen[string(rec.IV)] = struct{}{}
 	}
 }
