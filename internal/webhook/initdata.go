@@ -21,7 +21,9 @@ var confidentialKataClasses = map[string]struct{}{
 // stampInitData carries the CDS measurements to the guest's policy-monitor.
 // Writing the annotation is not what makes it trustworthy — the shim hashes the
 // document into HOST_DATA and the guest re-derives the digest before trusting
-// it (docs/kata-image-policy.md).
+// it. On the TDX classes the digest lands padded in MRCONFIGID instead, which
+// the guest refuses, so those pods enforce the baked seed
+// (docs/kata-image-policy.md).
 //
 // An author-supplied value would name the CDS their own guest pins, and the
 // HOST_DATA check cannot tell it from ours, so it is rejected. Comparing

@@ -260,9 +260,11 @@ already pinned.
 - **TDVF metadata must be present.** The tool refuses a firmware image without
   a TDX metadata GUID block, a TD HOB section, or whose firmware volumes do not
   tile the image.
-- **`MRCONFIGID` / `MROWNER` / `MROWNERCONFIG` are assumed zero**, which is what
-  kata's QEMU launches with today (the `tdx-guest` object sets none of them).
-  They are not part of MRTD, but a policy that pinned them would need capturing
+- **`MRCONFIGID` / `MROWNER` / `MROWNERCONFIG` are assumed zero.** kata sets
+  `mrconfigid` from the init-data digest when the pod carries an init-data
+  annotation, so the assumption holds only for pods without one; `MROWNER` and
+  `MROWNERCONFIG` are never set. None are part of MRTD, so `measure` is
+  unaffected either way, but a policy that pinned them would need capturing
   separately.
 
 ## Limitations

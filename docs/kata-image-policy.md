@@ -295,17 +295,19 @@ fake CDS.
 **Delivery: SEV-SNP init-data.** The host writes an init-data document
 the guest reads at `initdata.GuestDocumentPath`, and the shim commits
 `sha256(document)` into `HOST_DATA` at launch. policy-monitor attests
-itself against the in-guest attestation-service, reads `HOST_DATA` out
-of its own SNP report, and compares. The host still chooses the
-document, but it cannot choose one and commit another — the value is
-sealed into the measurement the operator already verifies, so a
-substituted pin changes an attested field rather than passing silently.
+itself against the in-guest attestation-service, has that report
+verified through the same attestation-api `/verify` endpoint the RA-TLS
+refresh uses, and compares the document against the `HOST_DATA` the
+verifier reports. The host still chooses the document, but it cannot choose one
+and commit another — the value is sealed into the measurement the
+operator already verifies, so a substituted pin changes an attested
+field rather than passing silently.
 On a mismatch, or with no document, the guest falls back to the baked
 seed.
 
-**TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`
-rather than `HOST_DATA`, which this code does not read, so a TDX guest
-enforces the baked seed alone. Empty `cds.measurements` (the chart
+**TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`,
+which is 48 bytes where the anchor is 32, so the guest refuses the
+claim and enforces the baked seed alone. Empty `cds.measurements` (the chart
 default) also leaves the refresh disabled on every platform — operator
 additions then reach the host-side enforcer but not running guests.
 

@@ -9,9 +9,10 @@
 // HOST_DATA makes the document tamper-EVIDENT, not trusted. The host still
 // chooses the content, and kata's guest agent never compares what it wrote to
 // the guest against what the shim committed. A consumer must therefore
-// re-derive sha256(raw) and compare it against HOST_DATA in its own attestation
-// report before acting on anything inside. See docs/kata-image-policy.md —
-// "Init-data trust anchor".
+// re-derive sha256(raw) and compare it against the HOST_DATA of an attestation
+// report a verifier has accepted — HOST_DATA read out of an unverified report
+// is host-chosen on both sides. See docs/kata-image-policy.md — "Allowlist
+// sourcing: baked seed + CDS refresh".
 package initdata
 
 import (
@@ -201,8 +202,8 @@ func (d Document) Render() ([]byte, error) {
 // and a parser that accepts more than it needs to is surface a caller does not
 // want on host-supplied bytes.
 //
-// Parse does not authenticate. Callers must compare Digest(raw) against
-// HOST_DATA first.
+// Parse does not authenticate. Callers must compare Digest(raw) against the
+// HOST_DATA of a verified report first.
 func Parse(raw []byte) (Document, error) {
 	if !utf8.Valid(raw) {
 		return Document{}, fmt.Errorf("%w: not valid UTF-8", ErrMalformed)

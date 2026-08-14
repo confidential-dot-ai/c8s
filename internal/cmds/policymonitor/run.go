@@ -152,7 +152,7 @@ rather than a transient runtime problem.`,
 	fs.StringVar(&cfg.LogLevel, "log-level", "info", "log level: debug, info, warn, error")
 	fs.StringVar(&cfg.CDSURL, "cds-url", "", "CDS base URL to refresh the allowlist from over RA-TLS (default $C8S_CDS_URL; empty = baked seed only, no network)")
 	fs.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch digests CDS's RA-TLS serving cert must match (default $C8S_CDS_MEASUREMENTS)")
-	fs.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "local attestation-service URL for in-guest RA-TLS evidence (default $C8S_ATTESTATION_SERVICE_URL or http://127.0.0.1:8400)")
+	fs.StringVar(&cfg.AttestationServiceURL, "attestation-service-url", "", "local attestation-api URL: builds in-guest RA-TLS evidence and verifies this guest's own report (default $C8S_ATTESTATION_SERVICE_URL or http://127.0.0.1:8400)")
 	fs.DurationVar(&cfg.RefreshInterval, "allowlist-refresh-interval", defaultRefreshInterval, "interval to poll CDS for allowlist updates (only when --cds-url is set)")
 	return cmd
 }
@@ -189,8 +189,9 @@ type Config struct {
 	// $C8S_CDS_MEASUREMENTS. Empty = accept any (unsafe; warned).
 	CDSMeasurements string
 
-	// AttestationServiceURL is the local attester used to build the
-	// in-guest RA-TLS evidence for the CDS handshake. Defaults from
+	// AttestationServiceURL is the local attestation-api: it builds the
+	// in-guest RA-TLS evidence for the CDS handshake and verifies the
+	// self-report the init-data anchor is read from. Defaults from
 	// $C8S_ATTESTATION_SERVICE_URL, else http://127.0.0.1:8400.
 	AttestationServiceURL string
 
