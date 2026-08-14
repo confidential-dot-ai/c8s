@@ -17,6 +17,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -59,47 +61,51 @@ func (r *fixedRemoteResolver) Resolve(string) (string, bool)              { retu
 func (r *fixedRemoteResolver) ValidateOutboundDest(string) (bool, string) { return true, "" }
 func (r *fixedRemoteResolver) ValidateLocalDest(string) bool              { return true }
 
-// fakeAttestFunc builds a fake SNP report from the hex-encoded REPORTDATA.
-// Suitable for TLS plumbing tests without AMD hardware.
-func fakeAttestFunc(_ context.Context, customData string) (string, error) {
-	var rd [64]byte
-	fmt.Sscanf(customData, "%x", &rd)
-	return string(fakeSNPReport(rd)), nil
-}
-
-// fakeSNPReport creates a minimal fake SEV-SNP report (1184 bytes).
-func fakeSNPReport(reportData [64]byte) []byte {
-	report := make([]byte, ratls.SNPReportSize)
-	report[0] = 0x02
-	report[0x0A] = 0x03
-	copy(report[0x50:], reportData[:])
-	return report
-}
-
-// testTLSConfigs creates server+client TLS configs for testing. Uses
-// InsecureSkipVerify because fake reports lack valid AMD signatures.
+// testTLSConfigs creates mutually-attested server+client TLS configs: both
+// sides mint RA-TLS certs from testattest evidence and verify the peer
+// through the production VerifyPeerCertificate. These tests exercise L4 proxy
+// plumbing, not attestation policy, so the policy pins no measurements;
+// pinning is covered by the mesh handshake tests.
 func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
 	t.Helper()
 
+	stub := testattest.New(t)
+	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
+	policy := &ratls.VerifyPolicy{AttestationApiURL: stub.URL}
+
 	serverCfg, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		Platform:     "sev-snp",
+		AttestFunc:   attestFunc,
+		DNSNames:     []string{"localhost"},
+		CertTTL:      1 * time.Hour,
+		ClientPolicy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
+		Policy:     policy,
 		Platform:   "sev-snp",
-		AttestFunc: fakeAttestFunc,
-		DNSNames:   []string{"localhost"},
+		AttestFunc: attestFunc,
 		CertTTL:    1 * time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Don't require client certs in tests (fake reports can't pass verification).
-	serverCfg.ClientAuth = tls.NoClientCert
-	serverCfg.VerifyPeerCertificate = nil
-
-	clientCfg := &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	}
 
 	return serverCfg, clientCfg
+}
+
+// staticCertProvider serves one fixed certificate through the
+// ratls.CertProvider interface, for tests that need the handshake to present
+// a specific leaf.
+type staticCertProvider struct {
+	cert tls.Certificate
+}
+
+func (p staticCertProvider) Provision(context.Context) (*tls.Certificate, time.Duration, error) {
+	return &p.cert, 0, nil
 }
 
 func testLogger() *slog.Logger {
@@ -209,7 +215,7 @@ func TestPipe(t *testing.T) {
 
 func TestInboundHandler(t *testing.T) {
 	backend := startBackend(t, "backend")
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	p := &Proxy{
 		inboundAddr: "127.0.0.1:0",
@@ -241,10 +247,7 @@ func TestInboundHandler(t *testing.T) {
 	}()
 
 	// Connect as RA-TLS client, send destination header, then data.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +493,7 @@ func TestConcurrentConnections(t *testing.T) {
 }
 
 func TestDestHeaderTimeout(t *testing.T) {
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	p := &Proxy{
 		inboundAddr:       "127.0.0.1:0",
@@ -522,10 +525,7 @@ func TestDestHeaderTimeout(t *testing.T) {
 	}()
 
 	// Connect but never send the destination header.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func TestDestHeaderTimeout(t *testing.T) {
 }
 
 func TestInvalidDestination(t *testing.T) {
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	p := &Proxy{
 		inboundAddr:       "127.0.0.1:0",
@@ -573,10 +573,7 @@ func TestInvalidDestination(t *testing.T) {
 	}()
 
 	// Send an invalid destination header (no port).
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +591,7 @@ func TestInvalidDestination(t *testing.T) {
 
 func TestGracefulDrain(t *testing.T) {
 	backend := startBackend(t, "drain")
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	p := &Proxy{
 		inboundAddr:  "127.0.0.1:0",
@@ -629,10 +626,7 @@ func TestGracefulDrain(t *testing.T) {
 	}()
 
 	// Establish a connection that will be in-flight during shutdown.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +721,7 @@ func TestIPv6RemoteAddr(t *testing.T) {
 
 func TestConnectionLimit(t *testing.T) {
 	backend := startBackend(t, "limited")
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
 	p := &Proxy{
@@ -776,10 +770,7 @@ func TestConnectionLimit(t *testing.T) {
 	}()
 
 	// First connection: should succeed.
-	conn1, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn1, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,10 +785,7 @@ func TestConnectionLimit(t *testing.T) {
 	// Second connection: should be rejected (limit=1, one in-flight).
 	// Server closes the raw TCP connection before TLS handshake, so
 	// tls.Dial itself may fail — that's the expected rejection.
-	conn2, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn2, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err == nil {
 		// If TLS handshake somehow completed, the read should still fail.
 		conn2.SetReadDeadline(time.Now().Add(1 * time.Second))
@@ -945,7 +933,7 @@ func TestOutboundRejectsNonPodOriginalDestination(t *testing.T) {
 }
 
 func TestDestHeaderReadErrorMetrics(t *testing.T) {
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
 	p := &Proxy{
@@ -977,10 +965,7 @@ func TestDestHeaderReadErrorMetrics(t *testing.T) {
 	}()
 
 	// Send an invalid destination header (no port).
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1012,7 @@ func TestReadinessOnShutdown(t *testing.T) {
 
 func TestMetricsAccounting(t *testing.T) {
 	backend := startBackend(t, "metrics")
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
 	p := &Proxy{
@@ -1058,10 +1043,7 @@ func TestMetricsAccounting(t *testing.T) {
 	}()
 
 	// Send a request through the inbound handler.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1062,7 @@ func TestMetricsAccounting(t *testing.T) {
 }
 
 func TestInboundDialFailureMetrics(t *testing.T) {
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
 	p := &Proxy{
@@ -1112,10 +1094,7 @@ func TestInboundDialFailureMetrics(t *testing.T) {
 	}()
 
 	// Trigger an inbound connection whose destination pod dial fails.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1231,7 +1210,7 @@ func (r *rejectResolver) ValidateOutboundDest(ip string) (bool, string) {
 func (r *rejectResolver) ValidateLocalDest(ip string) bool { return false }
 
 func TestInboundDestRejected(t *testing.T) {
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	m := testMetrics()
 	p := &Proxy{
@@ -1263,10 +1242,7 @@ func TestInboundDestRejected(t *testing.T) {
 	}()
 
 	// Send a valid destination header that the resolver rejects.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}

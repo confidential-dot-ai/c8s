@@ -157,7 +157,7 @@ func TestReleaseSrcKeepsBudgetWhileHeld(t *testing.T) {
 // included) is within the limit and must be accepted.
 func TestInboundHeaderAtSizeLimitAccepted(t *testing.T) {
 	backend := startBackend(t, "edge")
-	serverTLS, _ := testTLSConfigs(t)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	header := backend + "\n"
 	p := &Proxy{
@@ -188,10 +188,7 @@ func TestInboundHeaderAtSizeLimitAccepted(t *testing.T) {
 		}
 	}()
 
-	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-	})
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,10 +218,11 @@ func TestOutboundDialFailureClassifiedAsTLSError(t *testing.T) {
 	deadPort := freePort(t)
 	m := testMetrics()
 	var logBuf syncBuffer
+	_, clientTLS := testTLSConfigs(t)
 	p := &Proxy{
 		nodeIP:      "1.1.1.1",
 		inboundPort: deadPort,
-		clientTLS:   &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true},
+		clientTLS:   clientTLS,
 		resolver:    &fixedRemoteResolver{nodeIP: "127.0.0.1"},
 		origDstFunc: func(net.Conn) (string, error) { return "10.244.1.5:8080", nil },
 		accessLog:   true,

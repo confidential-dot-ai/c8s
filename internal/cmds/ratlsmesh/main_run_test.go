@@ -312,6 +312,11 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 		return resp.StatusCode == http.StatusOK
 	}, "health server never came up")
 
+	// --measurements is set: the pinning gauge must read 1.
+	if v := scrapedValue(t, cfg.healthPort, "ratls_mesh_measurement_pinning", nil); v != 1 {
+		t.Errorf("measurement_pinning = %v with --measurements configured, want 1", v)
+	}
+
 	// Let the metric ticker read the sidecar file at least once, then remove
 	// it so the read-after-success warning path runs too.
 	time.Sleep(50 * time.Millisecond)
