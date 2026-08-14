@@ -515,8 +515,6 @@ func normalizeHTTPServerConfig(cfg config) config {
 	return cfg
 }
 
-// newSecretsStore builds the store the secret handlers share, from the sizing
-// flags validateSecretsConfig has already checked.
 func newSecretsStore(cfg config) *secrets.MemoryStore {
 	return secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxValueBytes)
 }
@@ -529,6 +527,9 @@ func validateSecretsConfig(cfg config) error {
 	}
 	if cfg.secretsMaxPathsPerWorkload >= cfg.secretsMaxPaths {
 		return fmt.Errorf("--secrets-max-paths-per-workload (%d) must be below --secrets-max-paths (%d), or one workload can fill the store", cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxPaths)
+	}
+	if cfg.secretsMaxValueBytes < secrets.GeneratedValueBytes {
+		return fmt.Errorf("--secrets-max-value-bytes (%d) must be at least %d, the size of every value CDS generates", cfg.secretsMaxValueBytes, secrets.GeneratedValueBytes)
 	}
 	return nil
 }

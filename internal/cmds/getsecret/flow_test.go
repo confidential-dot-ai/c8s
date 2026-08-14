@@ -189,6 +189,33 @@ func TestFetchOneRereadsAfterLosingCreateRace(t *testing.T) {
 	}
 }
 
+// The store evicts nothing, so a 507 does not clear without a CDS restart.
+// Retrying it spends the whole budget and then hands the pod to the kubelet,
+// which restarts the sidecar for the pod's life; fail on the first pass instead.
+func TestFetchStopsRetryingWhenTheStoreIsFull(t *testing.T) {
+	endpoint := startInventory(t)
+	cds, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/api/db":  {{status: http.StatusNotFound}},
+		"POST /secrets/api/db": {{status: http.StatusInsufficientStorage}},
+	})
+	cfg := flowConfig(t, url)
+	pub := testKey(t)
+	err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
+		_, err := fetchAllWith(ctx, cfg, http.DefaultClient, pub, endpoint)
+		return err
+	})
+	if err == nil {
+		t.Fatal("a full store was treated as success")
+	}
+	if !strings.Contains(err.Error(), "/api/db") {
+		t.Fatalf("err = %v, want the refused path in the detail", err)
+	}
+	want := []string{"GET /secrets/api/db", "POST /secrets/api/db"}
+	if !equal(cds.requests, want) {
+		t.Fatalf("requests = %v, want the single pass %v", cds.requests, want)
+	}
+}
+
 // A denial is not a create: only 404 means the path is free.
 func TestFetchOneDoesNotCreateOnDenial(t *testing.T) {
 	endpoint := startInventory(t)

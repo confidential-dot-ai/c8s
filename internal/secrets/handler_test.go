@@ -38,7 +38,6 @@ const (
 	testAppImg      = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	// testAppImg2 is the entry's second main: release is gated on both running.
 	testAppImg2  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	testBulkImg  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	testInjected = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
 	testOther    = "sha256:8888888888888888888888888888888888888888888888888888888888888888"
 	// testInjectedOld is the previous release's injected image, still running in
@@ -47,6 +46,10 @@ const (
 	// testWorkerImg is the main of a second workload entry, declared only by
 	// tests that need one.
 	testWorkerImg = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	// testBulkImg is the main of the "bulk" entry, likewise declared where it
+	// is needed. Its digest is its own: a digest two entries share matches both
+	// the moment either widens its argv, and MatchWorkload answers ambiguous.
+	testBulkImg = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
 )
 
 // --- fakes ---
@@ -199,18 +202,6 @@ func newHarness(t *testing.T) *harness {
 				Write:  []string{"/api/**"},
 			},
 		},
-		"bulk": {
-			Containers: []pkgallowlist.Container{{
-				Digest:  mustDigest(t, testBulkImg),
-				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/bulk"}},
-				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
-			}},
-			Secrets: &pkgallowlist.SecretsPolicy{
-				Policy: pkgallowlist.PolicyAllow,
-				Read:   []string{"/bulk/**"},
-				Write:  []string{"/bulk/**"},
-			},
-		},
 	}}
 	inv := &fakeInventory{
 		keys: map[string]*ecdsa.PublicKey{testHost: signer.PublicKey()},
@@ -221,7 +212,7 @@ func newHarness(t *testing.T) *harness {
 		},
 	}
 	challenges := &fakeChallenges{used: map[string]bool{}}
-	store := NewMemoryStore(16, 16, 64)
+	store := NewMemoryStore(16, 15, 64)
 	return &harness{
 		h: Handler{
 			Store:          store,
@@ -239,6 +230,37 @@ func newHarness(t *testing.T) *harness {
 func (hn *harness) setStore(t *testing.T, s *MemoryStore) {
 	t.Helper()
 	hn.store, hn.h.Store = s, s
+}
+
+// declareBulkEntry adds a second granted entry, running in testBulkSandbox, and
+// returns the leaf that sandbox presents.
+func (hn *harness) declareBulkEntry(t *testing.T) *x509.Certificate {
+	t.Helper()
+	al, err := hn.h.Policy.Allowlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	al.Workloads["bulk"] = pkgallowlist.Workload{
+		Containers: []pkgallowlist.Container{{
+			Digest:  mustDigest(t, testBulkImg),
+			Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/bulk"}},
+			Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+		}},
+		Secrets: &pkgallowlist.SecretsPolicy{
+			Policy: pkgallowlist.PolicyAllow,
+			Read:   []string{"/bulk/**"},
+			Write:  []string{"/bulk/**"},
+		},
+	}
+	if hn.inv.bySandbox == nil {
+		hn.inv.bySandbox = map[string][]workloadclaims.SandboxContainer{}
+	}
+	hn.inv.bySandbox[testBulkSandbox] = []workloadclaims.SandboxContainer{
+		{Digest: testBulkImg, Argv: []string{"/bulk"}},
+		{Digest: testInjected, Argv: []string{"get-secret"}},
+	}
+	leaf, _ := leafFor(t, testBulkSandbox)
+	return leaf
 }
 
 // request builds a request as the fetcher would send it.
@@ -653,13 +675,7 @@ func TestInjectedImageFromPreviousReleaseIsDropped(t *testing.T) {
 func TestFloodingWorkloadDoesNotRefuseAnother(t *testing.T) {
 	hn := newHarness(t)
 	hn.setStore(t, NewMemoryStore(16, 2, 64))
-	hn.inv.bySandbox = map[string][]workloadclaims.SandboxContainer{
-		testBulkSandbox: {
-			{Digest: testBulkImg, Argv: []string{"/bulk"}},
-			{Digest: testInjected, Argv: []string{"get-secret"}},
-		},
-	}
-	bulkLeaf, _ := leafFor(t, testBulkSandbox)
+	bulkLeaf := hn.declareBulkEntry(t)
 
 	created, refused := 0, 0
 	for i := range 10 {
@@ -699,6 +715,47 @@ func TestQuotaIsPerWorkloadNotPerSandbox(t *testing.T) {
 	}
 	if hn.store.Len() != 1 {
 		t.Fatalf("store holds %d paths, want 1", hn.store.Len())
+	}
+}
+
+// A workload that has spent none of its quota is still refused by the ceiling
+// when other holders have filled the store, and the refusal names the ceiling
+// rather than the quota — the two are one status apart and only the code tells
+// the workload whether shrinking its own footprint would help.
+func TestCeilingRefusesAWorkloadUnderItsQuota(t *testing.T) {
+	hn := newHarness(t)
+	hn.setStore(t, NewMemoryStore(2, 1, 64))
+	// Operator values are exempt from the quota, so the store fills without
+	// anything being charged to the workload.
+	hn.seed(t, "/op/1", []byte("operator-value"))
+	hn.seed(t, "/op/2", []byte("operator-value"))
+
+	w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("first POST against a full store = %d (%s), want 507", w.Code, w.Body)
+	}
+	if code := errorCode(t, w); code != types.ErrorCodeSecretStoreFull {
+		t.Fatalf("error code = %q, want %q", code, types.ErrorCodeSecretStoreFull)
+	}
+	if hn.store.Len() != 2 {
+		t.Fatalf("store holds %d paths after a refusal, want the 2 it started with", hn.store.Len())
+	}
+}
+
+// A workload at its own quota is told so, below a store that has room.
+func TestQuotaRefusalNamesTheQuota(t *testing.T) {
+	hn := newHarness(t)
+	hn.setStore(t, NewMemoryStore(16, 1, 64))
+
+	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
+		t.Fatalf("first POST = %d (%s), want 201", w.Code, w.Body)
+	}
+	w := do(hn.h, hn.request(t, http.MethodPost, "/api/hf"))
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("POST past the quota = %d (%s), want 507", w.Code, w.Body)
+	}
+	if code := errorCode(t, w); code != types.ErrorCodeSecretHolderQuota {
+		t.Fatalf("error code = %q, want %q", code, types.ErrorCodeSecretHolderQuota)
 	}
 }
 

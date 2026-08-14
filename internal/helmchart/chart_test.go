@@ -1253,16 +1253,20 @@ func TestChartCDSPinnedToCDSNode(t *testing.T) {
 	}
 }
 
-// The per-workload secret quota is the bound a flooding workload meets first,
-// so a chart-deployed cluster must be able to size it.
+// Both secret path bounds are chart-settable: sizing the quota without the
+// ceiling it must stay below renders a CDS that will not start.
 func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		set  []string
-		want string
+		want []string
 	}{
-		{"default", nil, "--secrets-max-paths-per-workload=64"},
-		{"sized", []string{"--set", "cds.secretsMaxPathsPerWorkload=8"}, "--secrets-max-paths-per-workload=8"},
+		{"default", nil, []string{"--secrets-max-paths=1024", "--secrets-max-paths-per-workload=64"}},
+		{
+			"sized",
+			[]string{"--set", "cds.secretsMaxPaths=256", "--set", "cds.secretsMaxPathsPerWorkload=8"},
+			[]string{"--secrets-max-paths=256", "--secrets-max-paths-per-workload=8"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.set...)
@@ -1270,7 +1274,32 @@ func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
 				t.Fatalf("helm template: %v\n%s", err, out)
 			}
 			args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
-			assertContainerHasArg(t, "cds", args, tc.want)
+			for _, want := range tc.want {
+				assertContainerHasArg(t, "cds", args, want)
+			}
+		})
+	}
+}
+
+// The pair CDS refuses to start on is refused at template time instead: its
+// Recreate rollout deletes the serving pod before the replacement CrashLoops.
+func TestChartCDSSecretsQuotaAboveTheCeilingFailsRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  []string
+	}{
+		{"at the ceiling", []string{"--set", "cds.secretsMaxPaths=64"}},
+		{"above the ceiling", []string{"--set", "cds.secretsMaxPaths=32"}},
+		{"raised quota, default ceiling", []string{"--set", "cds.secretsMaxPathsPerWorkload=1024"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.set...)
+			if err == nil {
+				t.Fatalf("a quota at or above the ceiling rendered:\n%s", out)
+			}
+			if !strings.Contains(out, "kind=cds_secrets_path_budget") {
+				t.Fatalf("render failed without naming the guard: %v\n%s", err, out)
+			}
 		})
 	}
 }

@@ -25,4 +25,8 @@ const (
 	// front door, whose host-visible serving key cannot support transport
 	// binding; that deployment shape is attest-pq-only.
 	ErrorCodeUnsupportedFrontDoor = "unsupported_front_door"
+	// ErrorCodeSecretHolderQuota: the caller is at --secrets-max-paths-per-workload.
+	ErrorCodeSecretHolderQuota = "secret_holder_quota"
+	// ErrorCodeSecretStoreFull: the store is at --secrets-max-paths.
+	ErrorCodeSecretStoreFull = "secret_store_full"
 )

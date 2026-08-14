@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/confidential-dot-ai/c8s/internal/httputil"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // DefaultMaxOperatorBodyBytes caps a PUT body when OperatorHandler.MaxBodyBytes
@@ -125,15 +127,18 @@ func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path st
 	writeResult(w, http.StatusOK, PutResponse{Path: path, Existing: held.Origin})
 }
 
-// writeFailed answers a store error and reports whether it did. A bound is the
-// operator's own sizing, so it answers 507.
+// writeFailed answers a store error and reports whether it did. Both bounds
+// answer 507, distinguished by error code.
 func (h OperatorHandler) writeFailed(w http.ResponseWriter, path string, err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case bounded(err):
+	case errors.Is(err, ErrHolderQuota):
 		h.logger().Warn("operator secret write refused", "path", path, "error", err)
-		http.Error(w, "secret storage limit reached", http.StatusInsufficientStorage)
+		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretHolderQuota, "secret storage limit reached")
+	case errors.Is(err, ErrStoreFull):
+		h.logger().Warn("operator secret write refused", "path", path, "error", err)
+		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretStoreFull, "secret storage limit reached")
 	default:
 		h.logger().Error("operator secret write failed", "path", path, "error", err)
 		http.Error(w, "secret write failed", http.StatusInternalServerError)
