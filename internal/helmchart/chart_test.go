@@ -1367,6 +1367,9 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 	if strings.Contains(cfg, "[auth]") {
 		t.Fatalf("default config must not render [auth] (nothing routable to protect); got:\n%s", cfg)
 	}
+	if k, ok := sec.StringData["auth-key"]; ok {
+		t.Fatalf("default render must not carry proxy key material; auth-key = %q", k)
+	}
 
 	ds := renderedDaemonSet(t, out, "c8s-attestation-api")
 	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
@@ -1375,6 +1378,9 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		"--socket=/var/run/nri-image-policy/attestation-api.sock",
 		"--upstream=http://127.0.0.1:8400",
 	)
+	// A stray --api-key-file against the keyless Secret crash-loops the proxy
+	// on every node.
+	assertContainerNoArgPrefix(t, "attest-proxy", proxy.Args, "--api-key-file")
 	// The proxy publishes into the socket-dir hostPath, and both it and the
 	// API read their config from the Secret — dropping either renders fine
 	// and only fails at runtime.
@@ -1395,6 +1401,18 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 	// internal budget.
 	if proxy.ReadinessProbe.TimeoutSeconds != 5 || proxy.LivenessProbe.TimeoutSeconds != 5 {
 		t.Fatalf("exec probes must set timeoutSeconds=5; got readiness %d / liveness %d", proxy.ReadinessProbe.TimeoutSeconds, proxy.LivenessProbe.TimeoutSeconds)
+	}
+	// uid 0 owns the socket (clients reject a foreign owner) and gid 65532 is
+	// the socket's group — the chgrp works by membership, all caps dropped.
+	sc := proxy.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 0 || sc.RunAsGroup == nil || *sc.RunAsGroup != 65532 {
+		t.Fatalf("attest-proxy must run as uid 0 / gid 65532 (socket owner and group); got %+v", sc)
+	}
+	if sc.Capabilities == nil || !slices.Contains(sc.Capabilities.Drop, corev1.Capability("ALL")) {
+		t.Fatalf("attest-proxy must drop all capabilities; got %+v", sc.Capabilities)
+	}
+	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		t.Fatalf("attest-proxy must mount its root filesystem read-only; got %+v", sc.ReadOnlyRootFilesystem)
 	}
 	// An httpGet probe would never pass against the loopback bind, so the
 	// proxy's exec probe is the only health signal.
@@ -1581,6 +1599,10 @@ func TestChartRejectsExposedAttestationApiNullOrBlankKey(t *testing.T) {
 	if err := os.WriteFile(nullValues, []byte("attestationApi:\n  service:\n    nodePort: 30840\n  auth:\n    apiKey: null\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	nullAuthValues := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(nullAuthValues, []byte("attestationApi:\n  service:\n    nodePort: 30840\n  auth: null\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -1588,6 +1610,12 @@ func TestChartRejectsExposedAttestationApiNullOrBlankKey(t *testing.T) {
 		{"null key via values file", []string{"-f", nullValues}},
 		{"null key via --set-json", []string{"--set", "attestationApi.service.nodePort=30840", "--set-json", "attestationApi.auth.apiKey=null"}},
 		{"whitespace-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=  "}},
+		// The guard's trim set is the proxy's strings.TrimSpace: a key that is
+		// blank under it must fail here, not render a proxy that rejects its
+		// own key file at runtime.
+		{"newline-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=\n"}},
+		{"unicode-whitespace-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=\u00a0"}},
+		{"null auth block", []string{"-f", nullAuthValues}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.args...)
@@ -1604,22 +1632,68 @@ func TestChartRejectsExposedAttestationApiNullOrBlankKey(t *testing.T) {
 	}
 }
 
-// The key is normalized (trimmed) before render, so the key the proxy
-// injects is byte-identical to the one the API's [auth] list requires.
+// The key is normalized (trimmed) before render with the proxy's
+// strings.TrimSpace set, so the key the proxy injects is byte-identical to
+// the one the API's [auth] list requires.
 func TestChartTrimsAttestationApiKey(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "attestationApi.service.nodePort=31040",
-		"--set-string", "attestationApi.auth.apiKey= test-key ",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
+	for _, tc := range []struct {
+		name   string
+		padded string
+		want   string
+	}{
+		{"space-padded", " test-key ", "test-key"},
+		{"newline-padded", "\ntest-key\n", "test-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t,
+				"--set", "attestationApi.service.nodePort=31040",
+				"--set-string", "attestationApi.auth.apiKey="+tc.padded,
+			)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			sec := renderedSecret(t, out, "c8s-attestation-api")
+			if got := sec.StringData["auth-key"]; got != tc.want {
+				t.Fatalf("Secret auth-key = %q, want the trimmed key %q", got, tc.want)
+			}
+			if cfg := sec.StringData["config.toml"]; !strings.Contains(cfg, `api_keys = ["`+tc.want+`"]`) {
+				t.Fatalf("config must carry the trimmed key; got:\n%s", cfg)
+			}
+		})
 	}
-	sec := renderedSecret(t, out, "c8s-attestation-api")
-	if got := sec.StringData["auth-key"]; got != "test-key" {
-		t.Fatalf("Secret auth-key = %q, want the trimmed key", got)
+}
+
+// A blank key without a nodePort renders the plain keyless shape — no
+// [auth], no key material in the Secret, no --api-key-file on the proxy (a
+// stray one crash-loops it on an empty key file at runtime).
+func TestChartBlankKeyWithoutNodePortRendersKeyless(t *testing.T) {
+	nullAuthValues := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(nullAuthValues, []byte("attestationApi:\n  auth: null\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if cfg := sec.StringData["config.toml"]; !strings.Contains(cfg, `api_keys = ["test-key"]`) {
-		t.Fatalf("config must carry the trimmed key; got:\n%s", cfg)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"whitespace-only key", []string{"--set-string", "attestationApi.auth.apiKey=  "}},
+		{"newline-only key", []string{"--set-string", "attestationApi.auth.apiKey=\n"}},
+		{"null auth block", []string{"-f", nullAuthValues}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.args...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			sec := renderedSecret(t, out, "c8s-attestation-api")
+			if cfg := sec.StringData["config.toml"]; strings.Contains(cfg, "[auth]") {
+				t.Fatalf("keyless config must not render [auth]; got:\n%s", cfg)
+			}
+			if k, ok := sec.StringData["auth-key"]; ok {
+				t.Fatalf("keyless render must not carry proxy key material; auth-key = %q", k)
+			}
+			proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
+			assertContainerNoArgPrefix(t, "attest-proxy", proxy.Args, "--api-key-file")
+		})
 	}
 }
 

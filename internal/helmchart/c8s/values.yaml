@@ -324,7 +324,7 @@ cds:
 
 ## DaemonSet running the attestation-api image from github.com/confidential-dot-ai/attestation-rs.
 attestationApi:
-  ## Render the host-side attestation-api DaemonSet/Service. Disable on
+  ## Render the host-side attestation-api DaemonSet. Disable on
   ## clusters where every workload pod runs as a kata-qemu-snp CVM — the
   ## in-guest attestation-service is baked into kata-guest-base on loopback,
   ## so the host DaemonSet is redundant (and crashloops on bare-metal nodes
@@ -343,7 +343,8 @@ attestationApi:
   ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
   auth:
     ## Bearer key, required when service.nodePort exposes the listener
-    ## (enforced at render).
+    ## (enforced at render). Generate it high-entropy: the config checksum
+    ## covering it appears in a pod annotation.
     apiKey: ""
   service:
     ## Opt-in re-exposure for debugging: renders a NodePort Service and binds

@@ -346,13 +346,13 @@ pod (read-only) and the one the webhook mounts into get-cert sidecars.
 {{- end -}}
 
 {{- /*
-c8s.attestationApiKey — the configured Bearer key, normalized: a YAML null
-coalesces to "key absent" (nil) and a whitespace-only key is unusable, so
-null/empty/whitespace all read as "no key" everywhere (render guard, [auth]
-block, proxy key file).
+c8s.attestationApiKey — the configured Bearer key, normalized: the `with`
+reads a null auth block or key as "key absent", and the trim shares the
+attest-proxy's strings.TrimSpace, so the render guard and the proxy agree
+on which keys are blank.
 */ -}}
 {{- define "c8s.attestationApiKey" -}}
-{{- .Values.attestationApi.auth.apiKey | default "" | toString | trimAll " \t" -}}
+{{- with .Values.attestationApi.auth -}}{{- .apiKey | default "" | toString | trim -}}{{- end -}}
 {{- end -}}
 
 {{- /*
