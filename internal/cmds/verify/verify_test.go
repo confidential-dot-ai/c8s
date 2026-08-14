@@ -920,6 +920,60 @@ func TestRenderOutcome(t *testing.T) {
 		if !oc.Verified || oc.Measurement != measHex {
 			t.Errorf("unexpected outcome: %+v", oc)
 		}
+		// The security booleans must serialize even when false: a gate reading
+		// an absent key cannot tell "reported false" from "never checked".
+		var raw map[string]any
+		if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"debug", "smt"} {
+			v, present := raw[key]
+			if !present {
+				t.Errorf("json verdict omits %q — absent reads as false to a CI gate", key)
+			} else if v != false {
+				t.Errorf("json %q = %v, want false for these claims", key, v)
+			}
+		}
+	})
+
+	t.Run("debug/smt/report_data come from the verified claims", func(t *testing.T) {
+		snpResult := &teetypes.VerificationResult{
+			SignatureValid: true,
+			Platform:       teetypes.PlatformSNP,
+			Claims: teetypes.Claims{
+				LaunchDigest: measHex,
+				ReportData:   bytes.Repeat([]byte{0xAB}, 64),
+				PlatformData: map[string]any{
+					"policy":        map[string]any{"debug_allowed": true, "smt_allowed": true},
+					"platform_info": map[string]any{"smt_enabled": false},
+				},
+			},
+		}
+		oc := newOutcome(config{}, ev, snpResult, nil, emptyPlan())
+		if !oc.Debug {
+			t.Error("SNP policy.debug_allowed=true must surface as debug=true")
+		}
+		if oc.SMT {
+			t.Error("SMT must report platform_info.smt_enabled (false), not policy.smt_allowed")
+		}
+		if want := strings.Repeat("ab", 64); oc.ReportData != want {
+			t.Errorf("report_data = %q, want the claims' report_data %q", oc.ReportData, want)
+		}
+
+		tdxResult := &teetypes.VerificationResult{
+			SignatureValid: true,
+			Platform:       teetypes.PlatformTDX,
+			Claims: teetypes.Claims{
+				LaunchDigest: measHex,
+				PlatformData: map[string]any{
+					"td_attributes_parsed": map[string]any{"debug": true},
+				},
+			},
+		}
+		oc = newOutcome(config{}, ev, tdxResult, nil, emptyPlan())
+		if !oc.Debug || oc.SMT {
+			t.Errorf("TDX td_attributes debug=true must surface as debug=true (smt unattested), got %+v", oc)
+		}
 	})
 
 	t.Run("verdict error -> NOT VERIFIED", func(t *testing.T) {
@@ -1249,11 +1303,34 @@ func TestRenderTextSections(t *testing.T) {
 		}
 	})
 
-	t.Run("show-evidence prints the report data", func(t *testing.T) {
+	// The security section is only truthful if it comes from the verified
+	// claims: drive it through newOutcome with a debug=true SNP report.
+	t.Run("show-evidence prints the claims' security state", func(t *testing.T) {
+		ev := &evidence{platform: "snp", source: "test", bindingNote: "test binding", fresh: true}
+		result := &teetypes.VerificationResult{
+			SignatureValid: true,
+			Platform:       teetypes.PlatformSNP,
+			Claims: teetypes.Claims{
+				LaunchDigest: "ab" + strings.Repeat("00", 47),
+				ReportData:   bytes.Repeat([]byte{0xde, 0xad, 0xbe, 0xef}, 16),
+				PlatformData: map[string]any{
+					"policy":        map[string]any{"debug_allowed": true, "smt_allowed": true},
+					"platform_info": map[string]any{"smt_enabled": true},
+				},
+			},
+		}
+		oc := newOutcome(config{}, ev, result, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}})
+		if !oc.Verified || !oc.Debug || !oc.SMT {
+			t.Fatalf("newOutcome = %+v, want verified with debug=true smt=true", oc)
+		}
 		var out bytes.Buffer
-		renderText(config{showEvidence: true}, Outcome{Verified: true, Fresh: true, Pinned: true, ReportData: "deadbeef"}, &out)
-		if !strings.Contains(out.String(), "report_data:  deadbeef") {
-			t.Errorf("missing report_data with --show-evidence:\n%s", out.String())
+		renderText(config{showEvidence: true}, oc, &out)
+		got := out.String()
+		if !strings.Contains(got, "report_data:  "+strings.Repeat("deadbeef", 16)) {
+			t.Errorf("missing the claims' report_data with --show-evidence:\n%s", got)
+		}
+		if !strings.Contains(got, "debug=true smt=true") {
+			t.Errorf("debug/smt state not rendered from the claims:\n%s", got)
 		}
 	})
 }
