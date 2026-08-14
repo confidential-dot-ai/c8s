@@ -823,12 +823,14 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 
 // TestNewOutcomeFromRealGenoaEvidence drives the vendored Genoa fixture
 // through verifyInProcess + newOutcome and asserts the verdict carries the
-// platform's real security state — the report's policy is debug-off and the
-// platform has SMT on, a value no hand-built PlatformData map can
-// accidentally supply. This pins reportFlags against the engine's real claim
-// keys: an attestation-go key rename fails here instead of silently
-// reporting false. No TDX fixture verifies offline, so the TDX mapping keeps
-// only the hand-built pin in TestRenderOutcome.
+// platform's real security state — the platform has SMT on, a value no
+// hand-built PlatformData map can accidentally supply. The debug-off policy
+// is pinned by the key's presence in the real claims: the fixture's value is
+// the zero value, so value alone cannot catch a renamed key. Together these
+// pin reportFlags against the engine's real claim keys: an attestation-go
+// key rename fails here instead of silently reporting false. No TDX fixture
+// verifies offline, so the TDX mapping keeps only the hand-built pin in
+// TestRenderOutcome.
 func TestNewOutcomeFromRealGenoaEvidence(t *testing.T) {
 	fixture, err := os.ReadFile("testdata/snp-evidence-genoa.json")
 	if err != nil {
@@ -841,6 +843,13 @@ func TestNewOutcomeFromRealGenoaEvidence(t *testing.T) {
 	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil)
 	if err != nil {
 		t.Fatalf("the real fixture must verify: %v", err)
+	}
+	pol, ok := res.Claims.PlatformData["policy"].(map[string]any)
+	if !ok {
+		t.Fatalf("real claims carry no policy map, got %T", res.Claims.PlatformData["policy"])
+	}
+	if _, ok := pol["debug_allowed"].(bool); !ok {
+		t.Fatalf("real claims lack a bool policy.debug_allowed — reportFlags would read a renamed key as false; policy = %v", pol)
 	}
 	oc := newOutcome(config{}, ev, res, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}})
 	if !oc.Verified || oc.Debug || !oc.SMT {
