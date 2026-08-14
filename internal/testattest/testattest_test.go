@@ -116,11 +116,16 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 
 	expected := types.NewBase64Bytes([]byte("expected-report-data"))
 	req := types.VerifyReportData(types.AttestationEvidence{
-		Platform: "snp",
+		Platform: "gcp-snp",
 		Evidence: []byte(`{"quote":"x"}`),
 	}, expected)
-	if _, err := client.VerifyEnforced(context.Background(), req); err != nil {
+	resp, err := client.VerifyEnforced(context.Background(), req)
+	if err != nil {
 		t.Fatalf("VerifyEnforced against a passing verdict: %v", err)
+	}
+	// The response platform echoes the request's.
+	if resp.Result.Platform != req.Platform {
+		t.Fatalf("response platform = %q, want the request's %q", resp.Result.Platform, req.Platform)
 	}
 
 	reqs := stub.VerifyRequests()
@@ -133,8 +138,8 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 	if got := reqs[0].Params.ExpectedReportData.Bytes(); string(got) != string(expected.Bytes()) {
 		t.Fatalf("recorded expected_report_data = %x, want %x", got, expected.Bytes())
 	}
-	if reqs[0].Platform != "snp" {
-		t.Fatalf("recorded platform = %q, want snp", reqs[0].Platform)
+	if reqs[0].Platform != "gcp-snp" {
+		t.Fatalf("recorded platform = %q, want gcp-snp", reqs[0].Platform)
 	}
 }
 

@@ -80,7 +80,8 @@ func (s *Stub) SetVerdict(v Verdict) {
 }
 
 // SetPlatform sets the platform the stub reports detecting: what /attest
-// resolves an "auto" or empty request platform to.
+// resolves an "auto" or empty request platform to. The evidence bytes stay
+// an SNP report whatever the platform label.
 func (s *Stub) SetPlatform(p types.Platform) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
