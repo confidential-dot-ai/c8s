@@ -31,12 +31,15 @@ func NewCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&cfg.ListenAddr, "listen", ":8443", "HTTPS (RA-TLS) bind address")
 	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (source of the RA-TLS serving cert's TDX quote)")
-	f.StringVar(&cfg.Platform, "platform", "tdx", "TEE platform (RTMR is TDX-only)")
+	f.StringVar(&cfg.Platform, "platform", "", "TEE platform, tdx or snp — required; the operator-key binding is TDX-only today")
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.DurationVar(&cfg.CertTTL, "cert-ttl", 24*time.Hour, "lifetime of issued operator certs")
 	f.StringVar(&cfg.CertOrg, "cert-org", "system:masters", "Kubernetes group (cert Subject O) for the issued cert")
 	f.StringVar(&cfg.CertCN, "cert-cn", "operator", "Kubernetes user (cert Subject CN) for the issued cert")
+	// No default: an image must never silently serve for the wrong TEE (the
+	// node image renders the value from its required C8S_PLATFORM).
+	_ = cmd.MarkFlagRequired("platform")
 	return cmd
 }
