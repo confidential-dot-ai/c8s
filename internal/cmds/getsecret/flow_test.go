@@ -1,12 +1,14 @@
 package getsecret
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -226,6 +228,63 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 			t.Fatal("a sandbox token was reused across requests")
 		}
 		seen[tok] = true
+	}
+}
+
+// The sidecar's log leaves the TEE (docs/engineering-standards.md §8), so a
+// fetched value must never reach it: the read, create, write, and retry legs
+// are each driven with the log captured.
+func TestSecretValueNeverReachesTheLog(t *testing.T) {
+	endpoint := startInventory(t)
+	var log bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const existing = "sentinel-existing-value"
+	const minted = "sentinel-minted-value"
+	_, url := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/api/db":   {{status: http.StatusOK, value: existing}},
+		"GET /secrets/api/new":  {{status: http.StatusNotFound}},
+		"POST /secrets/api/new": {{status: http.StatusCreated, value: minted}},
+	})
+	cfg := flowConfig(t, url)
+	cfg.Secrets = []secretRequest{{Name: "DB", Path: "/api/db"}, {Name: "NEW", Path: "/api/new"}}
+	pub := testKey(t)
+	values, err := fetchAllWith(context.Background(), cfg, http.DefaultClient, pub, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(values["DB"]) != existing || string(values["NEW"]) != minted {
+		t.Fatalf("values = %q, %q; want both sentinels", values["DB"], values["NEW"])
+	}
+	if err := writeAll(cfg, values); err != nil {
+		t.Fatal(err)
+	}
+
+	// A refusal and a server failure: each attempt's error is logged, the last
+	// at ERROR.
+	_, brokenURL := newFakeCDS(t, map[string][]reply{
+		"GET /secrets/api/db": {{status: http.StatusForbidden}, {status: http.StatusInternalServerError}},
+	})
+	cfg = flowConfig(t, brokenURL)
+	cfg.RetryInterval = time.Millisecond
+	cfg.Attempts = 2
+	if err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
+		_, err := fetchAllWith(ctx, cfg, http.DefaultClient, pub, endpoint)
+		return err
+	}); err == nil {
+		t.Fatal("a refused release reported success")
+	}
+
+	out := log.String()
+	if !strings.Contains(out, "not released yet") {
+		t.Fatalf("the retries never reached the captured log; capture is broken:\n%s", out)
+	}
+	for _, v := range []string{existing, minted} {
+		if strings.Contains(out, v) || strings.Contains(out, base64.StdEncoding.EncodeToString([]byte(v))) {
+			t.Fatalf("the secret reached the log as %q:\n%s", v, out)
+		}
 	}
 }
 

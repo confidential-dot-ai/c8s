@@ -71,8 +71,8 @@ func TestExplainMarksInjectedContainers(t *testing.T) {
 	eh := newExplainHarness(t)
 	_, resp := eh.serve(testSandbox)
 
-	if len(resp.Reported) != 2 || len(resp.Candidates) != 1 {
-		t.Fatalf("reported=%d candidates=%d, want 2 and 1", len(resp.Reported), len(resp.Candidates))
+	if len(resp.Reported) != 3 || len(resp.Candidates) != 2 {
+		t.Fatalf("reported=%d candidates=%d, want 3 and 2", len(resp.Reported), len(resp.Candidates))
 	}
 	var injected int
 	for _, c := range resp.Reported {
@@ -86,8 +86,8 @@ func TestExplainMarksInjectedContainers(t *testing.T) {
 	if injected != 1 {
 		t.Fatalf("injected = %d, want 1", injected)
 	}
-	if resp.Candidates[0].Digest != testAppImg {
-		t.Fatalf("candidate = %s, want the app image", resp.Candidates[0].Digest)
+	if resp.Candidates[0].Digest != testAppImg || resp.Candidates[1].Digest != testAppImg2 {
+		t.Fatalf("candidates = %+v, want the two app images", resp.Candidates)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestExplainDoesNotDropAFloorImageRunningAShell(t *testing.T) {
 	}
 }
 
-// A declared main that is not running is the other half of the diff.
+// Declared mains that are not running are the other half of the diff.
 func TestExplainNamesAMissingMain(t *testing.T) {
 	eh := newExplainHarness(t)
 	eh.inv.containers = []workloadclaims.SandboxContainer{
@@ -158,8 +158,8 @@ func TestExplainNamesAMissingMain(t *testing.T) {
 		if e.Name != "api" {
 			continue
 		}
-		if len(e.MissingMains) != 1 || e.MissingMains[0].Digest != testAppImg {
-			t.Fatalf("missing mains = %+v, want the app image", e.MissingMains)
+		if len(e.MissingMains) != 2 || e.MissingMains[0].Digest != testAppImg || e.MissingMains[1].Digest != testAppImg2 {
+			t.Fatalf("missing mains = %+v, want both app images", e.MissingMains)
 		}
 	}
 }
@@ -287,6 +287,7 @@ func TestExplainAgreesWithTheMatcher(t *testing.T) {
 	}{
 		{"match", []workloadclaims.SandboxContainer{
 			{Digest: testAppImg, Argv: []string{"/serve"}},
+			{Digest: testAppImg2, Argv: []string{"/metrics"}},
 			{Digest: testInjected, Argv: []string{"get-cert"}},
 		}},
 		{"foreign image", []workloadclaims.SandboxContainer{
