@@ -420,7 +420,7 @@ in mind on the initial cold start.
 
 The attestation-api DaemonSet binds pod loopback and is served to on-node
 consumers by its attest-proxy sidecar over a Unix socket in
-`nriImagePolicy.hostPaths.runtimeDir`; no Service renders by default.
+`nriImagePolicy.hostPaths.runtimeDir`; no Service renders.
 
 Two operational notes:
 
