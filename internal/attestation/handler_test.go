@@ -681,6 +681,13 @@ func TestAttestKeyBindsChallengeAndOperatorPolicyIntoReportData(t *testing.T) {
 				t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte binding %x",
 					got, len(got), want[:sha512.Size384])
 			}
+			// The caller's evidence envelope must reach the verifier intact.
+			if reqs[0].Platform != "snp" {
+				t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
+			}
+			if got := string(reqs[0].Evidence); got != `{"quote":"abc"}` {
+				t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"quote":"abc"}`, got)
+			}
 		})
 	}
 }
@@ -716,6 +723,9 @@ func TestAttestKeyRejectsReplayedChallenge(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("replayed challenge: status = %d, want 400", resp.StatusCode)
+	}
+	if got := len(stub.VerifyRequests()); got != 1 {
+		t.Fatalf("/verify calls = %d, want 1: the replay must die before the verifier round-trip", got)
 	}
 }
 

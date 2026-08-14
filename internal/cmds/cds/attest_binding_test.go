@@ -22,7 +22,7 @@ func (r *recordingBinder) Record(sandboxID, inventoryHost string) bool {
 // requester names.
 func TestAttest_BindsSandboxToInventoryOnSuccess(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
 	csrPEM, _ := generateCSR(t)
@@ -47,7 +47,7 @@ func TestAttest_BindsSandboxToInventoryOnSuccess(t *testing.T) {
 // whole certificate lifetime. The refusal lands on the secrets path instead.
 func TestAttest_ConflictingBindingStillIssues(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.SandboxBindings = &recordingBinder{refuse: true}
 	csrPEM, _ := generateCSR(t)
 
@@ -61,7 +61,7 @@ func TestAttest_ConflictingBindingStillIssues(t *testing.T) {
 // bind, and issuance is unchanged.
 func TestAttest_NoTokenBindsNothing(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
 	csrPEM, _ := generateCSR(t)
@@ -78,7 +78,7 @@ func TestAttest_NoTokenBindsNothing(t *testing.T) {
 // a requester that never obtains a certificate could still claim a sandbox ID.
 func TestAttest_FailedIssuanceBindsNothing(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
 	// Pin a measurement the stub does not report, so the request fails after

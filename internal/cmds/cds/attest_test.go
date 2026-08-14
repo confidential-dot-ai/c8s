@@ -66,7 +66,7 @@ func generateCSRWith(t *testing.T, subject pkix.Name, dnsNames []string, ips []n
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), key
 }
 
-func newTestAttestHandler(t *testing.T, mockURL string, allowedMeasurements map[string]bool) AttestHandler {
+func newTestAttestHandler(t *testing.T, stubURL string, allowedMeasurements map[string]bool) AttestHandler {
 	t.Helper()
 	ca, err := issuer.NewCA("test ca", 2*issuer.MaxLeafTTL)
 	if err != nil {
@@ -75,7 +75,7 @@ func newTestAttestHandler(t *testing.T, mockURL string, allowedMeasurements map[
 	store := attestation.NewChallengeStore(30 * time.Second)
 	return AttestHandler{
 		Challenges:        &store,
-		AttestationClient: attestationclient.NewClient(mockURL),
+		AttestationClient: attestationclient.NewClient(stubURL),
 		CA:                ca,
 		CAChainPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		CertTTL:           time.Hour,
@@ -316,6 +316,13 @@ func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 	if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
 		t.Fatalf("expected_report_data = %x (%d bytes), want SHA-384(key||challenge) %x",
 			got, len(got), want[:sha512.Size384])
+	}
+	// The caller's evidence envelope must reach the verifier intact.
+	if reqs[0].Platform != "snp" {
+		t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
+	}
+	if got := string(reqs[0].Evidence); got != `{"test":true}` {
+		t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"test":true}`, got)
 	}
 }
 

@@ -59,17 +59,12 @@ func (f fakeDigests) FetchSandbox(_ context.Context, host, sandboxID string) (wo
 	}, nil
 }
 
-// newSandboxTestEnv wires an AttestHandler that can validate inventory EARs, and
-// an inventory signer whose EARs that handler accepts: the signer's EAR source
 // newSandboxTestEnv wires an AttestHandler that resolves an inventory key the
-// way production does — from the inventory's own endpoint — and the signer
-// holding that key. launchDigest is unused now that the key's provenance is the
-// privileged-port callback rather than an EAR, but is kept in the signature so
-// the call sites read the same.
-func newSandboxTestEnv(t *testing.T, mockURL, launchDigest string) (AttestHandler, *workloadclaims.SandboxTokenSigner) {
+// way production does — from the inventory's own endpoint — and returns the
+// signer holding that key.
+func newSandboxTestEnv(t *testing.T, stubURL string) (AttestHandler, *workloadclaims.SandboxTokenSigner) {
 	t.Helper()
-	_ = launchDigest
-	h := newTestAttestHandler(t, mockURL, nil)
+	h := newTestAttestHandler(t, stubURL, nil)
 
 	signer, err := workloadclaims.NewSandboxTokenSigner(testInventoryHost)
 	if err != nil {
@@ -139,7 +134,7 @@ func postAttestSandbox(t *testing.T, h AttestHandler, challenge, csrPEM string, 
 // A valid inventory token gets its sandbox ID stamped into the signed leaf.
 func TestAttest_SandboxToken_StampedOnLeaf(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)
@@ -159,7 +154,7 @@ func TestAttest_SandboxToken_StampedOnLeaf(t *testing.T) {
 // No token ⇒ no extension (the pre-sandbox flow is unchanged).
 func TestAttest_SandboxToken_AbsentWhenNotRequested(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 	csrPEM, _ := generateCSR(t)
 
 	w := postAttest(t, h, issueChallenge(t, h), csrPEM)
@@ -175,7 +170,7 @@ func TestAttest_SandboxToken_AbsentWhenNotRequested(t *testing.T) {
 // get-cert holding the bound key may redeem the token.
 func TestAttest_SandboxToken_RejectsWrongRequesterKey(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	victimCSR, _ := generateCSR(t)
 	attackerCSR, _ := generateCSR(t)
 
@@ -191,9 +186,9 @@ func TestAttest_SandboxToken_RejectsWrongRequesterKey(t *testing.T) {
 // rejected: provenance from a CDS-attested inventory key is the whole point.
 func TestAttest_SandboxToken_RejectsForeignInventoryEAR(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 	// A second env with its own EAR issuer the handler does not trust.
-	_, foreignSigner := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	_, foreignSigner := newSandboxTestEnv(t, stub.URL)
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)
@@ -210,7 +205,7 @@ func TestAttest_SandboxToken_RejectsForeignInventoryEAR(t *testing.T) {
 // privileged-port endpoint, so the impostor's own key never matches.
 func TestAttest_SandboxToken_RejectsKeyTheInventoryDoesNotHold(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 
 	// An attacker signs its own token for someone else's sandbox.
 	impostor, err := workloadclaims.NewSandboxTokenSigner(testInventoryHost)
@@ -230,7 +225,7 @@ func TestAttest_SandboxToken_RejectsKeyTheInventoryDoesNotHold(t *testing.T) {
 // callback at its own pod IP and answering as its node's inventory.
 func TestAttest_SandboxToken_RejectsHostOutsideNodeCIDRs(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	hosts, err := workloadclaims.ParseInventoryHosts([]string{"192.168.99.0/24"}) // not testInventoryHost
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +244,7 @@ func TestAttest_SandboxToken_RejectsHostOutsideNodeCIDRs(t *testing.T) {
 // outright rather than dialing wherever it is pointed.
 func TestAttest_SandboxToken_RejectsWithoutConfiguredCIDRs(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.InventoryHosts = nil
 
 	csrPEM, _ := generateCSR(t)
@@ -265,7 +260,7 @@ func TestAttest_SandboxToken_RejectsWithoutConfiguredCIDRs(t *testing.T) {
 // pre-signed token cannot be replayed against a fresh challenge.
 func TestAttest_SandboxToken_RejectsStaleNonce(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	csrPEM, _ := generateCSR(t)
 
 	// Token is bound to a different challenge than the request carries.
@@ -280,7 +275,7 @@ func TestAttest_SandboxToken_RejectsStaleNonce(t *testing.T) {
 // request that carries one rather than stamp it unverified.
 func TestAttest_SandboxToken_RejectsWhenUnverifiable(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.SandboxDigests = nil
 	csrPEM, _ := generateCSR(t)
 
@@ -304,7 +299,7 @@ func TestAttest_SandboxToken_RejectsMalformedEnvelope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newStubAttestationApi(t, "deadbeef")
-			h, _ := newSandboxTestEnv(t, stub.URL, "deadbeef")
+			h, _ := newSandboxTestEnv(t, stub.URL)
 			csrPEM, _ := generateCSR(t)
 			w := postAttestSandbox(t, h, issueChallenge(t, h), csrPEM, tc.token)
 			if w.Code != http.StatusForbidden {
@@ -332,7 +327,7 @@ func TestAttest_SandboxToken_RejectsMalformedSandboxID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := newStubAttestationApi(t, "deadbeef")
-			h, signer := newSandboxTestEnv(t, stub.URL, "deadbeef")
+			h, signer := newSandboxTestEnv(t, stub.URL)
 			// The inventory answers for the malformed ID, so the ID check is
 			// the only thing between this token and issuance.
 			h.SandboxDigests = fakeDigests{
