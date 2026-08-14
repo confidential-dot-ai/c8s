@@ -22,19 +22,28 @@ hold, with no error anywhere. Refusing to serve is better than that divergence.
 
 Sizing: `--secrets-max-paths-per-workload` (default 64, chart
 `cds.secretsMaxPathsPerWorkload`) bounds the paths one allowlist entry may hold,
-and is the bound a workload meets first. `--secrets-max-paths` (default 1024) is
-the store's memory ceiling; size it above the number of entries carrying a grant
-times the per-workload quota, or entries that arrive late find the store full.
-The quota must stay below the ceiling — CDS refuses to start otherwise, since a
-quota that reaches the ceiling is one workload's room to fill the store.
+and is checked before the ceiling. A workload, for this bound, is one allowlist
+entry — which the store calls a holder. `--secrets-max-paths` (default 1024,
+chart `cds.secretsMaxPaths`) is the store's memory ceiling; size it above the
+number of entries carrying a grant times the per-workload quota, or entries that
+arrive late find the store full. The quota must stay below the ceiling: CDS
+refuses to start otherwise, and the chart refuses to render
+(`VALIDATION_ERROR kind=cds_secrets_path_budget`), so raise the two together.
 Operator values count against the ceiling only. Also `--secrets-max-value-bytes`
-and `--sandbox-ledger-max-entries`. CDS is a single in-memory process holding
-the mesh CA, so a workload able to grow the store without limit could OOM it and
+(at least 32, the size of every value CDS generates) and
+`--sandbox-ledger-max-entries`. CDS is a single in-memory process holding the
+mesh CA, so a workload able to grow the store without limit could OOM it and
 take every certificate in the cluster with it.
 
 **Both bounds refuse the write; nothing is ever evicted.** A path holds the only
 copy of its value, so a store at either bound answers `507` and keeps what it
-has. Raising a bound needs a restart, which empties the store; see "Restarts".
+has, carrying `secret_holder_quota` or `secret_store_full` as the error code so
+a caller can tell which bound refused it. Raising a bound needs a restart, which
+empties the store; see "Restarts".
+
+The quota bounds one entry, not the store: enough entries one path apiece still
+reach the ceiling. What it buys is that the refusal lands on the entry that
+caused it rather than on the next one to ask.
 
 **kata is supported, with two caveats.** The fetcher redeems its sandbox token
 from whichever inventory its shape has: the mounted nri-image-policy socket on
@@ -172,7 +181,7 @@ PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 201 {"created": true}
                             → 409 {"existing": "workload"|"operator"}
                             → 200 {"existing": "workload"|"operator"}
-                            → 507 the store is at --secrets-max-paths
+                            → 507 {"error": "secret_store_full"} a bound refused it
 ```
 
 Authorization is the operator key that CDS already pins for allowlist writes

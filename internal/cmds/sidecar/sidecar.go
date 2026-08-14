@@ -8,6 +8,7 @@ package sidecar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -110,7 +111,17 @@ func (c *Config) ParseMeasurements() ([][]byte, error) {
 	return measurements, nil
 }
 
-// Retry runs one whole release pass at a time, retrying the set.
+// Terminal marks an error no later attempt can clear, so Retry stops on it
+// rather than spending its whole budget.
+func Terminal(err error) error { return terminal{err} }
+
+type terminal struct{ err error }
+
+func (t terminal) Error() string { return t.err.Error() }
+func (t terminal) Unwrap() error { return t.err }
+
+// Retry runs one whole release pass at a time, retrying the set until an
+// attempt succeeds, one returns a Terminal error, or the budget runs out.
 //
 // Retrying is expected, not exceptional: until every main container is running
 // the sandbox does not match its workload entry, so early attempts are denied
@@ -125,6 +136,11 @@ func Retry(ctx context.Context, cfg Config, what string, attempt func(context.Co
 			return nil
 		}
 		lastErr = err
+		var t terminal
+		if errors.As(err, &t) {
+			slog.Error(what+" release cannot succeed", "attempt", n, "of", cfg.Attempts, "error", err)
+			return err
+		}
 		if n == cfg.Attempts {
 			// The last attempt's error is the one that matters: log it at
 			// ERROR so a stuck release shows its real cause in the sidecar's

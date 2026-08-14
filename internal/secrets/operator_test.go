@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // operatorHarness wires the handler to a real store and a recording authorizer,
@@ -31,7 +32,7 @@ type operatorHarness struct {
 
 func newOperatorHarness(t *testing.T) *operatorHarness {
 	t.Helper()
-	oh := &operatorHarness{store: NewMemoryStore(8, 8, 64)}
+	oh := &operatorHarness{store: NewMemoryStore(8, 7, 64)}
 	oh.h = OperatorHandler{
 		Store: oh.store,
 		Authorize: func(_ *http.Request, body []byte) error {
@@ -40,6 +41,22 @@ func newOperatorHarness(t *testing.T) *operatorHarness {
 		},
 	}
 	return oh
+}
+
+// setStore swaps in a store bounded for the test at hand, keeping the
+// harness's own view and the handler's the same one.
+func (oh *operatorHarness) setStore(s *MemoryStore) {
+	oh.store, oh.h.Store = s, s
+}
+
+// errorCode reads the machine-readable code out of a refusal envelope.
+func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error envelope %q: %v", w.Body.String(), err)
+	}
+	return resp.Error
 }
 
 func putRequest(t *testing.T, path string, value []byte, overwrite bool) *http.Request {
@@ -170,7 +187,7 @@ func TestOperatorPutRejectsUnauthorized(t *testing.T) {
 
 // Nil means no operator keys are pinned, which must reject rather than admit.
 func TestOperatorPutWithoutAuthorizerRejects(t *testing.T) {
-	h := OperatorHandler{Store: NewMemoryStore(8, 8, 64)}
+	h := OperatorHandler{Store: NewMemoryStore(8, 7, 64)}
 	w, _ := doPut(h, putRequest(t, "/a", []byte("v"), false))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
@@ -245,17 +262,26 @@ func TestOperatorPutRespectsTheStoreValueBound(t *testing.T) {
 	}
 }
 
-// A full store is the operator's own sizing, so it answers 507; an existing
-// path can still be replaced.
+// A full store is the operator's own sizing, so it answers 507 naming the
+// ceiling; an existing path can still be replaced.
 func TestOperatorPutAtTheCeilingIsInsufficientStorage(t *testing.T) {
 	oh := newOperatorHarness(t)
-	oh.h.Store = NewMemoryStore(1, 1, 64)
+	oh.setStore(NewMemoryStore(2, 1, 64))
 
-	if w, _ := doPut(oh.h, putRequest(t, "/a", []byte("first"), false)); w.Code != http.StatusCreated {
-		t.Fatalf("first put = %d, want 201", w.Code)
+	for _, p := range []string{"/a", "/b"} {
+		if w, _ := doPut(oh.h, putRequest(t, p, []byte("first"), false)); w.Code != http.StatusCreated {
+			t.Fatalf("put %s = %d, want 201", p, w.Code)
+		}
 	}
-	if w, _ := doPut(oh.h, putRequest(t, "/b", []byte("second"), false)); w.Code != http.StatusInsufficientStorage {
+	w, _ := doPut(oh.h, putRequest(t, "/c", []byte("second"), false))
+	if w.Code != http.StatusInsufficientStorage {
 		t.Fatalf("put at the ceiling = %d, want 507", w.Code)
+	}
+	if code := errorCode(t, w); code != types.ErrorCodeSecretStoreFull {
+		t.Fatalf("error code = %q, want %q", code, types.ErrorCodeSecretStoreFull)
+	}
+	if oh.store.Len() != 2 {
+		t.Fatalf("store holds %d paths after a refusal, want 2", oh.store.Len())
 	}
 	if w, _ := doPut(oh.h, putRequest(t, "/a", []byte("replaced"), true)); w.Code != http.StatusOK {
 		t.Fatalf("replacing an existing path at the ceiling = %d, want 200", w.Code)
@@ -293,7 +319,7 @@ func TestOperatorPutAgainstRealOperatorAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := NewMemoryStore(8, 8, 64)
+	store := NewMemoryStore(8, 7, 64)
 	h := OperatorHandler{
 		Store:     store,
 		Authorize: operatorauth.Verifier{Keys: []*ecdsa.PublicKey{&key.PublicKey}}.Authorize,

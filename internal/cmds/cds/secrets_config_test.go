@@ -11,24 +11,25 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
-// An operator must be able to raise the quota without a rebuild, and the two
-// shipped defaults must satisfy the relation CDS starts on.
+// The shipped flag defaults must satisfy the relation CDS starts on.
 func TestSecretsPathQuotaFlagIsWired(t *testing.T) {
 	flags := NewCmd().Flags()
-	f := flags.Lookup("secrets-max-paths-per-workload")
-	if f == nil {
+	quota := flags.Lookup("secrets-max-paths-per-workload")
+	if quota == nil {
 		t.Fatal("missing --secrets-max-paths-per-workload flag")
-	}
-	if want := strconv.Itoa(secrets.DefaultMaxPathsPerHolder); f.DefValue != want {
-		t.Fatalf("default = %q, want %q", f.DefValue, want)
 	}
 	ceiling := flags.Lookup("secrets-max-paths")
 	if ceiling == nil {
 		t.Fatal("missing --secrets-max-paths flag")
 	}
+	value := flags.Lookup("secrets-max-value-bytes")
+	if value == nil {
+		t.Fatal("missing --secrets-max-value-bytes flag")
+	}
 	cfg := secretsReadyConfig()
 	cfg.secretsMaxPaths = mustAtoi(t, ceiling.DefValue)
-	cfg.secretsMaxPathsPerWorkload = mustAtoi(t, f.DefValue)
+	cfg.secretsMaxPathsPerWorkload = mustAtoi(t, quota.DefValue)
+	cfg.secretsMaxValueBytes = mustAtoi(t, value.DefValue)
 	if err := validateSecretsConfig(cfg); err != nil {
 		t.Fatalf("the shipped flag defaults refuse to start CDS: %v", err)
 	}
@@ -43,8 +44,7 @@ func mustAtoi(t *testing.T, s string) int {
 	return n
 }
 
-// The store the handlers share carries each flag to the bound it names. Three
-// distinct values, so dropping one or swapping two changes what the store does.
+// The store the handlers share carries each flag to the bound it names.
 func TestNewSecretsStoreCarriesEachBound(t *testing.T) {
 	ctx := context.Background()
 	s := newSecretsStore(config{
@@ -75,6 +75,11 @@ func TestNewSecretsStoreCarriesEachBound(t *testing.T) {
 	}
 	if _, _, err := s.PutIfAbsent(ctx, "/web/2", make([]byte, 8), web); !errors.Is(err, secrets.ErrStoreFull) {
 		t.Fatalf("fourth path across holders = %v, want ErrStoreFull", err)
+	}
+	// The store is now at its ceiling as well, and api is still the holder its
+	// own quota answers for.
+	if _, _, err := s.PutIfAbsent(ctx, "/api/4", make([]byte, 8), api); !errors.Is(err, secrets.ErrHolderQuota) {
+		t.Fatalf("a holder at its quota against a full store = %v, want ErrHolderQuota", err)
 	}
 }
 
@@ -180,8 +185,6 @@ func TestSecretsSizingMustBePositive(t *testing.T) {
 	}
 }
 
-// A quota at the ceiling is one workload's room to fill the store; above it the
-// ceiling answers first and the quota never fires.
 func TestSecretsQuotaMustStayBelowTheCeiling(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -202,5 +205,19 @@ func TestSecretsQuotaMustStayBelowTheCeiling(t *testing.T) {
 	cfg.secretsMaxPathsPerWorkload = cfg.secretsMaxPaths - 1
 	if err := validateSecretsConfig(cfg); err != nil {
 		t.Fatalf("a quota one below the ceiling refused: %v", err)
+	}
+}
+
+// Generate always mints GeneratedValueBytes, so a smaller cap turns every
+// workload's first POST into a 500 rather than refusing at startup.
+func TestSecretsValueBoundHoldsAGeneratedValue(t *testing.T) {
+	cfg := secretsReadyConfig()
+	cfg.secretsMaxValueBytes = secrets.GeneratedValueBytes - 1
+	if err := validateSecretsConfig(cfg); err == nil {
+		t.Fatalf("--secrets-max-value-bytes=%d was accepted below a generated value", cfg.secretsMaxValueBytes)
+	}
+	cfg.secretsMaxValueBytes = secrets.GeneratedValueBytes
+	if err := validateSecretsConfig(cfg); err != nil {
+		t.Fatalf("a cap exactly fitting a generated value refused: %v", err)
 	}
 }

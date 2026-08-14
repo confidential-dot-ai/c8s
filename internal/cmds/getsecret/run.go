@@ -138,6 +138,10 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 	switch {
 	case status == http.StatusCreated:
 		return value, nil
+	case status == http.StatusInsufficientStorage:
+		// The store evicts nothing, so a bound it has reached is still reached
+		// on every later attempt.
+		return nil, sidecar.Terminal(err)
 	case status != http.StatusConflict:
 		return nil, err
 	}

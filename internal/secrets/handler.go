@@ -17,6 +17,7 @@ import (
 
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -113,8 +114,8 @@ type Handler struct {
 	Logger *slog.Logger
 }
 
-// grant is the allowlist entry authorization matched: workload is the store's
-// holder key, secrets is the policy the request is checked against.
+// grant is the allowlist entry authorization matched: workload keys the store's
+// holder, secrets gates the path.
 type grant struct {
 	workload string
 	secrets  *pkgallowlist.SecretsPolicy
@@ -217,9 +218,17 @@ func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, g grant, 
 		return
 	}
 	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, WorkloadHolder(g.workload))
-	if bounded(err) {
+	switch {
+	case errors.Is(err, ErrHolderQuota):
 		h.logger().Warn("secret create refused", "path", path, "workload", g.workload, "error", err)
-		http.Error(w, "secret storage limit reached", http.StatusInsufficientStorage)
+		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretHolderQuota, "secret storage limit reached")
+		return
+	case errors.Is(err, ErrStoreFull):
+		// The census names the holders, and never the wire: it is other
+		// tenants' occupancy.
+		h.logger().Warn("secret create refused", "path", path, "workload", g.workload, "error", err,
+			"holders", census(h.Store, censusHolders))
+		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretStoreFull, "secret storage limit reached")
 		return
 	}
 	if err != nil {
@@ -248,6 +257,36 @@ func writeValue(w http.ResponseWriter, value []byte, status int) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(valueResponse{Value: base64.StdEncoding.EncodeToString(value)})
+}
+
+// writeError answers in the c8s error-envelope shape, so a caller reads which
+// bound refused it from code rather than from the message.
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: code, Message: message})
+}
+
+// censusHolders is how many holders the full-store log line names.
+const censusHolders = 5
+
+// storeCensus is the holder breakdown a store offers.
+type storeCensus interface {
+	TopHolders(n int) []HolderPaths
+}
+
+// census renders the largest holders for a log line.
+func census(s Store, n int) string {
+	c, ok := s.(storeCensus)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, n)
+	for _, hp := range c.TopHolders(n) {
+		parts = append(parts, fmt.Sprintf("%s=%d", hp.Holder, hp.Paths))
+	}
+	return strings.Join(parts, " ")
 }
 
 // requestPath returns the canonical store path a request names.

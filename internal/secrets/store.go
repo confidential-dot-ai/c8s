@@ -3,10 +3,12 @@
 package secrets
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -18,11 +20,6 @@ var (
 	ErrHolderQuota = errors.New("secrets: holder path quota")
 	ErrStoreFull   = errors.New("secrets: store path ceiling")
 )
-
-// bounded reports whether err is a bound refusing a write.
-func bounded(err error) bool {
-	return errors.Is(err, ErrHolderQuota) || errors.Is(err, ErrStoreFull)
-}
 
 // Origin records what put a value at a path.
 type Origin string
@@ -36,11 +33,18 @@ const (
 )
 
 // Holder is the party a stored path is charged to. Origin and name together are
-// the key, so an allowlist entry named "operator" is a different holder from
-// the operator.
+// the key.
 type Holder struct {
 	origin Origin
 	name   string
+}
+
+// String names the holder for a log line. It never carries a value.
+func (h Holder) String() string {
+	if h.origin == OriginOperator {
+		return string(OriginOperator)
+	}
+	return fmt.Sprintf("%s %q", h.origin, h.name)
 }
 
 // WorkloadHolder charges a path to the allowlist entry whose grant authorized
@@ -49,7 +53,7 @@ func WorkloadHolder(workload string) Holder {
 	return Holder{origin: OriginWorkload, name: workload}
 }
 
-// OperatorHolder charges a path to the operator key, which holds one bucket.
+// OperatorHolder charges a path to the operator; the ceiling is its only bound.
 func OperatorHolder() Holder {
 	return Holder{origin: OriginOperator}
 }
@@ -76,7 +80,8 @@ type Store interface {
 	// the write did not happen.
 	PutIfAbsent(ctx context.Context, path string, value []byte, by Holder) (current []byte, held Held, err error)
 	// Put stores value at path, replacing anything already there, and reports
-	// what it displaced.
+	// what it displaced. Replacing another holder's path moves the charge to by
+	// without a quota check, so only a quota-exempt holder may call it.
 	Put(ctx context.Context, path string, value []byte, by Holder) (Held, error)
 }
 
@@ -119,11 +124,11 @@ type entry struct {
 
 // NewMemoryStore builds the store. maxPaths bounds distinct paths across every
 // holder, maxPerHolder bounds one holder's, and maxValue bounds one value.
-// Operator writes count against maxPaths only. A quota above the ceiling is
-// inert — the ceiling answers first — so it is a wiring error.
+// Operator writes count against maxPaths only. maxPerHolder must be below
+// maxPaths.
 func NewMemoryStore(maxPaths, maxPerHolder, maxValue int) *MemoryStore {
-	if maxPerHolder > maxPaths {
-		panic(fmt.Sprintf("secrets: maxPerHolder %d exceeds maxPaths %d", maxPerHolder, maxPaths))
+	if maxPerHolder >= maxPaths {
+		panic(fmt.Sprintf("secrets: maxPerHolder %d must be below maxPaths %d", maxPerHolder, maxPaths))
 	}
 	return &MemoryStore{
 		values:       make(map[string]entry),
@@ -199,10 +204,9 @@ func (s *MemoryStore) storeLocked(path string, value []byte, by Holder) {
 	s.holders[by]++
 }
 
-// checkRoomLocked guards the path bounds. Callers hold the lock and have
-// established the path is absent, so this is only ever asked about a write that
-// grows the map. The holder's quota answers first, so a flood meets the bound
-// on its own writer.
+// checkRoomLocked guards the path bounds for a write that grows the map:
+// callers hold the lock and have established the path is absent. The holder's
+// quota answers before the ceiling.
 func (s *MemoryStore) checkRoomLocked(by Holder) error {
 	if by.origin != OriginOperator {
 		if held := s.holders[by]; held >= s.maxPerHolder {
@@ -220,4 +224,28 @@ func (s *MemoryStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.values)
+}
+
+// HolderPaths is one holder's share of the store.
+type HolderPaths struct {
+	Holder Holder
+	Paths  int
+}
+
+// TopHolders returns the n holders with the most paths, largest first, ties
+// broken by holder so the order is stable.
+func (s *MemoryStore) TopHolders(n int) []HolderPaths {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]HolderPaths, 0, len(s.holders))
+	for h, paths := range s.holders {
+		out = append(out, HolderPaths{Holder: h, Paths: paths})
+	}
+	slices.SortFunc(out, func(a, b HolderPaths) int {
+		if c := cmp.Compare(b.Paths, a.Paths); c != 0 {
+			return c
+		}
+		return cmp.Or(cmp.Compare(a.Holder.origin, b.Holder.origin), cmp.Compare(a.Holder.name, b.Holder.name))
+	})
+	return out[:min(n, len(out))]
 }
