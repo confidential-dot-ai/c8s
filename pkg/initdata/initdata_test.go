@@ -9,7 +9,7 @@ import (
 
 // The spike vector: this exact byte sequence was delivered to a live SEV-SNP
 // guest and its sha256 read back out of the AMD-signed report's HOST_DATA
-// (docs/kata-image-policy.md — "Init-data trust anchor"). Any change to Render
+// (docs/kata-image-policy.md — "Allowlist sourcing"). Any change to Render
 // that breaks it breaks the binding on hardware.
 const (
 	spikeRaw = "version = \"0.1.0\"\n" +

@@ -554,9 +554,9 @@ than let you discover them:
   In-guest `policy-monitor` refuses to refresh from CDS unless
   `C8S_CDS_MEASUREMENTS` pins the CDS launch digest. On SEV-SNP the webhook
   delivers that pin in the pod's launch-committed init-data document and
-  running guests pick up writes within one refresh interval; on TDX the
-  digest lands in a register the guest does not read back, so refresh stays
-  disabled and each guest enforces only the seed baked into its measured
+  running guests pick up writes within one refresh interval; on TDX the guest
+  does not accept the pin, so refresh stays disabled and each guest enforces
+  only the seed baked into its measured
   image — admitting a new workload image inside a TDX confidential pod means
   rebuilding the guest image. Installs with no pinned measurements, and the
   chart-managed pods in the release namespace (which get no init-data),

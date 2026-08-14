@@ -2,30 +2,36 @@ package policymonitor
 
 import (
 	"context"
+	"crypto/sha512"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
-	"github.com/google/go-sev-guest/abi"
-
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Distinct from a document that fails verification: this is an older control
 // plane, that is a host that tampered.
 var errNoInitData = errors.New("policy-monitor: no init-data document")
 
-// The in-guest attestation service has not answered yet. Like errNoInitData
-// this is a "too early" condition rather than a verdict.
-//
-// applyInitDataMeasurements reads once and treats every other error as a
-// verdict. awaitInitDataMeasurements re-reads a few times first, because a
-// document still being written presents as one (initDataSettleReads).
+// The attester or the verifier did not answer; a later read may.
 var errAttestUnavailable = errors.New("policy-monitor: attestation service unavailable")
+
+// The verifier refused this guest's report, which every retry reproduces.
+var errAttestVerdict = errors.New("policy-monitor: self-report refused")
+
+// The verified report carries no 32-byte anchor to compare the document
+// against. TDX reports the digest padded into a 48-byte MRCONFIGID, so this is
+// what an ordinary TDX boot reaches, not a hostile one.
+var errNoHostDataAnchor = errors.New("policy-monitor: HOST_DATA claim is not a 32-byte anchor")
 
 // Bounds the self-attestation; on expiry the caller falls back to the seed.
 const initDataTimeout = 15 * time.Second
@@ -48,9 +54,9 @@ func resolveInitDataMeasurements(ctx context.Context, cfg *Config) (string, erro
 		return "", fmt.Errorf("read init-data: %w", err)
 	}
 
-	hostData, err := selfHostData(ctx, cfg)
+	hostData, err := verifiedSelfHostData(ctx, cfg)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", errAttestUnavailable, err)
+		return "", err
 	}
 	want := initdata.Digest(raw)
 	if subtle.ConstantTimeCompare(hostData, want[:]) != 1 {
@@ -81,7 +87,7 @@ func applyInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 			"path", initdata.GuestDocumentPath)
 		return
 	case err != nil:
-		// Host tampering or a broken attester; both leave the guest on the seed.
+		// One read, so every failure is final here — including one a retry would clear.
 		logger.Error("init-data rejected; enforcing the baked seed alone", "error", err)
 		return
 	case measurements == "":
@@ -144,6 +150,12 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 			logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
 				"key", initdata.KeyCDSMeasurements)
 			return
+		case errors.Is(err, errAttestVerdict):
+			logger.Error("self-report refused by the verifier", "error", err)
+			return
+		case errors.Is(err, errNoHostDataAnchor):
+			logger.Warn("verified report carries no 32-byte init-data anchor", "error", err)
+			return
 		}
 		lastErr = err
 
@@ -174,30 +186,67 @@ func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 		"path", initdata.GuestDocumentPath, "waited", initDataWaitBudget, "error", lastErr)
 }
 
-// selfHostData reads HOST_DATA from a fresh report for this guest. Report data
-// is unused here, hence the zero value.
-//
-// SEV-SNP only: TDX commits the digest to MRCONFIGID, so a TDX guest fails to
-// parse here and falls back to the baked seed — safe, but not yet wired.
-func selfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
+// verifiedSelfHostData returns this guest's HOST_DATA as the attestation-api
+// reports it, from the claims of a report that api verified.
+func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, initDataTimeout)
 	defer cancel()
 
-	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, cfg.AttestationServiceURL, make([]byte, 48))
+	// One anchor, both legs: the attester is asked for the 48-byte prefix and
+	// zero-extends it into the 64-byte REPORTDATA the verifier must find.
+	var reportData [64]byte
+	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, cfg.AttestationServiceURL, reportData[:sha512.Size384])
 	if err != nil {
-		return nil, fmt.Errorf("attest self: %w", err)
+		return nil, fmt.Errorf("%w: attest self: %w", errAttestUnavailable, err)
 	}
-	report, err := attestclient.ExtractSNPReport(resp)
+	// Measurements stay unpinned.
+	verified, err := attestationclient.NewClient(cfg.AttestationServiceURL).VerifyEvidence(ctx,
+		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
 	if err != nil {
-		return nil, fmt.Errorf("extract snp report: %w", err)
+		return nil, fmt.Errorf("%w: %w", classifyVerifyError(err), err)
 	}
-	parsed, err := abi.ReportToProto([]byte(report))
+
+	hostData, err := hex.DecodeString(verified.Result.Claims.InitData)
 	if err != nil {
-		return nil, fmt.Errorf("parse snp report: %w", err)
+		return nil, fmt.Errorf("%w: not hex: %w", errNoHostDataAnchor, err)
 	}
-	hostData := parsed.GetHostData()
 	if len(hostData) != initdata.DigestSize {
-		return nil, fmt.Errorf("policy-monitor: HOST_DATA is %d bytes, want %d", len(hostData), initdata.DigestSize)
+		return nil, fmt.Errorf("%w: %d bytes, want %d", errNoHostDataAnchor, len(hostData), initdata.DigestSize)
 	}
 	return hostData, nil
+}
+
+// classifyVerifyError splits a refusal of the report from a failure to reach
+// the verifier, which is what decides whether the caller retries. The
+// attestation-api refuses with a 4xx status rather than with a false verdict,
+// so the status arm is the one a conforming verifier takes. That arm is shared
+// with cds.classifyVerifyError; the sentinel arms are not.
+func classifyVerifyError(err error) error {
+	switch {
+	case errors.Is(err, attestationclient.ErrSignatureInvalid),
+		errors.Is(err, attestationclient.ErrReportDataMismatch),
+		errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
+		errors.Is(err, attestationclient.ErrInvalidLaunchDigest),
+		errors.Is(err, attestationclient.ErrRTMRNotAllowed),
+		errors.Is(err, attestationclient.ErrUnsupportedPlatform):
+		return errAttestVerdict
+	}
+	// A refusal whose body is not the api's JSON error shape arrives as
+	// UnexpectedError, carrying the same status.
+	var apiErr *attestationclient.APIError
+	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
+		return errAttestVerdict
+	}
+	var unexpected *attestationclient.UnexpectedError
+	if errors.As(err, &unexpected) && refusesEvidence(unexpected.Status) {
+		return errAttestVerdict
+	}
+	return errAttestUnavailable
+}
+
+// refusesEvidence reports whether a status names the evidence rather than the
+// service; 408 and 429 are availability.
+func refusesEvidence(status int) bool {
+	return status >= 400 && status < 500 &&
+		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }

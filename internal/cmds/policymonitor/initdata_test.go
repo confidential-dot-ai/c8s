@@ -1,61 +1,135 @@
 package policymonitor
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// snpHostDataOffset is HOST_DATA's byte offset in an SEV-SNP ATTESTATION_REPORT
-// (AMD SEV-SNP ABI table: VERSION..PLATFORM_INFO, REPORT_DATA at 0x50,
-// MEASUREMENT at 0x90, HOST_DATA at 0xC0).
-const snpHostDataOffset = 0xC0
+// hostDataVerdict passes verification and reports hostData as the HOST_DATA claim.
+func hostDataVerdict(hostData []byte) testattest.Verdict {
+	v := testattest.PassingVerdict("")
+	v.Claims.InitData = hex.EncodeToString(hostData)
+	return v
+}
 
-const snpReportLen = 1184
+// testHostData is an arbitrary well-formed anchor.
+func testHostData() []byte { return bytes.Repeat([]byte{0xa5}, initdata.DigestSize) }
 
-// snpPolicyOffset is POLICY's offset. go-sev-guest rejects a report whose
-// bit 17 is clear, so the field cannot be left zero. 0x30000 is what a kata
-// SNP guest actually reports (bit 16 SMT, bit 17 reserved-must-be-1).
-const (
-	snpPolicyOffset = 0x08
-	snpTestPolicy   = 0x30000
-)
-
-// attesterServing returns the URL of a fake in-guest attester whose report
-// carries hostData in HOST_DATA.
+// attesterServing returns the URL of a stub in-guest attestation-api that
+// verifies this guest's report and reports hostData as its HOST_DATA.
 func attesterServing(t *testing.T, hostData []byte) string {
 	t.Helper()
-	report := make([]byte, snpReportLen)
-	report[0] = 0x02 // VERSION 2
-	binary.LittleEndian.PutUint64(report[snpPolicyOffset:], snpTestPolicy)
-	copy(report[snpHostDataOffset:], hostData)
+	return attesterWithVerdict(t, hostDataVerdict(hostData))
+}
 
-	evidence, err := json.Marshal(map[string]string{
-		"attestation_report": base64.StdEncoding.EncodeToString(report),
-	})
+func attesterWithVerdict(t *testing.T, v testattest.Verdict) string {
+	t.Helper()
+	stub := testattest.New(t)
+	stub.SetVerdict(v)
+	return stub.URL
+}
+
+// scriptedVerifier is an in-guest attestation-api whose /attest comes from the
+// shared stub and whose /verify answers status for its first `failures` calls
+// before proxying to the stub; failures < 0 fails every call. Verify calls are
+// counted here because a refused one never reaches the stub.
+type scriptedVerifier struct {
+	url      string
+	attester *testattest.Stub
+
+	mu    sync.Mutex
+	calls int
+}
+
+func newScriptedVerifier(t *testing.T, status, failures int) *scriptedVerifier {
+	t.Helper()
+	v := &scriptedVerifier{attester: testattest.New(t)}
+	v.attester.SetVerdict(hostDataVerdict(testHostData()))
+
+	target, err := url.Parse(v.attester.URL)
 	if err != nil {
-		t.Fatalf("marshal evidence: %v", err)
+		t.Fatalf("parse stub URL: %v", err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	mux := http.NewServeMux()
+	mux.Handle("POST /attest", proxy)
+	mux.HandleFunc("POST /verify", func(w http.ResponseWriter, r *http.Request) {
+		v.mu.Lock()
+		v.calls++
+		n := v.calls
+		v.mu.Unlock()
+		if failures >= 0 && n > failures {
+			proxy.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: "snp", Evidence: evidence})
-	}))
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: "verification_failed", Message: "evidence rejected"})
+	})
+
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv.URL
+	v.url = srv.URL
+	return v
+}
+
+func (v *scriptedVerifier) verifyCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.calls
+}
+
+// levelRecorder captures each record's level so a test can pin the operator
+// signal, not only the outcome.
+type levelRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (l *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (l *levelRecorder) WithAttrs([]slog.Attr) slog.Handler       { return l }
+func (l *levelRecorder) WithGroup(string) slog.Handler            { return l }
+
+func (l *levelRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, r)
+	return nil
+}
+
+// levelOf is the level of the first record whose message contains substr.
+func (l *levelRecorder) levelOf(t *testing.T, substr string) slog.Level {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, r := range l.records {
+		if strings.Contains(r.Message, substr) {
+			return r.Level
+		}
+	}
+	t.Fatalf("no log record mentioning %q", substr)
+	return 0
 }
 
 // writeInitData points initDataDocumentPath at a tempdir holding raw.
@@ -116,6 +190,21 @@ func TestResolveInitDataMeasurementsRejectsUncommittedDocument(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HOST_DATA") {
 		t.Fatalf("error = %v, want it to name HOST_DATA", err)
+	}
+}
+
+// HOST_DATA agreeing with the digest on every byte but one is still not the
+// commitment.
+func TestResolveInitDataMeasurementsRejectsNearCollision(t *testing.T) {
+	raw := testDocument(t, "aabb")
+	writeInitData(t, raw)
+
+	near := initdata.Digest(raw)
+	near[len(near)-1] ^= 0xff
+	cfg := &Config{AttestationServiceURL: attesterServing(t, near[:])}
+
+	if _, err := resolveInitDataMeasurements(context.Background(), cfg); err == nil {
+		t.Fatal("accepted a HOST_DATA that matches the digest only on its prefix")
 	}
 }
 
@@ -232,37 +321,216 @@ func TestApplyInitDataMeasurementsFailuresLeaveConfigEmpty(t *testing.T) {
 	}
 }
 
-func TestSelfHostDataReadsHostDataField(t *testing.T) {
-	want := make([]byte, initdata.DigestSize)
-	for i := range want {
-		want[i] = byte(i + 1)
-	}
+// The stub's report bytes carry an all-zero HOST_DATA, so a non-zero result can
+// only have come from the verified claim.
+func TestVerifiedSelfHostDataReadsTheVerifiedClaim(t *testing.T) {
+	want := testHostData()
 	cfg := &Config{AttestationServiceURL: attesterServing(t, want)}
 
-	got, err := selfHostData(context.Background(), cfg)
+	got, err := verifiedSelfHostData(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("selfHostData: %v", err)
+		t.Fatalf("verifiedSelfHostData: %v", err)
 	}
-	if string(got) != string(want) {
+	if !bytes.Equal(got, want) {
 		t.Fatalf("HOST_DATA = %x, want %x", got, want)
 	}
 }
 
-func TestSelfHostDataRejectsUnparseableReport(t *testing.T) {
-	evidence, err := json.Marshal(map[string]string{
-		"attestation_report": base64.StdEncoding.EncodeToString([]byte("too short")),
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+// Each way a report can be refused on a 200 response: no HOST_DATA reaches the
+// caller, and the refusal carries both the verifier's sentinel and the terminal
+// classification.
+func TestVerifiedSelfHostDataRejectsUnverifiedReport(t *testing.T) {
+	no := false
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T) string
+		want  error
+	}{
+		{"signature invalid", refusing(func(v *testattest.Verdict) { v.SignatureValid = false }), attestationclient.ErrSignatureInvalid},
+		{"report data unchecked", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = nil }), attestationclient.ErrReportDataMismatch},
+		{"report data mismatch", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = &no }), attestationclient.ErrReportDataMismatch},
+		{"launch digest malformed", refusing(func(v *testattest.Verdict) { v.Claims.LaunchDigest = "not-hex" }), attestationclient.ErrInvalidLaunchDigest},
+		{"platform with no verification rules", unsupportedPlatformAttester, attestationclient.ErrUnsupportedPlatform},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: tc.setup(t)})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if !errors.Is(err, errAttestVerdict) {
+				t.Fatalf("err = %v, want it classified as a terminal verdict", err)
+			}
+			if got != nil {
+				t.Fatalf("returned HOST_DATA %x alongside an error", got)
+			}
+		})
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.AttestResponse{Platform: "snp", Evidence: evidence})
-	}))
-	defer srv.Close()
+}
 
-	if _, err := selfHostData(context.Background(), &Config{AttestationServiceURL: srv.URL}); err == nil {
-		t.Fatal("accepted a report that does not parse")
+// refusing builds an attester whose /verify answers a passing verdict with
+// reject applied.
+func refusing(reject func(*testattest.Verdict)) func(*testing.T) string {
+	return func(t *testing.T) string {
+		v := hostDataVerdict(testHostData())
+		reject(&v)
+		return attesterWithVerdict(t, v)
+	}
+}
+
+// unsupportedPlatformAttester labels its evidence with a platform VerifyEvidence
+// has no rules for, which is refused before any claim is read.
+func unsupportedPlatformAttester(t *testing.T) string {
+	t.Helper()
+	stub := testattest.New(t)
+	stub.SetVerdict(hostDataVerdict(testHostData()))
+	stub.SetPlatform(types.Platform("gcp-tdx"))
+	return stub.URL
+}
+
+// A 422 refusal is terminal, not an outage.
+func TestVerifiedSelfHostDataRejectsAStatusRefusal(t *testing.T) {
+	v := newScriptedVerifier(t, http.StatusUnprocessableEntity, -1)
+
+	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: v.url})
+	if !errors.Is(err, errAttestVerdict) {
+		t.Fatalf("err = %v, want a terminal verdict", err)
+	}
+	if got != nil {
+		t.Fatalf("returned HOST_DATA %x alongside an error", got)
+	}
+}
+
+// A verifier that cannot answer is retryable, and the attest-leg assertion is
+// what makes this the verify leg's classification.
+func TestVerifiedSelfHostDataTreatsAVerifierOutageAsRetryable(t *testing.T) {
+	v := newScriptedVerifier(t, http.StatusServiceUnavailable, -1)
+
+	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: v.url})
+	if !errors.Is(err, errAttestUnavailable) {
+		t.Fatalf("err = %v, want errAttestUnavailable", err)
+	}
+	if got != nil {
+		t.Fatalf("returned HOST_DATA %x alongside an error", got)
+	}
+	if n := len(v.attester.AttestRequests()); n != 1 {
+		t.Fatalf("attest requests = %d, want 1: the attest leg must have succeeded", n)
+	}
+	if n := v.verifyCalls(); n != 1 {
+		t.Fatalf("verify calls = %d, want 1", n)
+	}
+}
+
+// classifyVerifyError is what decides retry-versus-give-up, and most of its
+// inputs cannot be produced end to end from this call site (no measurement or
+// RTMR pin is sent), so the mapping is pinned directly.
+func TestClassifyVerifyError(t *testing.T) {
+	apiErr := func(status int) error {
+		return &attestationclient.APIError{Status: status, Response: types.ErrorResponse{Error: "verification_failed"}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"signature invalid", attestationclient.ErrSignatureInvalid, errAttestVerdict},
+		{"report data mismatch", attestationclient.ErrReportDataMismatch, errAttestVerdict},
+		{"measurement not allowed", attestationclient.ErrMeasurementNotAllowed, errAttestVerdict},
+		{"launch digest malformed", attestationclient.ErrInvalidLaunchDigest, errAttestVerdict},
+		{"rtmr not allowed", attestationclient.ErrRTMRNotAllowed, errAttestVerdict},
+		{"unsupported platform", attestationclient.ErrUnsupportedPlatform, errAttestVerdict},
+		{"api 422", apiErr(http.StatusUnprocessableEntity), errAttestVerdict},
+		{"api 400", apiErr(http.StatusBadRequest), errAttestVerdict},
+		{"non-json 422", &attestationclient.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Expected request with `Content-Type: application/json`"}, errAttestVerdict},
+		{"non-json 408", &attestationclient.UnexpectedError{Status: http.StatusRequestTimeout}, errAttestUnavailable},
+		{"non-json 429", &attestationclient.UnexpectedError{Status: http.StatusTooManyRequests}, errAttestUnavailable},
+		{"non-json 503", &attestationclient.UnexpectedError{Status: http.StatusServiceUnavailable, Text: "<html>502 Bad Gateway</html>"}, errAttestUnavailable},
+		{"api 408", apiErr(http.StatusRequestTimeout), errAttestUnavailable},
+		{"api 429", apiErr(http.StatusTooManyRequests), errAttestUnavailable},
+		{"api 500", apiErr(http.StatusInternalServerError), errAttestUnavailable},
+		{"transport", &attestationclient.RequestError{Err: errors.New("connection refused")}, errAttestUnavailable},
+		{"deadline", context.DeadlineExceeded, errAttestUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Wrapped, because the call site never sees a bare sentinel.
+			if got := classifyVerifyError(fmt.Errorf("verify self report: %w", tc.err)); got != tc.want {
+				t.Fatalf("classifyVerifyError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// The attester is asked for the 48-byte anchor and the verifier is told to
+// expect its 64-byte zero-extension. Both are zero, so this pins the widths and
+// the value, not that one leg is derived from the other: when the anchor stops
+// being zero, this test must start asserting derivation.
+func TestVerifiedSelfHostDataBindsTheAnchorItRequested(t *testing.T) {
+	stub := testattest.New(t)
+	stub.SetVerdict(hostDataVerdict(testHostData()))
+
+	if _, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: stub.URL}); err != nil {
+		t.Fatalf("verifiedSelfHostData: %v", err)
+	}
+
+	attested, verified := stub.AttestRequests(), stub.VerifyRequests()
+	if len(attested) != 1 || len(verified) != 1 {
+		t.Fatalf("attest requests = %d, verify requests = %d, want 1 each", len(attested), len(verified))
+	}
+	if verified[0].Params == nil || verified[0].Params.ExpectedReportData == nil {
+		t.Fatal("the verifier was not asked to check any REPORTDATA binding")
+	}
+
+	if n := len(attested[0].ReportData.Bytes()); n != 48 {
+		t.Fatalf("attested report data = %d bytes, want the 48-byte anchor", n)
+	}
+	got := verified[0].Params.ExpectedReportData.Bytes()
+	if !bytes.Equal(got, make([]byte, 64)) {
+		t.Fatalf("expected_report_data = %x, want 64 zero bytes", got)
+	}
+}
+
+// A claim that is not a 32-byte anchor is refused rather than padded or
+// truncated, and is not a verifier refusal.
+func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
+	for _, tc := range []struct{ name, claim string }{
+		{"absent", ""},
+		{"tdx mrconfigid", strings.Repeat("00", 48)},
+		{"not hex", "not-hex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := testattest.PassingVerdict("")
+			v.Claims.InitData = tc.claim
+
+			got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+			if !errors.Is(err, errNoHostDataAnchor) {
+				t.Fatalf("err = %v for claim %q, want errNoHostDataAnchor", err, tc.claim)
+			}
+			if errors.Is(err, errAttestVerdict) {
+				t.Fatalf("err = %v for claim %q, must not read as a verifier refusal", err, tc.claim)
+			}
+			if got != nil {
+				t.Fatalf("returned HOST_DATA %x alongside an error", got)
+			}
+		})
+	}
+}
+
+// A forged report committing the document on disk still fails, because the
+// forgery is what the verifier rejects.
+func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
+	raw := testDocument(t, "aabb")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	v := hostDataVerdict(digest[:])
+	v.SignatureValid = false
+	cfg := &Config{AttestationServiceURL: attesterWithVerdict(t, v)}
+
+	measurements, err := resolveInitDataMeasurements(context.Background(), cfg)
+	if !errors.Is(err, attestationclient.ErrSignatureInvalid) {
+		t.Fatalf("err = %v, want the verifier's signature verdict", err)
+	}
+	if measurements != "" {
+		t.Fatalf("measurements = %q, want none from an unverified report", measurements)
 	}
 }
 
@@ -362,13 +630,85 @@ func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
 	}
 }
 
+// A refused report is terminal and reaches the operator at Error: the wait
+// stops at the first refusal rather than spending the budget on retries that
+// reproduce it.
+func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
+	writeInitData(t, testDocument(t, "aabb"))
+	// A budget that would dominate the test if the refusal were retried.
+	shortInitDataWait(t, time.Minute, 10*time.Second)
+
+	v := newScriptedVerifier(t, http.StatusUnprocessableEntity, -1)
+	cfg := &Config{AttestationServiceURL: v.url}
+	rec := &levelRecorder{}
+	start := time.Now()
+	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)
+
+	if cfg.CDSMeasurements != "" {
+		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
+	}
+	if n := v.verifyCalls(); n != 1 {
+		t.Fatalf("verify attempts = %d, want 1: a refusal must not be retried", n)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("refusal took %s; it must not consume the wait budget", elapsed)
+	}
+	if got := rec.levelOf(t, "refused"); got != slog.LevelError {
+		t.Fatalf("refusal logged at %v, want Error", got)
+	}
+}
+
+// A missing anchor is terminal like a refusal, but not at a refusal's level.
+func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
+	writeInitData(t, testDocument(t, "aabb"))
+	shortInitDataWait(t, time.Minute, 10*time.Second)
+
+	// MRCONFIGID's width.
+	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, 48))}
+	rec := &levelRecorder{}
+	start := time.Now()
+	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)
+
+	if cfg.CDSMeasurements != "" {
+		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("missing anchor took %s; it must not consume the wait budget", elapsed)
+	}
+	if got := rec.levelOf(t, "anchor"); got != slog.LevelWarn {
+		t.Fatalf("missing anchor logged at %v, want Warn", got)
+	}
+}
+
+// The other half of the split: a verifier still coming up is retried, so a slow
+// attestation-service does not cost the guest its pin.
+func TestAwaitInitDataMeasurementsRetriesAnUnavailableVerifier(t *testing.T) {
+	raw := testDocument(t, "aabb,ccdd")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
+
+	v := newScriptedVerifier(t, http.StatusServiceUnavailable, 2)
+	v.attester.SetVerdict(hostDataVerdict(digest[:]))
+
+	cfg := &Config{AttestationServiceURL: v.url}
+	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "aabb,ccdd" {
+		t.Fatalf("CDSMeasurements = %q, want the wait to outlast a verifier still coming up", cfg.CDSMeasurements)
+	}
+	if n := v.verifyCalls(); n != 3 {
+		t.Fatalf("verify calls = %d, want 3: two outages then the answer", n)
+	}
+}
+
 // A host that delivers no document at all leaves the guest exactly where it
 // was before: seed-only enforcement, no measurements.
 func TestAwaitInitDataMeasurementsBudgetExhausted(t *testing.T) {
 	pointInitDataAt(t)
 	shortInitDataWait(t, 100*time.Millisecond, 10*time.Millisecond)
 
-	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, 48))}
+	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, initdata.DigestSize))}
 	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "" {
