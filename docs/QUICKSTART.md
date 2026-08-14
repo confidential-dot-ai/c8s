@@ -24,7 +24,19 @@ This installs the supported chart-managed CVM shape: operator, RBAC, CRDs,
 webhook, attestation-api, and CDS.
 
 ```sh
-c8s install --namespace c8s-system --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
+  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+```
+
+`--cvm-mode` is required — one of `pod` (per-pod kata CVMs), `node`
+(node-as-CVM: the nodes themselves are TDX/SNP CVMs, shown here), `gke`, or
+`aks`. `--operator-keys` takes a PEM bundle of EC public keys that authorize
+`c8s allowlist` writes; without it the install refuses to proceed (pass
+`--force` to install with allowlist writes disabled):
+
+```sh
+openssl ecparam -genkey -name prime256v1 -noout -out operator.key
+openssl ec -in operator.key -pubout -out operator-pub.pem
 ```
 
 tls-lb ships no default upstream: `--upstream` (with the port on its
@@ -68,7 +80,7 @@ default image tag of its own, so the image tag above is supplied by
 To install without the advisory CRDs:
 
 ```sh
-c8s install --namespace c8s-system --install-crds=false \
+c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem --install-crds=false \
   --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
 
@@ -90,7 +102,8 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-username=<user-or-x-access-token> \
   --docker-password="$GITHUB_TOKEN"
 
-c8s install --namespace c8s-system --image-pull-secret ghcr-pull-secret \
+c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
+  --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
 
@@ -99,7 +112,8 @@ idempotently (re-run it to rotate the credential in place):
 
 ```sh
 IMAGE_PULL_SECRET=<ghcr-token> NAMESPACE=c8s-system ./scripts/deploy-image-pull-secret.sh
-c8s install --namespace c8s-system --image-pull-secret ghcr-pull-secret \
+c8s install --namespace c8s-system --cvm-mode=node --operator-keys operator-pub.pem \
+  --image-pull-secret ghcr-pull-secret \
   --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
 
