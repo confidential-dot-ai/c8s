@@ -111,8 +111,8 @@ func (c *Config) ParseMeasurements() ([][]byte, error) {
 	return measurements, nil
 }
 
-// Terminal marks an error no later attempt can clear, so Retry stops on it
-// rather than spending its whole budget.
+// Terminal marks a non-nil error no later attempt can clear, so Retry stops on
+// it.
 func Terminal(err error) error { return terminal{err} }
 
 type terminal struct{ err error }

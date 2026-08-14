@@ -3,6 +3,7 @@ package cds
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,8 +176,12 @@ func TestSecretsSizingMustBePositive(t *testing.T) {
 		t.Run(tc.flag, func(t *testing.T) {
 			cfg := secretsReadyConfig()
 			tc.brk(&cfg)
-			if err := validateSecretsConfig(cfg); err == nil {
+			err := validateSecretsConfig(cfg)
+			if err == nil {
 				t.Fatalf("%s was accepted at zero", tc.flag)
+			}
+			if !strings.Contains(err.Error(), tc.flag) {
+				t.Fatalf("%s at zero reported %q, want the flag named", tc.flag, err)
 			}
 		})
 	}
@@ -196,8 +201,12 @@ func TestSecretsQuotaMustStayBelowTheCeiling(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := secretsReadyConfig()
 			cfg.secretsMaxPathsPerWorkload = tc.quota(cfg.secretsMaxPaths)
-			if err := validateSecretsConfig(cfg); err == nil {
+			err := validateSecretsConfig(cfg)
+			if err == nil {
 				t.Fatalf("--secrets-max-paths-per-workload=%d was accepted against --secrets-max-paths=%d", cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxPaths)
+			}
+			if want := "--secrets-max-paths-per-workload (%d) must be below --secrets-max-paths"; !strings.Contains(err.Error(), fmt.Sprintf(want, cfg.secretsMaxPathsPerWorkload)) {
+				t.Fatalf("err = %q, want the quota/ceiling check", err)
 			}
 		})
 	}
@@ -213,8 +222,12 @@ func TestSecretsQuotaMustStayBelowTheCeiling(t *testing.T) {
 func TestSecretsValueBoundHoldsAGeneratedValue(t *testing.T) {
 	cfg := secretsReadyConfig()
 	cfg.secretsMaxValueBytes = secrets.GeneratedValueBytes - 1
-	if err := validateSecretsConfig(cfg); err == nil {
+	err := validateSecretsConfig(cfg)
+	if err == nil {
 		t.Fatalf("--secrets-max-value-bytes=%d was accepted below a generated value", cfg.secretsMaxValueBytes)
+	}
+	if !strings.Contains(err.Error(), "--secrets-max-value-bytes") {
+		t.Fatalf("err = %q, want the value-bytes check", err)
 	}
 	cfg.secretsMaxValueBytes = secrets.GeneratedValueBytes
 	if err := validateSecretsConfig(cfg); err != nil {

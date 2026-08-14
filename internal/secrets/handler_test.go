@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -308,9 +309,39 @@ func mintToken(t *testing.T, signer *workloadclaims.SandboxTokenSigner, sandboxI
 // seed plants a value directly, bypassing the release path under test.
 func (hn *harness) seed(t *testing.T, path string, value []byte) {
 	t.Helper()
-	if _, err := hn.store.Put(context.Background(), path, value, OperatorHolder()); err != nil {
+	if _, err := hn.store.Put(context.Background(), path, value); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// seedAs is seed charged to holder rather than to the operator.
+func (hn *harness) seedAs(t *testing.T, path string, holder Holder) {
+	t.Helper()
+	if _, _, err := hn.store.PutIfAbsent(context.Background(), path, []byte("neighbour-value"), holder); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// loggedHolder is one census entry as it lands in CDS's JSON log.
+type loggedHolder struct {
+	Holder string `json:"holder"`
+	Paths  int    `json:"paths"`
+}
+
+// logCensus collects the holders attribute from every captured log line.
+func logCensus(t *testing.T, out string) []loggedHolder {
+	t.Helper()
+	var found []loggedHolder
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var rec struct {
+			Holders []loggedHolder `json:"holders"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line is not JSON: %q", line)
+		}
+		found = append(found, rec.Holders...)
+	}
+	return found
 }
 
 // assertNoRelease fails if a refused response carries value, raw or base64.
@@ -720,15 +751,21 @@ func TestQuotaIsPerWorkloadNotPerSandbox(t *testing.T) {
 
 // A workload that has spent none of its quota is still refused by the ceiling
 // when other holders have filled the store, and the refusal names the ceiling
-// rather than the quota — the two are one status apart and only the code tells
-// the workload whether shrinking its own footprint would help.
+// rather than the quota. Who holds the paths reaches the CDS log; the body
+// carries the code and nothing else.
 func TestCeilingRefusesAWorkloadUnderItsQuota(t *testing.T) {
 	hn := newHarness(t)
-	hn.setStore(t, NewMemoryStore(2, 1, 64))
-	// Operator values are exempt from the quota, so the store fills without
-	// anything being charged to the workload.
-	hn.seed(t, "/op/1", []byte("operator-value"))
-	hn.seed(t, "/op/2", []byte("operator-value"))
+	hn.setStore(t, NewMemoryStore(7, 3, 64))
+	var log bytes.Buffer
+	hn.h.Logger = slog.New(slog.NewJSONHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Six neighbours fill the store, the first holding two paths: enough for
+	// the census to have a largest holder and one holder it must leave out.
+	hn.seedAs(t, "/n1/a", WorkloadHolder("neighbour-1"))
+	hn.seedAs(t, "/n1/b", WorkloadHolder("neighbour-1"))
+	for i := 2; i <= 6; i++ {
+		hn.seedAs(t, fmt.Sprintf("/n%d/a", i), WorkloadHolder(fmt.Sprintf("neighbour-%d", i)))
+	}
 
 	w := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
 	if w.Code != http.StatusInsufficientStorage {
@@ -737,15 +774,34 @@ func TestCeilingRefusesAWorkloadUnderItsQuota(t *testing.T) {
 	if code := errorCode(t, w); code != types.ErrorCodeSecretStoreFull {
 		t.Fatalf("error code = %q, want %q", code, types.ErrorCodeSecretStoreFull)
 	}
-	if hn.store.Len() != 2 {
-		t.Fatalf("store holds %d paths after a refusal, want the 2 it started with", hn.store.Len())
+	if hn.store.Len() != 7 {
+		t.Fatalf("store holds %d paths after a refusal, want the 7 it started with", hn.store.Len())
+	}
+
+	want := []loggedHolder{
+		{`workload "neighbour-1"`, 2},
+		{`workload "neighbour-2"`, 1},
+		{`workload "neighbour-3"`, 1},
+		{`workload "neighbour-4"`, 1},
+		{`workload "neighbour-5"`, 1},
+	}
+	if got := logCensus(t, log.String()); !slices.Equal(got, want) {
+		t.Fatalf("logged census = %+v, want the %d largest holders %+v:\n%s", got, censusHolders, want, log.String())
+	}
+	for _, leak := range []string{"neighbour", "holders", "paths"} {
+		if strings.Contains(w.Body.String(), leak) {
+			t.Fatalf("the refusal body carried the census (%q): %s", leak, w.Body)
+		}
 	}
 }
 
-// A workload at its own quota is told so, below a store that has room.
+// A workload at its own quota is told so, below a store that has room. The
+// census belongs to the ceiling, so this refusal does not carry one.
 func TestQuotaRefusalNamesTheQuota(t *testing.T) {
 	hn := newHarness(t)
 	hn.setStore(t, NewMemoryStore(16, 1, 64))
+	var log bytes.Buffer
+	hn.h.Logger = slog.New(slog.NewJSONHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
 		t.Fatalf("first POST = %d (%s), want 201", w.Code, w.Body)
@@ -756,6 +812,18 @@ func TestQuotaRefusalNamesTheQuota(t *testing.T) {
 	}
 	if code := errorCode(t, w); code != types.ErrorCodeSecretHolderQuota {
 		t.Fatalf("error code = %q, want %q", code, types.ErrorCodeSecretHolderQuota)
+	}
+	if got := logCensus(t, log.String()); len(got) != 0 {
+		t.Fatalf("a quota refusal logged a census: %+v\n%s", got, log.String())
+	}
+}
+
+// The two codes are a published wire contract: docs/secrets.md and every
+// deployed client switch on these exact strings.
+func TestSecretErrorCodeWireValues(t *testing.T) {
+	if types.ErrorCodeSecretHolderQuota != "secret_holder_quota" || types.ErrorCodeSecretStoreFull != "secret_store_full" {
+		t.Fatalf("error codes = %q, %q; want %q, %q",
+			types.ErrorCodeSecretHolderQuota, types.ErrorCodeSecretStoreFull, "secret_holder_quota", "secret_store_full")
 	}
 }
 

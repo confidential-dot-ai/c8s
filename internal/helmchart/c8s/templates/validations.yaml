@@ -162,15 +162,12 @@
 {{- end -}}
 {{- /*
   CDS refuses to start unless the per-workload secret quota is strictly below
-  the store ceiling, and its Deployment rolls with strategy: Recreate — the
-  serving pod is deleted before the replacement CrashLoops, and CDS is the mesh
-  CA and the only /sign-csr. Catching the pair here turns a cluster-wide
-  certificate-issuance outage into a failed `helm template`.
+  the store ceiling, so the pair is refused here instead.
 */ -}}
 {{- $secretsCeiling := int (include "c8s.positiveInt" (dict "value" .Values.cds.secretsMaxPaths "label" "cds.secretsMaxPaths")) -}}
 {{- $secretsQuota := int (include "c8s.positiveInt" (dict "value" .Values.cds.secretsMaxPathsPerWorkload "label" "cds.secretsMaxPathsPerWorkload")) -}}
 {{- if ge $secretsQuota $secretsCeiling -}}
-{{- fail (printf "VALIDATION_ERROR kind=cds_secrets_path_budget: cds.secretsMaxPathsPerWorkload must be below cds.secretsMaxPaths (%d), got: %d. Raise cds.secretsMaxPaths alongside it — CDS refuses to start on this pair, and its Recreate rollout deletes the serving pod first, so the cluster loses certificate issuance until the values are fixed." $secretsCeiling $secretsQuota) -}}
+{{- fail (printf "VALIDATION_ERROR kind=cds_secrets_path_budget: cds.secretsMaxPathsPerWorkload must be below cds.secretsMaxPaths (%d), got: %d" $secretsCeiling $secretsQuota) -}}
 {{- end -}}
 {{- /*
   Per-container `paths` was replaced by an entry-level `secrets` grant. CDS
