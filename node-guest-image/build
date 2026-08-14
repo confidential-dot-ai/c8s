@@ -26,6 +26,13 @@
 # not rebuild and clobber the tree the modules were built against.
 #
 # Knobs:
+#   C8S_PLATFORM=      REQUIRED. tdx or snp — the CVM TEE this image launches
+#                      on. No default anywhere: the profile is platform-
+#                      neutral and mkosi.sync renders every platform-
+#                      dependent bit (cred-release platform, node label,
+#                      NRI floor platform) from this one value; the sync
+#                      refuses to run without it. The guest kernel carries
+#                      both TEEs' symbols via confos kernel/required.config.
 #   C8S_DEV=1          demo/debug build: kernel/c8s-dev.config fragment
 #                      (8250 serial re-enabled) + the dev profile
 #                      (console=ttyS0, passwordless serial autologin).
@@ -50,8 +57,15 @@
 #                      is committed and measured — see MODULE-SIGNING.md.
 #
 # Extra args are passed through to `confos build`, e.g.:
-#   node-guest-image/build --profile ssh          # + SSH for bring-up debugging
+#   C8S_PLATFORM=tdx node-guest-image/build --profile ssh   # + SSH for bring-up
+#   C8S_PLATFORM=snp node-guest-image/build                  # SEV-SNP node image
 set -euo pipefail
+# Fail before any long step; mkosi.sync re-validates (the load-bearing gate,
+# reachable without this wrapper).
+case "${C8S_PLATFORM:-}" in
+tdx|snp) ;;
+*)  echo "node-guest-image/build: C8S_PLATFORM must be tdx or snp, got '${C8S_PLATFORM:-}'" >&2; exit 1 ;;
+esac
 NGI_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFOS_DIR=${CONFOS_DIR:-"$NGI_DIR/../../confidential-os-builder"}
 [ -x "$CONFOS_DIR/bin/confos" ] || { echo "node-guest-image/build: confos checkout not found at $CONFOS_DIR (set CONFOS_DIR)" >&2; exit 1; }
@@ -76,11 +90,12 @@ exec bin/confos build "${C8S_NAME:-c8s}" \
     ${DEV_PROFILE[@]+"${DEV_PROFILE[@]}"} \
     --profile-dir "$NGI_DIR/c8s" \
     --module-signing-cert "$NGI_DIR/module-signing.crt" \
+    --sync-input "platform=${C8S_PLATFORM}" \
     --sync-input "c8s-ref=${C8S_REF:-}" \
     --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
     --kernel-config-fragment "$FRAGMENT" \
     --kernel-builder-package "$KB_PKGS" \
     --cloud-init "$NGI_DIR/c8s/user-data" \
-    --platform tdx \
+    --platform "$C8S_PLATFORM" \
     --memory "${C8S_MEMORY:-16G}" \
     "$@"

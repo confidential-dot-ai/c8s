@@ -12,13 +12,31 @@ Layout:
   `confos build --profile-dir` (confos ≥ the release carrying
   confidential-os-builder#81); the dir basename **is** the profile name, so
   it must stay `c8s`.
+- Platform: the profile is platform-neutral; `build` requires
+  `C8S_PLATFORM` (`tdx`|`snp`, no default) and `c8s/mkosi.sync` renders the
+  **entire** tdx/snp divergence — three files — from it: cred-release's
+  `Environment=CRED_PLATFORM` drop-in, the node's self-label
+  (`confidential.ai/tdx` / `confidential.ai/sev-snp`, the k8s vocabulary
+  `c8s install --hardware-platform` selects on), and the NRI floor's
+  `platform:`. The sync refuses to render a missing/invalid value, so the
+  fail-closed gate is at **build** time; `--platform=${CRED_PLATFORM}` in
+  the unit is boot-time defense in depth (cred-release opens no quote
+  device — quotes come from attestation-api over HTTP, the operator-key
+  RTMR read is sysfs). The guest kernel carries both TEEs' symbols via
+  confos `kernel/required.config`, so the images differ only by those
+  three rendered files — which keeps a one-image-serves-both design
+  (boot-time platform probe, confos `--platform both`) evaluable later.
+  NOTE: the operator credential-release flow itself is TDX-only today
+  (RTMR[3] binding; SNP has no runtime-extend equivalent) — an SNP image
+  boots and attests, but operator flows fail closed pending an SNP
+  binding design.
 - `kernel/` — the guest-kernel config fragments (`c8s.config`,
   `c8s-dev.config`), passed via `--kernel-config-fragment` exactly like
   kata-guest-base's `container.config`. confos's `required`/`hardening`
   baselines stay in confos: a fragment request that conflicts with them
   fails the build (see the balloon catch in #263).
 - `build` — drop-in replacement for confos's `bin/build-c8s`: same env
-  contract (`C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
+  contract (`C8S_PLATFORM`, `C8S_REF`, `C8S_REGISTRY`, `C8S_DEV`, `C8S_NAME`, `C8S_MEMORY`) and the same profile stack
   and order; only the c8s profile content and kernel fragments come from
   here. Point `CONFOS_DIR` at a confos checkout (default: a sibling dir).
 

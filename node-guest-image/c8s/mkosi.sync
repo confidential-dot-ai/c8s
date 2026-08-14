@@ -59,6 +59,36 @@ C8S_REGISTRY=$(cat "$SYNC_INPUTS/c8s-registry" 2>/dev/null || true)
 C8S_REGISTRY="${C8S_REGISTRY:-ghcr.io/confidential-dot-ai}"
 NRI_REPO="${C8S_REGISTRY}/nri-image-policy"
 CDS_REPO="${C8S_REGISTRY}/cds"
+# The image's TEE platform, from build's --sync-input. Required: the NRI
+# floor types the RA-TLS identity CDS checks against attestation evidence,
+# so a wrong or defaulted value denies every adopted workload a certificate.
+PLATFORM=$(cat "$SYNC_INPUTS/platform" 2>/dev/null || true)
+case "$PLATFORM" in
+    tdx|snp) ;;
+    *) echo "c8s sync: FATAL platform sync-input must be tdx or snp, got '${PLATFORM}'" >&2; exit 1 ;;
+esac
+
+# Platform drop-ins rendered from the one sync-input: cred-release's
+# platform and the node self-label; the NRI floor's platform: is substituted
+# below together with the digests. Rendered paths must stay disjoint from
+# the profile's mkosi.extra tree (copy precedence between the two is
+# undocumented; today every rendered path is a new file).
+#
+# The label key is the one consumer with its own vocabulary: the chart
+# selector and c8s install use confidential.ai/sev-snp (NOT /snp — nothing
+# selects on that), while cred-release and the NRI floor normalize snp
+# themselves (ratls.NormalizePlatform).
+case "$PLATFORM" in
+    snp) LABEL_PLATFORM=sev-snp ;;
+    *)   LABEL_PLATFORM=$PLATFORM ;;
+esac
+mkdir -p "$STAGE_DIR/etc/systemd/system/cred-release.service.d" \
+         "$STAGE_DIR/etc/rancher/rke2/config.yaml.d"
+printf '[Service]\nEnvironment=CRED_PLATFORM=%s\n' "$PLATFORM" \
+    > "$STAGE_DIR/etc/systemd/system/cred-release.service.d/10-platform.conf"
+printf '# Self-label so `c8s install --hardware-platform %s` finds this node.\nnode-label:\n  - confidential.ai/%s=true\n' "$LABEL_PLATFORM" "$LABEL_PLATFORM" \
+    > "$STAGE_DIR/etc/rancher/rke2/config.yaml.d/50-platform.yaml"
+
 C8S_REF=$(cat "$SYNC_INPUTS/c8s-ref" 2>/dev/null || true)
 # Pinned c8s release: bakes the same component versions the CLI ships as.
 # docker.yml publishes images under v* tags, so the tag itself is the ref.
@@ -92,6 +122,7 @@ render_nri_floor() {
         -e "s|@NRI_IMAGE@|${NRI_IMAGE}|g" \
         -e "s|@CDS_DIGEST@|${CDS_DIGEST}|g" \
         -e "s|@CDS_IMAGE@|${CDS_REPO}@${CDS_DIGEST}|g" \
+        -e "s|@PLATFORM@|${PLATFORM}|g" \
         "$tmpl" > "$dst"
     echo "c8s sync: NRI floor rendered (nri ${NRI_DIGEST}, cds ${CDS_DIGEST})"
 }
