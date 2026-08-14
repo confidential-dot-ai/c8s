@@ -346,16 +346,6 @@ pod (read-only) and the one the webhook mounts into get-cert sidecars.
 {{- end -}}
 
 {{- /*
-c8s.attestationApiKey — the configured Bearer key, normalized: the `with`
-reads a null auth block or key as "key absent", and the trim shares the
-attest-proxy's strings.TrimSpace, so the render guard and the proxy agree
-on which keys are blank.
-*/ -}}
-{{- define "c8s.attestationApiKey" -}}
-{{- with .Values.attestationApi.auth -}}{{- .apiKey | default "" | toString | trim -}}{{- end -}}
-{{- end -}}
-
-{{- /*
 c8s.attestationApiHostSocket — "true" when consumers reach the chart-managed
 attestation-api over the on-node Unix socket, i.e. the DaemonSet renders and
 the in-guest (kata) endpoint does not apply.
@@ -568,23 +558,12 @@ seccompProfile:
 {{- define "c8s.attestationApiConfig" -}}
 {{- $root := .root -}}
 [server]
-{{- if ne (int $root.Values.attestationApi.service.nodePort) 0 }}
-# Routable by operator opt-in (attestationApi.service.nodePort); the [auth]
-# block is mandatory in this shape — see validations.yaml.
-bind = "0.0.0.0:{{ $root.Values.attestationApi.port }}"
-{{- else }}
 # Pod loopback only: consumers enter through the attest-proxy sidecar's
 # node-local Unix socket; nothing routable can reach /attest.
 bind = "127.0.0.1:{{ $root.Values.attestationApi.port }}"
-{{- end }}
 
 [server.tls]
 enabled = false
-{{- with include "c8s.attestationApiKey" $root }}
-
-[auth]
-api_keys = [{{ . | quote }}]
-{{- end }}
 
 [attestation]
 enabled = true

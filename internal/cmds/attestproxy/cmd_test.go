@@ -3,7 +3,6 @@ package attestproxy
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,9 +59,6 @@ func TestProxyForwardsOverSocket(t *testing.T) {
 		if r.URL.Path != "/attest" {
 			t.Errorf("upstream saw path %s, want /attest", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Errorf("Authorization = %q, want none forwarded without --api-key-file", got)
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"platform":"snp","evidence":{}}`))
 	}))
@@ -70,25 +66,6 @@ func TestProxyForwardsOverSocket(t *testing.T) {
 
 	if _, err := attestationclient.NewClient("unix://"+sock).Attest(context.Background(), types.AttestRequest{}); err != nil {
 		t.Fatalf("Attest over proxy socket: %v", err)
-	}
-}
-
-func TestProxyInjectsAPIKey(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(keyFile, []byte("s3cret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	upstream := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer s3cret" {
-			t.Errorf("Authorization = %q, want Bearer s3cret (trailing newline trimmed)", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	sock := serveProxy(t, config{upstream: upstream, apiKeyFile: keyFile, socketGID: 0})
-
-	if _, err := attestationclient.NewClient("unix://" + sock).Health(context.Background()); err != nil {
-		t.Fatalf("Health over proxy socket: %v", err)
 	}
 }
 
@@ -132,8 +109,6 @@ func TestNewProxyRejectsBadConfig(t *testing.T) {
 	}{
 		{"relative socket", config{socket: "rel.sock", upstream: upstream, readHeaderTimeout: time.Second}},
 		{"bad upstream scheme", config{socket: "/tmp/x.sock", upstream: "ftp://x", readHeaderTimeout: time.Second}},
-		{"missing key file", config{socket: "/tmp/x.sock", upstream: upstream, apiKeyFile: "/nonexistent", readHeaderTimeout: time.Second}},
-		{"empty key file", config{socket: "/tmp/x.sock", upstream: upstream, apiKeyFile: writeKeyFile(t, "  \n"), readHeaderTimeout: time.Second}},
 		{"nonpositive header timeout", config{socket: "/tmp/x.sock", upstream: upstream}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,47 +140,4 @@ func TestHealthcheckCmd(t *testing.T) {
 	if err := missing.Execute(); err == nil {
 		t.Fatal("healthcheck succeeded against a missing socket")
 	}
-}
-
-// A caller-supplied Authorization header must not survive the proxy: the
-// injected key overwrites it (Header.Set), so socket callers cannot smuggle
-// a stale or foreign key to the upstream.
-func TestProxyOverwritesInboundAuthorization(t *testing.T) {
-	keyFile := writeKeyFile(t, "s3cret")
-	upstream := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer s3cret" {
-			t.Errorf("Authorization = %q, want the injected key overwriting the inbound header", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	sock := serveProxy(t, config{upstream: upstream, apiKeyFile: keyFile, socketGID: 0})
-
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-		},
-	}}
-	req, err := http.NewRequest(http.MethodGet, "http://unix/health", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer caller-supplied")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("GET over proxy socket: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-}
-
-func writeKeyFile(t *testing.T, contents string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(p, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }

@@ -26,7 +26,6 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
@@ -1354,21 +1353,15 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		t.Fatalf("NetworkPolicy policyTypes = %v, want Ingress", np.Spec.PolicyTypes)
 	}
 
-	// The config is a Secret, not a ConfigMap: with the nodePort opt-in it
-	// carries the [auth] Bearer key (TestChartAttestationApiNodePortWithAuthRenders).
-	if renderedManifestHasNamedKind(t, out, "ConfigMap", "c8s-attestation-api") {
-		t.Fatalf("attestation-api config must render as a Secret, not a ConfigMap\n%s", out)
+	if renderedManifestHasNamedKind(t, out, "Secret", "c8s-attestation-api") {
+		t.Fatalf("attestation-api config must render as a ConfigMap, not a Secret\n%s", out)
 	}
-	sec := renderedSecret(t, out, "c8s-attestation-api")
-	cfg := sec.StringData["config.toml"]
+	cfg := renderedConfigMap(t, out, "c8s-attestation-api").Data["config.toml"]
 	if !strings.Contains(cfg, `bind = "127.0.0.1:8400"`) {
 		t.Fatalf("default config must bind pod loopback; got:\n%s", cfg)
 	}
 	if strings.Contains(cfg, "[auth]") {
-		t.Fatalf("default config must not render [auth] (nothing routable to protect); got:\n%s", cfg)
-	}
-	if k, ok := sec.StringData["auth-key"]; ok {
-		t.Fatalf("default render must not carry proxy key material; auth-key = %q", k)
+		t.Fatalf("config must not render [auth] (nothing routable to protect); got:\n%s", cfg)
 	}
 
 	ds := renderedDaemonSet(t, out, "c8s-attestation-api")
@@ -1378,17 +1371,15 @@ func TestChartAttestationApiDefaultsToNodeLocalSocket(t *testing.T) {
 		"--socket=/var/run/nri-image-policy/attestation-api.sock",
 		"--upstream=http://127.0.0.1:8400",
 	)
-	// A stray --api-key-file against the keyless Secret crash-loops the proxy
-	// on every node.
 	assertContainerNoArgPrefix(t, "attest-proxy", proxy.Args, "--api-key-file")
 	// The proxy publishes into the socket-dir hostPath, and both it and the
-	// API read their config from the Secret — dropping either renders fine
-	// and only fails at runtime.
+	// API read their config from the ConfigMap — dropping either renders
+	// fine and only fails at runtime.
 	assertPodVolume(t, &ds.Spec.Template.Spec, "socket-dir", func(v corev1.Volume) bool {
 		return v.HostPath != nil && v.HostPath.Path == "/var/run/nri-image-policy"
 	})
 	assertPodVolume(t, &ds.Spec.Template.Spec, "config", func(v corev1.Volume) bool {
-		return v.Secret != nil && v.Secret.SecretName == "c8s-attestation-api"
+		return v.ConfigMap != nil && v.ConfigMap.Name == "c8s-attestation-api"
 	})
 	assertContainerMount(t, proxy, "socket-dir", "/var/run/nri-image-policy")
 	if proxy.ReadinessProbe == nil || proxy.ReadinessProbe.Exec == nil {
@@ -1470,52 +1461,6 @@ func TestChartAttestationApiSocketWiresNRI(t *testing.T) {
 	}
 }
 
-// Deliberate re-exposure: nodePort set WITH an API key renders the
-// authenticated routable shape — NodePort Service, 0.0.0.0 bind, [auth] in the
-// rendered config, the key file the proxy injects for on-node callers, and a
-// NetworkPolicy opening exactly the API port.
-func TestChartAttestationApiNodePortWithAuthRenders(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "attestationApi.service.nodePort=31040",
-		"--set-string", "attestationApi.auth.apiKey=test-key",
-	)
-	if err != nil {
-		t.Fatalf("helm template: %v\n%s", err, out)
-	}
-	svc := renderedService(t, out, "c8s-attestation-api")
-	if svc.Spec.Type != corev1.ServiceTypeNodePort {
-		t.Fatalf("attestation-api Service type = %q, want NodePort", svc.Spec.Type)
-	}
-	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
-		t.Fatalf("attestation-api externalTrafficPolicy = %q, want Local", svc.Spec.ExternalTrafficPolicy)
-	}
-	if got := svc.Spec.Ports[0].NodePort; got != 31040 {
-		t.Fatalf("attestation-api nodePort = %d, want 31040", got)
-	}
-
-	sec := renderedSecret(t, out, "c8s-attestation-api")
-	cfg := sec.StringData["config.toml"]
-	if !strings.Contains(cfg, `bind = "0.0.0.0:8400"`) {
-		t.Fatalf("exposed config must bind 0.0.0.0 for the NodePort to forward to; got:\n%s", cfg)
-	}
-	if !strings.Contains(cfg, `api_keys = ["test-key"]`) {
-		t.Fatalf("exposed config must carry the API key; got:\n%s", cfg)
-	}
-	if got := sec.StringData["auth-key"]; got != "test-key" {
-		t.Fatalf("Secret auth-key = %q, want the injected key for the proxy", got)
-	}
-	proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
-	assertContainerArgs(t, proxy, "--api-key-file=/etc/attestation-api/auth-key")
-
-	var np networkingv1.NetworkPolicy
-	if !findDoc(t, out, "NetworkPolicy", "c8s-attestation-api", &np) {
-		t.Fatalf("exposed render missing the attestation-api NetworkPolicy\n%s", out)
-	}
-	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].Ports) != 1 || np.Spec.Ingress[0].Ports[0].Port == nil || *np.Spec.Ingress[0].Ports[0].Port != intstr.FromInt32(8400) {
-		t.Fatalf("exposed NetworkPolicy must allow exactly TCP 8400; got %+v", np.Spec.Ingress)
-	}
-}
-
 // On a cluster that is neither kata nor node-baked, host nri-image-policy is the
 // only image-admission enforcement, so disabling it must be rejected — otherwise
 // confidential workloads run with no attested allowlist gate. cvmMode=gke is the
@@ -1558,143 +1503,6 @@ func TestChartRejectsPlaintextNRIAllowlist(t *testing.T) {
 		t.Fatalf("helm template succeeded, want plaintext NRI allowlist failure\n%s", out)
 	}
 	assertHelmFailMessage(t, out, `nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got "http://c8s-cds.c8s-system.svc:8443"): the host plugin must fetch the allowlist over RA-TLS`)
-}
-
-func TestChartRejectsInvalidAttestationApiNodePort(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "attestationApi.service.nodePort=29999",
-		"--set-string", "attestationApi.auth.apiKey=test-key",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded, want invalid attestation-api nodePort failure\n%s", out)
-	}
-	assertHelmFailMessage(t, out, "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 (got 29999)")
-}
-
-// The render guard the whole hardening rests on: a routable evidence
-// listener without authentication must be impossible to render, and the
-// failure must name the value that fixes it.
-func TestChartRejectsExposedUnauthenticatedAttestationApi(t *testing.T) {
-	out, err := helmTemplate(t,
-		"--set", "attestationApi.service.nodePort=30840",
-	)
-	if err == nil {
-		t.Fatalf("helm template succeeded with a routable unauthenticated attestation-api, want failure\n%s", out)
-	}
-	if kind := parseValidationErrorKind(out); kind != "attestation_api_exposed_unauthenticated" {
-		t.Fatalf("validation error kind = %q, want attestation_api_exposed_unauthenticated\n%s", kind, out)
-	}
-	if msg := helmFailMessage(t, out); !strings.Contains(msg, "attestationApi.auth.apiKey") {
-		t.Fatalf("fail message must name the value to fix (attestationApi.auth.apiKey); got %q", msg)
-	}
-}
-
-// The guard must also catch the empty-key shapes a plain `eq … ""` check
-// misses: a YAML null (values file, or --set-json) coalesces to "key
-// absent", and a whitespace-only key is unusable. Each must fail the render
-// naming the value to fix — nodePort + null key is byte-for-byte the
-// unauthenticated routable shape otherwise.
-func TestChartRejectsExposedAttestationApiNullOrBlankKey(t *testing.T) {
-	nullValues := filepath.Join(t.TempDir(), "values.yaml")
-	if err := os.WriteFile(nullValues, []byte("attestationApi:\n  service:\n    nodePort: 30840\n  auth:\n    apiKey: null\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nullAuthValues := filepath.Join(t.TempDir(), "values.yaml")
-	if err := os.WriteFile(nullAuthValues, []byte("attestationApi:\n  service:\n    nodePort: 30840\n  auth: null\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		args []string
-	}{
-		{"null key via values file", []string{"-f", nullValues}},
-		{"null key via --set-json", []string{"--set", "attestationApi.service.nodePort=30840", "--set-json", "attestationApi.auth.apiKey=null"}},
-		{"whitespace-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=  "}},
-		// The guard's trim set is the proxy's strings.TrimSpace: a key that is
-		// blank under it must fail here, not render a proxy that rejects its
-		// own key file at runtime.
-		{"newline-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=\n"}},
-		{"unicode-whitespace-only key", []string{"--set", "attestationApi.service.nodePort=30840", "--set-string", "attestationApi.auth.apiKey=\u00a0"}},
-		{"null auth block", []string{"-f", nullAuthValues}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := helmTemplate(t, tc.args...)
-			if err == nil {
-				t.Fatalf("helm template succeeded with a routable unauthenticated attestation-api, want failure\n%s", out)
-			}
-			if kind := parseValidationErrorKind(out); kind != "attestation_api_exposed_unauthenticated" {
-				t.Fatalf("validation error kind = %q, want attestation_api_exposed_unauthenticated\n%s", kind, out)
-			}
-			if msg := helmFailMessage(t, out); !strings.Contains(msg, "attestationApi.auth.apiKey") {
-				t.Fatalf("fail message must name the value to fix (attestationApi.auth.apiKey); got %q", msg)
-			}
-		})
-	}
-}
-
-// The key is normalized (trimmed) before render with the proxy's
-// strings.TrimSpace set, so the key the proxy injects is byte-identical to
-// the one the API's [auth] list requires.
-func TestChartTrimsAttestationApiKey(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		padded string
-		want   string
-	}{
-		{"space-padded", " test-key ", "test-key"},
-		{"newline-padded", "\ntest-key\n", "test-key"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := helmTemplate(t,
-				"--set", "attestationApi.service.nodePort=31040",
-				"--set-string", "attestationApi.auth.apiKey="+tc.padded,
-			)
-			if err != nil {
-				t.Fatalf("helm template: %v\n%s", err, out)
-			}
-			sec := renderedSecret(t, out, "c8s-attestation-api")
-			if got := sec.StringData["auth-key"]; got != tc.want {
-				t.Fatalf("Secret auth-key = %q, want the trimmed key %q", got, tc.want)
-			}
-			if cfg := sec.StringData["config.toml"]; !strings.Contains(cfg, `api_keys = ["`+tc.want+`"]`) {
-				t.Fatalf("config must carry the trimmed key; got:\n%s", cfg)
-			}
-		})
-	}
-}
-
-// A blank key without a nodePort renders the plain keyless shape — no
-// [auth], no key material in the Secret, no --api-key-file on the proxy (a
-// stray one crash-loops it on an empty key file at runtime).
-func TestChartBlankKeyWithoutNodePortRendersKeyless(t *testing.T) {
-	nullAuthValues := filepath.Join(t.TempDir(), "values.yaml")
-	if err := os.WriteFile(nullAuthValues, []byte("attestationApi:\n  auth: null\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		args []string
-	}{
-		{"whitespace-only key", []string{"--set-string", "attestationApi.auth.apiKey=  "}},
-		{"newline-only key", []string{"--set-string", "attestationApi.auth.apiKey=\n"}},
-		{"null auth block", []string{"-f", nullAuthValues}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := helmTemplate(t, tc.args...)
-			if err != nil {
-				t.Fatalf("helm template: %v\n%s", err, out)
-			}
-			sec := renderedSecret(t, out, "c8s-attestation-api")
-			if cfg := sec.StringData["config.toml"]; strings.Contains(cfg, "[auth]") {
-				t.Fatalf("keyless config must not render [auth]; got:\n%s", cfg)
-			}
-			if k, ok := sec.StringData["auth-key"]; ok {
-				t.Fatalf("keyless render must not carry proxy key material; auth-key = %q", k)
-			}
-			proxy := renderedDaemonSetContainer(t, out, "c8s-attestation-api", "attest-proxy")
-			assertContainerNoArgPrefix(t, "attest-proxy", proxy.Args, "--api-key-file")
-		})
-	}
 }
 
 // Off kata and node mode the host DaemonSet is the only evidence source, so
@@ -5565,15 +5373,6 @@ func renderedConfigMap(t *testing.T, manifest, name string) corev1.ConfigMap {
 	return cm
 }
 
-func renderedSecret(t *testing.T, manifest, name string) corev1.Secret {
-	t.Helper()
-	var sec corev1.Secret
-	if !findDoc(t, manifest, "Secret", name, &sec) {
-		t.Fatalf("rendered manifest missing Secret %q\n%s", name, manifest)
-	}
-	return sec
-}
-
 func renderedService(t *testing.T, manifest, name string) corev1.Service {
 	t.Helper()
 	var svc corev1.Service
@@ -6455,8 +6254,8 @@ func TestChartImagePullSecretReachesEveryPodSpecWithoutCreatingASecret(t *testin
 	}
 	const secretName = "ghcr-secret"
 
-	if renderedManifestHasNamedKind(t, out, "Secret", secretName) {
-		t.Errorf("imagePullSecret mode rendered Secret %q — it pre-exists; the chart must not create it", secretName)
+	if kinds := renderedKinds(t, out); kinds["Secret"] > 0 {
+		t.Errorf("imagePullSecret mode rendered %d Secret(s), want 0 (the Secret pre-exists)", kinds["Secret"])
 	}
 
 	sasWithSecret := map[string]bool{}

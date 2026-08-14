@@ -1,7 +1,6 @@
 {{- $tlsLB := .Values.tlsLb -}}
 {{- $nri := .Values.nriImagePolicy -}}
 {{- $nriCDSURL := tpl (default "" $nri.cds.url) . -}}
-{{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 {{- /*
   Helm silently ignores values keys the chart no longer reads, so a values
   file carried over from a release that still had tee-proxy would drop its
@@ -97,21 +96,6 @@
 {{- end -}}
 {{- if and $nri.enabled (not (hasPrefix "https://" $nriCDSURL)) -}}
 {{- fail (printf "nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got %q): the host plugin must fetch the allowlist over RA-TLS" $nriCDSURL) -}}
-{{- end -}}
-{{- /*
-  The default-deny posture for evidence generation: the API is reachable only
-  over the on-node Unix socket. nodePort=0 keeps it that way; any nodePort
-  value publishes /attest on every node IP, which is an evidence oracle for
-  anything with L3 reach unless the listener requires the API key — so the
-  two must be set together.
-*/ -}}
-{{- if and .Values.attestationApi.enabled (ne $attestationNodePort 0) -}}
-{{- if or (lt $attestationNodePort 30000) (gt $attestationNodePort 32767) -}}
-{{- fail (printf "attestationApi.service.nodePort must be within the Kubernetes NodePort range 30000-32767 (got %d)" $attestationNodePort) -}}
-{{- end -}}
-{{- if empty (include "c8s.attestationApiKey" .) -}}
-{{- fail "VALIDATION_ERROR kind=attestation_api_exposed_unauthenticated: attestationApi.service.nodePort publishes evidence generation on every node IP, but attestationApi.auth.apiKey is empty — an unauthenticated routable /attest lets any host with L3 reach mint genuine node evidence over caller-chosen REPORTDATA and redeem it at CDS for a mesh leaf. Set attestationApi.auth.apiKey, or set nodePort back to 0 (the default: node-local Unix socket only)." -}}
-{{- end -}}
 {{- end -}}
 {{- /*
   The mirror of require_host_image_policy for evidence: off kata and node,

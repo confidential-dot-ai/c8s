@@ -341,18 +341,6 @@ attestationApi:
   ## Evidence generation is node-local only: the API binds pod loopback and
   ## the attest-proxy sidecar serves it on a hostPath Unix socket in
   ## nriImagePolicy.hostPaths.runtimeDir (0660, root:65532).
-  auth:
-    ## Bearer key, required when service.nodePort exposes the listener
-    ## (enforced at render). Generate it high-entropy: the config checksum
-    ## covering it appears in a pod annotation.
-    apiKey: ""
-  service:
-    ## Opt-in re-exposure for debugging: renders a NodePort Service and binds
-    ## the API on 0.0.0.0. Requires auth.apiKey (enforced at render); the
-    ## on-node socket path keeps working — the proxy injects the key for it.
-    ## 0 (the default) renders no Service at all.
-    nodePort: 0
-  ## attest-proxy sidecar (the Unix-socket front door).
   proxy:
     resources:
       requests:

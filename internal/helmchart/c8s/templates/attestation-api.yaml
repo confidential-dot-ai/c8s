@@ -1,5 +1,4 @@
 {{- if .Values.attestationApi.enabled }}
-{{- $attestationNodePort := int .Values.attestationApi.service.nodePort -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -10,53 +9,18 @@ metadata:
     app.kubernetes.io/component: attestation-api
 {{ include "c8s.serviceAccountImagePullSecrets" . }}
 ---
-# config.toml carries the [auth] Bearer key under the nodePort opt-in, so
-# the config renders as a Secret; auth-key feeds the same key to the proxy.
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
   name: {{ include "c8s.attestationApiName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "c8s.commonLabels" . | indent 4 }}
     app.kubernetes.io/component: attestation-api
-stringData:
+data:
   config.toml: |
 {{ include "c8s.attestationApiConfig" (dict "root" .) | indent 4 }}
-  {{- with include "c8s.attestationApiKey" . }}
-  # Bearer key the attest-proxy injects for on-node socket callers.
-  auth-key: {{ . | quote }}
-  {{- end }}
 ---
-{{- if ne $attestationNodePort 0 }}
-# Deliberate operator opt-in (attestationApi.service.nodePort): publishes the
-# attestation-api on every node IP. The render guard requires
-# attestationApi.auth.apiKey with it, so the exposed listener is always
-# authenticated. Local: evidence describes the node it was generated on, so a
-# cross-node hop would attest the wrong node.
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "c8s.attestationApiName" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-{{ include "c8s.commonLabels" . | indent 4 }}
-    app.kubernetes.io/component: attestation-api
-spec:
-  type: NodePort
-  externalTrafficPolicy: Local
-  selector:
-    app.kubernetes.io/name: c8s-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: attestation-api
-  internalTrafficPolicy: Local
-  ports:
-    - name: http
-      port: {{ .Values.attestationApi.port }}
-      targetPort: http
-      nodePort: {{ $attestationNodePort }}
----
-{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -158,9 +122,6 @@ spec:
             - attest-proxy
             - --socket={{ include "c8s.attestationApiSocket" . }}
             - --upstream=http://127.0.0.1:{{ .Values.attestationApi.port }}
-            {{- with include "c8s.attestationApiKey" . }}
-            - --api-key-file=/etc/attestation-api/auth-key
-            {{- end }}
           # uid 0 so the socket is root-owned (callers reject a socket owned
           # by anyone but root or themselves); runAsGroup is the socket's
           # group so the chgrp needs no CAP_CHOWN.
@@ -194,8 +155,8 @@ spec:
 {{ toYaml .Values.attestationApi.proxy.resources | indent 12 }}
       volumes:
         - name: config
-          secret:
-            secretName: {{ include "c8s.attestationApiName" . }}
+          configMap:
+            name: {{ include "c8s.attestationApiName" . }}
         # hostPath.type=CharDevice forces a hard failure on nodes that
         # lack the device, instead of silently mounting an empty file —
         # attestation evidence would then be silently bogus. Toggle each
@@ -236,8 +197,6 @@ spec:
 ---
 # The API binds pod loopback, so nothing on the pod network can reach it; this
 # policy is the second line, keeping even an accidental rebind pod-unreachable.
-# It denies all ingress by default; the nodePort opt-in opens exactly the API
-# port (authenticated per the render guard).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -254,10 +213,4 @@ spec:
       app.kubernetes.io/component: attestation-api
   policyTypes:
     - Ingress
-  {{- if ne $attestationNodePort 0 }}
-  ingress:
-    - ports:
-        - protocol: TCP
-          port: {{ .Values.attestationApi.port }}
-  {{- end }}
 {{- end }}

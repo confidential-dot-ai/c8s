@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"strings"
 	"syscall"
 	"time"
 
@@ -42,7 +41,6 @@ type config struct {
 	socket            string
 	socketGID         int
 	upstream          string
-	apiKeyFile        string
 	readHeaderTimeout time.Duration
 }
 
@@ -64,7 +62,6 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.socket, "socket", "", "Unix socket path to serve on (absolute; created 0660, chgrp'd to --socket-gid)")
 	f.IntVar(&cfg.socketGID, "socket-gid", workloadclaims.InventorySocketGID, "group that may connect to the socket (0 = keep the process group)")
 	f.StringVar(&cfg.upstream, "upstream", defaultUpstream, "attestation-api base URL (the pod-loopback listener in the same pod)")
-	f.StringVar(&cfg.apiKeyFile, "api-key-file", "", "file holding the API key the upstream requires; injected as an Authorization: Bearer header on every proxied request")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout on the socket listener")
 	cmd.AddCommand(newHealthcheckCmd())
 	return cmd
@@ -119,7 +116,7 @@ func runContext(ctx context.Context, cfg config) error {
 	}
 	go cmdsutil.ShutdownOnDone(ctx, srv, 5*time.Second)
 
-	slog.Info("attestation proxy listening", "socket", cfg.socket, "upstream", cfg.upstream, "auth_inject", cfg.apiKeyFile != "")
+	slog.Info("attestation proxy listening", "socket", cfg.socket, "upstream", cfg.upstream)
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -140,17 +137,6 @@ func newProxy(cfg config) (http.Handler, error) {
 	if target.Scheme != "http" && target.Scheme != "https" {
 		return nil, fmt.Errorf("--upstream must use http or https, got scheme %q", target.Scheme)
 	}
-	var apiKey string
-	if cfg.apiKeyFile != "" {
-		key, err := os.ReadFile(cfg.apiKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read --api-key-file: %w", err)
-		}
-		apiKey = strings.TrimSpace(string(key))
-		if apiKey == "" {
-			return nil, fmt.Errorf("--api-key-file %s is empty", cfg.apiKeyFile)
-		}
-	}
 	transport := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: upstreamResponseHeaderTimeout,
@@ -164,9 +150,6 @@ func newProxy(cfg config) (http.Handler, error) {
 			pr.Out.URL.RawPath = pr.In.URL.RawPath
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			pr.Out.Host = target.Host
-			if apiKey != "" {
-				pr.Out.Header.Set("Authorization", "Bearer "+apiKey)
-			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Error("attestation proxy request failed", "method", r.Method, "path", r.URL.Path, "error", err)
