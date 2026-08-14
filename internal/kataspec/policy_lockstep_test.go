@@ -26,7 +26,47 @@ func readPolicy(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read baked policy: %v", err)
 	}
-	return string(body)
+	return stripComments(string(body))
+}
+
+// stripComments removes `#` comments, which carry no semantics: left in, a
+// comment line can hide an else chain from the extractors or pose as a rule.
+// String and raw-string literals are preserved.
+func stripComments(policy string) string {
+	var out strings.Builder
+	out.Grow(len(policy))
+	inString, inRaw := false, false
+	for i := 0; i < len(policy); i++ {
+		c := policy[i]
+		switch {
+		case inString:
+			out.WriteByte(c)
+			if c == '\\' && i+1 < len(policy) {
+				i++
+				out.WriteByte(policy[i])
+			} else if c == '"' {
+				inString = false
+			}
+		case inRaw:
+			out.WriteByte(c)
+			if c == '`' {
+				inRaw = false
+			}
+		case c == '"':
+			inString = true
+			out.WriteByte(c)
+		case c == '`':
+			inRaw = true
+			out.WriteByte(c)
+		case c == '#':
+			for i+1 < len(policy) && policy[i+1] != '\n' {
+				i++
+			}
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
 }
 
 // extractPattern pulls the single regex.match pattern applied to subject.
@@ -92,15 +132,15 @@ func TestPullDigestAgreesWithBakedPolicy(t *testing.T) {
 	}
 }
 
-// ruleBodies extracts the bodies of the policy's top-level definitions of
-// name. The read is deliberately strict, and the lockstep tests below rely on
-// it: definitions are counted at column 0 so a second rule counts however it
-// is indented, each definition must be the braced, tab-indented shape these
-// tests parse, and an else chain after a body fails the test rather than
-// going unread.
+// ruleBodies extracts the bodies of the policy's definitions of name from
+// comment-stripped text. The read is deliberately strict, and the lockstep
+// tests below rely on it: a definition counts however it is indented (the
+// fmt gate in make policy-test normalises heads to column 0), each
+// definition must be the braced, tab-indented shape these tests parse, and
+// an else chain after a body fails the test rather than going unread.
 func ruleBodies(t *testing.T, policy, name string) []string {
 	t.Helper()
-	defs := regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(name)+`\b`).FindAllStringIndex(policy, -1)
+	defs := regexp.MustCompile(`(?m)^[ \t]*`+regexp.QuoteMeta(name)+`(\([^)]*\))?\s+(if|:=)`).FindAllStringIndex(policy, -1)
 	if len(defs) == 0 {
 		t.Fatalf("baked policy defines no %s rule", name)
 	}
@@ -144,9 +184,11 @@ func TestBakedPolicyRejectsCRIOContainerTypeMarker(t *testing.T) {
 
 // pull_source_bound decides what kata runs for an admitted request; its
 // sandbox branch is what makes it safe for policy-monitor to exempt the pause
-// from digest enforcement. Pin the admission shape that safety rests on:
-// exactly two branches, exactly one keyed on sandbox_annotations, and that
-// branch bound to the measured pause.
+// from digest enforcement, and its workload branch is the only place a
+// host-image source may bind. Pin the admission shape that safety rests on:
+// exactly two branches, the sandbox one keyed on sandbox_annotations and
+// bound to the measured pause, the workload one keyed on
+// workload_annotations.
 func TestBakedPolicyBindsSandboxPullToPause(t *testing.T) {
 	bodies := ruleBodies(t, readPolicy(t), "pull_source_bound")
 	if len(bodies) != 2 {
@@ -163,6 +205,20 @@ func TestBakedPolicyBindsSandboxPullToPause(t *testing.T) {
 	}
 	if !strings.Contains(bodies[sandbox[0]], "\tpull.source == \"pause\"\n") {
 		t.Error("the sandbox branch of pull_source_bound does not bind pull.source to the measured pause")
+	}
+	if !strings.Contains(bodies[1-sandbox[0]], "\tworkload_annotations\n") {
+		t.Error("the workload branch of pull_source_bound is not keyed on workload_annotations")
+	}
+}
+
+// A second workload_annotations definition would OR another predicate into
+// the branch that binds a host-image source — the widening half of the
+// admission contract. Counted and shape-checked exactly like
+// sandbox_annotations.
+func TestBakedPolicyDefinesOneWorkloadAnnotations(t *testing.T) {
+	bodies := ruleBodies(t, readPolicy(t), "workload_annotations")
+	if len(bodies) != 1 {
+		t.Fatalf("baked policy has %d workload_annotations rules, want exactly one (a second one would OR another predicate past the admission contract)", len(bodies))
 	}
 }
 

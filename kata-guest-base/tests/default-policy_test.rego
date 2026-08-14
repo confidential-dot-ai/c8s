@@ -176,6 +176,36 @@ test_sandbox_source_must_be_pause if {
 		sandbox_input,
 		{"storages": [object.union(sandbox_input.storages[0], {"source": digest_ref})]},
 	)
+	not CreateContainerRequest with input as object.union(
+		sandbox_input,
+		{"storages": [object.union(sandbox_input.storages[0], {"source": "ghcr.io/confidential-dot-ai/assam:latest"})]},
+	)
+}
+
+# Sandbox annotations without the sandbox marker in the pull metadata admit
+# no pull: the sandbox branch runs the measured pause and the workload branch
+# is keyed on workload_annotations, so neither may bind the host's image.
+test_sandbox_annotations_without_sandbox_metadata_denied if {
+	not CreateContainerRequest with input as object.union(sandbox_input, {
+		"storages": [object.union(sandbox_input.storages[0], {
+			"source": digest_ref,
+			"driver_options": ["image_guest_pull={}"],
+		})],
+		"OCI": {"Annotations": object.union(
+			sandbox_input.OCI.Annotations,
+			{"io.kubernetes.cri.image-name": digest_ref},
+		)},
+	})
+	not CreateContainerRequest with input as object.union(sandbox_input, {
+		"storages": [object.union(sandbox_input.storages[0], {
+			"source": digest_ref,
+			"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"container\"}"],
+		})],
+		"OCI": {"Annotations": object.union(
+			sandbox_input.OCI.Annotations,
+			{"io.kubernetes.cri.image-name": digest_ref},
+		)},
+	})
 }
 
 # An image-name annotation must not give a sandbox-annotated request's pull
