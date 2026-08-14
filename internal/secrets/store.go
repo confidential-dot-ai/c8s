@@ -33,7 +33,8 @@ const (
 )
 
 // Holder is the party a stored path is charged to. Origin and name together are
-// the key.
+// the key, so an allowlist entry named "operator" is a different holder from
+// the operator.
 type Holder struct {
 	origin Origin
 	name   string
@@ -46,6 +47,10 @@ func (h Holder) String() string {
 	}
 	return fmt.Sprintf("%s %q", h.origin, h.name)
 }
+
+// MarshalText renders the holder as its String form, so a structured log
+// carries the name.
+func (h Holder) MarshalText() ([]byte, error) { return []byte(h.String()), nil }
 
 // WorkloadHolder charges a path to the allowlist entry whose grant authorized
 // the write.
@@ -80,9 +85,11 @@ type Store interface {
 	// the write did not happen.
 	PutIfAbsent(ctx context.Context, path string, value []byte, by Holder) (current []byte, held Held, err error)
 	// Put stores value at path, replacing anything already there, and reports
-	// what it displaced. Replacing another holder's path moves the charge to by
-	// without a quota check, so only a quota-exempt holder may call it.
-	Put(ctx context.Context, path string, value []byte, by Holder) (Held, error)
+	// what it displaced. The path is charged to OperatorHolder, whose only
+	// bound is the ceiling.
+	Put(ctx context.Context, path string, value []byte) (Held, error)
+	// TopHolders returns the n holders with the most paths, largest first.
+	TopHolders(n int) []HolderPaths
 }
 
 // GeneratedValueBytes is the size of a value CDS mints for a workload that
@@ -167,7 +174,7 @@ func (s *MemoryStore) PutIfAbsent(_ context.Context, path string, value []byte, 
 	return append([]byte(nil), value...), Held{}, nil
 }
 
-func (s *MemoryStore) Put(_ context.Context, path string, value []byte, by Holder) (Held, error) {
+func (s *MemoryStore) Put(_ context.Context, path string, value []byte) (Held, error) {
 	if err := s.checkValue(value); err != nil {
 		return Held{}, err
 	}
@@ -175,11 +182,11 @@ func (s *MemoryStore) Put(_ context.Context, path string, value []byte, by Holde
 	defer s.mu.Unlock()
 	prior, existed := s.values[path]
 	if !existed {
-		if err := s.checkRoomLocked(by); err != nil {
+		if err := s.checkRoomLocked(OperatorHolder()); err != nil {
 			return Held{}, err
 		}
 	}
-	s.storeLocked(path, value, by)
+	s.storeLocked(path, value, OperatorHolder())
 	return Held{Exists: existed, Origin: prior.holder.origin}, nil
 }
 
@@ -228,8 +235,8 @@ func (s *MemoryStore) Len() int {
 
 // HolderPaths is one holder's share of the store.
 type HolderPaths struct {
-	Holder Holder
-	Paths  int
+	Holder Holder `json:"holder"`
+	Paths  int    `json:"paths"`
 }
 
 // TopHolders returns the n holders with the most paths, largest first, ties
@@ -247,5 +254,5 @@ func (s *MemoryStore) TopHolders(n int) []HolderPaths {
 		}
 		return cmp.Or(cmp.Compare(a.Holder.origin, b.Holder.origin), cmp.Compare(a.Holder.name, b.Holder.name))
 	})
-	return out[:min(n, len(out))]
+	return slices.Clip(out[:min(n, len(out))])
 }

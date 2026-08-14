@@ -114,7 +114,7 @@ func (h OperatorHandler) create(w http.ResponseWriter, r *http.Request, path str
 }
 
 func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path string, value []byte) {
-	held, err := h.Store.Put(r.Context(), path, value, OperatorHolder())
+	held, err := h.Store.Put(r.Context(), path, value)
 	if h.writeFailed(w, path, err) {
 		return
 	}
@@ -127,15 +127,13 @@ func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path st
 	writeResult(w, http.StatusOK, PutResponse{Path: path, Existing: held.Origin})
 }
 
-// writeFailed answers a store error and reports whether it did. Both bounds
-// answer 507, distinguished by error code.
+// writeFailed answers a store error and reports whether it did. Both write
+// paths hold as the operator, which is quota-exempt, so the ceiling is the only
+// bound that can refuse them.
 func (h OperatorHandler) writeFailed(w http.ResponseWriter, path string, err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case errors.Is(err, ErrHolderQuota):
-		h.logger().Warn("operator secret write refused", "path", path, "error", err)
-		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretHolderQuota, "secret storage limit reached")
 	case errors.Is(err, ErrStoreFull):
 		h.logger().Warn("operator secret write refused", "path", path, "error", err)
 		writeError(w, http.StatusInsufficientStorage, types.ErrorCodeSecretStoreFull, "secret storage limit reached")

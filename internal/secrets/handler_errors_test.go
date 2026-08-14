@@ -22,9 +22,10 @@ func (f failingStore) Get(context.Context, string) ([]byte, error) { return nil,
 func (f failingStore) PutIfAbsent(context.Context, string, []byte, Holder) ([]byte, Held, error) {
 	return nil, Held{}, f.err
 }
-func (f failingStore) Put(context.Context, string, []byte, Holder) (Held, error) {
+func (f failingStore) Put(context.Context, string, []byte) (Held, error) {
 	return Held{}, f.err
 }
+func (f failingStore) TopHolders(int) []HolderPaths { return nil }
 
 // A store failure is not a policy denial: the caller is told the secret is
 // unavailable, and the reason stays in the CDS log.

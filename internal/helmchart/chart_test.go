@@ -1253,8 +1253,8 @@ func TestChartCDSPinnedToCDSNode(t *testing.T) {
 	}
 }
 
-// Both secret path bounds are chart-settable: sizing the quota without the
-// ceiling it must stay below renders a CDS that will not start.
+// Both secret path bounds are chart-settable, up to a quota one below the
+// ceiling — the largest the guard admits.
 func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1266,6 +1266,11 @@ func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
 			"sized",
 			[]string{"--set", "cds.secretsMaxPaths=256", "--set", "cds.secretsMaxPathsPerWorkload=8"},
 			[]string{"--secrets-max-paths=256", "--secrets-max-paths-per-workload=8"},
+		},
+		{
+			"quota one below the ceiling",
+			[]string{"--set", "cds.secretsMaxPaths=256", "--set", "cds.secretsMaxPathsPerWorkload=255"},
+			[]string{"--secrets-max-paths=256", "--secrets-max-paths-per-workload=255"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1281,24 +1286,25 @@ func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
 	}
 }
 
-// The pair CDS refuses to start on is refused at template time instead: its
-// Recreate rollout deletes the serving pod before the replacement CrashLoops.
+// The pair CDS refuses to start on is refused at template time instead.
 func TestChartCDSSecretsQuotaAboveTheCeilingFailsRendering(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		set  []string
+		want string
 	}{
-		{"at the ceiling", []string{"--set", "cds.secretsMaxPaths=64"}},
-		{"above the ceiling", []string{"--set", "cds.secretsMaxPaths=32"}},
-		{"raised quota, default ceiling", []string{"--set", "cds.secretsMaxPathsPerWorkload=1024"}},
+		{"at the ceiling", []string{"--set", "cds.secretsMaxPaths=64"}, "kind=cds_secrets_path_budget"},
+		{"above the ceiling", []string{"--set", "cds.secretsMaxPaths=32"}, "kind=cds_secrets_path_budget"},
+		{"raised quota, default ceiling", []string{"--set", "cds.secretsMaxPathsPerWorkload=1024"}, "kind=cds_secrets_path_budget"},
+		{"zero ceiling", []string{"--set", "cds.secretsMaxPaths=0"}, "cds.secretsMaxPaths must be a positive integer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := helmTemplate(t, tc.set...)
 			if err == nil {
 				t.Fatalf("a quota at or above the ceiling rendered:\n%s", out)
 			}
-			if !strings.Contains(out, "kind=cds_secrets_path_budget") {
-				t.Fatalf("render failed without naming the guard: %v\n%s", err, out)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("render failed without %q: %v\n%s", tc.want, err, out)
 			}
 		})
 	}

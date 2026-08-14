@@ -515,6 +515,9 @@ func normalizeHTTPServerConfig(cfg config) config {
 	return cfg
 }
 
+// newSecretsStore builds the store from sizing flags validateSecretsConfig has
+// already checked: NewMemoryStore panics on a pair validateSecretsConfig
+// refuses.
 func newSecretsStore(cfg config) *secrets.MemoryStore {
 	return secrets.NewMemoryStore(cfg.secretsMaxPaths, cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxValueBytes)
 }
@@ -522,8 +525,8 @@ func newSecretsStore(cfg config) *secrets.MemoryStore {
 // validateSecretsConfig checks the bounds on secret storage. What secrets are
 // released to is policy, not configuration — see secretsEnabled.
 func validateSecretsConfig(cfg config) error {
-	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxPathsPerWorkload <= 0 || cfg.secretsMaxValueBytes <= 0 || cfg.sandboxLedgerMax <= 0 {
-		return fmt.Errorf("--secrets-max-paths, --secrets-max-paths-per-workload, --secrets-max-value-bytes and --sandbox-ledger-max-entries must be positive")
+	if cfg.secretsMaxPaths <= 0 || cfg.secretsMaxPathsPerWorkload <= 0 || cfg.sandboxLedgerMax <= 0 {
+		return fmt.Errorf("--secrets-max-paths, --secrets-max-paths-per-workload and --sandbox-ledger-max-entries must be positive")
 	}
 	if cfg.secretsMaxPathsPerWorkload >= cfg.secretsMaxPaths {
 		return fmt.Errorf("--secrets-max-paths-per-workload (%d) must be below --secrets-max-paths (%d), or one workload can fill the store", cfg.secretsMaxPathsPerWorkload, cfg.secretsMaxPaths)

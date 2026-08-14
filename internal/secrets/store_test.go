@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,7 +61,7 @@ func TestMemoryStorePut(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore(10, 9, 64)
 
-	held, err := s.Put(ctx, "/a", []byte("operator"), OperatorHolder())
+	held, err := s.Put(ctx, "/a", []byte("operator"))
 	if err != nil || held.Exists {
 		t.Fatalf("put onto an empty path: %+v %v", held, err)
 	}
@@ -68,7 +69,7 @@ func TestMemoryStorePut(t *testing.T) {
 	if _, _, err := s.PutIfAbsent(ctx, "/b", []byte("generated"), WorkloadHolder("api")); err != nil {
 		t.Fatal(err)
 	}
-	held, err = s.Put(ctx, "/b", []byte("operator"), OperatorHolder())
+	held, err = s.Put(ctx, "/b", []byte("operator"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,59 +82,34 @@ func TestMemoryStorePut(t *testing.T) {
 	}
 
 	// The replacement carries its own origin forward.
-	held, err = s.Put(ctx, "/b", []byte("again"), OperatorHolder())
+	held, err = s.Put(ctx, "/b", []byte("again"))
 	if err != nil || held.Origin != OriginOperator {
 		t.Fatalf("held = %+v %v, want the operator value it replaced", held, err)
 	}
 }
 
-// Put is bounded by the ceiling and the value cap — its one caller writes as
-// the quota-exempt operator — and replacing a path consumes no room.
+// Put is bounded by the ceiling and the value cap, and replacing a path
+// consumes no room.
 func TestMemoryStorePutBounds(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore(2, 1, 4)
 
-	if _, err := s.Put(ctx, "/a", []byte("toolong"), OperatorHolder()); err == nil {
+	if _, err := s.Put(ctx, "/a", []byte("toolong")); err == nil {
 		t.Fatal("an oversized value was stored")
 	}
 	for _, p := range []string{"/a", "/b"} {
-		if _, err := s.Put(ctx, p, []byte("ok"), OperatorHolder()); err != nil {
+		if _, err := s.Put(ctx, p, []byte("ok")); err != nil {
 			t.Fatalf("put %s: %v", p, err)
 		}
 	}
-	if _, err := s.Put(ctx, "/c", []byte("ok"), OperatorHolder()); !errors.Is(err, ErrStoreFull) {
+	if _, err := s.Put(ctx, "/c", []byte("ok")); !errors.Is(err, ErrStoreFull) {
 		t.Fatalf("put at the ceiling = %v, want ErrStoreFull", err)
 	}
-	if _, err := s.Put(ctx, "/a", []byte("new"), OperatorHolder()); err != nil {
+	if _, err := s.Put(ctx, "/a", []byte("new")); err != nil {
 		t.Fatalf("replacing an existing path at the ceiling: %v", err)
 	}
 	if s.Len() != 2 {
 		t.Fatalf("Len = %d, want 2", s.Len())
-	}
-}
-
-// Put moves a path's charge to the new holder without a quota check, so the
-// interface's one restriction — a quota-exempt caller — is pinned rather than
-// stated only in a comment.
-func TestPutMovesAChargePastTheQuota(t *testing.T) {
-	ctx := context.Background()
-	s := NewMemoryStore(4, 1, 8)
-	api, web := WorkloadHolder("api"), WorkloadHolder("web")
-
-	if _, _, err := s.PutIfAbsent(ctx, "/api/1", []byte("ok"), api); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.PutIfAbsent(ctx, "/web/1", []byte("ok"), web); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Put(ctx, "/api/1", []byte("taken"), web); err != nil {
-		t.Fatalf("Put onto another holder's path = %v, want the charge moved", err)
-	}
-	if got := s.TopHolders(1); len(got) != 1 || got[0].Holder != web || got[0].Paths != 2 {
-		t.Fatalf("top holder = %+v, want web holding 2 paths past a quota of 1", got)
-	}
-	if total, paths := holderTotal(s); total != paths || paths != 2 {
-		t.Fatalf("holder counts sum to %d over %d paths, want both 2", total, paths)
 	}
 }
 
@@ -283,8 +259,13 @@ func TestNewMemoryStoreRejectsAQuotaAboveTheCeiling(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
-				if recovered := recover() != nil; recovered != tc.wantPanic {
+				r := recover()
+				if recovered := r != nil; recovered != tc.wantPanic {
 					t.Fatalf("NewMemoryStore(%d, %d, 8) panicked=%v, want %v", tc.maxPaths, tc.quota, recovered, tc.wantPanic)
+				}
+				if want := fmt.Sprintf("maxPerHolder %d must be below maxPaths %d", tc.quota, tc.maxPaths); tc.wantPanic &&
+					!strings.Contains(fmt.Sprint(r), want) {
+					t.Fatalf("panic = %v, want it to name both bounds: %s", r, want)
 				}
 			}()
 			NewMemoryStore(tc.maxPaths, tc.quota, 8)
@@ -370,7 +351,6 @@ func TestMemoryStoreCeilingRefusesWithoutEvicting(t *testing.T) {
 
 // The quota bounds one holder, not the store: enough holders one path apiece
 // still reach the ceiling, and the holder that arrives after them is refused.
-// What the quota buys is the size of the blast radius, not its absence.
 func TestManyHoldersStillReachTheCeiling(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore(8, 2, 8)
@@ -416,7 +396,7 @@ func TestReplacingAValueMovesItsCharge(t *testing.T) {
 	if _, _, err := s.PutIfAbsent(ctx, "/api/hf", []byte("generated"), api); !errors.Is(err, ErrHolderQuota) {
 		t.Fatalf("second path at a quota of 1 = %v, want ErrHolderQuota", err)
 	}
-	if _, err := s.Put(ctx, "/api/db", []byte("operator"), OperatorHolder()); err != nil {
+	if _, err := s.Put(ctx, "/api/db", []byte("operator")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.PutIfAbsent(ctx, "/api/hf", []byte("generated"), api); err != nil {
@@ -448,6 +428,15 @@ func TestMemoryStoreQuotaUnderConcurrentWrites(t *testing.T) {
 			}()
 		}
 	}
+	// The census is taken under the same lock the writers hold, so -race sees
+	// both sides.
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.TopHolders(censusHolders)
+		}()
+	}
 	wg.Wait()
 
 	for h, name := range names {
@@ -460,41 +449,49 @@ func TestMemoryStoreQuotaUnderConcurrentWrites(t *testing.T) {
 	}
 }
 
-// The census names the holders and their counts, largest first, and never a
-// value.
+// The census names the holders and their counts, largest first. Four holders
+// tied at one path pin the tie-break: without it the order is the map's.
 func TestTopHolders(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore(16, 4, 16)
 
-	for i := range 3 {
+	for i := range 2 {
 		if _, _, err := s.PutIfAbsent(ctx, fmt.Sprintf("/api/%d", i), []byte("api-value"), WorkloadHolder("api")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := s.PutIfAbsent(ctx, "/web/1", []byte("web-value"), WorkloadHolder("web")); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"b", "c", "d"} {
+		if _, _, err := s.PutIfAbsent(ctx, "/"+name+"/1", []byte("value"), WorkloadHolder(name)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := s.Put(ctx, "/op/1", []byte("op-value"), OperatorHolder()); err != nil {
+	if _, err := s.Put(ctx, "/op/1", []byte("op-value")); err != nil {
 		t.Fatal(err)
 	}
 
-	got := s.TopHolders(2)
-	if len(got) != 2 {
-		t.Fatalf("TopHolders(2) returned %d holders", len(got))
+	want := []HolderPaths{
+		{Holder: WorkloadHolder("api"), Paths: 2},
+		{Holder: OperatorHolder(), Paths: 1},
+		{Holder: WorkloadHolder("b"), Paths: 1},
+		{Holder: WorkloadHolder("c"), Paths: 1},
+		{Holder: WorkloadHolder("d"), Paths: 1},
 	}
-	if got[0].Holder != WorkloadHolder("api") || got[0].Paths != 3 {
-		t.Fatalf("largest holder = %+v, want api holding 3", got[0])
+	if got := s.TopHolders(10); !slices.Equal(got, want) {
+		t.Fatalf("TopHolders(10) = %+v, want %+v", got, want)
 	}
-	if got[1].Paths != 1 {
-		t.Fatalf("second holder = %+v, want a single path", got[1])
+	if got := s.TopHolders(2); !slices.Equal(got, want[:2]) {
+		t.Fatalf("TopHolders(2) = %+v, want the first two of %+v", got, want)
 	}
-	if n := len(s.TopHolders(10)); n != 3 {
-		t.Fatalf("TopHolders(10) returned %d holders, want every one of the 3", n)
+}
+
+// Holder.String is what the census prints, and the operator has no name to
+// print.
+func TestHolderString(t *testing.T) {
+	if got := OperatorHolder().String(); got != "operator" {
+		t.Fatalf("operator holder = %q, want %q", got, "operator")
 	}
-	for _, hp := range s.TopHolders(10) {
-		if strings.Contains(hp.Holder.String(), "value") {
-			t.Fatalf("a holder rendered a stored value: %s", hp.Holder)
-		}
+	if got := WorkloadHolder("api").String(); got != `workload "api"` {
+		t.Fatalf("workload holder = %q, want %q", got, `workload "api"`)
 	}
 }
 

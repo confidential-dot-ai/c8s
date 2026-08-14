@@ -68,6 +68,7 @@ type fakeCDS struct {
 type reply struct {
 	status int
 	value  string // raw value; encoded as base64 in the response
+	code   string // c8s error-envelope code, for a non-2xx body
 }
 
 func newFakeCDS(t *testing.T, replies map[string][]reply) (*fakeCDS, string) {
@@ -107,6 +108,9 @@ func (f *fakeCDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.replies[key] = queue[1:]
 	if next.status != http.StatusOK && next.status != http.StatusCreated {
 		w.WriteHeader(next.status)
+		if next.code != "" {
+			json.NewEncoder(w).Encode(types.ErrorResponse{Error: next.code, Message: "secret storage limit reached"})
+		}
 		return
 	}
 	w.WriteHeader(next.status)
@@ -189,14 +193,13 @@ func TestFetchOneRereadsAfterLosingCreateRace(t *testing.T) {
 	}
 }
 
-// The store evicts nothing, so a 507 does not clear without a CDS restart.
-// Retrying it spends the whole budget and then hands the pod to the kubelet,
-// which restarts the sidecar for the pod's life; fail on the first pass instead.
+// The ceiling clears only on a CDS restart, which empties the store, so
+// retrying it cannot succeed.
 func TestFetchStopsRetryingWhenTheStoreIsFull(t *testing.T) {
 	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db":  {{status: http.StatusNotFound}},
-		"POST /secrets/api/db": {{status: http.StatusInsufficientStorage}},
+		"POST /secrets/api/db": {{status: http.StatusInsufficientStorage, code: types.ErrorCodeSecretStoreFull}},
 	})
 	cfg := flowConfig(t, url)
 	pub := testKey(t)
@@ -213,6 +216,51 @@ func TestFetchStopsRetryingWhenTheStoreIsFull(t *testing.T) {
 	want := []string{"GET /secrets/api/db", "POST /secrets/api/db"}
 	if !equal(cds.requests, want) {
 		t.Fatalf("requests = %v, want the single pass %v", cds.requests, want)
+	}
+}
+
+// Every other create failure keeps retrying: an operator overwrite frees holder
+// quota with no restart, and a 500 is not a bound at all. Both share the branch
+// the ceiling is terminal on.
+func TestFetchRetriesCreateFailuresThatCanClear(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refusal reply
+	}{
+		{"holder quota", reply{status: http.StatusInsufficientStorage, code: types.ErrorCodeSecretHolderQuota}},
+		{"507 with no envelope", reply{status: http.StatusInsufficientStorage}},
+		{"server failure", reply{status: http.StatusInternalServerError}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := startInventory(t)
+			cds, url := newFakeCDS(t, map[string][]reply{
+				"GET /secrets/api/db":  {{status: http.StatusNotFound}, {status: http.StatusNotFound}},
+				"POST /secrets/api/db": {tc.refusal, {status: http.StatusCreated, value: "minted"}},
+			})
+			cfg := flowConfig(t, url)
+			cfg.RetryInterval = time.Millisecond
+			cfg.Attempts = 2
+			pub := testKey(t)
+			var values map[string][]byte
+			err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
+				var err error
+				values, err = fetchAllWith(ctx, cfg, http.DefaultClient, pub, endpoint)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("a refusal that can clear was treated as terminal: %v", err)
+			}
+			if string(values["DB"]) != "minted" {
+				t.Fatalf("value = %q, want the second pass's", values["DB"])
+			}
+			want := []string{
+				"GET /secrets/api/db", "POST /secrets/api/db",
+				"GET /secrets/api/db", "POST /secrets/api/db",
+			}
+			if !equal(cds.requests, want) {
+				t.Fatalf("requests = %v, want two passes %v", cds.requests, want)
+			}
+		})
 	}
 }
 

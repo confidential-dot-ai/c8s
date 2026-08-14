@@ -234,8 +234,7 @@ cds:
   # cds.secretsMaxPaths; the chart refuses to render otherwise.
   secretsMaxPathsPerWorkload: 64
   # -- Max secret paths CDS holds in memory across every workload. Raise this
-  # alongside secretsMaxPathsPerWorkload; the store is process memory in the pod
-  # that also holds the mesh CA.
+  # alongside secretsMaxPathsPerWorkload.
   secretsMaxPaths: 1024
   readinessInterval: 10s
   ## /sign-csr CSRs arrive without a matching TCP source IP under chart routing,

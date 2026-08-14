@@ -12,6 +12,7 @@ package getsecret
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/sidecar"
 	"github.com/confidential-dot-ai/c8s/internal/fileutil"
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // config is everything the sidecar needs. The webhook renders all of it.
@@ -139,9 +141,13 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 	case status == http.StatusCreated:
 		return value, nil
 	case status == http.StatusInsufficientStorage:
-		// The store evicts nothing, so a bound it has reached is still reached
-		// on every later attempt.
-		return nil, sidecar.Terminal(err)
+		// The ceiling clears only on a CDS restart; the holder quota clears
+		// whenever an operator moves a charge off this entry.
+		var refusal *sidecar.StatusError
+		if errors.As(err, &refusal) && refusal.Code == types.ErrorCodeSecretStoreFull {
+			return nil, sidecar.Terminal(err)
+		}
+		return nil, err
 	case status != http.StatusConflict:
 		return nil, err
 	}

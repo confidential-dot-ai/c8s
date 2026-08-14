@@ -116,7 +116,8 @@ one caller and cannot be replayed.
 ```
 POST /secrets                      → {"challenge": "<base64>"}
 GET  /secrets/<store path>         → 200 {"value": "<base64>"} | 404 | 403
-POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403 | 507
+POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403
+                                   → 507 {"error": "secret_holder_quota"|"secret_store_full"}
 ```
 
 `PUT` on the same paths is the operator's, authorized by the operator key
@@ -181,7 +182,7 @@ PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 201 {"created": true}
                             → 409 {"existing": "workload"|"operator"}
                             → 200 {"existing": "workload"|"operator"}
-                            → 507 {"error": "secret_store_full"} a bound refused it
+                            → 507 {"error": "secret_store_full"} the ceiling refused it
 ```
 
 Authorization is the operator key that CDS already pins for allowlist writes
