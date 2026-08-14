@@ -19,9 +19,11 @@
 #   EXCLUDED_NS     mesh-excluded source namespace (default kube-system)
 #   MESH_HEALTH_PORT     ratls-mesh health/metrics port (chart
 #                        ratlsMesh.ports.health; default 15021)
-#   METRIC_WAIT_SECONDS  how long to wait for a counter to move (default 75;
-#                        raise it above ~2x ratlsMesh.iptablesSync.resyncPeriod
-#                        on clusters tuned to a longer resync)
+#   METRIC_WAIT_SECONDS  how long to wait for a counter to move; also the
+#                        abort budget for a baseline that never gets a
+#                        successful scrape (default 75; raise it above ~2x
+#                        ratlsMesh.iptablesSync.resyncPeriod on clusters tuned
+#                        to a longer resync)
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -78,35 +80,54 @@ client_curl() { kubectl exec -n "$ns" "$client" -- curl -s "$@"; }
 
 # Sum a mesh metric from a node's ratls-mesh /metrics (hostNetwork). The
 # health port is a node IP, never a pod IP, so this scrape is not itself
-# mesh-intercepted. A transient scrape failure prints 0 rather than aborting
-# the script under set -e/pipefail: callers poll, so a blip should retry, not
-# be a hard failure. awk always prints an integer, so the result is never
-# empty. The curl exit code is intentionally dropped ($? is not inspected).
+# mesh-intercepted. Exit 1 with no output marks a failed scrape, kept distinct
+# from a genuine 0 (curl -f fails on HTTP errors; kubectl exec propagates the
+# exit code): a blip must retry, never read as "counter is 0".
 mesh_metric() {
   local node_ip=$1 pattern=$2 body
-  body=$(client_curl --max-time 10 "http://${node_ip}:${health_port}/metrics" 2>/dev/null || true)
+  body=$(client_curl -f --max-time 10 "http://${node_ip}:${health_port}/metrics" 2>/dev/null) || return 1
   awk -v p="$pattern" '$0 ~ p {sum += $NF} END {printf "%d", sum+0}' <<<"$body"
 }
 
-# Poll until a metric exceeds a baseline, tolerating transient scrape failures
-# (mesh_metric returns 0 for those). The cw drop counter is published by the
-# iptables-sync sidecar on its resync tick, so the default deadline gives two
-# 30s ticks of headroom; raise METRIC_WAIT_SECONDS for a longer resyncPeriod.
-await_metric_above() {
-  local node_ip=$1 pattern=$2 baseline=$3 what=$4
-  local deadline=$((SECONDS + metric_wait)) v
-  while [ $SECONDS -lt $deadline ]; do
-    v=$(mesh_metric "$node_ip" "$pattern")
-    if [ "$v" -gt "$baseline" ]; then echo "ok: $what ($baseline -> $v)"; return 0; fi
+# Baselines gate every await_metric_above, so one must come from a genuine
+# scrape. Retry until one scrape succeeds; abort if none does inside the
+# budget.
+metric_baseline() {
+  local node_ip=$1 pattern=$2 what=$3 v
+  local deadline=$((SECONDS + metric_wait))
+  while :; do
+    if v=$(mesh_metric "$node_ip" "$pattern"); then
+      printf '%d\n' "$v"
+      return 0
+    fi
+    [ $SECONDS -lt $deadline ] || break
     sleep 5
   done
+  fail "$what: no successful metrics scrape of $node_ip:$health_port within ${metric_wait}s; cannot baseline"
+}
+
+# Poll until a metric exceeds a baseline, skipping failed scrapes rather than
+# reading them as 0. The cw drop counter is published by the iptables-sync
+# sidecar on its resync tick, so the default deadline gives two 30s ticks of
+# headroom; raise METRIC_WAIT_SECONDS for a longer resyncPeriod.
+await_metric_above() {
+  local node_ip=$1 pattern=$2 baseline=$3 what=$4
+  local deadline=$((SECONDS + metric_wait)) v scraped=""
+  while [ $SECONDS -lt $deadline ]; do
+    if v=$(mesh_metric "$node_ip" "$pattern"); then
+      scraped=1
+      [ "$v" -gt "$baseline" ] && { echo "ok: $what ($baseline -> $v)"; return 0; }
+    fi
+    sleep 5
+  done
+  [ -n "$scraped" ] || fail "$what: every metrics scrape of $node_ip:$health_port failed within ${metric_wait}s"
   fail "$what: no increase above $baseline within ${metric_wait}s"
 }
 
 # --- positive: a pod-IP dial is mesh-wrapped --------------------------------
 
 inbound='^ratls_mesh_connections_total.*direction="inbound"'
-base_inbound=$(mesh_metric "$cw_node_ip" "$inbound")
+base_inbound=$(metric_baseline "$cw_node_ip" "$inbound" "mesh inbound connections on $cw_node")
 
 client_curl -o /dev/null --max-time 10 "http://${cw_ip}:${cw_port}/" \
   || fail "direct pod-IP request to $cw_ip:$cw_port failed (exit $?); the mesh-wrapped path must work"
@@ -147,7 +168,7 @@ drops='^ratls_mesh_iptables_cw_inbound_drops_total'
 # cluster-wide). Under IPVS/nftables kube-proxy the VIP is rewritten off the
 # FORWARD path (see the README precondition), so this counter assertion, and
 # the guard itself, only hold in iptables mode.
-base_drops=$(mesh_metric "$client_node_ip" "$drops")
+base_drops=$(metric_baseline "$client_node_ip" "$drops" "cw inbound drops on $client_node")
 
 rc=0
 client_curl -o /dev/null --max-time 5 "http://${vip}:${cw_port}/" || rc=$?
@@ -174,7 +195,7 @@ kubectl wait --for=condition=Ready pod/"$excluded_pod" -n "$excluded_ns" --timeo
 excluded_node=$(kubectl get pod "$excluded_pod" -n "$excluded_ns" -o jsonpath='{.spec.nodeName}')
 excluded_node_ip=$(kubectl get node "$excluded_node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 [ -n "$excluded_node_ip" ] || fail "node $excluded_node reports no InternalIP; cannot read its drop counter"
-base_excluded_drops=$(mesh_metric "$excluded_node_ip" "$drops")
+base_excluded_drops=$(metric_baseline "$excluded_node_ip" "$drops" "cw inbound drops on $excluded_node")
 
 rc=0
 kubectl exec -n "$excluded_ns" "$excluded_pod" -- \
