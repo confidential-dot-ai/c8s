@@ -75,8 +75,8 @@ allowlist:
     interval: "30s"
     timeout: "30s"
     # The BAKED attestation-api (attest/attest-gpu profile, host service on
-    # :8400) — not the c8s chart's NodePort. The plugin runs in the host
-    # netns as a containerd child, so loopback reaches it.
+    # :8400). The plugin runs in the host netns as a containerd child, so
+    # loopback reaches it.
     attestation_api_url: "http://127.0.0.1:8400"
     # Deploy-time values; the installer's post-install config refresh pins
     # them. Empty = accept any RA-TLS-attested CDS measurement (logged).

@@ -33,9 +33,7 @@ import (
 const (
 	defaultUpstream          = "http://127.0.0.1:8400"
 	defaultReadHeaderTimeout = 5 * time.Second
-	// upstreamResponseHeaderTimeout covers the slowest evidence generation
-	// (TDX ConfigFS TSM ~1s, vTPM HCL reports, NRAS collateral fetches on
-	// cache miss).
+	// upstreamResponseHeaderTimeout bounds the slowest evidence generation.
 	upstreamResponseHeaderTimeout = 30 * time.Second
 	healthcheckTimeout            = 3 * time.Second
 )

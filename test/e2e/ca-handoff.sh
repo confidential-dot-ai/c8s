@@ -6,9 +6,12 @@
 # evidence, a real EAR minted by the live CDS, the real measurement gate,
 # and the transfer over the cluster network.
 #
-# Needs: kubectl pointed at a node-as-CVM (non-kata) cluster with the c8s
-# chart installed, cds.handoff.enabled=true, and a deployed cds image that
-# includes the request-handoff subcommand.
+# Needs: kubectl pointed at a node-as-CVM cluster running the chart's
+# attestation-api DaemonSet (gke/aks-style installs) with
+# cds.handoff.enabled=true, and a deployed cds image that includes the
+# request-handoff subcommand. Kata (in-guest endpoint) and cvmMode=node
+# (CDS's URL carries an unexpanded $(HOST_IP) the probe pod cannot resolve)
+# are unsupported.
 #
 # Env:
 #   CDS_NS                 namespace of the cds deployment (default: discover)
