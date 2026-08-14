@@ -41,23 +41,40 @@ import future.keywords.if
 import future.keywords.in
 
 default AddARPNeighborsRequest := true
+
 # Swap never leaves TEE memory.
 default AddSwapRequest := false
+
 default CloseStdinRequest := true
+
 default DestroySandboxRequest := true
+
 default GetDiagnosticDataRequest := true
+
 default GetMetricsRequest := true
+
 default GetOOMEventRequest := true
+
 default GuestDetailsRequest := true
+
 default ListInterfacesRequest := true
+
 default ListRoutesRequest := true
+
 default MemHotplugByProbeRequest := true
+
 default OnlineCPUMemRequest := true
+
 default PauseContainerRequest := true
+
 default PullImageRequest := true
+
 default RemoveContainerRequest := true
+
 default RemoveStaleVirtiofsShareMountsRequest := true
+
 default ReseedRandomDevRequest := true
+
 default ResumeContainerRequest := true
 
 # Load-bearing override. See header comment.
@@ -72,18 +89,29 @@ default SetPolicyRequest := false
 # boundary, so an in-guest shell/stream/file-copy would be a host-readable side
 # channel. Flip one back to `true` only with a one-line note on why it must stay.
 default ExecProcessRequest := false
+
 default ReadStreamRequest := false
+
 default WriteStreamRequest := false
 
 default SignalProcessRequest := true
+
 default StartContainerRequest := true
+
 default StartTracingRequest := true
+
 default StatsContainerRequest := true
+
 default StopTracingRequest := true
+
 default TtyWinResizeRequest := true
+
 default UpdateContainerRequest := true
+
 default UpdateInterfaceRequest := true
+
 default UpdateRoutesRequest := true
+
 default WaitProcessRequest := true
 
 # --- Container rootfs binding ------------------------------------------
