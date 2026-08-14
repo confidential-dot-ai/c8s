@@ -1,7 +1,9 @@
 # Build + publish the c8s confidential node image (TDX-measured RKE2 + NRI +
 # attestation-api + NVIDIA stack in the verity rootfs). confos is the build
 # tree (pinned CONFOS_REF); the trigger, baked commit, and publish live here.
-# Output: ghcr.io/confidential-dot-ai/node-guest-base, tags :rke2-cdi / :rke2-cdi-<sha>
+# Output: ghcr.io/confidential-dot-ai/node-guest-base, one image per TEE:
+# tags :rke2-{tdx,snp}[-cdi] / :rke2-{tdx,snp}[-cdi]-<sha>. The pre-matrix
+# :rke2[-cdi]* tags are frozen (TDX builds up to the rename).
 # (named to match kata-guest-base; pre-flip images stay frozen under c8s-base)
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
@@ -69,7 +71,7 @@ env:
 
 jobs:
   build-and-push:
-    name: Build c8s node image
+    name: Build c8s node image (${{ matrix.platform }})
     # Auto path: Docker succeeded on main (its PR runs don't publish components).
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -80,6 +82,12 @@ jobs:
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      # One image per TEE. fail-fast off: a platform-specific failure must not
+      # cancel the other platform's publish.
+      fail-fast: false
+      matrix:
+        platform: [tdx, snp]
     steps:
       # Layout: ./c8s ./attestation-rs ./confidential-os-builder (sibling repos).
       - name: Checkout c8s
@@ -109,10 +117,12 @@ jobs:
         run: |
           echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base" >> "$GITHUB_ENV"
           if [ "${{ github.event.inputs.dev }}" = "true" ]; then
-            echo "VARIANT=rke2-dev" >> "$GITHUB_ENV"
+            echo "VARIANT=rke2-${{ matrix.platform }}-dev" >> "$GITHUB_ENV"
+            echo "KERNEL_FLAVOR=rke2-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
           else
-            echo "VARIANT=rke2" >> "$GITHUB_ENV"
+            echo "VARIANT=rke2-${{ matrix.platform }}" >> "$GITHUB_ENV"
+            echo "KERNEL_FLAVOR=rke2" >> "$GITHUB_ENV"
             echo "C8S_DEV=0" >> "$GITHUB_ENV"
           fi
 
@@ -152,7 +162,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/kernel
-          key: ${{ runner.os }}-kernel-${{ env.VARIANT }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
+          key: ${{ runner.os }}-kernel-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
 
       - name: Cache base image tools
         uses: actions/cache@v5
@@ -244,7 +254,7 @@ jobs:
           # The build script requires an explicit platform (no default). This
           # workflow publishes the TDX image; the snp variant is built on
           # demand until M3 adds it to CI.
-          C8S_PLATFORM=tdx C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+          C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
