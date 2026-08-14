@@ -153,20 +153,12 @@ jobs:
           attestationApi:
             image:
               tag: "$AATAG"
-            # UN-PIN: keep cvmMode=node (what we actually ship on metal) and make
-            # $(HOST_IP) routing resolve. Our image predates the baked host
-            # attestation-api, but when nriImagePolicy is on the chart already
-            # publishes the AA as a NodePort for exactly this reason ("NodePort used
-            # by host-process components such as nri-image-policy"). Aligning the AA
-            # port with that NodePort makes $(HOST_IP):<port> hit the node's own AA
-            # pod (both traffic policies are Local, so it never leaves the node).
-            # Verified by helm template at HEAD: all 4 consumers (cds, operator, both
-            # tls-lb sidecars) render http://$(HOST_IP):30840, and the Service exposes
-            # port 30840 -> targetPort http -> containerPort 30840.
+            # cvmMode=node (what we ship on metal), but this node image
+            # predates the baked host attestation-api — so the chart's own
+            # DaemonSet + attest-proxy sidecar supplies the node-local
+            # endpoint on its Unix socket, and no $(HOST_IP)/NodePort
+            # alignment is needed.
             cvmMode: node
-            port: 30840
-            service:
-              nodePort: 30840
             teeDevices:
               sevGuest: true
               tdxGuest: false
