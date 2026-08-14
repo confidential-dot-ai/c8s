@@ -112,7 +112,14 @@ jobs:
             exit 1
           fi
 
+      # The cw-guard rule assertions resolve through iptables-translate;
+      # C8S_REQUIRE_IPTABLES_TRANSLATE fails the job if it is missing.
+      - name: Install iptables
+        run: sudo apt-get update && sudo apt-get install -y iptables
+
       - name: Test
+        env:
+          C8S_REQUIRE_IPTABLES_TRANSLATE: "1"
         run: make test
 
       # The advisory mutation job only exercises the 0-mutant path on
