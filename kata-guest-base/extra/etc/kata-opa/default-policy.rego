@@ -289,11 +289,14 @@ sandbox_pull_metadata(pull) if {
 }
 
 # containerd never writes the CRI-O key, so an honest request cannot carry it
-# in the serialised pull metadata either.
+# in the serialised pull metadata either. The key is checked after decoding,
+# the way the guest-pull handler reads it: a text match would miss a
+# JSON-escaped key.
 crio_pull_metadata(pull) if {
 	some opt in pull.driver_options
 	startswith(opt, "image_guest_pull=")
-	contains(opt, "io.kubernetes.cri-o.ContainerType")
+	metadata := json.unmarshal(trim_prefix(opt, "image_guest_pull="))
+	metadata["io.kubernetes.cri-o.ContainerType"]
 }
 
 # --- Sandbox and ephemeral storages ------------------------------------

@@ -210,16 +210,36 @@ test_crio_container_type_marker_denied if {
 }
 
 # The guest-pull handler reads the container type from the serialised pull
-# metadata as well; the CRI-O marker is denied there too.
+# metadata as well; the CRI-O marker is denied there too, plain or
+# JSON-escaped.
 test_crio_marker_in_pull_metadata_denied if {
 	not CreateContainerRequest with input as object.union(workload_input, {"storages": [object.union(
 		workload_input.storages[0],
 		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri-o.ContainerType\":\"sandbox\"}"]},
 	)]})
+	not CreateContainerRequest with input as object.union(workload_input, {"storages": [object.union(
+		workload_input.storages[0],
+		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri-o.\\u0043ontainerType\":\"sandbox\"}"]},
+	)]})
 	not CreateContainerRequest with input as object.union(sandbox_input, {"storages": [object.union(
 		sandbox_input.storages[0],
 		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"sandbox\",\"io.kubernetes.cri-o.ContainerType\":\"sandbox\"}"]},
 	)]})
+}
+
+# The veto reads decoded metadata keys, so an annotation value that merely
+# mentions the key string is not the marker.
+test_crio_key_string_in_annotation_value_allowed if {
+	CreateContainerRequest with input as object.union(workload_input, {
+		"storages": [object.union(
+			workload_input.storages[0],
+			{"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"container\",\"example.com/note\":\"mentions io.kubernetes.cri-o.ContainerType\"}"]},
+		)],
+		"OCI": {"Annotations": object.union(
+			workload_input.OCI.Annotations,
+			{"example.com/note": "mentions io.kubernetes.cri-o.ContainerType"},
+		)},
+	})
 }
 
 # The two type markers the policy conjoins must agree with each other.
