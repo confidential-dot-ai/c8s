@@ -48,11 +48,9 @@ tls-san:
 
 profile: cis
 pod-security-admission-config-file: /etc/rancher/rke2/psa-config.yaml
-# Self-label as a TDX confidential node so `c8s install --hardware-platform tdx`
-# finds a target without a manual `kubectl label`. This image is TDX-only
-# (RTMR[3] operator binding, TDX quotes); the label is always correct here.
-node-label:
-  - confidential.ai/tdx=true
+# The platform self-label (for `c8s install --hardware-platform`) is
+# rendered by mkosi.sync into a config.yaml.d drop-in — this base file is
+# platform-neutral.
 kubelet-arg:
   - max-pods=200
 kube-apiserver-arg:

@@ -27,15 +27,15 @@
 #   - pull.url must be https, and attestation_api_url is then required.
 #   - empty cds_measurements = accept any RA-TLS-attested CDS (warns).
 
-# The CPU TEE this image boots on. bin/build-c8s composes the c8s profile with
-# `--platform tdx`, so this image is TDX-only and the value is fixed.
+# The CPU TEE this image boots on — rendered from the build's required
+# C8S_PLATFORM (no default; the sync hook refuses to render without it).
 #
 # It types the RA-TLS identity the admission inventory serves to CDS, and CDS
 # refuses a peer whose type disagrees with the evidence envelope the
 # attestation-api returns. The plugin defaults this to snp for backward
 # compatibility, so omitting it here denies every sandbox token on the node,
 # which denies every adopted workload a certificate.
-platform: "tdx"
+platform: "@PLATFORM@"
 
 plugin:
   health_addr: "unix:///var/run/nri-image-policy/health.sock"
