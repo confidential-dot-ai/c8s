@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,16 +103,18 @@ func TestLBTranscriptHashValidatesShape(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string
 		nonce, serving, leaf, ca []byte
+		wantErr                  string
 	}{
-		{name: "nonce short", nonce: make([]byte, 16), serving: []byte{1}, leaf: []byte{2}, ca: []byte{3}},
-		{name: "nonce long", nonce: make([]byte, 33), serving: []byte{1}, leaf: []byte{2}, ca: []byte{3}},
-		{name: "serving leaf empty", nonce: nonce, leaf: []byte{2}, ca: []byte{3}},
-		{name: "mesh leaf empty", nonce: nonce, serving: []byte{1}, ca: []byte{3}},
-		{name: "ca empty", nonce: nonce, serving: []byte{1}, leaf: []byte{2}},
+		{name: "nonce short", nonce: make([]byte, 16), serving: []byte{1}, leaf: []byte{2}, ca: []byte{3}, wantErr: "lb transcript nonce must be 32 bytes, got 16"},
+		{name: "nonce long", nonce: make([]byte, 33), serving: []byte{1}, leaf: []byte{2}, ca: []byte{3}, wantErr: "lb transcript nonce must be 32 bytes, got 33"},
+		{name: "serving leaf empty", nonce: nonce, leaf: []byte{2}, ca: []byte{3}, wantErr: "lb transcript requires serving leaf, mesh leaf, and CA certificates"},
+		{name: "mesh leaf empty", nonce: nonce, serving: []byte{1}, ca: []byte{3}, wantErr: "lb transcript requires serving leaf, mesh leaf, and CA certificates"},
+		{name: "ca empty", nonce: nonce, serving: []byte{1}, leaf: []byte{2}, wantErr: "lb transcript requires serving leaf, mesh leaf, and CA certificates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := LBTranscriptHash(tc.nonce, tc.serving, tc.leaf, tc.ca); err == nil {
-				t.Fatal("invalid transcript input accepted")
+			_, err := LBTranscriptHash(tc.nonce, tc.serving, tc.leaf, tc.ca)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -162,21 +165,23 @@ func TestLBTranscriptGoldenVectors(t *testing.T) {
 func TestIdentityTranscriptHashValidatesShape(t *testing.T) {
 	valid := PublicKey{X25519: make([]byte, X25519PubBytes), MLKEM768: make([]byte, MLKEM768EKBytes)}
 	for _, tc := range []struct {
-		name  string
-		pub   PublicKey
-		nonce []byte
-		leaf  []byte
-		ca    []byte
+		name    string
+		pub     PublicKey
+		nonce   []byte
+		leaf    []byte
+		ca      []byte
+		wantErr string
 	}{
-		{name: "x25519", pub: PublicKey{X25519: make([]byte, 1), MLKEM768: valid.MLKEM768}, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}, ca: []byte{2}},
-		{name: "mlkem", pub: PublicKey{X25519: valid.X25519, MLKEM768: make([]byte, 1)}, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}, ca: []byte{2}},
-		{name: "nonce", pub: valid, nonce: make([]byte, 16), leaf: []byte{1}, ca: []byte{2}},
-		{name: "leaf", pub: valid, nonce: make([]byte, identityNonceBytes), ca: []byte{2}},
-		{name: "ca", pub: valid, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}},
+		{name: "x25519", pub: PublicKey{X25519: make([]byte, 1), MLKEM768: valid.MLKEM768}, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}, ca: []byte{2}, wantErr: "identity transcript X25519 key must be 32 bytes, got 1"},
+		{name: "mlkem", pub: PublicKey{X25519: valid.X25519, MLKEM768: make([]byte, 1)}, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}, ca: []byte{2}, wantErr: "identity transcript ML-KEM key must be 1184 bytes, got 1"},
+		{name: "nonce", pub: valid, nonce: make([]byte, 16), leaf: []byte{1}, ca: []byte{2}, wantErr: "identity transcript nonce must be 32 bytes, got 16"},
+		{name: "leaf", pub: valid, nonce: make([]byte, identityNonceBytes), ca: []byte{2}, wantErr: "identity transcript requires leaf and CA certificates"},
+		{name: "ca", pub: valid, nonce: make([]byte, identityNonceBytes), leaf: []byte{1}, wantErr: "identity transcript requires leaf and CA certificates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := IdentityTranscriptHash(tc.pub, tc.nonce, tc.leaf, tc.ca); err == nil {
-				t.Fatal("invalid transcript input accepted")
+			_, err := IdentityTranscriptHash(tc.pub, tc.nonce, tc.leaf, tc.ca)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}

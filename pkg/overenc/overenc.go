@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -32,6 +33,19 @@ const (
 	MLKEM768EKBytes = 1184
 	// MLKEM768CTBytes is the ML-KEM-768 ciphertext length.
 	MLKEM768CTBytes = 1088
+)
+
+// Sentinel errors for Channel.Open's rejection paths, matchable via [errors.Is].
+var (
+	// ErrInvalidIV: the record's IV is not the AES-GCM nonce size.
+	ErrInvalidIV = fmt.Errorf("overenc: IV must be %d bytes", ivBytes)
+	// ErrAuthenticationFailed: the record failed AEAD authentication (wrong
+	// key, tampered ciphertext, or wrong AAD).
+	ErrAuthenticationFailed = errors.New("overenc: authentication failed")
+	// ErrReplayedRecord: this channel already opened a record with this IV.
+	ErrReplayedRecord = errors.New("overenc: replayed record rejected")
+	// ErrRecordLimit: the anti-replay set is full; re-establish the session.
+	ErrRecordLimit = errors.New("overenc: channel record limit reached; re-establish the session")
 )
 
 // PublicKey is the LB's per-session hybrid public key, published in the
@@ -153,11 +167,17 @@ func clientAgree(pub PublicKey, salt []byte) (*Channel, Handshake, error) {
 	return ch, Handshake{ClientX25519: clientPriv.PublicKey().Bytes(), MLKEMCiphertext: ct}, nil
 }
 
-func deriveChannel(mlkemSS, x25519SS, salt []byte) (*Channel, error) {
+// deriveKey is the canonical key schedule pinned by TestChannelKeyGoldenVector:
+// HKDF-SHA256, ikm = mlkemSS || x25519SS, salt = identity transcript hash.
+func deriveKey(mlkemSS, x25519SS, salt []byte) ([]byte, error) {
 	ikm := make([]byte, 0, len(mlkemSS)+len(x25519SS))
 	ikm = append(ikm, mlkemSS...)
 	ikm = append(ikm, x25519SS...)
-	key, err := hkdf.Key(sha256.New, ikm, salt, hkdfInfo, 32)
+	return hkdf.Key(sha256.New, ikm, salt, hkdfInfo, 32)
+}
+
+func deriveChannel(mlkemSS, x25519SS, salt []byte) (*Channel, error) {
+	key, err := deriveKey(mlkemSS, x25519SS, salt)
 	if err != nil {
 		return nil, fmt.Errorf("overenc: HKDF: %w", err)
 	}
@@ -221,11 +241,11 @@ func (c *Channel) Seal(plaintext, aad []byte) (Record, error) {
 // channel has already opened (exact-record replay).
 func (c *Channel) Open(rec Record, aad []byte) ([]byte, error) {
 	if len(rec.IV) != ivBytes {
-		return nil, fmt.Errorf("overenc: IV must be %d bytes", ivBytes)
+		return nil, fmt.Errorf("%w, got %d", ErrInvalidIV, len(rec.IV))
 	}
 	pt, err := c.aead.Open(nil, rec.IV, rec.CT, aad)
 	if err != nil {
-		return nil, fmt.Errorf("overenc: authentication failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrAuthenticationFailed, err)
 	}
 	// Only authenticated records reach here, so a forged record cannot poison
 	// the set, and a genuine record's IV is unique per Seal — a repeat means the
@@ -237,10 +257,10 @@ func (c *Channel) Open(rec Record, aad []byte) ([]byte, error) {
 		c.seen = make(map[string]struct{})
 	}
 	if _, dup := c.seen[key]; dup {
-		return nil, fmt.Errorf("overenc: replayed record rejected")
+		return nil, ErrReplayedRecord
 	}
 	if len(c.seen) >= maxTrackedNonces {
-		return nil, fmt.Errorf("overenc: channel record limit reached; re-establish the session")
+		return nil, ErrRecordLimit
 	}
 	c.seen[key] = struct{}{}
 	return pt, nil
