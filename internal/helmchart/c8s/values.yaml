@@ -1381,11 +1381,14 @@ tlsLb:
     type: ClusterIP
     port: 443
     # -- externalTrafficPolicy for LoadBalancer/NodePort Services. Empty picks
-    # Local while the built-in /allowlist route renders (its limiters key on
-    # nginx's public peer address, which Cluster would SNAT away) and Cluster
-    # otherwise. Local delivers traffic only through nodes running the tls-lb
-    # pod; set Cluster explicitly if your LB cannot health-check nodes, at the
-    # cost of per-client limiting collapsing onto node IPs.
+    # Local while the built-in /allowlist route or the attestation sidecar
+    # renders (their limiters key on nginx's public peer address, which Cluster
+    # would SNAT away) and Cluster otherwise. Local delivers traffic only
+    # through nodes running the tls-lb pod; set Cluster explicitly if your LB
+    # cannot health-check nodes, and every client behind a node then shares one
+    # budget and one per-client bound: 512 concurrent attestation sessions for
+    # that whole node, past which any one client's traffic refuses new sessions
+    # for every other client behind it.
     externalTrafficPolicy: ""
     # -- Optional annotations on the Service. Use the provider's LB annotation to
     # pin a static IP (e.g. networking.gke.io/load-balancer-ip-addresses on GKE,

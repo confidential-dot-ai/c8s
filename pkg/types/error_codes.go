@@ -18,6 +18,9 @@ const (
 	ErrorCodeInternal                  = "internal"
 	ErrorCodeAttestationUnavailable    = "attestation_unavailable"
 	ErrorCodeBindingUnavailable        = "binding_unavailable"
+	// ErrorCodeTooManyRequests: the caller holds as many sessions as one
+	// client may. Retrying once the sessions it holds expire succeeds.
+	ErrorCodeTooManyRequests = "too_many_requests"
 	// ErrorCodeUnsupportedFrontDoor: attest-lb was requested on a WebPKI-secret
 	// front door, whose host-visible serving key cannot support transport
 	// binding; that deployment shape is attest-pq-only.

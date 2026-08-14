@@ -687,9 +687,20 @@ allowlist fetches — stays bounded; CORS preflights are exempt. If a flood
 saturates the front-door buckets, signed writes still work over a direct CDS
 URL or port-forward, which CDS accounts under the caller's own source IP.
 LoadBalancer and NodePort Services default to `externalTrafficPolicy: Local`
-while this route renders so nginx receives the public source address the
-per-client keys need; `tlsLb.service.externalTrafficPolicy` overrides (Local
-delivers traffic only through nodes that run the tls-lb pod).
+while this route or the attestation sidecar (`tlsLb.attest.enabled`) renders,
+so nginx receives the public source address their per-client keys need;
+`tlsLb.service.externalTrafficPolicy` overrides (Local delivers traffic only
+through nodes that run the tls-lb pod).
+
+The attestation sidecar bounds what one client may hold as well as how fast it
+may ask: 512 concurrent sessions and 512 handshakes in flight per client
+address (an IPv6 client is one /64), inside pools of 8192 each. A pool that is
+full gives up an entry only from a client above the share the pool divides
+between its holders and the caller, and never below 8 entries, so a client
+holding a handful is not drained by one holding thousands. Once every holder is
+down to that floor — which takes 1024 client addresses holding sessions — a new
+session is refused with 503 until one expires; established sessions are never
+taken to admit a new one.
 
 The proxy preserves the request method, original URI and query, body, and
 `Authorization` header. Reads remain unauthenticated at CDS. Writes still

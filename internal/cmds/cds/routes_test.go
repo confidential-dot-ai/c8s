@@ -3,6 +3,8 @@ package cds
 import (
 	"bytes"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/earsigner"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"golang.org/x/time/rate"
 )
 
@@ -45,6 +48,7 @@ func newStubRouter(t *testing.T) http.Handler {
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
+		ChallengeLimiter: newTestRateLimiter(t),
 		MaxRequestSize:   65536,
 	}
 	return newRouter(deps)
@@ -69,6 +73,7 @@ func TestRouter_RateLimitsAttestationEndpoints(t *testing.T) {
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
+		ChallengeLimiter: newTestRateLimiter(t),
 		MaxRequestSize:   65536,
 	}
 	r := newRouter(deps)
@@ -107,6 +112,7 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      rl,
+		ChallengeLimiter: newTestRateLimiter(t),
 		MaxRequestSize:   65536,
 	}
 	r := newRouter(deps)
@@ -123,6 +129,80 @@ func TestRouter_RateLimitsAllowlistWrites(t *testing.T) {
 	}
 	if got := do(); got != http.StatusTooManyRequests {
 		t.Fatalf("second request: got %d, want 429", got)
+	}
+}
+
+// TestRouter_RateLimitsAuthenticate pins the challenge endpoint behind the
+// per-source limiter: minting a challenge costs a stored nonce, and no caller
+// is authenticated at that point. Its budget is its own, so spending it leaves
+// the /attest that redeems the challenge servable.
+func TestRouter_RateLimitsAuthenticate(t *testing.T) {
+	keyPEM, _ := earsigner.Generate()
+	earIss, _ := ear.NewIssuer(keyPEM, "cds", time.Hour)
+	store, _ := allowlist.OpenInMemory()
+	t.Cleanup(func() { _ = store.Close() })
+	ca, _ := issuer.NewCA("test ca", time.Hour)
+	cs := attestation.NewChallengeStore(time.Minute)
+	// Burst of 1 with a refill too slow to reach, so the assertion is on the
+	// budget rather than on how fast the test runs. The challenge route has a
+	// limiter of its own, as it does in the shipped wiring.
+	rl, err := issuer.NewIPRateLimiter(rate.Limit(0.001), 1, 100)
+	if err != nil {
+		t.Fatalf("rate limiter: %v", err)
+	}
+	// A single-entry map, so a second source churns the first out of it — and
+	// the routes on the other limiter must not notice.
+	challengeRL, err := issuer.NewIPRateLimiter(rate.Limit(0.001), 1, 1)
+	if err != nil {
+		t.Fatalf("challenge rate limiter: %v", err)
+	}
+	deps := dependencies{
+		AttestHandler:    AttestHandler{Challenges: &cs, CA: ca, CertTTL: time.Hour},
+		AllowlistHandler: allowlist.Handler{Store: &store, WriteAuthorizer: func(*http.Request, []byte) error { return nil }},
+		ReadyFn:          func() bool { return true },
+		EarIssuer:        earIss,
+		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
+		RateLimiter:      rl,
+		ChallengeLimiter: challengeRL,
+		MaxRequestSize:   65536,
+	}
+	r := newRouter(deps)
+
+	post := func(path, addr string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{}`)))
+		req.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	first := post("/authenticate", "10.0.0.3:1234")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first /authenticate: got %d, want 200", first.Code)
+	}
+	var issued types.ChallengeResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &issued); err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	if raw, err := base64.StdEncoding.DecodeString(issued.Challenge); err != nil || len(raw) != 32 {
+		t.Fatalf("challenge %q decodes to %d bytes (err %v), want 32", issued.Challenge, len(raw), err)
+	}
+	if got := post("/authenticate", "10.0.0.3:1234").Code; got != http.StatusTooManyRequests {
+		t.Fatalf("second /authenticate from the same source: got %d, want 429", got)
+	}
+	// The same source's attestation budget is untouched by that flood: a
+	// challenge is only worth anything to a caller that can still redeem it.
+	if got := post("/attest", "10.0.0.3:1234").Code; got == http.StatusTooManyRequests {
+		t.Fatal("/attest was spent by the same source's challenge requests")
+	}
+	// A second source churns the one-entry challenge map, taking the first
+	// source's bucket with it. What must not follow is that source getting a
+	// fresh attestation bucket: the two maps are separate, so its spent
+	// /attest budget is still spent.
+	if got := post("/authenticate", "10.0.0.4:1234").Code; got != http.StatusOK {
+		t.Fatalf("/authenticate from a second source: got %d, want 200", got)
+	}
+	if got := post("/attest", "10.0.0.3:1234").Code; got != http.StatusTooManyRequests {
+		t.Fatalf("/attest after the challenge map churned: got %d, want the source's spent budget", got)
 	}
 }
 
@@ -201,6 +281,7 @@ func TestRouter_AttestRejectsOversizedBody(t *testing.T) {
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
+		ChallengeLimiter: newTestRateLimiter(t),
 		MaxRequestSize:   16,
 	}
 	r := newRouter(deps)
@@ -435,7 +516,7 @@ func TestNewRouter_PanicsOnZeroMaxRequestSize(t *testing.T) {
 			t.Fatal("expected panic for zero MaxRequestSize")
 		}
 	}()
-	newRouter(dependencies{RateLimiter: newTestRateLimiter(t), MaxRequestSize: 0})
+	newRouter(dependencies{RateLimiter: newTestRateLimiter(t), ChallengeLimiter: newTestRateLimiter(t), MaxRequestSize: 0})
 }
 
 func TestNewRouter_PanicsOnNilRateLimiter(t *testing.T) {
@@ -445,6 +526,30 @@ func TestNewRouter_PanicsOnNilRateLimiter(t *testing.T) {
 		}
 	}()
 	newRouter(dependencies{RateLimiter: nil, MaxRequestSize: 1})
+}
+
+// The challenge route meters in a map of its own, so a wiring that forgets it
+// must not fall back to sharing another route's.
+func TestNewRouter_PanicsOnNilChallengeLimiter(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for nil ChallengeLimiter")
+		}
+	}()
+	newRouter(dependencies{RateLimiter: newTestRateLimiter(t), ChallengeLimiter: nil, MaxRequestSize: 1})
+}
+
+// Sharing one limiter between the two routes is the regression the challenge
+// map exists to prevent, and it is a wiring mistake no route-level test would
+// notice, so the router refuses to be built that way.
+func TestNewRouter_PanicsOnASharedChallengeLimiter(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for a ChallengeLimiter shared with the attestation limiter")
+		}
+	}()
+	shared := newTestRateLimiter(t)
+	newRouter(dependencies{RateLimiter: shared, ChallengeLimiter: shared, MaxRequestSize: 1})
 }
 
 // When a HandoffHandler is wired, /handoff is mounted and reachable (a malformed
@@ -516,6 +621,7 @@ func newStubRouterWithHandoff(t *testing.T) http.Handler {
 		EarIssuer:        earIss,
 		CACertPEM:        certutil.EncodeCertPEM(ca.Cert.Raw),
 		RateLimiter:      newTestRateLimiter(t),
+		ChallengeLimiter: newTestRateLimiter(t),
 		MaxRequestSize:   65536,
 	}
 	return newRouter(deps)

@@ -27,6 +27,7 @@ type dependencies struct {
 	CACertPEM         []byte
 	OperatorKeysPEM   []byte                // pinned operator public keys; empty = /operator-keys 404s
 	RateLimiter       *issuer.IPRateLimiter // per-source-IP limiter for attestation endpoints
+	ChallengeLimiter  *issuer.IPRateLimiter // /authenticate's own, so it cannot spend the map above
 	MaxRequestSize    int64                 // applied to write endpoints; must be > 0
 	SecretsHandler    *secrets.Handler      // nil leaves /secrets unrouted (--secrets off)
 	SecretsChallenges *attestation.ChallengeStore
@@ -41,6 +42,12 @@ func newRouter(deps dependencies) http.Handler {
 	if deps.RateLimiter == nil {
 		panic("cds: dependencies.RateLimiter must be set")
 	}
+	if deps.ChallengeLimiter == nil {
+		panic("cds: dependencies.ChallengeLimiter must be set")
+	}
+	if deps.ChallengeLimiter == deps.RateLimiter {
+		panic("cds: dependencies.ChallengeLimiter must be a limiter of its own, not the attestation one")
+	}
 	r := chi.NewRouter()
 	r.Use(server.RequestLogger)
 
@@ -51,7 +58,7 @@ func newRouter(deps dependencies) http.Handler {
 	r.Get("/.well-known/jwks.json", server.HandleJWKS(deps.EarIssuer, deps.JWKSFunc))
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
-	r.Post("/authenticate", attestation.HandleAuthenticate(deps.AttestHandler.Challenges))
+	r.Method(http.MethodPost, "/authenticate", deps.challengeProtected(attestation.HandleAuthenticate(deps.AttestHandler.Challenges)))
 	r.Method(http.MethodPost, "/attest", deps.protected(http.HandlerFunc(deps.AttestHandler.HandleAttest)))
 	r.Method(http.MethodPost, "/attest-key", deps.protected(http.HandlerFunc(deps.AttestKeyHandler.HandleAttestKey)))
 	r.Method(http.MethodPost, "/sign-csr", deps.protected(http.HandlerFunc(deps.SignCSRHandler.HandleSignCSR)))
@@ -97,11 +104,22 @@ func newRouter(deps dependencies) http.Handler {
 const allowlistWriteBodyCap int64 = 1 << 20
 
 // protected wraps a write handler with per-source-IP rate limiting and the
-// request-body cap. Used for the endpoints an unauthenticated caller can hit
-// before any signature check: attestation issuance (each junk write costs up to
-// one ECDSA verify per pinned key).
+// request-body cap. Its routes verify evidence or a token before they answer,
+// so a junk write costs up to one ECDSA verify per pinned key.
 func (deps dependencies) protected(next http.Handler) http.Handler {
 	return issuer.RateLimitMiddleware(deps.RateLimiter, capBody(deps.MaxRequestSize, next))
+}
+
+// challengeProtected meters /authenticate in a limiter of its own, so a
+// challenge and the /attest that redeems it are charged separately and the
+// challenge keys do not spend the map the other routes are metered in.
+//
+// Its key is the source address, which for a pod is the node's: pods reach
+// CDS through a NodePort and the host-network mesh proxy. One pod can spend
+// the budget its co-tenants share — as it already can on /attest, which the
+// challenge is only useful with — and pods on a node share a trust domain.
+func (deps dependencies) challengeProtected(next http.Handler) http.Handler {
+	return issuer.RateLimitMiddleware(deps.ChallengeLimiter, capBody(deps.MaxRequestSize, next))
 }
 
 // allowlistWrite is protected with the larger allowlist body cap. Its callers

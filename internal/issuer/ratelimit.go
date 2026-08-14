@@ -30,10 +30,16 @@ type ipLimiterEntry struct {
 	lastSeen time.Time
 }
 
-// IPRateLimiter implements keyed rate limiting with bounded memory. Entries
-// beyond MaxEntries are evicted LRU in O(n); idle entries are evicted by
-// EvictionLoop at IdleTimeout. RateLimitMiddleware keys on the source address;
-// RateLimitBy keys on whatever identifies the caller.
+// IPRateLimiter implements keyed rate limiting with bounded memory. It holds
+// at most MaxEntries buckets, evicting the least recently used to make room,
+// and EvictionLoop reclaims buckets idle longer than IdleTimeout.
+// RateLimitMiddleware keys on the source address; RateLimitBy keys on whatever
+// identifies the caller.
+//
+// MaxEntries is how many callers are metered at once. Past it a caller is
+// still served, on a bucket taken from the quietest one — so a caller that
+// varies its key faster than the map holds keys meters itself out of the map.
+// Issue #105 owns that, and a saturation policy for it.
 type IPRateLimiter struct {
 	mu         sync.Mutex
 	limiters   map[string]*ipLimiterEntry
@@ -85,6 +91,13 @@ func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
 	return lim
 }
 
+// Len reports how many callers the limiter is metering, for metrics and tests.
+func (rl *IPRateLimiter) Len() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return len(rl.limiters)
+}
+
 // EvictionLoop removes rate limiter entries idle longer than idleTimeout.
 // It blocks until ctx is cancelled.
 func (rl *IPRateLimiter) EvictionLoop(ctx context.Context, interval, idleTimeout time.Duration) {
@@ -125,13 +138,11 @@ func RateLimitMiddleware(rl *IPRateLimiter, next http.Handler) http.Handler {
 	return RateLimitBy(rl, nil, next)
 }
 
-// RateLimitBy wraps next, charging each request to the bucket key names.
-//
-// Use it where the source address is not the caller: pods reach CDS through a
-// NodePort and the host-network mesh proxy, so every pod on a node presents the
-// same address and one of them could exhaust the bucket every other one shares.
-// A request with no identity to key on still falls back to the address, so
-// nothing escapes limiting by declining to identify itself.
+// RateLimitBy wraps next, charging each request to the bucket key names. Use
+// it where the source address is not the caller — an attested identity, a
+// session, or the address a front door recorded. A request with no identity to
+// key on falls back to the source address, so nothing escapes limiting by
+// declining to identify itself.
 func RateLimitBy(rl *IPRateLimiter, key KeyFunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket := ""
@@ -150,11 +161,34 @@ func RateLimitBy(rl *IPRateLimiter, key KeyFunc, next http.Handler) http.Handler
 	})
 }
 
-// SourceAddrKey charges a request to the address it arrived from.
+// SourceAddrKey charges a request to the exact address it arrived from. Its
+// callers are reached by nodes, pods and operators, whose addresses are
+// assigned rather than chosen, and which sit densely inside one subnet: a
+// bucket per address is what keeps one node's traffic off another's.
 func SourceAddrKey(r *http.Request) string {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if ip == "" {
 		ip = r.RemoteAddr
 	}
 	return "addr:" + ip
+}
+
+// clientPrefixBitsV6 is the IPv6 prefix a public client is charged to. An
+// ordinary subscriber is delegated a /64, so charging a full address would let
+// one of them name 2^64 buckets.
+const clientPrefixBitsV6 = 64
+
+// ClientPrefix names the address block a limit on a public client is charged
+// to: one IPv4 address, or one IPv6 /64. Use it where the caller is on the
+// internet and picks its own address within a prefix. An address it cannot
+// parse is charged verbatim, so nothing escapes a limit by being unparseable.
+func ClientPrefix(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return addr
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return fmt.Sprintf("%s/%d", ip.Mask(net.CIDRMask(clientPrefixBitsV6, 8*net.IPv6len)), clientPrefixBitsV6)
 }

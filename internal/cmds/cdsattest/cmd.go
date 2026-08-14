@@ -13,7 +13,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -149,13 +148,9 @@ func run(cfg config) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go cmdsutil.ShutdownOnDone(ctx, httpSrv, 5*time.Second)
 
 	logger.Info("LB browser-facing endpoints listening", "addr", addr)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
+	return srv.Serve(ctx, httpSrv)
 }
 
 func newLogger(level string) *slog.Logger {
