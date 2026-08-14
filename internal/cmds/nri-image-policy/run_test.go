@@ -25,16 +25,16 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 )
 
-// deadResolver returns a real containerd resolver whose socket nobody listens
-// on: construction is lazy, every RPC fails fast with a connection error.
-func deadResolver(t *testing.T) *ctrdresolver.Resolver {
+// bindDeadResolver points the plugin's containerd operations at a socket nobody
+// listens on: construction is lazy, every RPC fails fast with a connection error.
+func bindDeadResolver(t *testing.T, p *plugin) {
 	t.Helper()
 	r, err := ctrdresolver.NewResolver(filepath.Join(t.TempDir(), "ctr.sock"), "k8s.io")
 	if err != nil {
 		t.Fatalf("NewResolver: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Close() })
-	return r
+	p.resolve, p.stopContainer = r.Resolve, r.StopContainer
 }
 
 // --- plugin.Run via a fake stub ---
@@ -115,7 +115,7 @@ func TestConfigure_InventoryAddsRemoveContainerMask(t *testing.T) {
 func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.resolver = deadResolver(t)
+	bindDeadResolver(t, p)
 
 	// The containerd RPC blocks until the dial deadline; bound it so the
 	// failure path is exercised without a multi-second wait.
@@ -133,7 +133,7 @@ func TestCheckImage_ResolveFails_Denies(t *testing.T) {
 func TestRecordForInventory_ResolveFails_RecordsEmptyDigest(t *testing.T) {
 	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}},
 		&allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.resolver = deadResolver(t)
+	bindDeadResolver(t, p)
 	p.inventory = newAdmissionInventory(t.TempDir())
 
 	ctr := &api.Container{Id: "ctr-id", PodSandboxId: "sandbox-1", Name: "app"}
@@ -440,7 +440,7 @@ func TestCheckExisting_CountsFailedKill(t *testing.T) {
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy:    policyConfig{Mode: ModeFailClosed, EnforceExisting: true},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-	p.resolver = deadResolver(t)
+	bindDeadResolver(t, p)
 	var buf bytes.Buffer
 	p.logger = slog.New(slog.NewJSONHandler(&buf, nil))
 	p.SetReady()

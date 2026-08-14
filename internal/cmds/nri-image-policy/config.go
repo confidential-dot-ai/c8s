@@ -88,7 +88,7 @@ type policyConfig struct {
 	Mode                  string      `yaml:"mode"`                    // fail-closed, audit
 	EnforceExisting       bool        `yaml:"enforce_existing"`        // kill non-allowlisted containers on startup
 	DenyMissingAnnotation bool        `yaml:"deny_missing_annotation"` // deny containers without image annotation
-	ExemptNamespaces      []string    `yaml:"exempt_namespaces"`
+	ExemptNamespaces      []string    `yaml:"exempt_namespaces"`       // admit a denied container; applied after the checks
 	LabelRules            []labelRule `yaml:"label_rules"`
 }
 
@@ -238,10 +238,8 @@ func (c *config) Validate() error {
 	if c.Policy.Mode != ModeFailClosed && c.Policy.Mode != ModeAudit {
 		return fmt.Errorf("policy.mode must be '%s' or '%s'", ModeFailClosed, ModeAudit)
 	}
-	// Both inventory record sites sit under AllowlistEnabled, so without one the
-	// inventory answers every get-cert fetch empty-handed, forever.
 	if c.WorkloadClaims.SocketDir != "" && !c.AllowlistEnabled() {
-		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the inventory only records digest-checked containers")
+		return fmt.Errorf("workload_claims.socket_dir requires allowlist.always_allow or allowlist.pull: the inventory reports digests for CDS to match against the allowlist")
 	}
 	return validateLabelRules(c.Policy.LabelRules)
 }

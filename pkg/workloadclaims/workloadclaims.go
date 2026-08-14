@@ -151,7 +151,7 @@ type SandboxTokenRequest struct {
 // Digests is the deduplicated digest set cert issuance gates on. Containers
 // carries each container's effective argv, deduplicated by SandboxContainer.Key
 // (the whole (digest, argv) pair, not the digest alone), so a consumer can hold
-// a sandbox to the same pair admission evaluated.
+// a sandbox to the pair each container actually ran with.
 //
 // Digests is [] (never null) for a known sandbox with no containers. Containers
 // is absent on an inventory that predates it, which consumers must treat as
@@ -213,7 +213,8 @@ type SandboxResolver interface {
 	SandboxForPeer(peer Peer) (string, error)
 	// DigestsForSandbox returns every container ever admitted in the named
 	// sandbox — deduplicated digests for issuance, and the per-container
-	// (digest, argv) detail for secret release. known=false means no such
+	// (digest, argv) detail for secret release. Admitted means the container
+	// was let run, not that it passed a check. known=false means no such
 	// sandbox (a 404 on the wire); a known sandbox with no containers returns
 	// empty slices.
 	DigestsForSandbox(sandboxID string) (digests []string, containers []SandboxContainer, known bool, err error)
