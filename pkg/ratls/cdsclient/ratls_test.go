@@ -1,6 +1,7 @@
 package cdsclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,14 +9,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
+	"errors"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
@@ -51,11 +56,8 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 	if err == nil {
 		t.Fatal("Provision succeeded against unattested CDS")
 	}
-	// The exact error wording depends on which side of the handshake fails
-	// first, but it must be a TLS-layer failure (not e.g. a parse error from
-	// a successful HTTP exchange).
-	if !strings.Contains(err.Error(), "tls") && !strings.Contains(err.Error(), "ratls") && !strings.Contains(err.Error(), "x509") {
-		t.Fatalf("Provision error = %v, want TLS/RA-TLS handshake failure", err)
+	if !errors.Is(err, ratls.ErrNotAttested) {
+		t.Fatalf("Provision error = %v, want ErrNotAttested", err)
 	}
 }
 
@@ -112,5 +114,56 @@ func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
 	}
 	if _, _, err := p.Provision(context.Background()); err == nil {
 		t.Fatal("Provision accepted CDS cert without an RA-TLS attestation extension")
+	}
+}
+
+// TestProviderRATLSRejectsCDSWithUnpinnedMeasurement proves the measurement
+// pin closes the bootstrap-channel MITM gap: a real RA-TLS listener whose
+// evidence verifies but whose launch digest is not in CDSMeasurements must
+// fail the handshake with ErrPolicyViolation before any CDS request flows.
+func TestProviderRATLSRejectsCDSWithUnpinnedMeasurement(t *testing.T) {
+	as := testattest.New(t)
+	served := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
+	as.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(served)))
+
+	serverTLS, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		Platform:   "sev-snp",
+		AttestFunc: attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), as.URL),
+		CertTTL:    time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reached atomic.Int64
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go http.Serve(tls.NewListener(ln, serverTLS), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+	}))
+
+	pinned := bytes.Repeat([]byte{0x99}, ratls.SNPMeasurementSize)
+	p, err := NewProvider(&Config{
+		CDSURL:            "https://" + ln.Addr().String(),
+		AttestationApiURL: as.URL,
+		CDSCAURL:          "http://unused.invalid",
+		NodeIP:            "10.0.0.1",
+		TEEType:           ratls.TEETypeSEVSNP,
+		CDSMeasurements:   [][]byte{pinned},
+		// HTTPClient deliberately nil so NewClient builds the RA-TLS transport.
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = p.Provision(context.Background())
+	if !errors.Is(err, ratls.ErrPolicyViolation) {
+		t.Fatalf("Provision error = %v, want ErrPolicyViolation", err)
+	}
+	if got := reached.Load(); got != 0 {
+		t.Fatalf("CDS handler reached %d time(s); the measurement pin must fail the handshake first", got)
 	}
 }

@@ -128,6 +128,11 @@ func TestRunProxyConfigErrors(t *testing.T) {
 			c.attestationApiURL = "http://127.0.0.1:1"
 			c.measurements = "abcd"
 		}, "invalid measurement length"},
+		{"blank measurement entry", func(c *proxyConfig) {
+			c.nodeIP = "127.0.0.1"
+			c.attestationApiURL = "http://127.0.0.1:1"
+			c.measurements = valid48 + ","
+		}, "invalid measurement length"},
 		{"missing CA cert file", func(c *proxyConfig) {
 			c.nodeIP = "127.0.0.1"
 			c.attestationApiURL = "http://127.0.0.1:1"
@@ -234,8 +239,9 @@ func TestNewKubeClientsetDefaultOutsideCluster(t *testing.T) {
 }
 
 // TestRunProxyFullLifecycle drives runProxy end to end with a fake
-// clientset and local fake CDS / probe / attestation endpoints, then
-// cancels the context and expects a clean shutdown.
+// clientset and local fake CDS / probe endpoints (the attestation-api
+// URL is a dead port), then cancels the context and expects a clean
+// shutdown.
 func TestRunProxyFullLifecycle(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	pod := testPod("web", "default", "10.244.0.7", nodeIP, nil)
@@ -311,6 +317,11 @@ func TestRunProxyFullLifecycle(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
 	}, "health server never came up")
+
+	// --measurements is set: the pinning gauge must read 1.
+	if v := scrapedValue(t, cfg.healthPort, "ratls_mesh_measurement_pinning", nil); v != 1 {
+		t.Errorf("measurement_pinning = %v with --measurements configured, want 1", v)
+	}
 
 	// Let the metric ticker read the sidecar file at least once, then remove
 	// it so the read-after-success warning path runs too.

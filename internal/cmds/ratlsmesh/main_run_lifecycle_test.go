@@ -10,8 +10,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"net"
@@ -24,6 +22,9 @@ import (
 	"time"
 
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 // stdoutCapture redirects os.Stdout into a drained pipe so tests can assert
@@ -75,21 +76,6 @@ func (c *stdoutCapture) String() string { return c.buf.String() }
 
 func (c *stdoutCapture) hasMsg(msg string) bool {
 	return hasMsg(decodeLogRecords(c.String()), msg)
-}
-
-// fakeAttestationServer serves minimal bare-metal SNP evidence so RA-TLS
-// certificate provisioning succeeds without hardware.
-func fakeAttestationServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fakeReport := make([]byte, 1184)
-		json.NewEncoder(w).Encode(map[string]any{
-			"platform": "snp",
-			"evidence": map[string]string{"attestation_report": base64.StdEncoding.EncodeToString(fakeReport)},
-		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 // junkClientCert returns a self-signed cert with no RA-TLS extension: the
@@ -162,7 +148,7 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 	nodeIP := "127.0.0.1"
 	stubKubeClientset(t, k8sfake.NewSimpleClientset(testPod("web", "default", "10.244.0.7", nodeIP, nil)), nil)
 	t.Setenv("NODE_IP", "")
-	attest := fakeAttestationServer(t)
+	attest := testattest.New(t)
 
 	cfg := defaultTestProxyConfig(t)
 	cfg.logLevel = "error"
@@ -226,12 +212,17 @@ func TestRunProxySelfSignedReadiness(t *testing.T) {
 		t.Errorf("cert_mode_configured{cds} = %v in self-signed mode, want 0", v)
 	}
 
-	// A client without RA-TLS evidence must fail peer verification.
-	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.inboundPort), &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true,
-		Certificates:       []tls.Certificate{junkClientCert(t)},
+	// A client without RA-TLS evidence must fail peer verification. The
+	// dialer verifies the mesh server normally; its own junk cert is what
+	// the server must reject.
+	junkClientTLS, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
+		Policy:       &ratls.VerifyPolicy{AttestationApiURL: attest.URL},
+		CertProvider: staticCertProvider{junkClientCert(t)},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.inboundPort), junkClientTLS)
 	if err == nil {
 		// TLS 1.3 may surface the rejection on first read instead of dial.
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))

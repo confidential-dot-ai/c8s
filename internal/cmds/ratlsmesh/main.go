@@ -202,20 +202,11 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy := &ratls.VerifyPolicy{AttestationApiURL: c.attestationApiURL}
-	if c.measurements != "" {
-		for _, h := range strings.Split(c.measurements, ",") {
-			h = strings.TrimSpace(h)
-			b, err := hex.DecodeString(h)
-			if err != nil {
-				return fmt.Errorf("invalid measurement hex %q: %w", h, err)
-			}
-			if len(b) != ratls.SNPMeasurementSize {
-				return fmt.Errorf("invalid measurement length: %q is %d bytes, want %d (SHA-384 measurement must be %d hex characters)",
-					h, len(b), ratls.SNPMeasurementSize, ratls.SNPMeasurementSize*2)
-			}
-			meshPolicy.Measurements = append(meshPolicy.Measurements, b)
-		}
+	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements)
+	if err != nil {
+		return err
+	}
+	if len(meshPolicy.Measurements) > 0 {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
@@ -681,6 +672,30 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 
 		return attestclient.RATLSEvidence(resp)
 	}
+}
+
+// meshVerifyPolicy builds the mesh peer-verification policy: evidence checked
+// by the same-node attestation-api, launch measurements pinned to the
+// --measurements allowlist. Empty measurements leaves the policy unpinned
+// (accept any TEE — development only).
+func meshVerifyPolicy(attestationApiURL, measurements string) (*ratls.VerifyPolicy, error) {
+	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
+	if measurements == "" {
+		return policy, nil
+	}
+	for _, h := range strings.Split(measurements, ",") {
+		h = strings.TrimSpace(h)
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			return nil, fmt.Errorf("invalid measurement hex %q: %w", h, err)
+		}
+		if len(b) != ratls.SNPMeasurementSize {
+			return nil, fmt.Errorf("invalid measurement length: %q is %d bytes, want %d (SHA-384 measurement must be %d hex characters)",
+				h, len(b), ratls.SNPMeasurementSize, ratls.SNPMeasurementSize*2)
+		}
+		policy.Measurements = append(policy.Measurements, b)
+	}
+	return policy, nil
 }
 
 func effectiveCDSCAURL(certMode, cdsURL string) string {
