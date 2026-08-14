@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -20,23 +19,6 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
-
-// inventoryEndpoint is where the sandbox token is redeemed. A package variable
-// only so tests can point it at a socket they control; production always uses
-// the compiled path, which is what stops a control-plane value redirecting the
-// redemption to a rogue inventory (docs/getcert-workload-binding.md, Corner 5).
-// Unexported so that guarantee holds by visibility; tests use
-// SetInventoryEndpointForTest.
-var inventoryEndpoint = workloadclaims.InventoryEndpoint
-
-// SetInventoryEndpointForTest points the redemption endpoint at a socket the
-// test controls, restoring the compiled path on cleanup. Requiring a
-// testing.TB keeps the override out of reach of production code.
-func SetInventoryEndpointForTest(t testing.TB, f func() string) {
-	prev := inventoryEndpoint
-	inventoryEndpoint = f
-	t.Cleanup(func() { inventoryEndpoint = prev })
-}
 
 // Config is the release plumbing every sidecar needs. The webhook renders all
 // of it; each command adds its own fields for what it fetches and where it
@@ -60,13 +42,15 @@ type Config struct {
 	InventoryTimeout time.Duration
 }
 
-// endpoint is the compiled inventory endpoint for this sidecar's shape. The
-// flag selects between two baked values, never an address.
-func (c Config) endpoint() string {
+// Endpoint is the compiled inventory endpoint: where the sandbox token is
+// redeemed. The flag selects between two baked values, never an address, so a
+// control-plane value cannot redirect the redemption to a rogue inventory
+// (docs/getcert-workload-binding.md, Corner 5).
+func (c Config) Endpoint() string {
 	if c.WorkloadClaimsGuest {
 		return workloadclaims.GuestInventoryEndpoint()
 	}
-	return inventoryEndpoint()
+	return workloadclaims.InventoryEndpoint()
 }
 
 // BindFlags registers the flags shared by every sidecar, with get-secret's

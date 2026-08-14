@@ -104,14 +104,14 @@ func fetchAll(ctx context.Context, cfg config, measurements [][]byte) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	return fetchAllWith(ctx, cfg, client, pub)
+	return fetchAllWith(ctx, cfg, client, pub, cfg.Endpoint())
 }
 
 // fetchAllWith is fetchAll once the client and the key it is bound to exist.
-func fetchAllWith(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey) (map[string][]byte, error) {
+func fetchAllWith(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey, endpoint string) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(cfg.Secrets))
 	for _, s := range cfg.Secrets {
-		value, err := fetchOne(ctx, cfg, client, pub, s.Path)
+		value, err := fetchOne(ctx, cfg, client, pub, endpoint, s.Path)
 		if err != nil {
 			return nil, fmt.Errorf("secret %s: %w", s.Path, err)
 		}
@@ -125,8 +125,8 @@ func fetchAllWith(ctx context.Context, cfg config, client *http.Client, pub cryp
 // A workload that starts and finds its path empty is the one that creates it,
 // so 404 means "create". A 409 on that create means another replica won the
 // race, and the value is read back rather than returned by the create.
-func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey, path string) ([]byte, error) {
-	value, status, err := sidecar.Do(ctx, cfg.Config, client, pub, http.MethodGet, path)
+func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey, endpoint, path string) ([]byte, error) {
+	value, status, err := sidecar.Do(ctx, cfg.Config, client, pub, endpoint, http.MethodGet, path)
 	switch {
 	case err != nil && status != http.StatusNotFound:
 		return nil, err
@@ -134,7 +134,7 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 		return value, nil
 	}
 
-	value, status, err = sidecar.Do(ctx, cfg.Config, client, pub, http.MethodPost, path)
+	value, status, err = sidecar.Do(ctx, cfg.Config, client, pub, endpoint, http.MethodPost, path)
 	switch {
 	case status == http.StatusCreated:
 		return value, nil
@@ -142,7 +142,7 @@ func fetchOne(ctx context.Context, cfg config, client *http.Client, pub crypto.P
 		return nil, err
 	}
 
-	value, status, err = sidecar.Do(ctx, cfg.Config, client, pub, http.MethodGet, path)
+	value, status, err = sidecar.Do(ctx, cfg.Config, client, pub, endpoint, http.MethodGet, path)
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("created by another replica but not readable: %w", err)
 	}

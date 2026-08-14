@@ -57,15 +57,15 @@ func NewClient(cfg Config, measurements [][]byte) (*http.Client, crypto.PublicKe
 	}, parsed.PublicKey, nil
 }
 
-// Do performs one store request: a fresh challenge, a sandbox token bound to
-// it and to this pod's leaf key, then the request itself. Both are single-use,
-// so every call takes its own.
-func Do(ctx context.Context, cfg Config, client *http.Client, pub crypto.PublicKey, method, path string) ([]byte, int, error) {
+// Do performs one store request: a fresh challenge, a sandbox token redeemed
+// at endpoint and bound to the challenge and this pod's leaf key, then the
+// request itself. Both are single-use, so every call takes its own.
+func Do(ctx context.Context, cfg Config, client *http.Client, pub crypto.PublicKey, endpoint, method, path string) ([]byte, int, error) {
 	challenge, err := fetchChallenge(ctx, cfg, client)
 	if err != nil {
 		return nil, 0, err
 	}
-	token, err := workloadclaims.FetchSandboxToken(ctx, cfg.endpoint(), cfg.InventoryTimeout, pub, challenge)
+	token, err := workloadclaims.FetchSandboxToken(ctx, endpoint, cfg.InventoryTimeout, pub, challenge)
 	if err != nil {
 		return nil, 0, fmt.Errorf("redeem sandbox token: %w", err)
 	}

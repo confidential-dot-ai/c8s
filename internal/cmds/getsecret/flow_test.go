@@ -34,9 +34,9 @@ func (stubResolver) DigestsForSandbox(string) ([]string, []workloadclaims.Sandbo
 	return nil, nil, false, nil
 }
 
-// startInventory serves the real token route on a unix socket and points the
-// sidecar at it.
-func startInventory(t *testing.T) {
+// startInventory serves the real token route on a unix socket and returns its
+// endpoint.
+func startInventory(t *testing.T) string {
 	t.Helper()
 	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
 	if err != nil {
@@ -51,7 +51,7 @@ func startInventory(t *testing.T) {
 	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	sidecar.SetInventoryEndpointForTest(t, func() string { return "unix://" + sock })
+	return "unix://" + sock
 }
 
 // fakeCDS records what it was asked and answers from a scripted sequence.
@@ -129,11 +129,11 @@ func testKey(t *testing.T) *ecdsa.PublicKey {
 
 // An existing secret is read and returned without a create.
 func TestFetchOneReadsExisting(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db": {{status: http.StatusOK, value: "existing"}},
 	})
-	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/api/db")
+	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/api/db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +148,12 @@ func TestFetchOneReadsExisting(t *testing.T) {
 // A path the store does not hold yet is created by the workload that finds it
 // empty.
 func TestFetchOneCreatesWhenAbsent(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db":  {{status: http.StatusNotFound}},
 		"POST /secrets/api/db": {{status: http.StatusCreated, value: "minted"}},
 	})
-	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/api/db")
+	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/api/db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,12 +169,12 @@ func TestFetchOneCreatesWhenAbsent(t *testing.T) {
 // recovers by reading — otherwise it would hold nothing while its sibling holds
 // the secret.
 func TestFetchOneRereadsAfterLosingCreateRace(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db":  {{status: http.StatusNotFound}, {status: http.StatusOK, value: "winner"}},
 		"POST /secrets/api/db": {{status: http.StatusConflict}},
 	})
-	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/api/db")
+	got, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/api/db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +189,11 @@ func TestFetchOneRereadsAfterLosingCreateRace(t *testing.T) {
 
 // A denial is not a create: only 404 means the path is free.
 func TestFetchOneDoesNotCreateOnDenial(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db": {{status: http.StatusForbidden}},
 	})
-	if _, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/api/db"); err == nil {
+	if _, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/api/db"); err == nil {
 		t.Fatal("a denial was treated as success")
 	}
 	for _, r := range cds.requests {
@@ -206,12 +206,12 @@ func TestFetchOneDoesNotCreateOnDenial(t *testing.T) {
 // Every request takes its own challenge and its own token: both are single-use,
 // so reusing either would be refused by CDS.
 func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db":  {{status: http.StatusNotFound}, {status: http.StatusOK, value: "v"}},
 		"POST /secrets/api/db": {{status: http.StatusConflict}},
 	})
-	if _, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/api/db"); err != nil {
+	if _, err := fetchOne(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/api/db"); err != nil {
 		t.Fatal(err)
 	}
 	if cds.challenges != len(cds.requests) {
@@ -233,7 +233,7 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 // is running — so a denial that later clears must succeed rather than fail the
 // pod.
 func TestFetchWithRetryRecoversOnceReleased(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	cds, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db": {
 			{status: http.StatusForbidden},
@@ -248,7 +248,7 @@ func TestFetchWithRetryRecoversOnceReleased(t *testing.T) {
 	var values map[string][]byte
 	err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
 		var err error
-		values, err = fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+		values, err = fetchAllWith(ctx, cfg, http.DefaultClient, pub, endpoint)
 		return err
 	})
 	if err != nil {
@@ -265,7 +265,7 @@ func TestFetchWithRetryRecoversOnceReleased(t *testing.T) {
 // A bounded run that never gets released fails rather than idling in a Running
 // pod with no secret.
 func TestFetchWithRetryGivesUp(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/api/db": {{status: http.StatusForbidden}, {status: http.StatusForbidden}},
 	})
@@ -276,7 +276,7 @@ func TestFetchWithRetryGivesUp(t *testing.T) {
 	attempts := 0
 	err := sidecar.Retry(context.Background(), cfg.Config, "secret", func(ctx context.Context) error {
 		attempts++
-		_, err := fetchAllWith(ctx, cfg, http.DefaultClient, pub)
+		_, err := fetchAllWith(ctx, cfg, http.DefaultClient, pub, endpoint)
 		return err
 	})
 	if err == nil {

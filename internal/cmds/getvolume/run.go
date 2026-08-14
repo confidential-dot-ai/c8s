@@ -105,13 +105,13 @@ func openAll(ctx context.Context, cfg config, measurements [][]byte) error {
 		return err
 	}
 	daemon, base := daemonClient(cfg)
-	return openAllWith(ctx, cfg, client, pub, daemon, base)
+	return openAllWith(ctx, cfg, client, pub, cfg.Endpoint(), daemon, base)
 }
 
 // openAllWith is openAll once the clients exist.
-func openAllWith(ctx context.Context, cfg config, cds *http.Client, pub crypto.PublicKey, daemon *http.Client, daemonBase string) error {
+func openAllWith(ctx context.Context, cfg config, cds *http.Client, pub crypto.PublicKey, endpoint string, daemon *http.Client, daemonBase string) error {
 	for _, v := range cfg.Volumes {
-		blob, err := fetchBlob(ctx, cfg, cds, pub, v.Path)
+		blob, err := fetchBlob(ctx, cfg, cds, pub, endpoint, v.Path)
 		if err != nil {
 			return fmt.Errorf("volume %s: %w", v.Name, err)
 		}
@@ -129,8 +129,8 @@ func openAllWith(ctx context.Context, cfg config, cds *http.Client, pub crypto.P
 // never minted: the operator put it there with `c8s volume create`, and a POST
 // here would squat the path with random bytes that decrypt nothing, leaving the
 // real key unwritable behind a 409.
-func fetchBlob(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey, path string) (volume.Blob, error) {
-	value, _, err := sidecar.Do(ctx, cfg.Config, client, pub, http.MethodGet, path)
+func fetchBlob(ctx context.Context, cfg config, client *http.Client, pub crypto.PublicKey, endpoint, path string) (volume.Blob, error) {
+	value, _, err := sidecar.Do(ctx, cfg.Config, client, pub, endpoint, http.MethodGet, path)
 	if err != nil {
 		return volume.Blob{}, err
 	}

@@ -34,9 +34,9 @@ func (stubResolver) DigestsForSandbox(string) ([]string, []workloadclaims.Sandbo
 	return nil, nil, false, nil
 }
 
-// startInventory serves the real token route on a unix socket and points the
-// sidecar at it.
-func startInventory(t *testing.T) {
+// startInventory serves the real token route on a unix socket and returns its
+// endpoint.
+func startInventory(t *testing.T) string {
 	t.Helper()
 	signer, err := workloadclaims.NewSandboxTokenSigner("10.0.0.7")
 	if err != nil {
@@ -51,7 +51,7 @@ func startInventory(t *testing.T) {
 	go workloadclaims.ServeTokens(ctx, l, stubResolver{}, workloadclaims.NewSignerHolder(signer))
 	t.Cleanup(func() { cancel(); l.Close() })
 
-	sidecar.SetInventoryEndpointForTest(t, func() string { return "unix://" + sock })
+	return "unix://" + sock
 }
 
 // fakeCDS records what it was asked and answers from a scripted sequence.
@@ -168,12 +168,12 @@ func testKey(t *testing.T) *ecdsa.PublicKey {
 }
 
 func TestFetchBlobReadsTheStore(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: testBlobJSON(t)}},
 	})
 
-	got, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/tenant-a/volumes/weights")
+	got, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights")
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -187,12 +187,12 @@ func TestFetchBlobReadsTheStore(t *testing.T) {
 // would squat the path with random bytes that decrypt nothing and leave the
 // real key unwritable behind a 409.
 func TestFetchBlobNeverCreates(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	f, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusNotFound}},
 	})
 
-	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/tenant-a/volumes/weights"); err == nil {
+	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights"); err == nil {
 		t.Fatal("an absent key was accepted")
 	}
 	for _, req := range f.seen() {
@@ -205,12 +205,12 @@ func TestFetchBlobNeverCreates(t *testing.T) {
 // A denial is not a reason to write either: release is refused until every main
 // container is admitted, so 403 is the normal early answer.
 func TestFetchBlobDoesNotWriteOnDenial(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	f, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusForbidden}},
 	})
 
-	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/tenant-a/volumes/weights"); err == nil {
+	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights"); err == nil {
 		t.Fatal("a denial was accepted")
 	}
 	if got := f.seen(); len(got) != 1 || got[0] != "GET /secrets/tenant-a/volumes/weights" {
@@ -220,12 +220,12 @@ func TestFetchBlobDoesNotWriteOnDenial(t *testing.T) {
 
 // A value that is not a key blob is refused rather than handed to the daemon.
 func TestFetchBlobRejectsANonBlob(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	_, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {{status: http.StatusOK, value: []byte(`{"type":"something/else"}`)}},
 	})
 
-	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), "/tenant-a/volumes/weights"); err == nil {
+	if _, err := fetchBlob(context.Background(), flowConfig(t, url), http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights"); err == nil {
 		t.Fatal("a foreign document was accepted as a key blob")
 	}
 }
@@ -233,7 +233,7 @@ func TestFetchBlobRejectsANonBlob(t *testing.T) {
 // Each request carries its own challenge and its own token; both are single-use
 // at CDS, so a reused pair is a replayed request.
 func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
-	startInventory(t)
+	endpoint := startInventory(t)
 	f, url := newFakeCDS(t, map[string][]reply{
 		"GET /secrets/tenant-a/volumes/weights": {
 			{status: http.StatusForbidden},
@@ -243,7 +243,7 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 	cfg := flowConfig(t, url)
 
 	for i := 0; i < 2; i++ {
-		_, _ = fetchBlob(context.Background(), cfg, http.DefaultClient, testKey(t), "/tenant-a/volumes/weights")
+		_, _ = fetchBlob(context.Background(), cfg, http.DefaultClient, testKey(t), endpoint, "/tenant-a/volumes/weights")
 	}
 
 	f.mu.Lock()
