@@ -2,6 +2,8 @@ package credrelease
 
 import (
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestNewCmdDefaultsAndHelp(t *testing.T) {
@@ -36,10 +38,9 @@ func TestNewCmdDefaultsAndHelp(t *testing.T) {
 		}
 	}
 
-	// --platform is required: an image must never silently serve for the
-	// wrong TEE, so omission is a usage error, not a tdx default.
+	// Omitting --platform is a usage error, not a tdx default.
 	pf := flags.Lookup("platform")
-	if pf == nil || pf.Annotations["cobra_annotation_bash_completion_one_required_flag"] == nil {
+	if pf == nil || pf.Annotations[cobra.BashCompOneRequiredFlag] == nil {
 		t.Errorf("--platform is not marked required")
 	}
 }
