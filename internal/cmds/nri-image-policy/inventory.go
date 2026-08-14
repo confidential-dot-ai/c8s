@@ -12,9 +12,12 @@ import (
 // which sandbox a calling process belongs to, and which image digests a named
 // sandbox is running (docs/ratls.md, "Sandbox identity"). It is fed from the
 // same CreateContainer / Synchronize events that drive enforcement — and
-// pod-sandbox events for the sandbox set — so what it vouches for is exactly
-// what was admitted. Caller identity comes from the kernel (SO_PEERCRED →
-// cgroup → container), never from the request.
+// pod-sandbox events for the sandbox set. Caller identity comes from the kernel
+// (SO_PEERCRED → cgroup → container), never from the request.
+//
+// "Admitted" here and in every caller means the plugin let the container run,
+// not that it passed the checks: an exemption, audit mode or an undeliverable
+// kill each leave one running, and the inventory reports what runs.
 type admissionInventory struct {
 	mu         sync.RWMutex
 	containers map[string]ctrRec   // live containerID -> record (caller resolution)
@@ -25,7 +28,7 @@ type admissionInventory struct {
 
 type ctrRec struct {
 	sandboxID string
-	name      string
+	name      string // unread
 	digest    string // canonical sha256:<hex>; "" when unresolved
 	argv      []string
 }
@@ -35,7 +38,7 @@ type ctrRec struct {
 // See docs/secrets.md — "The report is a high-water mark".
 type sbxRec struct {
 	byKey      map[string]workloadclaims.SandboxContainer
-	unresolved bool // some admitted container never resolved a digest
+	unresolved map[string]struct{} // container IDs with no digest; cleared only by a later resolved record for the same ID
 }
 
 func newAdmissionInventory(procRoot string) *admissionInventory {
@@ -50,7 +53,7 @@ func newAdmissionInventory(procRoot string) *admissionInventory {
 // record notes an admitted container, injected sidecars included: /digests is
 // an inventory of what was admitted in the sandbox, and the injected images are
 // allowlist floor entries, so CDS drops them from workload matching itself.
-// argv is the effective OCI process.args the allowlist was evaluated against.
+// argv is the effective OCI process.args the container runs.
 func (b *admissionInventory) record(containerID, sandboxID, name, digest string, argv []string) {
 	if containerID == "" || sandboxID == "" {
 		return
@@ -61,11 +64,15 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 
 	rec, ok := b.admitted[sandboxID]
 	if !ok {
-		rec = sbxRec{byKey: map[string]workloadclaims.SandboxContainer{}}
+		rec = sbxRec{
+			byKey:      map[string]workloadclaims.SandboxContainer{},
+			unresolved: map[string]struct{}{},
+		}
 	}
 	if digest == "" {
-		rec.unresolved = true
+		rec.unresolved[containerID] = struct{}{}
 	} else {
+		delete(rec.unresolved, containerID)
 		c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
 		rec.byKey[c.Key()] = c
 	}
@@ -78,7 +85,9 @@ func (b *admissionInventory) record(containerID, sandboxID, name, digest string,
 
 // remove evicts a stopped container from caller resolution only. The sandbox's
 // admission record keeps it: a stopped container must not bind a caller, but it
-// still ran here (sbxRec).
+// still ran here (sbxRec). That includes an unresolved digest, so a container
+// that stops before one resolves closes its sandbox's answer for the sandbox's
+// life.
 func (b *admissionInventory) remove(containerID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -175,7 +184,7 @@ func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []wo
 		return nil, nil, false, nil
 	}
 	rec := b.admitted[sandboxID]
-	if rec.unresolved {
+	if len(rec.unresolved) > 0 {
 		return nil, nil, true, fmt.Errorf("sandbox %s admitted a container with no resolved image digest", sandboxID)
 	}
 	digests := []string{}

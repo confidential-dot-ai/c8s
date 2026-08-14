@@ -109,9 +109,9 @@ hijack. On node-CVM it is a unix socket, and there are two separate threats:
   into every `confidential.ai/cw` pod. Generates the leaf key, builds the CSR,
   redeems a sandbox token, drives the CDS attestation flow, writes the cert.
   (`internal/cmds/getcert`)
-- **The inventory** — the component that already makes the admit/deny decision,
-  so what it vouches for is exactly what was admitted. It serves two disjoint
-  surfaces (`pkg/workloadclaims`): `POST /sandbox` on a **local** endpoint
+- **The inventory** — fed by the component that makes the admit/deny decision,
+  so it reports what ran on the node whatever that decision was. It serves two
+  disjoint surfaces (`pkg/workloadclaims`): `POST /sandbox` on a **local** endpoint
   get-cert dials at one of two compiled addresses, and `GET /identity` +
   `GET /digests/{sandboxID}` on a **network endpoint over mutually-attested
   RA-TLS**, at the fixed privileged port `workloadclaims.DigestsPort` (1019),
@@ -262,11 +262,12 @@ skips it (it is measured via the rootfs, not allowlisted). Unknown sandbox ⇒
 - **Order-independent.** The same images in a different container order answer
   identically, so a reschedule that reorders containers does not churn the
   identity.
-- **All-or-nothing.** If the inventory cannot resolve a tracked container's
-  image digest it records an empty one (logged at error, see
-  `recordForInventory`), and rather than answer with the containers it *can*
-  describe — a subset passed off as the whole set — it fails the whole request,
-  which CDS treats as fail-closed.
+- **All-or-nothing.** If the inventory has no digest for a tracked container it
+  records an empty one — logged at error when a resolve failed
+  (`recordForInventory`), silently on the pre-allowlist hook that does not
+  resolve at all (`recordUncheckedForInventory`). Rather than answer with the
+  containers it *can* describe — a subset passed off as the whole set — it fails
+  the whole request, which CDS treats as fail-closed.
 - **CDS checks membership, not composition.** Every image the inventory reports
   must be allowlisted (floor or any workload container). Injected c8s containers
   are floor entries, so they pass by digest, not by name. CDS does not require
@@ -348,22 +349,27 @@ Two inventory behaviours that still matter here:
   containerd), a node reboot, or a crash. Running containers survive that
   restart, so their digests must be re-derived; NRI replays `Synchronize` with
   the full container list on every plugin start, and `checkExisting` records
-  what it admits. That recovery deliberately does **not** depend on
+  every container it sees. That recovery deliberately does **not** depend on
   `policy.enforce_existing` — that knob gates only the *kill* step, because
   "learn what is running" and "kill what shouldn't be" are separate concerns.
   Until the check completes, a callback landing in between gets a 404 (unknown
   sandbox) or a short set, and CDS refuses; get-cert retries at the next renewal
-  interval. The window is bounded by the plugin's initial pull (backoff plus
+  interval. That window is bounded by the plugin's initial pull (backoff plus
   fetch timeouts, tens of seconds), against a renewal interval measured in
-  hours.
-- **A partially repopulated check.** The `c8s-cert` image sits in the plugin's
-  `always_allow` floor, so the check always admits it; a tenant app image does
-  not, and a check running after the allowlist changed can deny one. The
-  sidecar is then tracked and the app container is not, so the callback answers
-  a floor-only set and the renewal is issued against it. With
-  `enforce_existing` on, the same check kills the offending container and the
-  state cannot persist; with it off, tolerating that container is the operator's
-  stated intent.
+  hours. One case outlives it: a container created in that window is recorded
+  from its image reference alone, so a reference carrying no digest records an
+  empty one and its sandbox answers closed until some later record resolves
+  that container — in practice the next `Synchronize` replay, not the deferred
+  check, which replays only what `Synchronize` listed.
+- **A check that denies one of the containers.** The `c8s-cert` image sits in
+  the plugin's `always_allow` floor, so the check always admits it; a tenant app
+  image does not, and a check running after the allowlist changed can deny one.
+  Recording is independent of that verdict, so both are tracked and the callback
+  answers the full set — including the denied image, which CDS then refuses. The
+  pod loses its certificate whether or not `enforce_existing` is on, because the
+  denied container ran in that sandbox either way; the knob decides only whether
+  it is also killed. `mode: audit` does not change this: it suppresses the kill,
+  not the record.
 
 **Enforcement is on both sides now.** Issuance refuses a sandbox running an
 image the allowlist does not admit; a relying party pinning

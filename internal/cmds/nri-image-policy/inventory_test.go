@@ -322,3 +322,49 @@ func TestInventoryArgvSeparatorDoesNotEraseAdmissions(t *testing.T) {
 		}
 	}
 }
+
+// A container recorded without a digest closes its sandbox's answer; a later
+// record that resolves that same container reopens it.
+func TestInventory_UnresolvedClearsWhenTheContainerResolves(t *testing.T) {
+	inv := newAdmissionInventory(t.TempDir())
+	inv.record("ctr-1", "sbx-1", "app", "", nil)
+	inv.record("ctr-2", "sbx-1", "side", pushDigestA, nil)
+
+	if _, _, _, err := inv.DigestsForSandbox("sbx-1"); err == nil {
+		t.Fatal("an unresolved container must fail the whole answer")
+	}
+
+	inv.record("ctr-3", "sbx-1", "other", "", nil)
+	inv.record("ctr-1", "sbx-1", "app", pushDigestB, nil)
+	if _, _, _, err := inv.DigestsForSandbox("sbx-1"); err == nil {
+		t.Fatal("a second unresolved container must keep the answer closed")
+	}
+
+	inv.record("ctr-3", "sbx-1", "other", pushDigestC, nil)
+	digests, _, _, err := inv.DigestsForSandbox("sbx-1")
+	if err != nil {
+		t.Fatalf("resolving every container must reopen the answer: %v", err)
+	}
+	for _, want := range []string{pushDigestA, pushDigestB, pushDigestC} {
+		if !slices.Contains(digests, want) {
+			t.Fatalf("digests %v missing %s", digests, want)
+		}
+	}
+}
+
+// unresolved is keyed on the runtime-assigned container ID: two containers in a
+// sandbox can share a name, and one resolving must not clear the other.
+func TestInventory_UnresolvedIsKeyedOnContainerID(t *testing.T) {
+	inv := newAdmissionInventory(t.TempDir())
+	inv.record("ctr-1", "sbx-1", "app", "", nil)
+	inv.record("ctr-2", "sbx-1", "app", pushDigestA, nil)
+
+	if _, _, _, err := inv.DigestsForSandbox("sbx-1"); err == nil {
+		t.Fatal("a namesake container cleared another container's unresolved marker")
+	}
+
+	inv.record("ctr-1", "sbx-1", "app", pushDigestB, nil)
+	if _, _, _, err := inv.DigestsForSandbox("sbx-1"); err != nil {
+		t.Fatalf("resolving the container itself must reopen the answer: %v", err)
+	}
+}

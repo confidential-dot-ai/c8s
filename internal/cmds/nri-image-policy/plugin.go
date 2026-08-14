@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/confidential-dot-ai/c8s/internal/audit"
-	ctrdresolver "github.com/confidential-dot-ai/c8s/internal/containerd"
 	"github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
@@ -90,15 +89,22 @@ func (s *policyStore) apply(pulled *allowlist.Allowlist, version uint64) bool {
 	return true
 }
 
+// containerdOps is the containerd surface admission drives; internal/containerd's
+// *Resolver satisfies it.
+type containerdOps interface {
+	Resolve(ctx context.Context, imageRef string) (string, error)
+	StopContainer(ctx context.Context, containerID string) error
+}
+
 // plugin implements the NRI plugin interface for image policy enforcement.
 type plugin struct {
-	stub     stub.Stub
-	cfg      *config
-	resolver *ctrdresolver.Resolver
-	policy   *policyStore
-	audit    *audit.Logger
-	logger   *slog.Logger
-	ready    atomic.Bool
+	stub       stub.Stub
+	cfg        *config
+	policy     *policyStore
+	audit      *audit.Logger
+	logger     *slog.Logger
+	ready      atomic.Bool
+	containerd containerdOps
 
 	// inventory serves the sandbox-identity flow (docs/ratls.md). nil ⇔ the flow
 	// is disabled (no workload_claims.socket_dir) — configuration, not a
@@ -116,17 +122,17 @@ type plugin struct {
 
 func newPlugin(
 	cfg *config,
-	resolver *ctrdresolver.Resolver,
+	ctrd containerdOps,
 	store *policyStore,
 	auditLogger *audit.Logger,
 	logger *slog.Logger,
 ) (*plugin, error) {
 	p := &plugin{
-		cfg:      cfg,
-		resolver: resolver,
-		policy:   store,
-		audit:    auditLogger,
-		logger:   logger,
+		cfg:        cfg,
+		policy:     store,
+		audit:      auditLogger,
+		logger:     logger,
+		containerd: ctrd,
 	}
 	if cfg.WorkloadClaims.SocketDir != "" {
 		procRoot := cfg.WorkloadClaims.ProcRoot
@@ -204,8 +210,9 @@ func (p *plugin) Configure(ctx context.Context, config, runtime, version string)
 	return mask, nil
 }
 
-// RemoveContainer evicts a stopped container from the admission inventory.
-// Only subscribed when the inventory is enabled (see Configure).
+// RemoveContainer evicts a stopped container from caller resolution; the
+// sandbox's record keeps it (inventory.remove). Only subscribed when the
+// inventory is enabled (see Configure).
 func (p *plugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
 	if p.inventory != nil {
 		p.inventory.remove(ctr.GetId())
@@ -231,27 +238,40 @@ func (p *plugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) erro
 	return nil
 }
 
-// recordForInventory resolves a container's admitted image digest and records it
-// for the admission inventory. A resolve failure records an empty digest,
-// which makes the inventory refuse the pod's whole answer rather than commit a
-// subset — fail-closed, and logged at error because it costs the pod its
-// claim. It never blocks the create path: admission already decided the
-// container.
+// recordForInventory resolves a container's image digest and records it for the
+// admission inventory. A resolve failure records an empty digest, which makes
+// the inventory refuse the pod's whole answer rather than commit a subset —
+// fail-closed, and logged at error because it costs the pod its claim.
+//
+// INVARIANT: callers record what runs, not what passed the checks.
 func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, imageRef string) {
 	if p.inventory == nil {
 		return
 	}
 	digest := extractDigest(imageRef)
 	if digest == "" && imageRef != "" {
-		if resolved, err := p.resolver.Resolve(ctx, imageRef); err == nil {
+		if resolved, err := p.containerd.Resolve(ctx, imageRef); err == nil {
 			digest = extractDigest(resolved)
 		} else {
-			p.logger.Error("cannot resolve admitted image digest; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
+			p.logger.Error("cannot resolve the image digest of a running container; the sandbox inventory will refuse to answer for this pod", "image", imageRef, "error", err)
 		}
 	}
-	// ctr.Args is the effective OCI process.args admission was evaluated
-	// against, so the inventory vouches for the same (digest, argv) pair the
-	// allowlist matched.
+	p.recordDigest(ctr, digest)
+}
+
+// recordUncheckedForInventory takes only a digest already inlined in the
+// reference: it runs on the hook that must answer inside NRI's
+// plugin_request_timeout for a required plugin, so it stays off containerd.
+func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) {
+	p.recordDigest(ctr, extractDigest(imageRef))
+}
+
+// recordDigest is the only inventory.record call site. ctr.Args is the
+// effective OCI process.args, the same value the checks read.
+func (p *plugin) recordDigest(ctr *api.Container, digest string) {
+	if p.inventory == nil {
+		return
+	}
 	p.inventory.record(ctr.GetId(), ctr.GetPodSandboxId(), ctr.GetName(), digest, ctr.GetArgs())
 }
 
@@ -265,13 +285,8 @@ func evaluateRule(rule labelRule, podLabels map[string]string) bool {
 }
 
 // checkLabels evaluates all label rules against a pod's labels.
-// Returns verdictSkip for exempt namespaces, verdictDeny if any rule is violated,
-// or verdictAllow if all rules pass.
+// Returns verdictDeny if any rule is violated, or verdictAllow if all rules pass.
 func (p *plugin) checkLabels(cfg *config, namespace, podName, containerName string, podLabels map[string]string) (imageVerdict, string) {
-	if slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
-		return verdictSkip, ""
-	}
-
 	for _, rule := range cfg.Policy.LabelRules {
 		if !evaluateRule(rule, podLabels) {
 			reason := fmt.Sprintf("label rule %q denied workload", rule.Name)
@@ -307,20 +322,6 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 		"image", imageRef,
 	)
 
-	// Check if namespace is exempt
-	if slices.Contains(cfg.Policy.ExemptNamespaces, namespace) {
-		log.Info("namespace exempt from policy")
-		p.audit.Log(audit.Event{
-			Action:    "allow",
-			Reason:    "namespace_exempt",
-			Namespace: namespace,
-			Pod:       podName,
-			Container: containerName,
-			Image:     imageRef,
-		})
-		return verdictSkip, ""
-	}
-
 	// If no image ref found, deny by default (missing annotation means kubelet was bypassed)
 	if imageRef == "" {
 		if cfg.Policy.DenyMissingAnnotation {
@@ -349,7 +350,7 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	digest := extractDigest(imageRef)
 	if digest == "" {
 		// No digest in reference — resolve tag via containerd image store
-		resolved, err := p.resolver.Resolve(ctx, imageRef)
+		resolved, err := p.containerd.Resolve(ctx, imageRef)
 		if err != nil {
 			log.Warn("cannot resolve image digest via containerd", "error", err)
 			p.audit.Log(audit.Event{
@@ -420,15 +421,59 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	return verdictAllow, ""
 }
 
+// checkContainer runs the label rules and the image allowlist over a container,
+// then applies the namespace exemption to their verdict.
+//
+// INVARIANT: the exemption runs last and only downgrades a denial, so an exempt
+// container is still checked and audited, and every downgrade emits
+// namespace_exempt.
+func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
+	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
+	exempt := slices.Contains(cfg.Policy.ExemptNamespaces, namespace)
+
+	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
+	if verdict == verdictDeny && !exempt {
+		return verdict, reason
+	}
+
+	if cfg.AllowlistEnabled() {
+		imgVerdict, imgReason := p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
+		if verdict != verdictDeny {
+			verdict, reason = imgVerdict, imgReason
+		}
+	}
+
+	if verdict == verdictDeny && exempt {
+		p.logger.Info("namespace exempt from policy; admitting denied container",
+			"namespace", namespace,
+			"pod", podName,
+			"container", ctrName,
+			"denial", reason,
+		)
+		p.audit.Log(audit.Event{
+			Action:    "allow",
+			Reason:    "namespace_exempt",
+			Overrides: reason,
+			Namespace: namespace,
+			Pod:       podName,
+			Container: ctrName,
+			Image:     imageRef,
+		})
+		return verdictSkip, ""
+	}
+
+	return verdict, reason
+}
+
 // shouldCheckExisting reports whether the startup check has work — enforcement,
 // inventory recovery, or both. See docs/getcert-workload-binding.md, Corner 4.
 func (p *plugin) shouldCheckExisting() bool {
 	return p.cfg.Policy.EnforceExisting || p.inventory != nil
 }
 
-// Synchronize is called when the plugin connects to containerd. It checks all
-// existing containers against the allowlist, records the admitted ones for the
-// inventory, and kills violations when enforce_existing is set.
+// Synchronize is called when the plugin connects to containerd. It records every
+// existing container, checks what it can, and kills violations when
+// enforce_existing is set.
 func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
 	cfg := p.cfg
 
@@ -460,9 +505,8 @@ func (p *plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ctrs [
 	return nil, nil
 }
 
-// checkExisting checks all existing containers against the allowlist, records
-// the admitted ones for the inventory, and kills violations when enforce_existing
-// is set.
+// checkExisting records every container it is handed, checks the ones whose pod
+// sandbox it was also handed, and kills violations when enforce_existing is set.
 func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.PodSandbox, ctrs []*api.Container) {
 	p.logger.Info("checking existing containers",
 		"pods", len(pods), "containers", len(ctrs), "enforcing", cfg.Policy.EnforceExisting)
@@ -475,41 +519,23 @@ func (p *plugin) checkExisting(ctx context.Context, cfg *config, pods []*api.Pod
 
 	var killed, failed int
 	for _, ctr := range ctrs {
+		// Recorded ahead of the lookup that can skip it; the record needs no pod.
+		imageRef := ctr.GetAnnotations()[annotationImageName]
+		p.recordForInventory(ctx, ctr, imageRef)
+
 		pod := podByID[ctr.GetPodSandboxId()]
 		if pod == nil {
 			continue
 		}
-
-		denied := false
-
-		labelVerdict, _ := p.checkLabels(cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), pod.GetLabels())
-		if labelVerdict == verdictSkip {
+		if verdict, _ := p.checkContainer(ctx, cfg, pod, ctr, imageRef); verdict != verdictDeny {
 			continue
 		}
-		if labelVerdict == verdictDeny {
-			denied = true
-		}
-
-		if !denied && cfg.AllowlistEnabled() {
-			imageRef := ctr.GetAnnotations()[annotationImageName]
-			imgVerdict, _ := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef, ctr.GetArgs())
-			if imgVerdict == verdictDeny {
-				denied = true
-			} else {
-				p.recordForInventory(ctx, ctr, imageRef)
-			}
-		}
-
-		if !denied {
-			continue
-		}
-
 		// enforce_existing off: the check only feeds the inventory.
 		if cfg.Policy.Mode == ModeAudit || !cfg.Policy.EnforceExisting {
 			continue
 		}
 
-		if err := p.resolver.StopContainer(ctx, ctr.GetId()); err != nil {
+		if err := p.containerd.StopContainer(ctx, ctr.GetId()); err != nil {
 			p.logger.Error("sync: failed to kill container", "container", ctr.GetName(), "error", err)
 			failed++
 		} else {
@@ -546,72 +572,48 @@ func (p *plugin) RunDeferredCheck(ctx context.Context) {
 	p.checkExisting(ctx, cfg, pods, ctrs)
 }
 
+// admitWhileInitializing decides a container seen after NRI registration but
+// before the first allowlist fetch: exempt namespaces and audit mode pass,
+// everything else is denied.
+func (p *plugin) admitWhileInitializing(cfg *config, pod *api.PodSandbox, ctr *api.Container) error {
+	log := p.logger.With(
+		"namespace", pod.GetNamespace(),
+		"pod", pod.GetName(),
+		"container", ctr.GetName(),
+	)
+
+	if slices.Contains(cfg.Policy.ExemptNamespaces, pod.GetNamespace()) {
+		log.Info("plugin initializing: allowing container in exempt namespace")
+		return nil
+	}
+	if cfg.Policy.Mode == ModeAudit {
+		log.Warn("plugin initializing: would deny container creation (audit mode)")
+		return nil
+	}
+	log.Warn("plugin initializing: denying container creation")
+	return fmt.Errorf("image policy plugin initializing, container creation denied")
+}
+
 // CreateContainer is called when a container is being created.
 // Returning an error will reject the container creation.
 func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	cfg := p.cfg
+	imageRef := ctr.GetAnnotations()[annotationImageName]
 
-	// Not-ready guard: plugin is registered with NRI but allowlist hasn't
-	// been fetched yet. Deny all non-exempt container creation to close
-	// the startup window.
 	if !p.Ready() {
-		// Exempt namespaces always pass (prevents deadlock when CDS itself
-		// runs in-cluster inside an exempt namespace).
-		if slices.Contains(cfg.Policy.ExemptNamespaces, pod.GetNamespace()) {
-			p.logger.Info("plugin initializing: allowing container in exempt namespace",
-				"namespace", pod.GetNamespace(),
-				"pod", pod.GetName(),
-				"container", ctr.GetName(),
-			)
-			return nil, nil, nil
+		if err := p.admitWhileInitializing(cfg, pod, ctr); err != nil {
+			return nil, nil, err
 		}
-
-		if cfg.Policy.Mode == ModeAudit {
-			p.logger.Warn("plugin initializing: would deny container creation (audit mode)",
-				"namespace", pod.GetNamespace(),
-				"pod", pod.GetName(),
-				"container", ctr.GetName(),
-			)
-			return nil, nil, nil
-		}
-
-		p.logger.Warn("plugin initializing: denying container creation",
-			"namespace", pod.GetNamespace(),
-			"pod", pod.GetName(),
-			"container", ctr.GetName(),
-		)
-		return nil, nil, fmt.Errorf("image policy plugin initializing, container creation denied")
-	}
-
-	// Label-based policy check (fast, no I/O — runs before image check)
-	labelVerdict, labelReason := p.checkLabels(cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), pod.GetLabels())
-	if labelVerdict == verdictDeny {
-		if cfg.Policy.Mode == ModeAudit {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("%s", labelReason)
-	}
-	if labelVerdict == verdictSkip {
+		p.recordUncheckedForInventory(ctr, imageRef)
 		return nil, nil, nil
 	}
 
-	// Image allowlist check (only when configured)
-	if cfg.AllowlistEnabled() {
-		imageRef := ctr.GetAnnotations()[annotationImageName]
-
-		// Effective argv (ctr.Args): NRI folds the OCI process.args here, so the
-		// full merged entrypoint+cmd the container runs is available at this hook.
-		verdict, reason := p.checkImage(ctx, cfg, pod.GetNamespace(), pod.GetName(), ctr.GetName(), imageRef, ctr.GetArgs())
-		if verdict == verdictDeny {
-			if cfg.Policy.Mode == ModeAudit {
-				return nil, nil, nil
-			}
-			return nil, nil, fmt.Errorf("%s", reason)
-		}
-		// Admitted: record for the admission inventory.
-		p.recordForInventory(ctx, ctr, imageRef)
+	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
+	if verdict == verdictDeny && cfg.Policy.Mode != ModeAudit {
+		return nil, nil, fmt.Errorf("%s", reason)
 	}
 
+	p.recordForInventory(ctx, ctr, imageRef)
 	return nil, nil, nil
 }
 

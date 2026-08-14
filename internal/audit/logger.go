@@ -8,6 +8,7 @@ type Event struct {
 	Action    string // allow, deny
 	Reason    string
 	Rule      string // label rule name, if any
+	Overrides string // the denial this allow overturned, if any
 	Namespace string
 	Pod       string
 	Container string
@@ -35,6 +36,9 @@ func (l *Logger) Log(event Event) {
 	}
 	if event.Rule != "" {
 		attrs = append(attrs, "rule", event.Rule)
+	}
+	if event.Overrides != "" {
+		attrs = append(attrs, "overrides", event.Overrides)
 	}
 	if event.Error != "" {
 		attrs = append(attrs, "error", event.Error)

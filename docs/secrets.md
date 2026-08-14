@@ -337,9 +337,9 @@ kept for operator-authored input, where an unknown field is a typo.
 | `digests` | deduplicated digest set | cert issuance (membership) |
 | `containers` | `[{digest, argv}]`, **not** deduplicated | secret release |
 
-`argv` is the effective OCI `process.args` that admission evaluated, so release
-can hold a sandbox to the same `(digest, argv)` pair the allowlist matched rather
-than to a digest set that says nothing about what those images were told to run.
+`argv` is the effective OCI `process.args` a container runs, so release can hold
+a sandbox to the `(digest, argv)` pairs that ran in it rather than to a digest
+set that says nothing about what those images were told to run.
 Without it, two entries differing only in argv are indistinguishable, and the
 argv admission enforces is a **union across every entry listing the digest** — so
 an entry that pins `command: exact` gives no guarantee at release time if another
