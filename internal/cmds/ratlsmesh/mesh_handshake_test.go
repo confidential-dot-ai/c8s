@@ -4,7 +4,9 @@ package ratlsmesh
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -92,12 +94,41 @@ func TestMeshHandshakeAcceptsAttestedPeer(t *testing.T) {
 		t.Fatalf("attested peer handshake failed: %v", err)
 	}
 	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := io.ReadFull(conn, make([]byte, 2)); err != nil {
 		t.Fatalf("server rejected the attested client: %v", err)
 	}
 
-	if got := len(stub.VerifyRequests()); got != 2 {
-		t.Fatalf("/verify calls = %d, want 2 (one per direction)", got)
+	// Each direction asks the verifier to bind the key its peer presented:
+	// the client pins the server's cert key, the server the client's (the
+	// TLS 1.3 server cert flight comes first, fixing the request order).
+	serverKey := conn.ConnectionState().PeerCertificates[0].PublicKey
+	clientCert, err := clientTLS.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatalf("GetClientCertificate: %v", err)
+	}
+	clientLeaf, err := x509.ParseCertificate(clientCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse client cert: %v", err)
+	}
+
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("/verify calls = %d, want 2 (one per direction)", len(reqs))
+	}
+	for i, key := range []crypto.PublicKey{serverKey, clientLeaf.PublicKey} {
+		want, err := ratls.ReportDataForKey(key, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reqs[i].Params == nil || reqs[i].Params.ExpectedReportData == nil {
+			t.Fatalf("/verify call %d: missing expected report data", i)
+		}
+		if got := reqs[i].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:]) {
+			t.Fatalf("/verify call %d: expected_report_data = %x, want %x (peer key binding)", i, got, want[:])
+		}
 	}
 }
 
