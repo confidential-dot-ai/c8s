@@ -19,10 +19,10 @@ import (
 type failingStore struct{ err error }
 
 func (f failingStore) Get(context.Context, string) ([]byte, error) { return nil, f.err }
-func (f failingStore) PutIfAbsent(context.Context, string, []byte, Origin) ([]byte, Held, error) {
+func (f failingStore) PutIfAbsent(context.Context, string, []byte, Holder) ([]byte, Held, error) {
 	return nil, Held{}, f.err
 }
-func (f failingStore) Put(context.Context, string, []byte, Origin) (Held, error) {
+func (f failingStore) Put(context.Context, string, []byte, Holder) (Held, error) {
 	return Held{}, f.err
 }
 

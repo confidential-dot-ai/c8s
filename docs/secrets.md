@@ -20,10 +20,21 @@ pods behind the Service at once, and the surge replica serves an empty store: a
 workload landing on it mints a value diverging from the one its siblings already
 hold, with no error anywhere. Refusing to serve is better than that divergence.
 
-Sizing: `--secrets-max-paths`, `--secrets-max-value-bytes`,
-`--sandbox-ledger-max-entries`. CDS is a single in-memory process holding the
-mesh CA, so a workload able to grow either map without limit could OOM it and
+Sizing: `--secrets-max-paths-per-workload` (default 64, chart
+`cds.secretsMaxPathsPerWorkload`) bounds the paths one allowlist entry may hold,
+and is the bound a workload meets first. `--secrets-max-paths` (default 1024) is
+the store's memory ceiling; size it above the number of entries carrying a grant
+times the per-workload quota, or entries that arrive late find the store full.
+The quota must stay below the ceiling — CDS refuses to start otherwise, since a
+quota that reaches the ceiling is one workload's room to fill the store.
+Operator values count against the ceiling only. Also `--secrets-max-value-bytes`
+and `--sandbox-ledger-max-entries`. CDS is a single in-memory process holding
+the mesh CA, so a workload able to grow the store without limit could OOM it and
 take every certificate in the cluster with it.
+
+**Both bounds refuse the write; nothing is ever evicted.** A path holds the only
+copy of its value, so a store at either bound answers `507` and keeps what it
+has. Raising a bound needs a restart, which empties the store; see "Restarts".
 
 **kata is supported, with two caveats.** The fetcher redeems its sandbox token
 from whichever inventory its shape has: the mounted nri-image-policy socket on
@@ -96,7 +107,7 @@ one caller and cannot be replayed.
 ```
 POST /secrets                      → {"challenge": "<base64>"}
 GET  /secrets/<store path>         → 200 {"value": "<base64>"} | 404 | 403
-POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403
+POST /secrets/<store path>         → 201 {"value": "<base64>"} | 409 | 403 | 507
 ```
 
 `PUT` on the same paths is the operator's, authorized by the operator key
@@ -161,6 +172,7 @@ PUT /secrets/<store path>   {"value": "<base64>", "overwrite": <bool>}
                             → 201 {"created": true}
                             → 409 {"existing": "workload"|"operator"}
                             → 200 {"existing": "workload"|"operator"}
+                            → 507 the store is at --secrets-max-paths
 ```
 
 Authorization is the operator key that CDS already pins for allowlist writes

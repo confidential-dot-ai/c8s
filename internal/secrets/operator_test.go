@@ -31,7 +31,7 @@ type operatorHarness struct {
 
 func newOperatorHarness(t *testing.T) *operatorHarness {
 	t.Helper()
-	oh := &operatorHarness{store: NewMemoryStore(8, 64)}
+	oh := &operatorHarness{store: NewMemoryStore(8, 8, 64)}
 	oh.h = OperatorHandler{
 		Store: oh.store,
 		Authorize: func(_ *http.Request, body []byte) error {
@@ -83,7 +83,7 @@ func TestOperatorPutCreates(t *testing.T) {
 func TestOperatorPutRefusesToDisplaceWithoutOverwrite(t *testing.T) {
 	oh := newOperatorHarness(t)
 	ctx := context.Background()
-	if _, _, err := oh.store.PutIfAbsent(ctx, "/tenant-a/db", []byte("generated"), OriginWorkload); err != nil {
+	if _, _, err := oh.store.PutIfAbsent(ctx, "/tenant-a/db", []byte("generated"), WorkloadHolder("api")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestOperatorPutRefusesToDisplaceWithoutOverwrite(t *testing.T) {
 // never reach a write-only caller.
 func TestOperatorPutConflictWithholdsTheValue(t *testing.T) {
 	oh := newOperatorHarness(t)
-	if _, _, err := oh.store.PutIfAbsent(context.Background(), "/a", []byte("topsecret"), OriginWorkload); err != nil {
+	if _, _, err := oh.store.PutIfAbsent(context.Background(), "/a", []byte("topsecret"), WorkloadHolder("api")); err != nil {
 		t.Fatal(err)
 	}
 	w, _ := doPut(oh.h, putRequest(t, "/a", []byte("new"), false))
@@ -117,7 +117,7 @@ func TestOperatorPutConflictWithholdsTheValue(t *testing.T) {
 func TestOperatorPutOverwriteReplaces(t *testing.T) {
 	oh := newOperatorHarness(t)
 	ctx := context.Background()
-	if _, _, err := oh.store.PutIfAbsent(ctx, "/a", []byte("generated"), OriginWorkload); err != nil {
+	if _, _, err := oh.store.PutIfAbsent(ctx, "/a", []byte("generated"), WorkloadHolder("api")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -170,7 +170,7 @@ func TestOperatorPutRejectsUnauthorized(t *testing.T) {
 
 // Nil means no operator keys are pinned, which must reject rather than admit.
 func TestOperatorPutWithoutAuthorizerRejects(t *testing.T) {
-	h := OperatorHandler{Store: NewMemoryStore(8, 64)}
+	h := OperatorHandler{Store: NewMemoryStore(8, 8, 64)}
 	w, _ := doPut(h, putRequest(t, "/a", []byte("v"), false))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
@@ -245,6 +245,23 @@ func TestOperatorPutRespectsTheStoreValueBound(t *testing.T) {
 	}
 }
 
+// A full store is the operator's own sizing, so it answers 507; an existing
+// path can still be replaced.
+func TestOperatorPutAtTheCeilingIsInsufficientStorage(t *testing.T) {
+	oh := newOperatorHarness(t)
+	oh.h.Store = NewMemoryStore(1, 1, 64)
+
+	if w, _ := doPut(oh.h, putRequest(t, "/a", []byte("first"), false)); w.Code != http.StatusCreated {
+		t.Fatalf("first put = %d, want 201", w.Code)
+	}
+	if w, _ := doPut(oh.h, putRequest(t, "/b", []byte("second"), false)); w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("put at the ceiling = %d, want 507", w.Code)
+	}
+	if w, _ := doPut(oh.h, putRequest(t, "/a", []byte("replaced"), true)); w.Code != http.StatusOK {
+		t.Fatalf("replacing an existing path at the ceiling = %d, want 200", w.Code)
+	}
+}
+
 func TestOperatorPutStoreFailureIsFiveHundred(t *testing.T) {
 	for _, overwrite := range []bool{false, true} {
 		h := OperatorHandler{
@@ -276,7 +293,7 @@ func TestOperatorPutAgainstRealOperatorAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := NewMemoryStore(8, 64)
+	store := NewMemoryStore(8, 8, 64)
 	h := OperatorHandler{
 		Store:     store,
 		Authorize: operatorauth.Verifier{Keys: []*ecdsa.PublicKey{&key.PublicKey}}.Authorize,

@@ -1253,6 +1253,28 @@ func TestChartCDSPinnedToCDSNode(t *testing.T) {
 	}
 }
 
+// The per-workload secret quota is the bound a flooding workload meets first,
+// so a chart-deployed cluster must be able to size it.
+func TestChartCDSSecretsPathQuotaFlagsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  []string
+		want string
+	}{
+		{"default", nil, "--secrets-max-paths-per-workload=64"},
+		{"sized", []string{"--set", "cds.secretsMaxPathsPerWorkload=8"}, "--secrets-max-paths-per-workload=8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.set...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, out)
+			}
+			args := renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args
+			assertContainerHasArg(t, "cds", args, tc.want)
+		})
+	}
+}
+
 func tolerates(tols []corev1.Toleration, key, value string) bool {
 	for _, t := range tols {
 		if t.Key == key && t.Value == value {

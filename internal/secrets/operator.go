@@ -99,10 +99,8 @@ func (h OperatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // so the operator can decide before anything is destroyed. The store has no
 // versioning and no delete, so a displaced value is gone.
 func (h OperatorHandler) create(w http.ResponseWriter, r *http.Request, path string, value []byte) {
-	_, held, err := h.Store.PutIfAbsent(r.Context(), path, value, OriginOperator)
-	if err != nil {
-		h.logger().Error("operator secret write failed", "path", path, "error", err)
-		http.Error(w, "secret write failed", http.StatusInternalServerError)
+	_, held, err := h.Store.PutIfAbsent(r.Context(), path, value, OperatorHolder())
+	if h.writeFailed(w, path, err) {
 		return
 	}
 	if held.Exists {
@@ -114,10 +112,8 @@ func (h OperatorHandler) create(w http.ResponseWriter, r *http.Request, path str
 }
 
 func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path string, value []byte) {
-	held, err := h.Store.Put(r.Context(), path, value, OriginOperator)
-	if err != nil {
-		h.logger().Error("operator secret write failed", "path", path, "error", err)
-		http.Error(w, "secret write failed", http.StatusInternalServerError)
+	held, err := h.Store.Put(r.Context(), path, value, OperatorHolder())
+	if h.writeFailed(w, path, err) {
 		return
 	}
 	if !held.Exists {
@@ -127,6 +123,22 @@ func (h OperatorHandler) replace(w http.ResponseWriter, r *http.Request, path st
 	}
 	h.logger().Info("operator secret replaced", "path", path, "bytes", len(value), "existing", held.Origin)
 	writeResult(w, http.StatusOK, PutResponse{Path: path, Existing: held.Origin})
+}
+
+// writeFailed answers a store error and reports whether it did. A bound is the
+// operator's own sizing, so it answers 507.
+func (h OperatorHandler) writeFailed(w http.ResponseWriter, path string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case bounded(err):
+		h.logger().Warn("operator secret write refused", "path", path, "error", err)
+		http.Error(w, "secret storage limit reached", http.StatusInsufficientStorage)
+	default:
+		h.logger().Error("operator secret write failed", "path", path, "error", err)
+		http.Error(w, "secret write failed", http.StatusInternalServerError)
+	}
+	return true
 }
 
 // authorize reads the body under the cap and runs the operator check against
