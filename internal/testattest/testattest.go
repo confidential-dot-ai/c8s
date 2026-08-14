@@ -1,12 +1,22 @@
-// Package testattest serves a fake attestation-api for tests. POST /attest
-// records its request and returns fake SNP evidence; POST /verify decodes
-// the types.VerifyRequest, records it (Params.ExpectedReportData included),
-// and answers with the configured Verdict. Tests assert on the recorded
-// requests, so the report-data binding production code asks the verifier to
-// check is pinned rather than answered blindly.
+// Package testattest serves a fake attestation-api for tests.
+//
+// POST /attest records its request and answers fake SNP evidence: a report of
+// ratls.SNPReportSize bytes with the requested report data clamped into the
+// 64-byte REPORTDATA field, carried under attestation_report as standard
+// base64 — the shape production evidence extraction
+// (attestclient.ExtractSNPReport) consumes.
+// The response platform resolves like the real api's: an explicit request
+// platform is honored; "auto" or empty resolves to the platform the stub
+// detects — snp, unless SetPlatform says otherwise.
+//
+// POST /verify decodes the types.VerifyRequest, records it
+// (Params.ExpectedReportData included), and answers the configured Verdict.
+// Tests assert on the recorded requests, so the report-data binding
+// production code asks the verifier to check is pinned.
 package testattest
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,10 +26,10 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// Verdict is what the stub's /verify answers for every request. The fields
-// map onto types.VerificationResult; ReportDataMatch is a pointer so a test
-// can send the omitted-field shape the real api returns when no
-// expected_report_data was checked.
+// Verdict is what the stub's /verify answers for every request; the response
+// platform echoes the request's, like the real api. The fields map onto
+// types.VerificationResult; ReportDataMatch is a pointer so the no-check wire
+// shape (the real api's explicit null) is expressible next to true and false.
 type Verdict struct {
 	SignatureValid  bool
 	ReportDataMatch *bool
@@ -38,20 +48,22 @@ func PassingVerdict(launchDigest string) Verdict {
 }
 
 // Stub is an httptest.Server speaking the attestation-api wire protocol. The
-// default verdict is PassingVerdict(""); change it with SetVerdict.
+// default verdict is PassingVerdict("") and the detected platform snp; change
+// them with SetVerdict and SetPlatform.
 type Stub struct {
 	*httptest.Server
 
-	mu      sync.Mutex
-	verdict Verdict
-	attest  []types.AttestRequest
-	verify  []types.VerifyRequest
+	mu       sync.Mutex
+	verdict  Verdict
+	platform types.Platform
+	attest   []types.AttestRequest
+	verify   []types.VerifyRequest
 }
 
 // New starts a stub attestation-api, closed at test cleanup.
 func New(t testing.TB) *Stub {
 	t.Helper()
-	s := &Stub{verdict: PassingVerdict("")}
+	s := &Stub{verdict: PassingVerdict(""), platform: types.PlatformSnp}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /attest", s.handleAttest)
 	mux.HandleFunc("POST /verify", s.handleVerify)
@@ -65,6 +77,14 @@ func (s *Stub) SetVerdict(v Verdict) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.verdict = v
+}
+
+// SetPlatform sets the platform the stub reports detecting: what /attest
+// resolves an "auto" or empty request platform to.
+func (s *Stub) SetPlatform(p types.Platform) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.platform = p
 }
 
 // AttestRequests returns the /attest requests received so far, in order.
@@ -89,22 +109,30 @@ func (s *Stub) handleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.attest = append(s.attest, req)
+	platform := s.platform
 	s.mu.Unlock()
 
-	// The fake evidence carries the report data it was minted over, so what a
-	// caller asked to bind stays visible in the evidence itself.
-	evidence, err := json.Marshal(map[string]any{
-		"report_data": req.ReportData,
-		"stub":        true,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if req.Platform != "" && req.Platform != types.PlatformAuto {
+		platform = req.Platform
 	}
 	writeJSON(w, types.AttestResponse{
-		Platform: string(types.PlatformSnp),
-		Evidence: evidence,
+		Platform: string(platform),
+		Evidence: fakeSNPEvidence(req.ReportData.Bytes()),
 	})
+}
+
+// fakeSNPEvidence wraps a minimal SEV-SNP report — version 2, SMT-allowed
+// policy, the requested report data in the 64-byte REPORTDATA field at
+// 0x50 — in the attestation_report envelope ExtractSNPReport reads.
+func fakeSNPEvidence(reportData []byte) json.RawMessage {
+	report := make([]byte, 1184) // AMD SEV-SNP report size (ratls.SNPReportSize)
+	report[0] = 0x02
+	report[0x0A] = 0x03
+	copy(report[0x50:0x90], reportData)
+	evidence, _ := json.Marshal(map[string]string{
+		"attestation_report": base64.StdEncoding.EncodeToString(report),
+	})
+	return evidence
 }
 
 func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {

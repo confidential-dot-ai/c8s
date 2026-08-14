@@ -1,6 +1,7 @@
 package testattest_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -9,9 +10,14 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
+// The stub's /attest evidence must pass the production evidence-extraction
+// path: an adopting test drives attestclient against the stub without a local
+// fake.
 func TestStubAttestRecordsAndReturnsSNPEvidence(t *testing.T) {
 	stub := testattest.New(t)
 	client := attestationclient.NewClient(stub.URL)
@@ -27,8 +33,18 @@ func TestStubAttestRecordsAndReturnsSNPEvidence(t *testing.T) {
 	if resp.Platform != string(types.PlatformSnp) {
 		t.Fatalf("platform = %q, want snp", resp.Platform)
 	}
-	if !strings.Contains(string(resp.Evidence), "report_data") {
-		t.Fatalf("evidence does not carry the report data: %s", resp.Evidence)
+
+	report, err := attestclient.ExtractSNPReport(resp)
+	if err != nil {
+		t.Fatalf("ExtractSNPReport: %v", err)
+	}
+	if len(report) != ratls.SNPReportSize {
+		t.Fatalf("report = %d bytes, want %d", len(report), ratls.SNPReportSize)
+	}
+	var wantReportData [64]byte
+	copy(wantReportData[:], reportData.Bytes())
+	if got := []byte(report[0x50:0x90]); !bytes.Equal(got, wantReportData[:]) {
+		t.Fatalf("REPORTDATA = %x, want %x", got, wantReportData)
 	}
 
 	reqs := stub.AttestRequests()
@@ -38,6 +54,59 @@ func TestStubAttestRecordsAndReturnsSNPEvidence(t *testing.T) {
 	if got := reqs[0].ReportData.Bytes(); string(got) != string(reportData.Bytes()) {
 		t.Fatalf("recorded report_data = %x, want %x", got, reportData.Bytes())
 	}
+}
+
+func TestStubAttestClampsReportDataToTheField(t *testing.T) {
+	stub := testattest.New(t)
+	client := attestationclient.NewClient(stub.URL)
+
+	oversize := types.NewBase64Bytes(bytes.Repeat([]byte{0xAB}, 100))
+	resp, err := client.Attest(context.Background(), types.AttestRequest{
+		ReportData: oversize,
+		Platform:   types.PlatformAuto,
+	})
+	if err != nil {
+		t.Fatalf("Attest: %v", err)
+	}
+	report, err := attestclient.ExtractSNPReport(resp)
+	if err != nil {
+		t.Fatalf("ExtractSNPReport: %v", err)
+	}
+	if got := []byte(report[0x50:0x90]); !bytes.Equal(got, oversize.Bytes()[:64]) {
+		t.Fatalf("REPORTDATA = %x, want the leading 64 bytes %x", got, oversize.Bytes()[:64])
+	}
+}
+
+func TestStubAttestPlatformResolution(t *testing.T) {
+	client := func(s *testattest.Stub) attestationclient.Client { return attestationclient.NewClient(s.URL) }
+	attest := func(t *testing.T, s *testattest.Stub, platform types.Platform) string {
+		t.Helper()
+		resp, err := client(s).Attest(context.Background(), types.AttestRequest{
+			ReportData: types.NewBase64Bytes([]byte("x")),
+			Platform:   platform,
+		})
+		if err != nil {
+			t.Fatalf("Attest: %v", err)
+		}
+		return resp.Platform
+	}
+
+	t.Run("auto resolves to the detected platform", func(t *testing.T) {
+		stub := testattest.New(t)
+		if got := attest(t, stub, types.PlatformAuto); got != string(types.PlatformSnp) {
+			t.Fatalf("platform = %q, want snp", got)
+		}
+		stub.SetPlatform(types.PlatformTdx)
+		if got := attest(t, stub, types.PlatformAuto); got != string(types.PlatformTdx) {
+			t.Fatalf("platform = %q after SetPlatform(tdx), want tdx", got)
+		}
+	})
+	t.Run("explicit platform is honored", func(t *testing.T) {
+		stub := testattest.New(t)
+		if got := attest(t, stub, types.PlatformGcpSnp); got != string(types.PlatformGcpSnp) {
+			t.Fatalf("platform = %q, want gcp-snp", got)
+		}
+	})
 }
 
 func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
