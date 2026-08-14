@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	mathrand "math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -35,6 +34,11 @@ type managedKey struct {
 	notAfterT time.Time
 }
 
+// expired reports whether now is at or past the key's deadline.
+func (k *managedKey) expired(now time.Time) bool {
+	return !now.Before(k.notAfterT)
+}
+
 // SwapKeyFunc is called when the active signing key changes.
 type SwapKeyFunc func(key *ecdsa.PrivateKey, kid string)
 
@@ -47,8 +51,6 @@ type Rotator struct {
 	mu       sync.RWMutex
 	active   *managedKey
 	retiring []*managedKey
-
-	jwksBody atomic.Pointer[[]byte]
 }
 
 // Generate creates a fresh P-256 private key and returns it as PEM bytes.
@@ -81,18 +83,37 @@ func NewRotator(cfg RotatorConfig, initialKeyPEM []byte, swapKey SwapKeyFunc) (*
 			notAfterT: now.Add(cfg.Interval + cfg.Overlap),
 		},
 	}
-	r.rebuildJWKS()
-
 	return r, nil
 }
 
-// JWKSetJSON returns the current pre-serialized JWKS response body.
+// JWKSetJSON serialises the current key set for the JWKS endpoint: the
+// active key plus retiring keys within their overlap window.
 func (r *Rotator) JWKSetJSON() []byte {
-	p := r.jwksBody.Load()
-	if p == nil {
+	r.mu.RLock()
+	var keys []jose.JSONWebKey
+	if r.active != nil {
+		if jwk, err := jwks.FromPublicKey(&r.active.key.PublicKey); err == nil {
+			keys = append(keys, jwk)
+		}
+	}
+	// Retiring keys are served until their overlap deadline, as in PublicKey.
+	now := time.Now()
+	for _, k := range r.retiring {
+		if k.expired(now) {
+			continue
+		}
+		if jwk, err := jwks.FromPublicKey(&k.key.PublicKey); err == nil {
+			keys = append(keys, jwk)
+		}
+	}
+	r.mu.RUnlock()
+
+	body, err := jwks.MarshalSet(keys...)
+	if err != nil {
+		r.cfg.Logger.Error("failed to marshal JWKS", "error", err)
 		return []byte(`{"keys":[]}`)
 	}
-	return *p
+	return body
 }
 
 // PublicKey returns the ECDSA public key matching kid from the active or
@@ -118,7 +139,7 @@ func (r *Rotator) PublicKey(kid string) (*ecdsa.PublicKey, error) {
 	now := time.Now()
 	for _, k := range r.retiring {
 		if k.kid == kid {
-			if !now.Before(k.notAfterT) {
+			if k.expired(now) {
 				return nil, fmt.Errorf("token-signer key for kid %q is retired (past overlap deadline)", kid)
 			}
 			return &k.key.PublicKey, nil
@@ -178,7 +199,7 @@ func (r *Rotator) rotate() {
 	// Evict expired retiring keys.
 	live := r.retiring[:0]
 	for _, k := range r.retiring {
-		if k.notAfterT.After(now) {
+		if !k.expired(now) {
 			live = append(live, k)
 		} else {
 			r.cfg.Logger.Info("evicted expired key", "kid", k.kid)
@@ -192,39 +213,5 @@ func (r *Rotator) rotate() {
 	// Swap the signing key in the Issuer.
 	r.swapKey(newKey, newKid)
 
-	r.rebuildJWKS()
-
 	r.cfg.Logger.Info("rotation complete", "new_kid", newKid, "retiring_keys", len(r.retiring))
-}
-
-func (r *Rotator) rebuildJWKS() {
-	r.mu.RLock()
-	var keys []jose.JSONWebKey
-
-	// Active key first.
-	if r.active != nil {
-		if jwk, err := jwks.FromPublicKey(&r.active.key.PublicKey); err == nil {
-			keys = append(keys, jwk)
-		}
-	}
-	// Only publish retiring keys that are still within their overlap window, so
-	// the JWKS never advertises a key past its retirement deadline (mirrors the
-	// deadline check in PublicKey).
-	now := time.Now()
-	for _, k := range r.retiring {
-		if !now.Before(k.notAfterT) {
-			continue
-		}
-		if jwk, err := jwks.FromPublicKey(&k.key.PublicKey); err == nil {
-			keys = append(keys, jwk)
-		}
-	}
-	r.mu.RUnlock()
-
-	body, err := jwks.MarshalSet(keys...)
-	if err != nil {
-		r.cfg.Logger.Error("failed to marshal JWKS", "error", err)
-		return
-	}
-	r.jwksBody.Store(&body)
 }

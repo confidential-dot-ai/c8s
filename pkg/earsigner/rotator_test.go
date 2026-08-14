@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -98,7 +100,7 @@ func TestJWKSetJSON_HasActiveKey(t *testing.T) {
 }
 
 // TestRun_Rotation drives the rotation loop with a tiny interval to exercise
-// rotate(), the swap callback, and JWKS rebuild including a retiring key.
+// rotate(), the swap callback, and JWKS serving of a retiring key.
 func TestRun_Rotation(t *testing.T) {
 	keyPEM, err := earsigner.Generate()
 	if err != nil {
@@ -233,6 +235,236 @@ func TestPublicKey_RetiringKeyExpires(t *testing.T) {
 	}
 }
 
+// TestJWKSDropsRetiredKeyPastOverlap proves the served JWKS drops a retiring
+// key once its overlap deadline passes, matching the lookup-time rejection in
+// PublicKey. The loop is stopped right after the first rotation so no later
+// rotate() can mask a stale served set.
+func TestJWKSDropsRetiredKeyPastOverlap(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	swapped := make(chan struct{}, 1)
+	r, err := earsigner.NewRotator(earsigner.RotatorConfig{
+		Interval: 100 * time.Millisecond,
+		Overlap:  400 * time.Millisecond,
+		Jitter:   0,
+		Logger:   discardLogger(),
+	}, keyPEM, func(_ *ecdsa.PrivateKey, _ string) {
+		select {
+		case swapped <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewRotator: %v", err)
+	}
+	initialKid := firstKid(t, r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	select {
+	case <-swapped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first rotation")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	// Inside the overlap window both views serve the retiring key.
+	if _, err := r.PublicKey(initialKid); err != nil {
+		t.Fatalf("PublicKey(retiring kid) inside overlap: %v", err)
+	}
+	if !jwksHasKid(parseJWKS(t, r.JWKSetJSON()), initialKid) {
+		t.Fatal("JWKS missing retiring key inside its overlap window")
+	}
+
+	// Past the overlap deadline, with no further rotation, both views must
+	// drop it.
+	time.Sleep(600 * time.Millisecond)
+
+	if _, err := r.PublicKey(initialKid); err == nil {
+		t.Error("PublicKey accepted a key past its overlap deadline")
+	}
+	if jwksHasKid(parseJWKS(t, r.JWKSetJSON()), initialKid) {
+		t.Error("JWKS still publishes a key past its overlap deadline")
+	}
+}
+
+// TestJWKSAgreesWithPublicKeyAcrossSchedule walks the rotation schedule —
+// initial, post-rotate inside overlap, past overlap expiry, next rotate — and
+// asserts PublicKey and the served JWKS agree on every key at every point.
+func TestJWKSAgreesWithPublicKeyAcrossSchedule(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	const (
+		interval = 600 * time.Millisecond
+		overlap  = 250 * time.Millisecond
+	)
+	swaps := make(chan string, 4)
+	r, err := earsigner.NewRotator(earsigner.RotatorConfig{
+		Interval: interval,
+		Overlap:  overlap,
+		Jitter:   0,
+		Logger:   discardLogger(),
+	}, keyPEM, func(_ *ecdsa.PrivateKey, kid string) { swaps <- kid })
+	if err != nil {
+		t.Fatalf("NewRotator: %v", err)
+	}
+	k0 := firstKid(t, r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+	}()
+
+	assertAgree := func(kid string, wantServed bool, when string) {
+		t.Helper()
+		_, pubErr := r.PublicKey(kid)
+		inJWKS := jwksHasKid(parseJWKS(t, r.JWKSetJSON()), kid)
+		if wantServed {
+			if pubErr != nil {
+				t.Errorf("%s: PublicKey(%q): %v", when, kid, pubErr)
+			}
+			if !inJWKS {
+				t.Errorf("%s: JWKS does not publish %q", when, kid)
+			}
+			return
+		}
+		if pubErr == nil {
+			t.Errorf("%s: PublicKey accepted retired key %q", when, kid)
+		}
+		if inJWKS {
+			t.Errorf("%s: JWKS publishes retired key %q", when, kid)
+		}
+	}
+	nextSwap := func() string {
+		t.Helper()
+		select {
+		case kid := <-swaps:
+			return kid
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for rotation")
+			return ""
+		}
+	}
+
+	// Initial: k0 active.
+	assertAgree(k0, true, "initial")
+
+	// First rotation: k0 retiring inside its overlap window, k1 active.
+	k1 := nextSwap()
+	assertAgree(k0, true, "inside overlap")
+	assertAgree(k1, true, "inside overlap")
+
+	// Past k0's overlap deadline but before the next rotation.
+	time.Sleep(overlap + 150*time.Millisecond)
+	assertAgree(k0, false, "past overlap")
+	assertAgree(k1, true, "past overlap")
+
+	// Second rotation: k0 evicted, k1 retiring inside overlap, k2 active.
+	k2 := nextSwap()
+	assertAgree(k0, false, "after next rotate")
+	assertAgree(k1, true, "after next rotate")
+	assertAgree(k2, true, "after next rotate")
+}
+
+// TestJWKSetJSONConcurrentWithRotation hammers JWKSetJSON and PublicKey from
+// concurrent readers while the rotation loop runs, asserting every served
+// body is a complete valid JWKS and lookups stay correct mid-rotation.
+func TestJWKSetJSONConcurrentWithRotation(t *testing.T) {
+	keyPEM, err := earsigner.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Overlap is long compared to the reader run time, so the initial key
+	// must resolve via PublicKey throughout.
+	r, err := earsigner.NewRotator(earsigner.RotatorConfig{
+		Interval: 5 * time.Millisecond,
+		Overlap:  time.Second,
+		Jitter:   0,
+		Logger:   discardLogger(),
+	}, keyPEM, func(*ecdsa.PrivateKey, string) {})
+	if err != nil {
+		t.Fatalf("NewRotator: %v", err)
+	}
+	initialKid := firstKid(t, r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	const readers = 8
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				var set struct {
+					Keys []jwkEntry `json:"keys"`
+				}
+				if err := json.Unmarshal(r.JWKSetJSON(), &set); err != nil {
+					errs <- fmt.Errorf("unmarshal served JWKS: %w", err)
+					return
+				}
+				if len(set.Keys) == 0 {
+					errs <- errors.New("served JWKS has no keys")
+					return
+				}
+				for _, k := range set.Keys {
+					if k.Kid == "" || k.Kty == "" || k.Crv == "" {
+						errs <- fmt.Errorf("served incomplete JWK entry: %+v", k)
+						return
+					}
+				}
+				if _, err := r.PublicKey(initialKid); err != nil {
+					errs <- fmt.Errorf("PublicKey(retiring kid) mid-rotation: %w", err)
+					return
+				}
+				if _, err := r.PublicKey("never-issued"); err == nil {
+					errs <- errors.New("PublicKey resolved an unknown kid")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	default:
+	}
+}
+
 // firstTickIn starts Run with an already-cancelled context so it exits right
 // after logging, and returns the first_tick_in duration from the startup log
 // record (the only observable form of the computed first tick).
@@ -316,6 +548,15 @@ func parseJWKS(t *testing.T, body []byte) []jwkEntry {
 		t.Fatalf("unmarshal JWKS %q: %v", body, err)
 	}
 	return set.Keys
+}
+
+func jwksHasKid(keys []jwkEntry, kid string) bool {
+	for _, k := range keys {
+		if k.Kid == kid {
+			return true
+		}
+	}
+	return false
 }
 
 func firstKid(t *testing.T, r *earsigner.Rotator) string {
