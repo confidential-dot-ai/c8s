@@ -156,7 +156,8 @@ test-e2e-ca-handoff:
 
 # Parse + decision tests for the baked kata-agent policy. The guest evaluates
 # it with regorus, which reads Rego v0 plus the future keywords, so the checks
-# run with --v0-compatible. Install with:
+# run with --v0-compatible. The fmt gate keeps the policy's layout normalised
+# for the Go lockstep tests that read its text. Install with:
 #   curl -fsSL -o opa https://openpolicyagent.org/downloads/$(OPA_VERSION)/opa_linux_amd64_static && chmod +x opa
 # Single source of the pinned version for CI's installer step.
 print-opa-version:
@@ -164,6 +165,7 @@ print-opa-version:
 
 policy-test:
 	@command -v $(OPA) >/dev/null 2>&1 || { echo "opa not found; see the policy-test comment in the Makefile"; exit 1; }
+	$(OPA) fmt --v0-compatible --diff --fail $(KATA_POLICY) $(KATA_POLICY_TESTS)
 	$(OPA) check --v0-compatible --strict $(KATA_POLICY)
 	$(OPA) test --v0-compatible $(KATA_POLICY) $(KATA_POLICY_TESTS)
 

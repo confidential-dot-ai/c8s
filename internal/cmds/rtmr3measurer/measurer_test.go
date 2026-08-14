@@ -197,11 +197,30 @@ func TestSandboxContainerNotMeasured(t *testing.T) {
 	m := newTestMeasurer(t, watch, state, tdx)
 
 	writeConfigJSON(t, watch, cid1, map[string]string{
-		"io.kubernetes.cri.container-type": "sandbox",
+		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+		"io.kubernetes.cri.container-type":         "sandbox",
 	})
 	m.scanOnce()
 	if tdx.extends != 0 {
 		t.Fatalf("extends = %d, want 0 (sandbox/pause is not a workload)", tdx.extends)
+	}
+}
+
+// The CRI-O container-type key is not a sandbox marker in this shape; a
+// container carrying only it is a workload and its digest is measured.
+func TestCRIOMarkedContainerIsMeasured(t *testing.T) {
+	watch, state := t.TempDir(), filepath.Join(t.TempDir(), "measured")
+	tdx := &fakeTDX{}
+	m := newTestMeasurer(t, watch, state, tdx)
+
+	writeConfigJSON(t, watch, cid1, map[string]string{
+		"io.kubernetes.cri.container-type":  "container",
+		"io.kubernetes.cri-o.ContainerType": "sandbox",
+		"io.kubernetes.cri.image-name":      "ghcr.io/confidential-dot-ai/app@sha256:" + hexA,
+	})
+	m.scanOnce()
+	if tdx.extends != 1 {
+		t.Fatalf("extends = %d, want 1 (the CRI-O marker does not exempt from measurement)", tdx.extends)
 	}
 }
 

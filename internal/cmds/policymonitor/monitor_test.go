@@ -362,14 +362,15 @@ func TestHandleNewContainer_MalformedConfigDenies(t *testing.T) {
 }
 
 func TestHandleNewContainer_SandboxSkipped(t *testing.T) {
-	// The pod sandbox (pause) container carries container-type=sandbox and
+	// The pod sandbox (pause) container carries the sandbox type markers and
 	// no image digest. kata runs the measured baked pause for it, so
 	// policy-monitor must skip it rather than deny — otherwise every pod's
 	// sandbox gets killed and no pod can start.
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	cid := testCID("sandbox0")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
-		"io.kubernetes.cri.container-type": "sandbox",
+		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+		"io.kubernetes.cri.container-type":         "sandbox",
 	})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
@@ -385,20 +386,43 @@ func TestHandleNewContainer_SandboxSkippedEvenWithUnallowlistedDigest(t *testing
 	// because kata-agent runs the measured baked pause for any sandbox
 	// regardless of the requested image, so a host that mislabels a
 	// workload as a sandbox to dodge enforcement gains nothing — its image
-	// never runs. policy-monitor identifies the sandbox the same way kata
-	// does (isSandbox), keeping the two in lockstep.
+	// never runs. policy-monitor identifies the sandbox the same way the
+	// baked kata-agent policy does (kataspec.IsSandbox), keeping the two in
+	// lockstep.
 	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	cid := testCID("sandbox-evil")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
-		"io.kubernetes.cri.container-type": "sandbox",
-		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
+		"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+		"io.kubernetes.cri.container-type":         "sandbox",
+		"io.kubernetes.cri.image-name":             "ghcr.io/evil/badimage@sha256:" + denied,
 	})
 
 	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
 
 	if calls := killer.snapshot(); len(calls) != 0 {
 		t.Fatalf("sandbox should be skipped even with a non-allowlisted digest, got %d kill calls: %+v", len(calls), calls)
+	}
+}
+
+func TestHandleNewContainer_CRIOSandboxMarkerDoesNotExempt(t *testing.T) {
+	// The baked policy classifies on the containerd container-type marker
+	// and denies any request carrying the CRI-O one; if such a bundle ever
+	// reaches the guest anyway, policy-monitor must digest-check it, not
+	// exempt it.
+	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	cid := testCID("crionly-sb")
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type":  "container",
+		"io.kubernetes.cri-o.ContainerType": "sandbox",
+		"io.kubernetes.cri.image-name":      "ghcr.io/evil/badimage@sha256:" + denied,
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected the CRI-O-marked container to be digest-checked and killed, got %d kill calls: %+v", len(calls), calls)
 	}
 }
 
@@ -876,7 +900,8 @@ func TestReadConfigJSON_EmptyAnnotationsIsRetriedNotJudged(t *testing.T) {
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		writeConfigJSON(t, watchDir, cid, map[string]string{
-			"io.kubernetes.cri.container-type": "sandbox",
+			"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
+			"io.kubernetes.cri.container-type":         "sandbox",
 		})
 	}()
 

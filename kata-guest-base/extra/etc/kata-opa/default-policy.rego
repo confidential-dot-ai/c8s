@@ -41,23 +41,40 @@ import future.keywords.if
 import future.keywords.in
 
 default AddARPNeighborsRequest := true
+
 # Swap never leaves TEE memory.
 default AddSwapRequest := false
+
 default CloseStdinRequest := true
+
 default DestroySandboxRequest := true
+
 default GetDiagnosticDataRequest := true
+
 default GetMetricsRequest := true
+
 default GetOOMEventRequest := true
+
 default GuestDetailsRequest := true
+
 default ListInterfacesRequest := true
+
 default ListRoutesRequest := true
+
 default MemHotplugByProbeRequest := true
+
 default OnlineCPUMemRequest := true
+
 default PauseContainerRequest := true
+
 default PullImageRequest := true
+
 default RemoveContainerRequest := true
+
 default RemoveStaleVirtiofsShareMountsRequest := true
+
 default ReseedRandomDevRequest := true
+
 default ResumeContainerRequest := true
 
 # Load-bearing override. See header comment.
@@ -72,18 +89,29 @@ default SetPolicyRequest := false
 # boundary, so an in-guest shell/stream/file-copy would be a host-readable side
 # channel. Flip one back to `true` only with a one-line note on why it must stay.
 default ExecProcessRequest := false
+
 default ReadStreamRequest := false
+
 default WriteStreamRequest := false
 
 default SignalProcessRequest := true
+
 default StartContainerRequest := true
+
 default StartTracingRequest := true
+
 default StatsContainerRequest := true
+
 default StopTracingRequest := true
+
 default TtyWinResizeRequest := true
+
 default UpdateContainerRequest := true
+
 default UpdateInterfaceRequest := true
+
 default UpdateRoutesRequest := true
+
 default WaitProcessRequest := true
 
 # --- Container rootfs binding ------------------------------------------
@@ -113,8 +141,15 @@ CreateContainerRequest if {
 	count(input.shared_mounts) == 0
 	print("CreateContainerRequest: no shared_mounts")
 
+	# containerd is the only CRI in this shape and never sets the CRI-O key.
+	not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]
+	print("CreateContainerRequest: no foreign container-type marker")
+
 	pull := sole_guest_pull_storage
 	print("CreateContainerRequest: one image_guest_pull storage")
+
+	not crio_pull_metadata(pull)
+	print("CreateContainerRequest: no foreign marker in the pull metadata")
 
 	# add_storages skips a handler whose mount point is already registered
 	# sandbox-wide, and setup_bundle bind-mounts the host's spec.root.path
@@ -217,8 +252,9 @@ bind_mount(m) if {
 
 # kata's own switch is io.katacontainers.pkg.oci.container_type; the guest-pull
 # handler's is the container-type copied into the storage's driver_options
-# metadata; policy-monitor's is the CRI annotation. A container runs what all
-# three agree on, or it does not run.
+# metadata; policy-monitor's is this same sandbox_annotations pair (a Go
+# lockstep test machine-compares them). A container runs what all three agree
+# on, or it does not run.
 pull_source_bound(pull) if {
 	sandbox_annotations
 	sandbox_pull_metadata(pull)
@@ -250,6 +286,17 @@ sandbox_pull_metadata(pull) if {
 	some opt in pull.driver_options
 	startswith(opt, "image_guest_pull=")
 	contains(opt, "\"io.kubernetes.cri.container-type\":\"sandbox\"")
+}
+
+# containerd never writes the CRI-O key, so an honest request cannot carry it
+# in the serialised pull metadata either. The key is checked after decoding,
+# the way the guest-pull handler reads it: a text match would miss a
+# JSON-escaped key.
+crio_pull_metadata(pull) if {
+	some opt in pull.driver_options
+	startswith(opt, "image_guest_pull=")
+	metadata := json.unmarshal(trim_prefix(opt, "image_guest_pull="))
+	metadata["io.kubernetes.cri-o.ContainerType"]
 }
 
 # --- Sandbox and ephemeral storages ------------------------------------

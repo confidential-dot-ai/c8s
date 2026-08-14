@@ -176,6 +176,106 @@ test_sandbox_source_must_be_pause if {
 		sandbox_input,
 		{"storages": [object.union(sandbox_input.storages[0], {"source": digest_ref})]},
 	)
+	not CreateContainerRequest with input as object.union(
+		sandbox_input,
+		{"storages": [object.union(sandbox_input.storages[0], {"source": "ghcr.io/confidential-dot-ai/assam:latest"})]},
+	)
+}
+
+# Sandbox annotations without the sandbox marker in the pull metadata admit
+# no pull: the sandbox branch runs the measured pause and the workload branch
+# is keyed on workload_annotations, so neither may bind the host's image.
+test_sandbox_annotations_without_sandbox_metadata_denied if {
+	not CreateContainerRequest with input as object.union(sandbox_input, {
+		"storages": [object.union(sandbox_input.storages[0], {
+			"source": digest_ref,
+			"driver_options": ["image_guest_pull={}"],
+		})],
+		"OCI": {"Annotations": object.union(
+			sandbox_input.OCI.Annotations,
+			{"io.kubernetes.cri.image-name": digest_ref},
+		)},
+	})
+	not CreateContainerRequest with input as object.union(sandbox_input, {
+		"storages": [object.union(sandbox_input.storages[0], {
+			"source": digest_ref,
+			"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"container\"}"],
+		})],
+		"OCI": {"Annotations": object.union(
+			sandbox_input.OCI.Annotations,
+			{"io.kubernetes.cri.image-name": digest_ref},
+		)},
+	})
+}
+
+# An image-name annotation must not give a sandbox-annotated request's pull
+# source a second way to bind: the sandbox branch runs the measured pause.
+test_sandbox_source_stays_pause_with_image_name if {
+	not CreateContainerRequest with input as object.union(sandbox_input, {
+		"storages": [object.union(sandbox_input.storages[0], {"source": digest_ref})],
+		"OCI": {"Annotations": object.union(
+			sandbox_input.OCI.Annotations,
+			{"io.kubernetes.cri.image-name": digest_ref},
+		)},
+	})
+}
+
+# object.union is shallow, so merge at each level to keep the rest of the
+# fixture — with the base fixtures admitted, only the override can deny.
+with_annotations(base, extra) := object.union(base, {"OCI": object.union(
+	base.OCI,
+	{"Annotations": object.union(base.OCI.Annotations, extra)},
+)})
+
+# containerd never sets the CRI-O marker; a request carrying one is denied
+# rather than classified, whatever the honest markers say. The guard is on
+# the key's presence, so an empty or garbage value denies too.
+test_crio_container_type_marker_denied if {
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": "sandbox"})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": "container"})
+	not CreateContainerRequest with input as with_annotations(sandbox_input, {"io.kubernetes.cri-o.ContainerType": "sandbox"})
+	not CreateContainerRequest with input as with_annotations(sandbox_input, {"io.kubernetes.cri-o.ContainerType": "container"})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": ""})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.kubernetes.cri-o.ContainerType": "garbage"})
+}
+
+# The guest-pull handler reads the container type from the serialised pull
+# metadata as well; the CRI-O marker is denied there too, plain or
+# JSON-escaped.
+test_crio_marker_in_pull_metadata_denied if {
+	not CreateContainerRequest with input as object.union(workload_input, {"storages": [object.union(
+		workload_input.storages[0],
+		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri-o.ContainerType\":\"sandbox\"}"]},
+	)]})
+	not CreateContainerRequest with input as object.union(workload_input, {"storages": [object.union(
+		workload_input.storages[0],
+		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri-o.\\u0043ontainerType\":\"sandbox\"}"]},
+	)]})
+	not CreateContainerRequest with input as object.union(sandbox_input, {"storages": [object.union(
+		sandbox_input.storages[0],
+		{"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"sandbox\",\"io.kubernetes.cri-o.ContainerType\":\"sandbox\"}"]},
+	)]})
+}
+
+# The veto reads decoded metadata keys, so an annotation value that merely
+# mentions the key string is not the marker.
+test_crio_key_string_in_annotation_value_allowed if {
+	CreateContainerRequest with input as object.union(workload_input, {
+		"storages": [object.union(
+			workload_input.storages[0],
+			{"driver_options": ["image_guest_pull={\"io.kubernetes.cri.container-type\":\"container\",\"example.com/note\":\"mentions io.kubernetes.cri-o.ContainerType\"}"]},
+		)],
+		"OCI": {"Annotations": object.union(
+			workload_input.OCI.Annotations,
+			{"example.com/note": "mentions io.kubernetes.cri-o.ContainerType"},
+		)},
+	})
+}
+
+# The two type markers the policy conjoins must agree with each other.
+test_conflicting_container_type_markers_denied if {
+	not CreateContainerRequest with input as with_annotations(sandbox_input, {"io.kubernetes.cri.container-type": "container"})
+	not CreateContainerRequest with input as with_annotations(workload_input, {"io.katacontainers.pkg.oci.container_type": "pod_sandbox"})
 }
 
 # --- sandbox and ephemeral storages -------------------------------------
