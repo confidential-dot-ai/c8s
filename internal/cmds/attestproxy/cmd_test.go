@@ -3,6 +3,7 @@ package attestproxy
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -140,6 +141,63 @@ func TestNewProxyRejectsBadConfig(t *testing.T) {
 				t.Fatal("newProxy succeeded, want rejection")
 			}
 		})
+	}
+}
+
+// The healthcheck subcommand is the DaemonSet's only liveness signal: it
+// must succeed against a live proxied upstream and fail against a missing
+// socket.
+func TestHealthcheckCmd(t *testing.T) {
+	upstream := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	sock := serveProxy(t, config{upstream: upstream, socketGID: 0})
+
+	cmd := newHealthcheckCmd()
+	cmd.SetArgs([]string{"--socket", sock})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("healthcheck against live proxied upstream: %v", err)
+	}
+
+	missing := newHealthcheckCmd()
+	missing.SetArgs([]string{"--socket", filepath.Join(t.TempDir(), "gone.sock")})
+	if err := missing.Execute(); err == nil {
+		t.Fatal("healthcheck succeeded against a missing socket")
+	}
+}
+
+// A caller-supplied Authorization header must not survive the proxy: the
+// injected key overwrites it (Header.Set), so socket callers cannot smuggle
+// a stale or foreign key to the upstream.
+func TestProxyOverwritesInboundAuthorization(t *testing.T) {
+	keyFile := writeKeyFile(t, "s3cret")
+	upstream := startUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer s3cret" {
+			t.Errorf("Authorization = %q, want the injected key overwriting the inbound header", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	sock := serveProxy(t, config{upstream: upstream, apiKeyFile: keyFile, socketGID: 0})
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+	}}
+	req, err := http.NewRequest(http.MethodGet, "http://unix/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer caller-supplied")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET over proxy socket: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
 

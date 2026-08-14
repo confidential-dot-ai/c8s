@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1568,5 +1569,38 @@ func TestCertContainerGetsRebasedAttestationURL(t *testing.T) {
 	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
 	if args := containerNamed(pod, reservedCertContainerName).Args; !hasArg(args, want) {
 		t.Fatalf("c8s-cert args %v missing %q", args, want)
+	}
+}
+
+// Every injected fetcher (cert, secret, volume) must carry the rebased
+// socket URL AND the mount that makes it reachable in the same container —
+// a rebased URL without the c8s-workload-claims mount dials a path nothing
+// serves.
+func TestFetchersCarryRebasedURLWithItsMount(t *testing.T) {
+	cfg := secretsConfig()
+	cfg.WorkloadClaimsHostDir = "/var/run/nri-image-policy"
+	cfg.AttestationApiURL = "unix:///var/run/nri-image-policy/attestation-api.sock"
+	pod := podWithApp()
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"DB=/api/db"}},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	want := "--attestation-api-url=unix://" + workloadclaims.SidecarSocketDir + "/attestation-api.sock"
+	for _, name := range []string{reservedCertContainerName, reservedSecretContainerName, reservedVolumeContainerName} {
+		c := containerNamed(pod, name)
+		if c == nil {
+			t.Fatalf("injected pod missing container %q", name)
+		}
+		if !hasArg(c.Args, want) {
+			t.Errorf("%s args %v missing rebased %q", name, c.Args, want)
+		}
+		hasMount := slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.Name == workloadClaimsVolumeName && m.MountPath == workloadclaims.SidecarSocketDir
+		})
+		if !hasMount {
+			t.Errorf("%s carries the rebased socket URL but no %s mount at %s; mounts %+v", name, workloadClaimsVolumeName, workloadclaims.SidecarSocketDir, c.VolumeMounts)
+		}
 	}
 }
