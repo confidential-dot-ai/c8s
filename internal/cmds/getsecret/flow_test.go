@@ -232,8 +232,8 @@ func TestEveryRequestTakesAFreshChallengeAndToken(t *testing.T) {
 }
 
 // The sidecar's log leaves the TEE (docs/engineering-standards.md §8), so a
-// fetched value must never reach it — on a read, a create, or a refusal the
-// retry loop logs alike.
+// fetched value must never reach it: the read, create, write, and retry legs
+// are each driven with the log captured.
 func TestSecretValueNeverReachesTheLog(t *testing.T) {
 	endpoint := startInventory(t)
 	var log bytes.Buffer

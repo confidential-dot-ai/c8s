@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -229,7 +230,7 @@ func (hn *harness) requestWithToken(t *testing.T, method, path string, leaf *x50
 	t.Helper()
 	body, _ := json.Marshal(token)
 	r := httptest.NewRequest(method, "/secrets"+path, nil)
-	r.Header.Set("X-C8s-Challenge", base64.StdEncoding.EncodeToString(nonce))
+	r.Header.Set(ChallengeHeader, base64.StdEncoding.EncodeToString(nonce))
 	r.Header.Set("Authorization", AuthScheme+base64.StdEncoding.EncodeToString(body))
 	r.TLS = &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{leaf},
@@ -238,8 +239,8 @@ func (hn *harness) requestWithToken(t *testing.T, method, path string, leaf *x50
 	return r
 }
 
-// mintToken signs with signer over the given requester key and nonce — the
-// three axes verifyToken checks, each bendable on its own.
+// mintToken signs with signer over the given sandbox, requester key, and
+// nonce — the axes verifyToken checks, each bendable on its own.
 func mintToken(t *testing.T, signer *workloadclaims.SandboxTokenSigner, sandboxID string, pub crypto.PublicKey, nonce []byte) *workloadclaims.SignedSandboxToken {
 	t.Helper()
 	keyDigest, err := workloadclaims.RequesterKeyDigest(pub)
@@ -258,6 +259,16 @@ func (hn *harness) seed(t *testing.T, path string, value []byte) {
 	t.Helper()
 	if _, err := hn.store.Put(context.Background(), path, value, OriginOperator); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// assertNoRelease fails if a refused response carries value, raw or base64.
+func assertNoRelease(t *testing.T, w *httptest.ResponseRecorder, value []byte) {
+	t.Helper()
+	for _, leak := range []string{string(value), base64.StdEncoding.EncodeToString(value)} {
+		if strings.Contains(w.Body.String(), leak) {
+			t.Fatalf("a refused request leaked the secret: %s", w.Body)
+		}
 	}
 }
 
@@ -413,14 +424,13 @@ func TestTokenSignedByAnotherInventoryRefused(t *testing.T) {
 	}
 	nonce := []byte("impostor")
 	token := mintToken(t, impostor, testSandbox, hn.leaf.PublicKey, nonce)
-	hn.seed(t, "/api/db", []byte("stored-secret"))
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
 	w := do(hn.h, hn.requestWithToken(t, http.MethodGet, "/api/db", hn.leaf, token, nonce))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("impostor-signed token = %d, want 403", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "value") {
-		t.Fatalf("a refused token released a value: %s", w.Body)
-	}
+	assertNoRelease(t, w, stored)
 }
 
 // The token is bound to one requester key: a token minted for another key must
@@ -430,14 +440,13 @@ func TestTokenBoundToAnotherKeyRefused(t *testing.T) {
 	other, _ := leafFor(t, testSandbox)
 	nonce := []byte("bound-to-another-key")
 	token := mintToken(t, hn.signer, testSandbox, other.PublicKey, nonce)
-	hn.seed(t, "/api/db", []byte("stored-secret"))
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
 	w := do(hn.h, hn.requestWithToken(t, http.MethodGet, "/api/db", hn.leaf, token, nonce))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("token for another key = %d, want 403", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "value") {
-		t.Fatalf("a refused token released a value: %s", w.Body)
-	}
+	assertNoRelease(t, w, stored)
 }
 
 // The token carries this request's challenge: one minted against another
@@ -445,14 +454,13 @@ func TestTokenBoundToAnotherKeyRefused(t *testing.T) {
 func TestTokenForAnotherChallengeRefused(t *testing.T) {
 	hn := newHarness(t)
 	token := mintToken(t, hn.signer, testSandbox, hn.leaf.PublicKey, []byte("another-challenge"))
-	hn.seed(t, "/api/db", []byte("stored-secret"))
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
 	w := do(hn.h, hn.requestWithToken(t, http.MethodGet, "/api/db", hn.leaf, token, []byte("this-request")))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("token for another challenge = %d, want 403", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "value") {
-		t.Fatalf("a refused token released a value: %s", w.Body)
-	}
+	assertNoRelease(t, w, stored)
 }
 
 // A floor image the entry does not declare is still foreign: floor membership
@@ -513,27 +521,35 @@ func TestEntryWithoutGrantRefused(t *testing.T) {
 // declares is running, the sandbox matches nothing and is refused.
 func TestReleaseRefusedUntilEveryMainIsRunning(t *testing.T) {
 	hn := newHarness(t)
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
 	hn.inv.containers = []workloadclaims.SandboxContainer{
 		{Digest: testAppImg, Argv: []string{"/serve"}},
 		{Digest: testInjected, Argv: []string{"get-cert", "--san=x"}},
 	}
-	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+	w := do(hn.h, hn.request(t, http.MethodGet, "/api/db"))
+	if w.Code != http.StatusForbidden {
 		t.Fatalf("one main not yet running = %d, want 403", w.Code)
 	}
+	assertNoRelease(t, w, stored)
 }
 
-// Two entries the running set satisfies equally are a refusal, through the
-// release path itself rather than the diagnostic.
+// Two entries the running set satisfies equally are a refusal, driven through
+// Handler.authorize.
 func TestAmbiguousMatchRefused(t *testing.T) {
 	hn := newHarness(t)
+	stored := []byte("stored-secret")
+	hn.seed(t, "/api/db", stored)
 	al, err := hn.h.Policy.Allowlist()
 	if err != nil {
 		t.Fatal(err)
 	}
 	al.Workloads["api-copy"] = al.Workloads["api"]
-	if w := do(hn.h, hn.request(t, http.MethodGet, "/api/db")); w.Code != http.StatusForbidden {
+	w := do(hn.h, hn.request(t, http.MethodGet, "/api/db"))
+	if w.Code != http.StatusForbidden {
 		t.Fatalf("ambiguous match = %d, want 403", w.Code)
 	}
+	assertNoRelease(t, w, stored)
 }
 
 // The grant honoured is the matched entry's own: a path only another entry
@@ -615,8 +631,8 @@ func TestEmptyFloorRefuses(t *testing.T) {
 }
 
 // Logs leave the TEE (docs/engineering-standards.md §8), so a secret value
-// must never reach one — on a served read, a denial, a miss, or a store
-// failure alike.
+// must never reach one — on a served read, a create that mints it, a denial,
+// a miss, or a store failure alike.
 func TestSecretValueNeverReachesTheLog(t *testing.T) {
 	hn := newHarness(t)
 	var log bytes.Buffer
@@ -633,6 +649,18 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 		t.Fatalf("read = %d (%s), want 200 carrying the value", w.Code, w.Body)
 	}
 
+	// The create's body carries the minted value by design; parse it out so
+	// the log can be checked against those exact bytes.
+	created := do(hn.h, hn.request(t, http.MethodPost, "/api/new"))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d (%s), want 201", created.Code, created.Body)
+	}
+	mintedB64 := decodeValue(t, created)
+	minted, err := base64.StdEncoding.DecodeString(mintedB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	impostor, err := workloadclaims.NewSandboxTokenSigner(testHost)
 	if err != nil {
 		t.Fatal(err)
@@ -642,10 +670,18 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 		mintToken(t, impostor, testSandbox, hn.leaf.PublicKey, nonce), nonce))
 	ungranted := do(hn.h, hn.request(t, http.MethodGet, "/other/db"))
 	missing := do(hn.h, hn.request(t, http.MethodGet, "/api/never-created"))
+	deniedCreate := do(hn.h, hn.request(t, http.MethodPost, "/other/db"))
 
 	hn.h.Store = failingStore{err: fmt.Errorf("backend down")}
 	unavailable := do(hn.h, hn.requestWith(t, http.MethodGet, "/api/db", hn.leaf, testSandbox, []byte("store-down")))
+	failedCreate := do(hn.h, hn.request(t, http.MethodPost, "/api/db"))
 
+	// minted is binary: a text log would carry it quoted, as base64, or as a
+	// byte dump, so raw containment alone is not enough.
+	leaks := []string{
+		string(value), valueB64,
+		string(minted), mintedB64, strconv.Quote(string(minted)), fmt.Sprintf("%v", minted),
+	}
 	drives := []struct {
 		name string
 		w    *httptest.ResponseRecorder
@@ -654,13 +690,15 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 		{"denied read", denied, http.StatusForbidden},
 		{"ungranted path", ungranted, http.StatusNotFound},
 		{"absent secret", missing, http.StatusNotFound},
+		{"denied create", deniedCreate, http.StatusNotFound},
 		{"store failure", unavailable, http.StatusInternalServerError},
+		{"failed create", failedCreate, http.StatusInternalServerError},
 	}
 	for _, d := range drives {
 		if d.w.Code != d.want {
 			t.Fatalf("%s = %d (%s), want %d", d.name, d.w.Code, d.w.Body, d.want)
 		}
-		for _, leak := range []string{string(value), valueB64} {
+		for _, leak := range leaks {
 			if strings.Contains(d.w.Body.String(), leak) {
 				t.Fatalf("%s body carried the secret: %s", d.name, d.w.Body)
 			}
@@ -671,7 +709,7 @@ func TestSecretValueNeverReachesTheLog(t *testing.T) {
 	if !strings.Contains(out, "secret request denied") {
 		t.Fatalf("the denial never reached the captured log; capture is broken:\n%s", out)
 	}
-	for _, leak := range []string{string(value), valueB64} {
+	for _, leak := range leaks {
 		if strings.Contains(out, leak) {
 			t.Fatalf("the secret reached the log as %q:\n%s", leak, out)
 		}
