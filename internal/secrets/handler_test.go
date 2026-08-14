@@ -30,10 +30,15 @@ import (
 
 const (
 	testSandbox = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	testHost    = "10.0.0.7"
-	testAppImg  = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	// testSandbox2 runs the same containers as testSandbox, so it matches the
+	// same workload entry; testBulkSandbox matches the other one.
+	testSandbox2    = "1023456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testBulkSandbox = "2023456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testHost        = "10.0.0.7"
+	testAppImg      = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	// testAppImg2 is the entry's second main: release is gated on both running.
 	testAppImg2  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	testBulkImg  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	testInjected = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
 	testOther    = "sha256:8888888888888888888888888888888888888888888888888888888888888888"
 	// testInjectedOld is the previous release's injected image, still running in
@@ -66,7 +71,9 @@ func (f *fakeChallenges) Consume(c []byte) bool {
 type fakeInventory struct {
 	keys       map[string]*ecdsa.PublicKey
 	containers []workloadclaims.SandboxContainer
-	err        error
+	// bySandbox overrides containers for the sandboxes it names.
+	bySandbox map[string][]workloadclaims.SandboxContainer
+	err       error
 }
 
 func (f *fakeInventory) InventoryKey(_ context.Context, host string) (*ecdsa.PublicKey, error) {
@@ -76,15 +83,19 @@ func (f *fakeInventory) InventoryKey(_ context.Context, host string) (*ecdsa.Pub
 	}
 	return key, nil
 }
-func (f *fakeInventory) FetchSandbox(context.Context, string, string) (workloadclaims.SandboxDigestsResponse, error) {
+func (f *fakeInventory) FetchSandbox(_ context.Context, _, sandboxID string) (workloadclaims.SandboxDigestsResponse, error) {
 	if f.err != nil {
 		return workloadclaims.SandboxDigestsResponse{}, f.err
 	}
-	digests := make([]string, 0, len(f.containers))
-	for _, c := range f.containers {
+	containers, ok := f.bySandbox[sandboxID]
+	if !ok {
+		containers = f.containers
+	}
+	digests := make([]string, 0, len(containers))
+	for _, c := range containers {
 		digests = append(digests, c.Digest)
 	}
-	return workloadclaims.SandboxDigestsResponse{Digests: digests, Containers: f.containers}, nil
+	return workloadclaims.SandboxDigestsResponse{Digests: digests, Containers: containers}, nil
 }
 
 type fakeBindings struct{ host string }
@@ -188,6 +199,18 @@ func newHarness(t *testing.T) *harness {
 				Write:  []string{"/api/**"},
 			},
 		},
+		"bulk": {
+			Containers: []pkgallowlist.Container{{
+				Digest:  mustDigest(t, testBulkImg),
+				Command: pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyExact, Argv: []string{"/bulk"}},
+				Args:    pkgallowlist.ArgvPolicy{Policy: pkgallowlist.PolicyDeny},
+			}},
+			Secrets: &pkgallowlist.SecretsPolicy{
+				Policy: pkgallowlist.PolicyAllow,
+				Read:   []string{"/bulk/**"},
+				Write:  []string{"/bulk/**"},
+			},
+		},
 	}}
 	inv := &fakeInventory{
 		keys: map[string]*ecdsa.PublicKey{testHost: signer.PublicKey()},
@@ -198,7 +221,7 @@ func newHarness(t *testing.T) *harness {
 		},
 	}
 	challenges := &fakeChallenges{used: map[string]bool{}}
-	store := NewMemoryStore(16, 64)
+	store := NewMemoryStore(16, 16, 64)
 	return &harness{
 		h: Handler{
 			Store:          store,
@@ -210,6 +233,12 @@ func newHarness(t *testing.T) *harness {
 		},
 		signer: signer, leaf: leaf, challenges: challenges, inv: inv, store: store,
 	}
+}
+
+// setStore swaps in a store bounded for the test at hand.
+func (hn *harness) setStore(t *testing.T, s *MemoryStore) {
+	t.Helper()
+	hn.store, hn.h.Store = s, s
 }
 
 // request builds a request as the fetcher would send it.
@@ -257,7 +286,7 @@ func mintToken(t *testing.T, signer *workloadclaims.SandboxTokenSigner, sandboxI
 // seed plants a value directly, bypassing the release path under test.
 func (hn *harness) seed(t *testing.T, path string, value []byte) {
 	t.Helper()
-	if _, err := hn.store.Put(context.Background(), path, value, OriginOperator); err != nil {
+	if _, err := hn.store.Put(context.Background(), path, value, OperatorHolder()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -616,6 +645,60 @@ func TestInjectedImageFromPreviousReleaseIsDropped(t *testing.T) {
 	}
 	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
 		t.Fatalf("pod running the previous injected image = %d, want 201", w.Code)
+	}
+}
+
+// The store charges a created path to the allowlist entry that authorized it,
+// so a workload that floods its quota does not spend another workload's.
+func TestFloodingWorkloadDoesNotRefuseAnother(t *testing.T) {
+	hn := newHarness(t)
+	hn.setStore(t, NewMemoryStore(16, 2, 64))
+	hn.inv.bySandbox = map[string][]workloadclaims.SandboxContainer{
+		testBulkSandbox: {
+			{Digest: testBulkImg, Argv: []string{"/bulk"}},
+			{Digest: testInjected, Argv: []string{"get-secret"}},
+		},
+	}
+	bulkLeaf, _ := leafFor(t, testBulkSandbox)
+
+	created, refused := 0, 0
+	for i := range 10 {
+		p := fmt.Sprintf("/bulk/%d", i)
+		switch w := do(hn.h, hn.requestWith(t, http.MethodPost, p, bulkLeaf, testBulkSandbox, []byte("bulk"+p))); w.Code {
+		case http.StatusCreated:
+			created++
+		case http.StatusInsufficientStorage:
+			refused++
+		default:
+			t.Fatalf("flood POST %s = %d (%s), want 201 or 507", p, w.Code, w.Body)
+		}
+	}
+	if created != 2 || refused != 8 {
+		t.Fatalf("the flooding workload created %d paths and was refused %d, want 2 and 8", created, refused)
+	}
+
+	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
+		t.Fatalf("POST for another workload during the flood = %d (%s), want 201", w.Code, w.Body)
+	}
+}
+
+// Two sandboxes of one workload share its quota. The charge is the allowlist
+// entry the inventory's report matched, so restarting pods to get fresh sandbox
+// IDs buys no room.
+func TestQuotaIsPerWorkloadNotPerSandbox(t *testing.T) {
+	hn := newHarness(t)
+	hn.setStore(t, NewMemoryStore(16, 1, 64))
+	sibling, _ := leafFor(t, testSandbox2)
+
+	if w := do(hn.h, hn.request(t, http.MethodPost, "/api/db")); w.Code != http.StatusCreated {
+		t.Fatalf("first POST = %d (%s), want 201", w.Code, w.Body)
+	}
+	w := do(hn.h, hn.requestWith(t, http.MethodPost, "/api/hf", sibling, testSandbox2, []byte("sibling")))
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("POST from a second sandbox of the same workload = %d, want 507", w.Code)
+	}
+	if hn.store.Len() != 1 {
+		t.Fatalf("store holds %d paths, want 1", hn.store.Len())
 	}
 }
 

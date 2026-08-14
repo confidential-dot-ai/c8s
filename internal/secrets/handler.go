@@ -113,6 +113,13 @@ type Handler struct {
 	Logger *slog.Logger
 }
 
+// grant is the allowlist entry authorization matched: workload is the store's
+// holder key, secrets is the policy the request is checked against.
+type grant struct {
+	workload string
+	secrets  *pkgallowlist.SecretsPolicy
+}
+
 // denial is a refusal to release. The reason reaches the CDS log; the client is
 // told only that it was refused, because the detail describes the state of a
 // pod the caller may not be entitled to learn about.
@@ -153,7 +160,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grant, err := h.authorize(ctx, r, nonce)
+	g, err := h.authorize(ctx, r, nonce)
 	if err != nil {
 		var d denial
 		if !errors.As(err, &d) {
@@ -166,16 +173,16 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		h.serveGet(ctx, w, grant, path)
+		h.serveGet(ctx, w, g, path)
 	case http.MethodPost:
-		h.servePost(ctx, w, grant, path)
+		h.servePost(ctx, w, g, path)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (h Handler) serveGet(ctx context.Context, w http.ResponseWriter, grant *pkgallowlist.SecretsPolicy, path string) {
-	if !grant.Allows(path, pkgallowlist.OpRead) {
+func (h Handler) serveGet(ctx context.Context, w http.ResponseWriter, g grant, path string) {
+	if !g.secrets.Allows(path, pkgallowlist.OpRead) {
 		// Indistinguishable from a path that does not exist: telling a caller
 		// which of its ungranted guesses are real would enumerate the store.
 		h.logger().Warn("secret read denied", "path", path)
@@ -195,8 +202,8 @@ func (h Handler) serveGet(ctx context.Context, w http.ResponseWriter, grant *pkg
 	writeValue(w, value, http.StatusOK)
 }
 
-func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, grant *pkgallowlist.SecretsPolicy, path string) {
-	if !grant.Allows(path, pkgallowlist.OpWrite) {
+func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, g grant, path string) {
+	if !g.secrets.Allows(path, pkgallowlist.OpWrite) {
 		h.logger().Warn("secret create denied", "path", path)
 		http.Error(w, "no such secret", http.StatusNotFound)
 		return
@@ -209,9 +216,14 @@ func (h Handler) servePost(ctx context.Context, w http.ResponseWriter, grant *pk
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
-	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, OriginWorkload)
+	_, held, err := h.Store.PutIfAbsent(ctx, path, candidate, WorkloadHolder(g.workload))
+	if bounded(err) {
+		h.logger().Warn("secret create refused", "path", path, "workload", g.workload, "error", err)
+		http.Error(w, "secret storage limit reached", http.StatusInsufficientStorage)
+		return
+	}
 	if err != nil {
-		h.logger().Error("secret create failed", "path", path, "error", err)
+		h.logger().Error("secret create failed", "path", path, "workload", g.workload, "error", err)
 		http.Error(w, "secret unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -274,43 +286,43 @@ func (h Handler) consumeChallenge(r *http.Request) ([]byte, error) {
 
 // authorize establishes which workload is calling and returns the secret grant
 // that workload holds. Every failure is fail-closed.
-func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (*pkgallowlist.SecretsPolicy, error) {
+func (h Handler) authorize(ctx context.Context, r *http.Request, nonce []byte) (grant, error) {
 	leaf, err := verifiedLeaf(r)
 	if err != nil {
-		return nil, deny("%v", err)
+		return grant{}, deny("%v", err)
 	}
 	sandboxID, err := ratls.SandboxIDFromCert(leaf)
 	if err != nil || sandboxID == "" {
-		return nil, deny("client certificate carries no sandbox ID")
+		return grant{}, deny("client certificate carries no sandbox ID")
 	}
 
 	// The token re-proves, against this request's own challenge, that the
 	// caller is still in that sandbox, and names the inventory that says so.
 	token, err := h.parseToken(r)
 	if err != nil {
-		return nil, deny("%v", err)
+		return grant{}, deny("%v", err)
 	}
 	host, err := h.verifyToken(ctx, token, leaf.PublicKey, nonce, sandboxID)
 	if err != nil {
-		return nil, deny("%v", err)
+		return grant{}, deny("%v", err)
 	}
 
 	al, err := h.Policy.Allowlist()
 	if err != nil {
-		return nil, fmt.Errorf("load allowlist: %w", err)
+		return grant{}, fmt.Errorf("load allowlist: %w", err)
 	}
 	containers, err := h.workloadContainers(ctx, al, host, sandboxID)
 	if err != nil {
-		return nil, deny("%v", err)
+		return grant{}, deny("%v", err)
 	}
 	name, workload, err := al.MatchWorkload(containers)
 	if err != nil {
-		return nil, deny("sandbox %s: %v", sandboxID, err)
+		return grant{}, deny("sandbox %s: %v", sandboxID, err)
 	}
 	if workload.Secrets == nil {
-		return nil, deny("workload %q holds no secret grant", name)
+		return grant{}, deny("workload %q holds no secret grant", name)
 	}
-	return workload.Secrets, nil
+	return grant{workload: name, secrets: workload.Secrets}, nil
 }
 
 // verifiedLeaf returns the client certificate, requiring that crypto/tls

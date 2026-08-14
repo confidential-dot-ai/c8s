@@ -42,7 +42,7 @@ func secretsRouter(t *testing.T, enabled bool) http.Handler {
 		// reaches it is refused for want of a client certificate.
 		deps.SecretsHandler = &secrets.Handler{}
 		deps.SecretsChallenges = &secretsCS
-		deps.SecretsOperator = &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)}
+		deps.SecretsOperator = &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 8, 64)}
 		deps.SecretsExplain = &secrets.ExplainHandler{}
 	}
 	return newRouter(deps)
@@ -106,7 +106,7 @@ func TestRouter_SecretsChallengePoolIsSeparate(t *testing.T) {
 		MaxRequestSize:    65536,
 		SecretsHandler:    &secrets.Handler{},
 		SecretsChallenges: &secretsCS,
-		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)},
+		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 8, 64)},
 		SecretsExplain:    &secrets.ExplainHandler{},
 	}
 	_ = newRouter(deps)
@@ -150,7 +150,7 @@ func TestRouter_SecretsPutUsesTheAllowlistWriteCap(t *testing.T) {
 		SecretsChallenges: &secretsCS,
 		SecretsExplain:    &secrets.ExplainHandler{},
 		SecretsOperator: &secrets.OperatorHandler{
-			Store:        secrets.NewMemoryStore(8, 4096),
+			Store:        secrets.NewMemoryStore(8, 8, 4096),
 			MaxBodyBytes: allowlistWriteBodyCap,
 			Authorize:    func(_ *http.Request, body []byte) error { seen = len(body); return nil },
 		},
@@ -236,7 +236,7 @@ func TestRouter_SecretRoutesRateLimitPerSandbox(t *testing.T) {
 		MaxRequestSize:    65536,
 		SecretsHandler:    &secrets.Handler{},
 		SecretsChallenges: &secretsCS,
-		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 64)},
+		SecretsOperator:   &secrets.OperatorHandler{Store: secrets.NewMemoryStore(8, 8, 64)},
 		SecretsExplain:    &secrets.ExplainHandler{},
 	})
 
