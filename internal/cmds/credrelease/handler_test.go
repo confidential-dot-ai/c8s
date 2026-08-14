@@ -107,6 +107,60 @@ func TestHandlerReleasesServerCA(t *testing.T) {
 	}
 }
 
+// The token's pbh binds it to the exact body it was minted over: a token
+// captured from one release must not authorize a different CSR, on the
+// endpoint that issues cluster-admin credentials.
+func TestReleaseRefusesATokenBoundToAnotherCSR(t *testing.T) {
+	signer, pubPEM := newOperatorAuth(t)
+	h, err := NewHandler(pubPEM, testCA(t), "system:masters", "operator", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyA, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyA, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, keyA))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyB, err := json.Marshal(ReleaseRequest{CSRPEM: string(csrPEMFromKey(t, keyB))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz, err := signer.Authorization(http.MethodPost, "/release-credential", bodyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The token signed over bodyA is replayed against bodyB.
+	req := httptest.NewRequest(http.MethodPost, "/release-credential", bytes.NewReader(bodyB))
+	req.Header.Set("Authorization", authz)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token bound to another CSR = %d, body %q; want 401", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("a refused request issued a certificate: %s", rec.Body.String())
+	}
+
+	// The same token against the body it was minted over succeeds, so the
+	// refusal above is the body binding and nothing else.
+	req = httptest.NewRequest(http.MethodPost, "/release-credential", bytes.NewReader(bodyA))
+	req.Header.Set("Authorization", authz)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the unswapped body = %d, body %q; want 200", rec.Code, rec.Body.String())
+	}
+}
+
 // newOperatorAuth generates a fresh operator keypair, returning a token signer
 // (the operator side) and the PKIX public-key PEM (the measured side).
 func newOperatorAuth(t *testing.T) (*operatorauth.Signer, []byte) {
