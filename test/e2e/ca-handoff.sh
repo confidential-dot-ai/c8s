@@ -146,6 +146,13 @@ spec:
   containers:
     - name: probe
       image: $cds_image
+      # The copied --attestation-api-url keeps the chart's $(HOST_IP) form
+      # under cvmMode=node; kubelet expands it only if the pod defines the env.
+      env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
       args:
         - request-handoff
         - --peer-url=$peer_url
