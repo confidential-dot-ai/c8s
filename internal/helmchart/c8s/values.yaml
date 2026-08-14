@@ -677,9 +677,12 @@ ratlsMesh:
   # cannot intercept. passthrough is the reply allowlist: proto:source-port
   # entries RETURNed before the drop for dataplanes whose conntrack does not
   # mark a reply ESTABLISHED (e.g. GKE Dataplane V2 / Cilium breaks the DNS
-  # reply, so without udp/tcp:53 get-cert can never resolve). Matching source
-  # port admits only replies, never a cw pod's own service ports. Empty list =
-  # strict drop-all.
+  # reply, so without udp/tcp:53 get-cert can never resolve). Entries are
+  # bounded to the stock ephemeral destination-port window (32768-60999), and
+  # TCP entries additionally to the handshake reply and segments with SYN
+  # clear, so no TCP entry can open a connection to a cw pod's service ports.
+  # A UDP entry admits any datagram from that source port into the window.
+  # Empty list = strict drop-all.
   cwInboundEnforcement:
     passthrough:
       - protocol: udp

@@ -3,8 +3,13 @@
 package ratlsmesh
 
 import (
+	"maps"
+	"os"
+	"os/exec"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -219,9 +224,9 @@ func TestCWJumpRule(t *testing.T) {
 
 func TestBuildCWGuardRulesDefaultPassthrough(t *testing.T) {
 	rules := buildCWGuardRules(defaultCWPassthrough)
-	// Per family, in order: conntrack RETURN, one passthrough RETURN per entry
-	// (udp:53, tcp:53), then DROP.
-	perFamily := 1 + len(defaultCWPassthrough) + 1
+	// Per family, in order: conntrack RETURN, the udp:53 exemption, the two
+	// tcp:53 exemptions (one per admitted segment shape), then DROP.
+	const perFamily = 5
 	if len(rules) != 2*perFamily {
 		t.Fatalf("expected %d rules (%d per family), got %d", 2*perFamily, perFamily, len(rules))
 	}
@@ -233,8 +238,8 @@ func TestBuildCWGuardRulesDefaultPassthrough(t *testing.T) {
 		{iptablesFamilyIPv6, cwPodIPSetName6},
 	} {
 		group := rules[i*perFamily : (i+1)*perFamily]
-		ret, ptUDP, ptTCP, drop := group[0], group[1], group[2], group[3]
-		for _, r := range []iptablesRule{ret, ptUDP, ptTCP, drop} {
+		ret, ptUDP, ptSYNACK, ptNonSYN, drop := group[0], group[1], group[2], group[3], group[4]
+		for _, r := range []iptablesRule{ret, ptUDP, ptSYNACK, ptNonSYN, drop} {
 			if r.table != "filter" || r.chain != cwChainName {
 				t.Errorf("%s: table=%q chain=%q, want filter/%s", spec.family, r.table, r.chain, cwChainName)
 			}
@@ -249,13 +254,39 @@ func TestBuildCWGuardRulesDefaultPassthrough(t *testing.T) {
 		assertArgNotContains(t, "cw return", ret.args, "-p")
 		// Passthrough exemptions (udp+tcp source port 53) precede the DROP so a
 		// dataplane that breaks the query's conntrack tuple still admits the
-		// reply that get-cert needs.
-		assertContains(t, "cw pt udp", ptUDP.args, "-p", "udp")
-		assertContains(t, "cw pt udp", ptUDP.args, "--sport", "53")
-		assertContains(t, "cw pt udp", ptUDP.args, "-j", "RETURN")
-		assertContains(t, "cw pt tcp", ptTCP.args, "-p", "tcp")
-		assertContains(t, "cw pt tcp", ptTCP.args, "--sport", "53")
-		assertContains(t, "cw pt tcp", ptTCP.args, "-j", "RETURN")
+		// reply that get-cert needs. Pin them verbatim: the exemption is the
+		// guard's only hole, so its exact width is the security property. The
+		// TCP legs enumerate the admitted segment shapes rather than negating
+		// SYN, which would also admit SYN|FIN and SYN|RST.
+		wantUDP := []string{
+			"-p", "udp", "--sport", "53", "--dport", cwPassthroughDportRange,
+			"-m", "set", "--match-set", spec.setName, "dst",
+			"-j", "RETURN",
+		}
+		if !reflect.DeepEqual(ptUDP.args, wantUDP) {
+			t.Errorf("%s udp passthrough = %v, want %v", spec.family, ptUDP.args, wantUDP)
+		}
+		wantSYNACK := []string{
+			"-p", "tcp", "--sport", "53", "--dport", cwPassthroughDportRange,
+			"--tcp-flags", "SYN,RST,ACK,FIN", "SYN,ACK",
+			"-m", "set", "--match-set", spec.setName, "dst",
+			"-j", "RETURN",
+		}
+		if !reflect.DeepEqual(ptSYNACK.args, wantSYNACK) {
+			t.Errorf("%s tcp syn-ack passthrough = %v, want %v", spec.family, ptSYNACK.args, wantSYNACK)
+		}
+		wantNonSYN := []string{
+			"-p", "tcp", "--sport", "53", "--dport", cwPassthroughDportRange,
+			"--tcp-flags", "SYN", "NONE",
+			"-m", "set", "--match-set", spec.setName, "dst",
+			"-j", "RETURN",
+		}
+		if !reflect.DeepEqual(ptNonSYN.args, wantNonSYN) {
+			t.Errorf("%s tcp non-syn passthrough = %v, want %v", spec.family, ptNonSYN.args, wantNonSYN)
+		}
+		// --tcp-flags is a TCP-match option; on the udp rule it is a parse error
+		// at install time.
+		assertArgNotContains(t, "cw pt udp", ptUDP.args, "--tcp-flags")
 		// The DROP stays protocol-agnostic and conntrack-agnostic.
 		assertContains(t, "cw drop", drop.args, "-j", "DROP")
 		assertArgNotContains(t, "cw drop", drop.args, "--ctstate")
@@ -277,6 +308,267 @@ func TestBuildCWGuardRulesEmptyPassthroughIsStrict(t *testing.T) {
 	assertContains(t, "strict drop", rules[1].args, "-j", "DROP")
 }
 
+// Every entry an operator can configure carries the destination-port bound,
+// and every TCP entry carries a flag match.
+// TestCWGuardTCPExemptionsAdmitOnlyReplyShapes checks what those flags admit.
+func TestBuildCWGuardRulesExemptionsCannotOpenConnections(t *testing.T) {
+	entries := []cwPassthrough{{"udp", 53}, {"tcp", 53}, {"tcp", 8443}, {"udp", 123}}
+	rules := buildCWGuardRules(entries)
+
+	var exemptions, tcpRules int
+	for _, r := range rules {
+		if !slices.Contains(r.args, "--sport") {
+			continue
+		}
+		exemptions++
+		assertContains(t, r.label, r.args, "--dport", cwPassthroughDportRange)
+		// Key off the value following -p, not the presence of the token "tcp":
+		// a rule emitting `-p 6` would otherwise skip the flag requirement and
+		// pass while admitting every segment shape.
+		if argValue(r.args, "-p") != "tcp" {
+			assertArgNotContains(t, r.label, r.args, "--tcp-flags")
+			continue
+		}
+		tcpRules++
+		if argValue(r.args, "--tcp-flags") == "" {
+			t.Errorf("%s: tcp exemption carries no --tcp-flags match", r.label)
+		}
+	}
+	// Two families: two udp entries emit one rule each, two tcp entries emit
+	// one per admitted segment shape.
+	if exemptions != 12 {
+		t.Fatalf("found %d exemption rules, want 12", exemptions)
+	}
+	if tcpRules != 8 {
+		t.Fatalf("found %d tcp exemption rules, want 8", tcpRules)
+	}
+}
+
+// tcpFlagBits are the bit values behind iptables' --tcp-flags names.
+var tcpFlagBits = map[string]uint8{
+	"FIN": 0x01, "SYN": 0x02, "RST": 0x04, "PSH": 0x08,
+	"ACK": 0x10, "URG": 0x20, "ECE": 0x40, "CWR": 0x80,
+}
+
+func tcpFlagValue(t *testing.T, spec string) uint8 {
+	t.Helper()
+	if spec == "NONE" {
+		return 0
+	}
+	var bits uint8
+	for _, name := range strings.Split(spec, ",") {
+		b, ok := tcpFlagBits[name]
+		if !ok {
+			t.Fatalf("unknown TCP flag %q in %q", name, spec)
+		}
+		bits |= b
+	}
+	return bits
+}
+
+// The TCP exemptions are evaluated as netfilter evaluates them —
+// (flags & mask) == comp.
+func TestCWGuardTCPExemptionsAdmitOnlyReplyShapes(t *testing.T) {
+	type leg struct{ mask, comp uint8 }
+	var legs []leg
+	for _, f := range cwTCPReplyFlags {
+		if len(f.args) != 3 || f.args[0] != "--tcp-flags" {
+			t.Fatalf("cwTCPReplyFlags entry %q is not {--tcp-flags, mask, comp}: %v", f.suffix, f.args)
+		}
+		legs = append(legs, leg{tcpFlagValue(t, f.args[1]), tcpFlagValue(t, f.args[2])})
+	}
+	admits := func(flags uint8) bool {
+		for _, l := range legs {
+			if flags&l.mask == l.comp {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tc := range []struct {
+		flags string
+		admit bool
+	}{
+		// Connection initiation in every shape that carries SYN.
+		{"SYN", false},
+		{"SYN,FIN", false},
+		{"SYN,RST", false},
+		{"SYN,FIN,ACK", false},
+		{"SYN,RST,ACK", false},
+		{"SYN,FIN,RST,ACK", false},
+		// Reply traffic.
+		{"SYN,ACK", true},
+		{"ACK", true},
+		{"ACK,PSH", true},
+		{"FIN,ACK", true},
+		{"RST,ACK", true},
+		{"RST", true},
+		{"NONE", true},
+		{"SYN,ACK,PSH", true},
+		// The ECN handshake reply: the mask leaves ECE free and must keep it so.
+		{"SYN,ACK,ECE", true},
+	} {
+		t.Run(tc.flags, func(t *testing.T) {
+			if got := admits(tcpFlagValue(t, tc.flags)); got != tc.admit {
+				t.Errorf("exemption admits %s = %v, want %v", tc.flags, got, tc.admit)
+			}
+		})
+	}
+}
+
+// The counter reader attributes a RETURN row to an exemption by its protocol
+// column, so every protocol-scoped rule the guard installs must be an exemption.
+// A protocol-scoped rule without a source port would inflate the gauge.
+func TestCWGuardProtocolScopedRulesAreExemptions(t *testing.T) {
+	rules := buildCWGuardRules(defaultCWPassthrough)
+	if len(rules) == 0 {
+		t.Fatal("no rules to check")
+	}
+	for _, r := range rules {
+		if slices.Contains(r.args, "-p") && !slices.Contains(r.args, "--sport") {
+			t.Errorf("%s: protocol-scoped rule with no source port; the counter reader would count it as an exemption", r.label)
+		}
+	}
+}
+
+// The exemption window is the stock Linux ephemeral port window.
+func TestCWPassthroughDportRangeBoundaries(t *testing.T) {
+	if cwPassthroughDportRange != "32768:60999" {
+		t.Fatalf("cwPassthroughDportRange = %q, want the stock ephemeral window 32768:60999", cwPassthroughDportRange)
+	}
+	loStr, hiStr, ok := strings.Cut(cwPassthroughDportRange, ":")
+	if !ok {
+		t.Fatalf("cwPassthroughDportRange = %q is not a lo:hi range", cwPassthroughDportRange)
+	}
+	lo, err := strconv.Atoi(loStr)
+	if err != nil {
+		t.Fatalf("range low bound %q: %v", loStr, err)
+	}
+	hi, err := strconv.Atoi(hiStr)
+	if err != nil {
+		t.Fatalf("range high bound %q: %v", hiStr, err)
+	}
+	for _, tc := range []struct {
+		port   int
+		inside bool
+	}{
+		{32767, false},
+		{32768, true},
+		{60999, true},
+		{61000, false},
+	} {
+		if got := tc.port >= lo && tc.port <= hi; got != tc.inside {
+			t.Errorf("port %d inside window = %v, want %v", tc.port, got, tc.inside)
+		}
+	}
+}
+
+// Every protocol the allowlist parser admits must also be attributable by the
+// counter reader, under both the name and the number iptables may print.
+// Widening one side alone makes the exemption counter read a permanent zero for
+// the new protocol — the bypass-is-silent defect, one protocol later.
+func TestCWPassthroughProtocolsBindParserAndCounter(t *testing.T) {
+	for name, number := range cwPassthroughProtocols {
+		if _, err := parseCWPassthrough(name + ":53"); err != nil {
+			t.Errorf("parseCWPassthrough rejects %q from the protocol table: %v", name, err)
+		}
+		if !cwExemptionProtocolColumn[name] {
+			t.Errorf("counter reader does not attribute protocol column %q", name)
+		}
+		if !cwExemptionProtocolColumn[number] {
+			t.Errorf("counter reader does not attribute protocol column %q (%s)", number, name)
+		}
+	}
+	// Port-less protocols, the empty name, and the wrong case and number forms
+	// of an accepted name: all stay non-members however the allowlist widens.
+	nonMembers := []string{"icmp", "gre", "esp", "", "TCP", "6"}
+	if len(nonMembers) == 0 {
+		t.Fatal("no non-members to check")
+	}
+	for _, proto := range nonMembers {
+		if _, err := parseCWPassthrough(proto + ":53"); err == nil {
+			t.Errorf("parseCWPassthrough accepted %q, which is absent from the protocol table", proto)
+		}
+	}
+	// The rejection message enumerates the table, so widening it cannot leave
+	// operators reading a stale list.
+	want := strings.Join(slices.Sorted(maps.Keys(cwPassthroughProtocols)), " or ")
+	_, err := parseCWPassthrough("icmp:53")
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("rejection %v does not enumerate the accepted protocols %q", err, want)
+	}
+}
+
+// iptables-translate renders a rule as the nft expression it compiles to, so
+// the flag mask and port window are asserted as matched rather than as
+// assembled. It installs nothing, but it does resolve ipset names, so the set
+// fragment is stripped. Skipped where the binary is absent.
+func TestCWGuardExemptionsTranslateToExpectedNftMatches(t *testing.T) {
+	wantFlags := map[string]string{
+		"cw-passthrough-tcp-53-synack": "tcp flags syn,ack / fin,syn,rst,ack",
+		"cw-passthrough-tcp-53-nonsyn": "tcp flags 0x0 / syn",
+	}
+	for _, tc := range []struct {
+		bin    string
+		family iptablesFamily
+	}{
+		{"iptables-translate", iptablesFamilyIPv4},
+		{"ip6tables-translate", iptablesFamilyIPv6},
+	} {
+		t.Run(tc.bin, func(t *testing.T) {
+			bin, err := exec.LookPath(tc.bin)
+			if err != nil {
+				// Setting this in a job that ships the binary turns a base
+				// image that drops it into a failure instead of a silent skip.
+				// No job sets it yet.
+				if os.Getenv("C8S_REQUIRE_IPTABLES_TRANSLATE") != "" {
+					t.Fatalf("%s not installed and C8S_REQUIRE_IPTABLES_TRANSLATE is set", tc.bin)
+				}
+				t.Skipf("%s not installed", tc.bin)
+			}
+			var checked int
+			for _, r := range buildCWGuardRules(defaultCWPassthrough) {
+				if r.family != tc.family || !slices.Contains(r.args, "--sport") {
+					continue
+				}
+				checked++
+				args := slices.Concat([]string{"-A", "FORWARD"}, withoutSetMatch(r.args))
+				out, err := exec.Command(bin, args...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("%s %v: %v\n%s", tc.bin, args, err, out)
+				}
+				got := string(out)
+				if !strings.Contains(got, "dport 32768-60999") {
+					t.Errorf("%s: exemption window missing from nft form: %s", r.label, got)
+				}
+				// `! --syn` renders as `flags != syn / ...`, which also admits
+				// SYN|FIN and SYN|RST.
+				if strings.Contains(got, "flags !=") {
+					t.Errorf("%s: negated flag match admits SYN-bearing shapes: %s", r.label, got)
+				}
+				if want, ok := wantFlags[r.label]; ok && !strings.Contains(got, want) {
+					t.Errorf("%s: want nft match %q, got %s", r.label, want, got)
+				}
+			}
+			if checked != 3 {
+				t.Fatalf("translated %d exemption rules, want 3 (udp:53 plus both tcp:53 legs)", checked)
+			}
+		})
+	}
+}
+
+// withoutSetMatch drops the `-m set --match-set <name> dst` fragment: the
+// *-translate binaries resolve the set and fail when it does not exist.
+func withoutSetMatch(args []string) []string {
+	for i := 0; i+4 < len(args); i++ {
+		if args[i] == "-m" && args[i+1] == "set" && args[i+2] == "--match-set" && args[i+4] == "dst" {
+			return slices.Concat(args[:i], args[i+5:])
+		}
+	}
+	return args
+}
+
 func TestParseCWPassthrough(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -288,7 +580,7 @@ func TestParseCWPassthrough(t *testing.T) {
 		{name: "dns default", in: "udp:53,tcp:53", want: []cwPassthrough{{"udp", 53}, {"tcp", 53}}},
 		{name: "whitespace", in: " udp:53 , tcp:53 ", want: []cwPassthrough{{"udp", 53}, {"tcp", 53}}},
 		{name: "single", in: "tcp:8443", want: []cwPassthrough{{"tcp", 8443}}},
-		{name: "bad proto", in: "sctp:53", wantErr: true},
+		{name: "bad proto", in: "icmp:53", wantErr: true},
 		{name: "missing port", in: "udp", wantErr: true},
 		{name: "port zero", in: "udp:0", wantErr: true},
 		{name: "port too big", in: "udp:70000", wantErr: true},
@@ -332,6 +624,21 @@ func TestFormatCWPassthroughDefaultMatchesChart(t *testing.T) {
 func mustBuildPodIPSetRules(t *testing.T, outboundPort, uid int, excludeUIDs []uint32, nodeIPs map[iptablesFamily]string) []iptablesRule {
 	t.Helper()
 	return buildPodIPSetRules(outboundPort, uid, excludeUIDs, nodeIPs)
+}
+
+// argValue returns the token following flag, and argValueAt the token n
+// positions after it. Empty when the flag is absent or has no such token.
+func argValue(args []string, flag string) string {
+	return argValueAt(args, flag, 1)
+}
+
+func argValueAt(args []string, flag string, n int) string {
+	for i, a := range args {
+		if a == flag && i+n < len(args) {
+			return args[i+n]
+		}
+	}
+	return ""
 }
 
 // assertContains checks that args contains the flag followed by the expected value.

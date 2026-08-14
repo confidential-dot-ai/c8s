@@ -42,24 +42,25 @@ type metrics struct {
 	// Sidecar counter values are mirrored as Gauges (not Counters) because
 	// they are snapshots of another process's counters; a sidecar restart
 	// would otherwise show up as an illegal Counter reset.
-	iptablesJumpViolations   prometheus.Gauge
-	iptablesJumpCheckErrors  prometheus.Gauge
-	iptablesIPSetOverflows   prometheus.Gauge
-	iptablesPodIPSetMembers  prometheus.Gauge
-	iptablesCWIPSetMembers   prometheus.Gauge
-	iptablesCWIPSetShrinks   prometheus.Gauge
-	iptablesCWInboundDrops   prometheus.Gauge
-	iptablesMetricsTimestamp prometheus.Gauge
-	resolverCacheSize        prometheus.Gauge
-	resolverLocalCIDRs       prometheus.Gauge
-	resolverLastEvent        prometheus.Gauge
-	certRotationFailures     prometheus.Counter
-	attestationFailures      prometheus.Counter
-	acceptErrors             prometheus.Counter
-	tlsSessionResumptions    prometheus.Counter
-	measurementPinning       prometheus.Gauge
-	certPipelineHealthy      prometheus.Gauge
-	certExpiry               *prometheus.GaugeVec
+	iptablesJumpViolations       prometheus.Gauge
+	iptablesJumpCheckErrors      prometheus.Gauge
+	iptablesIPSetOverflows       prometheus.Gauge
+	iptablesPodIPSetMembers      prometheus.Gauge
+	iptablesCWIPSetMembers       prometheus.Gauge
+	iptablesCWIPSetShrinks       prometheus.Gauge
+	iptablesCWInboundDrops       prometheus.Gauge
+	iptablesCWPassthroughReturns prometheus.Gauge
+	iptablesMetricsTimestamp     prometheus.Gauge
+	resolverCacheSize            prometheus.Gauge
+	resolverLocalCIDRs           prometheus.Gauge
+	resolverLastEvent            prometheus.Gauge
+	certRotationFailures         prometheus.Counter
+	attestationFailures          prometheus.Counter
+	acceptErrors                 prometheus.Counter
+	tlsSessionResumptions        prometheus.Counter
+	measurementPinning           prometheus.Gauge
+	certPipelineHealthy          prometheus.Gauge
+	certExpiry                   *prometheus.GaugeVec
 
 	tlsHandshakeDuration *prometheus.HistogramVec
 	connectionDuration   *prometheus.HistogramVec
@@ -153,6 +154,10 @@ func newMetrics() *metrics {
 		Name: "ratls_mesh_iptables_cw_inbound_drops_total",
 		Help: "Sidecar-reported packets dropped by the cw guard chain: non-mesh traffic that tried to reach a confidential-workload pod (Service VIP bypass, excluded-namespace or direct-to-pod-IP dials).",
 	})
+	m.iptablesCWPassthroughReturns = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratls_mesh_iptables_cw_passthrough_returns_total",
+		Help: "Sidecar-reported packets admitted by the cw guard's passthrough exemptions ahead of the drop: traffic matching an allowlisted source port, the ephemeral destination window and, for TCP, a reply segment shape.",
+	})
 	m.iptablesMetricsTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratls_mesh_iptables_metrics_file_updated_at_seconds",
 		Help: "Unix-seconds timestamp of the last sidecar metrics snapshot the proxy successfully read; 0 = never read.",
@@ -228,6 +233,7 @@ func newMetrics() *metrics {
 		m.iptablesCWIPSetMembers,
 		m.iptablesCWIPSetShrinks,
 		m.iptablesCWInboundDrops,
+		m.iptablesCWPassthroughReturns,
 		m.iptablesMetricsTimestamp,
 		m.resolverCacheSize,
 		m.resolverLocalCIDRs,
@@ -362,6 +368,7 @@ func (m *metrics) refreshIptablesMetrics(path string) error {
 	m.iptablesCWIPSetMembers.Set(float64(snap.CWIPSetMembers))
 	m.iptablesCWIPSetShrinks.Set(float64(snap.CWIPSetShrinks))
 	m.iptablesCWInboundDrops.Set(float64(snap.CWInboundDrops))
+	m.iptablesCWPassthroughReturns.Set(float64(snap.CWPassthroughReturns))
 	if snap.UpdatedAtUnixNano > 0 {
 		m.iptablesMetricsTimestamp.Set(float64(snap.UpdatedAtUnixNano / int64(time.Second)))
 	}

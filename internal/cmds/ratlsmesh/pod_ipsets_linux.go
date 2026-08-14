@@ -214,13 +214,13 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 		curr := stringSet(cwIPs)
 		flushCWConntrack(logger, newMembers(prevCWIPs, curr))
 		prevCWIPs = curr
-		// Drop counters change only on packet hits, not pod events, so
+		// Guard counters change only on packet hits, not pod events, so
 		// refresh on the resync tick rather than every event-driven sync
 		// (which would fork iptables and take the xtables lock during
 		// churn, contending with kube-proxy and the jump watchdog).
 		if resync {
-			if err := refreshCWInboundDrops(); err != nil {
-				logger.Warn("cw drop counter read failed", "error", err)
+			if err := refreshCWGuardCounters(); err != nil {
+				logger.Warn("cw guard counter read failed", "error", err)
 			}
 		}
 		publishIptablesMetrics(logger)

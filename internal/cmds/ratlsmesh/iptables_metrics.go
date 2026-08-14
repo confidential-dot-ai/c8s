@@ -25,6 +25,7 @@ type iptablesMetricsSnapshot struct {
 	JumpPositionCheckErrors int64 `json:"jump_position_check_errors"`
 	IPSetOverflows          int64 `json:"ipset_overflows"`
 	CWInboundDrops          int64 `json:"cw_inbound_drops"`
+	CWPassthroughReturns    int64 `json:"cw_passthrough_returns"`
 	// Membership is what the guard and the interception rules key on, so a set
 	// that empties is enforcement that stopped without anything failing. The
 	// sizes make the level observable; CWIPSetShrinks makes the transition
@@ -59,6 +60,7 @@ func currentIptablesMetricsSnapshot() iptablesMetricsSnapshot {
 		JumpPositionCheckErrors: iptablesJumpPositionCheckErrors(),
 		IPSetOverflows:          iptablesIPSetOverflows(),
 		CWInboundDrops:          iptablesCWInboundDrops(),
+		CWPassthroughReturns:    iptablesCWPassthroughReturns(),
 		PodIPSetMembers:         podIPSetMemberCount(),
 		CWIPSetMembers:          cwIPSetMemberCount(),
 		CWIPSetShrinks:          cwIPSetShrinks(),

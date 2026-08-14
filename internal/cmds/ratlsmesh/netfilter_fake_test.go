@@ -6,8 +6,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +135,15 @@ func installFakeNetfilter(t *testing.T) *fakeNetfilter {
 func (f *fakeNetfilter) set(name, content string) {
 	f.t.Helper()
 	if err := os.WriteFile(filepath.Join(f.dir, name), []byte(content), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// remove deletes a control file, making the fake fail the command that reads
+// it — the stats path exits non-zero for a chain it has no fixture for.
+func (f *fakeNetfilter) remove(name string) {
+	f.t.Helper()
+	if err := os.Remove(filepath.Join(f.dir, name)); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -319,28 +330,173 @@ func TestEnsureIptablesJumps(t *testing.T) {
 	})
 }
 
-func TestRefreshCWInboundDrops(t *testing.T) {
+// cwStatsV4 and cwStatsV6 are the chain as `iptables -L -n -v -x` prints it.
+// The v4 rows use the numeric protocol column that iptables 1.8.10 (nf_tables)
+// prints under -n; the v6 rows use the names the legacy backend prints. Both
+// ship, so both must be attributed, for tcp as well as udp.
+//
+// v4: drops 5, exemption returns 4+6+2 = 12.
+const cwStatsV4 = `Chain ` + cwChainName + ` (1 references)
+    pkts      bytes target     prot opt in     out     source               destination
+       3      100 RETURN     0    --  *      *       0.0.0.0/0            0.0.0.0/0            match-set RATLS-MESH-CW-PODS dst ctstate RELATED,ESTABLISHED
+       4      200 RETURN     17   --  *      *       0.0.0.0/0            0.0.0.0/0            udp spt:53 dpts:32768:60999 match-set RATLS-MESH-CW-PODS dst
+       6      250 RETURN     6    --  *      *       0.0.0.0/0            0.0.0.0/0            tcp spt:53 dpts:32768:60999 flags:0x17/0x12 match-set RATLS-MESH-CW-PODS dst
+       2      120 RETURN     6    --  *      *       0.0.0.0/0            0.0.0.0/0            tcp spt:53 dpts:32768:60999 flags:0x02/0x00 match-set RATLS-MESH-CW-PODS dst
+       5      300 DROP       0    --  *      *       0.0.0.0/0            0.0.0.0/0            match-set RATLS-MESH-CW-PODS dst
+`
+
+// v6: drops 2, exemption returns 1+8+3 = 12.
+const cwStatsV6 = `Chain ` + cwChainName + ` (1 references)
+    pkts      bytes target     prot opt in     out     source               destination
+       9       90 RETURN     all      *      *       ::/0                 ::/0                 match-set RATLS-MESH-CW-PODS6 dst ctstate RELATED,ESTABLISHED
+       1       40 RETURN     udp      *      *       ::/0                 ::/0                 udp spt:53 dpts:32768:60999 match-set RATLS-MESH-CW-PODS6 dst
+       8      420 RETURN     tcp      *      *       ::/0                 ::/0                 tcp spt:53 dpts:32768:60999 flags:0x17/0x12 match-set RATLS-MESH-CW-PODS6 dst
+       3      160 RETURN     tcp      *      *       ::/0                 ::/0                 tcp spt:53 dpts:32768:60999 flags:0x02/0x00 match-set RATLS-MESH-CW-PODS6 dst
+       2       80 DROP       all      *      *       ::/0                 ::/0                 match-set RATLS-MESH-CW-PODS6 dst
+`
+
+// resetCWGuardCounters isolates a test from counter state left by another.
+func resetCWGuardCounters(t *testing.T) {
+	t.Helper()
+	prevDrops, prevReturns := cwInboundDrops.Load(), cwPassthroughReturns.Load()
+	prevRead := maps.Clone(cwGuardLastRead)
+	clear(cwGuardLastRead)
+	cwInboundDrops.Store(0)
+	cwPassthroughReturns.Store(0)
+	t.Cleanup(func() {
+		cwInboundDrops.Store(prevDrops)
+		cwPassthroughReturns.Store(prevReturns)
+		cwGuardLastRead = prevRead
+	})
+}
+
+func TestRefreshCWGuardCounters(t *testing.T) {
 	nf := installFakeNetfilter(t)
 	mustInitFakeIptables(t)
-	nf.set("stats_iptables_"+cwChainName, `Chain `+cwChainName+` (1 references)
-    pkts      bytes target     prot opt in     out     source               destination
-       5      300 DROP       all  --  *      *       0.0.0.0/0            0.0.0.0/0
-       3      100 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0
-`)
-	nf.set("stats_ip6tables_"+cwChainName, `Chain `+cwChainName+` (1 references)
-    pkts      bytes target     prot opt in     out     source               destination
-       2       80 DROP       all      *      *       ::/0                 ::/0
-       9       90 RETURN     all      *      *       ::/0                 ::/0
-`)
+	nf.set("stats_iptables_"+cwChainName, cwStatsV4)
+	nf.set("stats_ip6tables_"+cwChainName, cwStatsV6)
+	resetCWGuardCounters(t)
 
-	prev := cwInboundDrops.Load()
-	t.Cleanup(func() { cwInboundDrops.Store(prev) })
-	if err := refreshCWInboundDrops(); err != nil {
-		t.Fatalf("refreshCWInboundDrops: %v", err)
+	if err := refreshCWGuardCounters(); err != nil {
+		t.Fatalf("refreshCWGuardCounters: %v", err)
 	}
 	if got := cwInboundDrops.Load(); got != 7 {
 		t.Errorf("cwInboundDrops = %d, want 7 (DROP rows only, both families)", got)
 	}
+	if got := cwPassthroughReturns.Load(); got != 24 {
+		t.Errorf("cwPassthroughReturns = %d, want 24 (protocol-scoped RETURN rows only, both families, both renderings)", got)
+	}
+}
+
+// A family that cannot be read holds its previous contribution, because a
+// step-down reads as a counter reset to rate().
+func TestRefreshCWGuardCountersHoldsFailingFamily(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failing string
+		other   string
+	}{
+		{"v6 read fails", "stats_ip6tables_" + cwChainName, "stats_iptables_" + cwChainName},
+		{"v4 read fails", "stats_iptables_" + cwChainName, "stats_ip6tables_" + cwChainName},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nf := installFakeNetfilter(t)
+			mustInitFakeIptables(t)
+			nf.set("stats_iptables_"+cwChainName, cwStatsV4)
+			nf.set("stats_ip6tables_"+cwChainName, cwStatsV6)
+			resetCWGuardCounters(t)
+
+			if err := refreshCWGuardCounters(); err != nil {
+				t.Fatalf("seed read: %v", err)
+			}
+			if got := cwInboundDrops.Load(); got != 7 {
+				t.Fatalf("seeded cwInboundDrops = %d, want 7", got)
+			}
+
+			// Remove one family's fixture: the fake exits non-zero for a chain
+			// it has no stats for.
+			nf.remove(tc.failing)
+			err := refreshCWGuardCounters()
+			if err == nil {
+				t.Fatal("expected an error naming the failing family")
+			}
+			if !strings.Contains(err.Error(), binForStatsKey(tc.failing)) {
+				t.Errorf("error %q does not name the failing binary %q", err, binForStatsKey(tc.failing))
+			}
+			if !strings.Contains(err.Error(), cwChainName) {
+				t.Errorf("error %q does not name the chain", err)
+			}
+			// Totals unchanged: the readable family re-read its own value and
+			// the failing one held the value it last reported.
+			if got := cwInboundDrops.Load(); got != 7 {
+				t.Errorf("cwInboundDrops = %d, want 7 held across the failure", got)
+			}
+			if got := cwPassthroughReturns.Load(); got != 24 {
+				t.Errorf("cwPassthroughReturns = %d, want 24 held across the failure", got)
+			}
+			// The surviving family still tracks live movement.
+			nf.set(tc.other, bumpDropRow(t, statsFor(tc.other)))
+			if err := refreshCWGuardCounters(); err == nil {
+				t.Fatal("expected the failing family to keep erroring")
+			}
+			if got := cwInboundDrops.Load(); got != 8 {
+				t.Errorf("cwInboundDrops = %d, want 8 after the readable family advanced by 1", got)
+			}
+		})
+	}
+}
+
+func TestRefreshCWGuardCountersBothFamiliesFail(t *testing.T) {
+	installFakeNetfilter(t)
+	mustInitFakeIptables(t)
+	resetCWGuardCounters(t)
+
+	err := refreshCWGuardCounters()
+	if err == nil {
+		t.Fatal("expected an error when neither family can be read")
+	}
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if !strings.Contains(err.Error(), bin) {
+			t.Errorf("joined error %q does not name %q", err, bin)
+		}
+	}
+	if got := cwInboundDrops.Load(); got != 0 {
+		t.Errorf("cwInboundDrops = %d, want 0 with nothing ever read", got)
+	}
+}
+
+func statsFor(key string) string {
+	if strings.Contains(key, "ip6tables") {
+		return cwStatsV6
+	}
+	return cwStatsV4
+}
+
+func binForStatsKey(key string) string {
+	if strings.Contains(key, "ip6tables") {
+		return "ip6tables"
+	}
+	return "iptables"
+}
+
+// bumpDropRow adds one packet to the chain's DROP row.
+func bumpDropRow(t *testing.T, stats string) string {
+	t.Helper()
+	lines := strings.Split(stats, "\n")
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[2] != "DROP" {
+			continue
+		}
+		n, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("parse DROP packet count %q: %v", fields[0], err)
+		}
+		lines[i] = strings.Replace(line, fields[0], strconv.Itoa(n+1), 1)
+		return strings.Join(lines, "\n")
+	}
+	t.Fatal("no DROP row in stats fixture")
+	return ""
 }
 
 func TestDeleteAllIptablesRulesCountsRemovals(t *testing.T) {
