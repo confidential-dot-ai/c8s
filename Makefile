@@ -138,19 +138,24 @@ mutation-full:
 	./scripts/mutation-check.sh summary
 
 # Live-cluster check of the cw-label integrity admission policy. Needs
-# kubectl pointed at a cluster with the c8s chart installed.
+# kubectl pointed at a cluster with the c8s chart installed. Also runs
+# post-merge in the snp-metal-e2e lane's in-guest payload.
 test-e2e-cw-label-policy:
 	./test/e2e/cw-label-policy.sh
 
 # Live-cluster check that the workload path is mesh-wrapped and plaintext
 # bypasses to cw pods fail closed. Needs kubectl pointed at a cluster with
-# the c8s chart installed and a Running confidential workload.
+# the c8s chart installed and a Running confidential workload. Not CI-wired:
+# snp-metal's guest kernel lacks ratls-mesh's netfilter matches (the lane
+# installs ratlsMesh.enabled=false) and tdx-metal's vendored lane runs Cilium
+# kube-proxy-free, so VIP traffic never hits the FORWARD guard this asserts.
 test-e2e-mesh-cw-enforcement:
 	./test/e2e/mesh-cw-enforcement.sh
 
 # Live-cluster check that attested CA handoff works end to end: an attested
 # probe pulls the mesh CA over /handoff and proves it is the live trust root.
 # Needs kubectl pointed at a node-as-CVM cluster with cds.handoff.enabled=true.
+# Also runs post-merge in the snp-metal-e2e lane's in-guest payload.
 test-e2e-ca-handoff:
 	./test/e2e/ca-handoff.sh
 
