@@ -821,6 +821,38 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 	}
 }
 
+// TestNewOutcomeFromRealGenoaEvidence drives the vendored Genoa fixture
+// through verifyInProcess + newOutcome and asserts the verdict carries the
+// platform's real security state — the report's policy is debug-off and the
+// platform has SMT on, a value no hand-built PlatformData map can
+// accidentally supply. This pins reportFlags against the engine's real claim
+// keys: an attestation-go key rename fails here instead of silently
+// reporting false. No TDX fixture verifies offline, so the TDX mapping keeps
+// only the hand-built pin in TestRenderOutcome.
+func TestNewOutcomeFromRealGenoaEvidence(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/snp-evidence-genoa.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := gatherFromFile(fixture, []byte("genoa-test-fixture"), "fixture", leafTrust{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil)
+	if err != nil {
+		t.Fatalf("the real fixture must verify: %v", err)
+	}
+	oc := newOutcome(config{}, ev, res, nil, &verifyPlan{policy: &ratls.VerifyPolicy{}})
+	if !oc.Verified || oc.Debug || !oc.SMT {
+		t.Errorf("outcome = verified:%v debug:%v smt:%v, want verified:true debug:false smt:true", oc.Verified, oc.Debug, oc.SMT)
+	}
+	// The fixture binds ASCII "genoa-test-fixture", zero-padded to 64 bytes.
+	wantRD := hex.EncodeToString([]byte("genoa-test-fixture")) + strings.Repeat("00", 64-len("genoa-test-fixture"))
+	if oc.ReportData != wantRD {
+		t.Errorf("report_data = %q, want the fixture's %q", oc.ReportData, wantRD)
+	}
+}
+
 func TestGatherFromEndpoint_Integration(t *testing.T) {
 	report := bytes.Repeat([]byte{0x01}, 64)
 	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)

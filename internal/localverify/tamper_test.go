@@ -68,8 +68,8 @@ func (p *genoaParts) evidence(t *testing.T) json.RawMessage {
 	return out
 }
 
-// foreignVCEKDER mints a self-signed P-384 certificate: no AMD key material
-// exists offline, so a forged or out-of-window VCEK is necessarily self-signed.
+// foreignVCEKDER mints a self-signed P-384 certificate: the offline stand-in
+// for a forged or expired VCEK.
 func foreignVCEKDER(t *testing.T, notBefore, notAfter time.Time) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
@@ -93,7 +93,8 @@ func foreignVCEKDER(t *testing.T, notBefore, notAfter time.Time) []byte {
 // mutated one way per case and asserts each failure is a verdict (a plain
 // error, which the CLI maps to exit 2), never a CollateralError (exit 3, "no
 // verdict, retry") — a host tampering with evidence must not read as an
-// infrastructure hiccup.
+// infrastructure hiccup. wantErr pins the rejection cause, so fixture drift
+// that moves a case's failure off its named path fails here.
 func TestVerifyRejectsTamperedEvidence(t *testing.T) {
 	now := time.Now()
 
@@ -104,20 +105,31 @@ func TestVerifyRejectsTamperedEvidence(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name  string
-		wreck func(t *testing.T, p *genoaParts)
+		name    string
+		wantErr string
+		wreck   func(t *testing.T, p *genoaParts)
 	}{
-		{"wrong signature", func(t *testing.T, p *genoaParts) { p.report[snpSignatureOff] ^= 0x01 }},
-		{"foreign VCEK", func(t *testing.T, p *genoaParts) {
+		{"wrong signature", "report signature verification error", func(t *testing.T, p *genoaParts) {
+			p.report[snpSignatureOff] ^= 0x01
+		}},
+		{"foreign VCEK", "reading VCEK product extension", func(t *testing.T, p *genoaParts) {
 			p.vcek = foreignVCEKDER(t, now.Add(-time.Hour), now.Add(time.Hour))
 		}},
-		{"broken chain", func(t *testing.T, p *genoaParts) { p.vcek[len(p.vcek)-20] ^= 0x01 }},
-		{"expired VCEK", func(t *testing.T, p *genoaParts) {
+		{"broken chain", "certificate signed by unknown authority", func(t *testing.T, p *genoaParts) {
+			p.vcek[len(p.vcek)-20] ^= 0x01
+		}},
+		// The self-signed expired stand-in is rejected at VCEK extension parsing.
+		{"expired VCEK", "reading VCEK product extension", func(t *testing.T, p *genoaParts) {
 			p.vcek = foreignVCEKDER(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
 		}},
-		{"truncated report", func(t *testing.T, p *genoaParts) { p.report = p.report[:len(p.report)/2] }},
-		{"zero-filled report", func(t *testing.T, p *genoaParts) { p.report = make([]byte, len(p.report)) }},
-		{"in-report TCB downgrade", func(t *testing.T, p *genoaParts) {
+		{"truncated report", "array size is 0x250", func(t *testing.T, p *genoaParts) {
+			p.report = p.report[:len(p.report)/2]
+		}},
+		{"zero-filled report", "malformed guest policy", func(t *testing.T, p *genoaParts) {
+			p.report = make([]byte, len(p.report))
+		}},
+		// Zeroing reported_tcb breaks the VCEK signature over the report.
+		{"in-report TCB downgrade", "report signature verification error", func(t *testing.T, p *genoaParts) {
 			copy(p.report[snpReportedTCBOff:snpReportedTCBOff+8], make([]byte, 8))
 		}},
 	} {
@@ -127,6 +139,9 @@ func TestVerifyRejectsTamperedEvidence(t *testing.T) {
 			_, err := Verify(context.Background(), "snp", p.evidence(t), Params{})
 			if err == nil {
 				t.Fatal("tampered evidence must be rejected")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("rejection = %q, want cause %q", err, tc.wantErr)
 			}
 			var ce *CollateralError
 			if errors.As(err, &ce) {

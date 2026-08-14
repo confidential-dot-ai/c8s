@@ -104,8 +104,9 @@ func releaseHandler(t *testing.T, status int, respBody string) http.Handler {
 }
 
 // testEnv wires up a full fake node: operator key + image manifest on disk,
-// attest endpoint, RA-TLS cred-release endpoint, and a stubbed verifier that
-// accepts iff the claims satisfy the full measured-identity policy.
+// the caller's attest endpoint URL, RA-TLS cred-release endpoint, and a
+// stubbed verifier that accepts iff the claims satisfy the full
+// measured-identity policy.
 type testEnv struct {
 	keyPath      string
 	manifestPath string

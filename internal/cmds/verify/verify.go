@@ -879,7 +879,7 @@ type Outcome struct {
 	Platform    string    `json:"platform,omitempty"`
 	Measurement string    `json:"measurement,omitempty"`
 	ReportData  string    `json:"report_data,omitempty"`
-	// Debug and SMT omit omitempty: an absent key reads as false to a CI gate.
+	// Debug and SMT always serialize, even when false: an absent key reads as false to a CI gate.
 	Debug      bool   `json:"debug"`
 	SMT        bool   `json:"smt"`
 	CurrentTCB string `json:"current_tcb,omitempty"`
@@ -1337,7 +1337,10 @@ func minTCBFromCfg(cfg config) *teetypes.SnpTcb {
 
 // reportFlags reads the debug and SMT state the verifier extracted into the
 // platform-specific claims: SNP carries them under policy/platform_info, TDX
-// attests debug under td_attributes_parsed and carries no SMT state.
+// attests debug under td_attributes_parsed and carries no SMT state (smt:false
+// means unattested, not off). attestation-go routes all six supported platforms
+// through one of these two claim layouts, so the non-TDX branch is SNP-shaped
+// by exhaustion.
 func reportFlags(platform string, pd map[string]any) (debug, smt bool) {
 	nested := func(section, key string) bool {
 		m, _ := pd[section].(map[string]any)
