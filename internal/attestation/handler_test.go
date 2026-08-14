@@ -1,17 +1,18 @@
 package attestation_test
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,9 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/attestation"
 	"github.com/confidential-dot-ai/c8s/internal/ear"
 	"github.com/confidential-dot-ai/c8s/internal/earclaims"
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -36,17 +39,6 @@ func testKeyPEM() []byte {
 		panic(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-}
-
-func mockVerifyResponse(signatureValid, reportDataMatch bool) string {
-	return mustJSON(types.VerifyResponse{
-		Result: types.VerificationResult{
-			Platform:        "snp",
-			SignatureValid:  signatureValid,
-			Claims:          types.Claims{},
-			ReportDataMatch: &reportDataMatch,
-		},
-	})
 }
 
 func mustJSON(v any) string {
@@ -144,13 +136,9 @@ func TestAuthenticateRejectsGetMethod(t *testing.T) {
 
 func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
 	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, mockVerifyResponse(true, true))
-	}))
-	defer mockAS.Close()
+	stub := testattest.New(t)
 
-	app := httptest.NewServer(testAppWithOperatorPolicy(mockAS.URL, operatorKeysHash))
+	app := httptest.NewServer(testAppWithOperatorPolicy(stub.URL, operatorKeysHash))
 	defer app.Close()
 
 	challenge := authenticate(t, app.URL)
@@ -209,13 +197,9 @@ func TestAttestKeyReturnsEARForAttestedPubkey(t *testing.T) {
 // TestAttestKeyEmbedsSubmittedEvidence: the issued EAR's ear_raw_evidence must
 // carry the evidence envelope the caller submitted, verbatim.
 func TestAttestKeyEmbedsSubmittedEvidence(t *testing.T) {
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, mockVerifyResponse(true, true))
-	}))
-	defer mockAS.Close()
+	stub := testattest.New(t)
 
-	app := httptest.NewServer(testApp(mockAS.URL))
+	app := httptest.NewServer(testApp(stub.URL))
 	defer app.Close()
 
 	challenge := authenticate(t, app.URL)
@@ -588,13 +572,12 @@ func attestKeyBody(t *testing.T, appURL string) string {
 }
 
 func TestAttestKeySignatureInvalid(t *testing.T) {
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, mockVerifyResponse(false, true))
-	}))
-	defer mockAS.Close()
+	stub := testattest.New(t)
+	verdict := testattest.PassingVerdict("")
+	verdict.SignatureValid = false
+	stub.SetVerdict(verdict)
 
-	app := httptest.NewServer(testApp(mockAS.URL))
+	app := httptest.NewServer(testApp(stub.URL))
 	defer app.Close()
 
 	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
@@ -605,13 +588,13 @@ func TestAttestKeySignatureInvalid(t *testing.T) {
 }
 
 func TestAttestKeyReportDataMismatch(t *testing.T) {
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, mockVerifyResponse(true, false))
-	}))
-	defer mockAS.Close()
+	stub := testattest.New(t)
+	verdict := testattest.PassingVerdict("")
+	match := false
+	verdict.ReportDataMatch = &match
+	stub.SetVerdict(verdict)
 
-	app := httptest.NewServer(testApp(mockAS.URL))
+	app := httptest.NewServer(testApp(stub.URL))
 	defer app.Close()
 
 	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
@@ -623,26 +606,126 @@ func TestAttestKeyReportDataMismatch(t *testing.T) {
 
 func TestAttestKeyReportDataMatchNil(t *testing.T) {
 	// ReportDataMatch omitted (nil) should be treated as a mismatch.
-	mockAS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, mustJSON(types.VerifyResponse{
-			Result: types.VerificationResult{
-				Platform:       "snp",
-				SignatureValid: true,
-				Claims:         types.Claims{},
-				// ReportDataMatch left nil
-			},
-		}))
-	}))
-	defer mockAS.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.Verdict{SignatureValid: true})
 
-	app := httptest.NewServer(testApp(mockAS.URL))
+	app := httptest.NewServer(testApp(stub.URL))
 	defer app.Close()
 
 	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// The verify request must bind this request's public key, challenge, and
+// operator-keys hash: an EAR minted against anything weaker attests a key the
+// caller does not hold or a policy the caller did not commit to.
+func TestAttestKeyBindsChallengeAndOperatorPolicyIntoReportData(t *testing.T) {
+	const operatorKeysHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name string
+		hash string
+	}{
+		{"with operator policy", operatorKeysHash},
+		{"without operator policy", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := testattest.New(t)
+			app := httptest.NewServer(testApp(stub.URL))
+			defer app.Close()
+
+			challenge := authenticate(t, app.URL)
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+			if err != nil {
+				t.Fatalf("marshal pubkey: %v", err)
+			}
+			body := mustJSON(types.AttestKeyRequestBody{
+				Challenge: challenge,
+				Evidence: types.AttestationEvidence{
+					Platform: "snp",
+					Evidence: json.RawMessage(`{"quote":"abc"}`),
+				},
+				PublicKey:        base64.StdEncoding.EncodeToString(pubDER),
+				OperatorKeysHash: tc.hash,
+			})
+
+			resp := postAttestKey(t, app.URL, body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				respBody, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
+			}
+
+			reqs := stub.VerifyRequests()
+			if len(reqs) != 1 {
+				t.Fatalf("/verify called %d times, want 1", len(reqs))
+			}
+			if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
+				t.Fatal("/verify carried no expected_report_data")
+			}
+			challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
+			if err != nil {
+				t.Fatalf("decode challenge: %v", err)
+			}
+			want, err := ratls.ReportDataForKeyWithContext(&key.PublicKey, challengeBytes, []byte(tc.hash))
+			if err != nil {
+				t.Fatalf("ReportDataForKeyWithContext: %v", err)
+			}
+			if got := reqs[0].Params.ExpectedReportData.Bytes(); !bytes.Equal(got, want[:sha512.Size384]) {
+				t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte binding %x",
+					got, len(got), want[:sha512.Size384])
+			}
+			// The caller's evidence envelope must reach the verifier intact.
+			if reqs[0].Platform != "snp" {
+				t.Fatalf("/verify platform = %q, want the submitted envelope's snp", reqs[0].Platform)
+			}
+			if got := string(reqs[0].Evidence); got != `{"quote":"abc"}` {
+				t.Fatalf(`/verify evidence = %s, want the submitted envelope's {"quote":"abc"}`, got)
+			}
+		})
+	}
+}
+
+// A consumed challenge must not attest twice: replaying it denies the second
+// EAR even when every other field is fresh.
+func TestAttestKeyRejectsReplayedChallenge(t *testing.T) {
+	stub := testattest.New(t)
+	app := httptest.NewServer(testApp(stub.URL))
+	defer app.Close()
+
+	challenge := authenticate(t, app.URL)
+	body := func() string {
+		pubDER, err := x509.MarshalPKIXPublicKey(generateAttestKeyPubKey(t))
+		if err != nil {
+			t.Fatalf("marshal pubkey: %v", err)
+		}
+		return mustJSON(types.AttestKeyRequestBody{
+			Challenge: challenge,
+			Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{}`)},
+			PublicKey: base64.StdEncoding.EncodeToString(pubDER),
+		})
+	}
+
+	resp := postAttestKey(t, app.URL, body())
+	first, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first attest-key: status = %d, want 200; body=%s", resp.StatusCode, first)
+	}
+
+	resp = postAttestKey(t, app.URL, body())
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("replayed challenge: status = %d, want 400", resp.StatusCode)
+	}
+	if got := len(stub.VerifyRequests()); got != 1 {
+		t.Fatalf("/verify calls = %d, want 1: the replay must die before the verifier round-trip", got)
 	}
 }
 

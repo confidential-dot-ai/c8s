@@ -82,14 +82,14 @@ func workloadEntry(t *testing.T, initDigests, mainDigests []string) pkgallowlist
 // requester sent no image list: everything checked here came from the inventory
 // the token named.
 func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = floorStore(wlDigestA, wlDigestB)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -99,14 +99,14 @@ func TestAttest_SandboxWorkload_AllowsFloorOnlySandbox(t *testing.T) {
 // issuance — the gate now runs on every token-bearing request, including the
 // first one, where a self-reported claim used to be empty.
 func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
@@ -115,14 +115,14 @@ func TestAttest_SandboxWorkload_RejectsUnallowlistedImage(t *testing.T) {
 // An inventory that does not know the sandbox is fail-closed: CDS cannot
 // establish what the pod runs, which is exactly when it must not issue.
 func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}, key: signer.PublicKey()} // knows no sandbox
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
@@ -134,14 +134,14 @@ func TestAttest_SandboxWorkload_UnreachableInventoryFailsClosed(t *testing.T) {
 // reaches this state legitimately while it is still syncing, so issuance must
 // wait rather than proceed unchecked.
 func TestAttest_SandboxWorkload_EmptySandboxFailsClosed(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
@@ -158,13 +158,13 @@ func TestAttest_SandboxWorkload_RejectsWhenGateUnwired(t *testing.T) {
 		{"no digests client", func(h *AttestHandler) { h.SandboxDigests = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mock := newMockAttestationApi(t, "deadbeef")
-			h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+			stub := newStubAttestationApi(t, "deadbeef")
+			h, signer := newSandboxTestEnv(t, stub.URL)
 			tc.wire(&h)
 
 			csrPEM, _ := generateCSR(t)
 			challenge := issueChallenge(t, h)
-			w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+			w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 			if w.Code != http.StatusForbidden {
 				t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 			}
@@ -196,14 +196,14 @@ func TestAttest_SandboxWorkload_PartialLifecycleStatesIssue(t *testing.T) {
 		{"a container transiently evicted while restarting", []string{wlDigestA}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mock := newMockAttestationApi(t, "deadbeef")
-			h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+			stub := newStubAttestationApi(t, "deadbeef")
+			h, signer := newSandboxTestEnv(t, stub.URL)
 			h.AllowlistStore = store
 			h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: tc.running}, key: signer.PublicKey()}
 
 			csrPEM, _ := generateCSR(t)
 			challenge := issueChallenge(t, h)
-			w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+			w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
 			}
@@ -218,14 +218,14 @@ func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 		floor:     map[string]bool{wlDigestC: true},
 		workloads: map[string]pkgallowlist.Workload{"api": workloadEntry(t, []string{wlDigestA}, nil)},
 	}
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = store
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestC, wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}
@@ -234,8 +234,8 @@ func TestAttest_SandboxWorkload_MembershipStillBitesMidLifecycle(t *testing.T) {
 // A request with no sandbox token is issued without a sandbox ID and without
 // the workload gate: it gets a leaf no workload authorizer will accept.
 func TestAttest_SandboxWorkload_NoTokenSkipsGate(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = floorStore() // admits nothing
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{}}
 
@@ -252,15 +252,15 @@ func TestAttest_SandboxWorkload_NoTokenSkipsGate(t *testing.T) {
 // what an empty allowlist already means for /attest itself. Losing the whole
 // flow here would break issuance for every workload on an unpinned cluster.
 func TestAttest_SandboxWorkload_UnpinnedMeasurementsStillIssue(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.Measurements = nil // dev: --measurements empty
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -277,15 +277,15 @@ func TestAttest_SandboxWorkload_UnpinnedMeasurementsStillIssue(t *testing.T) {
 // The allowlist gate still bites on an unpinned cluster: dropping the
 // measurement pin must not also drop the image check.
 func TestAttest_SandboxWorkload_UnpinnedStillEnforcesAllowlist(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.Measurements = nil
 	h.AllowlistStore = floorStore(wlDigestA)
 	h.SandboxDigests = fakeDigests{digests: map[string][]string{testSandboxID: {wlDigestA, wlDigestB}}, key: signer.PublicKey()}
 
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", w.Code, w.Body.String())
 	}

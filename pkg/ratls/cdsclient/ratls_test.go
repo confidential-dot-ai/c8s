@@ -8,8 +8,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
-	"encoding/json"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -17,31 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
-
-// fakeASEvidence stands up a minimal attestation-api stub that returns
-// canned SNP evidence for any /attest call. Required because RequestCert
-// dials the AS to embed an attestation report into the CSR before talking
-// to CDS — we want the test to fail at the CDS TLS handshake, not at
-// CSR construction.
-func fakeASEvidence(t *testing.T) *httptest.Server {
-	t.Helper()
-	report := make([]byte, ratls.SNPReportSize)
-	evidence, err := json.Marshal(map[string]string{
-		"attestation_report": base64.StdEncoding.EncodeToString(report),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(types.AttestResponse{
-			Platform: "snp",
-			Evidence: evidence,
-		})
-	}))
-}
 
 // TestProviderRATLSRejectsUnattestedCDS proves the cdsclient's default
 // (no HTTPClient override) http.Client refuses to talk to an CDS server
@@ -50,8 +26,7 @@ func fakeASEvidence(t *testing.T) *httptest.Server {
 // cannot present a TEE-attested cert with an allowed measurement, so the TLS
 // handshake fails before any cert-issuance bytes flow.
 func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
-	as := fakeASEvidence(t)
-	defer as.Close()
+	as := testattest.New(t)
 
 	// Plain HTTPS server with a regular self-signed cert (no RA-TLS extension).
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,8 +64,7 @@ func TestProviderRATLSRejectsUnattestedCDS(t *testing.T) {
 // a well-known x509 path (not self-signed by httptest), and confirms the
 // cdsclient still rejects it because the cert lacks the RA-TLS extension.
 func TestProviderRATLSRejectsCertWithoutAttestationExtension(t *testing.T) {
-	as := fakeASEvidence(t)
-	defer as.Close()
+	as := testattest.New(t)
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

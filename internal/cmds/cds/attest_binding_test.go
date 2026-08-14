@@ -21,14 +21,14 @@ func (r *recordingBinder) Record(sandboxID, inventoryHost string) bool {
 // so the secrets path later asks that same inventory rather than one a
 // requester names.
 func TestAttest_BindsSandboxToInventoryOnSuccess(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)
-	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge)); w.Code != http.StatusOK {
+	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID)); w.Code != http.StatusOK {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
 	}
 	if len(binder.calls) != 1 {
@@ -46,13 +46,13 @@ func TestAttest_BindsSandboxToInventoryOnSuccess(t *testing.T) {
 // token-less retry, so denying here would let one pre-claim wedge a pod for a
 // whole certificate lifetime. The refusal lands on the secrets path instead.
 func TestAttest_ConflictingBindingStillIssues(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.SandboxBindings = &recordingBinder{refuse: true}
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)
-	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge)); w.Code != http.StatusOK {
+	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID)); w.Code != http.StatusOK {
 		t.Fatalf("a refused binding blocked issuance: status %d, body=%s", w.Code, w.Body.String())
 	}
 }
@@ -60,8 +60,8 @@ func TestAttest_ConflictingBindingStillIssues(t *testing.T) {
 // A request carrying no sandbox token gets no binding — there is no sandbox to
 // bind, and issuance is unchanged.
 func TestAttest_NoTokenBindsNothing(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, _ := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, _ := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
 	csrPEM, _ := generateCSR(t)
@@ -77,17 +77,17 @@ func TestAttest_NoTokenBindsNothing(t *testing.T) {
 // A request that fails a later gate must not leave a binding behind: otherwise
 // a requester that never obtains a certificate could still claim a sandbox ID.
 func TestAttest_FailedIssuanceBindsNothing(t *testing.T) {
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	binder := &recordingBinder{}
 	h.SandboxBindings = binder
-	// Pin a measurement the mock does not report, so the request fails after
+	// Pin a measurement the stub does not report, so the request fails after
 	// the sandbox token has been verified.
 	h.Measurements = map[string]bool{"00": true}
 	csrPEM, _ := generateCSR(t)
 
 	challenge := issueChallenge(t, h)
-	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge)); w.Code == http.StatusOK {
+	if w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID)); w.Code == http.StatusOK {
 		t.Fatal("expected the measurement gate to refuse issuance")
 	}
 	if len(binder.calls) != 0 {

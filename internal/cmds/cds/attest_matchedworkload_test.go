@@ -50,8 +50,8 @@ func issueWithInventory(t *testing.T, store policyStore, digests []string, conta
 
 func leafFromInventory(t *testing.T, store policyStore, digests []string, containers []workloadclaims.SandboxContainer, tune func(*AttestHandler)) *x509.Certificate {
 	t.Helper()
-	mock := newMockAttestationApi(t, "deadbeef")
-	h, signer := newSandboxTestEnv(t, mock.URL, "deadbeef")
+	stub := newStubAttestationApi(t, "deadbeef")
+	h, signer := newSandboxTestEnv(t, stub.URL)
 	h.AllowlistStore = store
 	h.SandboxDigests = fakeDigests{
 		digests:    map[string][]string{testSandboxID: digests},
@@ -63,7 +63,7 @@ func leafFromInventory(t *testing.T, store policyStore, digests []string, contai
 	}
 	csrPEM, _ := generateCSR(t)
 	challenge := issueChallenge(t, h)
-	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge))
+	w := postAttestSandbox(t, h, challenge, csrPEM, signedSandboxToken(t, signer, csrPEM, challenge, testSandboxID))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}

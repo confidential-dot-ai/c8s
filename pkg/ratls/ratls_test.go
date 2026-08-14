@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -603,34 +604,6 @@ func embeddedAzureCert(t *testing.T) (*x509.Certificate, [64]byte) {
 	return embeddedEnvelopeCert(t, types.PlatformAzSnp, json.RawMessage(`{"hcl_report":"fake","tpm_quote":{"message":"fake"}}`))
 }
 
-// verifyResponse is a minimal builder for an attestation-api /verify
-// response. Tests mutate the returned map then JSON-encode it.
-func verifyResponse(measurement []byte) map[string]any {
-	result := map[string]any{
-		"platform":          string(types.PlatformAzSnp),
-		"signature_valid":   true,
-		"report_data_match": true,
-		"claims":            map[string]any{},
-	}
-	if measurement != nil {
-		result["claims"] = map[string]any{
-			"launch_digest": hex.EncodeToString(measurement),
-		}
-	}
-	return map[string]any{"result": result}
-}
-
-// newMockedVerifySrv returns a mocked attestation-api whose /verify always
-// responds with body.
-func newMockedVerifySrv(t *testing.T, body any) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewEncoder(w).Encode(body); err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-	}))
-}
-
 func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	key, expectedReportData, err := GenerateKeyPair()
 	if err != nil {
@@ -655,60 +628,39 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	}
 
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	var sawVerify bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/verify" {
-			t.Fatalf("path = %s, want /verify", r.URL.Path)
-		}
-		var req types.VerifyRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode verify request: %v", err)
-		}
-		sawVerify = true
-		// attestation-api wants platform at the top level and Evidence as the
-		// platform-specific evidence, not a nested AttestationEvidence envelope.
-		if req.Platform != string(types.PlatformAzSnp) {
-			t.Fatalf("platform = %q, want az-snp", req.Platform)
-		}
-		if string(req.Evidence) != string(evidenceJSON) {
-			t.Fatalf("evidence = %s, want the platform-specific evidence %s (not a nested envelope)", req.Evidence, evidenceJSON)
-		}
-		if req.Params == nil || req.Params.ExpectedReportData == nil {
-			t.Fatal("missing expected report data")
-		}
-		// az-snp binds via a TPM quote whose nonce is the 48-byte SHA-384
-		// digest, so exactly those 48 bytes must be sent — not the zero-padded
-		// 64-byte form, which fails attestation-api with a nonce-length error.
-		if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
-			t.Fatalf("expected_report_data = %x (%d bytes), want %x (%d bytes)", got, len(got), expectedReportData[:sha512.Size384], sha512.Size384)
-		}
-
-		resp := map[string]any{
-			"result": map[string]any{
-				"platform":          string(types.PlatformAzSnp),
-				"signature_valid":   true,
-				"report_data_match": true,
-				"claims": map[string]any{
-					"launch_digest": hex.EncodeToString(measurement),
-					"platform_data": map[string]any{"source": "test"},
-				},
-			},
-		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-	}))
-	defer srv.Close()
+	stub := testattest.New(t)
+	verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
+	verdict.Claims.PlatformData = json.RawMessage(`{"source":"test"}`)
+	stub.SetVerdict(verdict)
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: srv.URL,
+		AttestationApiURL: stub.URL,
 		Measurements:      [][]byte{measurement},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
-	if !sawVerify {
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
 		t.Fatal("attestation-api /verify was not called")
+	}
+	req := reqs[0]
+	// attestation-api wants platform at the top level and Evidence as the
+	// platform-specific evidence, not a nested AttestationEvidence envelope.
+	if req.Platform != string(types.PlatformAzSnp) {
+		t.Fatalf("platform = %q, want az-snp", req.Platform)
+	}
+	if string(req.Evidence) != string(evidenceJSON) {
+		t.Fatalf("evidence = %s, want the platform-specific evidence %s (not a nested envelope)", req.Evidence, evidenceJSON)
+	}
+	if req.Params == nil || req.Params.ExpectedReportData == nil {
+		t.Fatal("missing expected report data")
+	}
+	// az-snp binds via a TPM quote whose nonce is the 48-byte SHA-384 digest,
+	// so exactly those 48 bytes must be sent — not the zero-padded 64-byte
+	// form, which fails attestation-api with a nonce-length error.
+	if got := req.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
+		t.Fatalf("expected_report_data = %x (%d bytes), want %x (%d bytes)", got, len(got), expectedReportData[:sha512.Size384], sha512.Size384)
 	}
 	if !bytes.Equal(result.ReportData[:], expectedReportData[:]) {
 		t.Fatalf("ReportData = %x, want %x", result.ReportData, expectedReportData)
@@ -722,27 +674,22 @@ func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
 	cert, expectedReportData := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
 	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
 
-	var observed types.VerifyRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
-			t.Fatalf("decode verify request: %v", err)
-		}
-		resp := verifyResponse(mrtd)
-		resp["result"].(map[string]any)["platform"] = string(types.PlatformTdx)
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-	}))
-	defer srv.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(mrtd)))
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: srv.URL,
+		AttestationApiURL: stub.URL,
 		Measurements:      [][]byte{mrtd},
 		MinTCBVersion:     1,
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("/verify calls = %d, want 1", len(reqs))
+	}
+	observed := reqs[0]
 	if observed.Platform != string(types.PlatformTdx) {
 		t.Fatalf("platform = %q, want tdx", observed.Platform)
 	}
@@ -767,7 +714,7 @@ func TestVerifyCertEmbeddedTDXEvidenceEnforcesMRTD(t *testing.T) {
 
 	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
 	_, err = VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: srv.URL,
+		AttestationApiURL: stub.URL,
 		Measurements:      [][]byte{wrongMRTD},
 	}, nil)
 	if !errors.Is(err, ErrPolicyViolation) {
@@ -783,25 +730,21 @@ func TestVerifyCertEmbeddedGcpSnpEvidenceUsesAttestationApi(t *testing.T) {
 	cert, _ := embeddedEnvelopeCert(t, types.PlatformGcpSnp, json.RawMessage(`{"attestation_report":"fake"}`))
 
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
-	var observed types.VerifyRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
-			t.Fatalf("decode verify request: %v", err)
-		}
-		if err := json.NewEncoder(w).Encode(verifyResponse(measurement)); err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-	}))
-	defer srv.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 
 	if _, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: srv.URL,
+		AttestationApiURL: stub.URL,
 		Measurements:      [][]byte{measurement},
 	}, nil); err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
-	if observed.Platform != string(types.PlatformGcpSnp) {
-		t.Fatalf("platform = %q, want gcp-snp", observed.Platform)
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("/verify calls = %d, want 1", len(reqs))
+	}
+	if reqs[0].Platform != string(types.PlatformGcpSnp) {
+		t.Fatalf("platform = %q, want gcp-snp", reqs[0].Platform)
 	}
 }
 
@@ -816,33 +759,35 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	allowedMeasurements := [][]byte{measurement}
 
 	t.Run("signature_valid=false maps to ErrSignatureInvalid", func(t *testing.T) {
-		resp := verifyResponse(measurement)
-		resp["result"].(map[string]any)["signature_valid"] = false
-		srv := newMockedVerifySrv(t, resp)
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
+		verdict.SignatureValid = false
+		stub.SetVerdict(verdict)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrSignatureInvalid) {
 			t.Fatalf("got %v, want ErrSignatureInvalid", err)
 		}
 	})
 
 	t.Run("report_data_match=nil maps to ErrKeyBinding", func(t *testing.T) {
-		resp := verifyResponse(measurement)
-		delete(resp["result"].(map[string]any), "report_data_match")
-		srv := newMockedVerifySrv(t, resp)
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.Verdict{
+			SignatureValid: true,
+			Claims:         types.Claims{LaunchDigest: hex.EncodeToString(measurement)},
+		})
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
 	})
 
 	t.Run("report_data_match=false maps to ErrKeyBinding", func(t *testing.T) {
-		resp := verifyResponse(measurement)
-		resp["result"].(map[string]any)["report_data_match"] = false
-		srv := newMockedVerifySrv(t, resp)
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
+		match := false
+		verdict.ReportDataMatch = &match
+		stub.SetVerdict(verdict)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrKeyBinding) {
 			t.Fatalf("got %v, want ErrKeyBinding", err)
 		}
@@ -856,43 +801,35 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	})
 
 	t.Run("launch_digest missing with pinned measurements is rejected", func(t *testing.T) {
-		srv := newMockedVerifySrv(t, verifyResponse(nil))
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
 	})
 
 	t.Run("launch_digest not in allowed set is rejected", func(t *testing.T) {
-		other := bytes.Repeat([]byte{0x99}, SNPMeasurementSize)
-		srv := newMockedVerifySrv(t, verifyResponse(other))
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(bytes.Repeat([]byte{0x99}, SNPMeasurementSize))))
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrPolicyViolation) {
 			t.Fatalf("got %v, want ErrPolicyViolation", err)
 		}
 	})
 
 	t.Run("launch_digest not hex is rejected", func(t *testing.T) {
-		resp := verifyResponse(measurement)
-		resp["result"].(map[string]any)["claims"] = map[string]any{"launch_digest": "not-hex"}
-		srv := newMockedVerifySrv(t, resp)
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict("not-hex"))
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
 	})
 
 	t.Run("launch_digest wrong length is rejected", func(t *testing.T) {
-		resp := verifyResponse(measurement)
-		resp["result"].(map[string]any)["claims"] = map[string]any{
-			"launch_digest": hex.EncodeToString(bytes.Repeat([]byte{0x11}, 32)),
-		}
-		srv := newMockedVerifySrv(t, resp)
-		defer srv.Close()
-		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(bytes.Repeat([]byte{0x11}, 32))))
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrInvalidReport) {
 			t.Fatalf("got %v, want ErrInvalidReport", err)
 		}
@@ -910,9 +847,16 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	})
 
 	t.Run("AttestationVerifyTimeout bounds the call", func(t *testing.T) {
+		match := true
+		slow := types.VerifyResponse{Result: types.VerificationResult{
+			Platform:        string(types.PlatformAzSnp),
+			SignatureValid:  true,
+			ReportDataMatch: &match,
+			Claims:          types.Claims{LaunchDigest: hex.EncodeToString(measurement)},
+		}}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(200 * time.Millisecond)
-			_ = json.NewEncoder(w).Encode(verifyResponse(measurement))
+			_ = json.NewEncoder(w).Encode(slow)
 		}))
 		defer srv.Close()
 		start := time.Now()
@@ -931,25 +875,24 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	})
 
 	t.Run("MinTCBVersion is forwarded as unpacked components", func(t *testing.T) {
-		var observed types.VerifyRequest
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			_ = json.NewEncoder(w).Encode(verifyResponse(measurement))
-		}))
-		defer srv.Close()
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 		// Packed layout: bootloader=0x11, tee=0x22, snp=0x33 (byte 6),
 		// microcode=0x44 (byte 7). Reserved bytes stay zero.
 		packed := uint64(0x44_33_00_00_00_00_22_11)
 		_, err := VerifyCert(cert, &VerifyPolicy{
-			AttestationApiURL: srv.URL,
+			AttestationApiURL: stub.URL,
 			Measurements:      allowedMeasurements,
 			MinTCBVersion:     packed,
 		}, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
 		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 {
+			t.Fatalf("/verify calls = %d, want 1", len(reqs))
+		}
+		observed := reqs[0]
 		if observed.Params == nil || observed.Params.MinTcb == nil {
 			t.Fatal("MinTcb was not forwarded to /verify")
 		}
@@ -982,9 +925,9 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseCertificate: %v", err)
 		}
-		srv := newMockedVerifySrv(t, verifyResponse(measurement))
-		defer srv.Close()
-		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: allowedMeasurements}, nil)
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+		_, err = VerifyCert(tdxCert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
 		if !errors.Is(err, ErrUnsupportedTEE) {
 			t.Fatalf("got %v, want ErrUnsupportedTEE", err)
 		}
@@ -1000,26 +943,21 @@ func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
 		json.RawMessage(`{"hcl_report":"fake","td_quote":"fake","tpm_quote":{"message":"fake"}}`))
 	mrtd := bytes.Repeat([]byte{0x42}, sha512.Size384)
 
-	var observed types.VerifyRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
-			t.Fatalf("decode verify request: %v", err)
-		}
-		resp := verifyResponse(mrtd)
-		resp["result"].(map[string]any)["platform"] = string(types.PlatformAzTdx)
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-	}))
-	defer srv.Close()
+	stub := testattest.New(t)
+	stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(mrtd)))
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
-		AttestationApiURL: srv.URL,
+		AttestationApiURL: stub.URL,
 		Measurements:      [][]byte{mrtd},
 	}, nil)
 	if err != nil {
 		t.Fatalf("VerifyCert: %v", err)
 	}
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("/verify calls = %d, want 1", len(reqs))
+	}
+	observed := reqs[0]
 	// az-tdx binds via the 48-byte vTPM nonce, not the full 64-byte REPORTDATA.
 	if got := observed.Params.ExpectedReportData.Bytes(); !bytes.Equal(got, expectedReportData[:sha512.Size384]) {
 		t.Fatalf("expected_report_data = %x (%d bytes), want the 48-byte digest %x", got, len(got), expectedReportData[:sha512.Size384])
@@ -1032,7 +970,7 @@ func TestVerifyCertEmbeddedAzTdxEvidence(t *testing.T) {
 	}
 
 	wrongMRTD := bytes.Repeat([]byte{0x99}, sha512.Size384)
-	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{wrongMRTD}}, nil)
+	_, err = VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{wrongMRTD}}, nil)
 	if !errors.Is(err, ErrPolicyViolation) {
 		t.Fatalf("wrong MRTD: got %v, want ErrPolicyViolation", err)
 	}
@@ -1053,23 +991,18 @@ func TestVerifyCertBareSNPUsesAttestationApi(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 
 	t.Run("raw report is wrapped in the snp envelope", func(t *testing.T) {
-		var observed types.VerifyRequest
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := json.NewDecoder(r.Body).Decode(&observed); err != nil {
-				t.Fatalf("decode verify request: %v", err)
-			}
-			resp := verifyResponse(measurement)
-			resp["result"].(map[string]any)["platform"] = string(types.PlatformSnp)
-			if err := json.NewEncoder(w).Encode(resp); err != nil {
-				t.Fatalf("encode response: %v", err)
-			}
-		}))
-		defer srv.Close()
+		stub := testattest.New(t)
+		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
 
-		result, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: srv.URL, Measurements: [][]byte{measurement}}, nil)
+		result, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: [][]byte{measurement}}, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
 		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 {
+			t.Fatalf("/verify calls = %d, want 1", len(reqs))
+		}
+		observed := reqs[0]
 		if observed.Platform != string(types.PlatformSnp) {
 			t.Fatalf("platform = %q, want snp", observed.Platform)
 		}
@@ -1231,10 +1164,9 @@ func TestPublicKeyFromCertCurves(t *testing.T) {
 
 func TestVerifyAttestationUnsupportedKey(t *testing.T) {
 	_, att := testKeyAndAttestation(t)
-	srv := newMockedVerifySrv(t, verifyResponse(nil))
-	defer srv.Close()
+	stub := testattest.New(t)
 
-	_, err := VerifyAttestation("not-a-key", att, &VerifyPolicy{AttestationApiURL: srv.URL}, nil)
+	_, err := VerifyAttestation("not-a-key", att, &VerifyPolicy{AttestationApiURL: stub.URL}, nil)
 	if err == nil || !strings.Contains(err.Error(), "compute expected REPORTDATA") {
 		t.Fatalf("got %v, want REPORTDATA computation error", err)
 	}
@@ -1245,21 +1177,18 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 	newPolicy := func(url string) *VerifyPolicy {
 		return &VerifyPolicy{AttestationApiURL: url, Measurements: [][]byte{measurement}}
 	}
-	withPlatformData := func(platform string, platformData any) map[string]any {
-		resp := verifyResponse(measurement)
-		result := resp["result"].(map[string]any)
-		result["platform"] = platform
-		result["claims"] = map[string]any{
-			"launch_digest": hex.EncodeToString(measurement),
-			"platform_data": platformData,
-		}
-		return resp
+	stubWithPlatformData := func(t *testing.T, platformData json.RawMessage) *testattest.Stub {
+		t.Helper()
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
+		verdict.Claims.PlatformData = platformData
+		stub.SetVerdict(verdict)
+		return stub
 	}
 
 	t.Run("SNP platform data is surfaced", func(t *testing.T) {
 		cert, _ := embeddedAzureCert(t)
-		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformAzSnp), map[string]any{"source": "unit"}))
-		defer srv.Close()
+		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -1277,8 +1206,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("null SNP platform data is dropped", func(t *testing.T) {
 		cert, _ := embeddedAzureCert(t)
-		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformAzSnp), nil))
-		defer srv.Close()
+		srv := stubWithPlatformData(t, nil)
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -1290,8 +1218,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("TDX platform data is not surfaced", func(t *testing.T) {
 		cert, _ := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
-		srv := newMockedVerifySrv(t, withPlatformData(string(types.PlatformTdx), map[string]any{"source": "unit"}))
-		defer srv.Close()
+		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
