@@ -62,7 +62,7 @@ func TestNewCmdValidation(t *testing.T) {
 // TestNewCmdEndToEnd runs the whole command against the fake node: flags,
 // attest gate, RA-TLS release, kubeconfig on disk.
 func TestNewCmdEndToEnd(t *testing.T) {
-	env := newTestEnv(t, http.StatusOK, http.StatusOK, goodRelease)
+	env := newTestEnv(t, newAttestStub(t).URL+"/attest", http.StatusOK, goodRelease)
 
 	err := execCmd(t,
 		"--attest-url", env.attestURL,
