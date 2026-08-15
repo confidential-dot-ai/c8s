@@ -9,21 +9,21 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo '== 1/6 node label (current metal main selects confidential.ai/sev-snp) =='
+echo '== 1/7 node label (current metal main selects confidential.ai/sev-snp) =='
 kubectl label node sev-snp-gh-runner confidential.ai/sev-snp=true --overwrite
 
-echo '== 2/6 rke2 rootdisk import (CDI, ~2GiB — first run takes minutes) =='
+echo '== 2/7 rke2 rootdisk import (CDI, ~2GiB — first run takes minutes) =='
 kubectl apply -f rke2-rootdisk-dv.yaml
 kubectl -n confai-images wait dv/rke2-rootdisk-79d45313276e --for=condition=Ready --timeout=20m
 
-echo '== 3/6 stage /var/lib/igvm/rke2.igvm + capture golden measurement =='
+echo '== 3/7 stage /var/lib/igvm/rke2.igvm + capture golden measurement =='
 kubectl -n confai-images delete job igvm-stage-rke2-79d45313276e --ignore-not-found
 kubectl apply -f igvm-stage-job.yaml
 kubectl -n confai-images wait job/igvm-stage-rke2-79d45313276e --for=condition=complete --timeout=20m
 LOGS=$(kubectl -n confai-images logs job/igvm-stage-rke2-79d45313276e)
 echo "$LOGS" | tail -5
 
-echo '== 4/6 publish rke2-image-refs ConfigMap (incl. golden smp4 launch digest) =='
+echo '== 4/7 publish rke2-image-refs ConfigMap (incl. golden smp4 launch digest) =='
 # manifest.json carries per-variant measurements; pull the smp=4 variant's
 # snp_launch_digest (nested under measurement.*) — find the smp==4 object,
 # then regex its whole subtree for the sha384.
@@ -64,7 +64,7 @@ data:
   launchDigestSmp4: "$GOLDEN"
 EOF
 
-echo '== 5/6 base-image-refs ConfigMap (base-cpu; playbook publishes this on next provision) =='
+echo '== 5/7 base-image-refs ConfigMap (base-cpu; playbook publishes this on next provision) =='
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: ConfigMap
@@ -79,7 +79,26 @@ data:
   igvmFilePattern: "guest-smp{cores}.igvm"
 EOF
 
-echo '== 6/6 RBAC (adds configmaps read) + egress (adds in-CVM :6443) =='
+echo '== 6/7 tdx-rke2-image-refs ConfigMap (TDX lane; pinned image + its measurement tuple) =='
+# mrtd/rtmr1/rtmr2 are the confos build manifest for this exact image, not values
+# read back from a running guest: get-kubeconfig --image-manifest pins on them.
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tdx-rke2-image-refs
+  namespace: confai-images
+data:
+  image: "ghcr.io/confidential-dot-ai/c8s-base@sha256:20582959f163acd7b3c0927c3ce2c395da162bb5993890d4f387b46147f4258a"
+  rootPvc: "c8s-root-20582959f163"
+  cdiTag: "rke2-cdi-64b6d7a"
+  c8sRef: "64b6d7a"
+  mrtd: "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1"
+  rtmr1: "0e65a54c565bdd5045886a4665419eed653bfd0c694ed6590f1b518d512d00b42795838b90f8426804640e327a6c7866"
+  rtmr2: "29dba45b23f3773bed4ea6420ec444063c4651c42a37649eb54085b3de99d20a35b557b5b882c0efc894e9213595b311"
+EOF
+
+echo '== 7/7 RBAC (adds configmaps read) + egress (adds in-CVM :6443) =='
 kubectl apply -f ../../baremetal/kubevirt-rbac.yaml
 kubectl apply -f ../../baremetal/runner-egress.cnp.yaml
 
