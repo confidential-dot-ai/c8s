@@ -12,8 +12,8 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/requesthandoff"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
-	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 const (
