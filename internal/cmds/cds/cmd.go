@@ -31,12 +31,8 @@ func NewCmd() *cobra.Command {
 		Use:   "cds",
 		Short: "Run the Certificate Distribution Service (CDS)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// The empty-platform plain-HTTP mode stays reachable only for
-			// tests constructing Config directly, never from the CLI.
-			if norm := ratls.NormalizePlatform(cfg.ratlsPlatform); norm == "" {
-				return fmt.Errorf("--ratls-platform must not be empty (RA-TLS is mandatory; tests construct Config directly)")
-			} else if err := ratls.ValidatePlatform(norm); err != nil {
-				return fmt.Errorf("--ratls-platform: %w", err)
+			if err := validateRATLSPlatformFlag(cfg.ratlsPlatform); err != nil {
+				return err
 			}
 			return run(cfg)
 		},
@@ -177,4 +173,18 @@ type config struct {
 	secretsMaxPathsPerWorkload int
 	secretsMaxValueBytes       int
 	sandboxLedgerMax           int
+}
+
+// validateRATLSPlatformFlag rejects the CLI paths to a TLS-less CDS: the
+// empty-platform plain-HTTP mode stays reachable only for tests constructing
+// Config directly.
+func validateRATLSPlatformFlag(v string) error {
+	norm := ratls.NormalizePlatform(v)
+	if norm == "" {
+		return fmt.Errorf("--ratls-platform must not be empty (RA-TLS is mandatory; tests construct Config directly)")
+	}
+	if err := ratls.ValidatePlatform(norm); err != nil {
+		return fmt.Errorf("--ratls-platform: %w", err)
+	}
+	return nil
 }

@@ -1102,6 +1102,9 @@ func TestAppendCvmModeInstallArgsSetsAttestationApiValue(t *testing.T) {
 }
 
 func TestAppendCvmModeInstallArgsRejectsUnknownMode(t *testing.T) {
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "pod", ""); err == nil || !strings.Contains(err.Error(), "--hardware-platform is required") {
+		t.Fatalf("empty --hardware-platform: err = %v, want required error", err)
+	}
 	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "azure", "sev-snp"); err == nil {
 		t.Fatal("appendCvmModeInstallArgs accepted an unknown --cvm-mode, want error")
 	}

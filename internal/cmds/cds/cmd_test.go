@@ -7,6 +7,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 
 	"github.com/spf13/cobra"
+	"strings"
 )
 
 // TestNewCmdDurationFlagDefaults pins the shipped default for every duration
@@ -67,5 +68,26 @@ func TestNewCmdRequiresRATLSPlatform(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("documented --ratls-platform value is not accepted by ratls: %v", err)
+	}
+}
+
+func TestValidateRATLSPlatformFlag(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		wantErr string
+	}{
+		{"sev-snp", ""},
+		{"snp", ""}, // alias, normalized
+		{"tdx", ""},
+		{"", "must not be empty"},
+		{"foo", "--ratls-platform:"},
+	} {
+		err := validateRATLSPlatformFlag(tc.in)
+		if tc.wantErr == "" && err != nil {
+			t.Errorf("validateRATLSPlatformFlag(%q) = %v, want nil", tc.in, err)
+		}
+		if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("validateRATLSPlatformFlag(%q) = %v, want substring %q", tc.in, err, tc.wantErr)
+		}
 	}
 }

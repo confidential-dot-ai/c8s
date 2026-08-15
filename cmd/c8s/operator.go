@@ -12,6 +12,26 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/webhook"
 )
 
+// validateOperatorPlatform fails at start, not at first injection: an unknown
+// platform would otherwise silently select the SNP classes. Only kata
+// enforcement consumes the platform, so it is required exactly then (the
+// chart passes both flags together under kata.enabled).
+func validateOperatorPlatform(platform string, kataEnforce bool) error {
+	switch platform {
+	case webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX:
+		return nil
+	case "":
+		if kataEnforce {
+			return fmt.Errorf("--hardware-platform is required with --kata-enforce: %s or %s",
+				webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX)
+		}
+		return nil
+	default:
+		return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
+			webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, platform)
+	}
+}
+
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
 	Short: "Run the c8s controller-manager and admission webhook",
@@ -23,20 +43,8 @@ in via annotation.
 Pod-to-pod mTLS is handled by the node-level ratls-mesh DaemonSet, not
 by this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Fail at start, not at first injection: an unknown platform would
-		// otherwise silently select the SNP classes. Only kata enforcement
-		// consumes the platform, so it is required exactly then (the chart
-		// passes both flags together under kata.enabled).
-		switch operatorHardwarePlatform {
-		case webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX:
-		case "":
-			if kataEnforce {
-				return fmt.Errorf("--hardware-platform is required with --kata-enforce: %s or %s",
-					webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX)
-			}
-		default:
-			return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
-				webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, operatorHardwarePlatform)
+		if err := validateOperatorPlatform(operatorHardwarePlatform, kataEnforce); err != nil {
+			return err
 		}
 		return controller.Run(cmd.Context(), controller.Options{
 			MetricsAddr:             metricsAddr,
