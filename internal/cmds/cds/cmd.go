@@ -4,6 +4,7 @@
 package cds
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/requesthandoff"
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
 )
 
@@ -29,6 +31,13 @@ func NewCmd() *cobra.Command {
 		Use:   "cds",
 		Short: "Run the Certificate Distribution Service (CDS)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The empty-platform plain-HTTP mode stays reachable only for
+			// tests constructing Config directly, never from the CLI.
+			if norm := ratls.NormalizePlatform(cfg.ratlsPlatform); norm == "" {
+				return fmt.Errorf("--ratls-platform must not be empty (RA-TLS is mandatory; tests construct Config directly)")
+			} else if err := ratls.ValidatePlatform(norm); err != nil {
+				return fmt.Errorf("--ratls-platform: %w", err)
+			}
 			return run(cfg)
 		},
 	}
@@ -88,9 +97,10 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
 	flags.Float64Var(&cfg.rotationJitter, "token-signer-rotation-jitter", 0.1, "")
 
-	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "sev-snp", "TEE platform for the RA-TLS serving cert: sev-snp or tdx (snp/az-snp/gcp-snp and az-tdx/gcp-tdx aliases are normalized). Empty disables TLS — UNSAFE outside tests.")
+	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "", "TEE platform for the RA-TLS serving cert (REQUIRED): sev-snp or tdx (snp/az-snp/gcp-snp and az-tdx/gcp-tdx aliases are normalized)")
 	flags.DurationVar(&cfg.ratlsCertTTL, "ratls-cert-ttl", 24*time.Hour, "")
 
+	_ = cmd.MarkFlagRequired("ratls-platform")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
 	_ = cmd.MarkFlagRequired("allowlist-db")
 

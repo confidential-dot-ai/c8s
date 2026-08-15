@@ -186,9 +186,11 @@ func TestValueArgsToTreeRejectsUnknownFlag(t *testing.T) {
 // change the emitted args.
 func setCvmModeForTest(t *testing.T, mode string) {
 	t.Helper()
-	prev := installCvmMode
+	prev, prevPlat := installCvmMode, installHardwarePlatform
 	installCvmMode = mode
-	t.Cleanup(func() { installCvmMode = prev })
+	// --hardware-platform has no default anymore; state it like a caller must.
+	installHardwarePlatform = "sev-snp"
+	t.Cleanup(func() { installCvmMode, installHardwarePlatform = prev, prevPlat })
 }
 
 // buildValueArgs must assume nothing the operator did not pass — like install,
@@ -365,13 +367,14 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	}
 
 	prev := struct {
-		crds, singleNode, debug, resolveDigests bool
-		secret, cvm, upstream, operatorKeys     string
-		workloadRefs, measurements              []string
-	}{installCRDs, installSingleNode, installKataDebug, installResolveDigests, installImagePullSecret, installCvmMode, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements)}
+		crds, singleNode, debug, resolveDigests   bool
+		secret, cvm, plat, upstream, operatorKeys string
+		workloadRefs, measurements                []string
+	}{installCRDs, installSingleNode, installKataDebug, installResolveDigests, installImagePullSecret, installCvmMode, installHardwarePlatform, installUpstream, installOperatorKeys, slices.Clone(installWorkloadRefs), slices.Clone(installMeasurements)}
 	defer func() {
 		installCRDs, installSingleNode, installKataDebug, installResolveDigests = prev.crds, prev.singleNode, prev.debug, prev.resolveDigests
 		installImagePullSecret, installCvmMode = prev.secret, prev.cvm
+		installHardwarePlatform = prev.plat
 		installUpstream = prev.upstream
 		installOperatorKeys = prev.operatorKeys
 		installWorkloadRefs = prev.workloadRefs
@@ -385,6 +388,7 @@ func TestBuildValueArgsStaysWithinParserGrammar(t *testing.T) {
 	// form the builder emits; asserted in a second pass below.
 	installCRDs, installSingleNode, installKataDebug, installResolveDigests = false, true, true, false
 	installImagePullSecret, installCvmMode = "regcred", "pod"
+	installHardwarePlatform = "sev-snp"
 	installWorkloadRefs = []string{"infer=workloads/deployment/vllm:8000"}
 	installUpstream = "infer"
 	installOperatorKeys = writeTestOperatorKeys(t)

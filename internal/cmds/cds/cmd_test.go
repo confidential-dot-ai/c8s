@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+
+	"github.com/spf13/cobra"
 )
 
 // TestNewCmdDurationFlagDefaults pins the shipped default for every duration
@@ -46,20 +48,24 @@ func TestNewCmdDurationFlagDefaults(t *testing.T) {
 	}
 }
 
-func TestNewCmdDefaultsToSupportedRATLSPlatform(t *testing.T) {
+func TestNewCmdRequiresRATLSPlatform(t *testing.T) {
 	flag := NewCmd().Flags().Lookup("ratls-platform")
 	if flag == nil {
 		t.Fatal("missing --ratls-platform flag")
 	}
-	if flag.DefValue != "sev-snp" {
-		t.Fatalf("default --ratls-platform = %q, want sev-snp", flag.DefValue)
+	// No default: a silently-assumed TEE must never serve RA-TLS.
+	if flag.DefValue != "" {
+		t.Fatalf("default --ratls-platform = %q, want required with no default", flag.DefValue)
+	}
+	if flag.Annotations[cobra.BashCompOneRequiredFlag] == nil {
+		t.Fatal("--ratls-platform is not marked required")
 	}
 
 	_, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
-		Platform:   flag.DefValue,
+		Platform:   "sev-snp",
 		AttestFunc: func(context.Context, string) (string, error) { return "", nil },
 	})
 	if err != nil {
-		t.Fatalf("default --ratls-platform is not accepted by ratls: %v", err)
+		t.Fatalf("documented --ratls-platform value is not accepted by ratls: %v", err)
 	}
 }
