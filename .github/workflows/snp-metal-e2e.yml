@@ -124,6 +124,10 @@ jobs:
           AATAG="${{ inputs.aa_ref || 'main' }}"
           echo "resolved image tags: c8s-operator=$OPTAG cds=$CDSTAG attestation-api=$AATAG (chart+values from $SHORT)"
 
+          # Throwaway operator keypair for the ca-handoff e2e below (handoff requires cds.operatorKeys); the private half never leaves the runner.
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/e2e-op.key
+          OPPUB=$(openssl ec -in /tmp/e2e-op.key -pubout 2>/dev/null | sed 's/^/    /')  # the 4 spaces are the operatorKeys block-scalar indent below; keep $OPPUB outdented
+
           # c8s chart values — canonical per c8s/docs + the c8s-integration fleet:
           #  - cds.node.selector/tolerations null : the --single-node effect. The chart
           #    default pins role=cds, so CDS sits Pending forever on a single node.
@@ -148,25 +152,23 @@ jobs:
                                   # resurfaces -> CDS Pending (run 29536583462).
             ratlsPlatform: sev-snp
             measurements: ["RUNTIME_MEASUREMENT"]
+            # ca-handoff e2e in the payload: serve /handoff, gated on the pinned
+            # measurement; the chart requires an operator-key bundle with it.
+            operatorKeys: |-
+          $OPPUB
+            handoff:
+              enabled: true
             # NODE_CIDR placeholder: payload substitutes the node's InternalIP/32 (matching `c8s install`'s per-node host routes) — CDS fail-closes sandbox-token CSRs without it (#168; this lane writes raw values, so `c8s install` never fills it).
             sandboxInventoryCIDRs: ["NODE_CIDR"]
           attestationApi:
             image:
               tag: "$AATAG"
-            # UN-PIN: keep cvmMode=node (what we actually ship on metal) and make
-            # $(HOST_IP) routing resolve. Our image predates the baked host
-            # attestation-api, but when nriImagePolicy is on the chart already
-            # publishes the AA as a NodePort for exactly this reason ("NodePort used
-            # by host-process components such as nri-image-policy"). Aligning the AA
-            # port with that NodePort makes $(HOST_IP):<port> hit the node's own AA
-            # pod (both traffic policies are Local, so it never leaves the node).
-            # Verified by helm template at HEAD: all 4 consumers (cds, operator, both
-            # tls-lb sidecars) render http://$(HOST_IP):30840, and the Service exposes
-            # port 30840 -> targetPort http -> containerPort 30840.
+            # cvmMode=node (what we ship on metal), but this node image
+            # predates the baked host attestation-api — so the chart's own
+            # DaemonSet + attest-proxy sidecar supplies the node-local
+            # endpoint on its Unix socket, and no $(HOST_IP)/NodePort
+            # alignment is needed.
             cvmMode: node
-            port: 30840
-            service:
-              nodePort: 30840
             teeDevices:
               sevGuest: true
               tdxGuest: false
@@ -286,7 +288,16 @@ jobs:
             IC=\$(\$K -n default get pods -l app=demo-nginx -o jsonpath='{.items[0].spec.initContainers[*].name}' 2>/dev/null)
             echo "@@CWCONTAINERS \${IC:-none}@@"
             printf '%s' "\$IC" | grep -q 'c8s-cert' && { COK=1; say CERT_INJECTED; }
-            [ "\$WOK" = "1" ] && [ "\$COK" = "1" ] && say PAYLOAD_OK
+            if [ "\$WOK" = "1" ] && [ "\$COK" = "1" ]; then
+              # Live-cluster e2e suites from the merge-under-test's own source.
+              # A suite failure fails the lane (FAIL_ marker -> no PAYLOAD_OK).
+              export PATH="/var/lib/rancher/rke2/bin:\$PATH"
+              E2E=\$(echo /tmp/c8s-*/test/e2e)
+              FAILED=""
+              bash "\$E2E/cw-label-policy.sh" && say E2E_CW_LABEL_OK || FAILED="\$FAILED cw-label-policy"
+              bash "\$E2E/ca-handoff.sh" && say E2E_CA_HANDOFF_OK || FAILED="\$FAILED ca-handoff"
+              if [ -n "\$FAILED" ]; then say "FAIL_E2E:\$FAILED"; else say PAYLOAD_OK; fi
+            fi
             if [ "\$WOK" != "1" ]; then
               \$K -n default describe pods -l app=demo-nginx 2>&1 | grep -iE 'Warning|Failed|Error|Back-off|Reason' | tail -10 | sed 's/^/@@CWDESC /;s/\$/@@/'
               \$K -n default logs -l app=demo-nginx -c c8s-cert --tail=10 2>&1 | sed 's/^/@@CERTLOG /;s/\$/@@/'
