@@ -35,6 +35,30 @@ on:
         required: false
         type: boolean
         default: false
+  # Reusable form for image-repro-gate.yml: two gate legs in one caller run.
+  workflow_call:
+    inputs:
+      dev:
+        required: false
+        type: boolean
+        default: false
+      c8s_ref:
+        required: false
+        type: string
+        default: ""
+      confos_ref:
+        required: false
+        type: string
+        default: ""
+      gate:
+        required: false
+        type: boolean
+        default: false
+      leg:
+        description: "Distinguishes gate artifacts when one caller runs several legs."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -54,9 +78,9 @@ concurrency:
   # path, so the auto path groups exactly as before.
   group: >-
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
-    }}-${{ github.event.inputs.c8s_ref }}-${{ github.event.inputs.dev
-    }}-${{ github.event.inputs.confos_ref }}-${{ github.event.inputs.gate
-    }}-${{ github.event.inputs.gate_intree }}
+    }}-${{ inputs.c8s_ref }}-${{ inputs.dev
+    }}-${{ inputs.confos_ref }}-${{ inputs.gate
+    }}-${{ inputs.gate_intree }}-${{ inputs.leg }}
   cancel-in-progress: false
 
 env:
@@ -67,13 +91,15 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ github.event.inputs.confos_ref || '14e770f26f912d360f1a60a464145c3ee5615124' }} # pin: v0.4.2 — every apt pocket snapshot-pinned by URI, mirror-guarded builds (confos#96)
+  CONFOS_REF: ${{ inputs.confos_ref || '14e770f26f912d360f1a60a464145c3ee5615124' }} # pin: v0.4.2 — every apt pocket snapshot-pinned by URI, mirror-guarded builds (confos#96)
 
 jobs:
   build-and-push:
     name: Build c8s node image (${{ matrix.platform }})
     # Auto path: Docker succeeded on main (its PR runs don't publish components).
+    # Gate legs arrive via workflow_call, where event_name is the caller's.
     if: |
+      inputs.gate == true ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
@@ -116,7 +142,7 @@ jobs:
         # VARIANT drives C8S_NAME (-> output/$VARIANT/) and the push tags.
         run: |
           echo "IMAGE=${REGISTRY}/confidential-dot-ai/node-guest-base" >> "$GITHUB_ENV"
-          if [ "${{ github.event.inputs.dev }}" = "true" ]; then
+          if [ "${{ inputs.dev }}" = "true" ]; then
             echo "VARIANT=rke2-${{ matrix.platform }}-dev" >> "$GITHUB_ENV"
             echo "KERNEL_FLAVOR=rke2-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
@@ -237,7 +263,7 @@ jobs:
           ATTEST_GPU_BIN: ${{ github.workspace }}/attestation-rs/target/release/attestation-api
           LIBNVAT: /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          C8S_REF_INPUT: ${{ inputs.c8s_ref }}
           # Private half of the module signing certificate (org secret) — the
           # fetch script signs the NVIDIA modules with it and fails closed
           # without it. Signatures are deterministic (sign-file uses no
@@ -258,22 +284,22 @@ jobs:
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
-        if: github.event.inputs.gate == 'true'
+        if: inputs.gate == true
         uses: actions/upload-artifact@v4
         with:
-          name: gate-${{ env.VARIANT }}-${{ github.run_id }}
+          name: gate-${{ env.VARIANT }}-${{ github.run_id }}${{ inputs.leg && format('-{0}', inputs.leg) || '' }}
           path: |
             confidential-os-builder/output/${{ env.VARIANT }}/manifest.json
             confidential-os-builder/output/${{ env.VARIANT }}/roothash
           if-no-files-found: error
 
       - name: Check whether the rootfs changed
-        if: github.event.inputs.gate != 'true'
+        if: inputs.gate != true
         # Skip the multi-GB push when the roothash matches what's published.
         id: changed
         working-directory: confidential-os-builder
         env:
-          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          C8S_REF_INPUT: ${{ inputs.c8s_ref }}
         run: |
           set -uo pipefail
           # A c8s_ref rebuild compares against that release's own tag, not the
@@ -296,11 +322,11 @@ jobs:
           fi
 
       - name: Push to GHCR
-        if: github.event.inputs.gate != 'true' && steps.changed.outputs.skip != 'true'
+        if: inputs.gate != true && steps.changed.outputs.skip != 'true'
         working-directory: confidential-os-builder
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          C8S_REF_INPUT: ${{ inputs.c8s_ref }}
         run: |
           set -eux
           SHORT_SHA="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
@@ -323,7 +349,7 @@ jobs:
 
       - name: Summary
         env:
-          C8S_REF_INPUT: ${{ github.event.inputs.c8s_ref }}
+          C8S_REF_INPUT: ${{ inputs.c8s_ref }}
         run: |
           {
             echo "### ${VARIANT} confidential node image"
