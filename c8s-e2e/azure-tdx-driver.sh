@@ -281,7 +281,12 @@ mark CDS_ATTESTS_TDX
 
 # ── vTPM attestation probe (the Azure-unique evidence path; platform=az-tdx) ──
 mark STAGE_ATTEST_PROBE
-pf_start 8400 svc/c8s-attestation-api 8400:8400 || fail "port-forward to attestation-api never came up"
+# c8s#304 removed the Service. The API binds loopback in the DaemonSet pod and a
+# port-forward originates inside that netns, so it still reaches it.
+AAPOD=$(kubectl -n c8s-system get pod -l app.kubernetes.io/component=attestation-api \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+[ -n "$AAPOD" ] || fail "no attestation-api pod in c8s-system"
+pf_start 8400 "pod/$AAPOD" 8400:8400 || fail "port-forward to attestation-api never came up"
 NONCE=$(head -c 32 /dev/urandom | base64 -w0)
 # platform:auto matches every in-repo caller (getkubeconfig, attestclient,
 # handoff_bootstrap); an omitted platform is an untested request shape.

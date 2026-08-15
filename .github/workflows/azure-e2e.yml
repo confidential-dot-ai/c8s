@@ -206,8 +206,20 @@ jobs:
       - name: vTPM attestation probe (the Azure-unique evidence path)
         run: |
           set -euo pipefail
-          kubectl -n c8s-system port-forward svc/c8s-attestation-api 8400:8400 >/dev/null 2>&1 &
-          PF=$!; sleep 4
+          # c8s#304 removed the Service. The API binds loopback in the DaemonSet
+          # pod and a port-forward originates inside that netns, so it reaches it.
+          POD=$(kubectl -n c8s-system get pod -l app.kubernetes.io/component=attestation-api \
+            -o jsonpath='{.items[0].metadata.name}')
+          [ -n "$POD" ] || { echo "::error::no attestation-api pod in c8s-system"; exit 1; }
+          kubectl -n c8s-system port-forward "pod/$POD" 8400:8400 >/tmp/pf.log 2>&1 &
+          PF=$!
+          up=0
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8400) 2>/dev/null; then exec 3<&- 3>&-; up=1; break; fi
+            kill -0 "$PF" 2>/dev/null || break
+            sleep 1
+          done
+          [ "$up" = 1 ] || { echo "::error::port-forward never accepted: $(tail -2 /tmp/pf.log)"; exit 1; }
           NONCE=$(head -c 32 /dev/urandom | base64 -w0)
           http=$(curl -s -m 30 -o att.json -w '%{http_code}' -H 'content-type: application/json' \
             -d "{\"report_data\":\"$NONCE\"}" http://127.0.0.1:8400/attest)
