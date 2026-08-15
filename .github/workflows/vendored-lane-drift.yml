@@ -1,0 +1,49 @@
+# Both metal lanes are vendored: the same file lives in c8s and here, and each
+# copy's header says they stay byte-identical. Four silent drifts in three weeks
+# (ci#59, ci#61, c8s#265, c8s#304) because nothing compared them.
+name: vendored-lane-drift
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/snp-metal-e2e.yml'
+      - '.github/workflows/tdx-metal-e2e.yml'
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Compare each vendored lane against c8s main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          drift=0
+          for f in snp-metal-e2e.yml tdx-metal-e2e.yml; do
+            # Compare git blob SHAs: content identity, no checkout of c8s needed.
+            ours=$(git hash-object ".github/workflows/$f")
+            theirs=$(gh api "repos/confidential-dot-ai/c8s/contents/.github/workflows/$f?ref=main" --jq .sha 2>/dev/null)
+            if [ -z "$theirs" ]; then
+              echo "::warning::could not read c8s copy of $f, skipping"
+              continue
+            fi
+            if [ "$ours" = "$theirs" ]; then
+              echo "ok       $f  $ours"
+            else
+              drift=1
+              echo "::error::$f has drifted from c8s main"
+              echo "  here:     .github/workflows/$f  $ours"
+              echo "  c8s main: .github/workflows/$f  $theirs"
+            fi
+          done
+          [ "$drift" = 0 ] || {
+            echo "::error::vendored lanes differ from c8s. Sync the changed side, then re-run."
+            exit 1
+          }
