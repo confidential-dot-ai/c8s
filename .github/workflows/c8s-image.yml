@@ -67,7 +67,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ github.event.inputs.confos_ref || 'f7d03b74c1d6a740d0dc2478ee127245da567249' }} # pin: v0.4.1 — MODULE_SIG_KEY="" (no per-build GENKEY cert), fragment kernels bit-reproducible
+  CONFOS_REF: ${{ github.event.inputs.confos_ref || '14e770f26f912d360f1a60a464145c3ee5615124' }} # pin: v0.4.2 — every apt pocket snapshot-pinned by URI, mirror-guarded builds (confos#96)
 
 jobs:
   build-and-push:
