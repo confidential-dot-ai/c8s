@@ -17,19 +17,18 @@ import (
 // enforcement consumes the platform, so it is required exactly then (the
 // chart passes both flags together under kata.enabled).
 func validateOperatorPlatform(platform string, kataEnforce bool) error {
-	switch platform {
-	case webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX:
-		return nil
-	case "":
-		if kataEnforce {
-			return fmt.Errorf("--hardware-platform is required with --kata-enforce: %s or %s",
-				webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX)
-		}
-		return nil
-	default:
+	if platform == "" && !kataEnforce {
+		return nil // nothing consumes the platform without kata enforcement
+	}
+	if platform == "" {
+		return fmt.Errorf("--hardware-platform is required with --kata-enforce: %s or %s",
+			webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX)
+	}
+	if platform != webhook.HardwarePlatformSNP && platform != webhook.HardwarePlatformTDX {
 		return fmt.Errorf("--hardware-platform must be %s or %s, got %q",
 			webhook.HardwarePlatformSNP, webhook.HardwarePlatformTDX, platform)
 	}
+	return nil
 }
 
 var operatorCmd = &cobra.Command{
