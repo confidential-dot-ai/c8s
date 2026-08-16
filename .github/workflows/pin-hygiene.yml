@@ -1,0 +1,33 @@
+# Build pins must stay immutable refs (c8s#264): a branch name or short sha
+# here silently changes what a "pinned" build means.
+name: pin hygiene
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/c8s-image.yml"
+      - ".github/workflows/kata-guest-base.yml"
+      - ".github/workflows/pin-hygiene.yml"
+      - "node-guest-image/c8s/mkosi.sync"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - run: |
+          set -euo pipefail
+          fail=0
+          for wf in .github/workflows/c8s-image.yml .github/workflows/kata-guest-base.yml; do
+            if ! grep -m1 'CONFOS_REF:' "$wf" | grep -qE '[0-9a-f]{40}'; then
+              echo "::error file=$wf::CONFOS_REF must pin a full 40-hex commit"; fail=1
+            fi
+          done
+          ref=$(sed -n 's/^C8S_REF="\${C8S_REF:-\(.*\)}"$/\1/p' node-guest-image/c8s/mkosi.sync)
+          if ! echo "$ref" | grep -qE '^(v[0-9][0-9A-Za-z.+-]*|[0-9a-f]{7,40})$'; then
+            echo "::error file=node-guest-image/c8s/mkosi.sync::C8S_REF default must be a release tag or commit, got '$ref'"; fail=1
+          fi
+          exit $fail
