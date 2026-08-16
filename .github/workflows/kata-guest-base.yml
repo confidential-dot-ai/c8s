@@ -149,6 +149,10 @@ jobs:
           repository: confidential-dot-ai/attestation-rs
           path: attestation-rs
 
+      - name: Record the resolved attestation-rs revision
+        # The checkout floats on main; the manifest records what it resolved to.
+        run: echo "ATTESTATION_RS_SHA=$(git -C attestation-rs rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Checkout confidential-os-builder
         # CONFOS_REF above is the single source of truth for the ref.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -510,6 +514,10 @@ jobs:
           # Re-lay toolchain gate (values = published artifact's relay_toolchain): a runner upgrade fails preflight instead of silently shifting root_hash; re-pin on upgrade, expecting a new measurement.
           REPRO_E2FSPROGS_VERSION: "1.47.0"
           REPRO_CRYPTSETUP_VERSION: "2.7.0"
+          # Build provenance, recorded in manifest.json inputs (additive, v2).
+          PROV_C8S_REF: ${{ github.event.workflow_run.head_sha || github.sha }}
+          PROV_CONFOS_REF: ${{ env.CONFOS_REF }}
+          PROV_ATTESTATION_RS_REF: ${{ env.ATTESTATION_RS_SHA }}
           # GPU variants are mandatory in CI. build.sh Step 6 grafts the
           # NVIDIA payload from the staged kata-static artifacts
           # (KATA_NVIDIA_CONFIDENTIAL_IMG / KATA_NVIDIA_VMLINUZ, exported by

@@ -655,6 +655,10 @@ seal_and_assemble() {
         --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg e2fsprogs_ver "${MKE2FS_VERSION}" \
         --arg cryptsetup_ver "${VERITYSETUP_VERSION}" \
+        --arg c8s_ref "${PROV_C8S_REF:-}" \
+        --arg confos_ref "${PROV_CONFOS_REF:-}" \
+        --arg attestation_rs_ref "${PROV_ATTESTATION_RS_REF:-}" \
+        --arg snapshot_sha "$(sha256sum "${KERNEL_SNAPSHOT}" | awk '{print $1}')" \
         '{
            version: ($version|tonumber),
            boot_model: "kata-direct-kernel",
@@ -664,6 +668,12 @@ seal_and_assemble() {
            build_variant: $build_variant,
            kernel_verity_params: $kvp,
            relay_toolchain: { e2fsprogs: $e2fsprogs_ver, cryptsetup: $cryptsetup_ver },
+           inputs: {
+             c8s_ref: $c8s_ref,
+             confos_ref: $confos_ref,
+             attestation_rs_ref: $attestation_rs_ref,
+             kernel_config_snapshot_sha256: $snapshot_sha
+           },
            outputs: {
              kernel:        { path: "vmlinuz",         sha256: $vmlinuz_sha },
              rootfs_image:  { path: "kata-rootfs.img", sha256: $image_sha }
