@@ -61,25 +61,30 @@ func TestRunErrors(t *testing.T) {
 			wantSub: "--front-door-mode",
 		},
 		{
+			name:    "missing platform",
+			cfg:     config{frontDoorMode: FrontDoorModeCDS, evidenceFixture: fixture},
+			wantSub: "--platform is required",
+		},
+		{
 			name:    "no evidence source",
-			cfg:     config{frontDoorMode: FrontDoorModeCDS},
+			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp"},
 			wantSub: "--attestation-api-url or --evidence-fixture",
 		},
 		{
 			name:    "unreadable evidence fixture",
-			cfg:     config{frontDoorMode: FrontDoorModeCDS, evidenceFixture: filepath.Join(t.TempDir(), "missing.json")},
+			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp", evidenceFixture: filepath.Join(t.TempDir(), "missing.json")},
 			wantSub: "read evidence fixture",
 		},
 		{
 			name:    "invalid upstream URL",
-			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, evidenceFixture: fixture, upstream: "ftp://backend"},
+			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", evidenceFixture: fixture, upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
 		{
 			// The live-evidence branch must be selected on --attestation-api-url
 			// alone; the bad upstream proves run() got past provider selection.
 			name:    "invalid upstream URL with live evidence source",
-			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
+			cfg:     config{frontDoorMode: FrontDoorModeWebPKI, platform: "snp", attestationAPIURL: "http://127.0.0.1:9", upstream: "ftp://backend"},
 			wantSub: "upstream must be an http:// or https:// URL",
 		},
 	}

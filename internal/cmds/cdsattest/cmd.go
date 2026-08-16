@@ -67,7 +67,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.expectedWorkload, "expected-workload", "", "gate /readyz on the mesh identity leaf carrying a matched-workload stamp with this exact name; empty keeps /readyz unconditionally 200")
 	f.StringVar(&cfg.evidenceFixture, "evidence-fixture", "", "DEV ONLY: serve recorded TEE evidence from this file instead of the attestation-api")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
-	f.StringVar(&cfg.platform, "platform", "snp", "TEE platform: snp|az-snp|az-tdx|tdx")
+	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|az-snp|az-tdx|tdx")
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "pending-handshake TTL and established-session idle TTL")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
@@ -86,6 +86,11 @@ func run(cfg config) error {
 	// serving key lives, so the deployer must state it.
 	if cfg.frontDoorMode != FrontDoorModeCDS && cfg.frontDoorMode != FrontDoorModeWebPKI {
 		return fmt.Errorf("--front-door-mode must be %q or %q, got %q", FrontDoorModeCDS, FrontDoorModeWebPKI, cfg.frontDoorMode)
+	}
+	// Same rule as front-door-mode: the advertised TEE is a trust statement,
+	// so the deployer must state it.
+	if cfg.platform == "" {
+		return fmt.Errorf("--platform is required: snp, az-snp, az-tdx, or tdx")
 	}
 
 	var provider EvidenceProvider

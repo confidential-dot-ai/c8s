@@ -4,6 +4,7 @@
 package cds
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/cmds/verify"
 	"github.com/confidential-dot-ai/c8s/internal/issuer"
 	"github.com/confidential-dot-ai/c8s/internal/secrets"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 )
 
 const (
@@ -29,6 +31,9 @@ func NewCmd() *cobra.Command {
 		Use:   "cds",
 		Short: "Run the Certificate Distribution Service (CDS)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateRATLSPlatformFlag(cfg.ratlsPlatform); err != nil {
+				return err
+			}
 			return run(cfg)
 		},
 	}
@@ -88,9 +93,10 @@ func NewCmd() *cobra.Command {
 	flags.DurationVar(&cfg.rotationOverlap, "token-signer-overlap", 25*time.Hour, "how long a retired EAR key stays in JWKS")
 	flags.Float64Var(&cfg.rotationJitter, "token-signer-rotation-jitter", 0.1, "")
 
-	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "sev-snp", "TEE platform for the RA-TLS serving cert: sev-snp or tdx (snp/az-snp/gcp-snp and az-tdx/gcp-tdx aliases are normalized). Empty disables TLS — UNSAFE outside tests.")
+	flags.StringVar(&cfg.ratlsPlatform, "ratls-platform", "", "TEE platform for the RA-TLS serving cert (REQUIRED): sev-snp or tdx (snp/az-snp/gcp-snp and az-tdx/gcp-tdx aliases are normalized)")
 	flags.DurationVar(&cfg.ratlsCertTTL, "ratls-cert-ttl", 24*time.Hour, "")
 
+	_ = cmd.MarkFlagRequired("ratls-platform")
 	_ = cmd.MarkFlagRequired("attestation-api-url")
 	_ = cmd.MarkFlagRequired("allowlist-db")
 
@@ -167,4 +173,18 @@ type config struct {
 	secretsMaxPathsPerWorkload int
 	secretsMaxValueBytes       int
 	sandboxLedgerMax           int
+}
+
+// validateRATLSPlatformFlag rejects the CLI paths to a TLS-less CDS: the
+// empty-platform plain-HTTP mode stays reachable only for tests constructing
+// Config directly.
+func validateRATLSPlatformFlag(v string) error {
+	norm := ratls.NormalizePlatform(v)
+	if norm == "" {
+		return fmt.Errorf("--ratls-platform must not be empty (RA-TLS is mandatory; tests construct Config directly)")
+	}
+	if err := ratls.ValidatePlatform(norm); err != nil {
+		return fmt.Errorf("--ratls-platform: %w", err)
+	}
+	return nil
 }
