@@ -1,0 +1,94 @@
+# Reproducibility gate for the node image: any PR that touches the image
+# definition or its pins builds the image TWICE (parallel legs, separate
+# runners) and fails unless every measured value matches — mrtd, RTMRs, UKI,
+# vmlinuz, roothash, the whole manifest minus the build timestamp. This is
+# the automated form of the manual idempotence runbook (c8s#264): the check
+# is the verdict, per platform.
+name: image repro gate
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/c8s-image.yml"
+      - ".github/workflows/image-repro-gate.yml"
+      - "node-guest-image/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-repro-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ref:
+    # Bake the same published components both legs and production use: the
+    # C8S_REF default straight out of mkosi.sync, the single source of truth.
+    runs-on: ubuntu-latest
+    outputs:
+      c8s_ref: ${{ steps.pick.outputs.c8s_ref }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: pick
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^C8S_REF="\${C8S_REF:-\(.*\)}"$/\1/p' node-guest-image/c8s/mkosi.sync)
+          test -n "$ref"
+          echo "c8s_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "baking published components at \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+
+  build-a:
+    needs: ref
+    uses: ./.github/workflows/c8s-image.yml
+    secrets: inherit
+    with:
+      gate: true
+      leg: a
+      c8s_ref: ${{ needs.ref.outputs.c8s_ref }}
+
+  build-b:
+    needs: ref
+    uses: ./.github/workflows/c8s-image.yml
+    secrets: inherit
+    with:
+      gate: true
+      leg: b
+      c8s_ref: ${{ needs.ref.outputs.c8s_ref }}
+
+  compare:
+    needs: [build-a, build-b]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gate-*-${{ github.run_id }}-*
+          path: evidence
+      - name: Every measured value must match
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json, os, sys
+          run_id = os.environ["GITHUB_RUN_ID"]
+          fail = False
+          lines = ["### image repro gate", "", "| platform | field | verdict |", "|---|---|---|"]
+          for plat in ("tdx", "snp"):
+              legs = {}
+              for leg in ("a", "b"):
+                  d = f"evidence/gate-rke2-{plat}-{run_id}-{leg}"
+                  m = json.load(open(f"{d}/manifest.json"))
+                  # The report timestamp is metadata, not a baked byte.
+                  m.get("build", {}).pop("timestamp", None)
+                  legs[leg] = (m, open(f"{d}/roothash").read().strip())
+              (ma, ra), (mb, rb) = legs["a"], legs["b"]
+              fail = fail or ma != mb or ra != rb
+              lines.append(f"| {plat} | manifest (sans timestamp) | {'identical' if ma == mb else '**DIFFERS**'} |")
+              lines.append(f"| {plat} | roothash `{ra[:12]}…` | {'identical' if ra == rb else '**DIFFERS**'} |")
+              if ma != mb:
+                  a_flat = json.dumps(ma, sort_keys=True, indent=0).splitlines()
+                  b_flat = json.dumps(mb, sort_keys=True, indent=0).splitlines()
+                  for line in sorted(set(a_flat) ^ set(b_flat)):
+                      print(f"{plat} manifest delta: {line.strip()}", file=sys.stderr)
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          sys.exit(1 if fail else 0)
+          EOF
