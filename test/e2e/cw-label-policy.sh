@@ -36,12 +36,21 @@ expect_deny() {
 }
 
 kubectl create namespace "$ns" >/dev/null
+# The probes are bare pods, so a cluster enforcing the restricted PSA standard
+# denies them before the policy under test is ever consulted.
+kubectl label namespace "$ns" \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  pod-security.kubernetes.io/audit=privileged >/dev/null
 
 # Ordinary pod admission must be unaffected. This is also the canary for a
 # broken CEL expression: failurePolicy=Fail turns one into a deny-all.
-kubectl run "$pod" --namespace "$ns" --image=registry.k8s.io/pause:3.9 \
-  --restart=Never >/dev/null \
-  || fail "plain pod creation was denied; the policy is misfiring (broken CEL?)"
+# Report the admission error verbatim: this control cannot tell which admitter
+# refused, and guessing sent one investigation after a healthy CEL.
+if ! err=$(kubectl run "$pod" --namespace "$ns" --image=registry.k8s.io/pause:3.9 \
+  --restart=Never 2>&1); then
+  fail "plain pod creation was denied: ${err}"
+fi
 echo "ok: plain pod admitted"
 
 # Out-of-band writes on a running pod: the post-create mutation the
