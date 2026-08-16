@@ -1,12 +1,19 @@
-# Both metal lanes are vendored: the same file lives in c8s and here, and each
+# Three lane files are vendored: the same file lives in c8s and here, and each
 # copy's header says they stay byte-identical. Four silent drifts in three weeks
 # (ci#59, ci#61, c8s#265, c8s#304) because nothing compared them.
+#
+# e2e-c8s.yml is vendored too but is deliberately absent below: c8s's copy omits
+# the Azure rows because the Entra federated credential is ref-scoped, so the two
+# copies differ by design and comparing them would fail every run.
 name: vendored-lane-drift
 on:
   pull_request:
     paths:
       - '.github/workflows/snp-metal-e2e.yml'
       - '.github/workflows/tdx-metal-e2e.yml'
+      - '.github/workflows/cvm-e2e.yml'
+      # Self-test: editing the checker should run the checker.
+      - '.github/workflows/vendored-lane-drift.yml'
   schedule:
     - cron: '17 7 * * *'
   workflow_dispatch:
@@ -26,7 +33,7 @@ jobs:
         run: |
           set -uo pipefail
           drift=0
-          for f in snp-metal-e2e.yml tdx-metal-e2e.yml; do
+          for f in snp-metal-e2e.yml tdx-metal-e2e.yml cvm-e2e.yml; do
             # Compare git blob SHAs: content identity, no checkout of c8s needed.
             ours=$(git hash-object ".github/workflows/$f")
             theirs=$(gh api "repos/confidential-dot-ai/c8s/contents/.github/workflows/$f?ref=main" --jq .sha 2>/dev/null)
