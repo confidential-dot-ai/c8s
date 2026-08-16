@@ -1,0 +1,14 @@
+[Unit]
+Description=RKE2 role dispatch from the joindata disk
+# Role-gated units Requires= + After= this unit and condition on the
+# /run/confos/role-* verdict it writes. Requires=, not just After=: a failed
+# dispatch fails them visibly; the unselected role still condition-skips.
+
+[Service]
+Type=oneshot
+# Stays active (exited) so Requires= dependents bind to a live unit.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rke2-role.sh
+
+[Install]
+WantedBy=multi-user.target
