@@ -104,6 +104,17 @@ ok "exit 0" test "$RC" -eq 0
 ok "fragment has external ip" grep -qx 'node-external-ip: 203.0.113.10' "$FRAG"
 ok "role-server verdict" test -f "$RUN/role-server"
 
+# KubeVirt renders secret disks with kubelet AtomicWriter transport entries
+# at the ISO root; dispatch must skip them, not reject the disk.
+CASE="server-disk+kubevirt-transport-dirs"
+reset_state; server_dir "$WORK/d"
+mkdir -p "$WORK/d/..2026_01_01_00_00_00.111" "$WORK/d/..data"
+cp "$WORK/d/role" "$WORK/d/..data/role"
+cp "$WORK/d/role" "$WORK/d/..2026_01_01_00_00_00.111/role"
+make_iso "$WORK/d"; run_script
+ok "exit 0" test "$RC" -eq 0
+ok "role-server verdict" test -f "$RUN/role-server"
+
 # ---------------------------------------------------------------- happy: agent
 CASE="agent-disk"
 reset_state; agent_dir "$WORK/d"; make_iso "$WORK/d"; run_script
