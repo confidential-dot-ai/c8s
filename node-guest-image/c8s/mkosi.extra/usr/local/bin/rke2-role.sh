@@ -67,6 +67,9 @@ allow_only() {
         # Unmatched globs stay literal; -L keeps dangling symlinks rejectable.
         [[ -e "$f" || -L "$f" ]] || continue
         name=${f##*/}
+        # KubeVirt secret-ISO disks carry kubelet AtomicWriter transport
+        # entries (..data, ..<timestamp> payload dirs); they are not fields.
+        case "$name" in ..*) continue ;; esac
         allowed=no
         for a in "$@"; do
             if [[ "$name" == "$a" ]]; then allowed=yes; break; fi
