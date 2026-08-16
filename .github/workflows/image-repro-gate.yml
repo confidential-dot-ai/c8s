@@ -1,16 +1,11 @@
-# Reproducibility gate for the node image: any PR that touches the image
-# definition or its pins builds the image TWICE (parallel legs, separate
-# runners) and fails unless every measured value matches — mrtd, RTMRs, UKI,
-# vmlinuz, roothash, the whole manifest minus the build timestamp. This is
-# the automated form of the manual idempotence runbook (c8s#264): the check
-# is the verdict, per platform.
+# Reproducibility gate for the node image: PRs touching the image definition
+# or its pins build the image TWICE (parallel legs, separate runners) and fail
+# unless every measured value matches (c8s#264). Runs on EVERY PR and decides
+# relevance itself — a paths: filter would leave the required `compare` check
+# forever pending on unrelated PRs.
 name: image repro gate
 on:
   pull_request:
-    paths:
-      - ".github/workflows/c8s-image.yml"
-      - ".github/workflows/image-repro-gate.yml"
-      - "node-guest-image/**"
   workflow_dispatch: {}
 
 permissions:
@@ -22,49 +17,81 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ref:
-    # Bake the same published components both legs and production use: the
-    # C8S_REF default straight out of mkosi.sync, the single source of truth.
+  changes:
     runs-on: ubuntu-latest
     outputs:
-      c8s_ref: ${{ steps.pick.outputs.c8s_ref }}
+      image: ${{ steps.diff.outputs.image }}
+      c8s_ref: ${{ steps.diff.outputs.c8s_ref }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - id: pick
+      - id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          if [ -z "$PR" ]; then
+            image=true  # manual dispatch: always run the full gate
+          elif gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate \
+                 --jq '.[].filename' \
+               | grep -qE '^(node-guest-image/|\.github/workflows/(c8s-image|image-repro-gate)\.yml)'; then
+            image=true
+          else
+            image=false
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          # Bake the same published components production uses: mkosi.sync's
+          # own C8S_REF default, the single source of truth.
           ref=$(sed -n 's/^C8S_REF="\${C8S_REF:-\(.*\)}"$/\1/p' node-guest-image/c8s/mkosi.sync)
           test -n "$ref"
           echo "c8s_ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "baking published components at \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "image-relevant: $image (components at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
 
   build-a:
-    needs: ref
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
     uses: ./.github/workflows/c8s-image.yml
     secrets: inherit
     with:
       gate: true
       leg: a
-      c8s_ref: ${{ needs.ref.outputs.c8s_ref }}
+      c8s_ref: ${{ needs.changes.outputs.c8s_ref }}
 
   build-b:
-    needs: ref
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
     uses: ./.github/workflows/c8s-image.yml
     secrets: inherit
     with:
       gate: true
       leg: b
-      c8s_ref: ${{ needs.ref.outputs.c8s_ref }}
+      c8s_ref: ${{ needs.changes.outputs.c8s_ref }}
 
   compare:
-    needs: [build-a, build-b]
+    # The required check: green fast on image-irrelevant PRs, otherwise only
+    # after both legs built and every measured value matched.
+    needs: [changes, build-a, build-b]
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Nothing image-relevant changed
+        if: needs.changes.outputs.image != 'true'
+        run: echo "no image paths touched — gate not applicable" >> "$GITHUB_STEP_SUMMARY"
+      - name: Legs must have succeeded
+        if: needs.changes.outputs.image == 'true'
+        env:
+          A: ${{ needs.build-a.result }}
+          B: ${{ needs.build-b.result }}
+        run: |
+          set -euo pipefail
+          test "$A" = success && test "$B" = success || { echo "leg results: a=$A b=$B" >&2; exit 1; }
       - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.image == 'true'
         with:
           pattern: gate-*-${{ github.run_id }}-*
           path: evidence
       - name: Every measured value must match
+        if: needs.changes.outputs.image == 'true'
         run: |
           set -euo pipefail
           python3 - <<'EOF'
