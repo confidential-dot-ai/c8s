@@ -120,7 +120,9 @@ jobs:
       - name: Test
         env:
           C8S_REQUIRE_IPTABLES_TRANSLATE: "1"
-        run: make test
+        # TEST_COUNT= : unchanged packages reuse cached results from the
+        # restored GOCACHE; Go invalidates by content, so edits still rerun.
+        run: make test TEST_COUNT=
 
       # The advisory mutation job only exercises the 0-mutant path on
       # script-only diffs; this guards the summary paths it skips.
