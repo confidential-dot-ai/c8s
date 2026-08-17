@@ -138,13 +138,21 @@ ok "fragment has external ip" grep -qx 'node-external-ip: 203.0.113.11' "$FRAG"
 
 # 0.0.0.0 is the autodetect sentinel: the fragment must omit node-ip so
 # rke2 resolves the address itself (a literal 0.0.0.0 registers as the
-# node's InternalIP and breaks apiserver->kubelet traffic).
+# node's InternalIP and breaks apiserver->kubelet traffic). The agent
+# role shares stage_addresses, so this covers both roles.
 CASE="server-disk+autodetect-ip"
 reset_state; server_dir "$WORK/d"; write_f "$WORK/d" node-ip 0.0.0.0
 make_iso "$WORK/d"; run_script
 ok "exit 0" test "$RC" -eq 0
-ok "fragment omits node-ip" bash -c '! grep -q "node-ip" "'"$FRAG"'"'
+ok "fragment omits node-ip" bash -c '! grep -q "^node-ip:" "'"$FRAG"'"'
 ok "role-server verdict" test -f "$RUN/role-server"
+
+# No autodetect for external addresses: the sentinel there is a config
+# error and must reject, not pass through as ExternalIP 0.0.0.0.
+CASE="server-disk+zero-external-ip"
+reset_state; server_dir "$WORK/d" with_ext; write_f "$WORK/d" node-external-ip 0.0.0.0
+make_iso "$WORK/d"; run_script
+assert_rejected
 
 # ---------------------------------------------------------------- happy: no disk
 CASE="no-disk-legacy-server"
