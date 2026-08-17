@@ -173,6 +173,40 @@ func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
 			url:      func(t *testing.T) string { return snpAttester(t, "zz") },
 		},
 		{
+			name:     "InitData claim empty",
+			platform: "sev-snp",
+			url:      func(t *testing.T) string { return snpAttester(t, "") },
+		},
+		// The two verdict cases carry a MATCHING InitData: refusal must come
+		// from verdict enforcement, not the claims compare, so a refactor
+		// that drops VerifyEvidence's enforcement fails here.
+		{
+			name:     "verifier refuses: signature invalid",
+			platform: "sev-snp",
+			url: func(t *testing.T) string {
+				want := runtimemeasure.HostDataForOperatorKey(pub)
+				stub := testattest.New(t)
+				v := testattest.PassingVerdict("")
+				v.SignatureValid = false
+				v.Claims.InitData = hex.EncodeToString(want[:])
+				stub.SetVerdict(v)
+				return stub.URL
+			},
+		},
+		{
+			name:     "verifier refuses: REPORTDATA not bound",
+			platform: "sev-snp",
+			url: func(t *testing.T) string {
+				want := runtimemeasure.HostDataForOperatorKey(pub)
+				stub := testattest.New(t)
+				v := testattest.PassingVerdict("")
+				v.ReportDataMatch = nil
+				v.Claims.InitData = hex.EncodeToString(want[:])
+				stub.SetVerdict(v)
+				return stub.URL
+			},
+		},
+		{
 			name:     "attestation-api unreachable",
 			platform: "sev-snp",
 			url:      func(t *testing.T) string { return "http://127.0.0.1:1" },
