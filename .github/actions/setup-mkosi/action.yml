@@ -1,0 +1,37 @@
+name: setup-mkosi
+description: >
+  Local replacement for the systemd/mkosi setup action: same load-bearing host
+  prep (userns sysctls, ca-certificates mountpoint, apparmor teardown) plus a
+  pinned shallow clone of mkosi, without the codeload tarball fetch, the
+  diagnostics, the apparmor package removal, or the dnf/pacman/zypper installs
+  confos's Ubuntu-only builds never use.
+
+inputs:
+  ref:
+    description: mkosi commit to install (full sha)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Host prep
+      shell: bash
+      run: |
+        sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_unconfined=0
+        sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_userns=0
+        # unix-chkpwd/swtpm apparmor profiles are broken on runner images
+        # (apparmor/apparmor#402); unload and keep them off.
+        sudo aa-teardown || true
+        sudo systemctl mask --now apparmor || true
+        sudo mkdir -p /var/lib/ca-certificates
+
+    - name: Install mkosi (pinned)
+      shell: bash
+      env:
+        MKOSI_REF: ${{ inputs.ref }}
+      run: |
+        git init -q /opt/mkosi
+        git -C /opt/mkosi fetch -q --depth 1 https://github.com/systemd/mkosi.git "$MKOSI_REF"
+        git -C /opt/mkosi checkout -q FETCH_HEAD
+        sudo ln -svf /opt/mkosi/bin/mkosi /usr/bin/mkosi
+        mkosi --version

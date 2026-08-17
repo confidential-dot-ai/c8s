@@ -166,7 +166,11 @@ jobs:
         uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
 
       - name: Setup mkosi
-        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
+        # Local action (repo is checked out under c8s/): pinned mkosi without
+        # the upstream action's codeload fetch or foreign-distro installs.
+        uses: ./c8s/.github/actions/setup-mkosi
+        with:
+          ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
