@@ -106,7 +106,9 @@ jobs:
        (github.event.workflow_run.event == 'push' ||
         github.event.workflow_run.event == 'workflow_dispatch') &&
        github.event.workflow_run.head_branch == 'main')
-    runs-on: ubuntu-latest
+    # 16-core hosted larger runner (same as kernel-snapshot/kata-guest-base);
+    # scales to 100 concurrent jobs, 600G disk.
+    runs-on: the-machine
     timeout-minutes: 180
     strategy:
       # One image per TEE. fail-fast off: a platform-specific failure must not
@@ -152,14 +154,6 @@ jobs:
             echo "C8S_DEV=0" >> "$GITHUB_ENV"
           fi
 
-      - name: Free up disk space
-        # kernel + NVIDIA userspace + rke2 airgap + ~6G disk.raw on a 14G runner.
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          # Backgrounded: frees its space minutes before the big writes start.
-          sudo docker image prune --all --force >/dev/null 2>&1 &
-          df -h
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
         with:
@@ -184,10 +178,25 @@ jobs:
             libclang-dev clang libtss2-dev
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
+      - name: Cache staged GPU tree
+        # Signed modules + userspace staged by confos-fetch-gpu; the build
+        # script's stamp check skips the module rebuild when this restores.
+        # First of the confos caches: a hit makes the kernel-builder tools
+        # tree and the driver downloads unnecessary, so those restores gate
+        # on it.
+        id: gpu-staged
+        uses: actions/cache@v5
+        with:
+          path: |
+            confidential-os-builder/mkosi/base/mkosi.local/mkosi.extra
+            confidential-os-builder/output/gpu/stage.stamp
+          key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
+
       - name: Cache kernel-builder tools tree
         # mkosi.output (image + stamp) is what the kernel short-circuit path
         # still needs: confos-fetch-gpu compiles modules inside it. mkosi.tools
         # is only an intermediate for building it, so it isn't cached.
+        if: steps.gpu-staged.outputs.cache-hit != 'true'
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/mkosi/kernel-builder/mkosi.output
@@ -226,10 +235,23 @@ jobs:
 
       - name: Cache NVIDIA driver downloads
         # ~500MB, sha-verified; keyed on the script that carries the pins.
+        if: steps.gpu-staged.outputs.cache-hit != 'true'
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/gpu/cache
           key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/confos-fetch-gpu') }}
+
+      - name: Attestation binary key
+        id: attest-sha
+        run: echo "sha=$(git -C attestation-rs rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache attestation-api binary
+        # Keyed on the attestation-rs commit plus this workflow (libnvat pin).
+        id: attest-bin
+        uses: actions/cache@v5
+        with:
+          path: attestation-rs/target/release/attestation-api
+          key: ${{ runner.os }}-attest-bin-${{ steps.attest-sha.outputs.sha }}-${{ hashFiles('c8s/.github/workflows/c8s-image.yml') }}
 
       # attest-gpu: the build runs confos-fetch-attest-gpu, which needs a
       # prebuilt ATTEST_GPU_BIN + LIBNVAT. Vendor libnvat (Apache-2.0, digest-
@@ -266,8 +288,10 @@ jobs:
           NVAT_USE_SYSTEM_LIB: "1"
         working-directory: attestation-rs
         run: |
-          cargo build -p attestation-api --release \
-            --features nvidia-gpu-attest --bin attestation-api
+          if [ "${{ steps.attest-bin.outputs.cache-hit }}" != "true" ]; then
+            cargo build -p attestation-api --release \
+              --features nvidia-gpu-attest --bin attestation-api
+          fi
           # Must actually link libnvat (not a silent fallback).
           ldd target/release/attestation-api | grep -q libnvat
 
