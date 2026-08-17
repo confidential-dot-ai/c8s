@@ -179,16 +179,16 @@ jobs:
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache staged GPU tree
-        # Signed modules + userspace staged by confos-fetch-gpu; the build
-        # script's stamp check skips the module rebuild when this restores.
-        # First of the confos caches: a hit makes the kernel-builder tools
-        # tree and the driver downloads unnecessary, so those restores gate
-        # on it.
+        # Mirror + stamp written by the build script (confos build wipes the
+        # live mkosi.local staging, so only the mirror survives to save). A
+        # hit makes the driver downloads unnecessary, so that restore gates
+        # on it; the tools tree still restores unconditionally because the
+        # fallback path (stamp mismatch) needs it.
         id: gpu-staged
         uses: actions/cache@v5
         with:
           path: |
-            confidential-os-builder/mkosi/base/mkosi.local/mkosi.extra
+            confidential-os-builder/output/gpu/staged
             confidential-os-builder/output/gpu/stage.stamp
           key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
 
@@ -196,7 +196,6 @@ jobs:
         # mkosi.output (image + stamp) is what the kernel short-circuit path
         # still needs: confos-fetch-gpu compiles modules inside it. mkosi.tools
         # is only an intermediate for building it, so it isn't cached.
-        if: steps.gpu-staged.outputs.cache-hit != 'true'
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/mkosi/kernel-builder/mkosi.output
@@ -223,6 +222,20 @@ jobs:
             confidential-os-builder/mkosi/base/mkosi.tools
             confidential-os-builder/mkosi/base/mkosi.tools.manifest
           key: ${{ runner.os }}-c8s-tools-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf.d/tools.conf','confidential-os-builder/mkosi/base/mkosi.profiles/*/mkosi.conf','c8s/node-guest-image/c8s/mkosi.conf') }}
+
+      - name: Cache apt package cache
+        # mkosi's package cache for every subimage (initrd, base, main). Keeps
+        # assembly off snapshot.ubuntu.com, whose fetch latency varies by
+        # runner. restore-keys tolerates partial staleness: apt re-fetches
+        # only what's missing, and the mirror guard still polices the source.
+        uses: actions/cache@v5
+        with:
+          path: |
+            confidential-os-builder/mkosi/base/mkosi.pkgcache
+            !confidential-os-builder/mkosi/base/mkosi.pkgcache/c8s
+          key: ${{ runner.os }}-pkgcache-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf','confidential-os-builder/mkosi/base/mkosi.conf.d/**','confidential-os-builder/mkosi/base/mkosi.profiles/**','confidential-os-builder/mkosi/base/mkosi.sandbox/**','c8s/node-guest-image/c8s/mkosi.conf') }}
+          restore-keys: |
+            ${{ runner.os }}-pkgcache-
 
       - name: Cache c8s artifact downloads
         # ~3.5G rke2 tarball + airgap bundles, sha256-verified on reuse.
@@ -327,7 +340,8 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" \
             confidential-os-builder/mkosi/kernel-builder/mkosi.output \
             confidential-os-builder/mkosi/base/mkosi.tools \
-            confidential-os-builder/mkosi/base/mkosi.tools.manifest || true
+            confidential-os-builder/mkosi/base/mkosi.tools.manifest \
+            confidential-os-builder/mkosi/base/mkosi.pkgcache || true
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
