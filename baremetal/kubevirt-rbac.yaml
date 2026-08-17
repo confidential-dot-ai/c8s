@@ -33,18 +33,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]         # read base-image-refs (producer's single source of truth)
     verbs: ["get", "list"]
-  # cluster-prep-tdx publishes the TDX lane's image+measurement pin. Write is
-  # split from the read rule above and narrowed by name: this SA must never be
-  # able to rewrite an arbitrary pin, because the pin is what the lane proves
-  # the guest against. create cannot take resourceNames (the object does not
-  # exist yet), so it stays unnamed; update/patch are bound to the one object.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["create"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["tdx-rke2-image-refs"]
-    verbs: ["update", "patch"]
+    # Read-only on purpose. The TDX pin (tdx-rke2-image-refs) holds the
+    # measurements the lane proves the guest against, so an e2e job that could
+    # rewrite it could lower the bar the lane exists to enforce. Publishing it
+    # stays with a human running cluster-prep/apply.sh under cluster-admin;
+    # tdx-pin-check only reads and reports when the cluster and git disagree.
   - apiGroups: ["cdi.kubevirt.io"]    # per-run CDI clone of the base rootdisk
     resources: ["datavolumes"]
     verbs: ["get", "list", "watch", "create", "delete"]

@@ -1,0 +1,152 @@
+# Reports when the TDX lane's pin in git and the pin on the cluster disagree.
+#
+# Publishing the pin stays manual: cluster-prep/apply.sh, run by a human under
+# cluster-admin. That is how it has always worked and it is the right boundary,
+# because mrtd/rtmr1/rtmr2 are what the lane proves the guest against and CI
+# should not be able to move them.
+#
+# What actually went wrong in c8s#329 was nobody noticing the pin had gone
+# stale: it drifted when c8s#230 landed and the lane sat red for a week. That
+# needs detection, which is read-only, so this workflow asks for no permission
+# beyond the get/list the runner already had.
+name: tdx-pin-check
+on:
+  pull_request:
+    paths:
+      - 'c8s-e2e/cluster-prep/tdx-rootdisk-dv.yaml'
+      - 'c8s-e2e/cluster-prep/tdx-rke2-image-refs.cm.yaml'
+      - '.github/workflows/tdx-pin-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'c8s-e2e/cluster-prep/tdx-rootdisk-dv.yaml'
+      - 'c8s-e2e/cluster-prep/tdx-rke2-image-refs.cm.yaml'
+      - '.github/workflows/tdx-pin-check.yml'
+  # The drift this catches appears without anyone touching the repo: a build
+  # lands, someone bumps the cluster, and git is silently behind.
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: tdx-pin-check-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Cluster-free, runs on PRs: the pin appears in three overlapping forms
+  # across two files and a half-done bump is a real failure mode.
+  consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: The pin must agree with the rootdisk it names
+        working-directory: c8s-e2e/cluster-prep
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys, yaml
+
+          cm = yaml.safe_load(open("tdx-rke2-image-refs.cm.yaml"))["data"]
+          dv = yaml.safe_load(open("tdx-rootdisk-dv.yaml"))
+          url = dv["spec"]["source"]["registry"]["url"]
+          bad = []
+
+          if cm["rootPvc"] != dv["metadata"]["name"]:
+              bad.append(f'rootPvc {cm["rootPvc"]!r} != DataVolume name {dv["metadata"]["name"]!r}')
+
+          digest = cm["image"].split("@", 1)[-1]
+          if digest not in url:
+              bad.append(f"image digest {digest} is not the DataVolume source ({url})")
+
+          short = digest.split(":", 1)[-1][:12]
+          if not cm["rootPvc"].endswith(short):
+              bad.append(f'rootPvc {cm["rootPvc"]!r} does not end in the image digest prefix {short}')
+
+          # VERSION PAIRING: the image bakes an admission floor from its build
+          # ref, so the CDI tag it was published under must carry that ref.
+          if not cm["cdiTag"].endswith(cm["c8sRef"]):
+              bad.append(f'cdiTag {cm["cdiTag"]!r} is not a build of c8sRef {cm["c8sRef"]!r}')
+
+          for f in ("mrtd", "rtmr1", "rtmr2"):
+              v = cm[f]
+              if len(v) != 96 or not all(c in "0123456789abcdef" for c in v):
+                  bad.append(f"{f} is not a 96-char lowercase hex SHA-384")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad))
+              sys.exit(1)
+          print("pin is self-consistent:", cm["cdiTag"], "->", cm["rootPvc"])
+          PY
+
+  # Read-only against the cluster. Never writes: a mismatch is a message to a
+  # human, because publishing the pin is a human's job.
+  live:
+    needs: consistency
+    if: github.event_name != 'pull_request'
+    runs-on: cvm-launcher-tdx
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: kubectl
+        # Ephemeral ARC pod with nothing preinstalled, same as the lane.
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/bin"
+          for i in 1 2 3 4; do
+            if curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl; then
+              break
+            fi
+            if [ "$i" -eq 4 ]; then echo "::error::could not fetch kubectl"; exit 1; fi
+            sleep $((2 ** i))
+          done
+          chmod +x bin/kubectl
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Compare the live pin against git
+        working-directory: c8s-e2e/cluster-prep
+        run: |
+          set -euo pipefail
+          NS=confai-images
+          drift=0
+          {
+            echo "### TDX pin: cluster vs git"
+            echo
+            echo "| key | cluster | git |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for k in image rootPvc cdiTag c8sRef mrtd rtmr1 rtmr2; do
+            live=$(kubectl -n "$NS" get cm tdx-rke2-image-refs -o jsonpath="{.data.$k}" 2>/dev/null || true)
+            want=$(sed -n "s/^  $k: \"\(.*\)\"\$/\1/p" tdx-rke2-image-refs.cm.yaml | head -1)
+            if [ "$live" = "$want" ]; then
+              echo "  = $k"
+              echo "| \`$k\` | match | \`$want\` |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              drift=1
+              echo "::error title=pin drift::$k: cluster='${live:-<unset>}' git='$want'"
+              echo "| \`$k\` | \`${live:-<unset>}\` | \`$want\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          # The lane boots from whatever the CLUSTER says, so check that volume
+          # rather than the one git wants.
+          pvc=$(kubectl -n "$NS" get cm tdx-rke2-image-refs -o jsonpath='{.data.rootPvc}' 2>/dev/null || true)
+          if [ -n "$pvc" ]; then
+            phase=$(kubectl -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            if [ "$phase" = "Bound" ]; then
+              echo "  = rootPvc $pvc is Bound"
+            else
+              drift=1
+              echo "::error title=rootdisk missing::the live pin names '$pvc', which is '${phase:-missing}' — the lane cannot boot"
+            fi
+          fi
+
+          if [ "$drift" = 0 ]; then
+            echo "cluster matches git"
+            exit 0
+          fi
+          echo "::error::TDX pin drift. Publish with: KUBECONFIG=<rancher> c8s-e2e/cluster-prep/apply.sh (needs cluster-admin), or correct git to match the cluster if the cluster is right."
+          exit 1
