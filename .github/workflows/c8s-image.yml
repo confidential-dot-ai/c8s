@@ -161,6 +161,11 @@ jobs:
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
+        with:
+          # Both cargo workspaces this job compiles; the default "." caches neither.
+          cache-workspaces: |
+            attestation-rs
+            confidential-os-builder
 
       - name: Setup uv
         uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
@@ -171,16 +176,18 @@ jobs:
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
         # base ovmf is for the SNP path.
+        # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y systemd-container ovmf cpio acpica-tools
+          sudo apt-get install -y systemd-container ovmf cpio acpica-tools \
+            libclang-dev clang libtss2-dev
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache kernel tools
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/mkosi/kernel-builder/mkosi.tools
-          key: ${{ runner.os }}-tools-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf') }}
+          key: ${{ runner.os }}-tools-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**') }}
 
       - name: Cache kernel
         # Every input of confos's kernel fingerprint, or the cache is rejected
@@ -188,7 +195,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: confidential-os-builder/output/kernel
-          key: ${{ runner.os }}-kernel-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
+          key: ${{ runner.os }}-kernel-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
 
       - name: Cache base image tools
         uses: actions/cache@v5
@@ -249,9 +256,6 @@ jobs:
           NVAT_USE_SYSTEM_LIB: "1"
         working-directory: attestation-rs
         run: |
-          # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev clang libtss2-dev
           cargo build -p attestation-api --release \
             --features nvidia-gpu-attest --bin attestation-api
           # Must actually link libnvat (not a silent fallback).
