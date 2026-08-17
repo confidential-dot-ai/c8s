@@ -155,8 +155,8 @@ jobs:
       - name: Free up disk space
         # kernel + NVIDIA userspace + rke2 airgap + ~6G disk.raw on a 14G runner.
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          # Backgrounded: frees its space minutes before the big writes start.
+          # Backgrounded: the space is free minutes before the big writes start.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL &
           sudo docker image prune --all --force >/dev/null 2>&1 &
           df -h
 
@@ -231,6 +231,28 @@ jobs:
           path: confidential-os-builder/output/gpu/cache
           key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('confidential-os-builder/bin/confos-fetch-gpu') }}
 
+      - name: Cache staged GPU tree
+        # Signed modules + userspace staged by confos-fetch-gpu; the build
+        # script's stamp check skips the module rebuild when this restores.
+        uses: actions/cache@v5
+        with:
+          path: |
+            confidential-os-builder/mkosi/base/mkosi.local/mkosi.extra
+            confidential-os-builder/output/gpu/stage.stamp
+          key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
+
+      - name: Attestation binary key
+        id: attest-sha
+        run: echo "sha=$(git -C attestation-rs rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache attestation-api binary
+        # Keyed on the attestation-rs commit plus this workflow (libnvat pin).
+        id: attest-bin
+        uses: actions/cache@v5
+        with:
+          path: attestation-rs/target/release/attestation-api
+          key: ${{ runner.os }}-attest-bin-${{ steps.attest-sha.outputs.sha }}-${{ hashFiles('c8s/.github/workflows/c8s-image.yml') }}
+
       # attest-gpu: the build runs confos-fetch-attest-gpu, which needs a
       # prebuilt ATTEST_GPU_BIN + LIBNVAT. Vendor libnvat (Apache-2.0, digest-
       # pinned) and build the binary with NVAT_USE_SYSTEM_LIB=1.
@@ -266,8 +288,10 @@ jobs:
           NVAT_USE_SYSTEM_LIB: "1"
         working-directory: attestation-rs
         run: |
-          cargo build -p attestation-api --release \
-            --features nvidia-gpu-attest --bin attestation-api
+          if [ "${{ steps.attest-bin.outputs.cache-hit }}" != "true" ]; then
+            cargo build -p attestation-api --release \
+              --features nvidia-gpu-attest --bin attestation-api
+          fi
           # Must actually link libnvat (not a silent fallback).
           ldd target/release/attestation-api | grep -q libnvat
 
