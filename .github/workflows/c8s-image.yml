@@ -205,7 +205,7 @@ jobs:
           path: |
             confidential-os-builder/output/kernel
             confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kernel-v2-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
+          key: ${{ runner.os }}-kernel-v3-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
 
       - name: Cache base image tools
         uses: actions/cache@v5
@@ -295,6 +295,13 @@ jobs:
           # workflow publishes the TDX image; the snp variant is built on
           # demand until M3 adds it to CI.
           C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
+
+      - name: Make the tools tree cache-safe
+        # The post-job cache tar runs unprivileged; mkosi builds the tree as
+        # root, so the save fails on it without this. Runs after all use.
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" \
+            confidential-os-builder/mkosi/kernel-builder/mkosi.output || true
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
