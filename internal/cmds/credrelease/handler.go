@@ -51,7 +51,8 @@ type Handler struct {
 
 // NewHandler builds the release handler from the measured operator pubkey (PEM)
 // and the loaded cluster CA. The pubkey MUST already have been verified against
-// RTMR[3] by LoadMeasuredOperatorKey — NewHandler trusts it as authorized.
+// the launch binding by LoadMeasuredOperatorKey — NewHandler trusts it as
+// authorized.
 func NewHandler(operatorPubPEM []byte, ca *clusterCA, org, cn string, ttl time.Duration) (*Handler, error) {
 	keys, err := operatorauth.ParsePublicKeysPEM(operatorPubPEM)
 	if err != nil {

@@ -15,9 +15,10 @@ import (
 type Config struct {
 	// ListenAddr is the HTTPS bind address (e.g. ":8443").
 	ListenAddr string
-	// AttestationAPIURL is the local attestation-api base URL the RA-TLS
-	// serving cert's TDX quote is fetched from (the same :8400 service the
-	// rest of the stack uses).
+	// AttestationAPIURL is the local attestation-api base URL (the same
+	// :8400 service the rest of the stack uses). It provides the RA-TLS
+	// serving cert's quote and, on SNP, the verified self-report that
+	// anchors the operator key to the launch-committed HOSTDATA.
 	AttestationAPIURL string
 	// Platform is the TEE platform ("tdx" or "snp"; no default).
 	Platform string
@@ -41,7 +42,8 @@ type Config struct {
 //
 // Startup order matters for the trust story:
 //  1. LoadMeasuredOperatorKey — read the opkeydata pubkey and CONFIRM it
-//     matches RTMR[3]. Fails closed if the key was substituted after boot.
+//     matches the launch binding (TDX RTMR[3] / SNP HOSTDATA). Fails closed
+//     if the key was substituted after boot.
 //  2. loadClusterCA — the cluster client-CA that signs the operator's cert.
 //  3. serve over an RA-TLS config so the caller can attest this is the real
 //     guest before trusting the returned cert.
@@ -58,7 +60,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("--platform: %w", err)
 	}
 
-	operatorPub, err := LoadMeasuredOperatorKey()
+	operatorPub, err := LoadMeasuredOperatorKey(ctx, cfg.Platform, cfg.AttestationAPIURL)
 	if err != nil {
 		return fmt.Errorf("load measured operator key: %w", err)
 	}

@@ -1,10 +1,14 @@
 package credrelease
 
 import (
+	"bytes"
+	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/confidential-dot-ai/c8s/internal/testattest"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
 
@@ -45,7 +49,7 @@ func TestLoadMeasuredOperatorKey(t *testing.T) {
 	writeFileT(t, pubPath, pub)
 	writeFileT(t, rtmrPath, expectedRTMR3ForKey(pub))
 
-	got, err := LoadMeasuredOperatorKey()
+	got, err := LoadMeasuredOperatorKey(context.Background(), "tdx", "")
 	if err != nil {
 		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
 	}
@@ -97,7 +101,93 @@ func TestLoadMeasuredOperatorKeyFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pubPath, rtmrPath := overrideBindingPaths(t)
 			tc.stage(t, pubPath, rtmrPath)
-			if _, err := LoadMeasuredOperatorKey(); err == nil {
+			if _, err := LoadMeasuredOperatorKey(context.Background(), "tdx", ""); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+// snpAttester returns the URL of a stub attestation-api whose verified claims
+// report initData (hex-encoded verbatim) as this guest's HOSTDATA.
+func snpAttester(t *testing.T, initData string) string {
+	t.Helper()
+	stub := testattest.New(t)
+	v := testattest.PassingVerdict("")
+	v.Claims.InitData = initData
+	stub.SetVerdict(v)
+	return stub.URL
+}
+
+// TestLoadMeasuredOperatorKeySNP covers the SNP happy path: the verified
+// self-report's HOSTDATA equals sha256 of the staged pubkey bytes.
+func TestLoadMeasuredOperatorKeySNP(t *testing.T) {
+	pubPath, _ := overrideBindingPaths(t)
+	pub := []byte("operator public key bytes")
+	writeFileT(t, pubPath, pub)
+	want := runtimemeasure.HostDataForOperatorKey(pub)
+	url := snpAttester(t, hex.EncodeToString(want[:]))
+
+	got, err := LoadMeasuredOperatorKey(context.Background(), "sev-snp", url)
+	if err != nil {
+		t.Fatalf("LoadMeasuredOperatorKey: %v", err)
+	}
+	if string(got) != string(pub) {
+		t.Errorf("returned key = %q, want %q", got, pub)
+	}
+}
+
+// TestLoadMeasuredOperatorKeySNPFailsClosed enumerates the SNP refusals:
+// keyless launch (zero HOSTDATA), a different key's HOSTDATA, TDX-shaped and
+// malformed claims, an unreachable attestation-api, an unknown platform.
+func TestLoadMeasuredOperatorKeySNPFailsClosed(t *testing.T) {
+	pub := []byte("operator public key bytes")
+	otherKey := runtimemeasure.HostDataForOperatorKey([]byte("a different operator key"))
+	tests := []struct {
+		name     string
+		platform string
+		url      func(t *testing.T) string
+	}{
+		{
+			name:     "keyless launch: zero HOSTDATA",
+			platform: "sev-snp",
+			url: func(t *testing.T) string {
+				return snpAttester(t, hex.EncodeToString(bytes.Repeat([]byte{0}, runtimemeasure.HostDataSize)))
+			},
+		},
+		{
+			name:     "launched for a different key",
+			platform: "sev-snp",
+			url:      func(t *testing.T) string { return snpAttester(t, hex.EncodeToString(otherKey[:])) },
+		},
+		{
+			name:     "TDX-sized InitData (48-byte MRCONFIGID)",
+			platform: "sev-snp",
+			url: func(t *testing.T) string {
+				return snpAttester(t, hex.EncodeToString(bytes.Repeat([]byte{0xa5}, 48)))
+			},
+		},
+		{
+			name:     "InitData not hex",
+			platform: "sev-snp",
+			url:      func(t *testing.T) string { return snpAttester(t, "zz") },
+		},
+		{
+			name:     "attestation-api unreachable",
+			platform: "sev-snp",
+			url:      func(t *testing.T) string { return "http://127.0.0.1:1" },
+		},
+		{
+			name:     "unknown platform has no binding check",
+			platform: "no-such-platform",
+			url:      func(t *testing.T) string { return "" },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pubPath, _ := overrideBindingPaths(t)
+			writeFileT(t, pubPath, pub)
+			if _, err := LoadMeasuredOperatorKey(context.Background(), tc.platform, tc.url(t)); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})

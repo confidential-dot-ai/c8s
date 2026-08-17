@@ -23,15 +23,19 @@
 // FromDigestsSeeded(ForOperatorKey(pub), …) rather than FromDigests.
 //
 // This package is deliberately vendor-neutral: it is arithmetic over digests
-// and says nothing about where the register lives. Today the only backing
-// hardware is Intel TDX RTMR[3] — SEV-SNP has no equivalent runtime-extend
-// register — so the code that reads or writes the register is TDX-specific
-// (internal/cmds/rtmr3measurer, credrelease, the guest initrd) while the
-// convention it implements is not. See docs/kata-guest-base.md
-// "Per-workload RTMR[3] measurement".
+// and says nothing about where the register lives. The register-backed
+// convention above runs on Intel TDX RTMR[3]. SEV-SNP has no runtime-extend
+// register, so on SNP only the operator-key half of the convention exists:
+// the launcher commits the key digest into the report's immutable HOSTDATA
+// field at launch (HostDataForOperatorKey), and per-workload extends do not
+// exist — FromDigestsSeeded/Event remain TDX-only. The code that reads or
+// writes the TDX register is TDX-specific (internal/cmds/rtmr3measurer,
+// credrelease, the guest initrd) while the convention it implements is not.
+// See docs/kata-guest-base.md "Per-workload RTMR[3] measurement".
 package runtimemeasure
 
 import (
+	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
 	"strings"
@@ -101,6 +105,31 @@ func FromDigestsSeeded(seed [Size]byte, canonicalDigests []string) [Size]byte {
 // through unmodified rather than round-tripping through a PEM parser.
 func ForOperatorKey(pubkey []byte) [Size]byte {
 	return Extend(Zero, sha512.Sum384(pubkey))
+}
+
+// HostDataSize is the byte length of the SNP HOSTDATA field, and so of the
+// operator-key binding value on SNP (SHA-256).
+const HostDataSize = 32
+
+// HostDataForOperatorKey computes the SNP launch-time operator-key binding:
+// the value the launcher commits as HOSTDATA when launching a node CVM for
+// this key:
+//
+//	HOSTDATA = SHA256(pubkey)
+//
+// It is the SNP analog of ForOperatorKey. SEV-SNP has no runtime-extend
+// register, so instead of the measured initrd extending the key digest into
+// RTMR[3] after launch, the (untrusted) launcher commits it into the report's
+// immutable HOSTDATA field at launch. The trust argument is unchanged: the
+// host could set any value, but a verifier that checks HOSTDATA against the
+// key it expects rejects a wrong-key launch, exactly as it would reject a
+// wrong RTMR[3]. A VM launched without an operator key carries all-zero
+// HOSTDATA, which no SHA-256 output equals.
+//
+// pubkey is the EXACT bytes staged as the opkeydata disk's pubkey file (see
+// ForOperatorKey); any re-encoding yields a different digest.
+func HostDataForOperatorKey(pubkey []byte) [HostDataSize]byte {
+	return sha256.Sum256(pubkey)
 }
 
 // CanonicalDigest strictly canonicalizes an image reference to the
