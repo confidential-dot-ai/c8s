@@ -93,12 +93,23 @@ stage_addresses() {
     local node_ip node_ext
     node_ip=$(read_field node-ip)
     is_ipv4 "$node_ip" || fail "node-ip: not IPv4"
+    # 0.0.0.0 = autodetect: omit the field so rke2 resolves the address
+    # itself. Passing the literal through registers InternalIP 0.0.0.0 and
+    # breaks apiserver->kubelet traffic. `if`, not `&&` — see
+    # emit_node_addr_lines for why under set -e.
+    if [[ "$node_ip" == 0.0.0.0 ]]; then
+        node_ip=""
+    fi
     NODE_IP="$node_ip"
     NODE_EXT=""
     # -L: a dangling symlink must be rejected in read_field, not read as absent.
     if [[ -e "$MNT/node-external-ip" || -L "$MNT/node-external-ip" ]]; then
         node_ext=$(read_field node-external-ip)
         is_ipv4 "$node_ext" || fail "node-external-ip: not IPv4"
+        # No autodetect for external addresses: the sentinel is a config error.
+        if [[ "$node_ext" == 0.0.0.0 ]]; then
+            fail "node-external-ip: 0.0.0.0 is not a routable address"
+        fi
         NODE_EXT="$node_ext"
     fi
 }
@@ -106,7 +117,9 @@ stage_addresses() {
 # Infallible: runs inside the fragment pipe, where a failure would stage a
 # truncated fragment. Everything fallible (stage_addresses) runs before it.
 emit_node_addr_lines() {
-    printf 'node-ip: %s\n' "$NODE_IP"
+    if [[ -n "$NODE_IP" ]]; then
+        printf 'node-ip: %s\n' "$NODE_IP"
+    fi
     # `if`, not `&&`: a bare `[[…]] && printf` as last statement returns 1
     # when NODE_EXT is empty, aborting the pipe under set -e for every node
     # without an external IP.
