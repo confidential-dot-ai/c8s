@@ -296,12 +296,14 @@ jobs:
           # demand until M3 adds it to CI.
           C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
 
-      - name: Make the tools tree cache-safe
-        # The post-job cache tar runs unprivileged; mkosi builds the tree as
-        # root, so the save fails on it without this. Runs after all use.
+      - name: Make the tools trees cache-safe
+        # The post-job cache tar runs unprivileged; mkosi builds these trees as
+        # root, so their saves fail without this. Runs after all use.
         run: |
           sudo chown -R "$(id -u):$(id -g)" \
-            confidential-os-builder/mkosi/kernel-builder/mkosi.output || true
+            confidential-os-builder/mkosi/kernel-builder/mkosi.output \
+            confidential-os-builder/mkosi/base/mkosi.tools \
+            confidential-os-builder/mkosi/base/mkosi.tools.manifest || true
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
