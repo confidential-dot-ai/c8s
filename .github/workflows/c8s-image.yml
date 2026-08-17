@@ -233,7 +233,9 @@ jobs:
           path: |
             confidential-os-builder/mkosi/base/mkosi.pkgcache
             !confidential-os-builder/mkosi/base/mkosi.pkgcache/c8s
-          key: ${{ runner.os }}-pkgcache-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf','confidential-os-builder/mkosi/base/mkosi.conf.d/**','confidential-os-builder/mkosi/base/mkosi.profiles/**','confidential-os-builder/mkosi/base/mkosi.sandbox/**','c8s/node-guest-image/c8s/mkosi.conf') }}
+          # conf-only globs: profile mkosi.extra trees carry dangling systemd
+          # enablement symlinks, which hashFiles refuses to hash.
+          key: ${{ runner.os }}-pkgcache-${{ hashFiles('confidential-os-builder/mkosi/base/mkosi.conf','confidential-os-builder/mkosi/base/mkosi.conf.d/*.conf','confidential-os-builder/mkosi/base/mkosi.profiles/*/mkosi.conf','confidential-os-builder/mkosi/base/mkosi.sandbox/**','c8s/node-guest-image/c8s/mkosi.conf') }}
           restore-keys: |
             ${{ runner.os }}-pkgcache-
 
