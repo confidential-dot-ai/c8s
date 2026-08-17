@@ -22,12 +22,19 @@ jobs:
           set -euo pipefail
           fail=0
           for wf in .github/workflows/c8s-image.yml .github/workflows/kata-guest-base.yml; do
-            if ! grep -m1 'CONFOS_REF:' "$wf" | grep -qE '[0-9a-f]{40}'; then
-              echo "::error file=$wf::CONFOS_REF must pin a full 40-hex commit"; fail=1
+            value=$(yq -r '.env.CONFOS_REF // ""' "$wf")
+            if [[ "$value" =~ ^\$\{\{[[:space:]]*inputs\.confos_ref[[:space:]]*\|\|[[:space:]]*\'([0-9a-fA-F]{40})\'[[:space:]]*\}\}$ ]]; then
+              ref=${BASH_REMATCH[1]}
+            else
+              ref=$value
+            fi
+            if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error file=$wf::CONFOS_REF effective default must be a full 40-hex commit, got '$ref'"; fail=1
             fi
           done
-          ref=$(sed -n 's/^C8S_REF="\${C8S_REF:-\(.*\)}"$/\1/p' node-guest-image/c8s/mkosi.sync)
-          if ! echo "$ref" | grep -qE '^(v[0-9][0-9A-Za-z.+-]*|[0-9a-f]{7,40})$'; then
-            echo "::error file=node-guest-image/c8s/mkosi.sync::C8S_REF default must be a release tag or commit, got '$ref'"; fail=1
+          ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
+          release_re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$"
+          if [[ ! "$ref" =~ $release_re ]]; then
+            echo "::error file=node-guest-image/c8s/mkosi.sync::C8S_REF default must be a published vX.Y.Z[-alphaN|-betaN|-rcN] release tag, got '$ref'"; fail=1
           fi
           exit $fail

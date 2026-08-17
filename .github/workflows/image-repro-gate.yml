@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: image-repro-gate-${{ github.ref }}
@@ -34,7 +33,7 @@ jobs:
             image=true  # manual dispatch: always run the full gate
           elif gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate \
                  --jq '.[].filename' \
-               | grep -qE '^(node-guest-image/|\.github/workflows/(c8s-image|image-repro-gate)\.yml)'; then
+               | grep -qE "^(node-guest-image/|\.github/workflows/(c8s-image(-publish)?|image-repro-gate)\.yml)"; then
             image=true
           else
             image=false
@@ -42,30 +41,62 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           # Bake the same published components production uses: mkosi.sync's
           # own C8S_REF default, the single source of truth.
-          ref=$(sed -n 's/^C8S_REF="\${C8S_REF:-\(.*\)}"$/\1/p' node-guest-image/c8s/mkosi.sync)
+          ref=$(sed -n "s/^C8S_REF=\"\\\${C8S_REF:-\(.*\)}\"$/\1/p" node-guest-image/c8s/mkosi.sync)
           test -n "$ref"
           echo "c8s_ref=$ref" >> "$GITHUB_OUTPUT"
           echo "image-relevant: $image (components at \`$ref\`)" >> "$GITHUB_STEP_SUMMARY"
 
+      # PR code must never run with the production module-signing key. This
+      # keypair is shared by both legs, used only in unpublished gate images,
+      # and has no authority after those images are discarded.
+      - name: Generate gate-only module-signing key
+        if: steps.diff.outputs.image == 'true'
+        run: |
+          set -euo pipefail
+          install -d -m 0700 gate-signing
+          openssl req -x509 -newkey rsa:4096 -sha256 -nodes \
+            -subj "/CN=c8s image reproducibility gate/" \
+            -days 1 -set_serial 1 \
+            -keyout gate-signing/module-signing.key \
+            -out gate-signing/module-signing.crt
+          chmod 0600 gate-signing/module-signing.key
+
+      - name: Share gate-only module-signing key
+        if: steps.diff.outputs.image == 'true'
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: module-signing-${{ github.run_id }}
+          path: gate-signing
+          if-no-files-found: error
+          retention-days: 1
+          # Full reruns replace it; failed-job reruns reuse the prior artifact.
+          overwrite: true
+
   build-a:
     needs: changes
     if: needs.changes.outputs.image == 'true'
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/c8s-image.yml
-    secrets: inherit
     with:
       gate: true
       leg: a
       c8s_ref: ${{ needs.changes.outputs.c8s_ref }}
+      gate_signing_artifact: module-signing-${{ github.run_id }}
 
   build-b:
     needs: changes
     if: needs.changes.outputs.image == 'true'
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/c8s-image.yml
-    secrets: inherit
     with:
       gate: true
       leg: b
       c8s_ref: ${{ needs.changes.outputs.c8s_ref }}
+      gate_signing_artifact: module-signing-${{ github.run_id }}
 
   compare:
     # The required check: green fast on image-irrelevant PRs, otherwise only

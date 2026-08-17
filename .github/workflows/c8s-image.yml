@@ -1,6 +1,6 @@
 # Build + publish the c8s confidential node image (TDX-measured RKE2 + NRI +
 # attestation-api + NVIDIA stack in the verity rootfs). confos is the build
-# tree (pinned CONFOS_REF); the trigger, baked commit, and publish live here.
+# tree (pinned CONFOS_REF); callers select the baked commit and publish policy.
 # Output: ghcr.io/confidential-dot-ai/node-guest-base, one image per TEE:
 # tags :rke2-{tdx,snp}[-cdi] / :rke2-{tdx,snp}[-cdi]-<sha>. The pre-matrix
 # :rke2[-cdi]* tags are frozen (TDX builds up to the rename).
@@ -8,34 +8,6 @@
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
 on:
-  # After Docker: build-c8s resolves cds:<sha> / nri-image-policy:<sha>, which
-  # docker.yml publishes. Gate on it so those digests exist.
-  workflow_run:
-    workflows: ["Docker"]
-    types: [completed]
-  workflow_dispatch:
-    inputs:
-      dev:
-        description: "Build the rke2-dev variant (serial root autologin, different measurement). Never ship."
-        required: false
-        type: boolean
-        default: false
-      c8s_ref:
-        description: "Bake c8s components from this published commit (short SHA) instead of the triggering commit. Rebuilds a release against the current CONFOS_REF; pushes only the :<variant>[-cdi]-<ref> tags, leaving the floating tags alone."
-        required: false
-        type: string
-        default: ""
-      confos_ref:
-        description: "Build with this confos commit instead of the pinned CONFOS_REF. For A/B measurement checks (pair with gate=true); a different confos can mean a different measurement."
-        required: false
-        type: string
-        default: ""
-      gate:
-        description: "Build only — skip the publish and upload manifest.json + roothash as a run artifact, for measurement comparison against a published build."
-        required: false
-        type: boolean
-        default: false
-  # Reusable form for image-repro-gate.yml: two gate legs in one caller run.
   workflow_call:
     inputs:
       dev:
@@ -59,10 +31,18 @@ on:
         required: false
         type: string
         default: ""
+      gate_signing_artifact:
+        description: "Artifact containing the throwaway keypair shared by gate legs."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      MODULE_SIG_KEY_PEM:
+        description: "Production module-signing key; omitted by repro-gate callers."
+        required: false
 
-permissions:
-  contents: read
-  packages: write
+# The caller owns token permissions: c8s-image-publish.yml grants package write
+# to trusted release builds; image-repro-gate.yml grants read only to PR code.
 
 concurrency:
   # Per triggering commit, not per ref (workflow_run's ref is always main).
@@ -80,7 +60,7 @@ concurrency:
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
     }}-${{ inputs.c8s_ref }}-${{ inputs.dev
     }}-${{ inputs.confos_ref }}-${{ inputs.gate
-    }}-${{ inputs.gate_intree }}-${{ inputs.leg }}
+    }}-${{ inputs.leg }}
   cancel-in-progress: false
 
 env:
@@ -115,6 +95,12 @@ jobs:
       matrix:
         platform: [tdx, snp]
     steps:
+      - name: Keep gate-only signing material out of published images
+        if: inputs.gate_signing_artifact != '' && inputs.gate != true
+        run: |
+          echo "::error::gate_signing_artifact requires gate=true"
+          exit 1
+
       # Layout: ./c8s ./attestation-rs ./confidential-os-builder (sibling repos).
       - name: Checkout c8s
         # head_sha, not the default (workflow_run's ref is main).
@@ -122,6 +108,20 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
+
+      - name: Download gate-only module-signing key
+        if: inputs.gate_signing_artifact != ''
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ inputs.gate_signing_artifact }}
+          path: gate-signing
+
+      - name: Stage gate-only module-signing keypair
+        if: inputs.gate_signing_artifact != ''
+        run: |
+          chmod 0600 gate-signing/module-signing.key
+          install -m 0644 gate-signing/module-signing.crt \
+            c8s/node-guest-image/module-signing.crt
 
       - name: Checkout attestation-rs (for the gpu-attest binary)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -268,7 +268,10 @@ jobs:
           # fetch script signs the NVIDIA modules with it and fails closed
           # without it. Signatures are deterministic (sign-file uses no
           # authenticated attributes), so identical inputs sign identically.
-          MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
+          # Repro-gate callers instead supply one throwaway keypair to both
+          # legs. It is never used by a published image.
+          MODULE_SIG_KEY_PEM: ${{ inputs.gate_signing_artifact == '' && secrets.MODULE_SIG_KEY_PEM || '' }}
+          MODULE_SIG_KEY: ${{ inputs.gate_signing_artifact != '' && format('{0}/gate-signing/module-signing.key', github.workspace) || '' }}
         run: |
           set -euo pipefail
           # Short SHA matches docker.yml's component tags. The build script
