@@ -198,6 +198,9 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 	return client, nil
 }
 
+// obtainCertFn is a var so renewal-loop tests can observe attempts.
+var obtainCertFn = obtainCert
+
 func run(cfg config) error {
 	slog.Info("starting get-cert", "san", cfg.SAN)
 
@@ -263,7 +266,7 @@ func run(cfg config) error {
 			slog.Info("shutting down cert renewer")
 			return nil
 		case <-renewTimer.C:
-			renewed, err := obtainCert(ctx, cfg, client)
+			renewed, err := obtainCertFn(ctx, cfg, client)
 			if err != nil {
 				// A short backoff, not a full interval: the timer is paced so
 				// it fires around half the installed leaf's remaining
@@ -313,10 +316,6 @@ const (
 	// never raises a delay above --renew-interval, which the operator chose.
 	minRenewalDelay = 5 * time.Second
 
-	// renewalRetryBase is the first delay after a failed renewal; consecutive
-	// failures double it up to the ordinary pacing.
-	renewalRetryBase = 15 * time.Second
-
 	// unnamedBackoffAfter is how many consecutive unnamed renewals run at the
 	// fast poll before it doubles toward --renew-interval. A pod can be
 	// permanently unnamed — a foreign admission, an inventory with no
@@ -325,6 +324,11 @@ const (
 	// for its whole lifetime.
 	unnamedBackoffAfter = 10
 )
+
+// renewalRetryBase is the first delay after a failed renewal; consecutive
+// failures double it up to the ordinary pacing. It is a var the renewal-loop
+// test shrinks and TestRenewalRetryInterval reads; keep the package non-parallel.
+var renewalRetryBase = 15 * time.Second
 
 // renewalInterval picks the next renewal delay.
 //
@@ -415,11 +419,11 @@ func isNamedLeaf(leaf *x509.Certificate) bool {
 // start without a real mesh cert.
 func obtainCertWithRetry(ctx context.Context, cfg config, client attestclient.Client) (*x509.Certificate, error) {
 	if cfg.InitialRetryTimeout <= 0 {
-		return obtainCert(ctx, cfg, client)
+		return obtainCertFn(ctx, cfg, client)
 	}
 	bo := backoff.NewConstantBackOff(cfg.InitialRetryInterval)
 	return backoff.Retry(ctx, func() (*x509.Certificate, error) {
-		return obtainCert(ctx, cfg, client)
+		return obtainCertFn(ctx, cfg, client)
 	},
 		backoff.WithBackOff(bo),
 		backoff.WithMaxElapsedTime(cfg.InitialRetryTimeout),

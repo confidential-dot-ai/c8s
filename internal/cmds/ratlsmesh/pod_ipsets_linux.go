@@ -165,7 +165,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	// any that raced the chain-flush-then-append window in installIptablesRules)
 	// must re-establish through the DROP instead of being grandfathered by the
 	// ESTABLISHED,RELATED RETURN rule.
-	flushCWConntrack(logger, cwIPs)
+	_, _ = flushCWConntrack(logger, cwIPs)
 	publishIptablesMetrics(logger)
 	if cfg.readyFile != "" {
 		if err := os.WriteFile(cfg.readyFile, []byte("ready\n"), 0o600); err != nil {
@@ -212,7 +212,7 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 			continue
 		}
 		curr := stringSet(cwIPs)
-		flushCWConntrack(logger, newMembers(prevCWIPs, curr))
+		_, _ = flushCWConntrack(logger, newMembers(prevCWIPs, curr))
 		prevCWIPs = curr
 		// Guard counters change only on packet hits, not pod events, so
 		// refresh on the resync tick rather than every event-driven sync

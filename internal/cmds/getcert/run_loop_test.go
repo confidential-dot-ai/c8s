@@ -2,6 +2,9 @@ package getcert
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -23,16 +26,10 @@ type capturedRecord struct {
 	attrs map[string]slog.Value
 }
 
-// logCapture is a slog.Handler that stores records and wakes waiters, so tests
-// can wait for a specific message without polling or sleeping.
+// logCapture is a slog.Handler that stores records for later inspection.
 type logCapture struct {
 	mu      sync.Mutex
 	records []capturedRecord
-	arrived chan struct{}
-}
-
-func newLogCapture() *logCapture {
-	return &logCapture{arrived: make(chan struct{}, 1)}
 }
 
 func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
@@ -46,10 +43,6 @@ func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	c.mu.Lock()
 	c.records = append(c.records, rec)
 	c.mu.Unlock()
-	select {
-	case c.arrived <- struct{}{}:
-	default:
-	}
 	return nil
 }
 
@@ -67,26 +60,11 @@ func (c *logCapture) find(msg string) (capturedRecord, bool) {
 	return capturedRecord{}, false
 }
 
-func (c *logCapture) waitFor(t *testing.T, msg string) capturedRecord {
-	t.Helper()
-	deadline := time.After(15 * time.Second)
-	for {
-		if rec, ok := c.find(msg); ok {
-			return rec
-		}
-		select {
-		case <-c.arrived:
-		case <-deadline:
-			t.Fatalf("log message %q never appeared", msg)
-		}
-	}
-}
-
 // captureDefaultLogger swaps the process default logger for a capture handler
 // and restores it on cleanup.
 func captureDefaultLogger(t *testing.T) *logCapture {
 	t.Helper()
-	c := newLogCapture()
+	c := &logCapture{}
 	old := slog.Default()
 	slog.SetDefault(slog.New(c))
 	t.Cleanup(func() { slog.SetDefault(old) })
@@ -128,6 +106,74 @@ func terminateRun(t *testing.T, done <-chan error) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("run did not shut down after SIGTERM")
+	}
+}
+
+// stubObtainCert makes every certificate request return outcome(n), where n is
+// the 1-based attempt number, and returns a reader for the attempts' timestamps.
+func stubObtainCert(t *testing.T, outcome func(n int) (*x509.Certificate, error)) func() []time.Time {
+	t.Helper()
+	var mu sync.Mutex
+	var at []time.Time
+	old := obtainCertFn
+	obtainCertFn = func(context.Context, config, attestclient.Client) (*x509.Certificate, error) {
+		mu.Lock()
+		at = append(at, time.Now())
+		n := len(at)
+		mu.Unlock()
+		return outcome(n)
+	}
+	t.Cleanup(func() { obtainCertFn = old })
+	return func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]time.Time(nil), at...)
+	}
+}
+
+// stubObtainCertFailing makes every certificate request fail.
+func stubObtainCertFailing(t *testing.T) func() []time.Time {
+	return stubObtainCert(t, func(int) (*x509.Certificate, error) {
+		return nil, errors.New("stubbed certificate request failure")
+	})
+}
+
+// waitForAttempts polls until at least n certificate attempts were made.
+func waitForAttempts(t *testing.T, attempts func() []time.Time, n int) []time.Time {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if at := attempts(); len(at) >= n {
+			return at
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("got %d certificate attempts, want at least %d", len(attempts()), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// catchSIGHUP subscribes for the reload signal reloadNginx sends the master.
+func catchSIGHUP(t *testing.T) <-chan os.Signal {
+	t.Helper()
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	t.Cleanup(func() { signal.Stop(hup) })
+	return hup
+}
+
+// presentAsNginxMaster makes reloadNginx find this test process under root.
+func presentAsNginxMaster(t *testing.T, root string) {
+	t.Helper()
+	pidDir := filepath.Join(root, strconv.Itoa(os.Getpid()))
+	if err := os.MkdirAll(pidDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("nginx\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte("nginx: master process\x00"), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -188,31 +234,92 @@ func TestObtainCertLogsTokenFreeRequest(t *testing.T) {
 	}
 }
 
-// A failing renewal tick logs and retries instead of being treated as success.
-func TestRunRenewalLoopLogsFailedRenewal(t *testing.T) {
+// A failed renewal is retried off the renewalRetryBase backoff, not a whole
+// --renew-interval later: by the time a renewal fails the installed leaf is
+// already close to expiry.
+func TestRunRenewalLoopRetriesFailedRenewal(t *testing.T) {
 	holdSIGTERM(t)
-	c := captureDefaultLogger(t)
+
+	oldBase := renewalRetryBase
+	renewalRetryBase = 40 * time.Millisecond
+	t.Cleanup(func() { renewalRetryBase = oldBase })
+
+	attempts := stubObtainCertFailing(t)
 
 	cfg := unreachableRenewalConfig()
-	cfg.RenewInterval = 25 * time.Millisecond
+	cfg.RenewInterval = 200 * time.Millisecond
 	cfg.ReloadNginx = false
 
 	done := make(chan error, 1)
 	go func() { done <- run(cfg) }()
 
-	// A failed renewal no longer sleeps a whole interval: it backs off from
-	// renewalRetryBase, so the pod re-attempts long before the leaf it is
-	// still serving expires.
-	c.waitFor(t, "certificate renewal failed, retrying")
+	at := waitForAttempts(t, attempts, 4)
 	terminateRun(t, done)
+
+	// at[0] is the initial request, at[1] the first renewal tick. After each
+	// failure the loop must wait ~renewalRetryBase, then ~2x — never a whole
+	// --renew-interval.
+	if gap := at[2].Sub(at[1]); gap < renewalRetryBase || gap >= cfg.RenewInterval {
+		t.Errorf("first retry came %v after the failed renewal, want [%v, %v)", gap, renewalRetryBase, cfg.RenewInterval)
+	}
+	if gap := at[3].Sub(at[2]); gap < 2*renewalRetryBase || gap >= cfg.RenewInterval {
+		t.Errorf("second retry came %v after the failed renewal, want [%v, %v)", gap, 2*renewalRetryBase, cfg.RenewInterval)
+	}
 }
 
-// A changed watch file triggers the reload path, and a failed reload is
-// surfaced as a warning rather than swallowed.
-func TestRunRenewalLoopReloadsOnWatchChange(t *testing.T) {
-	overrideProcRoot(t, t.TempDir()) // no nginx master: reloads fail softly
+// A renewal that succeeds after failures resets the backoff: the loop keeps
+// running, paces the next renewal a full --renew-interval out, and a later
+// failure retries from renewalRetryBase again — not the pre-recovery climbed
+// delay.
+func TestRunRenewalLoopRecoversAfterFailedRenewals(t *testing.T) {
 	holdSIGTERM(t)
-	c := captureDefaultLogger(t)
+
+	oldBase := renewalRetryBase
+	renewalRetryBase = 40 * time.Millisecond
+	t.Cleanup(func() { renewalRetryBase = oldBase })
+
+	// The stub fails the initial request and three renewals — climbing the
+	// backoff to its ceiling — then returns a long-lived leaf on attempt 5, so
+	// post-recovery pacing is a full --renew-interval.
+	leaf := &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}
+	attempts := stubObtainCert(t, func(n int) (*x509.Certificate, error) {
+		if n == 5 {
+			return leaf, nil
+		}
+		return nil, errors.New("stubbed certificate request failure")
+	})
+
+	cfg := unreachableRenewalConfig()
+	cfg.RenewInterval = 200 * time.Millisecond
+	cfg.ReloadNginx = false
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+
+	at := waitForAttempts(t, attempts, 7)
+	terminateRun(t, done)
+
+	// at[4] is the recovered renewal, at[5] the next tick a full interval out,
+	// at[6] the retry after at[5] fails — back at renewalRetryBase, proving the
+	// failures counter reset.
+	if gap := at[5].Sub(at[4]); gap < cfg.RenewInterval {
+		t.Errorf("post-recovery renewal came %v after the success, want a full interval >= %v", gap, cfg.RenewInterval)
+	}
+	if gap := at[6].Sub(at[5]); gap < renewalRetryBase || gap >= cfg.RenewInterval {
+		t.Errorf("retry after the post-recovery failure came %v, want [%v, %v) — failures did not reset", gap, renewalRetryBase, cfg.RenewInterval)
+	}
+}
+
+// A changed watch file triggers an nginx reload, and a failed reload does
+// not stop the watcher: later changes still reload.
+func TestRunRenewalLoopReloadsOnWatchChange(t *testing.T) {
+	holdSIGTERM(t)
+	hup := catchSIGHUP(t)
+
+	// No nginx master yet, so the first reloads fail; the watcher proving
+	// live afterwards means those failures were tolerated.
+	root := t.TempDir()
+	overrideProcRoot(t, root)
 
 	watched := filepath.Join(t.TempDir(), "tls.crt")
 	if err := os.WriteFile(watched, []byte("v1"), 0644); err != nil {
@@ -227,13 +334,25 @@ func TestRunRenewalLoopReloadsOnWatchChange(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run(cfg) }()
 
-	// The snapshot is taken before this record, so a change written now is seen.
-	c.waitFor(t, "watching files for nginx reload")
-	if err := os.WriteFile(watched, []byte("v2"), 0644); err != nil {
+	// A change written before the loop's initial snapshot is invisible to the
+	// watcher, so keep changing the file: every post-snapshot change is a
+	// failed reload while the master is absent.
+	for i := 2; i <= 4; i++ {
+		if err := os.WriteFile(watched, []byte(fmt.Sprintf("v%d", i)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	presentAsNginxMaster(t, root)
+	if err := os.WriteFile(watched, []byte("v5"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	c.waitFor(t, "watched file changed, reloading nginx")
-	c.waitFor(t, "watched file changed but nginx reload failed")
+	select {
+	case <-hup:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no nginx reload after the watched file changed")
+	}
 	terminateRun(t, done)
 }
 
@@ -242,9 +361,10 @@ func TestRunRenewalLoopReloadsOnWatchChange(t *testing.T) {
 // come up and shut down cleanly.
 func TestRunRenewalLoopWithoutWatchPathsIgnoresWatchInterval(t *testing.T) {
 	holdSIGTERM(t)
-	c := captureDefaultLogger(t)
+	attempts := stubObtainCertFailing(t)
 
 	cfg := unreachableRenewalConfig()
+	cfg.RenewInterval = 25 * time.Millisecond
 	cfg.ReloadNginx = true
 	cfg.ReloadWatchPaths = nil
 	cfg.ReloadWatchInterval = 0
@@ -252,7 +372,9 @@ func TestRunRenewalLoopWithoutWatchPathsIgnoresWatchInterval(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run(cfg) }()
 
-	c.waitFor(t, "entering renewal loop")
+	// A second attempt means the tolerated initial failure carried run into
+	// the renewal loop.
+	waitForAttempts(t, attempts, 2)
 	terminateRun(t, done)
 }
 
@@ -380,23 +502,9 @@ func TestFindNginxMasterPID(t *testing.T) {
 
 func TestReloadNginx(t *testing.T) {
 	t.Run("signals the master", func(t *testing.T) {
-		// Present this test process as the nginx master and swallow the SIGHUP
-		// reloadNginx sends it.
-		hup := make(chan os.Signal, 1)
-		signal.Notify(hup, syscall.SIGHUP)
-		defer signal.Stop(hup)
-
+		hup := catchSIGHUP(t)
 		root := t.TempDir()
-		pidDir := filepath.Join(root, strconv.Itoa(os.Getpid()))
-		if err := os.MkdirAll(pidDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("nginx\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte("nginx: master process\x00"), 0644); err != nil {
-			t.Fatal(err)
-		}
+		presentAsNginxMaster(t, root)
 		overrideProcRoot(t, root)
 
 		if err := reloadNginx(); err != nil {
