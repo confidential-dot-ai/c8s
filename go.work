@@ -1,3 +1,7 @@
 go 1.26.3
 
-use .
+use (
+	.
+	./test/mock-attestation
+	./test/mock-cds
+)
