@@ -1,4 +1,5 @@
-// Package audit provides structured audit logging for policy decisions.
+// Package audit provides structured audit logging for policy decisions
+// (attestation results, admission verdicts, key lifecycle events).
 package audit
 
 import "log/slog"
