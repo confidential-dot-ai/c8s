@@ -191,7 +191,7 @@ jobs:
         run: make build-volumed
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@9d7e65c320fdb52dcd45ffaa68deb6c02c8754d9 # v1.12.0
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       # attestation-rs changes less often than this repo, so cache the built
       # binary keyed on its source and skip the build (+ its apt dep) on a hit.
