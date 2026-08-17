@@ -1,0 +1,62 @@
+Subject: [PATCH] agent: refuse ephemeral-encrypted block storage when CDH is
+ absent
+
+cdh_secure_mount returns Ok(()) when the CDH client was never
+initialised, and handle_block_storage treats that as a completed mount:
+a storage carrying encryption_key=ephemeral is handed to the container
+as an ordinary directory on the guest rootfs while policy, runtime and
+agent all report success. The client is initialised only when the CDH
+socket exists at agent startup; a missing or non-socket path logs at
+warn/debug and lets the agent boot healthy.
+
+The marker is a request for encryption, so being unable to honour it
+must refuse the storage: check the client on the encrypted branch of
+handle_block_storage and error out. The failure surfaces as a failed
+CreateContainer, not a silently unencrypted mount.
+
+--- a/src/agent/src/storage/block_handler.rs
++++ b/src/agent/src/storage/block_handler.rs
+@@ -59,6 +59,14 @@
+         .contains(&"encryption_key=ephemeral".to_string());
+ 
+     if has_ephemeral_encryption {
++        // c8s: cdh_secure_mount returns Ok without mounting when the CDH
++        // client is uninitialised, so check before trusting it.
++        if !crate::confidential_data_hub::is_cdh_client_initialized() {
++            return Err(anyhow!(
++                "refusing encryption_key=ephemeral storage at {}: CDH client is not initialized",
++                storage.mount_point
++            ));
++        }
+         crate::rpc::cdh_secure_mount(
+             "block-device",
+             dev_num,
+@@ -226,3 +234,28 @@
+         new_device(path)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn test_ephemeral_encryption_without_cdh_client_refused() {
++        // CDH_CLIENT is process-global and test_sealed_secret sets it when the
++        // suite runs as root (kata CI); only the uninitialised state runs the branch.
++        if crate::confidential_data_hub::is_cdh_client_initialized() {
++            return;
++        }
++        let logger = slog::Logger::root(slog::Discard, o!());
++        let storage = Storage {
++            mount_point: "/run/kata-containers/sandbox/storage/test".to_string(),
++            driver_options: vec!["encryption_key=ephemeral".to_string()],
++            ..Default::default()
++        };
++        let result = handle_block_storage(&logger, &storage, "8:16").await;
++        assert!(result.is_err());
++        if let Err(e) = result {
++            assert!(e.to_string().contains("CDH client is not initialized"));
++        }
++    }
++}

@@ -759,3 +759,7 @@ test_termination_log_read_denied if {
 test_add_swap_denied if {
 	not AddSwapRequest
 }
+
+test_reseed_random_dev_denied if {
+	not ReseedRandomDevRequest
+}
