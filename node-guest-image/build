@@ -86,14 +86,21 @@ PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
 # Fingerprint-gated: the module build must rerun iff the kernel, the fetch
 # script (NVIDIA pins), or the signing cert changed. The kernel manifest
 # covers the kernel side; signatures are deterministic, so a staged tree
-# with a matching stamp is byte-identical to a fresh one.
+# with a matching stamp is byte-identical to a fresh one. The tree is
+# mirrored under output/ because confos build wipes mkosi.local on exit.
 GPU_STAMP="output/gpu/stage.stamp"
+GPU_MIRROR="output/gpu/staged"
 GPU_FPR=$(cat output/kernel/manifest.json bin/confos-fetch-gpu "$NGI_DIR/module-signing.crt" | sha256sum | cut -d' ' -f1)
-if [ -d mkosi/base/mkosi.local/mkosi.extra ] && [ "$(cat "$GPU_STAMP" 2>/dev/null)" = "$GPU_FPR" ]; then
-    echo "staged GPU tree matches $GPU_FPR — skipping confos-fetch-gpu"
+if [ -d "$GPU_MIRROR" ] && [ "$(cat "$GPU_STAMP" 2>/dev/null)" = "$GPU_FPR" ]; then
+    echo "staged GPU tree matches $GPU_FPR — restoring mirror, skipping confos-fetch-gpu"
+    rm -rf mkosi/base/mkosi.local/mkosi.extra
+    mkdir -p mkosi/base/mkosi.local
+    cp -a "$GPU_MIRROR" mkosi/base/mkosi.local/mkosi.extra
 else
     MODULE_SIG_CERT="$NGI_DIR/module-signing.crt" bin/confos-fetch-gpu
-    mkdir -p "$(dirname "$GPU_STAMP")"
+    rm -rf "$GPU_MIRROR"
+    mkdir -p "$(dirname "$GPU_MIRROR")"
+    cp -a mkosi/base/mkosi.local/mkosi.extra "$GPU_MIRROR"
     echo "$GPU_FPR" > "$GPU_STAMP"
 fi
 bin/confos-fetch-attest-gpu
