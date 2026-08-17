@@ -34,13 +34,28 @@ import (
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
-// distinguishable from an unreachable endpoint (3).
+// distinguishable from an unreachable endpoint (3), and a partial verdict (4)
+// — evidence verified, but a property the evidence presents is not proven —
+// from both a full pass and a failure.
 const (
 	exitVerified   = 0
 	exitUsage      = 1
 	exitFailed     = 2 // evidence obtained, but verification/policy failed
 	exitNoEvidence = 3 // could not obtain evidence (connect/parse/file)
+	exitPartial    = 4 // evidence verified, but a presented property is not proven
 )
+
+// verdictExitCode maps a rendered verdict to the process exit code.
+func verdictExitCode(oc Outcome) int {
+	switch {
+	case oc.Verified:
+		return exitVerified
+	case oc.Partial:
+		return exitPartial
+	default:
+		return exitFailed
+	}
+}
 
 // connectError marks a failure to obtain evidence or verification collateral
 // (vs. a verification verdict), so the orchestration can map it to exit code 3.
@@ -157,7 +172,9 @@ Evidence sources:
   c8s verify https://lb.example.com:443 --kind lb --measurements <sha384-hex>
 
 Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
-unavailable (unreachable / unparseable).`,
+unavailable (unreachable / unparseable) · 4 partially verified (the evidence
+verified, but a property it presents is not proven — a WebPKI front door whose
+serving key is not attestation-bound, or a chain anchor the responder chose).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -189,7 +206,7 @@ unavailable (unreachable / unparseable).`,
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
-	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID")
+	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	const tcbSNPOnly = " (SEV-SNP evidence only — TDX carries no such component, so against TDX evidence this is a policy error rather than an ignored flag)"
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component"+tcbSNPOnly)
@@ -344,13 +361,64 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc := newOutcome(cfg, ev, result, verr, plan)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applySandboxPolicy(&oc, cfg, ev, opKeys)
-	applyWorkloadPolicy(&oc, cfg, ev, held)
+	applyVerdictPolicies(&oc, cfg, ev, held, opKeys)
 	render(cfg, oc, out)
+	return verdictExitCode(oc)
+}
+
+// applyVerdictPolicies runs every post-verification policy in verdict order:
+// the CA-vouched pins first (they authenticate the leaf's stamps and can fail
+// the verdict), then the honesty demotions, which only ever turn a passing
+// verdict partial. Ordering matters: applyChainAnchorPolicy reads the pinned
+// chain check's outcome from oc.Verified.
+func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport) {
+	applySandboxPolicy(oc, cfg, ev, opKeys)
+	applyWorkloadPolicy(oc, cfg, ev, held)
+	applyFrontDoorPolicy(oc, ev)
+	applyChainAnchorPolicy(oc, cfg, ev)
+}
+
+// demoteToPartial turns a passing verdict into a partial one, naming the
+// presented property that is not proven. It never rescues a failed verdict:
+// a verification failure dominates and stays exit 2.
+func demoteToPartial(oc *Outcome, notProven string) {
 	if !oc.Verified {
-		return exitFailed
+		return
 	}
-	return exitVerified
+	oc.Verified = false
+	oc.Partial = true
+	oc.NotProven = append(oc.NotProven, notProven)
+}
+
+// applyFrontDoorPolicy enforces the discovery document's public_tls.mode: a
+// WebPKI front door terminates public TLS on an operator certificate, so the
+// serving key clients reach is not the attestation-bound CDS key the evidence
+// speaks for.
+func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
+	if ev.publicTLSMode != "webpki" {
+		return
+	}
+	demoteToPartial(oc, "the front-door serving key is not attestation-bound: public_tls.mode=webpki terminates public TLS on an operator WebPKI certificate, not the CDS-issued key this evidence attests — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
+}
+
+// applyChainAnchorPolicy settles what the verdict may claim about an
+// endpoint-presented mesh chain (attest-pq / saved bundle). At gather time
+// the chain was checked against the CA the responder committed into its own
+// transcript — an anchor the responder chose. Only --mesh-ca turns that into
+// a verified chain (applySandboxPolicy has already enforced the pinned check
+// when it is set); a responder-chosen anchor leaves the endpoint's deployment
+// identity unproven, so a passing verdict is partial.
+func applyChainAnchorPolicy(oc *Outcome, cfg config, ev *evidence) {
+	if !ev.leafChainDerived {
+		return
+	}
+	if cfg.meshCA != "" {
+		if oc.Verified {
+			oc.ChainAnchor = "verified against the pinned --mesh-ca bundle"
+		}
+		return
+	}
+	demoteToPartial(oc, "the mesh chain anchor: the leaf chains to a CA the responder committed into its own attestation transcript — the evidence binds those CA bytes, but the anchor is responder-chosen, so which deployment this endpoint belongs to is not proven (pass --mesh-ca to pin it)")
 }
 
 // verifyPlan is one run's parsed, validated policy: the verifier policy, the
@@ -898,12 +966,28 @@ type Outcome struct {
 	// true, but with named limits a relying party should read.
 	Warnings []string `json:"warnings,omitempty"`
 
+	// Partial is true when the hardware evidence verified but a property the
+	// evidence presents is not proven (a WebPKI front door's serving key, a
+	// responder-chosen chain anchor). Verified stays false, so a CI gate
+	// checking verified==true fails closed; the exit code distinguishes the
+	// case (4) from a failure (2). NotProven names each unproven property.
+	Partial   bool     `json:"partial,omitempty"`
+	NotProven []string `json:"not_proven,omitempty"`
+
+	// ChainAnchor states what an endpoint-presented mesh chain (attest-pq /
+	// saved bundle) was verified against: set only when the chain verified
+	// against the pinned --mesh-ca bundle. A responder-chosen anchor is never
+	// reported here — it lands in NotProven.
+	ChainAnchor string `json:"chain_anchor,omitempty"`
+
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
-	// self-signed, a verified issuing chain, or — on a live RA-TLS dial —
-	// possession of the attested key. A leaf with none of the three is not
-	// accepted as evidence at all (authorizeLeafBody), because checking a
-	// validity window inside an unsigned body bounds nothing.
+	// self-signed, a verified issuing chain, possession of the attested key on
+	// a live RA-TLS dial, or — on attest-pq — the identity transcript the
+	// hardware evidence binds (whose chain anchor is responder-chosen; see
+	// ChainAnchor). A leaf with none of these is not accepted as evidence at
+	// all (authorizeLeafBody), because checking a validity window inside an
+	// unsigned body bounds nothing.
 	CertBody string `json:"cert_body,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
@@ -1159,20 +1243,19 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 	}
 	oc.Verified = true
 
-	// A passing TDX verdict with a launch-measurement pin but no image tuple
-	// says less than it looks like: MRTD covers only the TDVF firmware. What
-	// decides between rejecting that and warning about it is whether ANY CA
-	// anchor stands next to the measurements — not the CLI mode string, which
-	// says nothing about the evidence (--from-file leaves it empty, and
-	// ratls-cert without --mesh-ca has a self-signed leaf and no CA at all).
-	// With no anchor the verdict is deployment-class, the measurement pins are
-	// the entire trust anchor, and an incomplete image policy is a hard
-	// failure.
+	// What decides between rejecting an MRTD-only TDX verdict and warning
+	// about it is whether an operator-pinned CA anchor (--mesh-ca) stands next
+	// to the measurements. Without one the verdict is deployment-class — the
+	// measurement pins are the entire trust anchor — and an incomplete image
+	// policy is a hard failure. A responder-committed CA (attest-pq's derived
+	// anchor) does not downgrade this: chosen by the responder, it anchors
+	// nothing the operator asked about — the same rule the JS verifier applies
+	// to a deployment-class verdict.
 	if isTDX(oc.Platform) && pinned && plan.pins.image == nil {
 		const mrtdOnly = "TDX measurement pin covers MRTD only — MRTD measures the TDVF firmware, so the guest kernel and rootfs are UNMEASURED by this policy; pass --image-manifest to pin the full image tuple"
-		if plan.meshCA == nil && !ev.leafChainVerified {
+		if plan.meshCA == nil {
 			oc.Verified = false
-			oc.Error = mrtdOnly + " (with no CA anchor this verdict is deployment-class — the measurement pins are the entire trust anchor — so an incomplete measurement policy is rejected; pin --mesh-ca to downgrade this to a warning)"
+			oc.Error = mrtdOnly + " (with no pinned CA anchor this verdict is deployment-class — the measurement pins are the entire trust anchor — so an incomplete measurement policy is rejected; pin --mesh-ca to downgrade this to a warning)"
 			return oc
 		}
 		oc.Warnings = append(oc.Warnings, mrtdOnly)
@@ -1313,7 +1396,9 @@ func describeCertBody(_ config, ev *evidence) string {
 	case ev.leafBody == certutil.BodySelfSigned:
 		return "self-signed: body authenticated by the certificate's own attested key" + skew + certutil.LeafValiditySkew.String() + ")"
 	case ev.leafChainVerified:
-		return "CA-signed: body authenticated by a verified issuing chain (--mesh-ca, or the transcript-committed CA)" + skew + certutil.LeafValiditySkew.String() + ")"
+		return "CA-signed: body authenticated by a verified issuing chain (--mesh-ca)" + skew + certutil.LeafValiditySkew.String() + ")"
+	case ev.leafChainDerived:
+		return "CA-signed: body committed into the identity transcript — the hardware evidence binds these exact bytes" + skew + certutil.LeafValiditySkew.String() + ")"
 	case ev.leafKeyProven:
 		return "CA-signed: body not chain-checked, but the live RA-TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
 	default:
@@ -1389,9 +1474,12 @@ func render(cfg config, oc Outcome, out io.Writer) {
 }
 
 func renderText(cfg config, oc Outcome, out io.Writer) {
-	if oc.Verified {
+	switch {
+	case oc.Verified:
 		fmt.Fprintf(out, "✓ VERIFIED  (%s backend)\n", oc.Backend)
-	} else {
+	case oc.Partial:
+		fmt.Fprintf(out, "~ PARTIALLY VERIFIED  (%s backend)\n", oc.Backend)
+	default:
 		fmt.Fprintf(out, "✗ NOT VERIFIED  (%s backend)\n", oc.Backend)
 	}
 	fmt.Fprintf(out, "  source:       %s\n", oc.Source)
@@ -1413,7 +1501,13 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	if oc.CertBody != "" {
 		fmt.Fprintf(out, "  cert body:    %s\n", oc.CertBody)
 	}
+	if oc.ChainAnchor != "" {
+		fmt.Fprintf(out, "  chain anchor: %s\n", oc.ChainAnchor)
+	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
+	for _, np := range oc.NotProven {
+		fmt.Fprintf(out, "  not proven:   %s\n", np)
+	}
 	for _, w := range oc.Warnings {
 		fmt.Fprintf(out, "  WARNING:      %s\n", w)
 	}

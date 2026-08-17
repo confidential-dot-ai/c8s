@@ -521,9 +521,11 @@ flags against SEV-SNP evidence is a policy error, not an ignored option: SNP
 has no runtime measurement registers.
 
 A TDX verdict pinned on MRTD alone is **rejected**, not warned about, when no
-CA anchor stands beside the measurements (no `--mesh-ca`, and no chain
-verified while gathering): the measurement pins are then the entire trust
-anchor, so an incomplete image policy leaves nothing behind the verdict.
+operator-pinned CA anchor (`--mesh-ca`) stands beside the measurements: the
+measurement pins are then the entire trust anchor, so an incomplete image
+policy leaves nothing behind the verdict. A chain checked against a CA the
+responder committed into its own transcript (attest-pq) does not downgrade
+this — that anchor is responder-chosen.
 
 Certificate-sourced evidence must also carry an authenticated certificate
 body. A self-signed leaf authenticates its own body under the attested key; a
@@ -537,7 +539,16 @@ CA-issued discovery certificate requires `--mesh-ca` (the document publishes
 
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
-(unreachable/unparseable).
+(unreachable/unparseable), `4` partially verified — the evidence verified, but
+a property it presents is not proven. The two partial cases today: a
+discovery document declaring `public_tls.mode=webpki` (the front door's
+serving key is not attestation-bound — what is proven is the tls-lb pod's TEE
+residency and measurement, not the TLS endpoint clients reach), and attest-pq
+or saved-bundle evidence without `--mesh-ca` (the mesh chain anchors to a CA
+the responder committed into its own transcript, so which deployment the
+endpoint belongs to is not proven). JSON renders these as
+`verified: false, partial: true` with a `not_proven` list, so a gate checking
+`verified` fails closed while scripts can still tell partial from failure.
 
 Caveats the output surfaces:
 

@@ -81,10 +81,23 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 // the document is authenticated only by a --mesh-ca chain check; without one
 // the document is rejected rather than verified against a body nothing signed
 // for (authorizeLeafBody).
+//
+// public_tls.mode travels with the evidence to the verdict: a "webpki" front
+// door terminates public TLS on a certificate this evidence says nothing
+// about, so the verdict is demoted to partial downstream
+// (applyFrontDoorPolicy). An unknown mode fails closed here — a
+// securityError, so auto mode cannot fall through to the serving cert past a
+// document it cannot classify.
 func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*evidence, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
+	}
+	switch d.PublicTLS.Mode {
+	case "", "cds", "webpki":
+	default:
+		return nil, &securityError{err: fmt.Errorf(
+			"unknown public_tls.mode %q in discovery document (this build knows cds and webpki): the front door's serving-key binding cannot be established", d.PublicTLS.Mode)}
 	}
 	cert, rd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {
@@ -112,6 +125,7 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*eviden
 		leaf:              cert,
 		leafBody:          body,
 		leafChainVerified: chainVerified,
+		publicTLSMode:     d.PublicTLS.Mode,
 		sandboxID:         sandboxID,
 		sandboxErr:        sandboxErr,
 		workload:          workload,

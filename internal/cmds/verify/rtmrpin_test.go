@@ -309,12 +309,13 @@ func TestTDXPolicyDecisionsNormalizeThePlatformTag(t *testing.T) {
 
 // A passing TDX verdict pinned on MRTD alone must warn prominently: MRTD
 // covers only the TDVF firmware, and the guest kernel/rootfs stay unmeasured
-// by that policy. The warning is the degraded form — it requires a CA anchor
-// (see TestTDXMRTDOnlyRejectedWithoutCAAnchor).
+// by that policy. The warning is the degraded form — it requires an
+// operator-pinned CA anchor (see TestTDXMRTDOnlyRejectedWithoutCAAnchor).
 func TestTDXMRTDOnlyWarns(t *testing.T) {
 	cfg := config{measurements: []string{testMRTD}}
 	plan := mustPlan(t, cfg)
-	anchored := &evidence{platform: "tdx", leafChainVerified: true}
+	plan.meshCA = x509.NewCertPool()
+	anchored := &evidence{platform: "tdx"}
 
 	oc := newOutcome(cfg, anchored, tdxResult(testMRTD, matchingRTMRs()), nil, plan)
 	if !oc.Verified {
@@ -344,9 +345,10 @@ func TestTDXMRTDOnlyWarns(t *testing.T) {
 }
 
 // What decides between rejecting an MRTD-only TDX policy and warning about it
-// is whether a CA anchor stands beside the measurements — a property of the
-// evidence, not of the CLI mode string. Every mode, including the empty one
-// --from-file leaves behind, is rejected when there is no anchor at all.
+// is whether an operator-pinned CA anchor (--mesh-ca) stands beside the
+// measurements — a property of the policy, not of the CLI mode string. Every
+// mode, including the empty one --from-file leaves behind, is rejected when
+// there is no pinned anchor at all.
 func TestTDXMRTDOnlyRejectedWithoutCAAnchor(t *testing.T) {
 	for _, mode := range []string{"", "auto", "ratls-cert", "discovery", "attest-pq"} {
 		cfg := config{mode: mode, measurements: []string{testMRTD}}
@@ -359,34 +361,34 @@ func TestTDXMRTDOnlyRejectedWithoutCAAnchor(t *testing.T) {
 		}
 	}
 
-	// Either anchor downgrades the same condition to a warning: the operator's
-	// --mesh-ca pin, or a chain verified while gathering (attest-pq's
-	// transcript-committed CA).
-	for _, tc := range []struct {
-		name string
-		plan func(*testing.T) *verifyPlan
-		ev   *evidence
-	}{
-		{"--mesh-ca pinned", func(t *testing.T) *verifyPlan {
-			p := mustPlan(t, config{measurements: []string{testMRTD}})
-			p.meshCA = x509.NewCertPool()
-			return p
-		}, &evidence{platform: "tdx"}},
-		{"chain verified while gathering", func(t *testing.T) *verifyPlan {
-			return mustPlan(t, config{measurements: []string{testMRTD}})
-		}, &evidence{platform: "tdx", leafChainVerified: true}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := config{mode: "attest-pq", measurements: []string{testMRTD}}
-			oc := newOutcome(cfg, tc.ev, tdxResult(testMRTD, matchingRTMRs()), nil, tc.plan(t))
-			if !oc.Verified {
-				t.Fatalf("an anchored verdict must pass with a warning: %s", oc.Error)
-			}
-			if len(oc.Warnings) != 1 || !strings.Contains(oc.Warnings[0], "UNMEASURED") {
-				t.Fatalf("Warnings = %v, want the MRTD-only warning", oc.Warnings)
-			}
-		})
-	}
+	// Only an operator-pinned anchor downgrades the same condition to a
+	// warning. A chain checked against the responder-committed CA (attest-pq's
+	// derived anchor) does NOT: the responder chose that CA, so it anchors
+	// nothing the operator asked about and the verdict stays deployment-class.
+	t.Run("--mesh-ca pinned", func(t *testing.T) {
+		plan := mustPlan(t, config{measurements: []string{testMRTD}})
+		plan.meshCA = x509.NewCertPool()
+		cfg := config{mode: "attest-pq", measurements: []string{testMRTD}}
+		oc := newOutcome(cfg, &evidence{platform: "tdx"}, tdxResult(testMRTD, matchingRTMRs()), nil, plan)
+		if !oc.Verified {
+			t.Fatalf("a pinned-anchor verdict must pass with a warning: %s", oc.Error)
+		}
+		if len(oc.Warnings) != 1 || !strings.Contains(oc.Warnings[0], "UNMEASURED") {
+			t.Fatalf("Warnings = %v, want the MRTD-only warning", oc.Warnings)
+		}
+	})
+
+	t.Run("responder-committed chain is not an anchor", func(t *testing.T) {
+		cfg := config{mode: "attest-pq", measurements: []string{testMRTD}}
+		ev := &evidence{platform: "tdx", leafChainDerived: true}
+		oc := newOutcome(cfg, ev, tdxResult(testMRTD, matchingRTMRs()), nil, mustPlan(t, cfg))
+		if oc.Verified {
+			t.Fatal("a responder-chosen chain anchor must not downgrade the MRTD-only rejection")
+		}
+		if !strings.Contains(oc.Error, "UNMEASURED") || !strings.Contains(oc.Error, "deployment-class") {
+			t.Errorf("Error = %q, want the MRTD-only rejection", oc.Error)
+		}
+	})
 }
 
 func TestRTMRPinFlagErrors(t *testing.T) {
