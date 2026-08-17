@@ -184,6 +184,45 @@ jobs:
               gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
             done
 
+  tdx-measure:
+    name: TDX MRTD tripwire
+    runs-on: ubuntu-latest
+    env:
+      # The TDVF the nodes boot, from the kata-static payload kata-deploy installs
+      # (values.yaml kata.digest). Bump with that pin and with wantTDVFSHA/wantMRTD.
+      TDVF_URL: https://github.com/kata-containers/kata-containers/releases/download/3.30.0/kata-static-3.30.0-amd64.tar.zst
+      TDVF_SHA256: 2af9e5e974c0dc201163d1fd419f234cc4b6e64e99425ce6619e9a077fb0c0b6
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      # tar stops after the one member, early in the stream; curl's SIGPIPE is
+      # expected and the sha256 check is the gate on the untrusted fetch.
+      - name: Fetch the pinned TDVF
+        run: |
+          curl -fsSL "$TDVF_URL" | zstd -d | tar -xO --occurrence=1 ./opt/kata/share/ovmf/OVMF.inteltdx.fd > tdvf.fd || true
+          echo "$TDVF_SHA256  tdvf.fd" | sha256sum -c -
+
+      # With C8S_TDVF present nothing in this package may skip: a skip means
+      # the tripwire did not run, so it fails the job rather than reading green.
+      - name: Test pkg/tdxmeasure, failing on any skip
+        env:
+          C8S_TDVF: ${{ github.workspace }}/tdvf.fd
+        run: |
+          go test -count=1 -json ./pkg/tdxmeasure/... | tee tdxmeasure.json
+          if grep '"Action":"skip"' tdxmeasure.json; then
+            echo "::error::pkg/tdxmeasure test skipped — the MRTD tripwire must run (TDVF missing or sha mismatch)" >&2
+            exit 1
+          fi
+          if ! grep -q '"Action":"pass".*"Test":"TestMRTDMatchesHardware"' tdxmeasure.json; then
+            echo "::error::TestMRTDMatchesHardware did not run green — the tripwire is disarmed" >&2
+            exit 1
+          fi
+
   coverage:
     name: Coverage gate
     runs-on: ubuntu-latest
