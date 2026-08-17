@@ -107,7 +107,7 @@ jobs:
       # Layout: ./c8s ./attestation-rs ./confidential-os-builder (sibling repos).
       - name: Checkout c8s
         # head_sha, not the default (workflow_run's ref is main).
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
@@ -127,7 +127,7 @@ jobs:
             c8s/node-guest-image/module-signing.crt
 
       - name: Checkout attestation-rs (for the gpu-attest binary)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/attestation-rs
           ref: ${{ env.ATTESTATION_RS_REF }}
@@ -135,7 +135,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Checkout confidential-os-builder (build tree)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: confidential-dot-ai/confidential-os-builder
           ref: ${{ env.CONFOS_REF }}

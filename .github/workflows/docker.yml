@@ -93,7 +93,7 @@ jobs:
       retag_matrix: ${{ steps.docker-matrix.outputs.retag_matrix }}
       has_retag: ${{ steps.docker-matrix.outputs.has_retag }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A component filter that names a directory which does not exist matches
       # NOTHING, so paths-filter reports that component unchanged, the build is
       # skipped, and retag-unchanged aliases :main onto the new sha anyway. The
@@ -175,7 +175,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_images == 'true'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-c8s
       - name: Download Go modules
         run: go mod download
@@ -188,7 +188,7 @@ jobs:
     strategy:
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-c8s
 

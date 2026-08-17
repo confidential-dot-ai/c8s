@@ -37,7 +37,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-c8s
 
@@ -61,7 +61,7 @@ jobs:
     name: Kata guest policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # kata-agent aborts the VM on a policy it cannot load, so a broken file
       # costs a guest image build and an E2E run to discover. The decision
@@ -86,7 +86,7 @@ jobs:
       # superseded go-ci-* entries so they cannot LRU-evict the image caches.
       actions: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-c8s
         with:
@@ -193,7 +193,7 @@ jobs:
       TDVF_URL: https://github.com/kata-containers/kata-containers/releases/download/3.30.0/kata-static-3.30.0-amd64.tar.zst
       TDVF_SHA256: 2af9e5e974c0dc201163d1fd419f234cc4b6e64e99425ce6619e9a077fb0c0b6
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-c8s
 
@@ -227,7 +227,7 @@ jobs:
     name: Coverage gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-c8s
 
@@ -263,7 +263,7 @@ jobs:
       # evicted, or main's coverage run predates this workflow).
       - name: Checkout base branch
         if: github.event_name == 'pull_request' && steps.baseline.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
@@ -297,7 +297,7 @@ jobs:
     # Advisory: never blocks the PR, even if the tool itself breaks.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # gremlins --diff needs the base ref's history.
           fetch-depth: 0
