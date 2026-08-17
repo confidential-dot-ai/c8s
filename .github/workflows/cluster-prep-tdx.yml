@@ -90,6 +90,23 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
+      - name: kubectl
+        # The launcher runner is an ephemeral ARC pod with nothing preinstalled,
+        # so the lane fetches its own kubectl and this must too. Retried because
+        # one hiccup on the public internet would fail the prep.
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/bin"
+          for i in 1 2 3 4; do
+            if curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o bin/kubectl; then
+              break
+            fi
+            if [ "$i" -eq 4 ]; then echo "::error::could not fetch kubectl"; exit 1; fi
+            sleep $((2 ** i))
+          done
+          chmod +x bin/kubectl
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
       - name: Apply the rootdisk import and wait for it
         working-directory: c8s-e2e/cluster-prep
         run: |
