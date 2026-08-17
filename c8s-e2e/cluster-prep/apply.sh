@@ -81,7 +81,7 @@ EOF
 
 echo '== 6/8 tdx rootdisk import (CDI, ~2.8GiB — first run takes minutes) =='
 kubectl apply -f tdx-rootdisk-dv.yaml
-kubectl -n confai-images wait dv/c8s-root-a5772eb65e29 --for=condition=Ready --timeout=20m
+kubectl -n confai-images wait dv/c8s-root-d6a68e25ab3b --for=condition=Ready --timeout=20m
 
 echo '== 7/8 tdx-rke2-image-refs ConfigMap (TDX lane; pinned image + its measurement tuple) =='
 # Same file the cluster-prep-tdx workflow applies, so the pin has one home.

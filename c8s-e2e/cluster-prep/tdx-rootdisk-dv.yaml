@@ -12,7 +12,7 @@
 apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
-  name: c8s-root-a5772eb65e29
+  name: c8s-root-d6a68e25ab3b
   namespace: confai-images
   annotations:
     # mandatory: local-path is WFFC and KubeVirt won't schedule the VMI until
@@ -21,11 +21,11 @@ metadata:
   labels:
     app.kubernetes.io/part-of: confai
     app.kubernetes.io/component: shared-rootdisk
-    confai.confidential.ai/source-digest-sha256: "a5772eb65e29"
+    confai.confidential.ai/source-digest-sha256: "d6a68e25ab3b"
 spec:
   source:
     registry:
-      url: "docker://ghcr.io/confidential-dot-ai/node-guest-base@sha256:a5772eb65e294197259bbe596a0e777e9203fe19aae7b473b7547d769936748d"
+      url: "docker://ghcr.io/confidential-dot-ai/node-guest-base@sha256:d6a68e25ab3b91239c7e7cab98fc28cb20c67ac21673f39a49093c66ee7472ba"
       pullMethod: pod
       secretRef: ghcr-pull
   pvc:
