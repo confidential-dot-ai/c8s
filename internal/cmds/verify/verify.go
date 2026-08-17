@@ -28,6 +28,7 @@ import (
 	pkgallowlist "github.com/confidential-dot-ai/c8s/pkg/allowlist"
 	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
@@ -118,6 +119,7 @@ type config struct {
 	workload         string
 	allowlistFile    string
 	meshCA           string
+	initDataHex      string
 	allowDebug       bool
 	minTCBBootloader uint
 	minTCBTEE        uint
@@ -207,6 +209,7 @@ serving key is not attestation-bound, or a chain anchor the responder chose).`,
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
+	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	const tcbSNPOnly = " (SEV-SNP evidence only — TDX carries no such component, so against TDX evidence this is a policy error rather than an ignored flag)"
 	f.UintVar(&cfg.minTCBBootloader, "min-tcb-bootloader", 0, "minimum bootloader TCB component"+tcbSNPOnly)
@@ -353,7 +356,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
 		defer cancel()
 	}
-	result, verr := verifyInProcess(ctx, ev, plan.policy, minTCBFromCfg(cfg))
+	result, verr := verifyInProcess(ctx, ev, plan.policy, plan.initDataHash, minTCBFromCfg(cfg))
 	if isConnectError(verr) {
 		fmt.Fprintf(errOut, "error: could not fetch verification collateral: %v\n", verr)
 		return exitNoEvidence
@@ -362,6 +365,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
 	applyVerdictPolicies(&oc, cfg, ev, held, opKeys)
+	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
 }
@@ -421,6 +425,31 @@ func applyChainAnchorPolicy(oc *Outcome, cfg config, ev *evidence) {
 	demoteToPartial(oc, "the mesh chain anchor: the leaf chains to a CA the responder committed into its own attestation transcript — the evidence binds those CA bytes, but the anchor is responder-chosen, so which deployment this endpoint belongs to is not proven (pass --mesh-ca to pin it)")
 }
 
+// applyInitDataNote records what --init-data bound to, on the FINAL verdict:
+// it runs after applyVerdictPolicies (which can fail the verdict past
+// newOutcome) and skips a hard failure (oc.Error set) — the gate renderText
+// also applies. On az-* the pin binds vTPM PCR[8], not result.Claims.InitData
+// (the inner report's HOST_DATA), so a pinned az verdict reports the enforced
+// pin without presenting that field.
+func applyInitDataNote(oc *Outcome, result *teetypes.VerificationResult, plan *verifyPlan) {
+	if oc.Error != "" {
+		return
+	}
+	switch {
+	case oc.Platform == string(teetypes.PlatformAzSNP) || oc.Platform == string(teetypes.PlatformAzTDX):
+		if plan.initDataHash != nil {
+			oc.InitDataNote = "verified: pinned via vTPM PCR[8] (matches --init-data)"
+		}
+	case len(result.Claims.InitData) > 0:
+		oc.InitData = hex.EncodeToString(result.Claims.InitData)
+		if plan.initDataHash != nil {
+			oc.InitDataNote = "verified: matches --init-data"
+		} else {
+			oc.InitDataNote = "not pinned: the digest the evidence commits, compared against nothing (pass --init-data to pin it)"
+		}
+	}
+}
+
 // verifyPlan is one run's parsed, validated policy: the verifier policy, the
 // TDX register pins, and the --mesh-ca anchor. Everything file-backed is read
 // exactly ONCE, here, and threaded downstream — a pin resolved twice can be
@@ -432,6 +461,8 @@ type verifyPlan struct {
 	pins   rtmrPins
 	// meshCA is the parsed --mesh-ca bundle, nil when the flag is unset.
 	meshCA *x509.CertPool
+	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
+	initDataHash []byte
 }
 
 // buildPolicy parses the measurement allowlist, resolves the register pins and
@@ -539,6 +570,11 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, fmt.Errorf("--allowlist requires --mesh-ca: the stamped policy digest is vouched by CDS's signature on the leaf, not by the hardware evidence")
 	}
 
+	initDataHash, err := parseInitDataPin(cfg.initDataHex)
+	if err != nil {
+		return nil, err
+	}
+
 	return &verifyPlan{
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
@@ -548,9 +584,26 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
 		},
-		pins:   pins,
-		meshCA: caPool,
+		pins:         pins,
+		meshCA:       caPool,
+		initDataHash: initDataHash,
 	}, nil
+}
+
+// parseInitDataPin parses --init-data: the SHA-256 hex digest of the init-data
+// document the target guest must carry. Empty means unpinned.
+func parseInitDataPin(flag string) ([]byte, error) {
+	if flag == "" {
+		return nil, nil
+	}
+	digest, err := hex.DecodeString(strings.TrimSpace(flag))
+	if err != nil {
+		return nil, fmt.Errorf("--init-data is not hex: %v", err)
+	}
+	if len(digest) != initdata.DigestSize {
+		return nil, fmt.Errorf("--init-data is %d bytes, want %d (SHA-256 of the init-data document)", len(digest), initdata.DigestSize)
+	}
+	return digest, nil
 }
 
 // rtmrPins are every TDX register pin resolved from the flags: the image tuple
@@ -955,6 +1008,12 @@ type Outcome struct {
 	Pinned     bool   `json:"measurement_pinned"`
 	Error      string `json:"error,omitempty"`
 
+	// InitData is the init-data digest the verified evidence commits, and
+	// InitDataNote says what stands behind it: compared against --init-data,
+	// or reported unpinned.
+	InitData     string `json:"init_data,omitempty"`
+	InitDataNote string `json:"init_data_note,omitempty"`
+
 	// RTMRsPinned lists the TDX runtime measurement registers this verdict
 	// enforced, as "<index>:<hex>". On TDX the --measurements pin covers only
 	// MRTD (the TDVF firmware): without RTMR[1]/[2] the guest kernel and
@@ -1260,6 +1319,7 @@ func newOutcome(cfg config, ev *evidence, result *teetypes.VerificationResult, v
 		}
 		oc.Warnings = append(oc.Warnings, mrtdOnly)
 	}
+
 	return oc
 }
 
@@ -1493,6 +1553,14 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	for _, p := range oc.RTMRsPinned {
 		idx, hexVal, _ := strings.Cut(p, ":")
 		fmt.Fprintf(out, "  RTMR[%s]:      %s (matched)\n", idx, hexVal)
+	}
+	if oc.InitDataNote != "" {
+		if oc.InitData != "" {
+			fmt.Fprintf(out, "  init-data:    %s\n", oc.InitData)
+			fmt.Fprintf(out, "                %s\n", oc.InitDataNote)
+		} else {
+			fmt.Fprintf(out, "  init-data:    %s\n", oc.InitDataNote)
+		}
 	}
 	fmt.Fprintf(out, "  TCB:          %s   debug=%t smt=%t\n", oc.CurrentTCB, oc.Debug, oc.SMT)
 	if oc.CertSHA256 != "" {

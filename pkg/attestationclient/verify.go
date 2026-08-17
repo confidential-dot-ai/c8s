@@ -76,6 +76,10 @@ func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 			return ErrReportDataMismatch
 		}
 	}
+	// The init-data pin is enforced on the in-process engine path
+	// (internal/localverify Params.ExpectedInitDataHash), not on this delegated
+	// one: wiring req.Params.ExpectedInitDataHash must add a matching
+	// InitDataMatch gate here — see #89.
 	return nil
 }
 
