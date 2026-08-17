@@ -24,8 +24,10 @@ const (
 )
 
 // loadTDVF returns the validated TDVF build, or skips. The 4 MiB image is not
-// committed, so this runs on a TDX node (or with C8S_TDVF set) and is skipped
-// in CI. See docs/kata-launch-measurement.md to re-capture the expected value.
+// committed: CI's tripwire job fetches the pinned TDVF and sets C8S_TDVF;
+// elsewhere this runs on a TDX node (or with C8S_TDVF set) and skips
+// otherwise. See docs/kata-launch-measurement.md to re-capture the expected
+// value.
 func loadTDVF(t *testing.T) []byte {
 	t.Helper()
 	p := tdvfPath

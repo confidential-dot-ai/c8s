@@ -227,10 +227,14 @@ moves the value fails the build rather than shipping a wrong pin.
 
 ### Re-validating against hardware
 
-The 4 MiB TDVF is not committed, so the hardware check runs only where the
-firmware exists (a TDX node, or `C8S_TDVF=/path/to/OVMF.inteltdx.fd`); it skips
-in CI, and also skips if the TDVF is not the sha256 the expected digest was
-captured from. The CLI wiring is covered in CI with a synthetic TDVF.
+The 4 MiB TDVF is not committed. CI's TDX MRTD tripwire job fetches the
+pinned TDVF out of the kata-static release the nodes' kata-deploy installs,
+sha256-checks it against the pin next to its URL in `.github/workflows/ci.yml`,
+and runs the `pkg/tdxmeasure` tests with `C8S_TDVF` set, failing if any test
+skips. Elsewhere the hardware check runs only where the firmware exists (a TDX
+node, or `C8S_TDVF=/path/to/OVMF.inteltdx.fd`), skipping if the TDVF is not
+the sha256 the expected digest was captured from. The CLI wiring is covered in
+CI with a synthetic TDVF.
 
 To re-capture the expected MRTD after a kata-static bump, read it from a live
 pod's own attestation report. The in-guest attestation-service listens on
