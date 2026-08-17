@@ -25,6 +25,15 @@ What is specific to this image:
 Owning the certificate here is the point: which key may sign modules that
 load in this image is an image decision, not a builder decision (#264).
 
+Pull-request reproducibility builds never receive that private key. The image
+repro gate generates one throwaway keypair per run and stages its certificate
+over the gate checkout's working copy before sharing the same pair with both
+comparison legs. The production wrapper is the only caller that passes
+`MODULE_SIG_KEY_PEM`; gate callers have read-only package access and pass no
+secrets. Those images are not published, so the throwaway certificate grants
+no authority over a released image. In particular, do not mirror the production
+key into a Dependabot secret just to make action-update PRs pass.
+
 ## Generating the keypair
 
 Run once; keep the private key in a password manager or KMS as well as the CI

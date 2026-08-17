@@ -1,0 +1,10 @@
+# Bump PRs for action sha-pins (c8s#264 pinning-review follow-up); component
+# and image pins are deliberate measurement changes and stay manual. The image
+# repro gate gives every image-relevant PR a throwaway module-signing key; never
+# copy the production MODULE_SIG_KEY_PEM into Dependabot secrets.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
