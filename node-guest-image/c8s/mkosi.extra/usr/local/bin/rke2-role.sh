@@ -91,16 +91,19 @@ write_atomic() {
 # Common address fields, validated the same way for both roles.
 stage_addresses() {
     local node_ip node_ext
-    node_ip=$(read_field node-ip)
-    is_ipv4 "$node_ip" || fail "node-ip: not IPv4"
-    # 0.0.0.0 = autodetect: omit the field so rke2 resolves the address
-    # itself. Passing the literal through registers InternalIP 0.0.0.0 and
+    # node-ip is optional: absent, like the kubelet sentinel 0.0.0.0, means
+    # rke2 resolves the address itself (Kubernetes ChooseHostInterface).
+    # Passing a literal 0.0.0.0 through registers InternalIP 0.0.0.0 and
     # breaks apiserver->kubelet traffic. `if`, not `&&` — see
     # emit_node_addr_lines for why under set -e.
-    if [[ "$node_ip" == 0.0.0.0 ]]; then
-        node_ip=""
+    NODE_IP=""
+    if [[ -e "$MNT/node-ip" || -L "$MNT/node-ip" ]]; then
+        node_ip=$(read_field node-ip)
+        is_ipv4 "$node_ip" || fail "node-ip: not IPv4"
+        if [[ "$node_ip" != 0.0.0.0 ]]; then
+            NODE_IP="$node_ip"
+        fi
     fi
-    NODE_IP="$node_ip"
     NODE_EXT=""
     # -L: a dangling symlink must be rejected in read_field, not read as absent.
     if [[ -e "$MNT/node-external-ip" || -L "$MNT/node-external-ip" ]]; then

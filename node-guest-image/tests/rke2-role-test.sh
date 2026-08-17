@@ -147,6 +147,13 @@ ok "exit 0" test "$RC" -eq 0
 ok "fragment omits node-ip" bash -c '! grep -q "^node-ip:" "'"$FRAG"'"'
 ok "role-server verdict" test -f "$RUN/role-server"
 
+# Absent node-ip is the same autodetect path as the sentinel.
+CASE="agent-disk+absent-node-ip"
+reset_state; agent_dir "$WORK/d"; rm "$WORK/d/node-ip"; make_iso "$WORK/d"; run_script
+ok "exit 0" test "$RC" -eq 0
+ok "fragment omits node-ip" bash -c '! grep -q "^node-ip:" "'"$FRAG"'"'
+ok "role-agent verdict" test -f "$RUN/role-agent"
+
 # No autodetect for external addresses: the sentinel there is a config
 # error and must reject, not pass through as ExternalIP 0.0.0.0.
 CASE="server-disk+zero-external-ip"
