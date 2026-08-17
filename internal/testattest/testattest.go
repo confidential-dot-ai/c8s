@@ -10,14 +10,17 @@
 // detects — snp, unless SetPlatform says otherwise.
 //
 // POST /verify decodes the types.VerifyRequest, records it
-// (Params.ExpectedReportData included), and answers the configured Verdict.
-// Tests assert on the recorded requests, so the report-data binding
-// production code asks the verifier to check is pinned.
+// (Params.ExpectedReportData included), and answers the configured Verdict, or
+// the ErrorReply set by SetVerifyError. Tests assert on the recorded requests,
+// so the report-data binding production code asks the verifier to check is
+// pinned.
 package testattest
 
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -29,7 +32,11 @@ import (
 // Verdict is what the stub's /verify answers for every request; the response
 // platform echoes the request's, like the real api. The fields map onto
 // types.VerificationResult; ReportDataMatch is a pointer so the no-check wire
-// shape (the real api's explicit null) is expressible next to true and false.
+// shape (the real api's explicit null) is expressible. Every 200 the real api
+// sends reports success: a failed signature or report-data check is refused
+// with the 422 of VerificationFailed. A false in SignatureValid or
+// ReportDataMatch models a verifier contradicting itself — defense in depth
+// for caller tests, not a production refusal.
 type Verdict struct {
 	SignatureValid  bool
 	ReportDataMatch *bool
@@ -47,17 +54,39 @@ func PassingVerdict(launchDigest string) Verdict {
 	}
 }
 
+// ErrorReply is an error response from the attestation-api. A non-empty Code
+// sends the types.ErrorResponse JSON envelope, which callers see as
+// *attestationclient.APIError; an empty Code sends Message as text/plain — the
+// axum rejection shape — which callers see as *attestationclient.UnexpectedError.
+type ErrorReply struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+// VerificationFailed is what the attestation-api answers /verify with for
+// evidence that does not verify: HTTP 422, error code verification_failed
+// (attestation-api's ApiError::Verification).
+func VerificationFailed(message string) ErrorReply {
+	return ErrorReply{
+		Status:  http.StatusUnprocessableEntity,
+		Code:    types.ErrorCodeVerificationFailed,
+		Message: message,
+	}
+}
+
 // Stub is an httptest.Server speaking the attestation-api wire protocol. The
 // default verdict is PassingVerdict("") and the detected platform snp; change
 // them with SetVerdict and SetPlatform.
 type Stub struct {
 	*httptest.Server
 
-	mu       sync.Mutex
-	verdict  Verdict
-	platform types.Platform
-	attest   []types.AttestRequest
-	verify   []types.VerifyRequest
+	mu        sync.Mutex
+	verdict   Verdict
+	verifyErr ErrorReply
+	platform  types.Platform
+	attest    []types.AttestRequest
+	verify    []types.VerifyRequest
 }
 
 // New starts a stub attestation-api, closed at test cleanup.
@@ -77,6 +106,14 @@ func (s *Stub) SetVerdict(v Verdict) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.verdict = v
+}
+
+// SetVerifyError makes /verify answer reply instead of a verdict, still
+// recording the request. A zero Status answers the verdict.
+func (s *Stub) SetVerifyError(reply ErrorReply) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.verifyErr = reply
 }
 
 // SetPlatform sets the platform the stub reports detecting: what /attest
@@ -105,7 +142,7 @@ func (s *Stub) VerifyRequests() []types.VerifyRequest {
 func (s *Stub) handleAttest(w http.ResponseWriter, r *http.Request) {
 	var req types.AttestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, undecodableBody(err))
 		return
 	}
 	s.mu.Lock()
@@ -139,14 +176,18 @@ func fakeSNPEvidence(reportData []byte) json.RawMessage {
 func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {
 	var req types.VerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, undecodableBody(err))
 		return
 	}
 	s.mu.Lock()
 	s.verify = append(s.verify, req)
-	verdict := s.verdict
+	verdict, verifyErr := s.verdict, s.verifyErr
 	s.mu.Unlock()
 
+	if verifyErr.Status != 0 {
+		writeError(w, verifyErr)
+		return
+	}
 	writeJSON(w, types.VerifyResponse{
 		Result: types.VerificationResult{
 			Platform:        req.Platform,
@@ -157,13 +198,36 @@ func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// undecodableBody mirrors axum's Json rejection: 400 for a body that is not
+// valid JSON, 422 for one that does not fit the handler's type; both
+// text/plain.
+func undecodableBody(err error) ErrorReply {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return ErrorReply{
+			Status:  http.StatusUnprocessableEntity,
+			Message: "Failed to deserialize the JSON body into the target type: " + err.Error(),
+		}
+	}
+	return ErrorReply{
+		Status:  http.StatusBadRequest,
+		Message: "Failed to parse the request body as JSON: " + err.Error(),
+	}
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
+func writeError(w http.ResponseWriter, reply ErrorReply) {
+	if reply.Code == "" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(reply.Status)
+		_, _ = io.WriteString(w, reply.Message)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: "bad_request", Message: message})
+	w.WriteHeader(reply.Status)
+	_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: reply.Code, Message: reply.Message})
 }

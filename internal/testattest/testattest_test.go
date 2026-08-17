@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -143,6 +144,8 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 	}
 }
 
+// Defense in depth: a mismatch verdict on a 200 is a non-production shape
+// (Verdict); enforcement must still fail closed on it.
 func TestStubVerifyMismatchFailsEnforcement(t *testing.T) {
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict("")
@@ -159,6 +162,76 @@ func TestStubVerifyMismatchFailsEnforcement(t *testing.T) {
 	}
 }
 
+// The shape a refused report arrives in: HTTP 422 carrying the
+// attestation-api's verification_failed envelope, which reaches Go callers as
+// *attestationclient.APIError — a different branch from every verdict sentinel.
+func TestStubVerifyErrorAnswersTheRefusalShape(t *testing.T) {
+	stub := testattest.New(t)
+	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
+	client := attestationclient.NewClient(stub.URL)
+
+	expected := types.NewBase64Bytes([]byte("expected-report-data"))
+	req := types.VerifyReportData(types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)}, expected)
+	_, err := client.VerifyEnforced(context.Background(), req)
+
+	var apiErr *attestationclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %#v, want *attestationclient.APIError", err)
+	}
+	if apiErr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", apiErr.Status)
+	}
+	if apiErr.Response.Error != "verification_failed" {
+		t.Fatalf("error code = %q, want verification_failed", apiErr.Response.Error)
+	}
+	if errors.Is(err, attestationclient.ErrSignatureInvalid) || errors.Is(err, attestationclient.ErrReportDataMismatch) {
+		t.Fatalf("a 422 refusal matched a verdict sentinel: %v", err)
+	}
+
+	// The refusal is decided after the body is parsed, so the request stays recorded.
+	reqs := stub.VerifyRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("/verify calls = %d, want 1", len(reqs))
+	}
+	if reqs[0].Params == nil || reqs[0].Params.ExpectedReportData == nil {
+		t.Fatal("recorded request carries no expected_report_data")
+	}
+
+	// A zero reply restores the verdict.
+	stub.SetVerifyError(testattest.ErrorReply{})
+	if _, err := client.VerifyEnforced(context.Background(), req); err != nil {
+		t.Fatalf("VerifyEnforced after a zero-Status reset: %v", err)
+	}
+}
+
+// A codeless ErrorReply is the axum rejection: a status with a text/plain
+// body, which the client cannot decode into the error envelope.
+func TestStubVerifyErrorPlainTextBody(t *testing.T) {
+	stub := testattest.New(t)
+	stub.SetVerifyError(testattest.ErrorReply{
+		Status:  http.StatusUnprocessableEntity,
+		Message: "Failed to deserialize the JSON body into the target type",
+	})
+	client := attestationclient.NewClient(stub.URL)
+
+	req := types.VerifyReportData(
+		types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)},
+		types.NewBase64Bytes([]byte("expected-report-data")),
+	)
+	_, err := client.VerifyEnforced(context.Background(), req)
+
+	var unexpected *attestationclient.UnexpectedError
+	if !errors.As(err, &unexpected) {
+		t.Fatalf("err = %#v, want *attestationclient.UnexpectedError", err)
+	}
+	if unexpected.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", unexpected.Status)
+	}
+	if !strings.Contains(unexpected.Text, "Failed to deserialize") {
+		t.Fatalf("body = %q, want the plain-text rejection", unexpected.Text)
+	}
+}
+
 func TestStubRejectsUnknownPaths(t *testing.T) {
 	stub := testattest.New(t)
 	resp, err := http.Post(stub.URL+"/nope", "application/json", strings.NewReader(`{}`))
@@ -171,17 +244,38 @@ func TestStubRejectsUnknownPaths(t *testing.T) {
 	}
 }
 
+// axum splits the rejection: 400 for a body that is not valid JSON, 422 for
+// one that does not fit the request type.
 func TestStubRejectsUndecodableBody(t *testing.T) {
-	stub := testattest.New(t)
-	resp, err := http.Post(stub.URL+"/verify", "application/json", strings.NewReader(`not json`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
-	}
-	if got := len(stub.VerifyRequests()); got != 0 {
-		t.Fatalf("an undecodable body was recorded as %d request(s)", got)
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantPrefix string
+	}{
+		{"not valid JSON", `not json`, http.StatusBadRequest, "Failed to parse the request body as JSON"},
+		{"wrong field type", `{"platform": 123}`, http.StatusUnprocessableEntity, "Failed to deserialize the JSON body into the target type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := testattest.New(t)
+			resp, err := http.Post(stub.URL+"/verify", "application/json", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body %q)", resp.StatusCode, tc.wantStatus, body)
+			}
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+				t.Fatalf("content-type = %q, want the text/plain axum rejection", got)
+			}
+			if !strings.HasPrefix(string(body), tc.wantPrefix) {
+				t.Fatalf("body = %q, want the axum rejection prefix %q", body, tc.wantPrefix)
+			}
+			if got := len(stub.VerifyRequests()); got != 0 {
+				t.Fatalf("an undecodable body was recorded as %d request(s)", got)
+			}
+		})
 	}
 }

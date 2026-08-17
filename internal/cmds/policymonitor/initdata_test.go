@@ -346,9 +346,9 @@ func TestVerifiedSelfHostDataRejectsUnverifiedReport(t *testing.T) {
 		setup func(*testing.T) string
 		want  error
 	}{
-		{"signature invalid", refusing(func(v *testattest.Verdict) { v.SignatureValid = false }), attestationclient.ErrSignatureInvalid},
+		{"signature invalid on a 200 (defense in depth)", refusing(func(v *testattest.Verdict) { v.SignatureValid = false }), attestationclient.ErrSignatureInvalid},
 		{"report data unchecked", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = nil }), attestationclient.ErrReportDataMismatch},
-		{"report data mismatch", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = &no }), attestationclient.ErrReportDataMismatch},
+		{"report data mismatch on a 200 (defense in depth)", refusing(func(v *testattest.Verdict) { v.ReportDataMatch = &no }), attestationclient.ErrReportDataMismatch},
 		{"launch digest malformed", refusing(func(v *testattest.Verdict) { v.Claims.LaunchDigest = "not-hex" }), attestationclient.ErrInvalidLaunchDigest},
 		{"platform with no verification rules", unsupportedPlatformAttester, attestationclient.ErrUnsupportedPlatform},
 	} {
@@ -515,19 +515,16 @@ func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 }
 
 // A forged report committing the document on disk still fails, because the
-// forgery is what the verifier rejects.
+// forgery is what the verifier rejects: a 422, terminal rather than retryable.
 func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
-	raw := testDocument(t, "aabb")
-	writeInitData(t, raw)
-	digest := initdata.Digest(raw)
+	writeInitData(t, testDocument(t, "aabb"))
 
-	v := hostDataVerdict(digest[:])
-	v.SignatureValid = false
-	cfg := &Config{AttestationServiceURL: attesterWithVerdict(t, v)}
+	stub := testattest.New(t)
+	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
 
-	measurements, err := resolveInitDataMeasurements(context.Background(), cfg)
-	if !errors.Is(err, attestationclient.ErrSignatureInvalid) {
-		t.Fatalf("err = %v, want the verifier's signature verdict", err)
+	measurements, err := resolveInitDataMeasurements(context.Background(), &Config{AttestationServiceURL: stub.URL})
+	if !errors.Is(err, errAttestVerdict) {
+		t.Fatalf("err = %v, want the refusal classified as a terminal verdict", err)
 	}
 	if measurements != "" {
 		t.Fatalf("measurements = %q, want none from an unverified report", measurements)

@@ -571,6 +571,8 @@ func attestKeyBody(t *testing.T, appURL string) string {
 	})
 }
 
+// Defense in depth: a self-contradicting 200 must still mint no EAR. The
+// production refusal shape is the 422 below (testattest.Verdict).
 func TestAttestKeySignatureInvalid(t *testing.T) {
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict("")
@@ -587,6 +589,30 @@ func TestAttestKeySignatureInvalid(t *testing.T) {
 	}
 }
 
+// The attestation-api refuses a report it cannot verify with a 422; evidence
+// it rejected must mint no EAR.
+func TestAttestKeyVerifierRefusalMintsNoEAR(t *testing.T) {
+	stub := testattest.New(t)
+	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
+
+	app := httptest.NewServer(testApp(stub.URL))
+	defer app.Close()
+
+	resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("status = 200 for evidence the verifier refused; body=%s", body)
+	}
+	var out types.AttestKeyResponseBody
+	if json.Unmarshal(body, &out) == nil && out.EAR != "" {
+		t.Fatalf("an EAR was minted for refused evidence; body=%s", body)
+	}
+}
+
+// Defensive: non-production shape (testattest.Verdict). Production refuses a
+// mismatch with the 422 of VerificationFailed; the 401 pins the handler's own
+// fail-closed gate.
 func TestAttestKeyReportDataMismatch(t *testing.T) {
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict("")
