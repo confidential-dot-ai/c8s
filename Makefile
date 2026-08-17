@@ -121,11 +121,11 @@ build-nri-image-policy:
 
 # --- Tests ---
 
-# TEST_COUNT=  lets CI use Go's content-addressed test cache; the local
+# C8S_TEST_COUNT= lets CI use Go's content-addressed test cache; the local
 # default keeps forced reruns.
-TEST_COUNT ?= -count=1
+C8S_TEST_COUNT ?= -count=1
 test:
-	go test -race $(TEST_COUNT) -timeout=120s ./...
+	go test -race $(C8S_TEST_COUNT) -timeout=120s ./...
 
 test-integration:
 	./test/integration/run.sh
