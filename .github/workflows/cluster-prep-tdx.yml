@@ -107,21 +107,57 @@ jobs:
           chmod +x bin/kubectl
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
-      - name: Apply the rootdisk import and wait for it
+      - name: Ensure the rootdisk import exists, then wait for it
         working-directory: c8s-e2e/cluster-prep
         run: |
           set -euo pipefail
-          # Name comes back from the apply itself: the launcher runner has no
-          # PyYAML, and kubectl is the one dependency this job can count on.
-          dv=$(kubectl apply -f tdx-rootdisk-dv.yaml -o jsonpath='{.metadata.name}')
-          echo "rootdisk DataVolume: $dv"
-          # Import pulls ~1.9GiB compressed. Already-Ready is a no-op, so a
-          # re-run on an unchanged digest returns immediately.
+          # Create-if-absent, never patch. The name is digest-suffixed, so an
+          # existing one is by definition the right content and a bump lands a
+          # new name; patching a populated rootdisk would be wrong even if the
+          # SA could (it has create/delete on datavolumes, no patch).
+          # sed, not PyYAML: the launcher runner has neither PyYAML nor yq.
+          dv=$(sed -n 's/^  name: //p' tdx-rootdisk-dv.yaml | head -1)
+          [ -n "$dv" ] || { echo "::error::could not read the DataVolume name"; exit 1; }
+          if kubectl -n confai-images get "dv/$dv" >/dev/null 2>&1; then
+            echo "rootdisk $dv already present, leaving it alone"
+          else
+            echo "rootdisk $dv absent, importing"
+            kubectl create -f tdx-rootdisk-dv.yaml
+          fi
+          # Import pulls ~1.9GiB compressed. Already-Ready returns immediately.
           kubectl -n confai-images wait "dv/$dv" --for=condition=Ready --timeout=30m
 
       - name: Publish the image+measurement pin
         working-directory: c8s-e2e/cluster-prep
-        run: kubectl apply -f tdx-rke2-image-refs.cm.yaml
+        run: |
+          set -euo pipefail
+          NS=confai-images
+          # Say what is about to change before changing it. The pin can be
+          # bumped by hand on the cluster, and a silent overwrite here can swap
+          # a rootfs the lane has proven for one nothing has booted. Read-only,
+          # so it costs no extra RBAC.
+          changed=0
+          {
+            echo "### TDX pin: cluster <- git"
+            echo
+            echo "| key | live | repo |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for k in image rootPvc cdiTag c8sRef mrtd rtmr1 rtmr2; do
+            live=$(kubectl -n "$NS" get cm tdx-rke2-image-refs -o jsonpath="{.data.$k}" 2>/dev/null || true)
+            want=$(sed -n "s/^  $k: \"\(.*\)\"\$/\1/p" tdx-rke2-image-refs.cm.yaml | head -1)
+            if [ "$live" = "$want" ]; then
+              echo "  = $k"
+              echo "| \`$k\` | unchanged | \`$want\` |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              changed=1
+              echo "::warning title=pin change::$k: '${live:-<unset>}' -> '$want'"
+              echo "| \`$k\` | \`${live:-<unset>}\` | **\`$want\`** |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          # `if`, not `&&`: a false test as the last command trips set -e.
+          if [ "$changed" = 0 ]; then echo "live pin already matches git"; fi
+          kubectl apply -f tdx-rke2-image-refs.cm.yaml
 
       - name: Assert the lane's prerequisites resolve
         run: |
