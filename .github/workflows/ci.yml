@@ -80,10 +80,40 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Cache pruning (the step after the save) deletes this job's own
+      # superseded go-ci-* entries so they cannot LRU-evict the image caches.
+      actions: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - uses: ./.github/actions/setup-go-c8s
+        with:
+          cache: "false"
+
+      # Module cache: immutable per go.sum, so save-on-miss keying is correct
+      # for it (what setup-go does; managed here because its cache cannot be
+      # split from the build cache below).
+      - name: Cache Go modules
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-
+
+      # Build/test-result cache: NOT immutable per go.sum — every commit adds
+      # artifacts — so save-on-miss goes stale and cached test results never
+      # materialize. Restore the freshest entry; a new one is saved per main
+      # push and superseded entries are pruned.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/go-build
+          key: go-ci-${{ github.sha }}
+          restore-keys: |
+            go-ci-
 
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
@@ -120,12 +150,39 @@ jobs:
       - name: Test
         env:
           C8S_REQUIRE_IPTABLES_TRANSLATE: "1"
-        run: make test
+        # C8S_TEST_COUNT= : unchanged packages reuse cached results from the
+        # restored GOCACHE; Go invalidates by content, so edits still rerun.
+        # External binaries the tests exec (iptables-translate) are covered
+        # via the testlog's stat of the LookPath'd path: an apt bump changes
+        # its mtime and invalidates the cached pass.
+        run: make test C8S_TEST_COUNT=
 
       # The advisory mutation job only exercises the 0-mutant path on
       # script-only diffs; this guards the summary paths it skips.
       - name: mutation-check selftest
         run: ./scripts/mutation-check.sh selftest
+
+      - name: Save Go build cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/go-build
+          key: go-ci-${{ github.sha }}
+
+      - name: Prune superseded go-ci caches
+        # Only go-ci-* entries this job created; never touches other caches.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_KEY: go-ci-${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[]|select(.key|startswith("go-ci-"))|"\(.id) \(.key)"' |
+            awk -v cur="$CURRENT_KEY" '$2 != cur {print $1}' |
+            while read -r id; do
+              gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
+            done
 
   coverage:
     name: Coverage gate
