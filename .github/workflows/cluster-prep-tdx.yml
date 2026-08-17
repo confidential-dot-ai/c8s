@@ -94,9 +94,10 @@ jobs:
         working-directory: c8s-e2e/cluster-prep
         run: |
           set -euo pipefail
-          dv=$(python3 -c "import yaml;print(yaml.safe_load(open('tdx-rootdisk-dv.yaml'))['metadata']['name'])")
+          # Name comes back from the apply itself: the launcher runner has no
+          # PyYAML, and kubectl is the one dependency this job can count on.
+          dv=$(kubectl apply -f tdx-rootdisk-dv.yaml -o jsonpath='{.metadata.name}')
           echo "rootdisk DataVolume: $dv"
-          kubectl apply -f tdx-rootdisk-dv.yaml
           # Import pulls ~1.9GiB compressed. Already-Ready is a no-op, so a
           # re-run on an unchanged digest returns immediately.
           kubectl -n confai-images wait "dv/$dv" --for=condition=Ready --timeout=30m
