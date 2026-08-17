@@ -318,6 +318,7 @@ reviewed commit.
 | `UBUNTU_BASE_DIGEST` | `build.sh` | osbuilder's rootfs-builder toolchain image |
 | `UBUNTU_REPO_URL` (snapshot timestamp) | `build.sh` | guest apt packages |
 | `CONFOS_REF` | workflow env | guest kernel |
+| `ATTESTATION_RS_REF` | workflow env | baked `attestation-api` binary |
 | `REPRO_E2FSPROGS_VERSION` / `REPRO_CRYPTSETUP_VERSION` | workflow env | re-lay toolchain |
 | cds / get-cert / c8s-operator digests | resolved per build by `fetch.sh` | bootstrap allowlist |
 
