@@ -327,7 +327,9 @@ func TestAttest_BindsReportDataToCSRKeyAndChallenge(t *testing.T) {
 }
 
 // A verifier reporting that the evidence binds different report data must
-// deny issuance: the report attests some other key or challenge.
+// deny issuance: the report attests some other key or challenge. Defensive:
+// non-production shape (testattest.Verdict) — production refuses a mismatch
+// with a 422; the 401 pins CDS's own fail-closed gate.
 func TestAttest_ReportDataMismatchReturns401(t *testing.T) {
 	stub := newStubAttestationApi(t, "deadbeef")
 	verdict := testattest.PassingVerdict("deadbeef")

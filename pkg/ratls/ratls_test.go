@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/internal/testattest"
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -758,6 +759,18 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 	allowedMeasurements := [][]byte{measurement}
 
+	t.Run("422 verification_failed is refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
+		_, err := VerifyCert(cert, &VerifyPolicy{AttestationApiURL: stub.URL, Measurements: allowedMeasurements}, nil)
+		var apiErr *attestationclient.APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnprocessableEntity {
+			t.Fatalf("got %v, want a 422 *attestationclient.APIError", err)
+		}
+	})
+
+	// Defense in depth: a self-contradicting 200 must still be refused. The
+	// production refusal shape is the 422 above (testattest.Verdict).
 	t.Run("signature_valid=false maps to ErrSignatureInvalid", func(t *testing.T) {
 		stub := testattest.New(t)
 		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
@@ -781,6 +794,8 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 		}
 	})
 
+	// Defense in depth: a self-contradicting 200 must still be refused. The
+	// production refusal shape is the 422 above (testattest.Verdict).
 	t.Run("report_data_match=false maps to ErrKeyBinding", func(t *testing.T) {
 		stub := testattest.New(t)
 		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
