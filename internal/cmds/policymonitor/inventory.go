@@ -35,6 +35,7 @@ type admissionInventory struct {
 	mu         sync.RWMutex
 	containers map[string]string                          // live container id -> image digest
 	admitted   map[string]workloadclaims.SandboxContainer // key -> everything ever admitted
+	unresolved map[string]struct{}                        // container ids with no digest; cleared only by a later resolved record
 	sandboxID  string                                     // the guest's single pod sandbox
 	// refresh renders the allowlist-refresh posture. Set by runMonitor; nil
 	// leaves the field off the wire rather than reporting a false "disabled".
@@ -45,25 +46,35 @@ func newAdmissionInventory() *admissionInventory {
 	return &admissionInventory{
 		containers: map[string]string{},
 		admitted:   map[string]workloadclaims.SandboxContainer{},
+		unresolved: map[string]struct{}{},
 	}
 }
 
-// record notes an admitted container — injected sidecars included, so the
-// sandbox inventory is what actually ran in the guest. argv is the effective
-// OCI process.args the allowlist was evaluated against.
+// record notes every container that ran in the guest — injected sidecars
+// included, and denied containers too, so the sandbox inventory is what
+// actually ran, not what passed the checks. A container with no resolved
+// digest is tracked as unresolved and closes the sandbox's answer. argv is
+// the effective OCI process.args the allowlist was evaluated against.
 func (b *admissionInventory) record(cid, digest string, argv []string) {
-	if digest == "" {
+	if cid == "" {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if digest == "" {
+		b.unresolved[cid] = struct{}{}
+		return
+	}
+	delete(b.unresolved, cid)
 	b.containers[cid] = digest
 	c := workloadclaims.SandboxContainer{Digest: digest, Argv: argv}
 	b.admitted[c.Key()] = c
 }
 
 // remove evicts a container whose bundle kata-agent has torn down. The
-// admission record keeps it — it still ran in this guest. See docs/secrets.md,
+// admission record keeps it — it still ran in this guest — including an
+// unresolved digest, so a container that stops before one resolves closes the
+// sandbox's answer for the sandbox's life. See docs/secrets.md,
 // "The report is a high-water mark".
 func (b *admissionInventory) remove(cid string) {
 	b.mu.Lock()
@@ -101,11 +112,17 @@ func (b *admissionInventory) SandboxForPeer(_ workloadclaims.Peer) (string, erro
 // sandbox: every container ever admitted there, injected sidecars included, as
 // a sorted deduplicated digest set plus per-container (digest, argv) detail.
 // Any other sandbox ID is unknown.
+//
+// An unresolved digest fails the whole answer rather than commit a subset as
+// if it were the whole inventory.
 func (b *admissionInventory) DigestsForSandbox(sandboxID string) ([]string, []workloadclaims.SandboxContainer, bool, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.sandboxID == "" || sandboxID != b.sandboxID {
 		return nil, nil, false, nil
+	}
+	if len(b.unresolved) > 0 {
+		return nil, nil, true, fmt.Errorf("sandbox %s admitted a container with no resolved image digest", sandboxID)
 	}
 	digests := []string{}
 	containers := make([]workloadclaims.SandboxContainer, 0, len(b.admitted))

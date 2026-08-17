@@ -350,10 +350,10 @@ func (m *monitor) watch(ctx context.Context) (done bool, err error) {
 			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && filepath.Clean(evt.Name) == filepath.Clean(m.cfg.WatchDir) {
 				return watchDirGone("inotify " + evt.Op.String())
 			}
-			// A bundle disappearing means its container is gone; drop it
-			// from the inventory so /digests answers what the sandbox is
-			// running rather than everything it ever ran. The watch dir's
-			// own removal was handled above, so this is a child path.
+			// A bundle disappearing means its container is gone; drop it from
+			// caller resolution only — the sandbox's record keeps what it ran
+			// (remove's doc). The watch dir's own removal was handled above, so
+			// this is a child path.
 			if evt.Op.Has(fsnotify.Remove|fsnotify.Rename) && m.pathLooksLikeContainer(evt.Name) {
 				if m.inventory != nil {
 					m.inventory.remove(filepath.Base(filepath.Clean(evt.Name)))
@@ -498,6 +498,9 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		// itself went away, or we are shutting down — nothing to decide.
 		if _, statErr := os.Lstat(configPath); statErr == nil {
 			m.logger.Warn("deny container: config.json present but unreadable/malformed", "cid", cid, "path", configPath, "error", err)
+			if m.inventory != nil {
+				m.inventory.record(cid, "", nil)
+			}
 			m.deny(ctx, dir)
 			return
 		}
@@ -542,6 +545,9 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 		m.logger.Warn("deny container: image reference is absent or not digest-pinned",
 			"cid", cid, "reference", spec.Annotations[kataspec.PullReferenceKey],
 			"annotation_keys", slices.Sorted(maps.Keys(spec.Annotations)))
+		if m.inventory != nil {
+			m.inventory.record(cid, "", nil)
+		}
 		m.deny(ctx, dir)
 		return
 	}
@@ -566,11 +572,11 @@ func (m *monitor) handleNewContainer(ctx context.Context, dir string) {
 	if !m.admits(rc) {
 		m.refresh.awaitSettled(ctx, refreshSettleBudget)
 	}
+	if m.inventory != nil {
+		m.inventory.record(cid, digest, rc.Argv)
+	}
 	if m.admits(rc) {
 		m.logger.Info("allow container", "cid", cid, "digest", digest)
-		if m.inventory != nil {
-			m.inventory.record(cid, digest, rc.Argv)
-		}
 		m.recordVerdict(dir, verdictAllow)
 		return
 	}
