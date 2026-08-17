@@ -1,0 +1,135 @@
+# Applies the TDX lane's cluster-side prerequisites so a pin bump is a merge
+# rather than someone running apply.sh from a laptop. That drift is what left
+# the lane pinned to a 2026-07-24 image for three weeks (c8s#329).
+#
+# The apply job runs on the launcher runner, which holds the in-cluster bm-e2e
+# token, so there is no kubeconfig to manage. Its RBAC
+# (baremetal/kubevirt-rbac.yaml) allows the DataVolume outright and
+# update/patch on this one ConfigMap by name; a broader grant is deliberately
+# not requested.
+#
+# NOT the whole of cluster-prep/apply.sh: the SNP rootdisk, the igvm staging
+# job and the RBAC/egress objects still need cluster-admin and stay manual.
+name: cluster-prep-tdx
+on:
+  pull_request:
+    paths:
+      - 'c8s-e2e/cluster-prep/tdx-rootdisk-dv.yaml'
+      - 'c8s-e2e/cluster-prep/tdx-rke2-image-refs.cm.yaml'
+      - '.github/workflows/cluster-prep-tdx.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'c8s-e2e/cluster-prep/tdx-rootdisk-dv.yaml'
+      - 'c8s-e2e/cluster-prep/tdx-rke2-image-refs.cm.yaml'
+      - '.github/workflows/cluster-prep-tdx.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cluster-prep-tdx-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap, cluster-free, and runs on the PR: the two files carry the same pin
+  # in three overlapping forms, and a half-done bump is the exact failure this
+  # workflow exists to prevent.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: The pin must agree with the rootdisk it names
+        working-directory: c8s-e2e/cluster-prep
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys, yaml
+
+          cm = yaml.safe_load(open("tdx-rke2-image-refs.cm.yaml"))["data"]
+          dv = yaml.safe_load(open("tdx-rootdisk-dv.yaml"))
+          url = dv["spec"]["source"]["registry"]["url"]
+          bad = []
+
+          if cm["rootPvc"] != dv["metadata"]["name"]:
+              bad.append(f'rootPvc {cm["rootPvc"]!r} != DataVolume name {dv["metadata"]["name"]!r}')
+
+          digest = cm["image"].split("@", 1)[-1]
+          if digest not in url:
+              bad.append(f"image digest {digest} is not the DataVolume source ({url})")
+
+          # rootPvc is digest-suffixed so a bump lands a fresh PVC; if it is not
+          # derived from this digest, an old volume gets silently reused.
+          short = digest.split(":", 1)[-1][:12]
+          if not cm["rootPvc"].endswith(short):
+              bad.append(f'rootPvc {cm["rootPvc"]!r} does not end in the image digest prefix {short}')
+
+          # VERSION PAIRING: the image bakes an admission floor from its build
+          # ref, so the CDI tag it was published under must carry that ref.
+          if not cm["cdiTag"].endswith(cm["c8sRef"]):
+              bad.append(f'cdiTag {cm["cdiTag"]!r} is not a build of c8sRef {cm["c8sRef"]!r}')
+
+          for f in ("mrtd", "rtmr1", "rtmr2"):
+              v = cm[f]
+              if len(v) != 96 or not all(c in "0123456789abcdef" for c in v):
+                  bad.append(f"{f} is not a 96-char lowercase hex SHA-384")
+
+          if bad:
+              print("\n".join(f"::error::{b}" for b in bad))
+              sys.exit(1)
+          print("pin is self-consistent:", cm["cdiTag"], "->", cm["rootPvc"])
+          PY
+
+  apply:
+    needs: check
+    if: github.event_name != 'pull_request'
+    # Same runner as the tdx-metal lane: host-side, in-cluster bm-e2e token.
+    runs-on: cvm-launcher-tdx
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Apply the rootdisk import and wait for it
+        working-directory: c8s-e2e/cluster-prep
+        run: |
+          set -euo pipefail
+          dv=$(python3 -c "import yaml;print(yaml.safe_load(open('tdx-rootdisk-dv.yaml'))['metadata']['name'])")
+          echo "rootdisk DataVolume: $dv"
+          kubectl apply -f tdx-rootdisk-dv.yaml
+          # Import pulls ~1.9GiB compressed. Already-Ready is a no-op, so a
+          # re-run on an unchanged digest returns immediately.
+          kubectl -n confai-images wait "dv/$dv" --for=condition=Ready --timeout=30m
+
+      - name: Publish the image+measurement pin
+        working-directory: c8s-e2e/cluster-prep
+        run: kubectl apply -f tdx-rke2-image-refs.cm.yaml
+
+      - name: Assert the lane's prerequisites resolve
+        run: |
+          set -euo pipefail
+          NS=confai-images
+          # The lane hard-requires these keys and boots from rootPvc, so check
+          # the volume the pin names actually exists and is bound.
+          for k in image rootPvc cdiTag c8sRef mrtd rtmr1 rtmr2; do
+            v=$(kubectl -n "$NS" get cm tdx-rke2-image-refs -o jsonpath="{.data.$k}")
+            [ -n "$v" ] || { echo "::error::pin is missing '$k'"; exit 1; }
+            echo "  $k=$v"
+          done
+          pvc=$(kubectl -n "$NS" get cm tdx-rke2-image-refs -o jsonpath='{.data.rootPvc}')
+          phase=$(kubectl -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+          [ "$phase" = "Bound" ] || {
+            echo "::error::rootPvc '$pvc' is '${phase:-missing}', not Bound — the lane would fail to boot"
+            exit 1
+          }
+          echo "rootPvc $pvc is Bound"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### TDX cluster prep"
+            kubectl -n confai-images get cm tdx-rke2-image-refs \
+              -o jsonpath='{range $k,$v := .data}- `{$k}` = `{$v}`{"\n"}{end}' 2>/dev/null \
+              || echo "pin not readable"
+          } >> "$GITHUB_STEP_SUMMARY"

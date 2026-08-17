@@ -84,28 +84,8 @@ kubectl apply -f tdx-rootdisk-dv.yaml
 kubectl -n confai-images wait dv/c8s-root-a5772eb65e29 --for=condition=Ready --timeout=20m
 
 echo '== 7/8 tdx-rke2-image-refs ConfigMap (TDX lane; pinned image + its measurement tuple) =='
-# mrtd/rtmr1/rtmr2 are the confos build manifest for this exact image, not values
-# read back from a running guest: get-kubeconfig --image-manifest pins on them.
-#
-# VERSION PAIRING: c8sRef must be the c8s commit this image was built from. The
-# image bakes an admission floor from its own build ref, so bumping c8sRef alone
-# gets the CLI's own components denied. Bump the whole tuple together, taking
-# the measurements from the matching rke2-tdx-<ref> artifact's manifest.json.
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: tdx-rke2-image-refs
-  namespace: confai-images
-data:
-  image: "ghcr.io/confidential-dot-ai/node-guest-base@sha256:a5772eb65e294197259bbe596a0e777e9203fe19aae7b473b7547d769936748d"
-  rootPvc: "c8s-root-a5772eb65e29"
-  cdiTag: "rke2-tdx-cdi-ae260a3"
-  c8sRef: "ae260a3"
-  mrtd: "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1"
-  rtmr1: "2ffb548b1c3f657a398f711630030dd92e0bba466d483623c73e7d9ba0d61ec30f8bb227a3f1a499027e2afba903617b"
-  rtmr2: "2acdd2b7148716835934c1ab4c1ea9d48a652f42a08b1f390a38f25b2b171373ca946d0a48b86a5a54234cd201ecfc29"
-EOF
+# Same file the cluster-prep-tdx workflow applies, so the pin has one home.
+kubectl apply -f tdx-rke2-image-refs.cm.yaml
 
 echo '== 8/8 RBAC (adds configmaps read) + egress (adds in-CVM :6443) =='
 kubectl apply -f ../../baremetal/kubevirt-rbac.yaml
