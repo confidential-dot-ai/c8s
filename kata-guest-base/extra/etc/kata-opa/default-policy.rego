@@ -71,7 +71,9 @@ default RemoveContainerRequest := true
 
 default RemoveStaleVirtiofsShareMountsRequest := true
 
-default ReseedRandomDevRequest := true
+# The only in-stack producer is kata's VM-factory template path, which an
+# image= boot cannot enable; the guest CRNG seeds from the in-TEE CPU RNG.
+default ReseedRandomDevRequest := false
 
 default ResumeContainerRequest := true
 

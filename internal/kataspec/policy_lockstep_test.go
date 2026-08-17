@@ -318,6 +318,7 @@ func TestBakedPolicyKeepsItsFailClosedDefaults(t *testing.T) {
 		"default ReadStreamRequest := false",
 		"default WriteStreamRequest := false",
 		"default GetDiagnosticDataRequest := false",
+		"default ReseedRandomDevRequest := false",
 		// regorus defaults to Rego v0, where rule bodies need these.
 		"import future.keywords.every",
 		"import future.keywords.if",
