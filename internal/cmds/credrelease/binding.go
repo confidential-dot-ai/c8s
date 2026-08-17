@@ -1,18 +1,26 @@
 // Package credrelease implements the in-guest credential-release service (B4
 // of the operator-key design). It issues an operator a short-lived kube client
 // certificate, but only to a caller who proves possession of the operator
-// private key whose public half was bound into the CVM's RTMR[3] at launch —
-// giving an external operator console-free, non-TOFU admin access with no
-// pre-shared cluster secret and no trust in the untrusted host.
+// private key whose public half was bound into the CVM's launch identity
+// (TDX RTMR[3] / SNP HOSTDATA) at launch — giving an external operator
+// console-free, non-TOFU admin access with no pre-shared cluster secret and
+// no trust in the untrusted host.
 package credrelease
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // operatorPubkeyPath is where the measured initrd stages the operator public
@@ -87,16 +95,92 @@ func readOperatorPubkey() ([]byte, error) {
 	return pub, nil
 }
 
-// LoadMeasuredOperatorKey reads the operator pubkey off the opkeydata disk and
-// verifies it against RTMR[3]. The returned bytes are safe to trust as the
-// authorized operator key. This is called once at service start; the key is
-// fixed for the life of the TD.
-func LoadMeasuredOperatorKey() ([]byte, error) {
+// selfReportTimeout bounds the SNP self-attestation round trip against the
+// local attestation-api; on expiry the service fails start and systemd
+// retries, same as a failed RTMR read on TDX.
+const selfReportTimeout = 15 * time.Second
+
+// verifiedSelfHostData returns this guest's HOSTDATA as the attestation-api
+// reports it, from the claims of a report that api verified — reading it off
+// an unverified self-report would take the anchor from an unauthenticated
+// field. Mirrors policymonitor's verifiedSelfHostData, with a random anchor:
+// nothing here needs the zero-anchor convention, and a fresh nonce makes the
+// self-report non-replayable for free.
+func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, selfReportTimeout)
+	defer cancel()
+
+	// The attester is asked for the 48-byte prefix and zero-extends it into
+	// the 64-byte REPORTDATA the verifier must find.
+	var reportData [64]byte
+	if _, err := rand.Read(reportData[:sha512.Size384]); err != nil {
+		return nil, fmt.Errorf("self-report nonce: %w", err)
+	}
+	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, attestationAPIURL, reportData[:sha512.Size384])
+	if err != nil {
+		return nil, fmt.Errorf("attest self: %w", err)
+	}
+	verified, err := attestationclient.NewClient(attestationAPIURL).VerifyEvidence(ctx,
+		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+	if err != nil {
+		return nil, fmt.Errorf("verify self-report: %w", err)
+	}
+
+	hostData, err := hex.DecodeString(verified.Result.Claims.InitData)
+	if err != nil {
+		return nil, fmt.Errorf("HOSTDATA claim is not hex: %w", err)
+	}
+	// A TDX report leaking into this arm carries a 48-byte MRCONFIGID here
+	// and is refused by length, not silently truncated.
+	if len(hostData) != runtimemeasure.HostDataSize {
+		return nil, fmt.Errorf("HOSTDATA claim is %d bytes, want %d", len(hostData), runtimemeasure.HostDataSize)
+	}
+	return hostData, nil
+}
+
+// verifyKeyLaunchBound is the SNP analog of verifyKeyMeasured: before trusting
+// the on-disk key the service confirms sha256(file bytes) equals the HOSTDATA
+// the launcher committed at launch. HOSTDATA is immutable post-launch and
+// carried in every report, so a host that swapped the pubkey file post-boot
+// produces a mismatch here — it cannot alter HOSTDATA any more than it can
+// rewind RTMR[3]. A VM launched without an operator key carries all-zero
+// HOSTDATA, which no SHA-256 output equals, so that fails closed too.
+func verifyKeyLaunchBound(ctx context.Context, attestationAPIURL string, pubkey []byte) error {
+	hostData, err := verifiedSelfHostData(ctx, attestationAPIURL)
+	if err != nil {
+		return err
+	}
+	want := runtimemeasure.HostDataForOperatorKey(pubkey)
+	// Not secret (a public-key hash) — plain compare is fine.
+	if !bytes.Equal(hostData, want[:]) {
+		return fmt.Errorf(
+			"operator pubkey does not match the launch-committed HOSTDATA: got %s, key implies %s (was the pubkey file substituted after boot, or the VM launched for a different key?)",
+			hex.EncodeToString(hostData), hex.EncodeToString(want[:]))
+	}
+	return nil
+}
+
+// LoadMeasuredOperatorKey reads the operator pubkey the initrd staged off the
+// opkeydata disk and verifies it against the platform's launch binding: the
+// TDX RTMR[3] the initrd extended, or the SNP HOSTDATA the launcher committed.
+// The returned bytes are safe to trust as the authorized operator key. Called
+// once at service start; both bindings are fixed for the life of the guest.
+// platform is the ratls-normalized platform ("tdx" or "sev-snp").
+func LoadMeasuredOperatorKey(ctx context.Context, platform, attestationAPIURL string) ([]byte, error) {
 	pub, err := readOperatorPubkey()
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyKeyMeasured(pub); err != nil {
+	switch platform {
+	case "tdx":
+		err = verifyKeyMeasured(pub)
+	case "sev-snp":
+		err = verifyKeyLaunchBound(ctx, attestationAPIURL, pub)
+	default:
+		// Fail closed: an unknown platform has no binding to check.
+		err = fmt.Errorf("no operator-key binding check for platform %q", platform)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return pub, nil

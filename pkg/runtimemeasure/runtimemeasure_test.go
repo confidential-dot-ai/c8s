@@ -165,3 +165,26 @@ func TestCanonicalDigest(t *testing.T) {
 		})
 	}
 }
+
+// TestHostDataForOperatorKeyGolden pins the SNP binding formula: a changed
+// vector here breaks the launcher, the guest initrd, and every verifier at
+// once, exactly like the RTMR[3] vectors above.
+func TestHostDataForOperatorKeyGolden(t *testing.T) {
+	pub := []byte("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n")
+	const want = "f61b347fbb8e6469f294c1faa146d37688e5c1c8a6b1b25653ee85ad10b7447a"
+	if got := hex.EncodeToString(hostDataSlice(HostDataForOperatorKey(pub))); got != want {
+		t.Errorf("HostDataForOperatorKey = %s, want %s", got, want)
+	}
+}
+
+// Same exact-bytes rule as ForOperatorKey: a trailing newline changes the
+// binding.
+func TestHostDataForOperatorKeyIsByteExact(t *testing.T) {
+	withNewline := []byte("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n")
+	withoutNewline := withNewline[:len(withNewline)-1]
+	if HostDataForOperatorKey(withNewline) == HostDataForOperatorKey(withoutNewline) {
+		t.Error("HostDataForOperatorKey must not normalize its input; a trailing newline changes the binding")
+	}
+}
+
+func hostDataSlice(v [HostDataSize]byte) []byte { return v[:] }

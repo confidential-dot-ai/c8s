@@ -24,10 +24,11 @@ ConditionPathExists=/run/confos/role-server
 
 [Service]
 Type=simple
-# The operator key is bound into the platform's runtime measurement at launch
-# (TDX RTMR[3] today — the binding is TDX-only, so on SNP this check fails
-# closed pending an SNP binding design); the service verifies the on-disk
-# pubkey against it and refuses (exits non-zero) if it was substituted.
+# The operator key is bound into the platform's launch identity (TDX: the
+# initrd extends its hash into RTMR[3]; SNP: the launcher commits its sha256
+# as HOSTDATA); the service verifies the on-disk pubkey against that binding
+# via the local attestation-api and refuses (exits non-zero) if it was
+# substituted.
 # Non-operator boots never reach here (ConditionPathExists skips the unit).
 # Waits bounded (10 min) rather than failing fast: on a slow first boot the
 # CA can take minutes to appear, and 5 quick ExecStartPre failures 10s apart

@@ -8,16 +8,18 @@ import (
 
 // NewCmd builds the `cred-release` subcommand: the in-guest service that
 // issues an operator a short-lived kube client cert, gated on possession of
-// the operator key measured into RTMR[3]. Baked as a systemd unit in the c8s
-// node image; not run by hand in normal operation.
+// the operator key bound into the launch identity (TDX RTMR[3] / SNP
+// HOSTDATA). Baked as a systemd unit in the c8s node image; not run by hand
+// in normal operation.
 func NewCmd() *cobra.Command {
 	var cfg Config
 	cmd := &cobra.Command{
 		Use:   "cred-release",
-		Short: "Release a kube operator credential to the attested holder of the RTMR[3]-bound key",
+		Short: "Release a kube operator credential to the attested holder of the launch-bound key",
 		Long: "cred-release serves an RA-TLS endpoint that issues a short-lived\n" +
 			"kube client certificate to a caller who proves possession of the\n" +
-			"operator key whose public half was bound into RTMR[3] at launch.\n" +
+			"operator key whose public half was bound into the launch identity\n" +
+			"(TDX: RTMR[3]; SNP: HOSTDATA) at launch.\n" +
 			"It gives an external operator console-free, non-TOFU cluster-admin\n" +
 			"access with no pre-shared secret and no trust in the host. The cert\n" +
 			"is signed by the cluster's client CA and the kubeconfig anchors to\n" +
@@ -30,8 +32,8 @@ func NewCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&cfg.ListenAddr, "listen", ":8443", "HTTPS (RA-TLS) bind address")
-	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (source of the RA-TLS serving cert's TDX quote)")
-	f.StringVar(&cfg.Platform, "platform", "", "TEE platform: tdx or snp (required; operator-key binding is TDX-only)")
+	f.StringVar(&cfg.AttestationAPIURL, "attestation-api-url", "http://127.0.0.1:8400", "local attestation-api base URL (RA-TLS serving quote; on SNP also the HOSTDATA self-verify)")
+	f.StringVar(&cfg.Platform, "platform", "", "TEE platform: tdx or snp (required)")
 	f.StringVar(&cfg.ClientCACert, "client-ca-cert", defaultClientCACert, "cluster client-CA cert that signs kube client certs (kubeadm: /etc/kubernetes/pki/ca.crt)")
 	f.StringVar(&cfg.ClientCAKey, "client-ca-key", defaultClientCAKey, "cluster client-CA key (kubeadm: /etc/kubernetes/pki/ca.key)")
 	f.StringVar(&cfg.ServerCACert, "server-ca-cert", defaultServerCACert, "CA that signs the apiserver serving cert; embedded in the released kubeconfig (kubeadm: /etc/kubernetes/pki/ca.crt)")
