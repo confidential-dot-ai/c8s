@@ -11,7 +11,7 @@
 # joindata contract (v0), all files a single <=256-byte ASCII line (edge
 # whitespace tolerated and trimmed; interior whitespace rejected):
 #   role              server|agent            (both roles)
-#   node-ip           routable IPv4           (both roles)
+#   node-ip           IPv4, optional          (both roles; absent or 0.0.0.0 = autodetect)
 #   node-external-ip  routable IPv4, optional (both roles)
 #   server            IPv4, no scheme/port    (agent only; forbidden on server)
 #   server-token      64 lowercase hex        (server only; forbidden on agent)

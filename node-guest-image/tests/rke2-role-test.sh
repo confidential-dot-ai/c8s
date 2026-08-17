@@ -144,14 +144,17 @@ CASE="server-disk+autodetect-ip"
 reset_state; server_dir "$WORK/d"; write_f "$WORK/d" node-ip 0.0.0.0
 make_iso "$WORK/d"; run_script
 ok "exit 0" test "$RC" -eq 0
-ok "fragment omits node-ip" bash -c '! grep -q "^node-ip:" "'"$FRAG"'"'
+ok "fragment exact (node-ip omitted)" \
+   test "$(cat "$FRAG")" = "token-file: $RUN/rke2-server-token"
 ok "role-server verdict" test -f "$RUN/role-server"
 
 # Absent node-ip is the same autodetect path as the sentinel.
 CASE="agent-disk+absent-node-ip"
 reset_state; agent_dir "$WORK/d"; rm "$WORK/d/node-ip"; make_iso "$WORK/d"; run_script
 ok "exit 0" test "$RC" -eq 0
-ok "fragment omits node-ip" bash -c '! grep -q "^node-ip:" "'"$FRAG"'"'
+ok "fragment exact (node-ip omitted)" \
+   test "$(cat "$FRAG")" = "token-file: $RUN/rke2-agent-token
+server: https://192.168.7.10:$JOIN_PORT"
 ok "role-agent verdict" test -f "$RUN/role-agent"
 
 # No autodetect for external addresses: the sentinel there is a config
@@ -229,6 +232,9 @@ m_oversize_line()     { server_dir "$1"; { head -c 257 /dev/zero | tr '\0' a; } 
 m_nul_byte()          { server_dir "$1"; printf 'ser\0ver' > "$1/role"; }
 m_symlink()           { server_dir "$1"; rm "$1/role"; ln -s /etc/hostname "$1/role"; }
 m_dangling_ext_ip()   { server_dir "$1"; ln -s /nonexistent-target "$1/node-external-ip"; }
+# Now that absent node-ip means autodetect, a dangling symlink must still
+# reject in read_field, never read as absent.
+m_dangling_node_ip()  { server_dir "$1"; rm "$1/node-ip"; ln -s /nonexistent-target "$1/node-ip"; }
 m_nonregular_dir()    { server_dir "$1"; rm "$1/role"; mkdir "$1/role"; }
 m_empty_ext_ip()      { server_dir "$1"; write_f "$1" node-external-ip ''; }
 m_agent_no_server()   { agent_dir "$1"; rm "$1/server"; }
@@ -238,8 +244,8 @@ for c in wrong_role role_missing forbid_server forbid_stok extra_file_server \
          extra_file_agent equal_tokens tok_63 tok_upper tok_nonhex ip_range \
          ip_short ip_leading_zero ip_octet_08 srv_scheme srv_port interior_ws \
          multiline oversize_file oversize_line nul_byte symlink \
-         dangling_ext_ip nonregular_dir empty_ext_ip agent_no_server \
-         server_no_atok; do
+         dangling_ext_ip dangling_node_ip nonregular_dir empty_ext_ip \
+         agent_no_server server_no_atok; do
     reject_case "reject-$c" "m_$c"
 done
 
