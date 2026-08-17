@@ -1,0 +1,38 @@
+# CDI import of the measured TDX RKE2-node CVM image into a shared rootdisk
+# PVC, the TDX counterpart of rke2-rootdisk-dv.yaml. Digest-suffixed name: a
+# bumped image gets a fresh PVC alongside the old one.
+#
+# The TDX lane boots from this PVC by name (tdx-rke2-image-refs.rootPvc). It
+# used to be created out of band, so the ConfigMap named a volume nothing in
+# this repo produced; that is what left the lane pinned to a 2026-07-24 image
+# whose paired c8s ref predates the get-kubeconfig --image-manifest flag.
+#
+# Concurrency: same as the SNP import — local-path cannot do ROX, but many VMs
+# mount this RWO PVC at once provided each VM's disk sets readonly:true.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: c8s-root-a5772eb65e29
+  namespace: confai-images
+  annotations:
+    # mandatory: local-path is WFFC and KubeVirt won't schedule the VMI until
+    # the DV is Ready — bind-immediate breaks the deadlock
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+  labels:
+    app.kubernetes.io/part-of: confai
+    app.kubernetes.io/component: shared-rootdisk
+    confai.confidential.ai/source-digest-sha256: "a5772eb65e29"
+spec:
+  source:
+    registry:
+      url: "docker://ghcr.io/confidential-dot-ai/node-guest-base@sha256:a5772eb65e294197259bbe596a0e777e9203fe19aae7b473b7547d769936748d"
+      pullMethod: pod
+      secretRef: ghcr-pull
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: local-path
+    volumeMode: Filesystem
+    resources:
+      requests:
+        storage: 4Gi # disk.raw is ~2.81 GiB; DV spec immutable — resize = new name
