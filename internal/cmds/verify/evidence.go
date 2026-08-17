@@ -65,8 +65,9 @@ type evidence struct {
 	// leaf is the CDS-issued leaf the evidence speaks for: the serving cert in
 	// cert and discovery modes, the transcript-committed mesh leaf in
 	// attest-pq mode, nil otherwise. Kept so --mesh-ca can check what CDS
-	// actually signed. Every leaf set here has passed authenticateLeafBody
-	// AND one of the three body-authentication backstops below.
+	// actually signed. Every leaf set here has passed body authentication
+	// (authenticateLeafBody, or verifyCommittedChain on attest-pq) AND one of
+	// the body-authentication backstops below.
 	leaf *x509.Certificate
 	// leafBody is what authenticateLeafBody proved about the leaf's body
 	// fields: BodySelfSigned (authenticated by its own attested key) or
@@ -74,9 +75,20 @@ type evidence struct {
 	// leaf is nil.
 	leafBody certutil.BodyAuthentication
 	// leafChainVerified is true when the leaf's issuing chain was verified
-	// while gathering — the transcript-committed CA on attest-pq, or the
-	// --mesh-ca bundle elsewhere — so a CA-vouched body is authenticated.
+	// against the operator-pinned --mesh-ca bundle while gathering, so a
+	// CA-vouched body is authenticated by an anchor the operator chose.
 	leafChainVerified bool
+	// leafChainDerived is true when the leaf's issuing chain was checked
+	// against the CA the responder committed into its own attestation
+	// transcript (attest-pq). The transcript binds those CA bytes to the
+	// hardware evidence, but the anchor is responder-chosen: it is not a
+	// pinned trust anchor and the verdict must never treat it as one.
+	leafChainDerived bool
+	// publicTLSMode is the discovery document's declared front-door TLS mode
+	// ("" when not discovery-sourced): "cds" serves the attestation-bound
+	// CDS leaf, "webpki" an operator WebPKI certificate the evidence says
+	// nothing about.
+	publicTLSMode string
 	// leafKeyProven is true when a live TLS handshake with the leaf completed,
 	// which proves the presenter holds the attested private key. A forged body
 	// carrying someone else's attested SubjectPublicKeyInfo cannot complete
@@ -362,7 +374,9 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	// come before anything from the leaf is surfaced. The hardware evidence
 	// itself is verified downstream against erd; a failure here means the
 	// responder does not hold the committed identity, whatever its evidence
-	// says.
+	// says. The chain check anchors to the CA the responder committed — a
+	// derived anchor, recorded as such: only --mesh-ca turns it into a
+	// verified chain (applyChainAnchorPolicy).
 	if err := verifyIdentityProof(r.IdentityProof, leaf, erd); err != nil {
 		return nil, &securityError{err: err}
 	}
@@ -375,18 +389,18 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(leaf)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(leaf)
 	return &evidence{
-		platform:          platformOrDefault(r.Platform),
-		rawEvidence:       r.Evidence,
-		erd:               erd,
-		fresh:             fresh,
-		source:            source,
-		bindingNote:       "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
-		leaf:              leaf,
-		leafChainVerified: true,
-		sandboxID:         sandboxID,
-		sandboxErr:        sandboxErr,
-		workload:          workload,
-		workloadErr:       workloadErr,
+		platform:         platformOrDefault(r.Platform),
+		rawEvidence:      r.Evidence,
+		erd:              erd,
+		fresh:            fresh,
+		source:           source,
+		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		leaf:             leaf,
+		leafChainDerived: true,
+		sandboxID:        sandboxID,
+		sandboxErr:       sandboxErr,
+		workload:         workload,
+		workloadErr:      workloadErr,
 	}, nil
 }
 

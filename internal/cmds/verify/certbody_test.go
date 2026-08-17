@@ -338,6 +338,18 @@ func TestDescribeCertBody(t *testing.T) {
 		!strings.Contains(got, "validity enforced") {
 		t.Errorf("chain-verified note = %q", got)
 	}
+	// The attest-pq transcript binds the exact body bytes, so validity is
+	// genuinely enforced — but the note must not claim a verified chain: the
+	// anchor is responder-chosen, which the chain-anchor / not-proven lines
+	// carry.
+	derived := &evidence{leafChainDerived: true}
+	dgot := describeCertBody(config{}, derived)
+	if !strings.Contains(dgot, "identity transcript") || !strings.Contains(dgot, "validity enforced") {
+		t.Errorf("derived-chain note = %q", dgot)
+	}
+	if strings.Contains(dgot, "verified issuing chain") {
+		t.Errorf("derived-chain note = %q: a responder-chosen anchor is not a verified chain", dgot)
+	}
 	// A live handshake proves possession of the attested key, which is what
 	// stands behind an un-chained body there — say that, not "validity
 	// enforced": NotAfter inside an unsigned body bounds nothing on its own.
