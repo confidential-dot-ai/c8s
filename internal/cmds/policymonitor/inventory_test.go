@@ -105,6 +105,72 @@ func TestKataInventoryRemoveKeepsAdmissionRecord(t *testing.T) {
 	}
 }
 
+// An unresolved digest fails the whole answer: serving the siblings that did
+// resolve would pass a subset off as the sandbox's whole image set.
+func TestKataInventoryRefusesUnresolvedDigest(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("resolved"), pmDigestApp, nil)
+	b.record(testCID("unresolved"), "", nil)
+
+	if _, _, _, err := b.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("served a subset of the sandbox's images as if it were the whole set")
+	}
+}
+
+// A container recorded without a digest closes the sandbox's answer; a later
+// record that resolves that same container ID reopens it.
+func TestKataInventoryUnresolvedClearsWhenResolved(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("ctr"), "", nil)
+
+	if _, _, _, err := b.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("an unresolved container must fail the whole answer")
+	}
+
+	b.record(testCID("ctr"), pmDigestApp, nil)
+	digests, _, known, err := b.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("resolving the container must reopen the answer: known=%v err=%v", known, err)
+	}
+	if !slices.Contains(digests, pmDigestApp) {
+		t.Fatalf("digests = %v, want the newly-resolved digest present", digests)
+	}
+}
+
+// unresolved is keyed on the container ID: one container resolving must not
+// clear another container's unresolved marker.
+func TestKataInventoryUnresolvedIsKeyedOnContainerID(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("who"), "", nil)
+	b.record(testCID("other"), pmDigestApp, nil)
+
+	if _, _, _, err := b.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("a resolved namesake cleared another container's unresolved marker")
+	}
+
+	b.record(testCID("who"), pmDigestSidecar, nil)
+	if _, _, _, err := b.DigestsForSandbox(pmSandboxID); err != nil {
+		t.Fatalf("resolving the container itself must reopen the answer: %v", err)
+	}
+}
+
+// A removed container with an unresolved digest stays unresolved: it still ran,
+// so the sandbox's answer stays closed even if its bundle goes away.
+func TestKataInventoryRemoveKeepsUnresolved(t *testing.T) {
+	b := newAdmissionInventory()
+	b.recordSandboxID(pmSandboxID)
+	b.record(testCID("gone"), "", nil)
+
+	b.remove(testCID("gone"))
+
+	if _, _, _, err := b.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("a removed unresolved container must keep the sandbox's answer closed")
+	}
+}
+
 // The advertise host CDS dials back: explicit config wins, and a host it could
 // never reach is rejected where it is configured rather than at issuance.
 func TestSandboxDigestsHost(t *testing.T) {

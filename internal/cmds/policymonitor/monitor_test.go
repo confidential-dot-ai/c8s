@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,38 @@ func TestHandleNewContainer_WorkloadArgvMismatchKills(t *testing.T) {
 	}
 }
 
+// A container denied on its argv is likewise recorded: it ran (briefly)
+// before the kill landed, so /digests must list it too.
+func TestHandleNewContainer_ArgvDeniedRecordedInInventory(t *testing.T) {
+	floor := strings.Repeat("a", 64)
+	wl := strings.Repeat("b", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + floor})
+	m.overlay.apply(exactEntrypointOverlay(t, "sha256:"+wl, []string{"/bin/app"}), 1)
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
+
+	cid := testCID("argv-denied-recorded")
+	writeConfigJSONArgs(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type": "container",
+		"io.kubernetes.cri.image-name":     "ghcr.io/tenant/app@sha256:" + wl,
+	}, []string{"/bin/evil"})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	calls := killer.snapshot()
+	if len(calls) != 1 || calls[0] != cid {
+		t.Fatalf("non-matching argv should kill workload container, got: %+v", calls)
+	}
+
+	digests, _, known, err := m.inventory.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if !slices.Contains(digests, "sha256:"+wl) {
+		t.Fatalf("digests = %v, want the argv-denied container recorded", digests)
+	}
+}
+
 // The overlay honors epoch anti-rollback: a lower version is ignored, so the
 // argv policy applied at the higher version still governs.
 func TestPolicyOverlayAntiRollback(t *testing.T) {
@@ -274,12 +307,16 @@ func TestPolicyOverlayTrustsFirstVersionAfterRestart(t *testing.T) {
 	}
 }
 
-func TestHandleNewContainer_DeniedDigest(t *testing.T) {
+// A denied container is still recorded in the inventory — it ran (briefly)
+// before the kill landed, and under-reporting is the attack.
+func TestHandleNewContainer_DeniedDigestRecorded(t *testing.T) {
 	allowed := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	denied := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + allowed})
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
 
-	cid := testCID("denied-digest")
+	cid := testCID("denied-digest-recorded")
 	writeConfigJSON(t, watchDir, cid, map[string]string{
 		"io.kubernetes.cri.container-type": "container",
 		"io.kubernetes.cri.image-name":     "ghcr.io/evil/badimage@sha256:" + denied,
@@ -293,6 +330,92 @@ func TestHandleNewContainer_DeniedDigest(t *testing.T) {
 	}
 	if calls[0] != cid {
 		t.Errorf("container ID = %q, want %q", calls[0], cid)
+	}
+
+	digests, _, known, err := m.inventory.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if !slices.Contains(digests, "sha256:"+denied) {
+		t.Fatalf("denied container's digest = %v, want the denied container recorded", digests)
+	}
+}
+
+// A passing (allowed) container is reported: the inventory records what ran,
+// and an admitted container's digest must land in /digests.
+func TestHandleNewContainer_AllowedContainerRecordedInInventory(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:" + digest})
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
+
+	cid := testCID("allowed-recorded")
+	writeConfigJSON(t, watchDir, cid, map[string]string{
+		"io.kubernetes.cri.container-type": "container",
+		"io.kubernetes.cri.image-name":     "ghcr.io/confidential-dot-ai/assam@sha256:" + digest,
+	})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 0 {
+		t.Fatalf("unexpected kill calls: %+v", calls)
+	}
+
+	digests, _, known, err := m.inventory.DigestsForSandbox(pmSandboxID)
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if !slices.Contains(digests, "sha256:"+digest) {
+		t.Fatalf("digests = %v, want the allowed container recorded", digests)
+	}
+}
+
+// A container denied for having a reference that is not digest-pinned is
+// recorded as unresolved, closing the sandbox's answer (the container ran, but
+// we cannot say what image it was).
+func TestHandleNewContainer_NoDigestReferenceRecordedUnresolved(t *testing.T) {
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
+
+	cid := testCID("no-ref-recorded")
+	// Annotations carry an unrelated key only: the spec is complete input
+	// (non-partial), is not a sandbox, and carries no way to pull a digest.
+	writeConfigJSON(t, watchDir, cid, map[string]string{"unrelated": "x"})
+
+	m.handleNewContainer(context.Background(), filepath.Join(watchDir, cid))
+
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected deny+kill on missing digest-pinned reference, got %d calls: %+v", len(calls), calls)
+	}
+
+	if _, _, _, err := m.inventory.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("a container with no resolved digest must fail the whole answer")
+	}
+}
+
+// A container whose config.json is unreadable is recorded as unresolved: the
+// bundle exists, kata will run it, and we cannot determine its image.
+func TestHandleNewContainer_UnreadableConfigRecordedUnresolved(t *testing.T) {
+	m, killer, watchDir := newTestMonitor(t, []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	m.inventory = newAdmissionInventory()
+	m.inventory.recordSandboxID(pmSandboxID)
+	m.configReadDeadline = 50 * time.Millisecond
+
+	cid := testCID("unreadable-recorded")
+	dir := filepath.Join(watchDir, cid)
+	if err := os.MkdirAll(filepath.Join(dir, "config.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.handleNewContainer(context.Background(), dir)
+
+	if calls := killer.snapshot(); len(calls) != 1 {
+		t.Fatalf("expected deny+kill on present-but-unreadable config.json, got %d calls: %+v", len(calls), calls)
+	}
+
+	if _, _, _, err := m.inventory.DigestsForSandbox(pmSandboxID); err == nil {
+		t.Fatal("a container with no resolved digest must fail the whole answer")
 	}
 }
 
