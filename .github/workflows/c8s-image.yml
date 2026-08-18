@@ -71,7 +71,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ inputs.confos_ref || 'e29cd92e24081432d11e93742a2eab2970b87ff9' }} # pin: + initrd SNP operator-key arm (confos#106) and per-lineage kernel snapshot lockfiles (confos#105); attest-gpu serves SNP (#102/#103)
+  CONFOS_REF: ${{ inputs.confos_ref || 'cf544e9fa9f035dc17f87d5e92ec9732ae247660' }} # pin: v0.4.3 — SNP operator-key initrd arm (confos#106), per-lineage snapshot lockfiles (confos#105), attest-gpu serves SNP (confos#102/#103); one deliberate measurement roll
   ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
@@ -199,7 +199,7 @@ jobs:
           path: |
             confidential-os-builder/output/gpu/staged
             confidential-os-builder/output/gpu/stage.stamp
-          key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
+          key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','c8s/node-guest-image/kernel/config-x86_64-*.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
 
       - name: Cache kernel-builder tools tree
         # mkosi.output (image + stamp) is what the kernel short-circuit path
@@ -212,17 +212,16 @@ jobs:
 
       - name: Cache kernel
         # Every input of confos's kernel fingerprint, or the cache is rejected
-        # and rebuilt (hashFiles has no brace expansion). The snapshot lockfile
-        # rides the cache: the build rewrites it with the fragment-resolved
-        # config and fingerprints THAT, so restoring output/kernel without it
-        # can never match. The key hashes the committed snapshot (evaluated at
-        # restore, before the rewrite), which is stable per confos pin.
+        # and rebuilt (hashFiles has no brace expansion). The lineage snapshot
+        # lockfiles (written beside the fragments here since confos v0.4.3)
+        # ride the cache until they are committed in this repo, at which point
+        # the cached copy becomes redundant.
         uses: actions/cache@v5
         with:
           path: |
             confidential-os-builder/output/kernel
-            confidential-os-builder/kernel/config-x86_64.snapshot
-          key: ${{ runner.os }}-kernel-v3-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','confidential-os-builder/kernel/config-x86_64.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
+            c8s/node-guest-image/kernel/config-x86_64-*.snapshot
+          key: ${{ runner.os }}-kernel-v3-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','c8s/node-guest-image/kernel/config-x86_64-*.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt') }}
 
       - name: Cache base image tools
         uses: actions/cache@v5
