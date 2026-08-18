@@ -57,23 +57,34 @@ jobs:
         run: go install meat.dev/cmd/meat@latest
 
       - name: Abridge the PR diff
+        id: meat
         env:
           # Real keys (when the secrets exist) take precedence; empty values
-          # fall through to the runner's managed LLM gateway.
+          # fall through to the runner's managed LLM gateway. Not every
+          # runner that picks this job up has the gateway, so a missing-LLM
+          # failure degrades to a skip (with a notice) instead of a red row —
+          # job-level continue-on-error already keeps this non-blocking, but
+          # it cannot keep the check GREEN.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
         run: |
-          "$(go env GOPATH)/bin/meat" -json "$RANGE" > meat.json
+          if "$(go env GOPATH)/bin/meat" -json "$RANGE" > meat.json 2> meat.err; then
+            echo "ran=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::meat advisory skipped: $(head -c 300 meat.err)"
+          fi
 
       - name: Save meat cache
-        if: steps.meat-cache.outputs.persisted != 'true'
+        if: steps.meat-cache.outputs.persisted != 'true' && steps.meat.outputs.ran == 'true'
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.meat
           key: meat-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Post reading diff
+        if: steps.meat.outputs.ran == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
