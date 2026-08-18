@@ -58,18 +58,21 @@ func IdentityTranscriptHash(pub PublicKey, nonce, leafDER, caDER []byte) ([]byte
 }
 
 // LBTranscriptHash commits the client nonce, exact outer serving leaf,
-// exact mesh leaf, and issuing mesh CA to one SHA-384 value suitable for TEE
-// report_data — the attest-lb binding for clients that ride ordinary nginx
-// TLS:
+// exact mesh leaf, issuing mesh CA, and the configured upstream destination
+// to one SHA-384 value suitable for TEE report_data — the attest-lb binding
+// for clients that ride ordinary nginx TLS:
 //
-//	SHA-384( LP("c8s/attest-lb/v1") || LP(nonce) ||
+//	SHA-384( LP("c8s/attest-lb/v2") || LP(nonce) ||
 //	         LP(SHA-256(serving_leaf_DER)) || LP(SHA-256(mesh_leaf_DER)) ||
-//	         LP(SHA-256(mesh_CA_DER)) )
+//	         LP(SHA-256(mesh_CA_DER)) || LP(upstream) )
 //
 // A client recomputes it from the exact leaf it observed on the connection
 // being authorized, so a response relayed through a different serving leaf
-// fails even when both leaves share an issuer.
-func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte, error) {
+// fails even when both leaves share an issuer. upstream is the canonical base
+// URL the LB forwards decrypted traffic to (empty when it forwards nowhere);
+// the client pins it out of band, so a control plane that repoints the front
+// door changes the transcript and fails verification.
+func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte, upstream string) ([]byte, error) {
 	if len(nonce) != identityNonceBytes {
 		return nil, fmt.Errorf("overenc: lb transcript nonce must be %d bytes, got %d", identityNonceBytes, len(nonce))
 	}
@@ -87,6 +90,7 @@ func LBTranscriptHash(nonce, servingLeafDER, meshLeafDER, caDER []byte) ([]byte,
 		servingHash[:],
 		meshHash[:],
 		caHash[:],
+		[]byte(upstream),
 	} {
 		var err error
 		if encoded, err = appendLengthPrefixed(encoded, field); err != nil {

@@ -64,8 +64,9 @@ func TestLBTranscriptHashBindsEveryField(t *testing.T) {
 	serving := []byte("serving-der")
 	leaf := []byte("leaf-der")
 	ca := []byte("ca-der")
+	upstream := "http://c8s-infer.c8s-system.svc.cluster.local:8000"
 
-	base, err := LBTranscriptHash(nonce, serving, leaf, ca)
+	base, err := LBTranscriptHash(nonce, serving, leaf, ca, upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,18 +77,20 @@ func TestLBTranscriptHashBindsEveryField(t *testing.T) {
 	tests := []struct {
 		name                     string
 		nonce, serving, leaf, ca []byte
+		upstream                 string
 	}{
-		{name: "nonce", nonce: bytes.Repeat([]byte{0x66}, identityNonceBytes), serving: serving, leaf: leaf, ca: ca},
-		{name: "serving leaf", nonce: nonce, serving: []byte("other-serving"), leaf: leaf, ca: ca},
-		{name: "mesh leaf", nonce: nonce, serving: serving, leaf: []byte("other-leaf"), ca: ca},
-		{name: "ca", nonce: nonce, serving: serving, leaf: leaf, ca: []byte("other-ca")},
+		{name: "nonce", nonce: bytes.Repeat([]byte{0x66}, identityNonceBytes), serving: serving, leaf: leaf, ca: ca, upstream: upstream},
+		{name: "serving leaf", nonce: nonce, serving: []byte("other-serving"), leaf: leaf, ca: ca, upstream: upstream},
+		{name: "mesh leaf", nonce: nonce, serving: serving, leaf: []byte("other-leaf"), ca: ca, upstream: upstream},
+		{name: "ca", nonce: nonce, serving: serving, leaf: leaf, ca: []byte("other-ca"), upstream: upstream},
+		{name: "upstream", nonce: nonce, serving: serving, leaf: leaf, ca: ca, upstream: "http://attacker-svc.attacker.svc.cluster.local:8000"},
 		// Swapping the serving and mesh leaves must change the hash: the
 		// per-field positions are load-bearing, not just the field set.
-		{name: "serving/mesh swap", nonce: nonce, serving: leaf, leaf: serving, ca: ca},
+		{name: "serving/mesh swap", nonce: nonce, serving: leaf, leaf: serving, ca: ca, upstream: upstream},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := LBTranscriptHash(tt.nonce, tt.serving, tt.leaf, tt.ca)
+			got, err := LBTranscriptHash(tt.nonce, tt.serving, tt.leaf, tt.ca, tt.upstream)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,7 +115,7 @@ func TestLBTranscriptHashValidatesShape(t *testing.T) {
 		{name: "ca empty", nonce: nonce, serving: []byte{1}, leaf: []byte{2}, wantErr: "lb transcript requires serving leaf, mesh leaf, and CA certificates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := LBTranscriptHash(tc.nonce, tc.serving, tc.leaf, tc.ca)
+			_, err := LBTranscriptHash(tc.nonce, tc.serving, tc.leaf, tc.ca, "http://upstream:8000")
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
@@ -134,6 +137,7 @@ func TestLBTranscriptGoldenVectors(t *testing.T) {
 		ServingLeafB64 string `json:"serving_leaf_der_b64"`
 		MeshLeafB64    string `json:"mesh_leaf_der_b64"`
 		MeshCAB64      string `json:"mesh_ca_der_b64"`
+		Upstream       string `json:"upstream"`
 		ReportDataB64  string `json:"report_data_b64"`
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
@@ -151,7 +155,7 @@ func TestLBTranscriptGoldenVectors(t *testing.T) {
 	}
 	for _, v := range vectors {
 		t.Run(v.Description, func(t *testing.T) {
-			got, err := LBTranscriptHash(decode(v.NonceB64), decode(v.ServingLeafB64), decode(v.MeshLeafB64), decode(v.MeshCAB64))
+			got, err := LBTranscriptHash(decode(v.NonceB64), decode(v.ServingLeafB64), decode(v.MeshLeafB64), decode(v.MeshCAB64), v.Upstream)
 			if err != nil {
 				t.Fatal(err)
 			}

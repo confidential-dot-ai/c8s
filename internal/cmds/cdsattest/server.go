@@ -8,8 +8,8 @@
 // endpoint and then talk to it over a post-quantum over-encrypted channel that
 // terminates inside the LB's enclave — independent of whatever TLS terminator
 // sits in front of it. attest-lb binds fresh evidence to the exact serving
-// leaf for native clients that ride ordinary nginx TLS instead. See
-// c8s-verify-js/PROTOCOL.md.
+// leaf and the configured upstream destination for native clients that ride
+// ordinary nginx TLS instead. See c8s-verify-js/PROTOCOL.md.
 package cdsattest
 
 import (
@@ -125,6 +125,10 @@ const (
 // reconstructed request to the real backend (see backend.go).
 type Backend interface {
 	Forward(ctx context.Context, req types.TunnelRequest) (types.TunnelResponse, error)
+	// UpstreamIdentity is the canonical base URL Forward sends plaintext to,
+	// committed into the attest-lb transcript; "" when the backend forwards
+	// nowhere.
+	UpstreamIdentity() string
 }
 
 // Config configures the sidecar server.
@@ -502,7 +506,8 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce)
+	upstream := s.backend.UpstreamIdentity()
+	reportData, proof, err := identity.bindServingLeaf(servingLeafDER, nonce, upstream)
 	if err != nil {
 		s.log.Error("bind serving leaf", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "serving-leaf binding failed")
@@ -526,6 +531,7 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		CDSCertPEM:        string(identity.bundlePEM),
 		IdentityProof:     proof,
 		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
+		Upstream:          upstream,
 	})
 }
 

@@ -5,7 +5,8 @@
     "serving_leaf_der_b64": "oKCgoKCgoKA=",
     "mesh_leaf_der_b64": "sbGxsbGxsbE=",
     "mesh_ca_der_b64": "wsLCwsLCwsI=",
-    "report_data_b64": "c7jCsDEm+eu6BEGEm7GMIkzfG2K1e68kjEuhiXDZQDcKfQ8dgjlBZj+qn+OhhLIe"
+    "upstream": "http://c8s-infer.c8s-system.svc.cluster.local:8000",
+    "report_data_b64": "ZTVvbLZGqCm+NmF1bVVVMOYpk9EtM2Src9N3WK+7UzpLae2Y9zIBlWoZUrHcqM7r"
   },
   {
     "description": "ascii DER placeholders, distinct lengths",
@@ -13,7 +14,8 @@
     "serving_leaf_der_b64": "c2VydmluZy1sZWFmLWRlcg==",
     "mesh_leaf_der_b64": "bWVzaC1sZWFmLWRlcg==",
     "mesh_ca_der_b64": "bWVzaC1jYS1kZXI=",
-    "report_data_b64": "LTuGpmM9qbEUCqWy1qGCYcMof8Yu+iI2ISbyspGrtRVOmP5fr8J4wFQmI3uAUnhF"
+    "upstream": "https://vllm-router-service.vllm.svc.cluster.local:8443",
+    "report_data_b64": "S+F8OyValdkXBn9VXP1X3ATnGRS6nlCGev3FdXARvT6jkggQCo+Jx29z6nbcVGx9"
   },
   {
     "description": "identical serving and mesh leaf bytes still hash distinct positions",
@@ -21,6 +23,16 @@
     "serving_leaf_der_b64": "c2FtZS1kZXI=",
     "mesh_leaf_der_b64": "c2FtZS1kZXI=",
     "mesh_ca_der_b64": "aXNzdWVyLWRlcg==",
-    "report_data_b64": "ef1AXTZcVYVpvHcr92+B03bYfPQ/Y1tsdcGQ59repycHoeY3zNVIAch0BK3yIZQz"
+    "upstream": "http://c8s-infer.c8s-system.svc.cluster.local:8000",
+    "report_data_b64": "rD2srWRwS+87JhKSAIWdRka5qMi4M8HchVN84ixuVYOecx0LQoqe6LMIWfmlaC3P"
+  },
+  {
+    "description": "empty upstream (attestation-only echo backend)",
+    "nonce_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "serving_leaf_der_b64": "ZWNoby1zZXJ2aW5nLWRlcg==",
+    "mesh_leaf_der_b64": "ZWNoby1tZXNoLWRlcg==",
+    "mesh_ca_der_b64": "ZWNoby1jYS1kZXI=",
+    "upstream": "",
+    "report_data_b64": "xcSMxbzHYMcOqfDujwhl1gUDs1nmye8g8lHs3EFTSTStu1fbWrWukca0yj0QE61j"
   }
 ]

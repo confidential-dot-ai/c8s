@@ -42,6 +42,9 @@ var (
 	_ Backend = (*HTTPBackend)(nil)
 )
 
+// UpstreamIdentity implements Backend: echo forwards nowhere.
+func (EchoBackend) UpstreamIdentity() string { return "" }
+
 // Forward implements Backend.
 func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.TunnelResponse, error) {
 	msg := fmt.Sprintf("LB enclave received %d bytes over the over-encrypted channel for %s %s: %q",
@@ -62,6 +65,9 @@ type HTTPBackend struct {
 	base   string // upstream base URL, e.g. http://vllm-router-service.vllm.svc.cluster.local
 	client *http.Client
 }
+
+// UpstreamIdentity implements Backend.
+func (b *HTTPBackend) UpstreamIdentity() string { return b.base }
 
 // defaultUpstreamTimeout bounds a single forwarded request to the upstream
 // backend (connect + headers + body) when HTTPBackendOptions.Timeout is unset.

@@ -210,7 +210,9 @@ spec:
             - --mesh-identity-key-file={{ .Values.tlsLb.tlsMountPath }}/key.pem
             - --mesh-identity-ca-file={{ .Values.tlsLb.tlsMountPath }}/ca.pem
             # Terminate over-encryption here and forward to the same workload
-            # backend nginx proxies to. An http upstream is plaintext at the
+            # backend nginx proxies to; attest-lb commits this exact value
+            # into its transcript, so a client pinning a different destination
+            # rejects the front door. An http upstream is plaintext at the
             # app layer; pointed at a headless Service (an adopted workload),
             # the node mesh wraps the pod-IP hop in attested mTLS. An https
             # upstream terminates TLS itself and gets the mTLS args below.

@@ -53,6 +53,22 @@ func writeClientKeyPair(t *testing.T) (certPath, keyPath string) {
 	return certPath, keyPath
 }
 
+// The transcript commits UpstreamIdentity verbatim, so it must be the
+// canonical base URL Forward dials: echo names no destination, and a
+// trailing slash cannot fork the binding.
+func TestUpstreamIdentity(t *testing.T) {
+	if got := (EchoBackend{}).UpstreamIdentity(); got != "" {
+		t.Fatalf("echo upstream identity = %q, want empty", got)
+	}
+	hb, err := NewHTTPBackend("http://backend:8000/", HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hb.UpstreamIdentity(); got != "http://backend:8000" {
+		t.Fatalf("upstream identity = %q, want canonical base %q", got, "http://backend:8000")
+	}
+}
+
 // TestNewHTTPBackendTimeouts pins the client timeout fallback and the
 // transport's idle-connection timeout.
 func TestNewHTTPBackendTimeouts(t *testing.T) {

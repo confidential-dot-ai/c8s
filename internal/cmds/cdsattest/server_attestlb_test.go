@@ -113,9 +113,14 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	}
 
 	// Recompute the transcript the way a client does — from the leaf observed
-	// on the connection plus the served mesh chain — and require the hardware
-	// report_data and the ECDSA proof to verify against it.
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	// on the connection, the served mesh chain, and the pinned upstream
+	// destination (empty here: the default echo backend forwards nowhere) —
+	// and require the hardware report_data and the ECDSA proof to verify
+	// against it.
+	if b.Upstream != "" {
+		t.Errorf("upstream = %q, want empty for the echo backend", b.Upstream)
+	}
+	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +148,67 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	}
 }
 
+// The transcript names the plaintext destination: the bundle's report_data
+// commits the configured upstream, so a client pinning any other destination
+// recomputes a different hash and rejects the bundle.
+func TestAttestLBBindsUpstreamDestination(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	certPath, servingDER := writeTestServingLeaf(t)
+	const upstream = "http://c8s-infer.c8s-system.svc.cluster.local:8000"
+	backend, err := NewHTTPBackend(upstream, HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := &capturingProvider{}
+	srv := NewServer(Config{
+		Evidence:             prov,
+		FrontDoorMode:        FrontDoorModeCDS,
+		ServingCertFile:      certPath,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+		Backend:              backend,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var b types.AttestationBundle
+	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Upstream != upstream {
+		t.Fatalf("upstream = %q, want the configured %q", b.Upstream, upstream)
+	}
+
+	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(prov.lastReportData, want) {
+		t.Fatalf("report_data = %x, want lb transcript %x", prov.lastReportData, want)
+	}
+	other, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "http://attacker-svc.attacker.svc:8000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(prov.lastReportData, other) {
+		t.Fatal("report_data matched a transcript naming a different upstream")
+	}
+}
+
 // A pq-transcript signature must never verify against the lb transcript for
 // the same nonce and identity: the domain tags separate the two endpoints.
 func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
@@ -157,7 +223,7 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw)
+	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "")
 	if err != nil {
 		t.Fatal(err)
 	}

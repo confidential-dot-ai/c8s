@@ -30,7 +30,7 @@ const (
 	// mode and rejects the other response shape even if its evidence is
 	// otherwise valid — there is no negotiation, alias, or fallback.
 	BindingAttestPQ = "c8s/attest-pq/v1"
-	BindingAttestLB = "c8s/attest-lb/v1"
+	BindingAttestLB = "c8s/attest-lb/v2"
 
 	// MeshIdentityProofECDSASHA384 is the proof-of-possession algorithm.
 	MeshIdentityProofECDSASHA384 = "ecdsa-sha384"
@@ -53,10 +53,10 @@ type MeshIdentityProof struct {
 // GET /.well-known/c8s/attest-lb?nonce=<b64url>. attest-pq binds report_data
 // to the per-session hybrid key and the mesh identity
 // (overenc.IdentityTranscriptHash); attest-lb binds it to the exact outer
-// serving leaf plus the mesh identity (overenc.LBTranscriptHash) for native
-// clients that ride ordinary nginx TLS. Version carries the endpoint's
-// binding identifier (BindingAttestPQ / BindingAttestLB); a client requires
-// the one its endpoint mode selects.
+// serving leaf, the mesh identity, and the configured upstream destination
+// (overenc.LBTranscriptHash) for native clients that ride ordinary nginx TLS.
+// Version carries the endpoint's binding identifier (BindingAttestPQ /
+// BindingAttestLB); a client requires the one its endpoint mode selects.
 type AttestationBundle struct {
 	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
 	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
@@ -76,6 +76,14 @@ type AttestationBundle struct {
 	// observed on its own TLS connection and verify the transcript with that
 	// value — trusting the served field would let a relay substitute the leaf.
 	ServingLeafSHA256 string `json:"serving_leaf_sha256,omitempty"`
+	// Upstream (attest-lb only) is the canonical upstream base URL the
+	// sidecar committed into report_data — where the front door forwards
+	// decrypted traffic (empty when it forwards nowhere). Informational: the
+	// client MUST verify the transcript against its own out-of-band pinned
+	// destination and treat a mismatch with this served field as fatal —
+	// trusting the served value would let the control plane name any
+	// destination.
+	Upstream string `json:"upstream,omitempty"`
 }
 
 // HandshakeRequest is the body of POST /.well-known/c8s/handshake: the client
