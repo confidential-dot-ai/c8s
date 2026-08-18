@@ -57,6 +57,9 @@ spec:
             {{- range .Values.cds.measurements }}
             - --cds-measurements={{ . }}
             {{- end }}
+            {{- with .Values.minTcb }}
+            - --min-tcb={{ . }}
+            {{- end }}
             {{- range .Values.webhook.extraExcluded }}
             - --exclude-namespaces={{ . }}
             {{- end }}

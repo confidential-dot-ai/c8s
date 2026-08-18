@@ -5506,6 +5506,7 @@ type nriRuntimeConfig struct {
 			Timeout           string   `yaml:"timeout"`
 			AttestationApiURL string   `yaml:"attestation_api_url"`
 			CDSMeasurements   []string `yaml:"cds_measurements"`
+			CDSMinTCB         string   `yaml:"cds_min_tcb"`
 		} `yaml:"pull"`
 		Push struct {
 			PersistPath string `yaml:"persist_path"`
@@ -6981,6 +6982,85 @@ func TestChartOperatorOmitsCDSMeasurementsWhenUnset(t *testing.T) {
 	args := strings.Join(renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, " ")
 	if strings.Contains(args, "--cds-measurements") {
 		t.Errorf("operator carries --cds-measurements with none configured: %s", args)
+	}
+}
+
+// The shipped floor is non-zero and reaches every component that verifies
+// attestation evidence: CDS (issuance), the operator (injected fetchers),
+// the mesh (peers and CDS), the tls-lb allowlist proxy, and the NRI plugin's
+// pull config. Losing any one of them re-opens acceptance of vulnerable
+// firmware on that path.
+func TestChartMinTCBFloorReachesEveryVerifier(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	const floor = "3,0,8,0"
+
+	assertContainerHasArg(t, "cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--min-tcb="+floor)
+	assertContainerHasArg(t, "operator", renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, "--min-tcb="+floor)
+	assertContainerHasArg(t, "allowlist-proxy", renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy").Args, "--min-tcb="+floor)
+
+	meshArgs := renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args
+	i := slices.Index(meshArgs, "--min-tcb")
+	if i < 0 || i+1 >= len(meshArgs) || meshArgs[i+1] != floor {
+		t.Fatalf("ratls-mesh container missing --min-tcb %s\nargs: %v", floor, meshArgs)
+	}
+
+	if got := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker").Allowlist.Pull.CDSMinTCB; got != floor {
+		t.Fatalf("nri boot config cds_min_tcb = %q, want %q", got, floor)
+	}
+}
+
+// An override reaches the same surfaces, so install-time raises land
+// everywhere at once.
+func TestChartMinTCBOverridePropagates(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", `minTcb=4\,0\,28\,0`)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	assertContainerHasArg(t, "cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--min-tcb=4,0,28,0")
+	assertContainerHasArg(t, "operator", renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args, "--min-tcb=4,0,28,0")
+}
+
+// A malformed floor fails the render instead of being silently dropped by one
+// component's parser and not another's.
+func TestChartMinTCBMalformedFailsRender(t *testing.T) {
+	for _, bad := range []string{"3,0,8", "3,0,8,0,1", "3,0,8,256", "x,0,8,0", "3,0,8,"} {
+		out, err := helmTemplate(t, "--set-string", "minTcb="+strings.ReplaceAll(bad, ",", `\,`))
+		if err == nil {
+			t.Fatalf("minTcb=%q rendered; want a validation failure", bad)
+		}
+		if !strings.Contains(out, "kind=min_tcb_malformed") {
+			t.Fatalf("minTcb=%q failure = %v, want kind=min_tcb_malformed", bad, err)
+		}
+	}
+}
+
+// An explicitly emptied floor renders no flag (the components' own
+// development warnings take over) — the shape --force installs produce.
+func TestChartMinTCBEmptyRendersNoFlag(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "minTcb=")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args},
+		{"operator", renderedDeploymentContainer(t, out, "c8s-operator", "operator").Args},
+		{"allowlist-proxy", renderedDeploymentContainer(t, out, "c8s-tls-lb", "allowlist-proxy").Args},
+		{"ratls-mesh", renderedDaemonSetContainer(t, out, "c8s-ratls-mesh", "ratls-mesh").Args},
+	} {
+		if slices.Contains(tc.args, "--min-tcb") || slices.ContainsFunc(tc.args, func(a string) bool {
+			return strings.HasPrefix(a, "--min-tcb=")
+		}) {
+			t.Fatalf("%s carries --min-tcb with an emptied floor: %v", tc.name, tc.args)
+		}
+	}
+	if got := renderedNRIBootConfig(t, out, "c8s-nri-image-policy-worker").Allowlist.Pull.CDSMinTCB; got != "" {
+		t.Fatalf("nri boot config cds_min_tcb = %q, want empty", got)
 	}
 }
 

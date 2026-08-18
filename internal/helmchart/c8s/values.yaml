@@ -70,6 +70,14 @@ imagePullSecrets: []
 ## which fails fast when the Secret is missing.
 imagePullSecret: ""
 
+## Cluster-wide minimum SEV-SNP platform TCB (bootloader,tee,snp,microcode)
+## required of every attestation c8s verifies — CDS issuance, mesh peers, and
+## each component's view of CDS's RA-TLS evidence. A 0 component floors
+## nothing. SEV-SNP only: the attestation-api's TDX request has no minimum-TCB
+## parameter, so the floor is dropped on the TDX path (docs/ratls.md).
+## `c8s install --min-tcb` refuses to lower this without --force.
+minTcb: "3,0,8,0"
+
 ## Chart-wide get-cert behavior for the injected mesh-cert init containers.
 certProvisioning:
   ## How long an init get-cert container retries CDS in-process before failing.

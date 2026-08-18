@@ -201,6 +201,7 @@ allowlist:
 {{- else }}
       []
 {{- end }}
+    cds_min_tcb: {{ $root.Values.minTcb | quote }}
 {{- /* Self-allow the installer image first (load-bearing when
        bootstrapAllowlist.deriveComponents=false, where the floor omits it), then
        add the floor — skipping the installer digest so the map has no

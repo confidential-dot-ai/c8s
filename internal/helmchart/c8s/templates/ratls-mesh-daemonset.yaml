@@ -261,6 +261,10 @@ spec:
             - --measurements
             - {{ .Values.ratlsMesh.measurements | join "," | quote }}
             {{- end }}
+            {{- with .Values.minTcb }}
+            - --min-tcb
+            - {{ . | quote }}
+            {{- end }}
             {{- if gt (int .Values.ratlsMesh.maxConns) 0 }}
             - --max-conns
             - {{ .Values.ratlsMesh.maxConns | quote }}
