@@ -268,7 +268,7 @@ func TestResolveInitDataMeasurementsAttesterUnreachable(t *testing.T) {
 }
 
 func TestApplyInitDataMeasurementsSetsFromDocument(t *testing.T) {
-	raw := testDocument(t, "aabb,ccdd")
+	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
 
@@ -337,18 +337,48 @@ func TestApplyInitDataExplicitMinTCBWins(t *testing.T) {
 	}
 }
 
-// A document with no floor key leaves MinTCB empty: no floor is the warned
-// development shape, not something the guest invents a value for.
-func TestApplyInitDataDocumentWithoutFloorLeavesMinTCBEmpty(t *testing.T) {
+// A document carrying measurements but no floor key is the shape a host
+// writes when it strips the floor from the annotation: refusing it keeps
+// refresh disabled rather than refreshing CDS evidence from any TCB level.
+func TestApplyInitDataRejectsFloorlessMeasurementsDocument(t *testing.T) {
 	raw := testDocument(t, "aabb")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
 
+	recorder := &levelRecorder{}
+	logger := slog.New(recorder)
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	applyInitData(context.Background(), quietLogger(), cfg)
+	applyInitData(context.Background(), logger, cfg)
 
+	if cfg.CDSMeasurements != "" {
+		t.Fatalf("CDSMeasurements = %q, want empty so refresh stays disabled", cfg.CDSMeasurements)
+	}
 	if cfg.MinTCB != "" {
 		t.Fatalf("MinTCB = %q, want empty from a floorless document", cfg.MinTCB)
+	}
+	if got := recorder.levelOf(t, "no TCB floor"); got != slog.LevelError {
+		t.Fatalf("floorless-measurements refusal logged at %v, want error", got)
+	}
+}
+
+// An explicit floor covers a floorless document: the operator pinned the
+// floor out of band, so the document's measurements still deliver.
+func TestApplyInitDataExplicitFloorAdmitsFloorlessDocument(t *testing.T) {
+	raw := testDocument(t, "aabb")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	cfg := &Config{
+		MinTCB:                "3,0,8,0",
+		AttestationServiceURL: attesterServing(t, digest[:]),
+	}
+	applyInitData(context.Background(), quietLogger(), cfg)
+
+	if cfg.CDSMeasurements != "aabb" {
+		t.Fatalf("CDSMeasurements = %q, want it taken from the document", cfg.CDSMeasurements)
+	}
+	if cfg.MinTCB != "3,0,8,0" {
+		t.Fatalf("MinTCB = %q, want the explicit value kept", cfg.MinTCB)
 	}
 }
 
@@ -623,7 +653,7 @@ func shortInitDataWait(t *testing.T, budget, interval time.Duration) {
 // so a single read on the startup path could only ever miss it. The wait has
 // to survive an initially-absent file.
 func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
-	raw := testDocument(t, "aabb,ccdd")
+	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	digest := initdata.Digest(raw)
 	path := pointInitDataAt(t)
 	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
@@ -650,7 +680,7 @@ func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
 // what tampering looks like — the wait has to outlast it rather than call it a
 // verdict on the first read.
 func TestAwaitInitDataMeasurementsOutlastsAPartialWrite(t *testing.T) {
-	raw := testDocument(t, "aabb,ccdd")
+	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	digest := initdata.Digest(raw)
 	path := pointInitDataAt(t)
 	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)
@@ -749,7 +779,7 @@ func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 // The other half of the split: a verifier still coming up is retried, so a slow
 // attestation-service does not cost the guest its pin.
 func TestAwaitInitDataMeasurementsRetriesAnUnavailableVerifier(t *testing.T) {
-	raw := testDocument(t, "aabb,ccdd")
+	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
 	shortInitDataWait(t, 5*time.Second, 10*time.Millisecond)

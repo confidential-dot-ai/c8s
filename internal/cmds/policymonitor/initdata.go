@@ -85,8 +85,7 @@ func applyInitData(ctx context.Context, logger *slog.Logger, cfg *Config) {
 	data, err := resolveInitData(ctx, cfg)
 	switch {
 	case errors.Is(err, errNoInitData):
-		logger.Warn("no init-data document; CDS measurements unset, so allowlist refresh will stay disabled",
-			"path", initdata.GuestDocumentPath)
+		warnNoDocument(logger, cfg, "no init-data document", "path", initdata.GuestDocumentPath)
 		return
 	case err != nil:
 		// One read, so every failure is final here — including one a retry would clear.
@@ -96,12 +95,35 @@ func applyInitData(ctx context.Context, logger *slog.Logger, cfg *Config) {
 	applyInitDataValues(logger, cfg, data)
 }
 
+// warnNoDocument logs an undelivered document's consequence: the values it
+// would have delivered stay unset — unset measurements disable refresh, an
+// unset floor leaves CDS evidence unfloored. At least one is unset whenever
+// applyInitData/awaitInitData ran.
+func warnNoDocument(logger *slog.Logger, cfg *Config, msg string, args ...any) {
+	if cfg.CDSMeasurements == "" {
+		logger.Warn(msg+"; CDS measurements unset, so allowlist refresh will stay disabled", args...)
+		return
+	}
+	logger.Warn(msg+"; TCB floor unset, so CDS evidence from any platform TCB level is accepted (UNSAFE outside development)", args...)
+}
+
 // applyInitDataValues fills the still-unset policy values from a verified
 // document, logging what each key resolves to.
+//
+// A document that would enable refresh (measurements present) but carries no
+// floor key is refused outright: with no explicit floor to win, that is the
+// shape a host writes when it strips the floor from the annotation, and
+// refreshing CDS evidence from any TCB level is worse than no refresh.
 func applyInitDataValues(logger *slog.Logger, cfg *Config, data map[string]string) {
+	measurements, floor := data[initdata.KeyCDSMeasurements], data[initdata.KeyCDSMinTCB]
+	if cfg.CDSMeasurements == "" && cfg.MinTCB == "" && measurements != "" && floor == "" {
+		logger.Error("init-data carries CDS measurements but no TCB floor; refusing the document, so allowlist refresh will stay disabled",
+			"measurements_key", initdata.KeyCDSMeasurements, "floor_key", initdata.KeyCDSMinTCB)
+		return
+	}
 	if cfg.CDSMeasurements == "" {
-		if m := data[initdata.KeyCDSMeasurements]; m != "" {
-			cfg.CDSMeasurements = m
+		if measurements != "" {
+			cfg.CDSMeasurements = measurements
 			logger.Info("CDS measurements taken from the launch-committed init-data document",
 				"key", initdata.KeyCDSMeasurements)
 		} else {
@@ -110,8 +132,8 @@ func applyInitDataValues(logger *slog.Logger, cfg *Config, data map[string]strin
 		}
 	}
 	if cfg.MinTCB == "" {
-		if f := data[initdata.KeyCDSMinTCB]; f != "" {
-			cfg.MinTCB = f
+		if floor != "" {
+			cfg.MinTCB = floor
 			logger.Info("minimum TCB floor taken from the launch-committed init-data document",
 				"key", initdata.KeyCDSMinTCB)
 		} else {
@@ -197,7 +219,7 @@ func awaitInitData(ctx context.Context, logger *slog.Logger, cfg *Config) {
 		}
 		time.Sleep(wait)
 	}
-	logger.Warn("no init-data document within the wait budget; CDS measurements unset, so allowlist refresh will stay disabled",
+	warnNoDocument(logger, cfg, "no init-data document within the wait budget",
 		"path", initdata.GuestDocumentPath, "waited", initDataWaitBudget, "error", lastErr)
 }
 
