@@ -1,0 +1,44 @@
+name: actionlint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install actionlint (checksum-pinned)
+        env:
+          # SHA256 from the v1.7.12 release's checksums.txt (linux_amd64).
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "$SHA256  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+
+      - name: Lint workflows
+        # Ignores clear findings that pre-exist on origin/main (c8s-image.yml's
+        # undeclared workflow_call input; shellcheck hits in the metal e2e
+        # workflows, surfaced by the runners' preinstalled shellcheck) so only
+        # new findings fail the gate.
+        run: |
+          set -euo pipefail
+          ./actionlint \
+            -ignore 'property "gate_intree" is not defined in object type' \
+            -ignore 'SC2006' \
+            -ignore 'SC2013' \
+            -ignore 'SC2015' \
+            -ignore 'SC2016' \
+            -ignore 'SC2034' \
+            -ignore 'SC2086' \
+            -ignore 'SC2129'
