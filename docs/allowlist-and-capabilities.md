@@ -355,8 +355,8 @@ change never requires a guest-image rebuild.
 `c8s allowlist` reads and mutates the allowlist. Reads are unauthenticated (the
 RA-TLS channel provides integrity); writes are signed with the operator key you
 supply via `--operator-key` (or `C8S_OPERATOR_KEY`). Persistent flags: `--url`,
-`--measurements`/`--measurements-file` (RA-TLS pins), `--timeout`,
-`--operator-key`, `-o text|json`, `--insecure`.
+`--measurements`/`--measurements-file` (RA-TLS pins), `--min-tcb` (SNP TCB
+floor), `--timeout`, `--operator-key`, `-o text|json`, `--insecure`.
 
 ```
 c8s allowlist

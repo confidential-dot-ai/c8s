@@ -143,7 +143,7 @@ func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 		return approvingVerify(measurement)(ctx, platform, evidence, p)
 	}
 
-	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, verify)
+	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, nil, verify)
 	if err != nil {
 		t.Fatalf("NewVerifiedHTTPClient: %v", err)
 	}
@@ -166,6 +166,29 @@ func TestNewVerifiedHTTPClient_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestNewVerifiedHTTPClient_ForwardsMinTCB pins the floor reaching the
+// evidence verifier: a discovery check under --min-tcb must present the SNP
+// TCB floor, or a below-floor front door verifies clean.
+func TestNewVerifiedHTTPClient_ForwardsMinTCB(t *testing.T) {
+	servingCert, leaf := plainServingCert(t)
+	challenge := []byte("issuance-challenge")
+	doc := discoveryDoc(t, leaf, challenge, "cds", string(types.PlatformSnp), `{"attestation_report":"fake"}`)
+	lb := fakeLB(t, servingCert, doc)
+
+	floor := &teetypes.SnpTcb{Bootloader: 3, Snp: 8}
+	var got *teetypes.SnpTcb
+	verify := func(ctx context.Context, platform string, evidence json.RawMessage, p localverify.Params) (*teetypes.VerificationResult, error) {
+		got = p.MinTCB
+		return approvingVerify(nil)(ctx, platform, evidence, p)
+	}
+	if _, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, floor, verify); err != nil {
+		t.Fatalf("NewVerifiedHTTPClient: %v", err)
+	}
+	if got == nil || *got != *floor {
+		t.Fatalf("verifier got MinTCB %+v, want %+v", got, floor)
+	}
+}
+
 // TestNewVerifiedHTTPClient_NoDiscovery proves a target without a discovery
 // document (a direct CDS endpoint) signals ErrNoDiscovery so the caller falls
 // back to RA-TLS serving-cert verification.
@@ -173,7 +196,7 @@ func TestNewVerifiedHTTPClient_NoDiscovery(t *testing.T) {
 	srv := httptest.NewTLSServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	_, err := NewVerifiedHTTPClient(context.Background(), srv.URL, nil, approvingVerify(nil))
+	_, err := NewVerifiedHTTPClient(context.Background(), srv.URL, nil, nil, approvingVerify(nil))
 	if !errors.Is(err, ErrNoDiscovery) {
 		t.Fatalf("want ErrNoDiscovery, got: %v", err)
 	}
@@ -202,7 +225,7 @@ func TestNewVerifiedHTTPClient_FailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL,
-				[][]byte{bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)}, tc.verify)
+				[][]byte{bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)}, nil, tc.verify)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("want %v, got: %v", tc.wantErr, err)
 			}
@@ -224,7 +247,7 @@ func TestNewVerifiedHTTPClient_BindsDocCertToConnection(t *testing.T) {
 	doc := discoveryDoc(t, otherLeaf, []byte("challenge"), "cds", string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 	lb := fakeLB(t, servingCert, doc)
 
-	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, approvingVerify(nil))
+	_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, nil, nil, approvingVerify(nil))
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("different tls-lb replica")) {
 		t.Fatalf("want a doc-cert/connection-leaf binding failure, got: %v", err)
 	}
@@ -258,7 +281,7 @@ func TestNewVerifiedHTTPClient_PublicTLSModes(t *testing.T) {
 			doc := discoveryDoc(t, leaf, []byte("challenge"), tc.mode, string(types.PlatformAzSnp), `{"hcl_report":"fake"}`)
 			lb := fakeLB(t, servingCert, doc)
 
-			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, approvingVerify(measurement))
+			_, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, nil, approvingVerify(measurement))
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("NewVerifiedHTTPClient: %v", err)
@@ -285,7 +308,7 @@ func TestNewVerifiedHTTPClient_FailsClosedOnReconnect(t *testing.T) {
 	lb := fakeLB(t, servingCert, doc)
 	measurement := bytes.Repeat([]byte{0x42}, ratls.SNPMeasurementSize)
 
-	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, approvingVerify(measurement))
+	hc, err := NewVerifiedHTTPClient(context.Background(), lb.URL, [][]byte{measurement}, nil, approvingVerify(measurement))
 	if err != nil {
 		t.Fatalf("NewVerifiedHTTPClient: %v", err)
 	}
@@ -331,7 +354,7 @@ func TestNewSingleConnClientConfig(t *testing.T) {
 // outright: the trust model binds attestation to a TLS handshake, which
 // plaintext has none of.
 func TestNewVerifiedHTTPClient_RequiresHTTPS(t *testing.T) {
-	_, err := NewVerifiedHTTPClient(context.Background(), "http://cds.example", nil, approvingVerify(nil))
+	_, err := NewVerifiedHTTPClient(context.Background(), "http://cds.example", nil, nil, approvingVerify(nil))
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("scheme must be https")) {
 		t.Fatalf("want an https-scheme error, got: %v", err)
 	}
@@ -340,7 +363,7 @@ func TestNewVerifiedHTTPClient_RequiresHTTPS(t *testing.T) {
 // TestNewVerifiedHTTPClient_RequiresVerifier proves a nil verifier fails
 // closed at construction rather than skipping evidence verification.
 func TestNewVerifiedHTTPClient_RequiresVerifier(t *testing.T) {
-	_, err := NewVerifiedHTTPClient(context.Background(), "https://cds.example", nil, nil)
+	_, err := NewVerifiedHTTPClient(context.Background(), "https://cds.example", nil, nil, nil)
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("verifier is required")) {
 		t.Fatalf("want a nil-verifier error, got: %v", err)
 	}
@@ -381,7 +404,7 @@ func TestNewVerifiedHTTPClient_RejectsExpiredServingCert(t *testing.T) {
 		return approvingVerify(nil)(ctx, platform, evidence, p)
 	}
 
-	_, err = NewVerifiedHTTPClient(context.Background(), lb.URL, nil, verify)
+	_, err = NewVerifiedHTTPClient(context.Background(), lb.URL, nil, nil, verify)
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("expired")) {
 		t.Fatalf("want an expiry rejection of the attested serving cert, got: %v", err)
 	}

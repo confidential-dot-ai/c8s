@@ -26,6 +26,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // EnvOperatorKey supplies the operator private key when the flag is unset.
@@ -37,6 +38,7 @@ type Options struct {
 	URL              string
 	Measurements     []string
 	MeasurementsFile string
+	MinTCB           string
 	Timeout          time.Duration
 	OperatorKey      string
 	Insecure         bool
@@ -52,6 +54,7 @@ func BindFlags(pf *pflag.FlagSet, o *Options) {
 	pf.StringVar(&o.URL, "url", "", "CDS-issued-TLS tls-lb or direct CDS base URL (required); WebPKI tls-lb URLs are not attestation-bound")
 	pf.StringSliceVar(&o.Measurements, "measurements", nil, "trusted endpoint build ID(s) (repeatable/comma-separated); use the tls-lb value for CDS-issued public TLS or the CDS value for a direct URL; empty trusts any attested build (UNSAFE)")
 	pf.StringVar(&o.MeasurementsFile, "measurements-file", "", "file of trusted endpoint build IDs, one per line")
+	pf.StringVar(&o.MinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode for the endpoint's attestation evidence (SEV-SNP evidence only; TDX evidence carries no such components); empty = no floor")
 	pf.DurationVar(&o.Timeout, "timeout", 15*time.Second, "per-request timeout")
 	pf.StringVar(&o.OperatorKey, "operator-key", "", "operator EC private key PEM file, whose public key is pinned on CDS via --operator-keys (env "+EnvOperatorKey+"); required for writes")
 	pf.BoolVar(&o.Insecure, "insecure", false, "dev/test only: allow a plaintext http:// CDS URL, skipping RA-TLS attestation of CDS")
@@ -108,15 +111,19 @@ func (o *Options) HTTPClient(ctx context.Context) (*http.Client, error) {
 // — the same routing `c8s verify` uses in auto mode. A discovery document that
 // fails verification is a hard error, never a fallback.
 func (o *Options) httpsClient(ctx context.Context, measurements [][]byte) (*http.Client, error) {
+	floor, err := types.ParseMinTcb(o.MinTCB)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --min-tcb: %w", err)
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
-	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, measurements, o.verifyFunc())
+	hc, err := lbdiscovery.NewVerifiedHTTPClient(probeCtx, o.URL, measurements, localverify.SnpTcbFloor(floor), o.verifyFunc())
 	switch {
 	case err == nil:
 		fmt.Fprintln(os.Stderr, "note: target is a tls-lb front door; verified its discovery attestation and bound this session to the attested connection")
 		return hc, nil
 	case errors.Is(err, lbdiscovery.ErrNoDiscovery):
-		return localverify.NewRATLSHTTPClient(measurements, o.verifyFunc(), o.Timeout), nil
+		return localverify.NewRATLSHTTPClient(measurements, localverify.SnpTcbFloor(floor), o.verifyFunc(), o.Timeout), nil
 	default:
 		return nil, err
 	}

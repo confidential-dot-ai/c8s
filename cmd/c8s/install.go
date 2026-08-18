@@ -163,16 +163,21 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 // minTCBPreflight enforces that lowering the chart's shipped TCB floor is a
 // deliberate choice. The floor is the cluster's one defence against evidence
 // from known-vulnerable platform firmware, and lowering it re-opens that on
-// every verification path at once — so a --min-tcb below the shipped default
-// in any component requires --force. An empty --min-tcb leaves the shipped
-// floor in place; a floor at or above the default needs nothing.
-func minTCBPreflight(minTCB string, force bool) (warn string, err error) {
-	if minTCB == "" {
+// every verification path at once — so an effective floor below the shipped
+// default in any component requires --force, whether it comes from --min-tcb
+// or a -f values file. An install that sets neither keeps the shipped floor;
+// a floor at or above the default needs nothing.
+func minTCBPreflight(minTCB string, valuesFiles []string, force bool) (warn string, err error) {
+	effective, origin, err := effectiveMinTCB(minTCB, valuesFiles)
+	if err != nil {
+		return "", err
+	}
+	if origin == "" {
 		return "", nil
 	}
-	floor, err := types.ParseMinTcb(minTCB)
+	floor, err := types.ParseMinTcb(effective)
 	if err != nil {
-		return "", fmt.Errorf("--min-tcb: %w", err)
+		return "", fmt.Errorf("%s: %w", origin, err)
 	}
 	defRaw, err := fs.ReadFile(helmchart.ChartFS, helmchart.ChartRoot+"/values.yaml")
 	if err != nil {
@@ -191,10 +196,40 @@ func minTCBPreflight(minTCB string, force bool) (warn string, err error) {
 	if !minTcbBelow(floor, def) {
 		return "", nil
 	}
-	if !force {
-		return "", fmt.Errorf("--min-tcb %s lowers the chart's shipped TCB floor %s: evidence from platform firmware below %s would be accepted cluster-wide. Raise the floor, or re-run with --force to install with the lower floor anyway", minTCB, vals.MinTCB, vals.MinTCB)
+	setting := fmt.Sprintf("%s %q", origin, effective)
+	if origin == "--min-tcb" {
+		setting = fmt.Sprintf("--min-tcb %s", effective)
 	}
-	return fmt.Sprintf("installing with a TCB floor (%s) below the chart's shipped floor (%s); evidence from weaker platform firmware will be accepted cluster-wide", minTCB, vals.MinTCB), nil
+	if !force {
+		return "", fmt.Errorf("%s lowers the chart's shipped TCB floor %s: evidence from platform firmware below %s would be accepted cluster-wide. Raise the floor, or re-run with --force to install with the lower floor anyway", setting, vals.MinTCB, vals.MinTCB)
+	}
+	return fmt.Sprintf("installing with a TCB floor (%s) below the chart's shipped floor (%s); evidence from weaker platform firmware will be accepted cluster-wide", effective, vals.MinTCB), nil
+}
+
+// effectiveMinTCB resolves the floor an install will render: the --min-tcb
+// flag when set, else the last -f file to set minTcb (later files win,
+// matching helm's merge). origin names the value's source for messages; an
+// empty origin means neither set it and the shipped floor stands. An
+// explicitly emptied minTcb resolves to the zero floor — "no floor" — like
+// any other downgrade.
+func effectiveMinTCB(minTCB string, valuesFiles []string) (value, origin string, err error) {
+	if minTCB != "" {
+		return minTCB, "--min-tcb", nil
+	}
+	for _, f := range valuesFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return "", "", fmt.Errorf("read values file %q: %w", f, err)
+		}
+		var tree map[string]any
+		if err := yaml.Unmarshal(data, &tree); err != nil {
+			return "", "", fmt.Errorf("parse values file %q: %w", f, err)
+		}
+		if v, serr := stringAtPath(tree, "minTcb"); serr == nil {
+			value, origin = v, fmt.Sprintf("values file %q minTcb", f)
+		}
+	}
+	return value, origin, nil
 }
 
 // minTcbBelow reports whether floor accepts evidence def would reject: any
@@ -701,7 +736,7 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
 		}
-		if warn, err := minTCBPreflight(installMinTCB, installForce); err != nil {
+		if warn, err := minTCBPreflight(installMinTCB, installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1975,7 +2010,7 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled); install with --min-tcb below the chart's shipped TCB floor")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled); install with a minTcb (flag or -f values file) below the chart's shipped TCB floor")
 	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,0), enforced on the chart-managed verification paths (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
 	rootCmd.AddCommand(installCmd)
 }

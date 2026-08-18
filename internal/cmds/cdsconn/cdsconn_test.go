@@ -84,6 +84,13 @@ func closedAddr(t *testing.T) string {
 	return addr
 }
 
+func TestHTTPClientRejectsBadMinTCB(t *testing.T) {
+	o := Options{URL: "https://cds.example", MinTCB: "3,0,8", Timeout: time.Second}
+	if _, err := o.HTTPClient(context.Background()); err == nil || !strings.Contains(err.Error(), "--min-tcb") {
+		t.Fatalf("err = %v, want one mentioning --min-tcb", err)
+	}
+}
+
 func TestHTTPClientRejectsBadURL(t *testing.T) {
 	for _, tc := range []struct{ name, url, want string }{
 		{"no host", "https://", "invalid --url"},
@@ -215,7 +222,7 @@ func TestBindFlagsNamesEveryOption(t *testing.T) {
 	var o Options
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	BindFlags(fs, &o)
-	for _, name := range []string{"url", "measurements", "measurements-file", "timeout", "operator-key", "insecure"} {
+	for _, name := range []string{"url", "measurements", "measurements-file", "min-tcb", "timeout", "operator-key", "insecure"} {
 		if fs.Lookup(name) == nil {
 			t.Errorf("--%s is not bound", name)
 		}

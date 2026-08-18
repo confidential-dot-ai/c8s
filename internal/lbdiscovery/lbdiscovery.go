@@ -37,6 +37,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/internal/localverify"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -71,9 +73,11 @@ var ErrNoDiscovery = errors.New("lbdiscovery: target serves no discovery documen
 // Returns [ErrNoDiscovery] when base serves no discovery document, so callers
 // can fall back to direct RA-TLS verification for a non-fronted endpoint.
 //
+// minTCB, when set, floors the discovery evidence's SNP TCB.
+//
 // The issuance challenge is fixed, not a per-request nonce, so freshness is
 // not proven — the same trade-off as `c8s verify` discovery mode.
-func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]byte, verify localverify.VerifyFunc) (*http.Client, error) {
+func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]byte, minTCB *teetypes.SnpTcb, verify localverify.VerifyFunc) (*http.Client, error) {
 	if verify == nil {
 		return nil, fmt.Errorf("lbdiscovery: evidence verifier is required")
 	}
@@ -101,7 +105,7 @@ func NewVerifiedHTTPClient(ctx context.Context, base string, measurements [][]by
 	if err != nil {
 		return nil, err
 	}
-	cert, err := verifyDocument(ctx, data, verify, measurements)
+	cert, err := verifyDocument(ctx, data, verify, measurements, minTCB)
 	if err != nil {
 		return nil, fmt.Errorf("lbdiscovery: discovery document verification failed: %w", err)
 	}
@@ -177,7 +181,7 @@ func fetchDocument(ctx context.Context, client *http.Client, base *url.URL) ([]b
 // SHA-384(cert pubkey ‖ challenge), matching get-cert's issuance binding
 // (reportDataForCSR → ratls.ReportDataForKey), passed as the unpadded 48-byte
 // anchor.
-func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyFunc, measurements [][]byte) (*x509.Certificate, error) {
+func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyFunc, measurements [][]byte, minTCB *teetypes.SnpTcb) (*x509.Certificate, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
@@ -226,6 +230,7 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 	}
 	if _, err := verify(ctx, platform, d.Attestation.Evidence, localverify.Params{
 		ExpectedReportData: erd[:sha512.Size384],
+		MinTCB:             minTCB,
 		Measurements:       measurements,
 	}); err != nil {
 		return nil, err

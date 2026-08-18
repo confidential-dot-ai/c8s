@@ -25,6 +25,19 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
+// The parsed --min-tcb floor must reach the engine's SNP policy shape; the
+// zero floor stays nil so "no floor" is distinguishable from a real one.
+func TestSnpTcbFloor(t *testing.T) {
+	if got := SnpTcbFloor(types.MinTcb{}); got != nil {
+		t.Fatalf("zero floor = %+v, want nil (no floor)", got)
+	}
+	got := SnpTcbFloor(types.MinTcb{Bootloader: 3, Snp: 8})
+	want := teetypes.SnpTcb{Bootloader: 3, Snp: 8}
+	if got == nil || *got != want {
+		t.Fatalf("SnpTcbFloor = %+v, want %+v", got, want)
+	}
+}
+
 // ratlsServingCert mints a self-signed serving cert carrying an az-snp
 // evidence envelope in the RA-TLS extension, with the given validity window.
 func ratlsServingCert(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
@@ -89,7 +102,7 @@ func TestNewRATLSHTTPClientEnforcesPeerCertValidity(t *testing.T) {
 
 	t.Run("expired peer refused before evidence verification", func(t *testing.T) {
 		srv := tlsServer(t, ratlsServingCert(t, now.Add(-2*time.Hour), now.Add(-time.Hour)))
-		hc := NewRATLSHTTPClient(nil, approve, time.Second)
+		hc := NewRATLSHTTPClient(nil, nil, approve, time.Second)
 		_, err := hc.Get(srv.URL)
 		if err == nil || !strings.Contains(err.Error(), "expired") {
 			t.Fatalf("want an expiry rejection, got: %v", err)
@@ -101,7 +114,7 @@ func TestNewRATLSHTTPClientEnforcesPeerCertValidity(t *testing.T) {
 
 	t.Run("valid attested peer accepted", func(t *testing.T) {
 		srv := tlsServer(t, ratlsServingCert(t, now.Add(-time.Hour), now.Add(time.Hour)))
-		hc := NewRATLSHTTPClient(nil, approve, time.Second)
+		hc := NewRATLSHTTPClient(nil, nil, approve, time.Second)
 		resp, err := hc.Get(srv.URL)
 		if err != nil {
 			t.Fatalf("valid attested peer refused: %v", err)
@@ -170,7 +183,7 @@ func TestNewRATLSHTTPClientRejectsCAVouchedPeer(t *testing.T) {
 	}
 
 	srv := tlsServer(t, caSignedRATLSCert(t))
-	hc := NewRATLSHTTPClient(nil, approve, time.Second)
+	hc := NewRATLSHTTPClient(nil, nil, approve, time.Second)
 	_, err := hc.Get(srv.URL)
 	if err == nil || !strings.Contains(err.Error(), "not self-signed") {
 		t.Fatalf("want a body-authentication rejection, got: %v", err)
@@ -203,6 +216,7 @@ func attestedTLSServer(t *testing.T) *httptest.Server {
 type recordingVerify struct {
 	platform     string
 	erd          []byte
+	minTCB       *teetypes.SnpTcb
 	measurements [][]byte
 	hasDeadline  bool
 	err          error
@@ -211,6 +225,7 @@ type recordingVerify struct {
 func (r *recordingVerify) fn(ctx context.Context, platform string, evidence json.RawMessage, p Params) (*teetypes.VerificationResult, error) {
 	r.platform = platform
 	r.erd = p.ExpectedReportData
+	r.minTCB = p.MinTCB
 	r.measurements = p.Measurements
 	_, r.hasDeadline = ctx.Deadline()
 	if r.err != nil {
@@ -225,7 +240,7 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 
 	t.Run("attested peer accepted, policy and deadline forwarded", func(t *testing.T) {
 		rec := &recordingVerify{}
-		client := NewRATLSHTTPClient(measurements, rec.fn, 5*time.Second)
+		client := NewRATLSHTTPClient(measurements, nil, rec.fn, 5*time.Second)
 		resp, err := client.Get(srv.URL)
 		if err != nil {
 			t.Fatalf("GET through the verifying client: %v", err)
@@ -245,9 +260,23 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 		}
 	})
 
+	t.Run("min-TCB floor forwarded", func(t *testing.T) {
+		rec := &recordingVerify{}
+		floor := &teetypes.SnpTcb{Bootloader: 3, Snp: 8}
+		client := NewRATLSHTTPClient(nil, floor, rec.fn, 5*time.Second)
+		resp, err := client.Get(srv.URL)
+		if err != nil {
+			t.Fatalf("GET through the verifying client: %v", err)
+		}
+		resp.Body.Close()
+		if rec.minTCB == nil || *rec.minTCB != *floor {
+			t.Errorf("verifier got MinTCB %+v, want %+v", rec.minTCB, floor)
+		}
+	})
+
 	t.Run("zero verify timeout leaves the context unbounded", func(t *testing.T) {
 		rec := &recordingVerify{}
-		client := NewRATLSHTTPClient(nil, rec.fn, 0)
+		client := NewRATLSHTTPClient(nil, nil, rec.fn, 0)
 		resp, err := client.Get(srv.URL)
 		if err != nil {
 			t.Fatalf("GET through the verifying client: %v", err)
@@ -260,7 +289,7 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 
 	t.Run("verifier rejection fails the handshake", func(t *testing.T) {
 		rec := &recordingVerify{err: errors.New("rejected")}
-		client := NewRATLSHTTPClient(nil, rec.fn, 5*time.Second)
+		client := NewRATLSHTTPClient(nil, nil, rec.fn, 5*time.Second)
 		if _, err := client.Get(srv.URL); err == nil {
 			t.Fatal("a rejected attestation must fail the request")
 		}
@@ -270,7 +299,7 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 		plain := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		defer plain.Close()
 		rec := &recordingVerify{}
-		client := NewRATLSHTTPClient(nil, rec.fn, 5*time.Second)
+		client := NewRATLSHTTPClient(nil, nil, rec.fn, 5*time.Second)
 		if _, err := client.Get(plain.URL); err == nil {
 			t.Fatal("a cert without the RA-TLS extension must fail the request")
 		}
@@ -278,7 +307,7 @@ func TestNewRATLSHTTPClientHandshake(t *testing.T) {
 }
 
 func TestNewRATLSHTTPClientTimeouts(t *testing.T) {
-	client := NewRATLSHTTPClient(nil, (&recordingVerify{}).fn, time.Second)
+	client := NewRATLSHTTPClient(nil, nil, (&recordingVerify{}).fn, time.Second)
 	if client.Timeout != 30*time.Second {
 		t.Errorf("client timeout = %v, want 30s", client.Timeout)
 	}

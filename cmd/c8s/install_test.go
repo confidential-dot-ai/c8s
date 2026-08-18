@@ -1178,30 +1178,83 @@ func TestAppendCvmModeInstallArgsMinTCB(t *testing.T) {
 // in any component — including the all-zero "no floor" — requires --force.
 func TestMinTCBPreflight(t *testing.T) {
 	// Empty leaves the shipped floor in place: no gate, no warning.
-	if warn, err := minTCBPreflight("", false); err != nil || warn != "" {
+	if warn, err := minTCBPreflight("", nil, false); err != nil || warn != "" {
 		t.Fatalf("empty --min-tcb: want no error/warn, got warn=%q err=%v", warn, err)
 	}
 	// At or above the shipped floor needs nothing.
 	for _, ok := range []string{"3,0,8,0", "3,0,8,115", "4,0,28,222", "255,255,255,255"} {
-		if warn, err := minTCBPreflight(ok, false); err != nil || warn != "" {
+		if warn, err := minTCBPreflight(ok, nil, false); err != nil || warn != "" {
 			t.Fatalf("--min-tcb %s: want no error/warn, got warn=%q err=%v", ok, warn, err)
 		}
 	}
 	// Below the shipped floor in any component is a downgrade; the zeroed
 	// floor is the extreme case.
 	for _, below := range []string{"2,0,8,0", "3,0,7,0", "0,0,0,0"} {
-		if _, err := minTCBPreflight(below, false); err == nil {
+		if _, err := minTCBPreflight(below, nil, false); err == nil {
 			t.Fatalf("--min-tcb %s without --force: expected a downgrade error", below)
 		}
-		if warn, err := minTCBPreflight(below, true); err != nil || warn == "" {
+		if warn, err := minTCBPreflight(below, nil, true); err != nil || warn == "" {
 			t.Fatalf("--min-tcb %s with --force: want warn and no error, got warn=%q err=%v", below, warn, err)
 		}
 	}
 	// Malformed never reaches the comparison.
 	for _, bad := range []string{"garbage", "3,0,8", "3,0,8,256"} {
-		if _, err := minTCBPreflight(bad, true); err == nil {
+		if _, err := minTCBPreflight(bad, nil, true); err == nil {
 			t.Fatalf("--min-tcb %s: expected a parse error", bad)
 		}
+	}
+}
+
+// The downgrade gate reads the effective floor, not only the flag: a -f
+// values file that lowers minTcb is the same downgrade and needs the same
+// --force.
+func TestMinTCBPreflightValuesFiles(t *testing.T) {
+	writeValues := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// A values file below the shipped floor errors without --force and warns
+	// with it — the explicitly emptied floor included.
+	for _, body := range []string{`minTcb: "0,0,0,0"`, `minTcb: "2,0,8,0"`, `minTcb: ""`} {
+		f := writeValues(t, body)
+		if _, err := minTCBPreflight("", []string{f}, false); err == nil {
+			t.Fatalf("%s without --force: expected a downgrade error", body)
+		}
+		if warn, err := minTCBPreflight("", []string{f}, true); err != nil || warn == "" {
+			t.Fatalf("%s with --force: want warn and no error, got warn=%q err=%v", body, warn, err)
+		}
+	}
+	// A values file at/above the floor, or one that never mentions minTcb,
+	// needs nothing.
+	for _, body := range []string{`minTcb: "3,0,8,0"`, `minTcb: "4,0,28,222"`, `cds: {replicas: 1}`} {
+		f := writeValues(t, body)
+		if warn, err := minTCBPreflight("", []string{f}, false); err != nil || warn != "" {
+			t.Fatalf("%s: want no error/warn, got warn=%q err=%v", body, warn, err)
+		}
+	}
+	// Later files win, matching helm's merge: the downgrade in the first file
+	// is cancelled by the second.
+	low := writeValues(t, `minTcb: "0,0,0,0"`)
+	high := writeValues(t, `minTcb: "3,0,8,0"`)
+	if warn, err := minTCBPreflight("", []string{low, high}, false); err != nil || warn != "" {
+		t.Fatalf("later file raised the floor: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	if _, err := minTCBPreflight("", []string{high, low}, false); err == nil {
+		t.Fatal("later file lowered the floor: expected a downgrade error")
+	}
+	// The flag outranks every file.
+	if warn, err := minTCBPreflight("3,0,8,0", []string{low}, false); err != nil || warn != "" {
+		t.Fatalf("flag above the floor outranks a lowering file: got warn=%q err=%v", warn, err)
+	}
+	// A malformed file value fails fast with the file named.
+	bad := writeValues(t, `minTcb: "garbage"`)
+	if _, err := minTCBPreflight("", []string{bad}, true); err == nil || !strings.Contains(err.Error(), bad) {
+		t.Fatalf("malformed minTcb in a values file: want an error naming the file, got %v", err)
 	}
 }
 

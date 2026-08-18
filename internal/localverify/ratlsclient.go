@@ -8,17 +8,36 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
+
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// SnpTcbFloor converts a parsed --min-tcb floor into the engine's SNP TCB
+// policy; the zero floor is nil (no floor). The engine floors SNP evidence
+// only — TDX evidence carries no such components.
+func SnpTcbFloor(f types.MinTcb) *teetypes.SnpTcb {
+	if f == (types.MinTcb{}) {
+		return nil
+	}
+	return &teetypes.SnpTcb{
+		Bootloader: f.Bootloader,
+		Tee:        f.Tee,
+		Snp:        f.Snp,
+		Microcode:  f.Microcode,
+	}
+}
 
 // NewRATLSHTTPClient returns an http.Client whose TLS handshake verifies the
 // peer's RA-TLS attestation extension against measurements (empty accepts any
-// attested peer — callers warn). The in-process counterpart of
-// ratls.NewVerifyingHTTPClient, sharing its transport (ratls.HTTPClient).
-// verify is [Verify] in production, a stub in tests; verifyTimeout bounds
-// each handshake's verification, KDS fetch included.
-func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout time.Duration) *http.Client {
+// attested peer — callers warn) and, when minTCB is set, the SNP TCB floor.
+// The in-process counterpart of ratls.NewVerifyingHTTPClient, sharing its
+// transport (ratls.HTTPClient). verify is [Verify] in production, a stub in
+// tests; verifyTimeout bounds each handshake's verification, KDS fetch
+// included.
+func NewRATLSHTTPClient(measurements [][]byte, minTCB *teetypes.SnpTcb, verify VerifyFunc, verifyTimeout time.Duration) *http.Client {
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, //nolint:gosec // attestation, not PKI, authenticates the peer — verified below
@@ -63,6 +82,7 @@ func NewRATLSHTTPClient(measurements [][]byte, verify VerifyFunc, verifyTimeout 
 			}
 			if _, err := verify(ctx, platform, evidence, Params{
 				ExpectedReportData: erd,
+				MinTCB:             minTCB,
 				Measurements:       measurements,
 			}); err != nil {
 				return fmt.Errorf("localverify: peer attestation failed: %w", err)
