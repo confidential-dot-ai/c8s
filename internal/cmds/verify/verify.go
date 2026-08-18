@@ -396,17 +396,38 @@ func demoteToPartial(oc *Outcome, notProven string) {
 	oc.NotProven = append(oc.NotProven, notProven)
 }
 
+// frontDoorAttestedNote states a verified discovery verdict's basis: the
+// live handshake presented the attested serving certificate. It is appended
+// only to a passing verdict — on a refusal the gather-time fact must not
+// read as the verdict's basis.
+const frontDoorAttestedNote = "; the live handshake presented the attested serving certificate"
+
+// frontDoorScopeWarning bounds an attested front door to the observation made.
+const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single tls-lb replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/lbdiscovery)"
+
 // applyFrontDoorPolicy settles what the verdict may claim about the front
 // door's serving key, keying on the live handshake the discovery gather
 // observed. A door presenting the attestation-bound certificate leaves the
-// verdict standing; any other serving key, or no TLS observation at all,
-// leaves the endpoint clients reach unproven.
+// verdict standing, scoped to the one observation made; any other serving
+// key, or no TLS observation at all, leaves the endpoint clients reach
+// unproven. A lying door is named on every verdict shape — partial or failed —
+// so a dominating verification failure never buries the signal.
 func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
 	switch ev.frontDoor {
+	case frontDoorAttested:
+		if oc.Verified {
+			oc.Binding += frontDoorAttestedNote
+			oc.Warnings = append(oc.Warnings, frontDoorScopeWarning)
+		}
 	case frontDoorOther:
-		demoteToPartial(oc, fmt.Sprintf(
-			"the front door's live TLS handshake presented serving certificate sha256 %s, not the sha256 %s this evidence attests — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound",
-			ev.frontDoorCertSHA256, ev.certSHA256))
+		digests := fmt.Sprintf(
+			"the front door's live TLS handshake presented serving certificate sha256 %s, not the sha256 %s this evidence attests",
+			ev.frontDoorCertSHA256, ev.certSHA256)
+		if !oc.Verified {
+			oc.Error += "; " + digests + " — the TLS endpoint clients reach is not attestation-bound"
+			return
+		}
+		demoteToPartial(oc, digests+" — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
 	case frontDoorUnobserved:
 		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 	}

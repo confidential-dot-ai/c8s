@@ -164,8 +164,17 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 		if ev.frontDoor != frontDoorAttested {
 			t.Errorf("frontDoor = %v, want attested", ev.frontDoor)
 		}
-		if !strings.Contains(ev.bindingNote, "live handshake") {
-			t.Errorf("bindingNote = %q, want it to record the observed handshake", ev.bindingNote)
+		// The passing verdict states the observed handshake as its basis,
+		// scoped to the one observation made.
+		oc := snpVerifiedOutcome(t, config{}, ev)
+		if !oc.Verified {
+			t.Fatalf("verified=%v error=%q, want a verified verdict", oc.Verified, oc.Error)
+		}
+		if !strings.Contains(oc.Binding, "live handshake presented the attested serving certificate") {
+			t.Errorf("Binding = %q, want it to state the observed handshake as the verdict's basis", oc.Binding)
+		}
+		if len(oc.Warnings) != 1 || !strings.Contains(oc.Warnings[0], "single connection") {
+			t.Errorf("Warnings = %v, want the one-connection/one-replica/one-instant scope caveat", oc.Warnings)
 		}
 	})
 

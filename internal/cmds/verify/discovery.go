@@ -222,10 +222,6 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed
 	}
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
-	bindingNote := "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)"
-	if frontDoor == frontDoorAttested {
-		bindingNote += "; the live handshake presented the attested serving certificate"
-	}
 	return &evidence{
 		platform:            platformOrDefault(d.Attestation.Platform),
 		rawEvidence:         d.Attestation.Evidence,
@@ -233,7 +229,7 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed
 		fresh:               false,
 		source:              source,
 		certSHA256:          hex.EncodeToString(sum[:]),
-		bindingNote:         bindingNote,
+		bindingNote:         "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)",
 		leaf:                cert,
 		leafBody:            body,
 		leafChainVerified:   chainVerified,

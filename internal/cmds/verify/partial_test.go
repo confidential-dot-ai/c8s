@@ -138,13 +138,111 @@ func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 		t.Errorf("json not_proven = %v", parsed["not_proven"])
 	}
 
-	// A verification failure dominates the mode: exit 2, not partial.
+	// A verification failure dominates the mode: exit 2, not partial — and
+	// the door lie rides the failure instead of being buried by it.
 	verr := &securityError{err: errors.New("rejected")}
 	failed := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
 	applyVerdictPolicies(&failed, config{}, ev, nil, operatorKeysReport{})
 	if failed.Partial || verdictExitCode(failed) != exitFailed {
 		t.Errorf("failed evidence + webpki: partial=%v exit=%d, want a plain failure", failed.Partial, verdictExitCode(failed))
 	}
+	if !strings.Contains(failed.Error, ev.frontDoorCertSHA256) || !strings.Contains(failed.Error, ev.certSHA256) {
+		t.Errorf("Error = %q, want it to name the observed and attested serving keys even on a failure", failed.Error)
+	}
+}
+
+// The front-door metadata must never float over the verdict field in JSON:
+// a FAILED verdict carries no attested-door basis clause and no scope caveat
+// (a refusal has no basis to state), a VERIFIED one carries both, and a lying
+// door's digests surface on a failure exactly as on a partial.
+func TestFrontDoorVerdictJSONHonesty(t *testing.T) {
+	mk := func(frontDoor frontDoorObservation) *evidence {
+		return &evidence{
+			platform:            "snp",
+			source:              "discovery document https://lb.example.com/v1/discovery",
+			bindingNote:         "REPORTDATA binds the CDS cert key + issuance challenge",
+			certSHA256:          strings.Repeat("aa", 32),
+			frontDoor:           frontDoor,
+			frontDoorCertSHA256: strings.Repeat("bb", 32),
+		}
+	}
+	failedOutcome := func(ev *evidence) Outcome {
+		verr := &securityError{err: errors.New("rejected")}
+		oc := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
+		applyVerdictPolicies(&oc, config{}, ev, nil, operatorKeysReport{})
+		return oc
+	}
+	renderJSON := func(oc Outcome) map[string]any {
+		t.Helper()
+		var jout bytes.Buffer
+		render(config{output: "json"}, oc, &jout)
+		var parsed map[string]any
+		if err := json.Unmarshal(jout.Bytes(), &parsed); err != nil {
+			t.Fatalf("json render: %v", err)
+		}
+		return parsed
+	}
+
+	t.Run("verified + attested door: basis clause and scope caveat ride the tick", func(t *testing.T) {
+		oc := snpVerifiedOutcome(t, config{}, mk(frontDoorAttested))
+		if !oc.Verified {
+			t.Fatalf("verified=%v error=%q, want a verified verdict", oc.Verified, oc.Error)
+		}
+		parsed := renderJSON(oc)
+		if b, _ := parsed["binding"].(string); !strings.Contains(b, "live handshake presented the attested serving certificate") {
+			t.Errorf("json binding = %q, want the handshake basis clause", b)
+		}
+		w, _ := parsed["warnings"].([]any)
+		if len(w) != 1 || !strings.Contains(w[0].(string), "single connection") {
+			t.Errorf("json warnings = %v, want the one-connection scope caveat", parsed["warnings"])
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		if !strings.Contains(out.String(), "WARNING:") || !strings.Contains(out.String(), "single connection") {
+			t.Errorf("text render missing the scope WARNING:\n%s", out.String())
+		}
+	})
+
+	t.Run("failed + attested door: no basis clause, no caveat", func(t *testing.T) {
+		oc := failedOutcome(mk(frontDoorAttested))
+		if oc.Verified || oc.Error == "" {
+			t.Fatalf("verified=%v error=%q, want a failure", oc.Verified, oc.Error)
+		}
+		if strings.Contains(oc.Binding, "live handshake") || len(oc.Warnings) != 0 {
+			t.Errorf("binding = %q warnings = %v: a refusal must not carry the attested-door basis or scope caveat", oc.Binding, oc.Warnings)
+		}
+		parsed := renderJSON(oc)
+		if parsed["verified"] != false {
+			t.Errorf("json verified = %v, want false", parsed["verified"])
+		}
+		if b, _ := parsed["binding"].(string); strings.Contains(b, "live handshake") {
+			t.Errorf("json binding = %q rides verified:false — the basis clause must not", b)
+		}
+		if _, ok := parsed["warnings"]; ok {
+			t.Errorf("json warnings = %v on a failed verdict, want the key omitted", parsed["warnings"])
+		}
+	})
+
+	t.Run("failed + lying door: the digests ride the failure", func(t *testing.T) {
+		ev := mk(frontDoorOther)
+		oc := failedOutcome(ev)
+		if oc.Partial || verdictExitCode(oc) != exitFailed {
+			t.Fatalf("partial=%v exit=%d, want a plain failure", oc.Partial, verdictExitCode(oc))
+		}
+		if !strings.Contains(oc.Error, ev.frontDoorCertSHA256) || !strings.Contains(oc.Error, ev.certSHA256) ||
+			!strings.Contains(oc.Error, "not attestation-bound") {
+			t.Errorf("Error = %q, want both serving-key digests on the failure", oc.Error)
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		if !strings.Contains(out.String(), ev.frontDoorCertSHA256) {
+			t.Errorf("text render buries the lying door digest:\n%s", out.String())
+		}
+		parsed := renderJSON(oc)
+		if e, _ := parsed["error"].(string); !strings.Contains(e, ev.frontDoorCertSHA256) || !strings.Contains(e, ev.certSHA256) {
+			t.Errorf("json error = %q, want both serving-key digests", e)
+		}
+	})
 }
 
 // genoaFileEvidence parses the vendored Genoa fixture (VCEK inline, verifies
@@ -202,6 +300,9 @@ func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), "✓ VERIFIED") {
 			t.Errorf("output:\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), "WARNING:") || !strings.Contains(out.String(), "single connection") {
+			t.Errorf("an attested door's tick must carry the one-connection scope caveat:\n%s", out.String())
 		}
 	})
 
