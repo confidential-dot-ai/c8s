@@ -71,7 +71,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ inputs.confos_ref || 'e56427984177a680f1ee66b13f9de0c8db504b1d' }} # pin: v0.4.2 + attest-gpu serves SNP (platforms + DeviceAllow, confos#102/#103); snapshot-pinned mirror-guarded builds (confos#96)
+  CONFOS_REF: ${{ inputs.confos_ref || 'e29cd92e24081432d11e93742a2eab2970b87ff9' }} # pin: + initrd SNP operator-key arm (confos#106) and per-lineage kernel snapshot lockfiles (confos#105); attest-gpu serves SNP (#102/#103)
   ATTESTATION_RS_REF: "4c81fc55060723ce212a2ce5e8fcc49b294c6fb4" # pin: main 2026-08-06 (#80) — bump = new origin/main SHA + --measurements refresh in the same PR
 
 jobs:
