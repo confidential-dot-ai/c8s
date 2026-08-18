@@ -52,9 +52,12 @@ jobs:
   # ── ONE JOB PER PLATFORM ─────────────────────────────────────────────────
   # Vendored from confidential-ci. c8s is PUBLIC and confidential-ci is PRIVATE,
   # so a public repo cannot `uses:` the private reusable workflows and must keep
-  # local copies. cvm-e2e.yml and tdx-metal-e2e.yml here are byte-identical to
-  # their originals; edit the original, then copy across. snp-metal-e2e.yml is
-  # c8s-owned (the c8s payload lives in this copy); edit it here.
+  # local copies. cvm-e2e.yml here is byte-identical to its original; edit
+  # the original, then copy across. tdx-metal-e2e.yml is byte-identical
+  # except for a c8s-local cidata bait/tripwire patch carried until the
+  # source takes the same edit; node-guest-image-lint.yml guards those
+  # markers. snp-metal-e2e.yml is c8s-owned (the c8s payload lives in this
+  # copy); edit it here.
   #
   # NOT a `matrix:`. A reusable-workflow `uses:` takes no expressions, so a
   # matrix would need an if-gated dispatcher, and because every row instantiates

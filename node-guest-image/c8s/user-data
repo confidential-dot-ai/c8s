@@ -3,10 +3,16 @@
 # disk selects the role at runtime (see rke2-role.sh).
 #
 # This payload is BAKED INTO the verity root at build time (via
-# bin/build-c8s passing --cloud-init) and therefore measured into the
-# launch digest. Anything per-host (hostname, secrets, IPs) that needs to
-# differ between deployments belongs in NoCloud `meta-data` (which lives
-# outside the measurement) or in a config drop-in on a data disk.
+# node-guest-image/build passing --cloud-init) and therefore measured into
+# the launch digest. The baked seed — this payload plus the meta-data
+# confos injects beside it — is cloud-init's only input: the datasource
+# pin (mkosi.extra/etc/cloud/cloud.cfg.d/99-c8s-datasource.cfg) keeps
+# host-presented cidata disks and ds= cmdline/DMI redirects away from this
+# root interpreter; cloud-init's cc: cmdline config overrides cfg.d by
+# design and is closed only by the measured-cmdline attestation pin
+# (UKI->RTMR[2] on TDX). Anything per-host (secrets, IPs, join material)
+# rides a data disk (e.g. the joindata disk rke2-role.sh reads), not
+# cloud-init.
 #
 # The bulk of node setup is baked rather than scripted at first boot — see
 # this profile's mkosi.extra/ tree. The role-gated rke2 units are started
@@ -19,8 +25,7 @@
 # drop-ins on top of the baked /etc/rancher/rke2/config.yaml without
 # rebuilding the image.
 
-# Hostname is settable per-deployment via NoCloud meta-data's
-# `local-hostname`. Default below applies when meta-data doesn't override.
+# One hostname for every node: the baked seed is cloud-init's only input.
 preserve_hostname: false
 hostname: c8s-node
 

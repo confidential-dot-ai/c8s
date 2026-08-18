@@ -53,12 +53,12 @@ RKE2_IMAGES_CILIUM_SHA256="1ab41422cc16f5d030b8f62889133dff5d9dce985fbf13360c160
 # floor — resolve from a single c8s ref, so they never drift from each other or
 # from the images the chart later deploys. C8S_REF pins a specific commit (short
 # SHA) for testing an unmerged build; it arrives via
-# `confos build --sync-input c8s-ref=...` (passed by bin/build-c8s — an
+# `confos build --sync-input c8s-ref=...` (passed by node-guest-image/build — an
 # exported var never reaches this sandbox: mkosi runs under sudo, stripping
 # the env). Empty = the pinned default below. The tag must be published (c8s
 # docker.yml on main, or workflow_dispatch for a feature branch).
 # The registry the two component images resolve from. Overridable via
-# `--sync-input c8s-registry=...` (passed by bin/build-c8s from C8S_REGISTRY)
+# `--sync-input c8s-registry=...` (passed by node-guest-image/build from C8S_REGISTRY)
 # so an unmerged or air-gapped build can bake components from a local registry
 # without publishing them. Defaults to the published org.
 SYNC_INPUTS="$SRCDIR/mkosi.local/.confos-sync-inputs"

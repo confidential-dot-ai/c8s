@@ -508,7 +508,7 @@ func sandboxTokenSigner(cfg *config, logger *slog.Logger) (*workloadclaims.Sandb
 func digestsAdvertiseHost(cfg *config) (string, error) {
 	// Config first, then the file the chart's installer writes, then the
 	// environment — the node image bakes the plugin without an installer, so
-	// cloud-init supplies it there. None of these needs to be trustworthy: a
+	// nri-node-ip.service writes it there. None of these needs to be trustworthy: a
 	// wrong host makes CDS fetch a key the token signature fails under, so it
 	// can only fail closed, never redirect.
 	host := cfg.WorkloadClaims.AdvertiseHost
