@@ -1,7 +1,9 @@
 package getkubeconfig
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -42,6 +44,51 @@ func TestNewCmdValidation(t *testing.T) {
 		err := execCmd(t, "--operator-key", "k.pem", "--image-manifest", "m.json", "--out", "kc")
 		if err == nil || !strings.Contains(err.Error(), "set --node") {
 			t.Fatalf("want set-node error, got %v", err)
+		}
+	})
+
+	t.Run("vmi resolves to node", func(t *testing.T) {
+		restore := resolveVMIAddress
+		resolveVMIAddress = func(_ context.Context, ref string) (string, error) {
+			if ref != "mn-server" {
+				t.Fatalf("want ref mn-server, got %q", ref)
+			}
+			return "10.42.0.158", nil
+		}
+		t.Cleanup(func() { resolveVMIAddress = restore })
+		// A nonexistent operator key makes Run fail at its first step, which
+		// proves the resolved address satisfied the URL validation.
+		err := execCmd(t,
+			"--vmi", "mn-server",
+			"--operator-key", filepath.Join(t.TempDir(), "nope.key"),
+			"--image-manifest", filepath.Join(t.TempDir(), "m.json"),
+			"--out", filepath.Join(t.TempDir(), "kc"))
+		if err == nil || !strings.Contains(err.Error(), "read operator key") {
+			t.Fatalf("want read-key error from Run, got %v", err)
+		}
+	})
+
+	t.Run("vmi resolution failure aborts", func(t *testing.T) {
+		restore := resolveVMIAddress
+		resolveVMIAddress = func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("guest confai-images/mn-server has no reported address")
+		}
+		t.Cleanup(func() { resolveVMIAddress = restore })
+		err := execCmd(t,
+			"--vmi", "mn-server",
+			"--operator-key", "k.pem", "--image-manifest", "m.json", "--out", "kc")
+		if err == nil || !strings.Contains(err.Error(), `resolve --vmi "mn-server"`) ||
+			!strings.Contains(err.Error(), "no reported address") {
+			t.Fatalf("want wrapped resolution error, got %v", err)
+		}
+	})
+
+	t.Run("vmi and node are mutually exclusive", func(t *testing.T) {
+		err := execCmd(t,
+			"--vmi", "mn-server", "--node", "127.0.0.1",
+			"--operator-key", "k.pem", "--image-manifest", "m.json", "--out", "kc")
+		if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
+			t.Fatalf("want mutual-exclusion error, got %v", err)
 		}
 	})
 
