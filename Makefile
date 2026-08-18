@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-node-guest-image-role test-node-guest-image-role-systemd test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-node-guest-image-role test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -139,6 +139,12 @@ test-node-guest-image-role:
 # Needs only docker.
 test-node-guest-image-role-systemd:
 	./node-guest-image/tests/rke2-role-systemd-test.sh
+
+# The cloud-init datasource pin against the distro's real DataSourceNoCloud:
+# a host cidata disk or cmdline seed redirect must lose to the baked seed.
+# Needs the distro cloud-init package; no root.
+test-node-guest-image-cloud-init:
+	python3 ./node-guest-image/tests/cloud-init-datasource-test.py
 
 # Advisory mutation testing of code changed vs BASE (default origin/main).
 mutation-check:
