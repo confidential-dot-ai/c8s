@@ -124,9 +124,7 @@ func selfSignedServerCert(t *testing.T) (string, tls.Certificate) {
 	return certPEM, tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// discoveryServer starts a TLS server presenting serverCert and serving doc,
-// the tls-lb's shape: one pod terminates public TLS and serves the document
-// over the same port.
+// discoveryServer starts a TLS server presenting serverCert and serving doc.
 func discoveryServer(t *testing.T, serverCert tls.Certificate, doc []byte) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

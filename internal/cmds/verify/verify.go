@@ -176,8 +176,9 @@ Evidence sources:
 Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
 unavailable (unreachable / unparseable) · 4 partially verified (the evidence
 verified, but a property it presents is not proven — the front door's live
-handshake presented a serving key the evidence does not attest, or a chain
-anchor the responder chose).`,
+handshake presented a serving key the evidence does not attest, no handshake
+could be observed (a non-TLS discovery target), or a chain anchor the
+responder chose).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

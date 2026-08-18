@@ -105,8 +105,10 @@ func dialFrontDoor(ctx context.Context, addr, serverName string, timeout time.Du
 // singleConnClient serves requests over the one dialed connection and never
 // redials: the handshake leaf the gather compares is this connection's, so a
 // second dial could reach a different tls-lb replica serving a different cert.
-// Redirects are not followed for the same reason — a non-200 is a fetch
-// failure (connectError), as before.
+// Redirects are not followed for the same reason — a non-200, including a
+// redirect, is a fetch failure (connectError).
+// dialFrontDoor + this guard are a sibling of internal/lbdiscovery's
+// dialFrontDoor + newSingleConnClient — port fixes both ways.
 func singleConnClient(conn *tls.Conn, timeout time.Duration) *http.Client {
 	var dialed atomic.Bool
 	return &http.Client{

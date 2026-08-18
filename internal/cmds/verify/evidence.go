@@ -150,8 +150,9 @@ type leafTrust struct {
 	keyProven bool
 	// meshCA is the operator's --mesh-ca anchor (nil when unset). It is the
 	// only thing that can authenticate a CA-vouched body on a source with no
-	// proof of possession — a saved file, or a discovery document served
-	// unauthenticated over a connection nothing binds it to.
+	// proof of possession — a saved file, or a discovery document whose gather
+	// made no usable handshake observation (non-TLS target, or a leaf the
+	// document does not attest).
 	meshCA *x509.CertPool
 }
 

@@ -39,8 +39,9 @@ func discoveryDocWithPublicTLS(t *testing.T, mode, certPEM string, challenge []b
 // The discovery gather must classify public_tls.mode: cds (and its
 // pre-mode-field empty spelling) and webpki parse; anything else fails closed
 // as a security verdict — auto mode must not fall through past a document it
-// cannot classify. The declared mode is not recorded: the verdict keys on the
-// live handshake observation, which a parsed-but-unprobed document lacks.
+// cannot classify. A parsed mode gates classification only — the verdict keys
+// on the live handshake observation, which a parsed-but-unprobed document
+// lacks.
 func TestDiscoveryPublicTLSModeParsing(t *testing.T) {
 	certPEM, _ := selfSignedCertPEM(t)
 	challenge := []byte("issuance-challenge")
@@ -340,8 +341,9 @@ func TestEndpointEvidenceMarksChainDerived(t *testing.T) {
 	}
 }
 
-// run() over a served discovery document: WebPKI mode with evidence that
-// itself fails verification is a failure (exit 2), not a partial — the mode
+// run() over a served discovery document: an unattested front door (the
+// helper serves plain HTTP, so no handshake is observed) with evidence that
+// itself fails verification is a failure (exit 2), not a partial — the
 // demotion only ever applies to a passing verdict. An unknown mode is a
 // security verdict, and auto mode must not fall through past it.
 func TestRunDiscoveryPublicTLSModeVerdicts(t *testing.T) {
@@ -358,7 +360,7 @@ func TestRunDiscoveryPublicTLSModeVerdicts(t *testing.T) {
 		return srv.URL
 	}
 
-	t.Run("webpki + failing evidence is a failure, not partial", func(t *testing.T) {
+	t.Run("unattested door + failing evidence is a failure, not partial", func(t *testing.T) {
 		url := serve(t, discoveryDocWithPublicTLS(t, "webpki", certPEM, challenge, stubEvidence))
 		var out, errOut bytes.Buffer
 		code := run(context.Background(), config{url: url, kind: "lb", output: "text"}, &out, &errOut)

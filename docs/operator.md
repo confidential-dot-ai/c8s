@@ -540,20 +540,24 @@ body. A self-signed leaf authenticates its own body under the attested key; a
 CA-issued one does not, and `x509` parsing verifies no signature — so a
 CA-issued leaf is accepted only when its chain verifies against `--mesh-ca`,
 or when a live TLS handshake proves the peer holds the attested key. For
-`--mode discovery` that handshake doubles as the front-door check below: a
-CA-issued discovery certificate the live door presents byte-identically is
-authenticated by possession, and only a door serving some other certificate
+`--mode discovery` on an https target that handshake doubles as the front-door
+check below: a CA-issued discovery certificate the live door presents
+byte-identically is authenticated by possession. A door serving some other
+certificate — or a fetch with no handshake to observe (a non-https target) —
 still requires `--mesh-ca` (the document publishes `cds_tls.mesh_ca_url`).
 
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
 (unreachable/unparseable), `4` partially verified — the evidence verified, but
-a property it presents is not proven. The two partial cases today: the front
-door's live TLS handshake presenting a serving certificate the discovery
+a property it presents is not proven. The three partial cases today: the
+front door's live TLS handshake presenting a serving certificate the discovery
 evidence does not attest (a WebPKI front door, whatever the document's
-`public_tls.mode` declares — the verdict keys on the observed handshake, not
-the host-served declaration; what is proven is the tls-lb pod's TEE residency
-and measurement, not the TLS endpoint clients reach), and attest-pq or
+`public_tls.mode` declares — the verdict keys on the handshake observed on the
+verifier's own connection at verify time, not the host-served declaration;
+what is proven is the tls-lb pod's TEE residency and measurement, not the TLS
+endpoint clients reach), a discovery target fetched over a non-TLS connection
+(no live handshake observed — the declared `public_tls.mode` is then the only
+mode signal, a host-served claim nothing authenticates), and attest-pq or
 saved-bundle evidence without `--mesh-ca` (the mesh chain anchors to a CA the
 responder committed into its own transcript, so which deployment the endpoint
 belongs to is not proven). JSON renders these as
