@@ -1,6 +1,6 @@
 # PERMANENT lint for node-guest-image/ — the invariants that moved here with
 # the c8s profile from confos bin/lint (c8s#264), plus the cloud-init
-# datasource pin. These lint content this repo owns. The fragment superset
+# datasource pin. These jobs lint content this repo owns. The fragment superset
 # checks compare against confos's gpu/dev fragments at the pinned
 # CONFOS_REF — the exact tree the image builds with.
 #
@@ -145,7 +145,8 @@ jobs:
           fi
           # mkosi.sync generates image content at build time; a datasource
           # drop-in written there would evade the static grep above.
-          if grep -n 'datasource' "$ngi/c8s/mkosi.sync"; then
+          # Comment lines cannot write content; skip them.
+          if grep -vE '^[ 	]*#' "$ngi/c8s/mkosi.sync" | grep -n 'datasource'; then
             echo "::error::$ngi/c8s/mkosi.sync writes datasource config; build-time drop-ins must not bypass the pin check"
             exit 1
           fi
@@ -254,5 +255,5 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends cloud-init
 
       - name: Run the datasource-resolution harness
-        # System python3: the harness drives the distro cloud-init the guest boots with.
+        # System python3: the harness drives the distro-packaged cloud-init, as the guest does.
         run: make test-node-guest-image-cloud-init
