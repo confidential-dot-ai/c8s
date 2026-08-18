@@ -105,7 +105,7 @@ jobs:
       # only thing that can admit it before it is running is that two-entry
       # measured floor, which pins ONE cds digest: the node image's. Install a
       # different ref and its cds image is a different digest, so it is denied at
-      # container create in c8s-system (not an exempt namespace), never serves a
+      # container create in c8s-system, never serves a
       # seed, and helm --wait expires. Narrow in principle, since retag-unchanged
       # preserves the digest whenever cds itself is untouched, but measured on
       # 2026-07-27 it was 0 of the last 3 merge heads.

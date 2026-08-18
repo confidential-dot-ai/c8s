@@ -16,8 +16,8 @@ import (
 // (SO_PEERCRED → cgroup → container), never from the request.
 //
 // "Admitted" here and in every caller means the plugin let the container run,
-// not that it passed the checks: an exemption, audit mode or an undeliverable
-// kill each leave one running, and the inventory reports what runs.
+// not that it passed the checks: audit mode or an undeliverable kill each
+// leave one running, and the inventory reports what runs.
 type admissionInventory struct {
 	mu         sync.RWMutex
 	containers map[string]ctrRec   // live containerID -> record (caller resolution)

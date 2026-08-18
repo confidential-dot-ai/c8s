@@ -80,48 +80,19 @@ func TestCheckImage_MissingAnnotation_DenyDisabled(t *testing.T) {
 	}
 }
 
-func TestCheckImage_MissingAnnotation_ExemptNamespaceStillDenied(t *testing.T) {
-	p := newTestPlugin(&config{
-		Policy: policyConfig{
-			DenyMissingAnnotation: true,
-			ExemptNamespaces:      []string{"kube-system"},
-		},
-	})
-
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-system", "pod", "ctr", "", nil)
-	if verdict != verdictDeny {
-		t.Fatalf("expected verdictDeny, got %d", verdict)
-	}
-}
-
-func TestCheckContainer_MissingAnnotation_ExemptNamespaceAdmitted(t *testing.T) {
+func TestCheckContainer_MissingAnnotation_SystemNamespaceDenied(t *testing.T) {
 	p, _ := newCachedPlugin(&config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			DenyMissingAnnotation: true,
-			ExemptNamespaces:      []string{"kube-system"},
 		},
 	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
 
 	pod := makePod("kube-system", "pod")
 	verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, makeCtr(pod.Id, "ctr"), "")
-	if verdict != verdictSkip {
-		t.Fatalf("expected verdictSkip for exempt namespace, got %d", verdict)
-	}
-}
-
-func TestCheckImage_NonExemptSystemNamespace(t *testing.T) {
-	p := newTestPlugin(&config{
-		Policy: policyConfig{
-			DenyMissingAnnotation: true,
-			ExemptNamespaces:      []string{"kube-system"},
-		},
-	})
-
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-node-lease", "pod", "ctr", "", nil)
 	if verdict != verdictDeny {
-		t.Fatalf("expected verdictDeny for non-exempt namespace, got %d", verdict)
+		t.Fatalf("a system namespace buys nothing without an image annotation, got %d", verdict)
 	}
 }
 
@@ -194,49 +165,39 @@ func TestConfigureSubscribesPodSandboxEventsWithInventory(t *testing.T) {
 	}
 }
 
-func TestCreateContainer_NotReady_DenyNonExempt(t *testing.T) {
-	p := newTestPlugin(&config{
-		Policy: policyConfig{
-			Mode:             "fail-closed",
-			ExemptNamespaces: []string{"kube-system"},
-		},
-	})
+func TestCreateContainer_NotReady_DeniesNonFloorImage(t *testing.T) {
+	p := floorPlugin(t)
 	// plugin is NOT ready (default zero value of atomic.Bool is false)
 
 	pod := makePod("default", "mypod")
-	ctr := makeCtr(pod.Id, "myctr")
+	ctr := makeCtrWithImage(pod.Id, "myctr", "registry/repo@"+pushDigestB)
 
 	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
 	if err == nil {
-		t.Fatal("expected error when plugin not ready and namespace non-exempt")
+		t.Fatal("expected error when plugin not ready and the image is not in the floor")
 	}
-	if err.Error() != "image policy plugin initializing, container creation denied" {
+	if !strings.HasPrefix(err.Error(), "image policy plugin initializing: ") {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
 
-func TestCreateContainer_NotReady_AllowExemptNamespace(t *testing.T) {
-	p := newTestPlugin(&config{
-		Policy: policyConfig{
-			Mode:             "fail-closed",
-			ExemptNamespaces: []string{"kube-system"},
-		},
-	})
+func TestCreateContainer_NotReady_AdmitsFloorDigest(t *testing.T) {
+	p := floorPlugin(t)
 
+	// The digest rides the reference, so admission needs no containerd call
+	// (fakeContainerd panics if one happens).
 	pod := makePod("kube-system", "coredns")
-	ctr := makeCtr(pod.Id, "coredns")
+	ctr := makeCtrWithImage(pod.Id, "coredns", "registry/repo@"+pushDigestA)
 
-	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
-	if err != nil {
-		t.Fatalf("expected exempt namespace to be allowed, got error: %v", err)
+	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
+		t.Fatalf("a floor digest should be admitted while initializing, got: %v", err)
 	}
 }
 
 func TestCreateContainer_NotReady_AuditModeAllows(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{
-			Mode:             "audit",
-			ExemptNamespaces: []string{"kube-system"},
+			Mode: "audit",
 		},
 	})
 
@@ -321,7 +282,6 @@ func TestCreateContainer_Ready_PassesThrough(t *testing.T) {
 			Policy: policyConfig{
 				Mode:                  "fail-closed",
 				DenyMissingAnnotation: true,
-				ExemptNamespaces:      []string{"kube-system"},
 			},
 		},
 		audit:      audit.NewLogger(),
@@ -428,28 +388,9 @@ func TestEvaluateRule_UncompiledRuleFailsClosed(t *testing.T) {
 
 // --- checkLabels tests ---
 
-func TestCheckLabels_ExemptNamespaceStillEvaluatesRules(t *testing.T) {
+func TestCheckContainer_SystemNamespace_LabelDenialStands(t *testing.T) {
 	p := newTestPlugin(&config{
 		Policy: policyConfig{
-			ExemptNamespaces: []string{"kube-system"},
-			LabelRules: []labelRule{
-				{Name: "require-tenant", MatchExpressions: []labelExpression{
-					{Key: "tenant", Operator: "Exists"},
-				}},
-			},
-		},
-	})
-
-	verdict, _ := p.checkLabels(p.cfg, "kube-system", "pod", "ctr", nil)
-	if verdict != verdictDeny {
-		t.Fatalf("expected verdictDeny, got %d", verdict)
-	}
-}
-
-func TestCheckContainer_ExemptNamespace_OverridesLabelDenial(t *testing.T) {
-	p := newTestPlugin(&config{
-		Policy: policyConfig{
-			ExemptNamespaces: []string{"kube-system"},
 			LabelRules: []labelRule{
 				{Name: "require-tenant", MatchExpressions: []labelExpression{
 					{Key: "tenant", Operator: "Exists"},
@@ -460,8 +401,8 @@ func TestCheckContainer_ExemptNamespace_OverridesLabelDenial(t *testing.T) {
 
 	pod := makePod("kube-system", "pod")
 	verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, makeCtr(pod.Id, "ctr"), "")
-	if verdict != verdictSkip {
-		t.Fatalf("expected verdictSkip for exempt namespace, got %d", verdict)
+	if verdict != verdictDeny {
+		t.Fatalf("a label denial in a system namespace must stand, got %d", verdict)
 	}
 }
 
@@ -676,19 +617,6 @@ func TestCheckImage_NoPolicyLoaded_Denies(t *testing.T) {
 	}
 	if reason == "" {
 		t.Fatal("expected non-empty reason when no allowlist is available")
-	}
-}
-
-func TestCheckImage_ExemptNamespace_StillCheckedAgainstAllowlist(t *testing.T) {
-	imageRef := "registry/repo@" + pushDigestB // not in allowlist
-	p, _ := newCachedPlugin(&config{Policy: policyConfig{
-		Mode:             ModeFailClosed,
-		ExemptNamespaces: []string{"kube-system"},
-	}}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
-
-	verdict, _ := p.checkImage(context.Background(), p.cfg, "kube-system", "pod", "ctr", imageRef, nil)
-	if verdict != verdictDeny {
-		t.Fatalf("expected verdictDeny, got %d", verdict)
 	}
 }
 
@@ -1046,7 +974,7 @@ func TestSynchronize_Ready_AuditMode_ChecksWithoutEnforcing(t *testing.T) {
 	}
 }
 
-// --- Namespace exemption: ordering and inventory ---
+// --- System-component admission: digest-keyed, recorded everywhere ---
 
 // captureAudit collects the audit events fn emits on the default slog logger.
 // Swaps a process-global: not safe under t.Parallel.
@@ -1075,27 +1003,39 @@ func captureAudit(t *testing.T, fn func()) []map[string]any {
 	return events
 }
 
-// exemptPlugin admits pushDigestA only, exempts kube-system, and carries an
-// inventory.
-func exemptPlugin(t *testing.T) *plugin {
+// floorPlugin admits pushDigestA via the always_allow floor, and carries an
+// inventory. The store is floor-seeded (no pull applied), the state a plugin
+// is in before its first CDS fetch.
+func floorPlugin(t *testing.T) *plugin {
 	t.Helper()
-	p, _ := newCachedPlugin(&config{
+	cfg := &config{
 		Allowlist: allowlistConfig{AlwaysAllow: map[string]string{pushDigestA: "image-a"}},
 		Policy: policyConfig{
 			Mode:                  ModeFailClosed,
 			EnforceExisting:       true,
 			DenyMissingAnnotation: true,
-			ExemptNamespaces:      []string{"kube-system"},
 		},
-	}, &allowlist.Allowlist{Digests: map[string]string{pushDigestA: "image-a"}})
+	}
+	if err := validateLabelRules(cfg.Policy.LabelRules); err != nil {
+		t.Fatal(err)
+	}
+	p := &plugin{
+		cfg:        cfg,
+		policy:     newPolicyStore(floorAllowlist(cfg.Allowlist.AlwaysAllow)),
+		audit:      audit.NewLogger(),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		containerd: &fakeContainerd{},
+	}
 	p.inventory = newAdmissionInventory("/proc")
 	return p
 }
 
-func TestCheckContainer_ExemptNamespace_DigestCheckedBeforeExemption(t *testing.T) {
-	p := exemptPlugin(t)
+// Admission keys on the image digest alone: a non-floor image is denied in
+// every namespace, kube-system included.
+func TestCheckContainer_SystemNamespace_NonFloorImage_Denied(t *testing.T) {
+	p := floorPlugin(t)
 	pod := makePod("kube-system", "pod1")
-	imageRef := "registry/repo@" + pushDigestB // not in the allowlist
+	imageRef := "registry/repo@" + pushDigestB // not in the floor
 	ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
 
 	var verdict imageVerdict
@@ -1103,53 +1043,17 @@ func TestCheckContainer_ExemptNamespace_DigestCheckedBeforeExemption(t *testing.
 		verdict, _ = p.checkContainer(context.Background(), p.cfg, pod, ctr, imageRef)
 	})
 
-	if verdict != verdictSkip {
-		t.Fatalf("exempt namespace should still be admitted, got verdict %d", verdict)
+	if verdict != verdictDeny {
+		t.Fatalf("a non-floor image in kube-system must be denied, got verdict %d", verdict)
 	}
-	if len(events) != 2 {
-		t.Fatalf("want the digest denial then the exemption, got %d events: %v", len(events), events)
-	}
-	if events[0]["action"] != "deny" || events[0]["reason"] != "not_in_allowlist" {
-		t.Fatalf("the digest check must run first, got %v", events[0])
-	}
-	if events[1]["reason"] != "namespace_exempt" {
-		t.Fatalf("the exemption must be applied after the digest check, got %v", events[1])
+	if len(events) != 1 || events[0]["action"] != "deny" || events[0]["reason"] != "not_in_allowlist" {
+		t.Fatalf("want exactly the digest denial, got %v", events)
 	}
 }
 
-func TestCheckContainer_ExemptNamespace_LabelDenialDoesNotSkipDigestCheck(t *testing.T) {
-	p := exemptPlugin(t)
-	p.cfg.Policy.LabelRules = []labelRule{mustCompileRule(t, labelRule{
-		Name:             "require-tenant",
-		MatchExpressions: []labelExpression{{Key: "tenant", Operator: "Exists"}},
-	})}
-
-	pod := makePodWithLabels("kube-system", "pod1", nil) // violates require-tenant
-	imageRef := "registry/repo@" + pushDigestB
-	ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
-
-	var verdict imageVerdict
-	events := captureAudit(t, func() {
-		verdict, _ = p.checkContainer(context.Background(), p.cfg, pod, ctr, imageRef)
-	})
-
-	if verdict != verdictSkip {
-		t.Fatalf("exempt namespace should still be admitted, got verdict %d", verdict)
-	}
-	var sawImageDenial bool
-	for _, e := range events {
-		if e["action"] == "deny" && e["reason"] == "not_in_allowlist" {
-			sawImageDenial = true
-		}
-	}
-	if !sawImageDenial {
-		t.Fatalf("a label denial suppressed the digest check: %v", events)
-	}
-}
-
-func TestExemptNamespaceContainerIsRecordedOnEveryPath(t *testing.T) {
+func TestFloorContainerIsRecordedOnEveryPath(t *testing.T) {
 	pod := makePod("kube-system", "pod1")
-	imageRef := "registry/repo@" + pushDigestB // not in the allowlist
+	imageRef := "registry/repo@" + pushDigestA // in the floor
 	ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
 
 	paths := []struct {
@@ -1159,12 +1063,12 @@ func TestExemptNamespaceContainerIsRecordedOnEveryPath(t *testing.T) {
 		{"create hook", func(t *testing.T, p *plugin) {
 			p.SetReady()
 			if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
-				t.Fatalf("exempt namespace should be admitted: %v", err)
+				t.Fatalf("floor digest should be admitted: %v", err)
 			}
 		}},
 		{"create hook while initializing", func(t *testing.T, p *plugin) {
 			if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
-				t.Fatalf("exempt namespace should be admitted: %v", err)
+				t.Fatalf("floor digest should be admitted: %v", err)
 			}
 		}},
 		{"startup check", func(t *testing.T, p *plugin) {
@@ -1184,33 +1088,33 @@ func TestExemptNamespaceContainerIsRecordedOnEveryPath(t *testing.T) {
 
 	for _, path := range paths {
 		t.Run(path.name, func(t *testing.T) {
-			p := exemptPlugin(t)
+			p := floorPlugin(t)
 			path.run(t, p)
 
 			rec, ok := p.inventory.containers[ctr.Id]
 			if !ok {
-				t.Fatalf("exempt container is invisible to the inventory: %v", p.inventory.containers)
+				t.Fatalf("floor container is invisible to the inventory: %v", p.inventory.containers)
 			}
-			if rec.digest != pushDigestB {
-				t.Fatalf("recorded digest = %q, want %q", rec.digest, pushDigestB)
+			if rec.digest != pushDigestA {
+				t.Fatalf("recorded digest = %q, want %q", rec.digest, pushDigestA)
 			}
 			digests, _, known, err := p.inventory.DigestsForSandbox(pod.Id)
 			if err != nil || !known {
 				t.Fatalf("DigestsForSandbox(%s) = known %v, err %v", pod.Id, known, err)
 			}
-			if !slices.Contains(digests, pushDigestB) {
-				t.Fatalf("/digests omits the exempt container: %v", digests)
+			if !slices.Contains(digests, pushDigestA) {
+				t.Fatalf("/digests omits the floor container: %v", digests)
 			}
 		})
 	}
 }
 
-// Platform components on a default install take the ordinary allow, not the
-// exemption: the exemption leaves no trace when nothing denied.
-func TestCheckContainer_ExemptNamespace_AllowlistedImageIsPlainAllow(t *testing.T) {
-	p := exemptPlugin(t)
+// A platform component takes the ordinary allow: one verified event, nothing
+// else.
+func TestCheckContainer_SystemNamespace_FloorImageIsPlainAllow(t *testing.T) {
+	p := floorPlugin(t)
 	pod := makePod("kube-system", "pod1")
-	imageRef := "registry/repo@" + pushDigestA // in the allowlist
+	imageRef := "registry/repo@" + pushDigestA // in the floor
 	ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
 
 	var verdict imageVerdict
@@ -1219,94 +1123,62 @@ func TestCheckContainer_ExemptNamespace_AllowlistedImageIsPlainAllow(t *testing.
 	})
 
 	if verdict != verdictAllow {
-		t.Fatalf("an allowlisted image should be a plain allow, got verdict %d", verdict)
+		t.Fatalf("a floor image should be a plain allow, got verdict %d", verdict)
 	}
-	var sawVerified bool
-	for _, e := range events {
-		if e["reason"] == "namespace_exempt" {
-			t.Fatalf("the exemption fired with nothing to override: %v", events)
-		}
-		sawVerified = sawVerified || e["reason"] == "verified"
-	}
-	if !sawVerified {
-		t.Fatalf("the digest check did not run: %v", events)
+	if len(events) != 1 || events[0]["reason"] != "verified" {
+		t.Fatalf("want exactly the verified allow, got %v", events)
 	}
 }
 
-// The overridden denial must stay visible: an exemption that admits a container
-// a rule denied is the event an operator needs to see.
-func TestCheckContainer_ExemptNamespace_LabelDenialIsAuditedAsOverridden(t *testing.T) {
-	p := exemptPlugin(t)
-	p.cfg.Policy.LabelRules = []labelRule{mustCompileRule(t, labelRule{
-		Name:             "require-tenant",
-		MatchExpressions: []labelExpression{{Key: "tenant", Operator: "Exists"}},
-	})}
-
-	pod := makePodWithLabels("kube-system", "pod1", nil) // violates require-tenant
-	imageRef := "registry/repo@" + pushDigestA           // but the image is allowlisted
-	ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
-
-	var verdict imageVerdict
-	events := captureAudit(t, func() {
-		verdict, _ = p.checkContainer(context.Background(), p.cfg, pod, ctr, imageRef)
-	})
-
-	if verdict != verdictSkip {
-		t.Fatalf("a label denial the exemption overrode should be verdictSkip, got %d", verdict)
-	}
-	var exemptEvent map[string]any
-	for _, e := range events {
-		if e["reason"] == "namespace_exempt" {
-			exemptEvent = e
-		}
-	}
-	if exemptEvent == nil {
-		t.Fatalf("an allowlisted image erased the record of the overridden label rule: %v", events)
-	}
-	if got, _ := exemptEvent["overrides"].(string); !strings.Contains(got, "require-tenant") {
-		t.Fatalf("the exemption event does not name the denial it overturned: %q", got)
-	}
-}
-
-func TestCheckContainer_NamespaceNearMissesAreNotExempt(t *testing.T) {
-	imageRef := "registry/repo@" + pushDigestB // not in the allowlist
-	for _, tc := range []struct {
-		namespace string
-		want      imageVerdict
-	}{
-		{"kube-system", verdictSkip}, // positive control: the exemption does fire
-		{"", verdictDeny},
-		{"kube-system ", verdictDeny},
-		{" kube-system", verdictDeny},
-		{"KUBE-SYSTEM", verdictDeny},
-		{"Kube-System", verdictDeny},
-		{"kube-system.", verdictDeny},
-		{"kube-system\x00", verdictDeny},
-		{"kube-system\n", verdictDeny},
-		{"kube-systems", verdictDeny},
-		{"kube_system", verdictDeny},
+// No namespace rescues a non-floor image — exact or near-miss.
+func TestCheckContainer_NamespaceNeverRescues(t *testing.T) {
+	imageRef := "registry/repo@" + pushDigestB // not in the floor
+	for _, namespace := range []string{
+		"kube-system",
+		"local-path-storage",
+		"",
+		"kube-system ",
+		" kube-system",
+		"KUBE-SYSTEM",
+		"Kube-System",
+		"kube-system.",
+		"kube-system\x00",
+		"kube-system\n",
+		"kube-systems",
+		"kube_system",
 	} {
-		t.Run(fmt.Sprintf("%q", tc.namespace), func(t *testing.T) {
-			p := exemptPlugin(t)
-			pod := makePod(tc.namespace, "pod1")
+		t.Run(fmt.Sprintf("%q", namespace), func(t *testing.T) {
+			p := floorPlugin(t)
+			pod := makePod(namespace, "pod1")
 			ctr := makeCtrWithImage(pod.Id, "ctr1", imageRef)
 
 			verdict, _ := p.checkContainer(context.Background(), p.cfg, pod, ctr, imageRef)
-			if verdict != tc.want {
-				t.Fatalf("namespace %q: verdict %d, want %d", tc.namespace, verdict, tc.want)
+			if verdict != verdictDeny {
+				t.Fatalf("namespace %q: verdict %d, want verdictDeny", namespace, verdict)
 			}
 		})
 	}
 }
 
-// fakeContainerd panics if this path reaches the image store.
-func TestCreateContainer_NotReady_RecordsWithoutResolving(t *testing.T) {
-	p := exemptPlugin(t) // not ready
+// Pre-Ready the admission decision resolves a tag against the floor, but the
+// inventory record keeps the inline-only contract: no digest is committed
+// without one riding the reference, and the sandbox answer stays closed.
+func TestCreateContainer_NotReady_ResolvesForAdmission_RecordsInlineOnly(t *testing.T) {
+	p := floorPlugin(t) // not ready
+	var resolved []string
+	p.containerd = &fakeContainerd{resolve: func(_ context.Context, ref string) (string, error) {
+		resolved = append(resolved, ref)
+		return pushDigestA, nil
+	}}
+
 	pod := makePod("kube-system", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest") // no inline digest
 
 	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err != nil {
-		t.Fatalf("exempt namespace should be admitted: %v", err)
+		t.Fatalf("a tag resolving to the floor should be admitted: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("admission did not resolve the tag: %v", resolved)
 	}
 	rec, ok := p.inventory.containers[ctr.Id]
 	if !ok {
@@ -1317,6 +1189,39 @@ func TestCreateContainer_NotReady_RecordsWithoutResolving(t *testing.T) {
 	}
 	if _, _, _, err := p.inventory.DigestsForSandbox(pod.Id); err == nil {
 		t.Fatal("an unresolved digest must fail the sandbox answer closed")
+	}
+}
+
+// The denial twin: a tag resolving outside the floor is refused while
+// initializing, in any namespace.
+func TestCreateContainer_NotReady_TagOutsideFloor_Denied(t *testing.T) {
+	p := floorPlugin(t) // not ready
+	p.containerd = &fakeContainerd{resolve: func(_ context.Context, ref string) (string, error) {
+		return pushDigestB, nil
+	}}
+
+	pod := makePod("kube-system", "pod1")
+	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest")
+
+	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+		t.Fatal("a tag resolving outside the floor must be denied while initializing")
+	}
+}
+
+// A tag that fails to resolve during init is denied, not admitted: the
+// bootstrap window enforces the floor even when containerd cannot answer
+// inside NRI's timeout.
+func TestCreateContainer_NotReady_ResolveFails_Denied(t *testing.T) {
+	p := floorPlugin(t) // not ready
+	p.containerd = &fakeContainerd{resolve: func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("resolve timed out")
+	}}
+
+	pod := makePod("kube-system", "pod1")
+	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo:latest")
+
+	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
+		t.Fatal("a tag that fails to resolve while initializing must be denied")
 	}
 }
 
@@ -1376,6 +1281,29 @@ func TestCheckExisting_RecordsBeforeAttemptingTheKill(t *testing.T) {
 	}
 }
 
+// enforce_existing stops a foreign container in kube-system: the kill path
+// never reads the namespace, so an exempt name does not spare a non-floor
+// image (issue #96's enforce case).
+func TestCheckExisting_KubeSystemForeignContainerIsStopped(t *testing.T) {
+	p := floorPlugin(t)
+	p.SetReady()
+
+	pod := makePod("kube-system", "pod1")
+	denied := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestB) // not in the floor
+
+	var killed []string
+	p.containerd = &fakeContainerd{stop: func(_ context.Context, id string) error {
+		killed = append(killed, id)
+		return nil
+	}}
+
+	p.checkExisting(context.Background(), p.cfg, []*api.PodSandbox{pod}, []*api.Container{denied})
+
+	if len(killed) != 1 || killed[0] != denied.Id {
+		t.Fatalf("a non-floor container in kube-system must be stopped, got %v", killed)
+	}
+}
+
 // A container whose sandbox is absent from the Synchronize list runs like any
 // other, so the sandbox's answer must carry it.
 func TestCheckExisting_OrphanContainerIsStillRecorded(t *testing.T) {
@@ -1413,7 +1341,7 @@ func TestCheckExisting_ResolvesTagOnlyReference(t *testing.T) {
 	var resolved []string
 	p.containerd = &fakeContainerd{resolve: func(_ context.Context, ref string) (string, error) {
 		resolved = append(resolved, ref)
-		return "registry/repo@" + pushDigestA, nil
+		return pushDigestA, nil
 	}}
 	p.SetReady()
 
@@ -1461,14 +1389,14 @@ func TestCreateContainer_RecordsTheContainerArgv(t *testing.T) {
 
 // A container the create hook rejected never ran.
 func TestCreateContainer_DeniedContainerIsNotRecorded(t *testing.T) {
-	p := exemptPlugin(t)
+	p := floorPlugin(t)
 	p.SetReady()
 
 	pod := makePod("default", "pod1")
 	ctr := makeCtrWithImage(pod.Id, "ctr1", "registry/repo@"+pushDigestB)
 
 	if _, _, err := p.CreateContainer(context.Background(), pod, ctr); err == nil {
-		t.Fatal("expected denial for an image not in the allowlist")
+		t.Fatal("expected denial for an image not in the floor")
 	}
 	if _, ok := p.inventory.containers[ctr.Id]; ok {
 		t.Fatal("a denied container must not be recorded in the inventory")
