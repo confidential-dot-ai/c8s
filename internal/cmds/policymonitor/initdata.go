@@ -269,7 +269,11 @@ func classifyVerifyError(err error) error {
 		errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
 		errors.Is(err, attestationclient.ErrInvalidLaunchDigest),
 		errors.Is(err, attestationclient.ErrRTMRNotAllowed),
-		errors.Is(err, attestationclient.ErrUnsupportedPlatform):
+		errors.Is(err, attestationclient.ErrUnsupportedPlatform),
+		// Echo rejections reproduce on every retry — same evidence, same
+		// policy — so they are verdicts, not availability.
+		errors.Is(err, attestationclient.ErrMinTCBNotEchoed),
+		errors.Is(err, attestationclient.ErrDebugPolicyNotEchoed):
 		return errAttestVerdict
 	}
 	// A refusal whose body is not the api's JSON error shape arrives as

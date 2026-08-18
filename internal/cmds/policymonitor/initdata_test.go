@@ -559,6 +559,8 @@ func TestClassifyVerifyError(t *testing.T) {
 		{"launch digest malformed", attestationclient.ErrInvalidLaunchDigest, errAttestVerdict},
 		{"rtmr not allowed", attestationclient.ErrRTMRNotAllowed, errAttestVerdict},
 		{"unsupported platform", attestationclient.ErrUnsupportedPlatform, errAttestVerdict},
+		{"min TCB not echoed", attestationclient.ErrMinTCBNotEchoed, errAttestVerdict},
+		{"debug policy not echoed", attestationclient.ErrDebugPolicyNotEchoed, errAttestVerdict},
 		{"api 422", apiErr(http.StatusUnprocessableEntity), errAttestVerdict},
 		{"api 400", apiErr(http.StatusBadRequest), errAttestVerdict},
 		{"non-json 422", &attestationclient.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Expected request with `Content-Type: application/json`"}, errAttestVerdict},
