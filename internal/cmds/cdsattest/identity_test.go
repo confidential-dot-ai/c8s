@@ -169,7 +169,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}
-	wantReportData, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	wantReportData, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}

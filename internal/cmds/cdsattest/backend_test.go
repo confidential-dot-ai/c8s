@@ -19,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"reflect"
+
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -57,15 +60,61 @@ func writeClientKeyPair(t *testing.T) (certPath, keyPath string) {
 // canonical base URL Forward dials: echo names no destination, and a
 // trailing slash cannot fork the binding.
 func TestUpstreamIdentity(t *testing.T) {
-	if got := (EchoBackend{}).UpstreamIdentity(); got != "" {
-		t.Fatalf("echo upstream identity = %q, want empty", got)
+	if got := (EchoBackend{}).UpstreamIdentity(); !reflect.DeepEqual(got, overenc.UpstreamIdentity{}) {
+		t.Fatalf("echo upstream identity = %+v, want zero", got)
 	}
 	hb, err := NewHTTPBackend("http://backend:8000/", HTTPBackendOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hb.UpstreamIdentity(); got != "http://backend:8000" {
-		t.Fatalf("upstream identity = %q, want canonical base %q", got, "http://backend:8000")
+	if got := hb.UpstreamIdentity(); !reflect.DeepEqual(got, overenc.UpstreamIdentity{URL: "http://backend:8000"}) {
+		t.Fatalf("upstream identity = %+v, want canonical base only", got)
+	}
+}
+
+// An https upstream commits the TLS identity it verifies with: the explicit
+// or URL-derived server name and the CA bundle's hash.
+func TestUpstreamIdentityHTTPS(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	caPath := identity.caFile
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCAHash := overenc.UpstreamCABundleHash(caPEM)
+
+	// Explicit server name wins.
+	hb, err := NewHTTPBackend("https://backend.other.svc:8443/", HTTPBackendOptions{
+		TrustedCAFile: caPath,
+		ServerName:    "override.svc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := overenc.UpstreamIdentity{URL: "https://backend.other.svc:8443", ServerName: "override.svc", CAHash: wantCAHash}
+	if got := hb.UpstreamIdentity(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("upstream identity = %+v, want %+v", got, want)
+	}
+
+	// Default: the transport verifies against the URL host, so that is the
+	// committed name.
+	hb, err = NewHTTPBackend("https://backend.other.svc:8443", HTTPBackendOptions{TrustedCAFile: caPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want.ServerName = "backend.other.svc"
+	if got := hb.UpstreamIdentity(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("upstream identity = %+v, want %+v", got, want)
+	}
+
+	// No CA bundle: the hop verifies against system roots, committed as "no
+	// CA bundle".
+	hb, err = NewHTTPBackend("https://backend.other.svc:8443", HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hb.UpstreamIdentity(); got.CAHash != nil {
+		t.Fatalf("CAHash = %x, want nil without a CA bundle", got.CAHash)
 	}
 }
 
@@ -134,6 +183,8 @@ func TestNewHTTPBackendErrors(t *testing.T) {
 		wantSub string
 	}{
 		{"bad scheme", "ftp://backend", HTTPBackendOptions{}, "must be an http:// or https:// URL"},
+		{"scheme-only", "http://", HTTPBackendOptions{}, "has no host"},
+		{"unparseable", "http://backend", HTTPBackendOptions{}, "does not parse"},
 		{"missing CA file", "https://backend", HTTPBackendOptions{TrustedCAFile: filepath.Join(dir, "missing-ca.pem")}, "read upstream CA"},
 		{"CA file with no certs", "https://backend", HTTPBackendOptions{TrustedCAFile: garbageCA}, "has no certificates"},
 		{"missing client keypair", "https://backend", HTTPBackendOptions{

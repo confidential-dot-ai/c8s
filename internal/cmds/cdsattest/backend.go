@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -43,7 +45,7 @@ var (
 )
 
 // UpstreamIdentity implements Backend: echo forwards nowhere.
-func (EchoBackend) UpstreamIdentity() string { return "" }
+func (EchoBackend) UpstreamIdentity() overenc.UpstreamIdentity { return overenc.UpstreamIdentity{} }
 
 // Forward implements Backend.
 func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.TunnelResponse, error) {
@@ -64,10 +66,14 @@ func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.Tu
 type HTTPBackend struct {
 	base   string // upstream base URL, e.g. http://vllm-router-service.vllm.svc.cluster.local
 	client *http.Client
+	// identity is the destination the transcripts commit, captured at
+	// construction so the committed value is byte-exactly what Forward dials
+	// and verifies: clients pin the exact deployed strings.
+	identity overenc.UpstreamIdentity
 }
 
 // UpstreamIdentity implements Backend.
-func (b *HTTPBackend) UpstreamIdentity() string { return b.base }
+func (b *HTTPBackend) UpstreamIdentity() overenc.UpstreamIdentity { return b.identity }
 
 // defaultUpstreamTimeout bounds a single forwarded request to the upstream
 // backend (connect + headers + body) when HTTPBackendOptions.Timeout is unset.
@@ -90,14 +96,32 @@ type HTTPBackendOptions struct {
 }
 
 // NewHTTPBackend builds an HTTP(S) forwarding backend for base (a full URL).
+// The parse is validation plus the effective server name: the committed base
+// stays the caller's raw string (trailing slashes trimmed), byte-exactly what
+// Forward dials.
 func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) {
 	base = strings.TrimRight(base, "/")
+	u, err := url.Parse(base)
+	if err != nil {
+		return nil, fmt.Errorf("upstream URL %q does not parse: %w", base, err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("upstream URL %q has no host", base)
+	}
+	identity := overenc.UpstreamIdentity{URL: base}
 	transport := &http.Transport{
 		MaxIdleConns:    100,
 		IdleConnTimeout: 90 * time.Second,
 	}
-	if strings.HasPrefix(base, "https://") {
-		tlsCfg := &tls.Config{ServerName: opts.ServerName, MinVersion: tls.VersionTLS12}
+	switch u.Scheme {
+	case "https":
+		identity.ServerName = opts.ServerName
+		if identity.ServerName == "" {
+			// The transport verifies against the URL host when ServerName is
+			// unset; commit the name it will actually use.
+			identity.ServerName = u.Hostname()
+		}
+		tlsCfg := &tls.Config{ServerName: identity.ServerName, MinVersion: tls.VersionTLS12}
 		if opts.TrustedCAFile != "" {
 			caPEM, err := os.ReadFile(opts.TrustedCAFile)
 			if err != nil {
@@ -108,6 +132,7 @@ func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) 
 				return nil, fmt.Errorf("upstream CA file %q has no certificates", opts.TrustedCAFile)
 			}
 			tlsCfg.RootCAs = pool
+			identity.CAHash = overenc.UpstreamCABundleHash(caPEM)
 		}
 		if opts.ClientCertFile != "" && opts.ClientKeyFile != "" {
 			loader, err := newUpstreamCertLoader(opts.ClientCertFile, opts.ClientKeyFile)
@@ -117,7 +142,8 @@ func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) 
 			tlsCfg.GetClientCertificate = loader.getClientCertificate
 		}
 		transport.TLSClientConfig = tlsCfg
-	} else if !strings.HasPrefix(base, "http://") {
+	case "http":
+	default:
 		return nil, fmt.Errorf("upstream must be an http:// or https:// URL, got %q", base)
 	}
 
@@ -125,7 +151,7 @@ func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) 
 	if timeout <= 0 {
 		timeout = defaultUpstreamTimeout
 	}
-	return &HTTPBackend{base: base, client: &http.Client{Transport: transport, Timeout: timeout}}, nil
+	return &HTTPBackend{base: base, client: &http.Client{Transport: transport, Timeout: timeout}, identity: identity}, nil
 }
 
 // upstreamCertRecheckInterval is how often the upstream client credential is

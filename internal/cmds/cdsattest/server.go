@@ -8,8 +8,9 @@
 // endpoint and then talk to it over a post-quantum over-encrypted channel that
 // terminates inside the LB's enclave — independent of whatever TLS terminator
 // sits in front of it. attest-lb binds fresh evidence to the exact serving
-// leaf and the configured upstream destination for native clients that ride
-// ordinary nginx TLS instead. See c8s-verify-js/PROTOCOL.md.
+// leaf for native clients that ride ordinary nginx TLS instead. Both
+// endpoints also bind the upstream destination this sidecar's own forwarding
+// dials. See c8s-verify-js/PROTOCOL.md.
 package cdsattest
 
 import (
@@ -125,10 +126,11 @@ const (
 // reconstructed request to the real backend (see backend.go).
 type Backend interface {
 	Forward(ctx context.Context, req types.TunnelRequest) (types.TunnelResponse, error)
-	// UpstreamIdentity is the canonical base URL Forward sends plaintext to,
-	// committed into the attest-lb transcript; "" when the backend forwards
-	// nowhere.
-	UpstreamIdentity() string
+	// UpstreamIdentity is the destination Forward sends plaintext to,
+	// committed into both attestation transcripts; the zero value when the
+	// backend forwards nowhere. Byte-exactly what Forward dials and verifies
+	// — clients pin the exact deployed strings.
+	UpstreamIdentity() overenc.UpstreamIdentity
 }
 
 // Config configures the sidecar server.
@@ -400,9 +402,10 @@ func attestNonce(w http.ResponseWriter, r *http.Request) (nonceB64 string, nonce
 }
 
 // handleAttestPQ serves the identity-bound over-encryption binding:
-// report_data commits the hybrid session key, nonce, exact mesh leaf, and
-// issuing mesh CA to one domain-separated transcript, and the leaf signs that
-// transcript to prove possession of its private key.
+// report_data commits the hybrid session key, nonce, exact mesh leaf,
+// issuing mesh CA, and the upstream destination identity to one
+// domain-separated transcript, and the leaf signs that transcript to prove
+// possession of its private key.
 func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	nonceB64, nonce := attestNonce(w, r)
 	if nonce == nil {
@@ -434,7 +437,8 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	}
 	pub := key.Public()
 
-	reportData, proof, err := identity.bind(pub, nonce)
+	upstream := s.backend.UpstreamIdentity()
+	reportData, proof, err := identity.bind(pub, nonce, upstream)
 	if err != nil {
 		s.log.Error("bind mesh identity", "error", err)
 		writeErr(w, http.StatusInternalServerError, types.ErrorCodeInternal, "mesh identity binding failed")
@@ -468,16 +472,20 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 			X25519:   base64.RawURLEncoding.EncodeToString(pub.X25519),
 			MLKEM768: base64.RawURLEncoding.EncodeToString(pub.MLKEM768),
 		},
-		IdentityProof: proof,
+		IdentityProof:      proof,
+		Upstream:           upstream.URL,
+		UpstreamServerName: upstream.ServerName,
+		UpstreamCASHA256:   base64.RawURLEncoding.EncodeToString(upstream.CAHash),
 	})
 }
 
 // handleAttestLB serves the ordinary-TLS binding: report_data commits the
-// nonce, the exact serving leaf nginx presents, the exact mesh leaf, and the
-// issuing mesh CA (overenc.LBTranscriptHash), and the mesh leaf signs that
-// transcript. No over-encryption keypair is minted and no pending session is
-// stored — the client recomputes the transcript from the leaf it observed on
-// its own TLS connection and then rides that TLS.
+// nonce, the exact serving leaf nginx presents, the exact mesh leaf, the
+// issuing mesh CA, and the upstream destination identity
+// (overenc.LBTranscriptHash), and the mesh leaf signs that transcript. No
+// over-encryption keypair is minted and no pending session is stored — the
+// client recomputes the transcript from the leaf it observed on its own TLS
+// connection plus its pinned upstream, and then rides that TLS.
 func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	nonceB64, nonce := attestNonce(w, r)
 	if nonce == nil {
@@ -523,15 +531,17 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 
 	servingLeafHash := sha256.Sum256(servingLeafDER)
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:           types.BindingAttestLB,
-		Platform:          platform,
-		Generation:        generation,
-		Nonce:             nonceB64,
-		Evidence:          evidence,
-		CDSCertPEM:        string(identity.bundlePEM),
-		IdentityProof:     proof,
-		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
-		Upstream:          upstream,
+		Version:            types.BindingAttestLB,
+		Platform:           platform,
+		Generation:         generation,
+		Nonce:              nonceB64,
+		Evidence:           evidence,
+		CDSCertPEM:         string(identity.bundlePEM),
+		IdentityProof:      proof,
+		ServingLeafSHA256:  base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),
+		Upstream:           upstream.URL,
+		UpstreamServerName: upstream.ServerName,
+		UpstreamCASHA256:   base64.RawURLEncoding.EncodeToString(upstream.CAHash),
 	})
 }
 

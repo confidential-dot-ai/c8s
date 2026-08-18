@@ -46,6 +46,13 @@ func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 // the channel from it.
 func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce []byte) (*overenc.Channel, overenc.Handshake) {
 	t.Helper()
+	return clientChannelFromTranscript(t, bundle, nonce, bundleUpstream(t, bundle))
+}
+
+// clientChannelFromTranscript derives the client channel against a caller's
+// pinned upstream identity rather than the served one — the pin-mismatch path.
+func clientChannelFromTranscript(t *testing.T, bundle types.AttestationBundle, nonce []byte, pinned overenc.UpstreamIdentity) (*overenc.Channel, overenc.Handshake) {
+	t.Helper()
 	x, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.X25519)
 	m, _ := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.MLKEM768)
 	pub := overenc.PublicKey{X25519: x, MLKEM768: m}
@@ -56,7 +63,7 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce
 	if len(certs) != 2 {
 		t.Fatalf("bundle chain has %d certs, want leaf + issuing CA", len(certs))
 	}
-	transcript, err := overenc.IdentityTranscriptHash(pub, nonce, certs[0].Raw, certs[1].Raw)
+	transcript, err := overenc.IdentityTranscriptHash(pub, nonce, certs[0].Raw, certs[1].Raw, pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +72,16 @@ func clientChannelFromBundle(t *testing.T, bundle types.AttestationBundle, nonce
 		t.Fatal(err)
 	}
 	return channel, hs
+}
+
+// bundleUpstream decodes the destination identity a bundle serves.
+func bundleUpstream(t *testing.T, bundle types.AttestationBundle) overenc.UpstreamIdentity {
+	t.Helper()
+	caHash, err := base64.RawURLEncoding.DecodeString(bundle.UpstreamCASHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return overenc.UpstreamIdentity{URL: bundle.Upstream, ServerName: bundle.UpstreamServerName, CAHash: caHash}
 }
 
 func fetchBundle(t *testing.T, base string, nonce []byte) types.AttestationBundle {
@@ -166,6 +183,74 @@ func TestFullFlowOverEncryptedEcho(t *testing.T) {
 	}
 	if !strings.Contains(string(resp.Body), "hi enclave") {
 		t.Fatalf("echo did not round-trip: %q", resp.Body)
+	}
+}
+
+// The transcript is the channel's HKDF salt: a client whose pinned upstream
+// differs from the committed one derives a different channel key, so the
+// redirect is not just detected at verification time — its records never
+// open.
+func TestAttestPQPinMismatchCannotOpenRecords(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "from upstream "+r.URL.Path)
+	}))
+	defer upstream.Close()
+	backend, err := NewHTTPBackend(upstream.URL, HTTPBackendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(Config{
+		Evidence: FixtureEvidenceProvider{
+			Raw:        json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
+			Platform:   "snp",
+			Generation: "genoa",
+		},
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+		Backend:              backend,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Mismatched pin: the handshake still agrees (the salt never gates key
+	// agreement), but the sealed record is garbage to the server.
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	bundle := fetchBundle(t, ts.URL, nonce)
+	if bundle.Upstream != upstream.URL {
+		t.Fatalf("bundle upstream = %q, want the configured %q", bundle.Upstream, upstream.URL)
+	}
+	badChannel, hs := clientChannelFromTranscript(t, bundle, nonce, overenc.UpstreamIdentity{URL: "http://attacker-svc.attacker.svc:8000"})
+	sessionID := postHandshake(t, ts.URL, nonce, hs)
+	plain, _ := cbor.Marshal(types.TunnelRequest{Method: "GET", Path: "/v1/models"})
+	rec, err := badChannel.Seal(plain, overenc.RequestAAD())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recBody, _ := cbor.Marshal(rec)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/.well-known/c8s/tunnel", bytes.NewReader(recBody))
+	httpReq.Header.Set("X-C8s-Session", sessionID)
+	httpReq.Header.Set("Content-Type", "application/cbor")
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("pin-mismatch record: tunnel status = %d, want 400 (decrypt failed)", httpResp.StatusCode)
+	}
+
+	// Matching pin: the same flow round-trips to the committed upstream.
+	nonce2 := make([]byte, 32)
+	rand.Read(nonce2)
+	bundle2 := fetchBundle(t, ts.URL, nonce2)
+	goodChannel, hs2 := clientChannelFromBundle(t, bundle2, nonce2)
+	sessionID2 := postHandshake(t, ts.URL, nonce2, hs2)
+	resp := tunnel(t, ts.URL, goodChannel, sessionID2, types.TunnelRequest{Method: "GET", Path: "/v1/models"})
+	if resp.Status != http.StatusOK || !strings.Contains(string(resp.Body), "from upstream /v1/models") {
+		t.Fatalf("pinned session did not reach the committed upstream: %d %q", resp.Status, resp.Body)
 	}
 }
 

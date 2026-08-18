@@ -120,7 +120,7 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	if b.Upstream != "" {
 		t.Errorf("upstream = %q, want empty for the echo backend", b.Upstream)
 	}
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "")
+	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,19 +193,107 @@ func TestAttestLBBindsUpstreamDestination(t *testing.T) {
 		t.Fatalf("upstream = %q, want the configured %q", b.Upstream, upstream)
 	}
 
-	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, upstream)
+	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{URL: upstream})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(prov.lastReportData, want) {
 		t.Fatalf("report_data = %x, want lb transcript %x", prov.lastReportData, want)
 	}
-	other, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "http://attacker-svc.attacker.svc:8000")
+	other, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{URL: "http://attacker-svc.attacker.svc:8000"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(prov.lastReportData, other) {
 		t.Fatal("report_data matched a transcript naming a different upstream")
+	}
+	// The client's rejection is the composition: a transcript recomputed with
+	// its own pin must fail report_data match AND proof verification.
+	signature, err := base64.RawURLEncoding.DecodeString(b.IdentityProof.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha512.Sum384(other)
+	if ecdsa.VerifyASN1(&identity.key.PublicKey, digest[:], signature) {
+		t.Fatal("identity proof verified against a transcript naming a different upstream")
+	}
+}
+
+// An https upstream's TLS identity is destination identity too: the
+// transcript commits the verification server name and the CA bundle hash
+// alongside the URL, and the bundle serves all three.
+func TestAttestLBBindsHTTPSUpstreamIdentity(t *testing.T) {
+	identity := writeTestMeshIdentity(t)
+	certPath, servingDER := writeTestServingLeaf(t)
+	caPath := identity.caFile
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upstream = "https://backend.other.svc:8443"
+	backend, err := NewHTTPBackend(upstream, HTTPBackendOptions{TrustedCAFile: caPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := &capturingProvider{}
+	srv := NewServer(Config{
+		Evidence:             prov,
+		FrontDoorMode:        FrontDoorModeCDS,
+		ServingCertFile:      certPath,
+		MeshIdentityCertFile: identity.certFile,
+		MeshIdentityKeyFile:  identity.keyFile,
+		MeshIdentityCAFile:   identity.caFile,
+		Backend:              backend,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var b types.AttestationBundle
+	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Upstream != upstream || b.UpstreamServerName != "backend.other.svc" {
+		t.Fatalf("upstream identity = %q / %q, want the configured https destination", b.Upstream, b.UpstreamServerName)
+	}
+	wantCA := base64.RawURLEncoding.EncodeToString(overenc.UpstreamCABundleHash(caPEM))
+	if b.UpstreamCASHA256 != wantCA {
+		t.Fatalf("upstream_ca_sha256 = %q, want %q", b.UpstreamCASHA256, wantCA)
+	}
+
+	caHash, _ := base64.RawURLEncoding.DecodeString(b.UpstreamCASHA256)
+	want, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw,
+		overenc.UpstreamIdentity{URL: upstream, ServerName: "backend.other.svc", CAHash: caHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(prov.lastReportData, want) {
+		t.Fatalf("report_data = %x, want lb transcript %x", prov.lastReportData, want)
+	}
+	// Same URL under a rogue CA or server name is a different transcript.
+	for _, rogue := range []overenc.UpstreamIdentity{
+		{URL: upstream, ServerName: "rogue.svc", CAHash: caHash},
+		{URL: upstream, ServerName: "backend.other.svc", CAHash: bytes.Repeat([]byte{0x99}, 32)},
+	} {
+		other, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, rogue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(prov.lastReportData, other) {
+			t.Fatalf("report_data matched a transcript with rogue identity %+v", rogue)
+		}
 	}
 }
 
@@ -219,11 +307,11 @@ func TestAttestLBTranscriptDiffersFromPQ(t *testing.T) {
 		X25519:   make([]byte, overenc.X25519PubBytes),
 		MLKEM768: make([]byte, overenc.MLKEM768EKBytes),
 	}
-	pq, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw)
+	pq, err := overenc.IdentityTranscriptHash(pub, nonce, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, "")
+	lb, err := overenc.LBTranscriptHash(nonce, servingDER, identity.leaf.Raw, identity.ca.Raw, overenc.UpstreamIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -548,15 +548,20 @@ CA-issued discovery certificate requires `--mesh-ca` (the document publishes
 Exit codes are a CI contract: `0` verified, `1` usage error, `2`
 verification/policy failed (e.g. wrong measurement), `3` evidence unavailable
 (unreachable/unparseable), `4` partially verified — the evidence verified, but
-a property it presents is not proven. The two partial cases today: a
+a property it presents is not proven. The three partial cases today: a
 discovery document declaring `public_tls.mode=webpki` (the front door's
 serving key is not attestation-bound — what is proven is the tls-lb pod's TEE
-residency and measurement, not the TLS endpoint clients reach), and attest-pq
+residency and measurement, not the TLS endpoint clients reach), attest-pq
 or saved-bundle evidence without `--mesh-ca` (the mesh chain anchors to a CA
 the responder committed into its own transcript, so which deployment the
-endpoint belongs to is not proven). JSON renders these as
-`verified: false, partial: true` with a `not_proven` list, so a gate checking
-`verified` fails closed while scripts can still tell partial from failure.
+endpoint belongs to is not proven), and an attest-pq upstream destination
+without `--expected-upstream` (the evidence binds where the LB forwards
+plaintext, but no operator pin authenticates that this is the intended
+destination — and for an https upstream, the CA bundle the LB verifies
+against is proven only when it is the pinned `--mesh-ca` bundle). JSON renders
+these as `verified: false, partial: true` with a `not_proven` list, so a gate
+checking `verified` fails closed while scripts can still tell partial from
+failure.
 
 Caveats the output surfaces:
 

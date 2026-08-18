@@ -30,6 +30,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/initdata"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 )
@@ -119,6 +120,7 @@ type config struct {
 	workload         string
 	allowlistFile    string
 	meshCA           string
+	expectedUpstream string
 	initDataHex      string
 	allowDebug       bool
 	minTCBBootloader uint
@@ -176,7 +178,8 @@ Evidence sources:
 Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
 unavailable (unreachable / unparseable) · 4 partially verified (the evidence
 verified, but a property it presents is not proven — a WebPKI front door whose
-serving key is not attestation-bound, or a chain anchor the responder chose).`,
+serving key is not attestation-bound, a chain anchor the responder chose, or an
+attest-pq upstream destination no --expected-upstream pin authenticates).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -208,7 +211,8 @@ serving key is not attestation-bound, or a chain anchor the responder chose).`,
 	f.StringVar(&cfg.sandboxID, "sandbox-id", "", "expected CRI pod sandbox ID on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the ID (docs/ratls.md)")
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
-	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified")
+	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified, and it authenticates an https upstream's committed CA bundle")
+	f.StringVar(&cfg.expectedUpstream, "expected-upstream", "", "expected upstream destination of an attest-pq LB (the exact canonical base URL the deployment commits, e.g. http://c8s-<id>.<ns>.svc.cluster.local:<port>); verification fails if the evidence commits a different destination. Unset, a committed destination is reported but not proven (partial verdict)")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	const tcbSNPOnly = " (SEV-SNP evidence only — TDX carries no such component, so against TDX evidence this is a policy error rather than an ignored flag)"
@@ -364,7 +368,7 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 	oc := newOutcome(cfg, ev, result, verr, plan)
 	oc.OperatorKeys = opKeys.fingerprints
 	oc.OperatorKeysNote = opKeys.note
-	applyVerdictPolicies(&oc, cfg, ev, held, opKeys)
+	applyVerdictPolicies(&oc, cfg, plan, ev, held, opKeys)
 	applyInitDataNote(&oc, result, plan)
 	render(cfg, oc, out)
 	return verdictExitCode(oc)
@@ -375,9 +379,10 @@ func verifyEvidence(ctx context.Context, cfg config, plan *verifyPlan, ev *evide
 // the verdict), then the honesty demotions, which only ever turn a passing
 // verdict partial. Ordering matters: applyChainAnchorPolicy reads the pinned
 // chain check's outcome from oc.Verified.
-func applyVerdictPolicies(oc *Outcome, cfg config, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport) {
+func applyVerdictPolicies(oc *Outcome, cfg config, plan *verifyPlan, ev *evidence, held *heldAllowlist, opKeys operatorKeysReport) {
 	applySandboxPolicy(oc, cfg, ev, opKeys)
 	applyWorkloadPolicy(oc, cfg, ev, held)
+	applyUpstreamPolicy(oc, cfg, plan, ev)
 	applyFrontDoorPolicy(oc, ev)
 	applyChainAnchorPolicy(oc, cfg, ev)
 }
@@ -392,6 +397,45 @@ func demoteToPartial(oc *Outcome, notProven string) {
 	oc.Verified = false
 	oc.Partial = true
 	oc.NotProven = append(oc.NotProven, notProven)
+}
+
+// applyUpstreamPolicy settles what the verdict may claim about an attest-pq
+// responder's committed upstream destination. The committed value is
+// hardware-bound (the evidence verified against the transcript that commits
+// it), but "the LB forwards to X" is only meaningful against an operator pin:
+// --expected-upstream makes a mismatch fatal; without it a committed
+// destination is responder-chosen, so a passing verdict is partial. For an
+// https upstream the CA bundle is destination identity too: it is proven only
+// when it is the operator's pinned --mesh-ca bundle.
+func applyUpstreamPolicy(oc *Outcome, cfg config, plan *verifyPlan, ev *evidence) {
+	if !ev.upstreamBound {
+		return
+	}
+	oc.Upstream = ev.upstream.URL
+	if cfg.expectedUpstream != "" {
+		if ev.upstream.URL != cfg.expectedUpstream {
+			oc.Verified = false
+			if oc.Error == "" {
+				oc.Error = fmt.Sprintf("upstream destination mismatch: the evidence commits %q but --expected-upstream pins %q (the LB's plaintext destination is not the one you pinned)", ev.upstream.URL, cfg.expectedUpstream)
+			}
+			return
+		}
+		oc.UpstreamNote = "verified: matches --expected-upstream"
+		if len(ev.upstream.CAHash) == 0 {
+			return
+		}
+		if plan.meshCAHash != nil && bytes.Equal(plan.meshCAHash, ev.upstream.CAHash) {
+			oc.UpstreamNote += "; the upstream CA bundle is the pinned --mesh-ca bundle"
+			return
+		}
+		demoteToPartial(oc, "the upstream TLS trust root: the LB verifies its https upstream against a CA bundle that is not the pinned --mesh-ca bundle, so the destination's authenticity is not proven (point --mesh-ca at the upstream's CA bundle to pin it)")
+		return
+	}
+	if ev.upstream.URL == "" {
+		oc.UpstreamNote = "the LB commits an empty upstream (it forwards nowhere)"
+		return
+	}
+	demoteToPartial(oc, "the upstream destination: the evidence commits the LB forwarding to "+ev.upstream.URL+", but no --expected-upstream pin authenticates that this is the intended destination")
 }
 
 // applyFrontDoorPolicy enforces the discovery document's public_tls.mode: a
@@ -461,6 +505,8 @@ type verifyPlan struct {
 	pins   rtmrPins
 	// meshCA is the parsed --mesh-ca bundle, nil when the flag is unset.
 	meshCA *x509.CertPool
+	// meshCAHash is the bundle's upstream-commitment hash, nil when unset.
+	meshCAHash []byte
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
 }
@@ -535,8 +581,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 	}
 
 	var caPool *x509.CertPool
+	var caHash []byte
 	if cfg.meshCA != "" {
-		caPool, err = meshCAPool(cfg.meshCA)
+		caPool, caHash, err = meshCAPool(cfg.meshCA)
 		if err != nil {
 			return nil, err
 		}
@@ -586,6 +633,7 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		},
 		pins:         pins,
 		meshCA:       caPool,
+		meshCAHash:   caHash,
 		initDataHash: initDataHash,
 	}, nil
 }
@@ -877,17 +925,19 @@ func loadHeldAllowlist(path string) (*heldAllowlist, error) {
 	return &heldAllowlist{raw: data, doc: doc}, nil
 }
 
-// meshCAPool loads the mesh CA bundle used to authenticate a leaf's sandbox ID.
-func meshCAPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
+// meshCAPool loads the mesh CA bundle used to authenticate a leaf's sandbox
+// ID, plus the bundle's upstream-commitment hash (the form an attest-pq
+// upstream_ca_sha256 is compared against).
+func meshCAPool(path string) (*x509.CertPool, []byte, error) {
+	pemBytes, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read --mesh-ca: %w", err)
+		return nil, nil, fmt.Errorf("read --mesh-ca: %w", err)
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("--mesh-ca %s contains no PEM certificates", path)
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, nil, fmt.Errorf("--mesh-ca %s contains no PEM certificates", path)
 	}
-	return pool, nil
+	return pool, overenc.UpstreamCABundleHash(pemBytes), nil
 }
 
 func gatherEvidence(ctx context.Context, cfg config, plan *verifyPlan, overrideERD []byte) (*evidence, error) {
@@ -1039,6 +1089,13 @@ type Outcome struct {
 	// reported here — it lands in NotProven.
 	ChainAnchor string `json:"chain_anchor,omitempty"`
 
+	// Upstream is the upstream destination an attest-pq responder committed
+	// into its transcript; UpstreamNote says what stands behind it (the
+	// --expected-upstream pin, and for an https upstream whether --mesh-ca
+	// authenticates its CA bundle).
+	Upstream     string `json:"upstream,omitempty"`
+	UpstreamNote string `json:"upstream_note,omitempty"`
+
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
 	// self-signed, a verified issuing chain, possession of the attested key on
@@ -1097,7 +1154,7 @@ func applySandboxPolicy(oc *Outcome, cfg config, ev *evidence, opKeys operatorKe
 			fail("--mesh-ca needs the target's leaf certificate (this evidence source carries none — use a cert, discovery, or attest-pq target)")
 			return
 		}
-		pool, err := meshCAPool(cfg.meshCA)
+		pool, _, err := meshCAPool(cfg.meshCA)
 		if err != nil {
 			fail("%v", err)
 			return
@@ -1571,6 +1628,12 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.ChainAnchor != "" {
 		fmt.Fprintf(out, "  chain anchor: %s\n", oc.ChainAnchor)
+	}
+	if oc.Upstream != "" {
+		fmt.Fprintf(out, "  upstream:     %s\n", oc.Upstream)
+		if oc.UpstreamNote != "" {
+			fmt.Fprintf(out, "              %s\n", oc.UpstreamNote)
+		}
 	}
 	fmt.Fprintf(out, "  binding:      %s\n", oc.Binding)
 	for _, np := range oc.NotProven {

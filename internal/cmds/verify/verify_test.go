@@ -342,11 +342,15 @@ func mintEndpointIdentityFrom(t *testing.T, leafPub crypto.PublicKey, notBefore,
 	return &endpointIdentity{leaf: leaf, ca: ca, key: leafKey, chainPEM: chain}
 }
 
+// testEndpointUpstream is the destination identity the test endpoints commit
+// and serve, mirroring a chart-deployed adopted-workload upstream.
+var testEndpointUpstream = overenc.UpstreamIdentity{URL: "http://c8s-infer.c8s-system.svc.cluster.local:8000"}
+
 // transcript computes the identity transcript the server would have bound for
 // this identity and session.
 func (id *endpointIdentity) transcript(t *testing.T, nonce, x25519, mlkem []byte) []byte {
 	t.Helper()
-	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw)
+	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, id.leaf.Raw, id.ca.Raw, testEndpointUpstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,6 +397,7 @@ func buildEndpointJSONWithEvidence(t *testing.T, id *endpointIdentity, nonce []b
 		"nonce":          b64u(nonce),
 		"evidence":       evidence,
 		"session_pubkey": map[string]any{"x25519": b64u(x25519), "mlkem768": b64u(mlkem)},
+		"upstream":       testEndpointUpstream.URL,
 	}
 	if id != nil {
 		resp["cds_cert_pem"] = id.chainPEM
@@ -551,7 +556,7 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 		// issuing relationship, which must fail closed.
 		other := mintEndpointIdentity(t)
 		b64u := base64.RawURLEncoding.EncodeToString
-		erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw)
+		erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, other.ca.Raw, testEndpointUpstream)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -609,7 +614,7 @@ func TestEvidenceFromEndpointJSON(t *testing.T) {
 	})
 
 	t.Run("wrong or missing version rejected (cross-endpoint responses)", func(t *testing.T) {
-		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB, "c8s/attest-pq/v2"} {
+		for _, version := range []string{"", "c8s-verify/v1", types.BindingAttestLB, "c8s/attest-pq/v1"} {
 			var obj map[string]any
 			if err := json.Unmarshal(data, &obj); err != nil {
 				t.Fatal(err)
@@ -701,7 +706,8 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
   },
   "cds_cert_pem": %q,
   "session_pubkey": { "x25519": %q, "mlkem768": %q },
-  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q }
+  "identity_proof": { "algorithm": "ecdsa-sha384", "leaf_sha256": %q, "mesh_ca_sha256": %q, "signature": %q },
+  "upstream": %q
 }`,
 		types.BindingAttestPQ,
 		b64u(nonce),
@@ -710,6 +716,7 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 		id.chainPEM,
 		b64u(x), b64u(m),
 		b64u(leafHash[:]), b64u(caHash[:]), b64u(sig),
+		testEndpointUpstream.URL,
 	)
 
 	ev, err := evidenceFromEndpointJSON([]byte(payload), nonce, "endpoint")

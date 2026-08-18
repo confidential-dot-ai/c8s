@@ -18,18 +18,14 @@ type SessionPublicKey struct {
 }
 
 const (
-	// ProtocolVersion is the attest-pq identity-transcript domain: the exact
-	// string overenc.IdentityTranscriptHash frames into report_data. It is a
-	// hash input shipped in deployed evidence, so it never changes; the wire
-	// discriminator clients check is the per-endpoint binding identifier below.
-	ProtocolVersion = "c8s-verify/v1"
-
 	// BindingAttestPQ / BindingAttestLB are the response binding identifiers
 	// carried in AttestationBundle.Version by the two explicit attestation
-	// endpoints. A client requires the identifier selected by its endpoint
-	// mode and rejects the other response shape even if its evidence is
-	// otherwise valid — there is no negotiation, alias, or fallback.
-	BindingAttestPQ = "c8s/attest-pq/v1"
+	// endpoints, and the transcript domain tags overenc.IdentityTranscriptHash
+	// / overenc.LBTranscriptHash frame into report_data. A client requires
+	// the identifier selected by its endpoint mode and rejects the other
+	// response shape even if its evidence is otherwise valid — there is no
+	// negotiation, alias, or fallback.
+	BindingAttestPQ = "c8s/attest-pq/v2"
 	BindingAttestLB = "c8s/attest-lb/v2"
 
 	// MeshIdentityProofECDSASHA384 is the proof-of-possession algorithm.
@@ -51,12 +47,13 @@ type MeshIdentityProof struct {
 // AttestationBundle is the response body of the two explicit attestation
 // endpoints, GET /.well-known/c8s/attest-pq?nonce=<b64url> and
 // GET /.well-known/c8s/attest-lb?nonce=<b64url>. attest-pq binds report_data
-// to the per-session hybrid key and the mesh identity
-// (overenc.IdentityTranscriptHash); attest-lb binds it to the exact outer
-// serving leaf, the mesh identity, and the configured upstream destination
-// (overenc.LBTranscriptHash) for native clients that ride ordinary nginx TLS.
-// Version carries the endpoint's binding identifier (BindingAttestPQ /
-// BindingAttestLB); a client requires the one its endpoint mode selects.
+// to the per-session hybrid key, the mesh identity, and the upstream
+// destination identity (overenc.IdentityTranscriptHash); attest-lb binds it
+// to the exact outer serving leaf, the mesh identity, and the same upstream
+// destination identity (overenc.LBTranscriptHash) for native clients that
+// ride ordinary nginx TLS. Version carries the endpoint's binding identifier
+// (BindingAttestPQ / BindingAttestLB); a client requires the one its endpoint
+// mode selects.
 type AttestationBundle struct {
 	Version    string          `json:"version"`      // BindingAttestPQ | BindingAttestLB
 	Platform   string          `json:"platform"`     // "snp" | "az-snp" | "az-tdx" | "tdx"
@@ -76,14 +73,23 @@ type AttestationBundle struct {
 	// observed on its own TLS connection and verify the transcript with that
 	// value — trusting the served field would let a relay substitute the leaf.
 	ServingLeafSHA256 string `json:"serving_leaf_sha256,omitempty"`
-	// Upstream (attest-lb only) is the canonical upstream base URL the
-	// sidecar committed into report_data — where the front door forwards
-	// decrypted traffic (empty when it forwards nowhere). Informational: the
-	// client MUST verify the transcript against its own out-of-band pinned
-	// destination and treat a mismatch with this served field as fatal —
-	// trusting the served value would let the control plane name any
-	// destination.
+	// Upstream is the canonical upstream base URL the sidecar committed into
+	// report_data — the destination its own forwarding dials (empty when it
+	// forwards nowhere). Informational: the client MUST verify the transcript
+	// against its own out-of-band pinned destination and treat a mismatch
+	// with this served field as fatal — trusting the served value would let
+	// the control plane name any destination.
 	Upstream string `json:"upstream,omitempty"`
+	// UpstreamServerName is the TLS verification name the sidecar uses for an
+	// https upstream, committed into report_data alongside Upstream. Empty
+	// for a plaintext (mesh-wrapped) upstream. Informational, same MUST-pin
+	// contract as Upstream.
+	UpstreamServerName string `json:"upstream_server_name,omitempty"`
+	// UpstreamCASHA256 is the unpadded base64url SHA-256 of the upstream CA
+	// bundle the sidecar verifies an https upstream against (concatenated
+	// certificate DERs in file order), committed into report_data alongside
+	// Upstream. Informational, same MUST-pin contract as Upstream.
+	UpstreamCASHA256 string `json:"upstream_ca_sha256,omitempty"`
 }
 
 // HandshakeRequest is the body of POST /.well-known/c8s/handshake: the client

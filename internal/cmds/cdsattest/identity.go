@@ -102,8 +102,8 @@ func checkValidity(now time.Time, cert *x509.Certificate, role string) error {
 	return nil
 }
 
-func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types.MeshIdentityProof, error) {
-	transcriptHash, err := overenc.IdentityTranscriptHash(pub, nonce, m.leaf.Raw, m.ca.Raw)
+func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte, upstream overenc.UpstreamIdentity) ([]byte, *types.MeshIdentityProof, error) {
+	transcriptHash, err := overenc.IdentityTranscriptHash(pub, nonce, m.leaf.Raw, m.ca.Raw, upstream)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -115,10 +115,10 @@ func (m *meshIdentity) bind(pub overenc.PublicKey, nonce []byte) ([]byte, *types
 }
 
 // bindServingLeaf is the attest-lb sibling of bind: it commits the exact outer
-// serving leaf, the configured upstream destination, and the mesh identity,
+// serving leaf, the upstream destination identity, and the mesh identity,
 // and signs that transcript. No session key exists on this path — the TLS
 // handshake itself proves possession of the serving-leaf key.
-func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte, upstream string) ([]byte, *types.MeshIdentityProof, error) {
+func (m *meshIdentity) bindServingLeaf(servingLeafDER, nonce []byte, upstream overenc.UpstreamIdentity) ([]byte, *types.MeshIdentityProof, error) {
 	transcriptHash, err := overenc.LBTranscriptHash(nonce, servingLeafDER, m.leaf.Raw, m.ca.Raw, upstream)
 	if err != nil {
 		return nil, nil, err

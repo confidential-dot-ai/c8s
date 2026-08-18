@@ -79,7 +79,7 @@ func snpVerifiedOutcome(t *testing.T, cfg config, ev *evidence) Outcome {
 		Claims:         teetypes.Claims{LaunchDigest: launch},
 	}
 	oc := newOutcome(cfg, ev, result, nil, plan)
-	applyVerdictPolicies(&oc, cfg, ev, nil, operatorKeysReport{})
+	applyVerdictPolicies(&oc, cfg, &verifyPlan{}, ev, nil, operatorKeysReport{})
 	return oc
 }
 
@@ -135,7 +135,7 @@ func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 	// A verification failure dominates the mode: exit 2, not partial.
 	verr := &securityError{err: errors.New("rejected")}
 	failed := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
-	applyVerdictPolicies(&failed, config{}, ev, nil, operatorKeysReport{})
+	applyVerdictPolicies(&failed, config{}, &verifyPlan{}, ev, nil, operatorKeysReport{})
 	if failed.Partial || verdictExitCode(failed) != exitFailed {
 		t.Errorf("failed evidence + webpki: partial=%v exit=%d, want a plain failure", failed.Partial, verdictExitCode(failed))
 	}

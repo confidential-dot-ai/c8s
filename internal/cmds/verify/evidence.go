@@ -84,6 +84,12 @@ type evidence struct {
 	// hardware evidence, but the anchor is responder-chosen: it is not a
 	// pinned trust anchor and the verdict must never treat it as one.
 	leafChainDerived bool
+	// upstream is the destination identity the responder committed into its
+	// transcript (attest-pq): hardware-bound once the evidence verifies
+	// against the recomputed transcript, but meaningful only against an
+	// operator pin — see applyUpstreamPolicy.
+	upstream      overenc.UpstreamIdentity
+	upstreamBound bool
 	// publicTLSMode is the discovery document's declared front-door TLS mode
 	// ("" when not discovery-sourced): "cds" serves the attestation-bound
 	// CDS leaf, "webpki" an operator WebPKI certificate the evidence says
@@ -135,7 +141,10 @@ type attestationResponse struct {
 		X25519   string `json:"x25519"`
 		Mlkem768 string `json:"mlkem768"`
 	} `json:"session_pubkey"`
-	IdentityProof *types.MeshIdentityProof `json:"identity_proof"`
+	IdentityProof      *types.MeshIdentityProof `json:"identity_proof"`
+	Upstream           string                   `json:"upstream"`
+	UpstreamServerName string                   `json:"upstream_server_name"`
+	UpstreamCASHA256   string                   `json:"upstream_ca_sha256"`
 }
 
 // leafTrust is what a caller can offer to authenticate a leaf body that is
@@ -362,11 +371,16 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 	if err != nil {
 		return nil, err
 	}
+	upstreamCAHash, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(r.UpstreamCASHA256, "="))
+	if err != nil {
+		return nil, fmt.Errorf("decode upstream_ca_sha256: %w", err)
+	}
+	upstream := overenc.UpstreamIdentity{URL: r.Upstream, ServerName: r.UpstreamServerName, CAHash: upstreamCAHash}
 	// The transcript rejects wrong-size keys and nonces: report_data framing is
 	// length-prefixed, so a wrong-size field can never reproduce the served
 	// hash — refuse it here instead of failing report-data match downstream.
 	erd, err := overenc.IdentityTranscriptHash(
-		overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, leaf.Raw, ca.Raw)
+		overenc.PublicKey{X25519: x25519, MLKEM768: mlkem}, nonce, leaf.Raw, ca.Raw, upstream)
 	if err != nil {
 		return nil, fmt.Errorf("compute identity transcript: %w", err)
 	}
@@ -394,9 +408,11 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		erd:              erd,
 		fresh:            fresh,
 		source:           source,
-		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
+		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA + the upstream destination identity (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
+		upstream:         upstream,
+		upstreamBound:    true,
 		sandboxID:        sandboxID,
 		sandboxErr:       sandboxErr,
 		workload:         workload,
