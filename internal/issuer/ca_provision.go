@@ -34,9 +34,8 @@ type CAProvisionConfig struct {
 	// Measurements pins the peer's launch digest on both the RA-TLS serving
 	// cert and the handoff issuer EAR. Required when PeerURL is set.
 	Measurements []string
-	// MinTcb, when set, is the minimum SEV-SNP platform TCB for the handoff
-	// attestations: the local signer-key evidence sent for verification, and
-	// the peer's RA-TLS evidence when adopting.
+	// MinTcb, when set, is the minimum SEV-SNP platform TCB required of the
+	// peer's RA-TLS evidence when adopting.
 	MinTcb *types.MinTcb
 	// ExpectedIssuer is the EAR issuer claim required on the peer's handoff
 	// EAR (the peer's --ear-issuer; "cds" by default).
