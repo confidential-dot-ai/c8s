@@ -106,6 +106,16 @@ support a non-CVM install shape or a bring-your-own CDS endpoint shape.
   On a cluster whose node network is separate from the pod network, pass
   `--node-cidr <range>` instead: CDS then uses the static range and the chart
   grants no node access. (docs/ratls.md, "Sandbox identity".)
+
+  **Under `--cvm-mode=pod` the inventory is inside each kata guest** and answers
+  on the guest's pod IP, so `c8s install` pins `cds.sandboxInventoryCIDRs` to the
+  cluster's **pod range(s)** (read from `spec.podCIDRs`) instead of leaving CDS
+  to derive node host routes. The address bound is not what separates a
+  workload from its guest's inventory there — both share the guest's IP; the
+  RA-TLS handshake CDS runs against the inventory endpoint is, since only the
+  guest's own attested mesh identity can present that leaf. A CNI that runs its
+  own IPAM leaves `spec.podCIDR` empty; the install then fails and asks for
+  `--node-cidr <pod-cidr>` explicitly.
 - `image.tag` or `image.digest`, `attestationApi.image.tag` or
   `attestationApi.image.digest`, and `cds.image.tag` or
   `cds.image.digest` are required; the CLI passes its build version when
