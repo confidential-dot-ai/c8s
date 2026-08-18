@@ -307,10 +307,11 @@ func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
 // Spec hooks ride inside an otherwise-admitted CreateContainerRequest;
 // Prestart and CreateContainer execute as guest root ahead of the
 // admission verdict, the remaining lists after it (CreateRuntime never
-// fires in the agent). Pin the guard the same way as the CRI-O marker:
-// one no_spec_hooks rule holding one line per hook list, conjoined into
-// CreateContainerRequest — a commented-out or relocated line still
-// leaves the substrings present, so read the rule bodies.
+// fires in the agent). The guard admits the one shape an honest request
+// carries, so a hook list added on a kata bump is covered without naming
+// it. Pin it the same way as the CRI-O marker: one no_spec_hooks rule,
+// conjoined into CreateContainerRequest — a commented-out or relocated
+// line still leaves the substrings present, so read the rule bodies.
 func TestBakedPolicyRejectsSpecHooks(t *testing.T) {
 	policy := readPolicy(t)
 
@@ -318,12 +319,9 @@ func TestBakedPolicyRejectsSpecHooks(t *testing.T) {
 	if len(hookBodies) != 1 {
 		t.Fatalf("baked policy has %d no_spec_hooks rules, want exactly one (a second would OR another predicate past the guard)", len(hookBodies))
 	}
-	for _, list := range []string{"Prestart", "CreateRuntime", "CreateContainer", "StartContainer", "Poststart", "Poststop"} {
-		guard := "not input.OCI.Hooks." + list + "[0]"
-		line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta(guard) + `$`)
-		if !line.MatchString(hookBodies[0]) {
-			t.Errorf("no_spec_hooks does not carry the guard line %q", guard)
-		}
+	guard := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta("is_null(input.OCI.Hooks)") + `$`)
+	if !guard.MatchString(hookBodies[0]) {
+		t.Errorf("no_spec_hooks does not carry the is_null(input.OCI.Hooks) guard; an enumeration of the known hook lists admits an unnamed one")
 	}
 
 	containerBodies := ruleBodies(t, policy, "CreateContainerRequest")
@@ -335,18 +333,31 @@ func TestBakedPolicyRejectsSpecHooks(t *testing.T) {
 	}
 }
 
-// add_hooks arms every container with executables from the guest_hook_path
-// directory, so the baked policy holds it empty, matching upstream
-// genpolicy's CreateSandboxRequest guard.
-func TestBakedPolicyRejectsGuestHookPath(t *testing.T) {
+// sandboxGuard asserts CreateSandboxRequest conjoins guard as its own line.
+// Both callers pin a count() over a key the serializer always emits, which
+// upstream genpolicy's CreateSandboxRequest carries verbatim.
+func sandboxGuard(t *testing.T, guard string) {
+	t.Helper()
 	bodies := ruleBodies(t, readPolicy(t), "CreateSandboxRequest")
 	if len(bodies) != 1 {
 		t.Fatalf("baked policy has %d CreateSandboxRequest rules, want exactly one", len(bodies))
 	}
-	line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta("count(input.guest_hook_path) == 0") + `$`)
+	line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta(guard) + `$`)
 	if !line.MatchString(bodies[0]) {
-		t.Error("CreateSandboxRequest does not carry the guest_hook_path guard")
+		t.Errorf("CreateSandboxRequest does not carry the guard line %q", guard)
 	}
+}
+
+// add_hooks arms every container with executables from the guest_hook_path
+// directory.
+func TestBakedPolicyRejectsGuestHookPath(t *testing.T) {
+	sandboxGuard(t, "count(input.guest_hook_path) == 0")
+}
+
+// load_kernel_module passes the request's name and parameters to modprobe
+// as argv.
+func TestBakedPolicyRejectsKernelModules(t *testing.T) {
+	sandboxGuard(t, "count(input.kernel_modules) == 0")
 }
 
 // A rule that silently reverts to `default … := true` is a no-op with no

@@ -1,0 +1,101 @@
+# Gates kata-guest-base/patches/ on a PR. The image build itself
+# (kata-guest-base.yml) is post-merge only, so without this job the patch
+# series is never applied before it lands — a rejected hunk would first show
+# up as a failed post-merge build of the measured guest.
+#
+# Applying at -F0 is stricter than build.sh's default fuzz of 2: a patch that
+# still lands with fuzz is a patch whose context has drifted from the pinned
+# commit, and fuzz picks the anchor by guesswork.
+name: Kata patches
+
+on:
+  pull_request:
+    branches: [main, "feat/**"]
+    paths:
+      - "kata-guest-base/patches/**"
+      - "kata-guest-base/scripts/**"
+      - ".github/workflows/kata-patches.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patches:
+    name: Series applies to pinned kata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the pinned kata commit
+        id: pin
+        run: |
+          set -euo pipefail
+          # build.sh owns the pin; read it there so this gate cannot test a
+          # different commit than the image is built from.
+          sha=$(grep -m1 '^KATA_SRC_COMMIT=' kata-guest-base/scripts/build.sh | grep -oE '[0-9a-f]{40}')
+          [ -n "$sha" ] || { echo "::error::could not read KATA_SRC_COMMIT from kata-guest-base/scripts/build.sh"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the pinned kata source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KATA_SRC_COMMIT: ${{ steps.pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p pristine
+          gh api "repos/kata-containers/kata-containers/tarball/${KATA_SRC_COMMIT}" > kata-src.tar.gz
+          tar xzf kata-src.tar.gz -C pristine --strip-components=1
+          [ -f pristine/src/agent/src/rpc.rs ] || { echo "::error::kata source layout changed"; exit 1; }
+
+      - name: The series applies in order at fuzz 0
+        env:
+          KATA_SRC_COMMIT: ${{ steps.pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf series && cp -a pristine series
+          kata-guest-base/scripts/apply-patches.sh "$PWD/series" -F0
+
+      - name: Only the declared patches depend on an earlier patch's output
+        # A patch whose context includes a line another patch introduced can
+        # only be re-based as part of the series. Naming them keeps that a
+        # deliberate property: a patch that silently acquires the dependency,
+        # or sheds it, fails here.
+        env:
+          EXPECTED: "0009-agent-refuse-oci-spec-hooks.patch"
+        run: |
+          set -euo pipefail
+          dependent=""
+          for p in kata-guest-base/patches/*.patch; do
+            rm -rf solo && cp -a pristine solo
+            if patch -p1 --forward --batch -F0 --dry-run -d solo <"$p" >/dev/null 2>&1; then
+              echo "standalone: $(basename "$p")"
+            else
+              echo "needs the series: $(basename "$p")"
+              dependent="${dependent}${dependent:+ }$(basename "$p")"
+            fi
+          done
+          if [ "$dependent" != "$EXPECTED" ]; then
+            echo "::error::patches depending on an earlier patch changed: got '$dependent', declared '$EXPECTED'"
+            exit 1
+          fi
+
+      - name: The upstream facts the baked policy's hook guard rests on
+        # no_spec_hooks admits only `null`, which is honest solely because the
+        # runtime clears Hooks and the serializer renders the unset message as
+        # null. If either moves on a kata bump, every pod is denied — fail
+        # here instead, while the tarball is already unpacked.
+        run: |
+          set -euo pipefail
+          agent=pristine/src/runtime/virtcontainers/kata_agent.go
+          if ! grep -qP '^\tgrpcSpec\.Hooks = nil$' "$agent"; then
+            echo "::error::$agent no longer clears grpcSpec.Hooks unconditionally in constrainGRPCSpec; the baked no_spec_hooks guard would deny every container"
+            exit 1
+          fi
+
+          serde=pristine/src/libs/protocols/src/serde_config.rs
+          body=$(awk '/pub fn serialize_message_field/,/^}/' "$serde")
+          if ! printf '%s\n' "$body" | grep -q 'serialize_unit()'; then
+            echo "::error::serialize_message_field in $serde no longer falls back to serialize_unit; an unset Hooks would stop serializing as null"
+            exit 1
+          fi

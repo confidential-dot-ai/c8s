@@ -324,13 +324,8 @@ if [[ ! -d "${OSBUILDER}" ]]; then
     # Step 2. They are pinned to KATA_SRC_COMMIT: a rejected hunk means the
     # upstream code moved and the patch needs re-basing, so fail the build
     # rather than ship a guest missing it.
-    shopt -s nullglob
-    for p in "${PATCH_DIR}"/*.patch; do
-        log "Applying $(basename "${p}")"
-        patch -p1 --forward --batch -d "${KATA_SRC}" < "${p}" \
-            || die "patch $(basename "${p}") does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
-    done
-    shopt -u nullglob
+    "${HERE}/apply-patches.sh" "${KATA_SRC}" \
+        || die "the patch series does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
 fi
 echo "    osbuilder: ${OSBUILDER}"
 

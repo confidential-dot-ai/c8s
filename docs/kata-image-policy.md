@@ -207,9 +207,9 @@ a healthy guest.
 
 kata-agent's baked OPA policy fails closed: it binds each request to
 itself — container id shape, storages, mounts, spec hooks,
-`guest_hook_path` — and denies the RPCs that would let the host reach
-into a running container, with `SetPolicyRequest := false` so the host
-cannot swap it at runtime. The one decision it does not carry is a
+`guest_hook_path`, `kernel_modules` — and denies the RPCs that would let
+the host reach into a running container, with `SetPolicyRequest := false`
+so the host cannot swap it at runtime. The one decision it does not carry is a
 per-image-digest Rego rule, because:
 
 1. **Regorus crypto.** Adding `data.agent_policy.allow if

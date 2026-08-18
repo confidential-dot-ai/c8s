@@ -187,15 +187,12 @@ CreateContainerRequest if {
 # do_create_container, ahead of the admission verdict — prestart in the
 # agent's own namespaces. The remaining lists run after the verdict, with
 # the admitted container (CreateRuntime has no execution site in the
-# agent). The runtime sends none — the GPU hook is CDI-injected by the
-# agent after this check — so a hook in the request is host-smuggled.
+# agent). The runtime clears Hooks before it sends the spec, so the
+# serializer emits null and that is the only shape an honest request
+# carries; every other shape is host-smuggled. Same guard as upstream
+# genpolicy's allow_create_container_input.
 no_spec_hooks if {
-	not input.OCI.Hooks.Prestart[0]
-	not input.OCI.Hooks.CreateRuntime[0]
-	not input.OCI.Hooks.CreateContainer[0]
-	not input.OCI.Hooks.StartContainer[0]
-	not input.OCI.Hooks.Poststart[0]
-	not input.OCI.Hooks.Poststop[0]
+	is_null(input.OCI.Hooks)
 }
 
 container_rootfs := concat("/", ["/run/kata-containers", input.container_id, "rootfs"])
@@ -402,6 +399,9 @@ default CreateSandboxRequest := false
 CreateSandboxRequest if {
 	# add_hooks arms every container with executables from this guest directory
 	count(input.guest_hook_path) == 0
+
+	# load_kernel_modules runs modprobe as guest root with host-chosen argv
+	count(input.kernel_modules) == 0
 
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)

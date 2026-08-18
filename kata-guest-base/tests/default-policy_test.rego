@@ -40,6 +40,7 @@ workload_input_for(id) := {
 			"io.kubernetes.cri.container-type": "container",
 			"io.kubernetes.cri.image-name": digest_ref,
 		},
+		"Hooks": null,
 		"Mounts": [],
 	},
 }
@@ -365,6 +366,7 @@ sandbox_input := {
 			"io.katacontainers.pkg.oci.container_type": "pod_sandbox",
 			"io.kubernetes.cri.container-type": "sandbox",
 		},
+		"Hooks": null,
 		"Mounts": [],
 	},
 }
@@ -495,8 +497,9 @@ test_conflicting_container_type_markers_denied if {
 # the trees a container binds from, so both carry a container storage's
 # constraints.
 
-# guest_hook_path always serializes; an honest request carries it empty.
-sandbox_req(ss) := {"guest_hook_path": "", "storages": ss}
+# guest_hook_path and kernel_modules always serialize; an honest request
+# carries both empty.
+sandbox_req(ss) := {"guest_hook_path": "", "kernel_modules": [], "storages": ss}
 
 # The fixture is otherwise admissible, so only the rootfs shape can deny it. A
 # sandbox-tree path can be rootfs-shaped too, which is the case that isolates
@@ -698,12 +701,10 @@ test_mount_allows_projected_volume_names if {
 # Hooks ride inside the OCI spec of an otherwise-admitted request; Prestart
 # and CreateContainer execute as guest root before the admission verdict,
 # the remaining lists after it (CreateRuntime never fires in the agent).
-# All six lists must be empty; the honest shapes are an absent Hooks, null
-# (what the protobuf serializer emits for an unset message), an empty Hooks
-# message, and empty lists.
+# constrainGRPCSpec clears Hooks, and the protobuf serializer emits null
+# for an unset message, so null is the one shape an honest request carries.
 
-# object.union is shallow, so merge at the OCI level to keep the fixture.
-with_hooks(base, hooks) := object.union(base, {"OCI": object.union(base.OCI, {"Hooks": hooks})})
+with_hooks(base, hooks) := object.union(base, {"OCI": {"Hooks": hooks}})
 
 spec_hook := {"Path": "/bin/bash", "Args": ["bash", "-c", "true"], "Env": [], "Timeout": 0}
 
@@ -714,26 +715,54 @@ test_spec_hooks_denied if {
 	}
 }
 
-test_honest_hook_shapes_allowed if {
+test_honest_hook_shape_allowed if {
 	CreateContainerRequest with input as with_hooks(workload_input, null)
-	CreateContainerRequest with input as with_hooks(workload_input, {})
-	CreateContainerRequest with input as with_hooks(workload_input, {
-		"Prestart": [],
-		"CreateRuntime": [],
-		"CreateContainer": [],
-		"StartContainer": [],
-		"Poststart": [],
-		"Poststop": [],
-	})
 }
+
+# Shapes an enumeration of the six known lists reads straight past: a hook
+# list this kata pin does not have, a falsy element, an empty-but-present
+# message, and a Hooks that is not an object at all.
+test_non_null_hooks_denied if {
+	every hooks in [
+		{"NewHookList": [spec_hook]},
+		{"Prestart": [false]},
+		{"Prestart": []},
+		{},
+		"hooks",
+		[spec_hook],
+	] {
+		not CreateContainerRequest with input as with_hooks(workload_input, hooks)
+	}
+}
+
+admissible_sandbox := sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}])
 
 # A non-empty guest_hook_path is denied even on an otherwise-admitted
 # sandbox: add_hooks would arm every container from that guest directory.
 test_guest_hook_path_denied if {
+	CreateSandboxRequest with input as admissible_sandbox
 	not CreateSandboxRequest with input as object.union(
-		sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}]),
+		admissible_sandbox,
 		{"guest_hook_path": "/run/kata-containers/shared/containers/x"},
 	)
+}
+
+# load_kernel_module runs modprobe with the request's name and parameters
+# as argv, so a module list is host-chosen code in the guest kernel.
+test_kernel_modules_denied if {
+	not CreateSandboxRequest with input as object.union(
+		admissible_sandbox,
+		{"kernel_modules": [{"name": "c8s_hostile", "parameters": []}]},
+	)
+}
+
+# Both guards are count() over a key the protobuf serializer always emits.
+# An absent key makes count() undefined, so the request is denied — pinned
+# because a kata bump that stops emitting either key denies every sandbox.
+test_sandbox_guard_keys_required if {
+	every key in ["guest_hook_path", "kernel_modules"] {
+		not CreateSandboxRequest with input as object.remove(admissible_sandbox, [key])
+	}
 }
 
 # --- CopyFile -----------------------------------------------------------
