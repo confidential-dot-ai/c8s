@@ -305,8 +305,13 @@ trust assumptions hold:
 3. **Code identity.** The guest booted exactly an allowlisted image: its
    launch digest (SNP LAUNCH_DIGEST / TDX MRTD) is in the verifier's pinned
    set. *This guarantee only exists when measurements are pinned.*
-4. **Runtime policy floor.** Debug-mode guests are rejected by default;
-   on SNP a minimum TCB (microcode/SNP firmware level) can be enforced.
+4. **Runtime policy floor.** Debug-mode guests are rejected: `allow_debug=false`
+   rides every `/verify` request, and the response's verified claims must show
+   it held. On SEV-SNP a minimum platform TCB — the chart's `minTcb`,
+   bootloader/TEE/SP-firmware/microcode — rides the same request and is
+   re-checked against the claims. TDX's verifier request has no minimum-TCB
+   parameter, so the floor applies to SNP evidence only (GAPS); the debug
+   rejection holds on both platforms.
 5. **Channel security.** TLS 1.3 with ephemeral key exchange protects
    confidentiality and integrity; certificates rotate halfway through their
    TTL (24h default).

@@ -305,6 +305,11 @@ field rather than passing silently.
 On a mismatch, or with no document, the guest falls back to the baked
 seed.
 
+The same document carries the minimum-TCB floor (`c8s.cds.min-tcb`,
+from the chart's `minTcb`) for the same reason: a host that could strip
+it from an unattested channel would run known-vulnerable firmware
+unobserved.
+
 **TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`,
 which is 48 bytes where the anchor is 32, so the guest refuses the
 claim and enforces the baked seed alone. Empty `cds.measurements` (the chart

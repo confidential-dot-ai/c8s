@@ -183,8 +183,9 @@ a debug image can't silently stand in for a locked one. Select it with
   rootfs — one fixed identity (`C8S_WORKLOAD_ID=c8s-broker`) shared by every
   guest. Should per-pod user-data injection land it would be host-written and
   host-visible, which is why these values are URLs and workload IDs rather
-  than secrets. The one value that must not come from the host,
-  `C8S_CDS_MEASUREMENTS`, is delivered over SNP init-data instead and checked
+  than secrets. The values that must not come from the host —
+  `C8S_CDS_MEASUREMENTS` and the minimum-TCB floor — are delivered over SNP
+  init-data instead and checked
   against `HOST_DATA` (see
   [`docs/kata-image-policy.md`](../docs/kata-image-policy.md)).
 - **kata version pin.** `scripts/build.sh` (osbuilder source tag) must
