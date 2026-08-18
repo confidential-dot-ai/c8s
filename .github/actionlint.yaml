@@ -2,6 +2,5 @@ self-hosted-runner:
   # Custom labels beyond the GitHub-hosted set, so actionlint's runner-label
   # check knows them.
   labels:
-    - meaty-runner
     - the-machine
     - cvm-launcher-tdx

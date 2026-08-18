@@ -1,8 +1,9 @@
 # Reproducibility gate for the node image: PRs touching the image definition
 # or its pins build the image TWICE (parallel legs, separate runners) and fail
-# unless every measured value matches (c8s#264). Runs on EVERY PR and decides
+# unless every measured value matches (c8s#264). Runs on every PR and decides
 # relevance itself — a paths: filter would leave the required `compare` check
-# forever pending on unrelated PRs.
+# forever pending on unrelated PRs. Fork PRs are exempt from the gate
+# (security-over-coverage); the post-merge main build remains the published gate.
 name: image repro gate
 on:
   pull_request:
@@ -17,6 +18,8 @@ concurrency:
 
 jobs:
   changes:
+    # The gate build legs run on the-machine (self-hosted); never fork-trigger.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.diff.outputs.image }}
@@ -99,8 +102,9 @@ jobs:
       gate_signing_artifact: module-signing-${{ github.run_id }}
 
   compare:
-    # The required check: green fast on image-irrelevant PRs, otherwise only
-    # after both legs built and every measured value matched.
+    # The required check: green fast on image-irrelevant PRs (and fork PRs,
+    # whose changes job is skipped), otherwise only after both legs built
+    # and every measured value matched.
     needs: [changes, build-a, build-b]
     if: always()
     runs-on: ubuntu-latest
