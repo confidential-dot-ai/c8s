@@ -225,8 +225,8 @@ func TestNewVMIClientFailures(t *testing.T) {
 	})
 
 	t.Run("context without a usable cluster", func(t *testing.T) {
-		// The namespace loads, but client-config validation rejects the
-		// server-less cluster.
+		// clientcmd validates the whole config on the first read, so even a
+		// non-namespace defect like a server-less cluster surfaces there.
 		kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 		if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
 kind: Config
@@ -245,8 +245,8 @@ current-context: outer
 		}
 		t.Setenv("KUBECONFIG", kubeconfig)
 		if _, _, err := newVMIClient(); err == nil ||
-			!strings.Contains(err.Error(), "load kubeconfig") {
-			t.Fatalf("want load-kubeconfig error, got %v", err)
+			!strings.Contains(err.Error(), "namespace from kubeconfig") {
+			t.Fatalf("want namespace error, got %v", err)
 		}
 	})
 
