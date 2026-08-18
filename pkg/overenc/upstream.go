@@ -12,7 +12,9 @@ import (
 // one transcript commitment and different destinations differ:
 //
 //   - scheme and host lowercased
-//   - default port elided (:80 for http, :443 for https); other ports kept
+//   - default port elided (:80 for http, :443 for https); other ports kept;
+//     a port outside 1-65535 rejected (a forwarding destination has a real
+//     port)
 //   - one trailing root dot stripped from the host
 //   - percent-encoded unreserved characters decoded and dot-segments
 //     resolved (RFC 3986 §6.2.2.3, §5.2.4); trailing slashes trimmed
@@ -23,6 +25,11 @@ import (
 // function: the backend dials and commits the result, and the verify CLI
 // canonicalises --expected-upstream with it before comparing.
 func CanonicalUpstreamURL(raw string) (string, error) {
+	// net/url drops a bare trailing "#", so the fragment check must see the
+	// raw string: any "#" introduces a fragment.
+	if strings.Contains(raw, "#") {
+		return "", fmt.Errorf("upstream URL %q carries a fragment: the committed destination is a base URL only", raw)
+	}
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return "", fmt.Errorf("upstream URL %q does not parse: %w", raw, err)
@@ -36,9 +43,6 @@ func CanonicalUpstreamURL(raw string) (string, error) {
 	if u.RawQuery != "" || u.ForceQuery {
 		return "", fmt.Errorf("upstream URL %q carries a query: the committed destination is a base URL only", raw)
 	}
-	if u.Fragment != "" {
-		return "", fmt.Errorf("upstream URL %q carries a fragment: the committed destination is a base URL only", raw)
-	}
 	host := CanonicalDNSName(u.Hostname())
 	if host == "" {
 		return "", fmt.Errorf("upstream URL %q has no host", raw)
@@ -47,8 +51,12 @@ func CanonicalUpstreamURL(raw string) (string, error) {
 		host = "[" + host + "]" // IPv6 literal
 	}
 	if port := u.Port(); port != "" {
-		// url.Parse rejects non-numeric ports, so Atoi cannot fail.
-		if n, _ := strconv.Atoi(port); !defaultPort(u.Scheme, n) {
+		// url.Parse rejects non-numeric ports; Atoi errors on range overflow.
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("upstream URL %q carries port %q: a forwarding destination has a real port (1-65535)", raw, port)
+		}
+		if !defaultPort(u.Scheme, n) {
 			host += ":" + strconv.Itoa(n)
 		}
 	}

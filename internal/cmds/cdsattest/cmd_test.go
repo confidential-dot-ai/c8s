@@ -100,9 +100,17 @@ func TestRunErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := run(tc.cfg)
-			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
-				t.Fatalf("run() error = %v, want substring %q", err, tc.wantSub)
+			// A regressed pre-listen check would leave run() serving forever;
+			// fail the case on a deadline instead of hanging the package.
+			errCh := make(chan error, 1)
+			go func() { errCh <- run(tc.cfg) }()
+			select {
+			case err := <-errCh:
+				if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+					t.Fatalf("run() error = %v, want substring %q", err, tc.wantSub)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("run() did not return within 5s — expected error %q", tc.wantSub)
 			}
 		})
 	}
