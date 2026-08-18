@@ -78,11 +78,12 @@ jobs:
           # The baked NRI floor is a template whose always_allow entries are
           # @-tokens the sync fills with ref-resolved digests; a hardcoded
           # sha256 would bake a stale digest the fail-closed floor can't
-          # reconcile with the ref.
+          # reconcile with the ref. The marked block is exempt: systemfloor
+          # generates it from the pinned RKE2 airgap bundles (see mkosi.sync).
           policy="$ngi/c8s/image-policy.yaml.in"
           [ -f "$policy" ] || { echo "::error::NRI floor template $policy not found"; exit 1; }
-          if grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:' "$policy"; then
-            echo "::error::$policy has a hardcoded always_allow digest; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
+          if sed '/# BEGIN rke2 system floor/,/# END rke2 system floor/d' "$policy"               | grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:'; then
+            echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
             exit 1
           fi
 
@@ -112,6 +113,59 @@ jobs:
           fi
 
           echo "all node-guest-image invariants hold at CONFOS_REF ${{ steps.ref.outputs.ref }}"
+
+  system-floor:
+    name: system floor lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - name: Read the RKE2 bundle pins
+        id: pins
+        run: |
+          set -euo pipefail
+          sync=node-guest-image/c8s/mkosi.sync
+          version=$(sed -n 's/^RKE2_VERSION="\(.*\)"$/\1/p' "$sync")
+          core=$(sed -n 's/^RKE2_IMAGES_CORE_SHA256="\(.*\)"$/\1/p' "$sync")
+          cilium=$(sed -n 's/^RKE2_IMAGES_CILIUM_SHA256="\(.*\)"$/\1/p' "$sync")
+          for v in "$version" "$core" "$cilium"; do
+            [ -n "$v" ] || { echo "::error::could not read the RKE2 pins from $sync"; exit 1; }
+          done
+          {
+            echo "version=$version"
+            echo "core=$core"
+            echo "cilium=$cilium"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the pinned airgap bundles
+        env:
+          RKE2_VERSION: ${{ steps.pins.outputs.version }}
+          CORE_SHA256: ${{ steps.pins.outputs.core }}
+          CILIUM_SHA256: ${{ steps.pins.outputs.cilium }}
+        run: |
+          set -euo pipefail
+          # '+' is %2B in a release URL, as mkosi.sync does.
+          base="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
+          curl -fL --retry 3 --retry-delay 5 -o core.tar.zst "$base/rke2-images-core.linux-amd64.tar.zst"
+          curl -fL --retry 3 --retry-delay 5 -o cilium.tar.zst "$base/rke2-images-cilium.linux-amd64.tar.zst"
+          echo "$CORE_SHA256  core.tar.zst" | sha256sum -c -
+          echo "$CILIUM_SHA256  cilium.tar.zst" | sha256sum -c -
+
+      - name: The baked floor matches the pinned bundles
+        # systemfloor re-derives the always_allow block from the pinned
+        # bundles; -check fails when image-policy.yaml.in is stale, so an RKE2
+        # pin bump without a floor regen cannot merge and wedge node boot.
+        run: |
+          set -euo pipefail
+          manifests=node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests
+          go run ./node-guest-image/c8s/systemfloor -check \
+            -template node-guest-image/c8s/image-policy.yaml.in \
+            -bundle core.tar.zst \
+            -bundle cilium.tar.zst \
+            -manifest "$manifests/local-path-storage.yaml" \
+            -manifest "$manifests/nvidia-device-plugin.yaml"
 
   rke2-role:
     name: rke2-role dispatch (script)

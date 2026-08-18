@@ -61,9 +61,6 @@ func TestLogOmitsRuleAndErrorWhenEmpty(t *testing.T) {
 	if _, ok := rec["rule"]; ok {
 		t.Error("rule should be omitted when empty")
 	}
-	if _, ok := rec["overrides"]; ok {
-		t.Error("overrides should be omitted when empty")
-	}
 	if _, ok := rec["error"]; ok {
 		t.Error("error should be omitted when empty")
 	}

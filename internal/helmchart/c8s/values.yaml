@@ -888,8 +888,6 @@ nriImagePolicy:
     mode: fail-closed  # fail-closed | audit
     enforceExisting: true
     denyMissingAnnotation: true
-    exemptNamespaces:
-      - kube-system
     # labelRules: Kubernetes-style label selectors evaluated against pod
     # labels at container creation time. With the host-process model there
     # is one plugin per node, so these rules apply globally on each node;

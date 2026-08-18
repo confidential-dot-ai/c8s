@@ -178,6 +178,36 @@ allowlist:
 	}
 }
 
+// A config written before the namespace exemption was removed still carries
+// exempt_namespaces. The loader is not field-strict, so the unknown key is
+// dropped and the plugin starts fail-closed; a strict loader would instead
+// refuse the config and wedge node-wide container creation via
+// required_plugins.
+func TestLoadConfig_StaleExemptNamespacesIgnored(t *testing.T) {
+	const body = `
+allowlist:
+  always_allow:
+    "sha256:0000000000000000000000000000000000000000000000000000000000000001": "installer"
+  pull:
+    url: https://127.0.0.1:30808
+    attestation_api_url: http://localhost:30840
+policy:
+  mode: fail-closed
+  exempt_namespaces: [kube-system, local-path-storage]
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("a config still carrying exempt_namespaces must load: %v", err)
+	}
+	if cfg.Policy.Mode != ModeFailClosed {
+		t.Errorf("Mode = %q, want fail-closed after loading a stale config", cfg.Policy.Mode)
+	}
+}
+
 func TestLoadConfig_InvalidYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(":::bad"), 0o644); err != nil {

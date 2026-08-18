@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -32,7 +31,7 @@ type imageVerdict int
 const (
 	verdictAllow imageVerdict = iota
 	verdictDeny
-	verdictSkip // exempt namespace, etc.
+	verdictSkip // no admission check applied (missing image annotation)
 )
 
 // policySnapshot is an immutable admission view: an Index built from the
@@ -259,9 +258,9 @@ func (p *plugin) recordForInventory(ctx context.Context, ctr *api.Container, ima
 	p.recordDigest(ctr, digest)
 }
 
-// recordUncheckedForInventory takes only a digest already inlined in the
-// reference: it runs on the hook that must answer inside NRI's
-// plugin_request_timeout for a required plugin, so it stays off containerd.
+// recordUncheckedForInventory records the digest inlined in the reference
+// without resolving; the pre-Ready hook must answer inside NRI's
+// plugin_request_timeout, so recording adds no containerd round-trip.
 func (p *plugin) recordUncheckedForInventory(ctr *api.Container, imageRef string) {
 	p.recordDigest(ctr, extractDigest(imageRef))
 }
@@ -421,45 +420,19 @@ func (p *plugin) checkImage(ctx context.Context, cfg *config, namespace, podName
 	return verdictAllow, ""
 }
 
-// checkContainer runs the label rules and the image allowlist over a container,
-// then applies the namespace exemption to their verdict.
-//
-// INVARIANT: the exemption runs last and only downgrades a denial, so an exempt
-// container is still checked and audited, and every downgrade emits
-// namespace_exempt.
+// checkContainer runs the label rules and the image allowlist over a
+// container. Only the image digest (answered by the containerd content
+// store) admits; label rules can only deny.
 func (p *plugin) checkContainer(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) (imageVerdict, string) {
 	namespace, podName, ctrName := pod.GetNamespace(), pod.GetName(), ctr.GetName()
-	exempt := slices.Contains(cfg.Policy.ExemptNamespaces, namespace)
 
 	verdict, reason := p.checkLabels(cfg, namespace, podName, ctrName, pod.GetLabels())
-	if verdict == verdictDeny && !exempt {
+	if verdict == verdictDeny {
 		return verdict, reason
 	}
 
 	if cfg.AllowlistEnabled() {
-		imgVerdict, imgReason := p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
-		if verdict != verdictDeny {
-			verdict, reason = imgVerdict, imgReason
-		}
-	}
-
-	if verdict == verdictDeny && exempt {
-		p.logger.Info("namespace exempt from policy; admitting denied container",
-			"namespace", namespace,
-			"pod", podName,
-			"container", ctrName,
-			"denial", reason,
-		)
-		p.audit.Log(audit.Event{
-			Action:    "allow",
-			Reason:    "namespace_exempt",
-			Overrides: reason,
-			Namespace: namespace,
-			Pod:       podName,
-			Container: ctrName,
-			Image:     imageRef,
-		})
-		return verdictSkip, ""
+		verdict, reason = p.checkImage(ctx, cfg, namespace, podName, ctrName, imageRef, ctr.GetArgs())
 	}
 
 	return verdict, reason
@@ -573,25 +546,26 @@ func (p *plugin) RunDeferredCheck(ctx context.Context) {
 }
 
 // admitWhileInitializing decides a container seen after NRI registration but
-// before the first allowlist fetch: exempt namespaces and audit mode pass,
-// everything else is denied.
-func (p *plugin) admitWhileInitializing(cfg *config, pod *api.PodSandbox, ctr *api.Container) error {
+// before the first allowlist fetch: audit mode passes, everything else takes
+// the ordinary check. The store is seeded with the always_allow floor at
+// startup, so bootstrap images are admitted and nothing else is.
+func (p *plugin) admitWhileInitializing(ctx context.Context, cfg *config, pod *api.PodSandbox, ctr *api.Container, imageRef string) error {
 	log := p.logger.With(
 		"namespace", pod.GetNamespace(),
 		"pod", pod.GetName(),
 		"container", ctr.GetName(),
 	)
 
-	if slices.Contains(cfg.Policy.ExemptNamespaces, pod.GetNamespace()) {
-		log.Info("plugin initializing: allowing container in exempt namespace")
-		return nil
-	}
 	if cfg.Policy.Mode == ModeAudit {
 		log.Warn("plugin initializing: would deny container creation (audit mode)")
 		return nil
 	}
-	log.Warn("plugin initializing: denying container creation")
-	return fmt.Errorf("image policy plugin initializing, container creation denied")
+	verdict, reason := p.checkContainer(ctx, cfg, pod, ctr, imageRef)
+	if verdict == verdictDeny {
+		log.Warn("plugin initializing: denying container creation", "denial", reason)
+		return fmt.Errorf("image policy plugin initializing: %s", reason)
+	}
+	return nil
 }
 
 // CreateContainer is called when a container is being created.
@@ -601,7 +575,7 @@ func (p *plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	imageRef := ctr.GetAnnotations()[annotationImageName]
 
 	if !p.Ready() {
-		if err := p.admitWhileInitializing(cfg, pod, ctr); err != nil {
+		if err := p.admitWhileInitializing(ctx, cfg, pod, ctr, imageRef); err != nil {
 			return nil, nil, err
 		}
 		p.recordUncheckedForInventory(ctr, imageRef)

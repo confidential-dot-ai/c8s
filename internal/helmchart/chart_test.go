@@ -6069,6 +6069,25 @@ func TestChartBootConfigParsesAsPluginYAML(t *testing.T) {
 	}
 }
 
+// The rendered worker boot config admits by the digest floor alone: no
+// exempt_namespaces key. Mirrors the node-image lockstep pin in
+// image_policy_template_test.go.
+func TestChartBootConfigHasNoExemptNamespaces(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-nri-image-policy-worker")
+	script := strings.Join(containerArgs(t, &ds, "install"), "\n")
+	m := bootConfigHeredocRE.FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("install script has no IMAGE_POLICY_EOF heredoc\n%s", script)
+	}
+	if strings.Contains(m[1], "exempt_namespaces") {
+		t.Errorf("worker boot config still renders exempt_namespaces:\n%s", m[1])
+	}
+}
+
 // A fleet-supplied bootstrapAllowlist.digests entry must override a derived
 // entry for the same sha256 (fleet values win).
 func TestChartFleetAllowlistOverridesDerived(t *testing.T) {

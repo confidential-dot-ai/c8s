@@ -88,7 +88,6 @@ type policyConfig struct {
 	Mode                  string      `yaml:"mode"`                    // fail-closed, audit
 	EnforceExisting       bool        `yaml:"enforce_existing"`        // kill non-allowlisted containers on startup
 	DenyMissingAnnotation bool        `yaml:"deny_missing_annotation"` // deny containers without image annotation
-	ExemptNamespaces      []string    `yaml:"exempt_namespaces"`       // admit a denied container; applied after the checks
 	LabelRules            []labelRule `yaml:"label_rules"`
 }
 

@@ -220,10 +220,6 @@ policy:
   mode: {{ $root.Values.nriImagePolicy.policy.mode | quote }}
   enforce_existing: {{ $root.Values.nriImagePolicy.policy.enforceExisting }}
   deny_missing_annotation: {{ $root.Values.nriImagePolicy.policy.denyMissingAnnotation }}
-  exempt_namespaces:
-{{- range $root.Values.nriImagePolicy.policy.exemptNamespaces }}
-    - {{ . | quote }}
-{{- end }}
   label_rules:
 {{- if $root.Values.nriImagePolicy.policy.labelRules }}
 {{- toYaml $root.Values.nriImagePolicy.policy.labelRules | nindent 4 }}
