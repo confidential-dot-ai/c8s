@@ -34,7 +34,7 @@ on:
   # ghcr.io/confidential-dot-ai/{cds,get-cert}:<IMAGE_TAG>`) are the ones docker.yml
   # just published — not whatever stale digests were on `main` at the moment
   # of a concurrent push. The job-level `if:` below gates on a successful
-  # Docker push to main or a release tag (excludes Docker's own PR runs and
+  # Docker push to main (excludes Docker's own PR runs and
   # side-branch pushes — those never build or publish).
   #
   # No `pull_request:` trigger: the build is long (historically 45+ min;
@@ -94,10 +94,10 @@ jobs:
     name: Build kata-guest-base
     # workflow_run fires for every Docker completion — including its PR runs,
     # which don't publish. Gate the AUTOMATIC path to "Docker succeeded on main
-    # or a release tag (v*)": those are the only refs we publish a
-    # kata-guest-base image for, so a side-branch push never triggers the
-    # ~45-min build or pushes a branch-* tag (head_branch is the source ref of
-    # the triggering Docker event — "main", the tag name, or a branch name).
+    # or a manually dispatched release ref (v*)": those are the only refs we
+    # publish a kata-guest-base image for, so a side-branch push never triggers
+    # the ~45-min build or pushes a branch-* tag (head_branch is the source ref
+    # of the triggering Docker event — "main", a tag name, or a branch name).
     #
     # Accept BOTH origins of that Docker run: a push (the normal merge-to-main
     # path) and a workflow_dispatch (the manual rebuild — e.g. a base-image
@@ -141,24 +141,34 @@ jobs:
         # same commit whose images we'll bake into the allowlist.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
 
       - name: Checkout attestation-rs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: confidential-dot-ai/attestation-rs
           ref: ${{ env.ATTESTATION_RS_REF }}
           path: attestation-rs
 
       - name: Record the resolved attestation-rs revision
+        id: attestation-revision
         # The checkout floats on main; the manifest records what it resolved to.
-        run: echo "ATTESTATION_RS_SHA=$(git -C attestation-rs rev-parse HEAD)" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+
+          revision="$(git -C attestation-rs rev-parse HEAD)"
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Checkout confidential-os-builder
         # CONFOS_REF above is the single source of truth for the ref.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: confidential-dot-ai/confidential-os-builder
           ref: ${{ env.CONFOS_REF }}
           path: confidential-os-builder
@@ -519,7 +529,7 @@ jobs:
           # Build provenance, recorded in manifest.json inputs (additive, v2).
           PROV_C8S_REF: ${{ github.event.workflow_run.head_sha || github.sha }}
           PROV_CONFOS_REF: ${{ env.CONFOS_REF }}
-          PROV_ATTESTATION_RS_REF: ${{ env.ATTESTATION_RS_SHA }}
+          PROV_ATTESTATION_RS_REF: ${{ steps.attestation-revision.outputs.sha }}
           # GPU variants are mandatory in CI. build.sh Step 6 grafts the
           # NVIDIA payload from the staged kata-static artifacts
           # (KATA_NVIDIA_CONFIDENTIAL_IMG / KATA_NVIDIA_VMLINUZ, exported by
@@ -645,7 +655,7 @@ jobs:
       # --- Push to GHCR ------------------------------------------------
       #
       # The job-level `if:` already gates the whole job on a successful
-      # Docker push to main / a release tag (or a manual workflow_dispatch),
+      # Docker push to main (or a manual workflow_dispatch),
       # so we publish unconditionally here. Tag derivation uses
       # `head_branch`/`head_sha` from the
       # workflow_run payload so the published tags match the commit Docker
@@ -655,37 +665,75 @@ jobs:
       # We already logged in to GHCR earlier for the digest-resolution step
       # that feeds the bootstrap allowlist, so no second login is needed.
 
+      # The parent Docker run creates a stable release tag before completing.
+      # GITHUB_TOKEN intentionally suppresses a second tag-triggered Docker run,
+      # so discover that tag on the exact built commit and publish its guest
+      # aliases in this existing main-triggered build.
+      - name: Find stable release tag for this revision
+        id: release-tag
+        # Stable aliases are immutable release output. A manual Docker/Kata
+        # rebuild may refresh main and commit-scoped artifacts, but must not
+        # overwrite an existing vX.Y.Z guest image.
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Docker revision is not a full commit SHA"
+            exit 1
+          fi
+          mapfile -t release_tags < <(
+            git -C c8s tag --points-at "$HEAD_SHA" --list 'v*' \
+              | grep -E '^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$' \
+              | sort -V
+          )
+          if [ "${#release_tags[@]}" -gt 1 ]; then
+            echo "::error::multiple stable release tags name $HEAD_SHA"
+            printf '%s\n' "${release_tags[@]}"
+            exit 1
+          fi
+          echo "tag=${release_tags[0]:-}" >> "$GITHUB_OUTPUT"
+
       - name: Compute tags
         id: tags
         env:
           # head_branch is the source branch of the triggering Docker event:
-          # "main" for a main push, the tag name (e.g. "v0.1.0") for a tag push.
+          # "main" for a main push, or the selected ref for a manual run.
           # github.ref_name is the workflow_dispatch fallback.
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: c8s/kata-guest-base/scripts/ci/compute-tags.sh
 
       - name: Push to GHCR
         working-directory: c8s/kata-guest-base/output
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          TAGS: ${{ steps.tags.outputs.tags }}
         run: |
           set -euo pipefail
           # The artifact is the kata-native guest: vmlinuz + the dm-verity
           # rootfs image + the verity-params / rootfs-type sidecars +
           # manifest.json. The puller pulls all of these (see
           # kata-image-puller.yaml).
-          oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.tags }}" \
+          oras push "$IMAGE:$TAGS" \
             --artifact-type application/vnd.confidential.kata-guest.v2 \
             ./*
 
       - name: Push debug variant to GHCR
         working-directory: c8s/kata-guest-base/output-debug
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          TAGS: ${{ steps.tags.outputs.debug_tags }}
         run: |
           set -euo pipefail
           # Same layout as the locked artifact, one delta: the guest policy
           # allows host log/exec streams (kubectl logs / exec). Published in
           # lockstep at <tag>-debug so kata.guestImage.debug=true can derive
           # the ref from any locked tag (see workflow header).
-          oras push "${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.debug_tags }}" \
+          oras push "$IMAGE:$TAGS" \
             --artifact-type application/vnd.confidential.kata-guest.v2 \
             ./*
 
@@ -724,6 +772,18 @@ jobs:
           oras push "${IMAGE}:${nv_tags}" \
             --artifact-type application/vnd.confidential.kata-guest.v2 \
             ./*
+
+      # Stable aliases are create-or-verify. Keep them out of the oras push
+      # commands above because those commands update every supplied tag; a
+      # retry with different upstream inputs must fail instead of moving an
+      # already published release.
+      - name: Publish or verify stable guest aliases
+        if: steps.tags.outputs.release_tag != ''
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          IMAGE: ${{ steps.tags.outputs.image }}
+          RELEASE_TAG: ${{ steps.tags.outputs.release_tag }}
+        run: c8s/kata-guest-base/scripts/ci/publish-release-aliases.sh
 
   # RETIRED: the interim build-nvidia job (repackaging the stock kata GPU
   # rootfs verbatim on ubuntu-latest) is gone — the GPU variants are now real

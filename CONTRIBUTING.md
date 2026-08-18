@@ -96,6 +96,14 @@ additionally runs golangci-lint, a CRD/chart consistency check
 - Maintainers review and merge at their discretion; expect requests for
   changes.
 
+## Releases
+
+Merges to `main` are versioned automatically from their Conventional Commit
+messages. Maintainers should not calculate or push release tags manually; see
+[docs/releases.md](docs/releases.md) for the version rules, repository setup,
+and recovery procedure. Automatic releases remain on major version zero until
+the release policy is deliberately graduated to `v1.0.0`.
+
 ## Security issues
 
 Do **not** report vulnerabilities through public issues or PRs. See

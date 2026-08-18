@@ -339,10 +339,10 @@ The `build.sh` pins carry a re-resolve command in a comment beside each.
 The [`kata-guest-base.yml`](../.github/workflows/kata-guest-base.yml)
 workflow builds the image and pushes it to
 `ghcr.io/confidential-dot-ai/kata-guest-base` (flat at the org level, matching
-every other c8s artifact). It tags images as `<short-sha>` on every
-commit to `main` or `feat/**` branches that touches the recipe or the
-in-guest binaries. On a release tag (`v*`) the same image also gets the
-release version; `latest` moves only on `main`.
+every other c8s artifact). After each successful `Docker` run on `main`, it tags
+the image as `<short-sha>` and `main`. When the parent run created a stable
+release tag on that exact revision, the same build also receives the matching
+`vX.Y.Z` alias. A manual dispatch can publish a branch-scoped alias.
 
 Operators select the artifact tag by setting `kata.guestImage.tag` in a values
 file (`c8s install --cvm-mode=pod -f values.yaml`). The

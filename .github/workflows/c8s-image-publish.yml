@@ -35,16 +35,161 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # A rerun of the same parent completion must not race its own alias repair.
+  # The distinct prefix avoids sharing a group with the called builder.
+  group: c8s-image-entrypoint-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-push:
+  # A stable tag is created inside the successful parent Docker run. Resolve it
+  # from that run's exact revision only for the trusted automatic main path;
+  # manual node-image rebuilds must never mint or move release aliases.
+  release-context:
+    name: Resolve stable release context
+    if: |
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+    steps:
+      - name: Checkout the parent Docker revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Find its canonical stable tag
+        id: release-tag
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo "::error::parent Docker revision is not the checked-out full commit SHA"
+            exit 1
+          fi
+          mapfile -t release_tags < <(
+            git tag --points-at "$HEAD_SHA" --list 'v*' \
+              | grep -E '^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$' \
+              | sort -V
+          )
+          if [ "${#release_tags[@]}" -gt 1 ]; then
+            echo "::error::multiple stable release tags name $HEAD_SHA"
+            printf '%s\n' "${release_tags[@]}"
+            exit 1
+          fi
+          echo "tag=${release_tags[0]:-}" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: release-context
+    if: |
+      always() &&
+      (needs.release-context.result == 'success' ||
+       needs.release-context.result == 'skipped')
+    permissions:
+      contents: read
+      packages: write # Publish trusted floating and commit-scoped artifacts.
     uses: ./.github/workflows/c8s-image.yml
     with:
       dev: ${{ inputs.dev || false }}
       c8s_ref: ${{ inputs.c8s_ref || '' }}
       confos_ref: ${{ inputs.confos_ref || '' }}
       gate: ${{ inputs.gate || false }}
+      release_tag: ${{ needs.release-context.outputs.tag }}
     secrets:
       MODULE_SIG_KEY_PEM: ${{ secrets.MODULE_SIG_KEY_PEM }}
+
+  # Wait for both TDX/SNP matrix legs, then preflight every exact alias before
+  # creating any of them. Registry publication is not transactional, so a
+  # network failure may leave a subset; a rerun repairs missing aliases and
+  # rejects any existing alias whose digest differs.
+  promote-release:
+    name: Publish stable node-image aliases
+    needs: [release-context, build-and-push]
+    if: |
+      always() &&
+      needs.release-context.result == 'success' &&
+      needs.build-and-push.result == 'success' &&
+      needs.release-context.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      packages: write # Promote aliases only from this protected job.
+    steps:
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          version: "1.2.3"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish or verify exact release aliases
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          IMAGE: ghcr.io/confidential-dot-ai/node-guest-base
+          RELEASE_TAG: ${{ needs.release-context.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]; then
+            echo "::error::invalid node-image release context"
+            exit 1
+          fi
+          short="${HEAD_SHA:0:7}"
+          repo_tags="$(oras repo tags "$IMAGE")"
+          aliases="$RUNNER_TEMP/node-release-aliases"
+          : > "$aliases"
+
+          for platform in tdx snp; do
+            for format in '' -cdi; do
+              base_tag="rke2-$platform$format"
+              source_tag="$base_tag-$short"
+              release_alias="$base_tag-$RELEASE_TAG"
+              source_digest="$(oras resolve "$IMAGE:$source_tag")"
+              if [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::$IMAGE:$source_tag did not resolve to an OCI digest"
+                exit 1
+              fi
+
+              exists=false
+              if grep -Fxq -- "$release_alias" <<< "$repo_tags"; then
+                exists=true
+                destination_digest="$(oras resolve "$IMAGE:$release_alias")"
+                if [ "$destination_digest" != "$source_digest" ]; then
+                  echo "::error::$IMAGE:$release_alias already names $destination_digest, expected $source_digest"
+                  exit 1
+                fi
+              fi
+              printf '%s\t%s\t%s\n' "$release_alias" "$source_digest" "$exists" >> "$aliases"
+            done
+          done
+
+          while IFS=$'\t' read -r release_alias source_digest exists; do
+            if [ "$exists" = false ]; then
+              oras tag "$IMAGE@$source_digest" "$release_alias"
+            fi
+            test "$(oras resolve "$IMAGE:$release_alias")" = "$source_digest"
+          done < "$aliases"
+
+          {
+            echo "### $RELEASE_TAG node image aliases"
+            cut -f1 "$aliases" | sed 's/^/- `ghcr.io\/confidential-dot-ai\/node-guest-base:/' | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"

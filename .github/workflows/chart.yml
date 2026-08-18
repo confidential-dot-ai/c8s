@@ -1,9 +1,8 @@
-name: Release Helm Chart
+name: Helm Chart
 
 on:
   push:
     branches: [main, "feat/**"]
-    tags: ["v*"]
     paths: &chart-paths
       - "internal/helmchart/**"
       - ".github/workflows/chart.yml"
@@ -25,6 +24,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -38,21 +39,28 @@ jobs:
         run: .github/scripts/chart-verify.sh
 
       - name: Helm package
+        env:
+          CHART_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           mkdir -p dist
           helm package "$CHART_DIR" \
-            --version "${{ steps.ver.outputs.version }}" \
-            --app-version "${{ steps.ver.outputs.version }}" \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION" \
             -d dist/
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        if: github.event_name == 'push'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | \
+            helm registry login "$REGISTRY" -u "$GHCR_USERNAME" --password-stdin
 
       - name: Helm push
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        if: github.event_name == 'push'
+        env:
+          CHART_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          helm push "dist/c8s-${{ steps.ver.outputs.version }}.tgz" \
+          helm push "dist/c8s-$CHART_VERSION.tgz" \
             "oci://$CHART_REPO"

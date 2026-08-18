@@ -64,17 +64,17 @@ matches (override `cds.node.selector` for a different label):
 kubectl label node <cds-node> role=cds
 ```
 
-`c8s install` passes the CLI build version as the chart image tag, but only when
-it is a release tag (for example `v0.1.0`), the version CI publishes a matching
-image for. Any other build (a local `git describe` derivative, a commit SHA, or
-the unstamped default) falls back to the `main` branch tag, the only other tag
-every component publishes.
+`c8s install` passes the CLI build version as the chart image tag when it is a
+stable release version (for example `v0.1.0`), for which CI publishes a matching
+image alias. Any other build (a local `git describe` derivative, a commit SHA,
+or the unstamped default) falls back to the `main` branch tag, the only other
+fallback tag published for every component.
 
 The chart itself is versioned separately. CI publishes it to
-`oci://ghcr.io/confidential-dot-ai/charts` under a SemVer chart version (`1.2.3` for a
-release tag, `<Chart.yaml version>-g<short-sha>` for a `main` build), never a
-`main` tag, because Helm chart versions must be SemVer. The chart carries no
-default image tag of its own, so the image tag above is supplied by
+`oci://ghcr.io/confidential-dot-ai/charts` under a SemVer chart version (`X.Y.Z`
+for a stable release, `<Chart.yaml version>-g<short-sha>` for a development
+build), never a `main` tag, because Helm chart versions must be SemVer. The chart
+carries no default image tag of its own, so the image tag above is supplied by
 `c8s install` rather than baked into the published chart.
 
 To install without the advisory CRDs:

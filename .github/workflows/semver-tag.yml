@@ -1,0 +1,565 @@
+name: SemVer release
+
+on:
+  workflow_call:
+    inputs:
+      target-sha:
+        description: Commit whose Docker jobs passed and which the release must name
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CHART_DIR: internal/helmchart/c8s
+  CHART_IMAGE: ghcr.io/confidential-dot-ai/charts/c8s
+  CHART_REPO: ghcr.io/confidential-dot-ai/charts
+  GH_API_TIMEOUT: 30s
+  GITHUB_API_VERSION: "2026-03-10"
+  GIT_CLIFF_SHA256: 200d2535da6d9703f3bcc8a4d159c3b55eacdb01cf2148c55b3eee9dd04d5249
+  GIT_CLIFF_VERSION: "2.13.1"
+  ORAS_VERSION: "1.2.3"
+  RELEASE_MAJOR: "0"
+  RELEASE_WAIT_ATTEMPTS: "60"
+  RELEASE_WAIT_INTERVAL: 15s
+
+jobs:
+  calculate:
+    name: Calculate release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      image-matrix: ${{ steps.release-images.outputs.matrix }}
+      publish: ${{ steps.version.outputs.publish }}
+      tag: ${{ steps.version.outputs.tag }}
+      update-series: ${{ steps.version.outputs.update-series }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate release context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != push ] || [ "$EVENT_REF" != refs/heads/main ]; then
+            echo "::error::releases may only originate from a push to main"
+            exit 1
+          fi
+          if [ "$TARGET_SHA" != "$EVENT_SHA" ] || [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release target must equal the caller event's full commit SHA"
+            exit 1
+          fi
+
+      # Repository-monotonic run IDs serialize release calculation without
+      # dropping a middle merge from the Docker -> Kata/e2e workflow chain.
+      - name: Wait for older Docker runs on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          github_api() {
+            timeout --kill-after=5s "$GH_API_TIMEOUT" \
+              gh api -H "X-GitHub-Api-Version: $GITHUB_API_VERSION" "$@"
+          }
+
+          older=0
+          for ((attempt = 1; attempt <= RELEASE_WAIT_ATTEMPTS; attempt++)); do
+            if ! older="$(
+              github_api "/repos/$GITHUB_REPOSITORY/actions/workflows/docker.yml/runs?event=push&branch=main&per_page=100" \
+                --jq '.workflow_runs[] | select(.status != "completed") | .id' \
+                | awk -v current="$GITHUB_RUN_ID" 'NF && $1+0 < current+0' \
+                | wc -l \
+                | tr -d ' '
+            )"; then
+              echo "::error::could not query older Docker runs"
+              exit 1
+            fi
+
+            if [ "$older" = "0" ]; then
+              echo "no older in-flight Docker run on main"
+              break
+            fi
+
+            echo "waiting on $older older Docker run(s) ($attempt/$RELEASE_WAIT_ATTEMPTS)"
+            sleep "$RELEASE_WAIT_INTERVAL"
+          done
+
+          if [ "$older" != "0" ]; then
+            echo "::error::older Docker runs exceeded the release wait budget"
+            exit 1
+          fi
+
+      # Fetch only after serialization: an older run may create the baseline
+      # tag while this run is waiting.
+      - name: Checkout current release history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.target-sha }}
+
+      - name: Load complete release image matrix
+        id: release-images
+        env:
+          C8S: "false"
+          CDS: "false"
+          GET_CERT: "false"
+          NRI_IMAGE_POLICY: "false"
+          RATLS_MESH: "false"
+          SHARED: "true"
+          VOLUMED: "false"
+        run: .github/scripts/docker-build-matrix.sh
+
+      - name: Install pinned git-cliff
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/git-cliff-$GIT_CLIFF_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/orhun/git-cliff/releases/download/v$GIT_CLIFF_VERSION/$(basename "$archive")"
+          printf '%s  %s\n' "$GIT_CLIFF_SHA256" "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+
+          binary="$RUNNER_TEMP/git-cliff-$GIT_CLIFF_VERSION/git-cliff"
+          test -x "$binary"
+          test "$("$binary" --version)" = "git-cliff $GIT_CLIFF_VERSION"
+          echo "GIT_CLIFF_BIN=$binary" >> "$GITHUB_ENV"
+
+      - name: Calculate stable pre-1.0 SemVer
+        id: version
+        env:
+          TARGET_SHA: ${{ inputs.target-sha }}
+        run: .github/scripts/calculate-release-version.sh
+
+  images:
+    name: Build release image (${{ matrix.binary }})
+    needs: calculate
+    if: needs.calculate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.calculate.outputs.image-matrix) }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target-sha }}
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      # Rebuild every release image instead of trusting a mutable :main alias.
+      # This preserves the old tag-triggered release integrity while avoiding a
+      # second workflow run. VERSION stamps the SemVer into the c8s binary even
+      # though the Git tag is reserved only after all staging builds succeed.
+      - name: Build release binary
+        env:
+          RELEASE_TAG: ${{ needs.calculate.outputs.tag }}
+        run: make build-c8s VERSION="$RELEASE_TAG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          version: ${{ env.ORAS_VERSION }}
+
+      # Preserve a completed staging build across retries. Rebuilding it after
+      # an upstream base image moves could produce a different digest and make
+      # an otherwise repairable partial release impossible to finish.
+      - name: Inspect commit-scoped staging image
+        id: staging
+        env:
+          IMAGE: ${{ matrix.image }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+        run: |
+          set -euo pipefail
+
+          staging_tag="release-$TARGET_SHA"
+          repo_tags="$(oras repo tags "$IMAGE")"
+          if grep -Fxq -- "$staging_tag" <<< "$repo_tags"; then
+            digest="$(oras resolve "$IMAGE:$staging_tag")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "reusing $IMAGE:$staging_tag at $digest"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push commit-scoped staging image
+        if: steps.staging.outputs.exists != 'true'
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ matrix.image }}:release-${{ inputs.target-sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.target-sha }}
+            org.opencontainers.image.version=${{ needs.calculate.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Validate commit-scoped staging image
+        env:
+          IMAGE: ${{ matrix.image }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+        run: |
+          set -euo pipefail
+
+          digest="$(oras resolve "$IMAGE:release-$TARGET_SHA")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+      - name: Scan release image
+        id: container-scan
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ matrix.image }}:release-${{ inputs.target-sha }}
+          fail-build: false
+
+      - name: Inspect release image scan report
+        env:
+          SARIF_REPORT: ${{ steps.container-scan.outputs.sarif }}
+        run: |
+          set -euo pipefail
+
+          test -s "$SARIF_REPORT"
+          cat "$SARIF_REPORT"
+
+  chart:
+    name: Build release chart
+    needs: calculate
+    if: needs.calculate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target-sha }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - name: Lint and render chart
+        run: .github/scripts/chart-verify.sh
+
+      - name: Package deterministic release chart
+        env:
+          TARGET_SHA: ${{ inputs.target-sha }}
+          VERSION: ${{ needs.calculate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          [[ "$VERSION" =~ ^0[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          source_epoch="$(git show -s --format=%ct "$TARGET_SHA")"
+          [[ "$source_epoch" =~ ^[0-9]+$ ]]
+
+          raw="$RUNNER_TEMP/chart-raw"
+          tree="$RUNNER_TEMP/chart-tree"
+          mkdir -p "$raw" "$tree" dist
+          helm package "$CHART_DIR" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination "$raw"
+          tar -xzf "$raw/c8s-$VERSION.tgz" -C "$tree"
+          if find "$tree" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
+            echo "::error::chart package contains a non-regular entry"
+            exit 1
+          fi
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$source_epoch" -C "$tree" -cf - c8s \
+            | gzip -n > "dist/c8s-$VERSION.tgz"
+          (cd dist && sha256sum "c8s-$VERSION.tgz" > SHA256SUMS)
+          helm show chart "dist/c8s-$VERSION.tgz" > /dev/null
+
+      - name: Upload release chart
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: c8s-release-chart-${{ inputs.target-sha }}
+          path: |
+            dist/c8s-*.tgz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish release
+    needs: [calculate, images, chart]
+    if: needs.calculate.outputs.publish == 'true' && needs.images.result == 'success' && needs.chart.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    environment:
+      name: release
+      deployment: false
+    steps:
+      - name: Download release chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: c8s-release-chart-${{ inputs.target-sha }}
+          path: dist
+
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          version: ${{ env.ORAS_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.14.4
+
+      - name: Validate release inputs and payload
+        env:
+          RELEASE_MATRIX: ${{ needs.calculate.outputs.image-matrix }}
+          RELEASE_TAG: ${{ needs.calculate.outputs.tag }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+          VERSION: ${{ needs.calculate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v0[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+          test "$RELEASE_TAG" = "v$VERSION"
+
+          mapfile -t payload < <(find dist -mindepth 1 -maxdepth 1 -type f -print | sort)
+          test "${#payload[@]}" -eq 2
+          test -f dist/SHA256SUMS
+          test ! -L dist/SHA256SUMS
+          if find dist -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            echo "::error::release payload contains a non-regular entry"
+            exit 1
+          fi
+          chart="dist/c8s-$VERSION.tgz"
+          test -f "$chart"
+          test ! -L "$chart"
+          manifest_hash="$(
+            awk -v file="c8s-$VERSION.tgz" \
+              '$2 == file { count++; digest=$1 } END { if (count == 1) print digest; else exit 1 }' \
+              dist/SHA256SUMS
+          )"
+          [[ "$manifest_hash" =~ ^[0-9a-f]{64}$ ]]
+          actual_hash="$(sha256sum "$chart")"
+          test "${actual_hash%% *}" = "$manifest_hash"
+
+          if ! jq -e '
+            type == "object" and
+            keys == ["include"] and
+            (.include | type == "array" and length > 0) and
+            ([.include[].image] | length == (unique | length)) and
+            all(.include[];
+              type == "object" and
+              keys == ["binary", "dockerfile", "image"] and
+              (.binary | test("^[a-z0-9][a-z0-9-]*$")) and
+              (.dockerfile | test("^cmd/[a-z0-9][a-z0-9-]*/Dockerfile$")) and
+              (.image | test("^ghcr[.]io/confidential-dot-ai/[a-z0-9][a-z0-9-]*$"))
+            )
+          ' <<< "$RELEASE_MATRIX" > /dev/null; then
+            echo "::error::release image matrix is malformed or unsafe"
+            exit 1
+          fi
+          jq -r '.include[].image' <<< "$RELEASE_MATRIX" \
+            | sort > "$RUNNER_TEMP/release-images"
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$GH_TOKEN" | oras login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      # Reads must succeed before any tag or package is mutated. Existing exact
+      # release aliases are accepted only when they resolve to this build.
+      - name: Preflight image and chart destinations
+        id: preflight
+        env:
+          TARGET_SHA: ${{ inputs.target-sha }}
+          VERSION: ${{ needs.calculate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          staging_tag="release-$TARGET_SHA"
+          : > "$RUNNER_TEMP/release-image-digests"
+          while IFS= read -r image; do
+            source_digest="$(oras resolve "$image:$staging_tag")"
+            [[ "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            repo_tags="$(oras repo tags "$image")"
+            for tag in "v$VERSION" "$VERSION"; do
+              if grep -Fxq -- "$tag" <<< "$repo_tags"; then
+                destination_digest="$(oras resolve "$image:$tag")"
+                if [ "$destination_digest" != "$source_digest" ]; then
+                  echo "::error::$image:$tag already names $destination_digest, expected $source_digest"
+                  exit 1
+                fi
+              fi
+            done
+            printf '%s\t%s\n' "$image" "$source_digest" \
+              >> "$RUNNER_TEMP/release-image-digests"
+          done < "$RUNNER_TEMP/release-images"
+
+          chart_tags="$(oras repo tags "$CHART_IMAGE")"
+          chart_exists=false
+          if grep -Fxq -- "$VERSION" <<< "$chart_tags"; then
+            chart_exists=true
+            mkdir -p "$RUNNER_TEMP/chart-preflight"
+            helm pull "oci://$CHART_IMAGE" --version "$VERSION" \
+              --destination "$RUNNER_TEMP/chart-preflight"
+            cmp "dist/c8s-$VERSION.tgz" \
+              "$RUNNER_TEMP/chart-preflight/c8s-$VERSION.tgz"
+          fi
+          echo "chart-exists=$chart_exists" >> "$GITHUB_OUTPUT"
+
+      # The Git reference reserves the version before registry writes. A retry
+      # verifies the exact target and repairs only missing registry aliases.
+      - name: Create or verify annotated release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.calculate.outputs.tag }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+        run: |
+          set -euo pipefail
+
+          github_api() {
+            timeout --kill-after=5s "$GH_API_TIMEOUT" \
+              gh api -H "X-GitHub-Api-Version: $GITHUB_API_VERSION" "$@"
+          }
+
+          refs="$(github_api "/repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG")"
+          exact_ref="refs/tags/$RELEASE_TAG"
+          exact_count="$(jq --arg ref "$exact_ref" '[.[] | select(.ref == $ref)] | length' <<< "$refs")"
+          if [ "$exact_count" = "0" ]; then
+            tagger_name="github-actions[bot]"
+            tagger_id="$(github_api "/users/$tagger_name" --jq .id)"
+            [[ "$tagger_id" =~ ^[0-9]+$ ]]
+            tag_object_sha="$(
+              github_api --method POST "/repos/$GITHUB_REPOSITORY/git/tags" \
+                --raw-field tag="$RELEASE_TAG" \
+                --raw-field message="Release $RELEASE_TAG from $TARGET_SHA" \
+                --raw-field object="$TARGET_SHA" \
+                --raw-field type=commit \
+                --raw-field "tagger[name]=$tagger_name" \
+                --raw-field "tagger[email]=$tagger_id+$tagger_name@users.noreply.github.com" \
+                --jq .sha
+            )"
+            test -n "$tag_object_sha"
+            github_api --method POST "/repos/$GITHUB_REPOSITORY/git/refs" \
+              --raw-field ref="$exact_ref" \
+              --raw-field sha="$tag_object_sha" > /dev/null
+          elif [ "$exact_count" != "1" ]; then
+            echo "::error::multiple exact refs returned for $RELEASE_TAG"
+            exit 1
+          fi
+
+          IFS=$'\t' read -r ref_type ref_sha <<< "$(
+            github_api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )"
+          test "$ref_type" = tag
+          [[ "$ref_sha" =~ ^[0-9a-f]{40}$ ]]
+          IFS=$'\t' read -r target_type target_sha <<< "$(
+            github_api "/repos/$GITHUB_REPOSITORY/git/tags/$ref_sha" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )"
+          test "$target_type" = commit
+          test "$target_sha" = "$TARGET_SHA"
+
+      - name: Publish or verify component image aliases
+        env:
+          RELEASE_TAG: ${{ needs.calculate.outputs.tag }}
+          TARGET_SHA: ${{ inputs.target-sha }}
+          UPDATE_SERIES: ${{ needs.calculate.outputs.update-series }}
+          VERSION: ${{ needs.calculate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          [[ "$UPDATE_SERIES" =~ ^(true|false)$ ]]
+          series="${VERSION%.*}"
+          short_sha="${TARGET_SHA:0:7}"
+
+          while IFS=$'\t' read -r image source_digest; do
+            repo_tags="$(oras repo tags "$image")"
+            new_tags=()
+            for tag in "$RELEASE_TAG" "$VERSION"; do
+              if grep -Fxq -- "$tag" <<< "$repo_tags"; then
+                test "$(oras resolve "$image:$tag")" = "$source_digest"
+              else
+                new_tags+=("$tag")
+              fi
+            done
+            if [ "$UPDATE_SERIES" = true ]; then
+              if ! grep -Fxq -- "$series" <<< "$repo_tags" || \
+                 [ "$(oras resolve "$image:$series")" != "$source_digest" ]; then
+                new_tags+=("$series")
+              fi
+            fi
+            # The downstream Kata build resolves component manifests by this
+            # commit tag. Point it at the canonical all-components release
+            # rebuild before the parent Docker workflow completes.
+            if ! grep -Fxq -- "$short_sha" <<< "$repo_tags" || \
+               [ "$(oras resolve "$image:$short_sha")" != "$source_digest" ]; then
+              new_tags+=("$short_sha")
+            fi
+
+            if [ "${#new_tags[@]}" -gt 0 ]; then
+              oras tag "$image@$source_digest" "${new_tags[@]}"
+            fi
+            test "$(oras resolve "$image:$RELEASE_TAG")" = "$source_digest"
+            test "$(oras resolve "$image:$VERSION")" = "$source_digest"
+            test "$(oras resolve "$image:$short_sha")" = "$source_digest"
+            if [ "$UPDATE_SERIES" = true ]; then
+              test "$(oras resolve "$image:$series")" = "$source_digest"
+            fi
+          done < "$RUNNER_TEMP/release-image-digests"
+
+      - name: Publish or verify Helm chart
+        env:
+          CHART_EXISTS: ${{ steps.preflight.outputs.chart-exists }}
+          VERSION: ${{ needs.calculate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "$CHART_EXISTS" = false ]; then
+            helm push "dist/c8s-$VERSION.tgz" "oci://$CHART_REPO"
+          fi
+          mkdir -p "$RUNNER_TEMP/chart-verify"
+          helm pull "oci://$CHART_IMAGE" --version "$VERSION" \
+            --destination "$RUNNER_TEMP/chart-verify"
+          cmp "dist/c8s-$VERSION.tgz" \
+            "$RUNNER_TEMP/chart-verify/c8s-$VERSION.tgz"

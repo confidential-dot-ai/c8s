@@ -1,9 +1,9 @@
 name: Docker
 
 on:
-  # Publish component images on EVERY push to main, and on v* release tags.
+  # Publish component images on EVERY push to main.
   # Feature branches don't publish: the kata-guest-base pipeline only builds for
-  # main / release tags (its job if: gates on head_branch == main || v*), so
+  # main (its job if: gates on head_branch == main), so
   # per-branch images had no consumer.
   #
   # NO paths filter on the push trigger, deliberately. This workflow is the head
@@ -30,7 +30,6 @@ on:
   # SEV-SNP e2e (30024734575).
   push:
     branches: [main]
-    tags: ["v*"]
   # PRs stay path-gated: a PR run builds and scans but publishes nothing (see the
   # push/dispatch gates on the login and build-push steps), so a docs-only PR has
   # nothing to gain from it. The list is inlined because the YAML anchor it used
@@ -51,7 +50,7 @@ on:
   # Manual rebuild escape hatch, for a rebuild with NO new commit behind it: a
   # base-image refresh or a registry re-push. workflow_dispatch publishes EVERY
   # component image at this commit's tags (the matrix fans out to all of them,
-  # see docker-build-matrix.sh), exactly as a tag push does, so the downstream
+  # see docker-build-matrix.sh), so the downstream
   # "Kata guest base" workflow can resolve every component's :<short-sha> and
   # cascade off this run (its workflow_run gate accepts a workflow_dispatch
   # origin on main / v*, see kata-guest-base.yml). NOTE: dispatching this
@@ -72,14 +71,14 @@ jobs:
   # internal/cmds/<X> changed (this applies to both PR events and
   # pushes to main). Shared code (pkg/**, root internal/** minus
   # cmds/helmchart, go.mod/sum, Makefile, this workflow) fans out to
-  # every image. Tag pushes (v*) always fan out so semver release
-  # tags land on every image.
+  # every image. The final release job rebuilds the complete component set from
+  # this exact revision before applying its SemVer aliases.
   #
   # On a push to main, unchanged components keep their existing
   # `latest` / `main` tag pointing at the previous build's manifest —
   # which is the correct state, since nothing changed for them.
-  # Deploys pinned to `latest` or to a release tag work without any
-  # CI-side tag aliasing.
+  # Deploys pinned to `latest` continue to consume the normal main build;
+  # stable release aliases consume the complete release rebuild below.
   changes:
     name: Detect changed components
     runs-on: ubuntu-latest
@@ -118,7 +117,7 @@ jobs:
             exit 1; }
       # Skip on workflow_dispatch: a manual run has no before/after diff base for
       # paths-filter to compute against, and we fan out to every component anyway
-      # (docker-build-matrix.sh treats workflow_dispatch like a tag push). With
+      # (docker-build-matrix.sh has an explicit dispatch fan-out). With
       # this step skipped its outputs read empty downstream, which the matrix
       # script correctly sees as "no per-component filter" before falling through
       # to the fan-out.
@@ -214,9 +213,6 @@ jobs:
           tags: |
             type=sha,prefix=
             type=ref,event=branch
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
@@ -233,11 +229,11 @@ jobs:
           # `type=sha,prefix=` (the 7-char short SHA), and the "Kata guest base"
           # build resolves cds/get-cert by that short SHA (IMAGE_TAG=${HEAD_SHA::7})
           # to pin their digests into the measured bootstrap allowlist. tags[0]
-          # is the highest-priority *human* tag (main / semver), so with the old
+          # is the highest-priority *human* tag (main), so with the old
           # single-tag push the short-SHA tag never reached GHCR and that lookup
           # could not resolve. Pushing the full set also makes `latest` real on
-          # main (deploys pin it); latest/semver/tag tags are gated to the
-          # default branch / tag pushes.
+          # main (deploys pin it). A later release job performs the separate,
+          # version-stamped all-component build used by SemVer aliases.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # GHA layer caching. ignore-error: a cache-service blip during the
@@ -361,3 +357,27 @@ jobs:
           # Idempotent: re-runs of the same commit are no-ops if the
           # tag already points at the same manifest.
           oras tag "${IMAGE}:main" "${SHORT_SHA}"
+
+  # Release publication is the final main-push stage: every build/retag leg must
+  # succeed first. The called workflow rebuilds every component under a
+  # commit-scoped staging tag, promotes the verified digests, and pushes the
+  # chart before this Docker run completes. Its GITHUB_TOKEN-created Git tag
+  # therefore does not need to trigger another workflow.
+  release-tag:
+    name: Publish SemVer release
+    needs: [changes, go-modules, images, retag-unchanged]
+    if: |
+      always()
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.changes.result == 'success'
+      && (needs.go-modules.result == 'success' || needs.go-modules.result == 'skipped')
+      && (needs.images.result == 'success' || needs.images.result == 'skipped')
+      && (needs.retag-unchanged.result == 'success' || needs.retag-unchanged.result == 'skipped')
+    uses: ./.github/workflows/semver-tag.yml
+    permissions:
+      actions: read # The called workflow serializes against older Docker runs.
+      contents: write # Create the annotated release tag.
+      packages: write # Alias component images and publish the Helm chart.
+    with:
+      target-sha: ${{ github.sha }}
