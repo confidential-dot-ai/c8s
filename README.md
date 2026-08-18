@@ -290,12 +290,14 @@ See [docs/kata.md](docs/kata.md) for the runtime details and
   [Managing the allowlist](#managing-the-image-allowlist).
 
 - **Set the TCB floor to your fleet.** The chart floors the SEV-SNP platform
-  TCB at `minTcb` (default `3,0,8,0`) on every verification path — CDS
-  issuance, mesh peers, and each component's check of CDS's evidence. Raise
-  it to your nodes' actual levels with `c8s install --min-tcb b,t,s,m`;
-  lowering the shipped floor requires `--force`. TDX's verifier has no
-  minimum-TCB parameter, so the floor applies to SNP evidence only; the
-  debug-mode rejection applies on both platforms.
+  TCB at `minTcb` (default `3,0,8,0`) on the chart-managed verification
+  paths — CDS issuance, mesh peers, and each component's check of CDS's
+  evidence. (Known gap: the in-guest ratls-mesh has no floor delivery yet;
+  it warns at boot.) Raise it to your nodes' actual levels with
+  `c8s install --min-tcb b,t,s,m`; lowering the shipped floor requires
+  `--force`. TDX's verifier has no minimum-TCB parameter, so the floor
+  applies to SNP evidence only; the debug-mode rejection applies on both
+  platforms.
 
 ### A note on QEMU
 

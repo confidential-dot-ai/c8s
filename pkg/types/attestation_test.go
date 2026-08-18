@@ -207,6 +207,35 @@ func TestVerifyReportData(t *testing.T) {
 	}
 }
 
+// The floor applies to SNP-family evidence only: attaching it to TDX evidence
+// would refuse every TDX attestation, because the verified claims carry a
+// Tdx-typed TCB the SNP echo gate can never match.
+func TestVerifyReportDataScopesFloorToSNP(t *testing.T) {
+	floor := MinTcb{Bootloader: 3, Snp: 8}
+	reportData := NewBase64Bytes([]byte("report-data-digest"))
+	for _, tc := range []struct {
+		platform string
+		wantNil  bool
+	}{
+		{"snp", false},
+		{"az-snp", false},
+		{"gcp-snp", false},
+		{"tdx", true},
+		{"az-tdx", true},
+		{"unknown", true},
+	} {
+		t.Run(tc.platform, func(t *testing.T) {
+			req := VerifyReportData(AttestationEvidence{Platform: tc.platform, Evidence: json.RawMessage(`{}`)}, reportData, false, &floor)
+			if tc.wantNil && req.Params.MinTcb != nil {
+				t.Fatalf("min_tcb = %+v, want nil for platform %q", req.Params.MinTcb, tc.platform)
+			}
+			if !tc.wantNil && (req.Params.MinTcb == nil || *req.Params.MinTcb != floor) {
+				t.Fatalf("min_tcb = %+v, want %+v for platform %q", req.Params.MinTcb, floor, tc.platform)
+			}
+		})
+	}
+}
+
 func TestParseMinTcb(t *testing.T) {
 	for _, tc := range []struct {
 		in      string

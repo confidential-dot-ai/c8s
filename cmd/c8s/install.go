@@ -1976,6 +1976,6 @@ func init() {
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
 	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled); install with --min-tcb below the chart's shipped TCB floor")
-	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,0), enforced on every verification path (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
+	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,0), enforced on the chart-managed verification paths (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
 	rootCmd.AddCommand(installCmd)
 }

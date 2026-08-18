@@ -297,6 +297,14 @@ func TestEnforceVerdictPolicyEcho(t *testing.T) {
 		{"no TCB claims", "snp", policy{boolPtr(false), floor}, nil, snpDebugOK, ErrMinTCBNotEchoed},
 		{"empty TCB claims", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{}`), snpDebugOK, ErrMinTCBNotEchoed},
 		{"non-SNP TCB claims", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{"type":"Tdx","tcb_svn":"00"}`), snpDebugOK, ErrMinTCBNotEchoed},
+		// VerifyReportData never builds a floored TDX request, but a
+		// hand-built one must fail loud, not silently ignore the floor.
+		{"tdx platform with floor and Tdx claims", "tdx", policy{boolPtr(false), floor}, json.RawMessage(`{"type":"Tdx","tcb_svn":"00"}`), json.RawMessage(`{"td_attributes_parsed":{"debug":false}}`), ErrMinTCBNotEchoed},
+		// Each floored component arm must bite: bootloader names pre-Milan
+		// firmware; tee and microcode floors compose when an operator sets them.
+		{"below floor on bootloader", "snp", policy{boolPtr(false), floor}, snpTCB(2, 0, 8, 115), snpDebugOK, ErrMinTCBNotEchoed},
+		{"below floor on tee", "snp", policy{boolPtr(false), &types.MinTcb{Tee: 1}}, snpTCB(3, 0, 8, 115), snpDebugOK, ErrMinTCBNotEchoed},
+		{"below floor on microcode", "snp", policy{boolPtr(false), &types.MinTcb{Microcode: 116}}, snpTCB(3, 0, 8, 115), snpDebugOK, ErrMinTCBNotEchoed},
 		{"floored component missing", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{"type":"Snp","bootloader":3}`), snpDebugOK, ErrMinTCBNotEchoed},
 		{"zero floor components unfloored", "snp", policy{boolPtr(false), &types.MinTcb{Snp: 8}}, snpTCB(0, 0, 8, 0), snpDebugOK, nil},
 		{"debug-disabled echoed", "snp", policy{boolPtr(false), nil}, snpTCB(3, 0, 8, 115), snpDebugOK, nil},

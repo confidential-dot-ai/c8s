@@ -20,10 +20,10 @@ var (
 	// (e.g., AMD VCEK → ASK → ARK).
 	ErrSignatureInvalid = errors.New("ratls: hardware signature verification failed")
 
-	// ErrPolicyViolation indicates that the verified launch measurement is not
-	// in the [VerifyPolicy] allowlist. Debug and minimum-TCB policy are
-	// enforced by the attestation-api; those rejections surface as the
-	// attestation-api error or [ErrSignatureInvalid], not this sentinel.
+	// ErrPolicyViolation indicates the evidence failed a caller-pinned
+	// policy: the [VerifyPolicy] launch-measurement allowlist, or the
+	// requested min-TCB floor / debug rejection the verified claims fail to
+	// echo.
 	ErrPolicyViolation = errors.New("ratls: attestation policy check failed")
 
 	// ErrUnsupportedTEE indicates an unrecognized TEE platform type.

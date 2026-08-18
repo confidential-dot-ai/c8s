@@ -159,13 +159,28 @@ func NewVerifyRequest(evidence AttestationEvidence, params *VerifyParams, issueT
 //
 // The policy is sent with the request rather than left to the verifier's
 // defaults; attestationclient.EnforceVerdict rejects a response whose claims
-// do not echo it.
+// do not echo it. The floor rides SNP-family evidence only: the
+// attestation-api's TDX request has no minimum-TCB parameter, and a floor
+// attached to TDX evidence would be unmeetable — the verified claims carry a
+// Tdx-typed TCB the SNP echo gate can never match.
 func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes, allowDebug bool, minTcb *MinTcb) VerifyRequest {
 	return NewVerifyRequest(evidence, &VerifyParams{
 		ExpectedReportData: &expectedReportData,
 		AllowDebug:         &allowDebug,
-		MinTcb:             minTcb,
+		MinTcb:             MinTcbForPlatform(evidence.Platform, minTcb),
 	}, false)
+}
+
+// MinTcbForPlatform returns the floor for SNP-family evidence and nil for
+// anything else, so the SNP floor is never asserted against claims that
+// cannot carry it.
+func MinTcbForPlatform(platform string, floor *MinTcb) *MinTcb {
+	switch Platform(platform) {
+	case PlatformSnp, PlatformAzSnp, PlatformGcpSnp:
+		return floor
+	default:
+		return nil
+	}
 }
 
 // VerifyParams contains optional verification parameters.

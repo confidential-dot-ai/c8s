@@ -165,13 +165,17 @@ type stubAttestation struct {
 	attestErr  error
 	verifyResp types.VerifyResponse
 	verifyErr  error
+	verifyReqs *[]types.VerifyRequest // when set, Verify records each request
 }
 
 func (s stubAttestation) Attest(context.Context, types.AttestRequest) (types.AttestResponse, error) {
 	return s.attestResp, s.attestErr
 }
 
-func (s stubAttestation) Verify(context.Context, types.VerifyRequest) (types.VerifyResponse, error) {
+func (s stubAttestation) Verify(_ context.Context, req types.VerifyRequest) (types.VerifyResponse, error) {
+	if s.verifyReqs != nil {
+		*s.verifyReqs = append(*s.verifyReqs, req)
+	}
 	return s.verifyResp, s.verifyErr
 }
 
@@ -268,6 +272,106 @@ func TestLocalHandoffBootstrapMintsOnlyAfterVerify(t *testing.T) {
 				if minter.called.Load() != 0 {
 					t.Fatalf("minter called %d times on a failed verify; must be 0", minter.called.Load())
 				}
+			}
+		})
+	}
+}
+
+// TestLocalHandoffBootstrapMinTCBFloor pins the floor on the handoff
+// self-attestation: SNP evidence carries it and is refused below it, while TDX
+// evidence (what PlatformAuto resolves to on a TDX host) drops it — a floor
+// asserted against TDX claims would refuse CDS's own EAR bootstrap.
+func TestLocalHandoffBootstrapMinTCBFloor(t *testing.T) {
+	floor := types.MinTcb{Bootloader: 3, Snp: 8}
+	match := true
+	verifyWith := func(tcb, platformData string) types.VerifyResponse {
+		return types.VerifyResponse{Result: types.VerificationResult{
+			SignatureValid:  true,
+			ReportDataMatch: &match,
+			Claims: types.Claims{
+				LaunchDigest: "deadbeef",
+				Tcb:          json.RawMessage(tcb),
+				PlatformData: json.RawMessage(platformData),
+			},
+		}}
+	}
+
+	cases := []struct {
+		name      string
+		platform  string
+		verify    types.VerifyResponse
+		wantMint  bool
+		wantFloor bool // the /verify request must carry the floor
+	}{
+		{
+			name:     "SNP at the floor mints and carries the floor",
+			platform: "snp",
+			verify: verifyWith(
+				`{"type":"Snp","bootloader":3,"tee":0,"snp":8,"microcode":115}`,
+				`{"policy":{"debug_allowed":false}}`,
+			),
+			wantMint:  true,
+			wantFloor: true,
+		},
+		{
+			name:     "below-floor SNP evidence mints nothing",
+			platform: "snp",
+			verify: verifyWith(
+				`{"type":"Snp","bootloader":3,"tee":0,"snp":7,"microcode":115}`,
+				`{"policy":{"debug_allowed":false}}`,
+			),
+			wantMint:  false,
+			wantFloor: true,
+		},
+		{
+			name:     "TDX evidence drops the floor and mints",
+			platform: "tdx",
+			verify: verifyWith(
+				`{"type":"Tdx","tcb_svn":"00000000000000000000000000000000"}`,
+				`{"td_attributes_parsed":{"debug":false}}`,
+			),
+			wantMint:  true,
+			wantFloor: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var reqs []types.VerifyRequest
+			minter := &stubMinter{tokenToIssue: "minted-ear"}
+			b, err := NewLocalHandoffBootstrap(
+				stubAttestation{
+					attestResp: types.AttestResponse{Platform: tc.platform},
+					verifyResp: tc.verify,
+					verifyReqs: &reqs,
+				},
+				minter,
+				testOperatorKeysHash,
+				&floor,
+			)
+			if err != nil {
+				t.Fatalf("NewLocalHandoffBootstrap: %v", err)
+			}
+			lb := b.(*localHandoffBootstrap)
+			pubDER, err := x509.MarshalPKIXPublicKey(&lb.signer.PublicKey)
+			if err != nil {
+				t.Fatalf("marshal pubkey: %v", err)
+			}
+
+			_, err = lb.attestKey(context.Background(), pubDER)
+			if tc.wantMint && err != nil {
+				t.Fatalf("attestKey: %v", err)
+			}
+			if !tc.wantMint && err == nil {
+				t.Fatal("expected attestKey to refuse below-floor evidence")
+			}
+			if len(reqs) != 1 || reqs[0].Params == nil {
+				t.Fatalf("verify requests = %+v, want 1 with params", reqs)
+			}
+			if tc.wantFloor && (reqs[0].Params.MinTcb == nil || *reqs[0].Params.MinTcb != floor) {
+				t.Fatalf("min_tcb = %+v, want %+v", reqs[0].Params.MinTcb, floor)
+			}
+			if !tc.wantFloor && reqs[0].Params.MinTcb != nil {
+				t.Fatalf("min_tcb = %+v, want nil for platform %q", reqs[0].Params.MinTcb, tc.platform)
 			}
 		})
 	}

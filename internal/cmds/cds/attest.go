@@ -51,9 +51,9 @@ type AttestHandler struct {
 	// to obtain a signed leaf. Empty = no measurement pinning.
 	Measurements map[string]bool
 
-	// MinTcb is the minimum SEV-SNP platform TCB evidence must meet to
-	// obtain a signed leaf, sent with every /verify call. nil = no floor
-	// (UNSAFE outside development).
+	// MinTcb is the minimum platform TCB SNP evidence must meet to obtain a
+	// signed leaf; TDX evidence is unfloored (the TDX verifier request has
+	// no floor parameter). nil = no floor (UNSAFE outside development).
 	MinTcb *types.MinTcb
 
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without

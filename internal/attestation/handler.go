@@ -27,9 +27,9 @@ type Handler struct {
 	// OperatorKeysHash, when set, makes /attest-key fail closed unless the
 	// caller attests the same operator-key policy. /attest remains unaffected.
 	OperatorKeysHash string
-	// MinTcb is the minimum SEV-SNP platform TCB evidence must meet to
-	// obtain an EAR, sent with every /verify call. nil = no floor (UNSAFE
-	// outside development).
+	// MinTcb is the minimum platform TCB SNP evidence must meet to obtain
+	// an EAR; TDX evidence is unfloored (the TDX verifier request has no
+	// floor parameter). nil = no floor (UNSAFE outside development).
 	MinTcb *types.MinTcb
 }
 

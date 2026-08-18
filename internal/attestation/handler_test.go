@@ -555,6 +555,11 @@ func TestAttestKeyInvalidPublicKeyBase64(t *testing.T) {
 // challenge against the given app.
 func attestKeyBody(t *testing.T, appURL string) string {
 	t.Helper()
+	return attestKeyBodyPlatform(t, appURL, "snp")
+}
+
+func attestKeyBodyPlatform(t *testing.T, appURL, platform string) string {
+	t.Helper()
 	challenge := authenticate(t, appURL)
 	pubKey := generateAttestKeyPubKey(t)
 	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
@@ -564,7 +569,7 @@ func attestKeyBody(t *testing.T, appURL string) string {
 	return mustJSON(types.AttestKeyRequestBody{
 		Challenge: challenge,
 		Evidence: types.AttestationEvidence{
-			Platform: "snp",
+			Platform: platform,
 			Evidence: json.RawMessage(`{"quote":"abc"}`),
 		},
 		PublicKey: base64.StdEncoding.EncodeToString(pubDER),
@@ -643,6 +648,112 @@ func TestAttestKeyReportDataMatchNil(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
+}
+
+// testAppWithFloor mounts the attestation routes with a minimum-TCB floor
+// configured on the handler.
+func testAppWithFloor(attestationURL string, floor *types.MinTcb) http.Handler {
+	challengeStore := attestation.NewChallengeStore(60 * time.Second)
+
+	earIssuer, err := ear.NewIssuer(testKeyPEM(), "test-issuer", 24*time.Hour)
+	if err != nil {
+		panic(err)
+	}
+
+	h := attestation.Handler{
+		Challenges:        &challengeStore,
+		AttestationClient: attestationclient.NewClient(attestationURL),
+		EarIssuer:         earIssuer,
+		MinTcb:            floor,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /authenticate", attestation.HandleAuthenticate(h.Challenges))
+	mux.HandleFunc("POST /attest-key", h.HandleAttestKey)
+	return mux
+}
+
+// The floor reaches the verifier on the EAR path too: /attest-key sends
+// min_tcb with the /verify call and refuses evidence the response shows below
+// it. TDX evidence is unfloored (the TDX verifier request has no floor
+// parameter) and must still issue on a floored cluster.
+func TestAttestKeyMinTCBFloorSentAndEnforced(t *testing.T) {
+	floor := types.MinTcb{Bootloader: 3, Snp: 8}
+
+	t.Run("at the floor issues", func(t *testing.T) {
+		stub := testattest.New(t) // stub TCB: 3,0,8,115
+		app := httptest.NewServer(testAppWithFloor(stub.URL, &floor))
+		defer app.Close()
+
+		resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 || reqs[0].Params == nil || reqs[0].Params.MinTcb == nil || *reqs[0].Params.MinTcb != floor {
+			t.Fatalf("attest-key /verify did not carry min_tcb %+v: %+v", floor, reqs)
+		}
+		if reqs[0].Params.AllowDebug == nil || *reqs[0].Params.AllowDebug {
+			t.Fatalf("attest-key /verify did not carry allow_debug=false: %+v", reqs[0].Params)
+		}
+	})
+
+	t.Run("below the floor is refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict("")
+		verdict.Claims.Tcb = testattest.SNPTcbClaims(types.MinTcb{Bootloader: 3, Snp: 7, Microcode: 115})
+		stub.SetVerdict(verdict)
+		app := httptest.NewServer(testAppWithFloor(stub.URL, &floor))
+		defer app.Close()
+
+		resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body=%s", resp.StatusCode, body)
+		}
+		var out types.AttestKeyResponseBody
+		if json.Unmarshal(body, &out) == nil && out.EAR != "" {
+			t.Fatalf("an EAR was minted for below-floor evidence; body=%s", body)
+		}
+	})
+
+	t.Run("a response carrying no TCB is refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict("")
+		// The stub fills empty claims with a conforming TCB; a verifier that
+		// dropped the policy echoes nothing, which must fail rather than pass.
+		verdict.Claims.Tcb = json.RawMessage(`{}`)
+		stub.SetVerdict(verdict)
+		app := httptest.NewServer(testAppWithFloor(stub.URL, &floor))
+		defer app.Close()
+
+		resp := postAttestKey(t, app.URL, attestKeyBody(t, app.URL))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 403; body=%s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("TDX evidence issues with the floor configured", func(t *testing.T) {
+		stub := testattest.New(t)
+		app := httptest.NewServer(testAppWithFloor(stub.URL, &floor))
+		defer app.Close()
+
+		resp := postAttestKey(t, app.URL, attestKeyBodyPlatform(t, app.URL, "tdx"))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 || reqs[0].Params == nil || reqs[0].Params.MinTcb != nil {
+			t.Fatalf("TDX /verify must carry no min_tcb: %+v", reqs)
+		}
+	})
 }
 
 // The verify request must bind this request's public key, challenge, and

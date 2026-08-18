@@ -191,8 +191,9 @@ Step by step:
 
 Verification failures map to typed sentinels (`errors.go`):
 `ErrSignatureInvalid` (hardware chain), `ErrKeyBinding` (REPORTDATA mismatch —
-the key was not generated in that TEE), `ErrPolicyViolation` (measurement not
-allowlisted), `ErrNotAttested`, `ErrInvalidReport`, `ErrUnsupportedTEE`.
+the key was not generated in that TEE), `ErrPolicyViolation` (a caller-pinned
+policy failed: measurement not allowlisted, or the min-TCB / debug policy echo
+did not hold), `ErrNotAttested`, `ErrInvalidReport`, `ErrUnsupportedTEE`.
 
 ## From self-signed to CA-issued: the CDS regime
 
@@ -220,7 +221,8 @@ evidence flow, that its key lives in an attested, measurement-allowlisted TEE.
    { challenge, evidence, CSR } ──▶
                                     verify evidence (CDS's own
                                     same-TCB attestation-api),
-                                    enforce cds.measurements,
+                                    enforce cds.measurements +
+                                    min-TCB / debug policy,
                                     validate SAN / CN policy,
                                     sign CSR with the mesh CA
    ◀──────────────────────────────  leaf certificate chain + CA bundle

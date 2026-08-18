@@ -71,11 +71,16 @@ imagePullSecrets: []
 imagePullSecret: ""
 
 ## Cluster-wide minimum SEV-SNP platform TCB (bootloader,tee,snp,microcode)
-## required of every attestation c8s verifies — CDS issuance, mesh peers, and
-## each component's view of CDS's RA-TLS evidence. A 0 component floors
-## nothing. SEV-SNP only: the attestation-api's TDX request has no minimum-TCB
-## parameter, so the floor is dropped on the TDX path (docs/ratls.md).
-## `c8s install --min-tcb` refuses to lower this without --force.
+## required of SNP evidence on the chart-managed paths — CDS issuance, mesh
+## peers, and each component's view of CDS's RA-TLS evidence. Known gap: the
+## in-guest ratls-mesh has no floor delivery yet; it warns at boot. A 0
+## component floors nothing: the default floors the bootloader and SP
+## firmware (snp) levels, the oldest TCB observed across the c8s e2e fleet
+## (not CVE-mapped — raise it to your fleet's patched levels), and leaves tee
+## and microcode unfloored. SEV-SNP only: the attestation-api's TDX request
+## has no minimum-TCB parameter, so the floor is dropped on the TDX path
+## (docs/ratls.md). `c8s install --min-tcb` refuses to lower this without
+## --force.
 minTcb: "3,0,8,0"
 
 ## Chart-wide get-cert behavior for the injected mesh-cert init containers.

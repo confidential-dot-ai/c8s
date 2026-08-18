@@ -91,9 +91,14 @@ func issueChallenge(t *testing.T, h AttestHandler) string {
 
 func postAttest(t *testing.T, h AttestHandler, challenge, csrPEM string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postAttestPlatform(t, h, challenge, csrPEM, "snp")
+}
+
+func postAttestPlatform(t *testing.T, h AttestHandler, challenge, csrPEM, platform string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(types.AttestRequestBody{
 		Challenge: challenge,
-		Evidence:  types.AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"test":true}`)},
+		Evidence:  types.AttestationEvidence{Platform: platform, Evidence: json.RawMessage(`{"test":true}`)},
 		CSR:       csrPEM,
 	})
 	if err != nil {
@@ -275,6 +280,45 @@ func TestAttest_MinTCBFloorSentAndEnforced(t *testing.T) {
 		csrPEM, _ := generateCSR(t)
 
 		w := postAttest(t, h, issueChallenge(t, h), csrPEM)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status: got %d, want 403; body=%s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// The floor applies to SNP evidence only: a TDX pod on a floored cluster must
+// still issue. CDS drops the floor from the TDX /verify request (the TDX
+// verifier has no floor parameter), so TDX claims can never trip the SNP echo
+// gate; the debug policy still bites on TDX claims.
+func TestAttest_MinTCBFloorDoesNotRefuseTDX(t *testing.T) {
+	floor := types.MinTcb{Bootloader: 3, Snp: 8}
+
+	t.Run("TDX evidence issues with the floor configured", func(t *testing.T) {
+		stub := newStubAttestationApi(t, "approved-digest")
+		h := newTestAttestHandler(t, stub.URL, nil)
+		h.MinTcb = &floor
+		csrPEM, _ := generateCSR(t)
+
+		w := postAttestPlatform(t, h, issueChallenge(t, h), csrPEM, "tdx")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 || reqs[0].Params == nil || reqs[0].Params.MinTcb != nil {
+			t.Fatalf("TDX /verify must carry no min_tcb: %+v", reqs)
+		}
+	})
+
+	t.Run("debug-enabled TDX evidence is still refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict("approved-digest")
+		verdict.Claims.PlatformData = json.RawMessage(`{"td_attributes_parsed":{"debug":true}}`)
+		stub.SetVerdict(verdict)
+		h := newTestAttestHandler(t, stub.URL, nil)
+		h.MinTcb = &floor
+		csrPEM, _ := generateCSR(t)
+
+		w := postAttestPlatform(t, h, issueChallenge(t, h), csrPEM, "tdx")
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("status: got %d, want 403; body=%s", w.Code, w.Body.String())
 		}
