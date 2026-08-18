@@ -305,11 +305,12 @@ field rather than passing silently.
 On a mismatch, or with no document, the guest falls back to the baked
 seed.
 
-**TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`,
-which is 48 bytes where the anchor is 32, so the guest refuses the
-claim and enforces the baked seed alone. Empty `cds.measurements` (the chart
-default) also leaves the refresh disabled on every platform — operator
-additions then reach the host-side enforcer but not running guests.
+**TDX takes the same path through `MRCONFIGID`:** the shim commits
+`sha256(document)` zero-padded to the 48-byte `MRCONFIGID`, and the guest
+accepts that shape as the 32-byte anchor (a non-zero tail is refused as
+ill-shaped). Empty `cds.measurements` (the chart default) leaves the refresh
+disabled on every platform — operator additions then reach the host-side
+enforcer but not running guests.
 
 ## Scenarios
 

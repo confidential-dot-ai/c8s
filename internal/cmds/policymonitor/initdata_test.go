@@ -488,12 +488,14 @@ func TestVerifiedSelfHostDataBindsTheAnchorItRequested(t *testing.T) {
 	}
 }
 
-// A claim that is not a 32-byte anchor is refused rather than padded or
-// truncated, and is not a verifier refusal.
+// A claim that is neither a 32-byte anchor nor a zero-padded one in a 48-byte
+// MRCONFIGID is refused rather than padded or truncated, and is not a verifier
+// refusal.
 func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 	for _, tc := range []struct{ name, claim string }{
 		{"absent", ""},
-		{"tdx mrconfigid", strings.Repeat("00", 48)},
+		{"tdx mrconfigid with a non-zero tail", strings.Repeat("aa", 48)},
+		{"neither width", strings.Repeat("00", 40)},
 		{"not hex", "not-hex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -655,13 +657,31 @@ func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
 	}
 }
 
+// The TDX shim commits sha256(document) into MRCONFIGID zero-padded to 48
+// bytes, so that shape resolves the pin exactly like SNP's 32-byte HOST_DATA.
+func TestVerifiedSelfHostDataAcceptsZeroPaddedMRCONFIGID(t *testing.T) {
+	digest := initdata.Digest([]byte("doc"))
+	padded := make([]byte, 48)
+	copy(padded, digest[:])
+	v := testattest.PassingVerdict("")
+	v.Claims.InitData = hex.EncodeToString(padded)
+
+	got, err := verifiedSelfHostData(context.Background(), &Config{AttestationServiceURL: attesterWithVerdict(t, v)})
+	if err != nil {
+		t.Fatalf("verifiedSelfHostData: %v", err)
+	}
+	if !bytes.Equal(got, digest[:]) {
+		t.Fatalf("anchor = %x, want the 32-byte digest %x", got, digest[:])
+	}
+}
+
 // A missing anchor is terminal like a refusal, but not at a refusal's level.
 func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	shortInitDataWait(t, time.Minute, 10*time.Second)
 
-	// MRCONFIGID's width.
-	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, 48))}
+	// MRCONFIGID's width, but not carrying a zero-padded digest.
+	cfg := &Config{AttestationServiceURL: attesterServing(t, bytes.Repeat([]byte{0xaa}, 48))}
 	rec := &levelRecorder{}
 	start := time.Now()
 	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)
