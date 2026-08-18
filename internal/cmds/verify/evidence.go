@@ -84,11 +84,12 @@ type evidence struct {
 	// hardware evidence, but the anchor is responder-chosen: it is not a
 	// pinned trust anchor and the verdict must never treat it as one.
 	leafChainDerived bool
-	// publicTLSMode is the discovery document's declared front-door TLS mode
-	// ("" when not discovery-sourced): "cds" serves the attestation-bound
-	// CDS leaf, "webpki" an operator WebPKI certificate the evidence says
-	// nothing about.
-	publicTLSMode string
+	// frontDoor is what a discovery gather's live TLS handshake showed about
+	// the front door's serving key (frontDoorNone when not discovery-sourced).
+	frontDoor frontDoorObservation
+	// frontDoorCertSHA256 is the hex SHA-256 of the leaf the live handshake
+	// presented ("" when no handshake was observed).
+	frontDoorCertSHA256 string
 	// leafKeyProven is true when a live TLS handshake with the leaf completed,
 	// which proves the presenter holds the attested private key. A forged body
 	// carrying someone else's attested SubjectPublicKeyInfo cannot complete

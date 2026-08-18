@@ -175,8 +175,9 @@ Evidence sources:
 
 Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
 unavailable (unreachable / unparseable) · 4 partially verified (the evidence
-verified, but a property it presents is not proven — a WebPKI front door whose
-serving key is not attestation-bound, or a chain anchor the responder chose).`,
+verified, but a property it presents is not proven — the front door's live
+handshake presented a serving key the evidence does not attest, or a chain
+anchor the responder chose).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -394,15 +395,20 @@ func demoteToPartial(oc *Outcome, notProven string) {
 	oc.NotProven = append(oc.NotProven, notProven)
 }
 
-// applyFrontDoorPolicy enforces the discovery document's public_tls.mode: a
-// WebPKI front door terminates public TLS on an operator certificate, so the
-// serving key clients reach is not the attestation-bound CDS key the evidence
-// speaks for.
+// applyFrontDoorPolicy settles what the verdict may claim about the front
+// door's serving key, keying on the live handshake the discovery gather
+// observed. A door presenting the attestation-bound certificate leaves the
+// verdict standing; any other serving key, or no TLS observation at all,
+// leaves the endpoint clients reach unproven.
 func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
-	if ev.publicTLSMode != "webpki" {
-		return
+	switch ev.frontDoor {
+	case frontDoorOther:
+		demoteToPartial(oc, fmt.Sprintf(
+			"the front door's live TLS handshake presented serving certificate sha256 %s, not the sha256 %s this evidence attests — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound",
+			ev.frontDoorCertSHA256, ev.certSHA256))
+	case frontDoorUnobserved:
+		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 	}
-	demoteToPartial(oc, "the front-door serving key is not attestation-bound: public_tls.mode=webpki terminates public TLS on an operator WebPKI certificate, not the CDS-issued key this evidence attests — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 }
 
 // applyChainAnchorPolicy settles what the verdict may claim about an
@@ -1460,7 +1466,7 @@ func describeCertBody(_ config, ev *evidence) string {
 	case ev.leafChainDerived:
 		return "CA-signed: body committed into the identity transcript — the hardware evidence binds these exact bytes" + skew + certutil.LeafValiditySkew.String() + ")"
 	case ev.leafKeyProven:
-		return "CA-signed: body not chain-checked, but the live RA-TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
+		return "CA-signed: body not chain-checked, but the live TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
 	default:
 		return "CA-signed: body fields are CA-vouched and UNAUTHENTICATED — pass --mesh-ca to check the chain"
 	}

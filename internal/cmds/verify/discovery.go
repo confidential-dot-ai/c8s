@@ -1,15 +1,21 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
@@ -19,39 +25,114 @@ import (
 // defaultDiscoveryPath is the path the tls-lb serves its discovery document on.
 const defaultDiscoveryPath = "/v1/discovery"
 
+// frontDoorObservation is what a discovery gather's live TLS handshake showed
+// about the serving key the front door actually speaks.
+type frontDoorObservation int
+
+const (
+	// frontDoorNone: the evidence is not discovery-sourced; no front-door
+	// property is presented.
+	frontDoorNone frontDoorObservation = iota
+	// frontDoorUnobserved: discovery-sourced, but the target connection was
+	// not TLS, so no handshake showed the serving key.
+	frontDoorUnobserved
+	// frontDoorAttested: the handshake presented byte-identically the
+	// certificate the evidence attests — the peer holds the attestation-bound
+	// key.
+	frontDoorAttested
+	// frontDoorOther: the handshake presented a certificate the evidence does
+	// not attest.
+	frontDoorOther
+)
+
 // gatherFromDiscovery fetches the tls-lb discovery document and builds evidence
 // from the embedded attestation, bound to the CDS cert key + the issuance
 // challenge. The challenge is fixed at issuance time, so this is NOT a freshness
 // proof (fresh=false) — but it ships the VCEK, so it verifies offline.
+//
+// An https target is dialed once and the document fetched over that one
+// connection: the handshake leaf is the front door's serving key made
+// observable, and serving certs are per replica, so the observation and the
+// document must ride the same connection. The document stays unauthenticated
+// public bytes (anyone who once fetched a genuine one can replay it with the
+// certificate re-minted — see authorizeLeafBody); what the handshake adds is
+// which key the door THIS connection reached actually speaks.
 func gatherFromDiscovery(ctx context.Context, base, path, serverName string, timeout time.Duration, trust leafTrust) (*evidence, error) {
-	data, src, err := fetchDiscoveryDoc(ctx, base, path, serverName, timeout)
+	u, err := url.Parse(base)
+	if err != nil {
+		return nil, fmt.Errorf("parse url %q: %w", base, err)
+	}
+	client := insecureClient(serverName, timeout)
+	var conn *tls.Conn
+	if u.Scheme == "https" {
+		conn, err = dialFrontDoor(ctx, u.Host, serverName, timeout)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+		client = singleConnClient(conn, timeout)
+	}
+	data, src, err := fetchDiscoveryDoc(ctx, client, u, path)
 	if err != nil {
 		return nil, err
 	}
-	// No keyProven here, deliberately: fetchDiscoveryDoc dials with
-	// InsecureSkipVerify and no VerifyPeerCertificate, so nothing binds the
-	// certificate INSIDE the document to the leaf that served it. The document
-	// is unauthenticated public bytes — anyone who once fetched a genuine one
-	// can replay it with the certificate re-minted. See authorizeLeafBody.
-	return evidenceFromDiscovery(data, src, trust)
+	var observed *x509.Certificate
+	if conn != nil {
+		if peers := conn.ConnectionState().PeerCertificates; len(peers) > 0 {
+			observed = peers[0]
+		}
+	}
+	return evidenceFromDiscovery(data, src, trust, observed)
 }
 
-// fetchDiscoveryDoc GETs the discovery document from a component's
-// (unauthenticated) discovery endpoint and returns the raw bytes plus a
-// human-readable source string. PKI is intentionally not verified — the trust
-// anchor is the hardware attestation inside the document, checked downstream.
-func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeout time.Duration) ([]byte, string, error) {
+// dialFrontDoor opens the TLS connection the discovery document is fetched
+// over. PKI is intentionally not verified — the trust anchor is the
+// attestation in the document, checked downstream, and the handshake leaf is
+// compared against the document's attested certificate after the fetch.
+func dialFrontDoor(ctx context.Context, addr, serverName string, timeout time.Duration) (*tls.Conn, error) {
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: timeout},
+		Config:    &tls.Config{InsecureSkipVerify: true, ServerName: serverName}, //nolint:gosec
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, &connectError{err: fmt.Errorf("dial %s: %w", addr, err)}
+	}
+	// tls.Dialer.DialContext always returns a *tls.Conn.
+	return conn.(*tls.Conn), nil
+}
+
+// singleConnClient serves requests over the one dialed connection and never
+// redials: the handshake leaf the gather compares is this connection's, so a
+// second dial could reach a different tls-lb replica serving a different cert.
+// Redirects are not followed for the same reason — a non-200 is a fetch
+// failure (connectError), as before.
+func singleConnClient(conn *tls.Conn, timeout time.Duration) *http.Client {
+	var dialed atomic.Bool
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{
+			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+				if dialed.Swap(true) {
+					return nil, errors.New("the attested connection was lost and redialing could reach a different tls-lb replica; re-run the command")
+				}
+				return conn, nil
+			},
+		},
+	}
+}
+
+// fetchDiscoveryDoc GETs the discovery document over client and returns the
+// raw bytes plus a human-readable source string.
+func fetchDiscoveryDoc(ctx context.Context, client *http.Client, base *url.URL, path string) ([]byte, string, error) {
 	if path == "" {
 		path = defaultDiscoveryPath
 	}
-	u, err := url.Parse(base)
-	if err != nil {
-		return nil, "", fmt.Errorf("parse url %q: %w", base, err)
-	}
+	u := *base
 	u.Path = path
 	u.RawQuery = ""
 
-	client := insecureClient(serverName, timeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, "", err
@@ -78,17 +159,21 @@ func fetchDiscoveryDoc(ctx context.Context, base, path, serverName string, timeo
 // gets the same body authentication as every other cert-sourced path, and is
 // retained as the evidence leaf so the --mesh-ca / --sandbox-id / --workload
 // pins work against discovery targets too. A CDS-issued (CA-vouched) cert in
-// the document is authenticated only by a --mesh-ca chain check; without one
-// the document is rejected rather than verified against a body nothing signed
-// for (authorizeLeafBody).
+// the document is authenticated by a --mesh-ca chain check, or by the live
+// handshake below; with neither the document is rejected rather than verified
+// against a body nothing signed for (authorizeLeafBody).
 //
-// public_tls.mode travels with the evidence to the verdict: a "webpki" front
-// door terminates public TLS on a certificate this evidence says nothing
-// about, so the verdict is demoted to partial downstream
-// (applyFrontDoorPolicy). An unknown mode fails closed here — a
-// securityError, so auto mode cannot fall through to the serving cert past a
-// document it cannot classify.
-func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*evidence, error) {
+// observed is the leaf the target connection's TLS handshake presented (nil
+// when no handshake was made). Byte-identical to the attested cert, the
+// completed handshake proves the peer holds the attestation-bound key — the
+// same possession backstop as the RA-TLS path — and the verdict may stand on
+// the front door speaking the attested key (applyFrontDoorPolicy).
+//
+// An unknown public_tls.mode fails closed here — a securityError, so auto
+// mode cannot fall through to the serving cert past a document it cannot
+// classify. A known mode is classification only: the verdict keys on the
+// live handshake observation (applyFrontDoorPolicy).
+func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed *x509.Certificate) (*evidence, error) {
 	var d types.DiscoveryDocument
 	if err := json.Unmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
@@ -103,6 +188,21 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*eviden
 	if err != nil {
 		return nil, err
 	}
+	frontDoor := frontDoorUnobserved
+	var observedSHA256 string
+	if observed != nil {
+		sum := sha256.Sum256(observed.Raw)
+		observedSHA256 = hex.EncodeToString(sum[:])
+		if bytes.Equal(observed.Raw, cert.Raw) {
+			frontDoor = frontDoorAttested
+			// The possession backstop admits the body only where no pinned CA
+			// authenticates it instead: with --mesh-ca the chain check is the
+			// stronger authentication, and authorizeLeafBody reports it.
+			trust.keyProven = trust.meshCA == nil
+		} else {
+			frontDoor = frontDoorOther
+		}
+	}
 	body, err := authenticateLeafBody(cert)
 	if err != nil {
 		return nil, err
@@ -114,21 +214,27 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust) (*eviden
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
 	sum := sha256.Sum256(cert.Raw)
+	bindingNote := "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)"
+	if frontDoor == frontDoorAttested {
+		bindingNote += "; the live handshake presented the attested serving certificate"
+	}
 	return &evidence{
-		platform:          platformOrDefault(d.Attestation.Platform),
-		rawEvidence:       d.Attestation.Evidence,
-		erd:               keyAnchor(rd),
-		fresh:             false,
-		source:            source,
-		certSHA256:        hex.EncodeToString(sum[:]),
-		bindingNote:       "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)",
-		leaf:              cert,
-		leafBody:          body,
-		leafChainVerified: chainVerified,
-		publicTLSMode:     d.PublicTLS.Mode,
-		sandboxID:         sandboxID,
-		sandboxErr:        sandboxErr,
-		workload:          workload,
-		workloadErr:       workloadErr,
+		platform:            platformOrDefault(d.Attestation.Platform),
+		rawEvidence:         d.Attestation.Evidence,
+		erd:                 keyAnchor(rd),
+		fresh:               false,
+		source:              source,
+		certSHA256:          hex.EncodeToString(sum[:]),
+		bindingNote:         bindingNote,
+		leaf:                cert,
+		leafBody:            body,
+		leafChainVerified:   chainVerified,
+		leafKeyProven:       trust.keyProven,
+		frontDoor:           frontDoor,
+		frontDoorCertSHA256: observedSHA256,
+		sandboxID:           sandboxID,
+		sandboxErr:          sandboxErr,
+		workload:            workload,
+		workloadErr:         workloadErr,
 	}, nil
 }

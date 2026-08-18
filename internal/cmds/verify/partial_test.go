@@ -36,26 +36,27 @@ func discoveryDocWithPublicTLS(t *testing.T, mode, certPEM string, challenge []b
 	return data
 }
 
-// The discovery gather must read public_tls.mode: cds (and its pre-mode-field
-// empty spelling) and webpki are recorded for the verdict; anything else
-// fails closed as a security verdict — auto mode must not fall through past a
-// document it cannot classify.
+// The discovery gather must classify public_tls.mode: cds (and its
+// pre-mode-field empty spelling) and webpki parse; anything else fails closed
+// as a security verdict — auto mode must not fall through past a document it
+// cannot classify. The declared mode is not recorded: the verdict keys on the
+// live handshake observation, which a parsed-but-unprobed document lacks.
 func TestDiscoveryPublicTLSModeParsing(t *testing.T) {
 	certPEM, _ := selfSignedCertPEM(t)
 	challenge := []byte("issuance-challenge")
 	evidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
 
 	for _, mode := range []string{"", "cds", "webpki"} {
-		ev, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, mode, certPEM, challenge, evidence), "test", leafTrust{})
+		ev, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, mode, certPEM, challenge, evidence), "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatalf("mode %q: %v", mode, err)
 		}
-		if ev.publicTLSMode != mode {
-			t.Errorf("mode %q: publicTLSMode = %q", mode, ev.publicTLSMode)
+		if ev.frontDoor != frontDoorUnobserved {
+			t.Errorf("mode %q: frontDoor = %v, want unobserved (no handshake was made)", mode, ev.frontDoor)
 		}
 	}
 
-	_, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, "dns", certPEM, challenge, evidence), "test", leafTrust{})
+	_, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, "dns", certPEM, challenge, evidence), "test", leafTrust{}, nil)
 	if err == nil || !isSecurityError(err) {
 		t.Fatalf("an unknown public_tls.mode must fail closed as a security verdict, got %v", err)
 	}
@@ -83,38 +84,42 @@ func snpVerifiedOutcome(t *testing.T, cfg config, ev *evidence) Outcome {
 	return oc
 }
 
-// A WebPKI front door terminates public TLS on a certificate the evidence
-// says nothing about: the evidence verifies, but the verdict is partial —
-// never "✓ VERIFIED" — and the exit code tells scripts so.
+// A front door whose live handshake presents a serving key the evidence does
+// not attest (a WebPKI door, whatever the document declares): the evidence
+// verifies, but the verdict is partial — never "✓ VERIFIED" — and the exit
+// code tells scripts so.
 func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 	ev := &evidence{
-		platform:      "snp",
-		source:        "discovery document https://lb.example.com/v1/discovery",
-		bindingNote:   "REPORTDATA binds the CDS cert key + issuance challenge",
-		publicTLSMode: "webpki",
+		platform:            "snp",
+		source:              "discovery document https://lb.example.com/v1/discovery",
+		bindingNote:         "REPORTDATA binds the CDS cert key + issuance challenge",
+		certSHA256:          strings.Repeat("aa", 32),
+		frontDoor:           frontDoorOther,
+		frontDoorCertSHA256: strings.Repeat("bb", 32),
 	}
 	oc := snpVerifiedOutcome(t, config{}, ev)
 	if oc.Verified || !oc.Partial {
-		t.Fatalf("webpki front door: verified=%v partial=%v, want a partial verdict", oc.Verified, oc.Partial)
+		t.Fatalf("unbound front door: verified=%v partial=%v, want a partial verdict", oc.Verified, oc.Partial)
 	}
 	if got := verdictExitCode(oc); got != exitPartial {
 		t.Errorf("exit = %d, want %d", got, exitPartial)
 	}
-	if len(oc.NotProven) != 1 || !strings.Contains(oc.NotProven[0], "public_tls.mode=webpki") ||
+	if len(oc.NotProven) != 1 || !strings.Contains(oc.NotProven[0], "live TLS handshake") ||
+		!strings.Contains(oc.NotProven[0], ev.frontDoorCertSHA256) || !strings.Contains(oc.NotProven[0], ev.certSHA256) ||
 		!strings.Contains(oc.NotProven[0], "not attestation-bound") {
-		t.Errorf("NotProven = %v, want it to name the WebPKI serving key", oc.NotProven)
+		t.Errorf("NotProven = %v, want it to name the observed and attested serving keys", oc.NotProven)
 	}
 
 	var out bytes.Buffer
 	renderText(config{}, oc, &out)
 	got := out.String()
-	for _, want := range []string{"~ PARTIALLY VERIFIED", "not proven:", "public_tls.mode=webpki", "measurement:", "binding:"} {
+	for _, want := range []string{"~ PARTIALLY VERIFIED", "not proven:", "not attestation-bound", "measurement:", "binding:"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("partial render missing %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "✓ VERIFIED") {
-		t.Errorf("a WebPKI front door must never print ✓:\n%s", got)
+		t.Errorf("an unattested front door must never print ✓:\n%s", got)
 	}
 
 	// JSON carries the same honesty: verified stays false (CI fails closed),
@@ -156,15 +161,16 @@ func genoaFileEvidence(t *testing.T) *evidence {
 	return ev
 }
 
-// The full verify path on real offline-verifiable evidence: a WebPKI-mode
-// discovery verdict exits 4, and the same evidence with an attestation-bound
-// front door still exits 0 — the regression pair.
-func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
+// The full verify path on real offline-verifiable evidence: a discovery
+// verdict whose live handshake presented an unattested serving key (or could
+// not observe one) exits 4, and the same evidence with the attestation-bound
+// front door observed — or no front-door property at all — still exits 0.
+func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 	plan := &verifyPlan{policy: &ratls.VerifyPolicy{}}
 
-	t.Run("webpki front door exits partial", func(t *testing.T) {
+	t.Run("unbound front door exits partial", func(t *testing.T) {
 		ev := genoaFileEvidence(t)
-		ev.publicTLSMode = "webpki" // as a discovery gather would record it
+		ev.frontDoor = frontDoorOther // as a discovery gather would record it
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
 		if code != exitPartial {
@@ -175,18 +181,19 @@ func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
 		}
 	})
 
-	t.Run("pre-mode discovery document still verifies", func(t *testing.T) {
-		ev := genoaFileEvidence(t) // publicTLSMode "" — a pre-mode-field document
+	t.Run("unobserved front door exits partial", func(t *testing.T) {
+		ev := genoaFileEvidence(t)
+		ev.frontDoor = frontDoorUnobserved // discovery doc fetched over a non-TLS connection
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
-		if code != exitVerified {
-			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
+		if code != exitPartial {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitPartial, out.String(), errOut.String())
 		}
 	})
 
-	t.Run("attestation-bound front door still verifies", func(t *testing.T) {
+	t.Run("attested front door still verifies", func(t *testing.T) {
 		ev := genoaFileEvidence(t)
-		ev.publicTLSMode = "cds"
+		ev.frontDoor = frontDoorAttested
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
 		if code != exitVerified {
@@ -194,6 +201,15 @@ func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), "✓ VERIFIED") {
 			t.Errorf("output:\n%s", out.String())
+		}
+	})
+
+	t.Run("no front-door property still verifies", func(t *testing.T) {
+		ev := genoaFileEvidence(t) // frontDoorNone — not discovery-sourced
+		var out, errOut bytes.Buffer
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		if code != exitVerified {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
 		}
 	})
 }

@@ -82,7 +82,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	}
 
 	t.Run("forwards platform + evidence verbatim and binds cert key + challenge", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test", leafTrust{})
+		ev, err := evidenceFromDiscovery(buildDoc("snp", certPEM), "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -109,7 +109,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("forwards a non-snp platform (e.g. tdx) rather than rejecting it", func(t *testing.T) {
-		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test", leafTrust{})
+		ev, err := evidenceFromDiscovery(buildDoc("tdx", certPEM), "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestEvidenceFromDiscovery(t *testing.T) {
 	})
 
 	t.Run("rejects missing certificate", func(t *testing.T) {
-		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test", leafTrust{}); err == nil {
+		if _, err := evidenceFromDiscovery(buildDoc("snp", ""), "test", leafTrust{}, nil); err == nil {
 			t.Fatal("expected error when certificate_pem is absent")
 		}
 	})
