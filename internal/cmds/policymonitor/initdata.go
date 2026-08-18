@@ -116,9 +116,13 @@ func warnNoDocument(logger *slog.Logger, cfg *Config, msg string, args ...any) {
 // refreshing CDS evidence from any TCB level is worse than no refresh.
 func applyInitDataValues(logger *slog.Logger, cfg *Config, data map[string]string) {
 	measurements, floor := data[initdata.KeyCDSMeasurements], data[initdata.KeyCDSMinTCB]
-	if cfg.CDSMeasurements == "" && cfg.MinTCB == "" && measurements != "" && floor == "" {
-		logger.Error("init-data carries CDS measurements but no TCB floor; refusing the document, so allowlist refresh will stay disabled",
-			"measurements_key", initdata.KeyCDSMeasurements, "floor_key", initdata.KeyCDSMinTCB)
+	// The all-zero floor parses clean and packs to "no floor", so a document
+	// naming it is as floorless as one missing the key.
+	parsed, parseErr := types.ParseMinTcb(floor)
+	floorless := parseErr == nil && parsed == (types.MinTcb{})
+	if cfg.CDSMeasurements == "" && cfg.MinTCB == "" && measurements != "" && floorless {
+		logger.Error("init-data carries CDS measurements but no non-zero TCB floor; refusing the document, so allowlist refresh will stay disabled",
+			"measurements_key", initdata.KeyCDSMeasurements, "floor_key", initdata.KeyCDSMinTCB, "floor", floor)
 		return
 	}
 	if cfg.CDSMeasurements == "" {

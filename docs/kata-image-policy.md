@@ -308,9 +308,9 @@ seed.
 The same document carries the minimum-TCB floor (`c8s.cds.min-tcb`,
 from the chart's `minTcb`) for the same reason: a host that could strip
 it from an unattested channel would run known-vulnerable firmware
-unobserved. A document that carries the measurements but not the floor
-is refused — refresh stays disabled rather than run unfloored, unless an
-explicit floor already covers the guest.
+unobserved. A document that carries the measurements but no floor — or a
+zero floor, which is no floor — is refused: refresh stays disabled rather
+than run unfloored, unless an explicit floor already covers the guest.
 
 **TDX has no equivalent path yet:** the digest goes to `MRCONFIGID`,
 which is 48 bytes where the anchor is 32, so the guest refuses the

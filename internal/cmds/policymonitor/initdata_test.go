@@ -356,8 +356,30 @@ func TestApplyInitDataRejectsFloorlessMeasurementsDocument(t *testing.T) {
 	if cfg.MinTCB != "" {
 		t.Fatalf("MinTCB = %q, want empty from a floorless document", cfg.MinTCB)
 	}
-	if got := recorder.levelOf(t, "no TCB floor"); got != slog.LevelError {
+	if got := recorder.levelOf(t, "non-zero TCB floor"); got != slog.LevelError {
 		t.Fatalf("floorless-measurements refusal logged at %v, want error", got)
+	}
+}
+
+// A zero floor is no floor: the all-zero spelling parses clean and packs to
+// "no floor", so a host-authored document naming it must hit the same
+// refusal as a missing key.
+func TestApplyInitDataRejectsZeroFloorDocument(t *testing.T) {
+	for _, floor := range []string{"0,0,0,0", "0, 0, 0, 0"} {
+		raw := testDocumentWithFloor(t, "aabb", floor)
+		writeInitData(t, raw)
+		digest := initdata.Digest(raw)
+
+		recorder := &levelRecorder{}
+		cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+		applyInitData(context.Background(), slog.New(recorder), cfg)
+
+		if cfg.CDSMeasurements != "" || cfg.MinTCB != "" {
+			t.Fatalf("floor %q: cfg = (%q, %q), want untouched so refresh stays disabled", floor, cfg.CDSMeasurements, cfg.MinTCB)
+		}
+		if got := recorder.levelOf(t, "non-zero TCB floor"); got != slog.LevelError {
+			t.Fatalf("floor %q: refusal logged at %v, want error", floor, got)
+		}
 	}
 }
 
