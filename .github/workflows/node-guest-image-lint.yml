@@ -17,6 +17,9 @@ on:
       # The rke2-role job runs via make; a broken/renamed target must fail
       # here, not on the next node-guest-image change.
       - "Makefile"
+      # The lint guards this vendored file's c8s-local bait/tripwire markers;
+      # a re-vendor PR touches nothing else and must fail here.
+      - ".github/workflows/tdx-metal-e2e.yml"
   workflow_dispatch:
 
 permissions:
