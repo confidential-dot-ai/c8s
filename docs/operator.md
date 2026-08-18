@@ -475,6 +475,14 @@ are enforced client-side against the report's launch measurement; with no
 `--measurements` the command still runs but prints an UNSAFE warning — any
 genuine TEE is accepted.
 
+`--init-data <sha256-hex>` pins the guest's init-data document: the kata shim
+commits `sha256(document)` at launch, and a verdict pinned this way fails
+unless the evidence commits exactly that digest. The document renders
+deterministically from the pod's role and CDS measurement set (`pkg/initdata`),
+so the digest comes from the same pipeline that chose those measurements. With
+no `--init-data` the committed digest is still shown on SNP/TDX, labelled as
+compared against nothing.
+
 On TDX, `--measurements` pins MRTD, which covers only the TDVF firmware: the
 guest kernel and rootfs live in RTMR[1] and RTMR[2], and a verdict pinned on
 MRTD alone warns that they are unmeasured by that policy. To pin the whole

@@ -806,7 +806,7 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 	if ev.platform != "az-snp" {
 		t.Fatalf("platform = %q, want az-snp", ev.platform)
 	}
-	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil)
+	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil, nil)
 	if err != nil {
 		t.Fatalf("az-snp evidence with its bound nonce must verify: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestVerifyRealAzSnpEvidence_UnpaddedAnchor(t *testing.T) {
 
 	// A different anchor fails closed, at the nonce gate specifically.
 	ev.erd = []byte("not-the-nonce")
-	if _, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil); err == nil || !strings.Contains(err.Error(), "nonce") {
+	if _, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil, nil); err == nil || !strings.Contains(err.Error(), "nonce") {
 		t.Fatalf("wrong nonce must fail closed at the nonce check, got: %v", err)
 	}
 }
@@ -840,7 +840,7 @@ func TestNewOutcomeFromRealGenoaEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil)
+	res, err := verifyInProcess(context.Background(), ev, &ratls.VerifyPolicy{}, nil, nil)
 	if err != nil {
 		t.Fatalf("the real fixture must verify: %v", err)
 	}

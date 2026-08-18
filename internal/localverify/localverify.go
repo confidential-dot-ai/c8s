@@ -50,6 +50,10 @@ type Params struct {
 	// Measurements pins the launch digest (SNP MEASUREMENT / TDX MR_TD).
 	// Empty = no pin; with a pin, a missing launch digest fails closed.
 	Measurements [][]byte
+	// ExpectedInitDataHash, when set, pins the init-data digest: the engine
+	// compares it against SNP HOST_DATA, TDX MRCONFIGID (zero-padded to 48),
+	// or the az vTPM PCR[8] binding, and a mismatch fails verification.
+	ExpectedInitDataHash []byte
 }
 
 // VerifyFunc is the signature of [Verify], taken as a parameter by consumers
@@ -68,14 +72,15 @@ func (e *CollateralError) Unwrap() error { return e.Err }
 var ErrMeasurementNotAllowed = errors.New("launch measurement not in the allowed set")
 
 // Verify verifies a self-describing evidence envelope and enforces p. The
-// chain, binding, debug, and min-TCB checks are attestation-go's verdict; the
-// measurement pin is enforced here on its claims. ctx bounds any AMD KDS
-// collateral fetch.
+// chain, binding, debug, min-TCB, and init-data checks are attestation-go's
+// verdict; the measurement pin is enforced here on its claims. ctx bounds any
+// AMD KDS collateral fetch.
 func Verify(ctx context.Context, platform string, evidence json.RawMessage, p Params) (*teetypes.VerificationResult, error) {
 	params := teetypes.VerifyParams{
-		ExpectedReportData: p.ExpectedReportData,
-		AllowDebug:         p.AllowDebug,
-		MinTCB:             p.MinTCB,
+		ExpectedReportData:   p.ExpectedReportData,
+		ExpectedInitDataHash: p.ExpectedInitDataHash,
+		AllowDebug:           p.AllowDebug,
+		MinTCB:               p.MinTCB,
 	}
 
 	res, err := dispatch(ctx, platform, evidence, params)
@@ -104,6 +109,9 @@ func enforceResult(res *teetypes.VerificationResult, p Params) error {
 	}
 	if p.ExpectedReportData != nil && (res.ReportDataMatch == nil || !*res.ReportDataMatch) {
 		return fmt.Errorf("REPORTDATA does not match the expected binding (report_data_match not true)")
+	}
+	if p.ExpectedInitDataHash != nil && (res.InitDataMatch == nil || !*res.InitDataMatch) {
+		return fmt.Errorf("init-data digest does not match the expected binding (init_data_match not true)")
 	}
 	if len(p.Measurements) > 0 {
 		mb, err := hex.DecodeString(res.Claims.LaunchDigest)
