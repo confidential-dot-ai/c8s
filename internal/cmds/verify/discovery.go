@@ -209,13 +209,19 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed
 	if err != nil {
 		return nil, err
 	}
+	sum := sha256.Sum256(cert.Raw)
 	chainVerified, err := authorizeLeafBody(cert, body, trust)
 	if err != nil {
+		// A mismatching door is the actionable signal: lead the failure
+		// with the observed-vs-attested digests, then the body check.
+		if frontDoor == frontDoorOther {
+			err = fmt.Errorf("the front door's live TLS handshake presented serving certificate sha256 %s, not the sha256 %s this evidence attests: %w",
+				observedSHA256, hex.EncodeToString(sum[:]), err)
+		}
 		return nil, err
 	}
 	sandboxID, sandboxErr := ratls.SandboxIDFromCert(cert)
 	workload, workloadErr := ratls.MatchedWorkloadFromCert(cert)
-	sum := sha256.Sum256(cert.Raw)
 	bindingNote := "REPORTDATA binds the CDS cert key + issuance challenge from the discovery doc (ships the VCEK; no per-request nonce — replayable within the authenticated certificate validity window)"
 	if frontDoor == frontDoorAttested {
 		bindingNote += "; the live handshake presented the attested serving certificate"

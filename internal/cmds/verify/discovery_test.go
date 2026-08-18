@@ -289,5 +289,13 @@ func TestDiscoveryHandshakeAuthenticatesCAVouchedBody(t *testing.T) {
 		if !strings.Contains(err.Error(), "--mesh-ca") {
 			t.Errorf("error = %q, want it to name the flag that fixes it", err)
 		}
+		// The door lie is the actionable signal: the served-vs-attested
+		// digests must reach the operator, not be buried by the body failure.
+		served := sha256.Sum256(otherCert.Certificate[0])
+		attested := sha256.Sum256(id.leaf.Raw)
+		if !strings.Contains(err.Error(), hex.EncodeToString(served[:])) ||
+			!strings.Contains(err.Error(), hex.EncodeToString(attested[:])) {
+			t.Errorf("error = %q, want it to name the served and attested serving-cert digests", err)
+		}
 	})
 }
