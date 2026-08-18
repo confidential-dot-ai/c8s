@@ -144,10 +144,11 @@ func TestSecretsDisabledWhenItCannotAnswer(t *testing.T) {
 	}
 }
 
-// Without CIDRs there is nothing bounding which address the callback may dial.
+// Without a bound there is nothing constraining which address the callback
+// may dial.
 func TestSecretsDisabledWithoutInventoryCIDRs(t *testing.T) {
 	enabled, why := secretsEnabled(secretsReadyConfig(), &workloadclaims.DigestsClient{}, nil)
-	if enabled || !strings.Contains(why, "--sandbox-inventory-cidr") {
+	if enabled || !strings.Contains(why, "no node addresses") {
 		t.Fatalf("enabled=%v reason=%q", enabled, why)
 	}
 }

@@ -223,12 +223,9 @@ func run(cfg config) error {
 	// posture /attest already takes above, so a dev cluster still issues
 	// sandbox-bound leaves (and can still receive secrets) instead of failing
 	// every workload.
-	inventoryHosts, err := workloadclaims.ParseInventoryHosts(cfg.inventoryCIDRs)
+	inventoryHosts, err := buildInventoryHosts(ctx, cfg.inventoryCIDRs)
 	if err != nil {
 		return err
-	}
-	if len(inventoryHosts) == 0 {
-		slog.Warn("--sandbox-inventory-cidr not set: CDS will refuse any request carrying a sandbox token, since it has no node CIDRs to bound the inventory callback to")
 	}
 
 	var sandboxDigests *workloadclaims.DigestsClient
@@ -556,8 +553,8 @@ func secretsEnabled(cfg config, sandboxDigests *workloadclaims.DigestsClient, in
 		return false, "handoff is configured: a surge replica would serve an empty secret store and mint values diverging from those already delivered"
 	case sandboxDigests == nil:
 		return false, "no --ratls-platform, so CDS has no attested channel to an inventory"
-	case len(inventoryHosts) == 0:
-		return false, "no --sandbox-inventory-cidr to bound which addresses the inventory callback may dial"
+	case inventoryHosts == nil || inventoryHosts.Empty():
+		return false, "the inventory callback has no node addresses to bound it"
 	case len(cfg.measurements) == 0:
 		return false, "no --measurements, so any TEE could answer as a sandbox's inventory"
 	}
