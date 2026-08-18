@@ -61,13 +61,26 @@ enforcing it are one shape, not two (see [Enforcement](#enforcement)).
 # TEE platform labels are applied automatically from --hardware-platform
 # (see below). tls-lb runs as a kata CVM; --upstream (with the port on its
 # --workload-ref) points tls-lb at an adopted workload's mesh-wrapped headless
-# Service (see operator.md, "tls-lb upstream").
-c8s install --cvm-mode=pod --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+# Service (see operator.md, "tls-lb upstream"). --measurements pins the kata
+# guest launch digest; without it the install refuses (see below).
+c8s install --cvm-mode=pod --measurements <guest-launch-digest> --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 
 # Dev only: use the -debug guest image so `kubectl logs` and `kubectl exec`
 # work against kata pods (host log/exec RPCs allowed in the guest policy).
-c8s install --cvm-mode=pod --debug --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+c8s install --cvm-mode=pod --debug --measurements <guest-launch-digest> --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 ```
+
+**`--measurements` is effectively required under `--cvm-mode=pod`.** The
+injected get-cert runs inside a kata guest whose argv the host writes, so it
+refuses to dial an unpinned CDS; an unpinned pod-mode cluster brings up CDS
+and tls-lb but no `confidential.ai/cw` workload ever obtains a certificate,
+and the refusal is only visible in an init container's log inside a locked
+guest. `c8s install` therefore refuses a pod-mode install with no
+`--measurements` (and no `-f` values file that could carry
+`cds.measurements`) unless you pass `--force`, which installs the control
+plane only. Under SNP the value comes from `c8s kata measure`; under TDX,
+until the guest image publishes its predicted MRTD, read it from a running
+cluster with `c8s verify https://<tls-lb> --kind lb` and reinstall pinned.
 
 Confidential pods only schedule to nodes carrying their platform label —
 `confidential.ai/sev-snp=true` for the SNP classes,

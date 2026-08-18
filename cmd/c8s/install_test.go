@@ -24,6 +24,29 @@ import (
 
 var errTestResolve = errors.New("simulated resolve failure")
 
+func TestPodModeMeasurementsPreflight(t *testing.T) {
+	// Not pod mode → no gate regardless of measurements.
+	if warn, err := podModeMeasurementsPreflight("node", nil, nil, false); err != nil || warn != "" {
+		t.Fatalf("node mode: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	// Pod mode with measurements → no gate, no warning.
+	if warn, err := podModeMeasurementsPreflight("pod", []string{"ab"}, nil, false); err != nil || warn != "" {
+		t.Fatalf("pod + measurements: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	// Pod mode, no measurements, no force → hard error (must acknowledge).
+	if _, err := podModeMeasurementsPreflight("pod", nil, nil, false); err == nil {
+		t.Fatal("pod + no measurements + no force: expected an error requiring --measurements or --force")
+	}
+	// Pod mode, no measurements, --force → allowed, but warns.
+	if warn, err := podModeMeasurementsPreflight("pod", nil, nil, true); err != nil || warn == "" {
+		t.Fatalf("pod + no measurements + force: want warn and no error, got warn=%q err=%v", warn, err)
+	}
+	// -f supplied → operator owns cds.measurements in their values file; no gate.
+	if warn, err := podModeMeasurementsPreflight("pod", nil, []string{"custom.yaml"}, false); err != nil || warn != "" {
+		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+}
+
 func TestOperatorKeysPreflight(t *testing.T) {
 	// Keys provided → no gate, no warning.
 	if warn, err := operatorKeysPreflight("operator.pub", nil, false); err != nil || warn != "" {
