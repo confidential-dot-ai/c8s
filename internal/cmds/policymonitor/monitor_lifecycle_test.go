@@ -365,6 +365,7 @@ func TestRunMonitor_CDSRefreshAdmitsPulledDigest(t *testing.T) {
 		CgroupRoot:            cgroupRoot,
 		CDSURL:                srv.URL,
 		CDSMeasurements:       strings.Repeat("ab", 48),
+		MinTCB:                "3,0,8,0",
 		AttestationServiceURL: "http://127.0.0.1:8400",
 		RefreshInterval:       50 * time.Millisecond,
 		// Loopback is rejected fast as an advertise host; without it the

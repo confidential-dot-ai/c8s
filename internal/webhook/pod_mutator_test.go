@@ -1288,7 +1288,7 @@ func TestHandleRejectsKataHypervisorAnnotations(t *testing.T) {
 	// cc_init_data is unchanged: the webhook's own stamp passes, an
 	// author-chosen document is still rejected by stampInitData.
 	t.Run("accepts the stamped cc_init_data value", func(t *testing.T) {
-		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements)
+		want, err := initDataAnnotation(kataSnpRuntimeClass, testMeasurements, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1518,6 +1518,52 @@ func TestCertContainerOmitsEmptyCDSMeasurements(t *testing.T) {
 	for _, arg := range containerNamed(pod, reservedCertContainerName).Args {
 		if strings.HasPrefix(arg, "--cds-measurements") {
 			t.Fatalf("c8s-cert carries %q with no measurements configured", arg)
+		}
+	}
+}
+
+// The TCB floor reaches every injected fetcher that verifies CDS's RA-TLS
+// evidence: get-cert, the volume fetcher, and the secret fetcher.
+func TestInjectedContainersCarryMinTCB(t *testing.T) {
+	pod := podWithApp()
+	cfg := secretsConfig()
+	cfg.MinTCB = "3,0,8,0"
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"db-creds"}, Dir: "/run/secrets"},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, cfg)
+
+	for _, name := range []string{reservedCertContainerName, reservedVolumeContainerName, reservedSecretContainerName} {
+		c := containerNamed(pod, name)
+		if c == nil {
+			t.Fatalf("%s was not injected", name)
+		}
+		if !hasArg(c.Args, "--min-tcb=3,0,8,0") {
+			t.Fatalf("%s args %v missing --min-tcb=3,0,8,0", name, c.Args)
+		}
+	}
+}
+
+// An unset floor emits no flag: the fetchers read "" as "no floor", which an
+// empty --min-tcb= would also mean but by a longer road.
+func TestInjectedContainersOmitEmptyMinTCB(t *testing.T) {
+	pod := podWithApp()
+	mutatePod(pod, &injection{
+		WorkloadID: "api",
+		Secrets:    secretsSpec{Specs: []string{"db-creds"}, Dir: "/run/secrets"},
+		Volumes:    volumesSpec{Specs: []string{"weights=/tenant-a/volumes/weights"}},
+	}, secretsConfig())
+
+	for _, name := range []string{reservedCertContainerName, reservedVolumeContainerName, reservedSecretContainerName} {
+		c := containerNamed(pod, name)
+		if c == nil {
+			t.Fatalf("%s was not injected", name)
+		}
+		for _, arg := range c.Args {
+			if strings.HasPrefix(arg, "--min-tcb") {
+				t.Fatalf("%s carries %q with no floor configured", name, arg)
+			}
 		}
 	}
 }

@@ -156,6 +156,21 @@ func testDocument(t *testing.T, measurements string) []byte {
 	return raw
 }
 
+// testDocumentWithFloor renders the shape the c8s webhook stamps on a
+// floored cluster: measurements plus the minimum-TCB key.
+func testDocumentWithFloor(t *testing.T, measurements, floor string) []byte {
+	t.Helper()
+	raw, err := initdata.New(map[string]string{
+		initdata.KeyRole:            initdata.RoleWorkload,
+		initdata.KeyCDSMeasurements: measurements,
+		initdata.KeyCDSMinTCB:       floor,
+	}).Render()
+	if err != nil {
+		t.Fatalf("render document: %v", err)
+	}
+	return raw
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -166,12 +181,12 @@ func TestResolveInitDataMeasurementsHonoursCommittedDocument(t *testing.T) {
 	digest := initdata.Digest(raw)
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	got, err := resolveInitDataMeasurements(context.Background(), cfg)
+	got, err := resolveInitData(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("resolveInitDataMeasurements: %v", err)
+		t.Fatalf("resolveInitData: %v", err)
 	}
-	if got != "aabb,ccdd" {
-		t.Fatalf("measurements = %q, want %q", got, "aabb,ccdd")
+	if got[initdata.KeyCDSMeasurements] != "aabb,ccdd" {
+		t.Fatalf("measurements = %q, want %q", got[initdata.KeyCDSMeasurements], "aabb,ccdd")
 	}
 }
 
@@ -184,7 +199,7 @@ func TestResolveInitDataMeasurementsRejectsUncommittedDocument(t *testing.T) {
 	other := initdata.Digest(testDocument(t, "deadbeef"))
 	cfg := &Config{AttestationServiceURL: attesterServing(t, other[:])}
 
-	_, err := resolveInitDataMeasurements(context.Background(), cfg)
+	_, err := resolveInitData(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("accepted a document HOST_DATA does not commit")
 	}
@@ -203,7 +218,7 @@ func TestResolveInitDataMeasurementsRejectsNearCollision(t *testing.T) {
 	near[len(near)-1] ^= 0xff
 	cfg := &Config{AttestationServiceURL: attesterServing(t, near[:])}
 
-	if _, err := resolveInitDataMeasurements(context.Background(), cfg); err == nil {
+	if _, err := resolveInitData(context.Background(), cfg); err == nil {
 		t.Fatal("accepted a HOST_DATA that matches the digest only on its prefix")
 	}
 }
@@ -213,7 +228,7 @@ func TestResolveInitDataMeasurementsRejectsZeroHostData(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, initdata.DigestSize))}
 
-	if _, err := resolveInitDataMeasurements(context.Background(), cfg); err == nil {
+	if _, err := resolveInitData(context.Background(), cfg); err == nil {
 		t.Fatal("accepted a document against zero HOST_DATA")
 	}
 }
@@ -223,7 +238,7 @@ func TestResolveInitDataMeasurementsNoDocument(t *testing.T) {
 	initDataDocumentPath = filepath.Join(t.TempDir(), "absent.toml")
 	t.Cleanup(func() { initDataDocumentPath = old })
 
-	_, err := resolveInitDataMeasurements(context.Background(), &Config{})
+	_, err := resolveInitData(context.Background(), &Config{})
 	if !errors.Is(err, errNoInitData) {
 		t.Fatalf("err = %v, want errNoInitData", err)
 	}
@@ -237,7 +252,7 @@ func TestResolveInitDataMeasurementsMalformedDocument(t *testing.T) {
 	digest := initdata.Digest(raw)
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	_, err := resolveInitDataMeasurements(context.Background(), cfg)
+	_, err := resolveInitData(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "parse init-data") {
 		t.Fatalf("err = %v, want a parse failure", err)
 	}
@@ -247,7 +262,7 @@ func TestResolveInitDataMeasurementsAttesterUnreachable(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	cfg := &Config{AttestationServiceURL: "http://127.0.0.1:1"}
 
-	if _, err := resolveInitDataMeasurements(context.Background(), cfg); err == nil {
+	if _, err := resolveInitData(context.Background(), cfg); err == nil {
 		t.Fatal("succeeded with no reachable attester")
 	}
 }
@@ -258,7 +273,7 @@ func TestApplyInitDataMeasurementsSetsFromDocument(t *testing.T) {
 	digest := initdata.Digest(raw)
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	applyInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	applyInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "aabb,ccdd" {
 		t.Fatalf("CDSMeasurements = %q, want it taken from the document", cfg.CDSMeasurements)
@@ -276,10 +291,64 @@ func TestApplyInitDataMeasurementsExplicitValueWins(t *testing.T) {
 		CDSMeasurements:       "explicit",
 		AttestationServiceURL: attesterServing(t, digest[:]),
 	}
-	applyInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	applyInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "explicit" {
 		t.Fatalf("CDSMeasurements = %q, want the explicit value kept", cfg.CDSMeasurements)
+	}
+}
+
+// The floor rides the same launch-committed document as the measurements: a
+// host cannot strip it from the guest's env, because there is no env to strip.
+func TestApplyInitDataSetsMinTCBFromDocument(t *testing.T) {
+	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+	applyInitData(context.Background(), quietLogger(), cfg)
+
+	if cfg.MinTCB != "3,0,8,0" {
+		t.Fatalf("MinTCB = %q, want it taken from the document", cfg.MinTCB)
+	}
+	if cfg.CDSMeasurements != "aabb,ccdd" {
+		t.Fatalf("CDSMeasurements = %q, want it taken from the document", cfg.CDSMeasurements)
+	}
+}
+
+// An operator-set floor is not re-pointed by the host's document; per-key,
+// the measurements the operator left unset still come from the document.
+func TestApplyInitDataExplicitMinTCBWins(t *testing.T) {
+	raw := testDocumentWithFloor(t, "aabb", "9,9,9,9")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	cfg := &Config{
+		MinTCB:                "3,0,8,0",
+		AttestationServiceURL: attesterServing(t, digest[:]),
+	}
+	applyInitData(context.Background(), quietLogger(), cfg)
+
+	if cfg.MinTCB != "3,0,8,0" {
+		t.Fatalf("MinTCB = %q, want the explicit value kept", cfg.MinTCB)
+	}
+	if cfg.CDSMeasurements != "aabb" {
+		t.Fatalf("CDSMeasurements = %q, want it taken from the document", cfg.CDSMeasurements)
+	}
+}
+
+// A document with no floor key leaves MinTCB empty: no floor is the warned
+// development shape, not something the guest invents a value for.
+func TestApplyInitDataDocumentWithoutFloorLeavesMinTCBEmpty(t *testing.T) {
+	raw := testDocument(t, "aabb")
+	writeInitData(t, raw)
+	digest := initdata.Digest(raw)
+
+	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
+	applyInitData(context.Background(), quietLogger(), cfg)
+
+	if cfg.MinTCB != "" {
+		t.Fatalf("MinTCB = %q, want empty from a floorless document", cfg.MinTCB)
 	}
 }
 
@@ -313,7 +382,7 @@ func TestApplyInitDataMeasurementsFailuresLeaveConfigEmpty(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.setup(t)
-			applyInitDataMeasurements(context.Background(), quietLogger(), cfg)
+			applyInitData(context.Background(), quietLogger(), cfg)
 			if cfg.CDSMeasurements != "" {
 				t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed", cfg.CDSMeasurements)
 			}
@@ -522,12 +591,12 @@ func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
 	stub := testattest.New(t)
 	stub.SetVerifyError(testattest.VerificationFailed("report signature does not verify"))
 
-	measurements, err := resolveInitDataMeasurements(context.Background(), &Config{AttestationServiceURL: stub.URL})
+	data, err := resolveInitData(context.Background(), &Config{AttestationServiceURL: stub.URL})
 	if !errors.Is(err, errAttestVerdict) {
 		t.Fatalf("err = %v, want the refusal classified as a terminal verdict", err)
 	}
-	if measurements != "" {
-		t.Fatalf("measurements = %q, want none from an unverified report", measurements)
+	if data != nil {
+		t.Fatalf("data = %v, want none from an unverified report", data)
 	}
 }
 
@@ -569,7 +638,7 @@ func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
 	t.Cleanup(func() { <-written })
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	awaitInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "aabb,ccdd" {
 		t.Fatalf("CDSMeasurements = %q, want it picked up once kata-agent wrote the document", cfg.CDSMeasurements)
@@ -599,7 +668,7 @@ func TestAwaitInitDataMeasurementsOutlastsAPartialWrite(t *testing.T) {
 	t.Cleanup(func() { <-written })
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, digest[:])}
-	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	awaitInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "aabb,ccdd" {
 		t.Fatalf("CDSMeasurements = %q, want the wait to outlast a half-written document", cfg.CDSMeasurements)
@@ -617,7 +686,7 @@ func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, other[:])}
 	start := time.Now()
-	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	awaitInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "" {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
@@ -639,7 +708,7 @@ func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
 	cfg := &Config{AttestationServiceURL: v.url}
 	rec := &levelRecorder{}
 	start := time.Now()
-	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)
+	awaitInitData(context.Background(), slog.New(rec), cfg)
 
 	if cfg.CDSMeasurements != "" {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
@@ -664,7 +733,7 @@ func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, 48))}
 	rec := &levelRecorder{}
 	start := time.Now()
-	awaitInitDataMeasurements(context.Background(), slog.New(rec), cfg)
+	awaitInitData(context.Background(), slog.New(rec), cfg)
 
 	if cfg.CDSMeasurements != "" {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)
@@ -689,7 +758,7 @@ func TestAwaitInitDataMeasurementsRetriesAnUnavailableVerifier(t *testing.T) {
 	v.attester.SetVerdict(hostDataVerdict(digest[:]))
 
 	cfg := &Config{AttestationServiceURL: v.url}
-	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	awaitInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "aabb,ccdd" {
 		t.Fatalf("CDSMeasurements = %q, want the wait to outlast a verifier still coming up", cfg.CDSMeasurements)
@@ -706,7 +775,7 @@ func TestAwaitInitDataMeasurementsBudgetExhausted(t *testing.T) {
 	shortInitDataWait(t, 100*time.Millisecond, 10*time.Millisecond)
 
 	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, initdata.DigestSize))}
-	awaitInitDataMeasurements(context.Background(), quietLogger(), cfg)
+	awaitInitData(context.Background(), quietLogger(), cfg)
 
 	if cfg.CDSMeasurements != "" {
 		t.Fatalf("CDSMeasurements = %q, want empty so refresh fails closed onto the baked seed", cfg.CDSMeasurements)

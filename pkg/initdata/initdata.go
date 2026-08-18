@@ -64,6 +64,13 @@ const (
 	// cannot be baked (it is a digest of the image it would live in).
 	KeyCDSMeasurements = "c8s.cds.measurements"
 
+	// KeyCDSMinTCB carries the minimum SEV-SNP platform TCB
+	// (bootloader,tee,snp,microcode) the guest requires of CDS's RA-TLS
+	// evidence. It rides the launch-committed document for the same reason
+	// measurements do: an unattested channel would let the host strip the
+	// floor.
+	KeyCDSMinTCB = "c8s.cds.min-tcb"
+
 	// KeyCDSAllowlistSeedSHA256 is the hex sha256 of the allowlist document CDS
 	// was started with (--allowlist-seed). Committed into CDS's own launch so a
 	// measurement pin no longer says nothing about the content served.

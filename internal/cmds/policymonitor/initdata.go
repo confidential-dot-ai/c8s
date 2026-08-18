@@ -40,47 +40,49 @@ const initDataTimeout = 15 * time.Second
 // tempdir; production always uses the baked path.
 var initDataDocumentPath = initdata.GuestDocumentPath
 
-// resolveInitDataMeasurements returns the CDS measurements the host delivered.
+// resolveInitData returns the launch-committed init-data document's data.
 //
 // The document is host-supplied; what makes it usable is that the shim commits
 // sha256(document) into HOST_DATA at launch. A mismatch means the host wrote
 // one document and committed another, and is treated as tampering.
-func resolveInitDataMeasurements(ctx context.Context, cfg *Config) (string, error) {
+func resolveInitData(ctx context.Context, cfg *Config) (map[string]string, error) {
 	raw, err := os.ReadFile(initDataDocumentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", errNoInitData
+			return nil, errNoInitData
 		}
-		return "", fmt.Errorf("read init-data: %w", err)
+		return nil, fmt.Errorf("read init-data: %w", err)
 	}
 
 	hostData, err := verifiedSelfHostData(ctx, cfg)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	want := initdata.Digest(raw)
 	if subtle.ConstantTimeCompare(hostData, want[:]) != 1 {
-		return "", fmt.Errorf("policy-monitor: init-data digest %x is not the launch-committed HOST_DATA %x", want, hostData)
+		return nil, fmt.Errorf("policy-monitor: init-data digest %x is not the launch-committed HOST_DATA %x", want, hostData)
 	}
 
 	doc, err := initdata.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse init-data: %w", err)
+		return nil, fmt.Errorf("parse init-data: %w", err)
 	}
-	return doc.Data[initdata.KeyCDSMeasurements], nil
+	return doc.Data, nil
 }
 
-// applyInitDataMeasurements fills cfg.CDSMeasurements from the launch-committed
-// document. It is the only delivery path: the value cannot be baked (it would
-// be a digest of the image it lives in) and unattested env must not be trusted.
+// applyInitData fills cfg.CDSMeasurements and cfg.MinTCB from the
+// launch-committed document. It is the only delivery path: the measurements
+// cannot be baked (they are a digest of the image they would live in) and an
+// unattested channel must not be trusted — a host that could strip the floor
+// from env would run known-vulnerable firmware unobserved.
 //
 // An explicit value wins, and every failure leaves cfg untouched, so the
 // fallback is always the baked seed.
-func applyInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Config) {
-	if cfg.CDSMeasurements != "" {
+func applyInitData(ctx context.Context, logger *slog.Logger, cfg *Config) {
+	if cfg.CDSMeasurements != "" && cfg.MinTCB != "" {
 		return
 	}
-	measurements, err := resolveInitDataMeasurements(ctx, cfg)
+	data, err := resolveInitData(ctx, cfg)
 	switch {
 	case errors.Is(err, errNoInitData):
 		logger.Warn("no init-data document; CDS measurements unset, so allowlist refresh will stay disabled",
@@ -90,14 +92,33 @@ func applyInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Co
 		// One read, so every failure is final here — including one a retry would clear.
 		logger.Error("init-data rejected; enforcing the baked seed alone", "error", err)
 		return
-	case measurements == "":
-		logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
-			"key", initdata.KeyCDSMeasurements)
-		return
 	}
-	cfg.CDSMeasurements = measurements
-	logger.Info("CDS measurements taken from the launch-committed init-data document",
-		"key", initdata.KeyCDSMeasurements)
+	applyInitDataValues(logger, cfg, data)
+}
+
+// applyInitDataValues fills the still-unset policy values from a verified
+// document, logging what each key resolves to.
+func applyInitDataValues(logger *slog.Logger, cfg *Config, data map[string]string) {
+	if cfg.CDSMeasurements == "" {
+		if m := data[initdata.KeyCDSMeasurements]; m != "" {
+			cfg.CDSMeasurements = m
+			logger.Info("CDS measurements taken from the launch-committed init-data document",
+				"key", initdata.KeyCDSMeasurements)
+		} else {
+			logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
+				"key", initdata.KeyCDSMeasurements)
+		}
+	}
+	if cfg.MinTCB == "" {
+		if f := data[initdata.KeyCDSMinTCB]; f != "" {
+			cfg.MinTCB = f
+			logger.Info("minimum TCB floor taken from the launch-committed init-data document",
+				"key", initdata.KeyCDSMinTCB)
+		} else {
+			logger.Warn("init-data carries no TCB floor; CDS evidence from any platform TCB level is accepted (UNSAFE outside development)",
+				"key", initdata.KeyCDSMinTCB)
+		}
+	}
 }
 
 // initDataWaitBudget bounds how long the guest waits for kata-agent to write
@@ -117,8 +138,8 @@ const (
 	initDataSettleDelay = 100 * time.Millisecond
 )
 
-// awaitInitDataMeasurements is applyInitDataMeasurements for a caller running
-// after READY=1: it waits for the document rather than reading once.
+// awaitInitData is applyInitData for a caller running after READY=1: it waits
+// for the document rather than reading once.
 //
 // kata-agent writes /run/confidential-containers/initdata/initdata.toml during
 // its own startup, and systemd orders kata-agent.service behind this unit
@@ -128,27 +149,21 @@ const (
 //
 // Waiting is bounded and every outcome still falls back to the baked seed, so
 // a guest whose host delivers no document behaves exactly as before.
-func awaitInitDataMeasurements(ctx context.Context, logger *slog.Logger, cfg *Config) {
-	if cfg.CDSMeasurements != "" {
+func awaitInitData(ctx context.Context, logger *slog.Logger, cfg *Config) {
+	if cfg.CDSMeasurements != "" && cfg.MinTCB != "" {
 		return
 	}
 	deadline := time.Now().Add(initDataWaitBudget)
 	var lastErr error
 	settling := 0
 	for {
-		measurements, err := resolveInitDataMeasurements(ctx, cfg)
+		data, err := resolveInitData(ctx, cfg)
 		switch {
-		case err == nil && measurements != "":
-			cfg.CDSMeasurements = measurements
-			logger.Info("CDS measurements taken from the launch-committed init-data document",
-				"key", initdata.KeyCDSMeasurements)
-			return
 		case err == nil:
 			// The digest matched, so this is the launch-committed document
-			// itself: it carries no measurements and a later read cannot
-			// change that.
-			logger.Warn("init-data carries no CDS measurements; allowlist refresh will stay disabled",
-				"key", initdata.KeyCDSMeasurements)
+			// itself: a key it does not carry now is one a later read cannot
+			// deliver either.
+			applyInitDataValues(logger, cfg, data)
 			return
 		case errors.Is(err, errAttestVerdict):
 			logger.Error("self-report refused by the verifier", "error", err)

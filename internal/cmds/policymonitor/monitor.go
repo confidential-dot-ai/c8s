@@ -154,7 +154,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		// Before the initdata wait: the budget bounds the serial chain.
 		settle := time.Now().Add(signerSettleBudget)
 		go func() {
-			awaitInitDataMeasurements(ctx, logger, cfg)
+			awaitInitData(ctx, logger, cfg)
 			// Both need the measurements the document carries, and neither may
 			// hold the other up: the signer waits on the pod network, the
 			// refresh only on CDS answering.

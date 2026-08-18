@@ -18,19 +18,19 @@ var confidentialKataClasses = map[string]struct{}{
 	kataTdxGpuRuntimeClass: {},
 }
 
-// stampInitData carries the CDS measurements to the guest's policy-monitor.
-// Writing the annotation is not what makes it trustworthy — the shim hashes the
-// document into HOST_DATA and the guest re-derives the digest before trusting
-// it. On the TDX classes the digest lands padded in MRCONFIGID instead, which
-// the guest refuses, so those pods enforce the baked seed
-// (docs/kata-image-policy.md).
+// stampInitData carries the CDS measurements and TCB floor to the guest's
+// policy-monitor. Writing the annotation is not what makes it trustworthy —
+// the shim hashes the document into HOST_DATA and the guest re-derives the
+// digest before trusting it. On the TDX classes the digest lands padded in
+// MRCONFIGID instead, which the guest refuses, so those pods enforce the
+// baked seed (docs/kata-image-policy.md).
 //
 // An author-supplied value would name the CDS their own guest pins, and the
 // HOST_DATA check cannot tell it from ours, so it is rejected. Comparing
 // against the desired value rather than banning the key is what keeps this
 // reinvocation-safe: initdata rendering is canonical.
-func stampInitData(pod *corev1.Pod, kataClass string, measurements []string) error {
-	want, err := initDataAnnotation(kataClass, measurements)
+func stampInitData(pod *corev1.Pod, kataClass string, measurements []string, minTCB string) error {
+	want, err := initDataAnnotation(kataClass, measurements, minTCB)
 	if err != nil {
 		return err
 	}
@@ -68,18 +68,21 @@ func rejectKataHypervisorAnnotations(pod *corev1.Pod) error {
 }
 
 // initDataAnnotation renders the value, or "" when the shape carries none.
-func initDataAnnotation(kataClass string, measurements []string) (string, error) {
+func initDataAnnotation(kataClass string, measurements []string, minTCB string) (string, error) {
 	if _, ok := confidentialKataClasses[kataClass]; !ok {
 		return "", nil
 	}
-	joined := strings.Join(measurements, ",")
-	if joined == "" {
+	data := map[string]string{initdata.KeyRole: initdata.RoleWorkload}
+	if joined := strings.Join(measurements, ","); joined != "" {
+		data[initdata.KeyCDSMeasurements] = joined
+	}
+	if minTCB != "" {
+		data[initdata.KeyCDSMinTCB] = minTCB
+	}
+	if len(data) == 1 {
 		return "", nil
 	}
-	built, err := initdata.New(map[string]string{
-		initdata.KeyRole:            initdata.RoleWorkload,
-		initdata.KeyCDSMeasurements: joined,
-	}).Build()
+	built, err := initdata.New(data).Build()
 	if err != nil {
 		return "", fmt.Errorf("build init-data document: %w", err)
 	}

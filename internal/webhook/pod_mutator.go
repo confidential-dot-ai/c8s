@@ -777,7 +777,7 @@ func (m *podMutator) Handle(ctx context.Context, req admission.Request) admissio
 		if m.cfg.KataGuestReadyGate {
 			requireGuestReadyNode(pod)
 		}
-		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements); err != nil {
+		if err := stampInitData(pod, kataClass, m.cfg.CDSMeasurements, m.cfg.MinTCB); err != nil {
 			if errors.Is(err, errInvalidInjectionAnnotation) {
 				return admission.Errored(http.StatusBadRequest, err)
 			}

@@ -14,6 +14,8 @@ var testMeasurements = []string{
 	"da0854af8bff0e67f87b37f84af11a1aac570739efe55032e511c7d13dee180d1f4e3b4b209197d351646ddbd0e91509",
 }
 
+const testMinTCB = "3,0,8,0"
+
 // decodeStamped reads the document back the way policy-monitor does.
 func decodeStamped(t *testing.T, pod *corev1.Pod) initdata.Document {
 	t.Helper()
@@ -30,7 +32,7 @@ func decodeStamped(t *testing.T, pod *corev1.Pod) initdata.Document {
 
 func TestStampInitDataCarriesMeasurementsAndRole(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, testMinTCB); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 
@@ -42,13 +44,16 @@ func TestStampInitDataCarriesMeasurementsAndRole(t *testing.T) {
 	if got := doc.Data[initdata.KeyRole]; got != initdata.RoleWorkload {
 		t.Fatalf("role = %q, want %q", got, initdata.RoleWorkload)
 	}
+	if got := doc.Data[initdata.KeyCDSMinTCB]; got != testMinTCB {
+		t.Fatalf("min-tcb = %q, want %q", got, testMinTCB)
+	}
 }
 
 // What the webhook encodes must decode to the bytes whose digest the shim
 // commits — that equality is the whole trust anchor.
 func TestStampInitDataDigestMatchesEncodedBytes(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, testMinTCB); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	raw, err := initdata.Decode(pod.Annotations[initdata.AnnotationKey])
@@ -59,6 +64,7 @@ func TestStampInitDataDigestMatchesEncodedBytes(t *testing.T) {
 	built, err := initdata.New(map[string]string{
 		initdata.KeyRole:            initdata.RoleWorkload,
 		initdata.KeyCDSMeasurements: testMeasurements[0] + "," + testMeasurements[1],
+		initdata.KeyCDSMinTCB:       testMinTCB,
 	}).Build()
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -71,7 +77,7 @@ func TestStampInitDataDigestMatchesEncodedBytes(t *testing.T) {
 // Nothing in a plain kata-qemu guest reads the document.
 func TestStampInitDataSkipsNonConfidentialClass(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataRuntimeClass, testMeasurements, ""); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	if _, ok := pod.Annotations[initdata.AnnotationKey]; ok {
@@ -81,11 +87,27 @@ func TestStampInitDataSkipsNonConfidentialClass(t *testing.T) {
 
 func TestStampInitDataSkipsWithoutMeasurements(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, nil); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, nil, ""); err != nil {
 		t.Fatalf("stampInitData: %v", err)
 	}
 	if _, ok := pod.Annotations[initdata.AnnotationKey]; ok {
 		t.Fatal("stamped an empty document with no measurements to carry")
+	}
+}
+
+// The floor alone is worth a document: a cluster that floors TCB but pins no
+// measurements still delivers the floor.
+func TestStampInitDataCarriesFloorWithoutMeasurements(t *testing.T) {
+	pod := &corev1.Pod{}
+	if err := stampInitData(pod, kataSnpRuntimeClass, nil, testMinTCB); err != nil {
+		t.Fatalf("stampInitData: %v", err)
+	}
+	doc := decodeStamped(t, pod)
+	if got := doc.Data[initdata.KeyCDSMinTCB]; got != testMinTCB {
+		t.Fatalf("min-tcb = %q, want %q", got, testMinTCB)
+	}
+	if _, ok := doc.Data[initdata.KeyCDSMeasurements]; ok {
+		t.Fatal("no measurements configured, but the document carries a measurements key")
 	}
 }
 
@@ -94,7 +116,7 @@ func TestStampInitDataRejectsAuthorSuppliedValue(t *testing.T) {
 	pod := &corev1.Pod{}
 	pod.Annotations = map[string]string{initdata.AnnotationKey: "rogue"}
 
-	err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements)
+	err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, testMinTCB)
 	if !errors.Is(err, errInvalidInjectionAnnotation) {
 		t.Fatalf("err = %v, want errInvalidInjectionAnnotation", err)
 	}
@@ -114,7 +136,7 @@ func TestStampInitDataRejectsAuthorValueOnUnstampedShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{}
 			pod.Annotations = map[string]string{initdata.AnnotationKey: "rogue"}
-			if err := stampInitData(pod, tc.class, tc.measurements); !errors.Is(err, errInvalidInjectionAnnotation) {
+			if err := stampInitData(pod, tc.class, tc.measurements, ""); !errors.Is(err, errInvalidInjectionAnnotation) {
 				t.Fatalf("err = %v, want errInvalidInjectionAnnotation", err)
 			}
 		})
@@ -124,11 +146,11 @@ func TestStampInitDataRejectsAuthorValueOnUnstampedShapes(t *testing.T) {
 // The second pass must accept its own stamp, not read it as author-supplied.
 func TestStampInitDataIsReinvocationSafe(t *testing.T) {
 	pod := &corev1.Pod{}
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, testMinTCB); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	first := pod.Annotations[initdata.AnnotationKey]
-	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements); err != nil {
+	if err := stampInitData(pod, kataSnpRuntimeClass, testMeasurements, testMinTCB); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	if pod.Annotations[initdata.AnnotationKey] != first {
@@ -139,7 +161,7 @@ func TestStampInitDataIsReinvocationSafe(t *testing.T) {
 func TestStampInitDataCoversEveryConfidentialClass(t *testing.T) {
 	for class := range confidentialKataClasses {
 		pod := &corev1.Pod{}
-		if err := stampInitData(pod, class, testMeasurements); err != nil {
+		if err := stampInitData(pod, class, testMeasurements, ""); err != nil {
 			t.Fatalf("stampInitData(%s): %v", class, err)
 		}
 		if _, ok := pod.Annotations[initdata.AnnotationKey]; !ok {
