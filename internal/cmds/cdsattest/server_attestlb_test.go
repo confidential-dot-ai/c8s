@@ -33,9 +33,15 @@ type capturingProvider struct {
 	lastReportData []byte
 }
 
-func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (json.RawMessage, string, string, error) {
+func (p *capturingProvider) Evidence(_ context.Context, reportData []byte) (CollectedEvidence, error) {
 	p.lastReportData = append([]byte(nil), reportData...)
-	return json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), "snp", "genoa", nil
+	return CollectedEvidence{
+		Evidence:    json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
+		Platform:    "snp",
+		Generation:  "genoa",
+		GPUAttested: types.GPUAttestedEvidenceCollected,
+		NvidiaGPU:   json.RawMessage(`{"devices":[],"binding":{"kind":"concat","algo":"sha256"}}`),
+	}, nil
 }
 
 // writeTestServingLeaf writes a self-signed leaf PEM to a temp file and
@@ -106,6 +112,12 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 	}
 	if b.Nonce != b64url(nonce) {
 		t.Errorf("nonce not echoed: got %q", b.Nonce)
+	}
+	if b.GPUAttested != types.GPUAttestedEvidenceCollected {
+		t.Errorf("gpu_attested = %q", b.GPUAttested)
+	}
+	if string(b.NvidiaGPU) != `{"devices":[],"binding":{"kind":"concat","algo":"sha256"}}` {
+		t.Errorf("nvidia_gpu changed: %s", b.NvidiaGPU)
 	}
 	servingHash := sha256.Sum256(servingDER)
 	if b.ServingLeafSHA256 != b64url(servingHash[:]) {

@@ -1320,6 +1320,9 @@ tlsLb:
   # AMD-only generation), so both TEEs advertise correctly out of the box.
   attest:
     enabled: true
+    # -- Request nonce-bound NVIDIA GPU evidence for each public attestation.
+    # Keep this false on generic and CPU-only deployments.
+    nvidiaGpuEvidence: false
     # -- Loopback port the sidecar listens on; nginx proxies `/.well-known/c8s/`
     # to 127.0.0.1 on this port.
     port: 8800

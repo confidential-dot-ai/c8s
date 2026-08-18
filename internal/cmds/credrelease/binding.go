@@ -121,7 +121,8 @@ func verifiedSelfHostData(ctx context.Context, attestationAPIURL string) ([]byte
 		return nil, fmt.Errorf("attest self: %w", err)
 	}
 	verified, err := attestationclient.NewClient(attestationAPIURL).VerifyEvidence(ctx,
-		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+		types.AttestationEvidence{Platform: resp.Platform, Evidence: resp.Evidence},
+		attestationclient.EvidencePolicy{ExpectedReportData: reportData})
 	if err != nil {
 		return nil, fmt.Errorf("verify self-report: %w", err)
 	}

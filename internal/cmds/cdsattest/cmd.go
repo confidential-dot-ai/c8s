@@ -31,6 +31,7 @@ type config struct {
 	attestationAPIURL    string
 	platform             string
 	generation           string
+	nvidiaGPUEvidence    bool
 	sessionTTL           time.Duration
 	readHeaderTimeout    time.Duration
 
@@ -69,6 +70,7 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL (production evidence source)")
 	f.StringVar(&cfg.platform, "platform", "", "REQUIRED: TEE platform: snp|az-snp|az-tdx|tdx")
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
+	f.BoolVar(&cfg.nvidiaGPUEvidence, "nvidia-gpu-evidence", false, "request nonce-bound NVIDIA GPU evidence from the attestation API")
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "pending-handshake TTL and established-session idle TTL")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
 	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Empty uses an echo backend (demo).")
@@ -105,9 +107,10 @@ func run(cfg config) error {
 			"file", cfg.evidenceFixture)
 	case cfg.attestationAPIURL != "":
 		provider = LiveEvidenceProvider{
-			Client:     attestationclient.NewClient(cfg.attestationAPIURL),
-			Platform:   types.Platform(cfg.platform),
-			Generation: cfg.generation,
+			Client:            attestationclient.NewClient(cfg.attestationAPIURL),
+			Platform:          types.Platform(cfg.platform),
+			Generation:        cfg.generation,
+			NvidiaGPUEvidence: cfg.nvidiaGPUEvidence,
 		}
 	default:
 		return fmt.Errorf("one of --attestation-api-url or --evidence-fixture is required")

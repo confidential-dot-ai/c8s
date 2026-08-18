@@ -1,6 +1,7 @@
 package cdsattest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,13 +11,20 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// EvidenceProvider yields TEE attestation evidence whose report_data equals
-// the endpoint's transcript hash (overenc.IdentityTranscriptHash for
-// attest-pq, overenc.LBTranscriptHash for attest-lb). The returned evidence is
-// the platform's attestation-rs evidence JSON (SnpEvidence, AzSnpEvidence,
-// TdxEvidence, …) the client verifier consumes verbatim.
+// CollectedEvidence carries CPU evidence and an optional NVIDIA bundle.
+// NvidiaGPU stays opaque so c8s preserves the attestation-rs bundle shape.
+type CollectedEvidence struct {
+	Evidence    json.RawMessage
+	Platform    string
+	Generation  string
+	GPUAttested string
+	NvidiaGPU   json.RawMessage
+}
+
+// EvidenceProvider yields evidence whose report_data equals the endpoint's
+// transcript hash. It also returns raw NVIDIA evidence when requested.
 type EvidenceProvider interface {
-	Evidence(ctx context.Context, reportData []byte) (evidence json.RawMessage, platform, generation string, err error)
+	Evidence(ctx context.Context, reportData []byte) (CollectedEvidence, error)
 }
 
 var _ EvidenceProvider = LiveEvidenceProvider{}
@@ -25,8 +33,9 @@ var _ EvidenceProvider = LiveEvidenceProvider{}
 // bound to reportData. This is the production path; it requires a reachable
 // attestation-api and runs inside the LB's CVM.
 type LiveEvidenceProvider struct {
-	Client   attestationclient.Client
-	Platform types.Platform // e.g. types.PlatformSnp
+	Client            attestationclient.Client
+	Platform          types.Platform // e.g. types.PlatformSnp
+	NvidiaGPUEvidence bool
 	// Generation is the AMD processor generation the browser's bare-SNP
 	// verifier needs. It is meaningful only for PlatformSnp; the other
 	// platforms auto-detect (az-snp) or have no generation concept (TDX),
@@ -35,13 +44,14 @@ type LiveEvidenceProvider struct {
 }
 
 // Evidence implements EvidenceProvider against the attestation-api.
-func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (json.RawMessage, string, string, error) {
+func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (CollectedEvidence, error) {
 	resp, err := p.Client.Attest(ctx, types.AttestRequest{
 		ReportData: types.NewBase64Bytes(reportData),
 		Platform:   p.Platform,
+		NvidiaGPU:  p.NvidiaGPUEvidence,
 	})
 	if err != nil {
-		return nil, "", "", fmt.Errorf("attestation-api: %w", err)
+		return CollectedEvidence{}, fmt.Errorf("attestation-api: %w", err)
 	}
 	platform := resp.Platform
 	if platform == "" {
@@ -51,7 +61,44 @@ func (p LiveEvidenceProvider) Evidence(ctx context.Context, reportData []byte) (
 	if platform != string(types.PlatformSnp) {
 		generation = ""
 	}
-	return resp.Evidence, platform, generation, nil
+	if err := validateGPUCollection(resp, p.NvidiaGPUEvidence); err != nil {
+		return CollectedEvidence{}, fmt.Errorf("attestation-api: %w", err)
+	}
+	return CollectedEvidence{
+		Evidence:    resp.Evidence,
+		Platform:    platform,
+		Generation:  generation,
+		GPUAttested: normalizedGPUStatus(resp.GPUAttested),
+		NvidiaGPU:   resp.NvidiaGPU,
+	}, nil
+}
+
+func normalizedGPUStatus(status string) string {
+	if status == "" {
+		return types.GPUAttestedUnknown
+	}
+	return status
+}
+
+func validateGPUCollection(resp types.AttestResponse, required bool) error {
+	status := normalizedGPUStatus(resp.GPUAttested)
+	hasBundle := len(bytes.TrimSpace(resp.NvidiaGPU)) != 0 && !bytes.Equal(bytes.TrimSpace(resp.NvidiaGPU), []byte("null"))
+	switch status {
+	case types.GPUAttestedUnknown:
+		if hasBundle {
+			return fmt.Errorf("GPU status is unknown but the response carries a bundle")
+		}
+	case types.GPUAttestedEvidenceCollected:
+		if !hasBundle {
+			return fmt.Errorf("GPU status says evidence_collected but the response carries no bundle")
+		}
+	default:
+		return fmt.Errorf("unsupported GPU collection status %q", resp.GPUAttested)
+	}
+	if required && status != types.GPUAttestedEvidenceCollected {
+		return fmt.Errorf("GPU evidence was requested but the service did not collect it")
+	}
+	return nil
 }
 
 // FixtureEvidenceProvider serves a recorded evidence file. DEV/DEMO ONLY: the
@@ -93,6 +140,11 @@ func LoadFixtureEvidence(path, platform, generation string) (FixtureEvidenceProv
 }
 
 // Evidence implements EvidenceProvider; reportData is ignored (see type doc).
-func (p FixtureEvidenceProvider) Evidence(_ context.Context, _ []byte) (json.RawMessage, string, string, error) {
-	return p.Raw, p.Platform, p.Generation, nil
+func (p FixtureEvidenceProvider) Evidence(_ context.Context, _ []byte) (CollectedEvidence, error) {
+	return CollectedEvidence{
+		Evidence:    p.Raw,
+		Platform:    p.Platform,
+		Generation:  p.Generation,
+		GPUAttested: types.GPUAttestedUnknown,
+	}, nil
 }

@@ -230,8 +230,11 @@ func (c Client) AttestKeyWithOperatorKeysHash(ctx context.Context, attestationAp
 	}
 
 	body, err := json.Marshal(types.AttestKeyRequestBody{
-		Challenge:        challengeResp.Challenge,
-		Evidence:         types.AttestationEvidence(asResp),
+		Challenge: challengeResp.Challenge,
+		Evidence: types.AttestationEvidence{
+			Platform: asResp.Platform,
+			Evidence: asResp.Evidence,
+		},
 		PublicKey:        base64.StdEncoding.EncodeToString(pubKeyDER),
 		OperatorKeysHash: operatorKeysHash,
 	})

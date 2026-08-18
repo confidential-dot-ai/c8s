@@ -437,7 +437,7 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
+	collected, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
 		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
@@ -454,12 +454,14 @@ func (s *Server) handleAttestPQ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
-		Version:    types.BindingAttestPQ,
-		Platform:   platform,
-		Generation: generation,
-		Nonce:      nonceB64,
-		Evidence:   evidence,
-		CDSCertPEM: string(identity.bundlePEM),
+		Version:     types.BindingAttestPQ,
+		Platform:    collected.Platform,
+		Generation:  collected.Generation,
+		Nonce:       nonceB64,
+		Evidence:    collected.Evidence,
+		GPUAttested: collected.GPUAttested,
+		NvidiaGPU:   collected.NvidiaGPU,
+		CDSCertPEM:  string(identity.bundlePEM),
 		SessionPubKey: &types.SessionPublicKey{
 			X25519:   base64.RawURLEncoding.EncodeToString(pub.X25519),
 			MLKEM768: base64.RawURLEncoding.EncodeToString(pub.MLKEM768),
@@ -509,7 +511,7 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	evidence, platform, generation, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
+	collected, err := s.cfg.Evidence.Evidence(r.Context(), reportData)
 	if err != nil {
 		s.log.Error("evidence provider failed", "error", err)
 		writeErr(w, http.StatusBadGateway, types.ErrorCodeAttestationUnavailable, "could not obtain attestation evidence")
@@ -519,10 +521,12 @@ func (s *Server) handleAttestLB(w http.ResponseWriter, r *http.Request) {
 	servingLeafHash := sha256.Sum256(servingLeafDER)
 	writeJSON(w, http.StatusOK, types.AttestationBundle{
 		Version:           types.BindingAttestLB,
-		Platform:          platform,
-		Generation:        generation,
+		Platform:          collected.Platform,
+		Generation:        collected.Generation,
 		Nonce:             nonceB64,
-		Evidence:          evidence,
+		Evidence:          collected.Evidence,
+		GPUAttested:       collected.GPUAttested,
+		NvidiaGPU:         collected.NvidiaGPU,
 		CDSCertPEM:        string(identity.bundlePEM),
 		IdentityProof:     proof,
 		ServingLeafSHA256: base64.RawURLEncoding.EncodeToString(servingLeafHash[:]),

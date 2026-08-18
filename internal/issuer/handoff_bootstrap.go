@@ -223,7 +223,10 @@ func (h *localHandoffBootstrap) attestKey(ctx context.Context, pubDER []byte) (s
 	}
 
 	verifyReq := types.VerifyReportData(
-		types.AttestationEvidence(asResp),
+		types.AttestationEvidence{
+			Platform: asResp.Platform,
+			Evidence: asResp.Evidence,
+		},
 		types.NewBase64Bytes(reportDataDigest),
 	)
 	verifyResp, err := h.attestation.Verify(ctx, verifyReq)

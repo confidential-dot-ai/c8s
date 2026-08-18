@@ -2527,6 +2527,31 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	}
 }
 
+func TestChartTLSLBNvidiaGPUEvidenceIsDeploymentScoped(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "tlsLb.attest.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template defaults: %v\n%s", err, out)
+	}
+	defaultSidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerNoArgPrefix(t, "cds-attest", defaultSidecar.Args, "--nvidia-gpu-evidence")
+
+	out, err = helmTemplate(t,
+		"--set", "tlsLb.attest.enabled=true",
+		"--set", "tlsLb.attest.nvidiaGpuEvidence=true",
+	)
+	if err != nil {
+		t.Fatalf("helm template GPU evidence: %v\n%s", err, out)
+	}
+	gpuSidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerHasArgPrefix(t, "cds-attest", gpuSidecar.Args, "--nvidia-gpu-evidence")
+
+	out, err = helmTemplate(t, "--set-string", "tlsLb.attest.nvidiaGpuEvidence=true")
+	if err == nil {
+		t.Fatalf("string GPU evidence value must fail\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "tlsLb.attest.nvidiaGpuEvidence must be a boolean; do not set it via --set-string, got: true")
+}
+
 func TestTLSLBCertProvisioningValuesDriveGetCertContainers(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set-string", "tlsLb.certProvisioning.renewInterval=30m",

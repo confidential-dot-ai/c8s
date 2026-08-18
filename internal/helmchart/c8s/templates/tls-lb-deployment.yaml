@@ -4,6 +4,9 @@
 Recreate, silently defeating the operator's opt-out. */ -}}
 {{- fail (printf "tlsLb.hostPort.enabled must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.hostPort.enabled) -}}
 {{- end -}}
+{{- if not (kindIs "bool" .Values.tlsLb.attest.nvidiaGpuEvidence) -}}
+{{- fail (printf "tlsLb.attest.nvidiaGpuEvidence must be a boolean; do not set it via --set-string, got: %v" .Values.tlsLb.attest.nvidiaGpuEvidence) -}}
+{{- end -}}
 {{- if and .Values.kata.enabled (ne (int .Values.tlsLb.nginx.httpsPort) 8443) -}}
 {{- /* The guest bakes C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443 (a guest-wide
 default in cloudinit.env, not a chart value) and redirects every other inbound
@@ -180,6 +183,9 @@ spec:
             - --port={{ .Values.tlsLb.attest.port }}
             - --platform={{ .Values.tlsLb.attest.platform }}
             - --generation={{ .Values.tlsLb.attest.generation }}
+            {{- if .Values.tlsLb.attest.nvidiaGpuEvidence }}
+            - --nvidia-gpu-evidence
+            {{- end }}
             - --attestation-api-url={{ default (include "c8s.attestationApiURL" .) .Values.tlsLb.attest.attestationApiURL }}
             # attest-lb transport trust rests on the serving key being TEE-held:
             # a publicTLS Secret's key is host-visible, so that front door is

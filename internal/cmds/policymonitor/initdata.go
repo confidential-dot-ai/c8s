@@ -201,7 +201,8 @@ func verifiedSelfHostData(ctx context.Context, cfg *Config) ([]byte, error) {
 	}
 	// Measurements stay unpinned.
 	verified, err := attestationclient.NewClient(cfg.AttestationServiceURL).VerifyEvidence(ctx,
-		types.AttestationEvidence(resp), attestationclient.EvidencePolicy{ExpectedReportData: reportData})
+		types.AttestationEvidence{Platform: resp.Platform, Evidence: resp.Evidence},
+		attestationclient.EvidencePolicy{ExpectedReportData: reportData})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", classifyVerifyError(err), err)
 	}

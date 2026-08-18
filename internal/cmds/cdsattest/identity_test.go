@@ -159,6 +159,12 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	if bundle.IdentityProof == nil || bundle.SessionPubKey == nil {
 		t.Fatalf("bundle missing identity proof or session key: %+v", bundle)
 	}
+	if bundle.GPUAttested != types.GPUAttestedEvidenceCollected {
+		t.Fatalf("gpu_attested = %q", bundle.GPUAttested)
+	}
+	if string(bundle.NvidiaGPU) != `{"devices":[],"binding":{"kind":"concat","algo":"sha256"}}` {
+		t.Fatalf("nvidia_gpu changed: %s", bundle.NvidiaGPU)
+	}
 
 	x25519, err := base64.RawURLEncoding.DecodeString(bundle.SessionPubKey.X25519)
 	if err != nil {
