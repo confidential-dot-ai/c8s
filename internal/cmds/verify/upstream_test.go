@@ -2,6 +2,8 @@ package verify
 
 import (
 	"bytes"
+	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,6 +159,91 @@ func TestApplyUpstreamPolicy(t *testing.T) {
 					t.Errorf("NotProven = %v, want it to name the upstream TLS trust root", oc.NotProven)
 				}
 			})
+		}
+	})
+
+	// The full committed https destination identity surfaces in the verdict:
+	// the TLS verification name and the CA bundle hash (base64url, as served)
+	// next to the URL — an operator pinning an IP-literal URL can see which
+	// name the evidence binds.
+	t.Run("the committed https identity surfaces", func(t *testing.T) {
+		caHash := bytes.Repeat([]byte{0x5a}, 32)
+		https := overenc.UpstreamIdentity{URL: "https://10.96.0.15:8443", ServerName: "backend.other.svc", CAHash: caHash}
+		oc := upstreamOutcome(t, config{expectedUpstream: https.URL}, caHash, https)
+		if !oc.Verified || oc.Partial {
+			t.Fatalf("verified=%v partial=%v, want a clean verdict", oc.Verified, oc.Partial)
+		}
+		if oc.UpstreamServerName != https.ServerName {
+			t.Errorf("UpstreamServerName = %q, want %q", oc.UpstreamServerName, https.ServerName)
+		}
+		wantCA := base64.RawURLEncoding.EncodeToString(caHash)
+		if oc.UpstreamCASHA256 != wantCA {
+			t.Errorf("UpstreamCASHA256 = %q, want %q (base64url as served)", oc.UpstreamCASHA256, wantCA)
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		for _, want := range []string{https.URL, "server name " + https.ServerName, "CA bundle sha256 " + wantCA} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("text render missing %q:\n%s", want, out.String())
+			}
+		}
+	})
+
+	// On a failed verdict the served upstream fields are unauthenticated
+	// responder bytes: they surface, but no verified-style note may attach.
+	t.Run("failed outcome carries no verified-style note", func(t *testing.T) {
+		cfg := config{expectedUpstream: committed.URL, measurements: []string{"ab" + strings.Repeat("00", 47)}}
+		plan := mustPlan(t, cfg)
+		ev := &evidence{
+			platform:      "snp",
+			source:        "test",
+			bindingNote:   "b",
+			upstream:      committed,
+			upstreamBound: true,
+		}
+		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, plan)
+		applyVerdictPolicies(&oc, cfg, plan, ev, nil, operatorKeysReport{})
+		if got := verdictExitCode(oc); got != exitFailed {
+			t.Fatalf("exit = %d, want %d", got, exitFailed)
+		}
+		if oc.Upstream != committed.URL {
+			t.Errorf("Upstream = %q, want the served value still surfaced", oc.Upstream)
+		}
+		if oc.UpstreamNote != "" {
+			t.Errorf("UpstreamNote = %q on a failed outcome: the committed value never verified, no note may claim it did", oc.UpstreamNote)
+		}
+		var jout bytes.Buffer
+		render(config{output: "json"}, oc, &jout)
+		if strings.Contains(jout.String(), "upstream_note") {
+			t.Errorf("json of a failed outcome carries upstream_note:\n%s", jout.String())
+		}
+	})
+
+	t.Run("failed echo outcome carries no note", func(t *testing.T) {
+		cfg := config{measurements: []string{"ab" + strings.Repeat("00", 47)}}
+		plan := mustPlan(t, cfg)
+		ev := &evidence{platform: "snp", source: "test", bindingNote: "b", upstream: overenc.UpstreamIdentity{}, upstreamBound: true}
+		oc := newOutcome(cfg, ev, nil, &securityError{err: errors.New("rejected")}, plan)
+		applyVerdictPolicies(&oc, cfg, plan, ev, nil, operatorKeysReport{})
+		if got := verdictExitCode(oc); got != exitFailed {
+			t.Fatalf("exit = %d, want %d", got, exitFailed)
+		}
+		if oc.UpstreamNote != "" {
+			t.Errorf("UpstreamNote = %q on a failed outcome, want none", oc.UpstreamNote)
+		}
+	})
+
+	// The empty-upstream note is the most security-relevant sentence of an
+	// echo-mode verdict: the human-readable render must not drop it.
+	t.Run("echo-mode note renders in text output", func(t *testing.T) {
+		oc := upstreamOutcome(t, config{}, nil, overenc.UpstreamIdentity{})
+		if !oc.Verified || oc.Partial {
+			t.Fatalf("verified=%v partial=%v, want a clean verdict for the echo shape", oc.Verified, oc.Partial)
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		if !strings.Contains(out.String(), "forwards nowhere") {
+			t.Errorf("text render drops the empty-upstream note:\n%s", out.String())
 		}
 	})
 

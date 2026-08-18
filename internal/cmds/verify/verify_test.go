@@ -738,6 +738,74 @@ func TestEvidenceFromEndpointJSON_RealShape(t *testing.T) {
 	}
 }
 
+// TestEvidenceFromEndpointJSON_HTTPSTriple parses an endpoint bundle serving
+// the full https destination identity: the committed verification name and CA
+// hash must reach ev.upstream, and a malformed upstream_ca_sha256 is refused.
+func TestEvidenceFromEndpointJSON_HTTPSTriple(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x77}, nonceSize)
+	x := bytes.Repeat([]byte{0x02}, overenc.X25519PubBytes)
+	m := bytes.Repeat([]byte{0x03}, overenc.MLKEM768EKBytes)
+	id := mintEndpointIdentity(t)
+	caHash := sha256.Sum256([]byte("upstream-ca-bundle"))
+	upstream := overenc.UpstreamIdentity{
+		URL:        "https://10.96.0.15:8443",
+		ServerName: "backend.other.svc",
+		CAHash:     caHash[:],
+	}
+	erd, err := overenc.IdentityTranscriptHash(overenc.PublicKey{X25519: x, MLKEM768: m}, nonce, id.leaf.Raw, id.ca.Raw, upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64u := base64.RawURLEncoding.EncodeToString
+	resp := map[string]any{
+		"version":  types.BindingAttestPQ,
+		"platform": "snp",
+		"nonce":    b64u(nonce),
+		"evidence": map[string]any{
+			"attestation_report": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, 64)),
+			"cert_chain":         map[string]any{"vcek": base64.StdEncoding.EncodeToString([]byte("vcek"))},
+		},
+		"cds_cert_pem":         id.chainPEM,
+		"session_pubkey":       map[string]any{"x25519": b64u(x), "mlkem768": b64u(m)},
+		"identity_proof":       id.proofJSON(t, erd),
+		"upstream":             upstream.URL,
+		"upstream_server_name": upstream.ServerName,
+		"upstream_ca_sha256":   b64u(upstream.CAHash),
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("https triple parses into the committed identity", func(t *testing.T) {
+		ev, err := evidenceFromEndpointJSON(data, nonce, "test")
+		if err != nil {
+			t.Fatalf("unexpected: %v", err)
+		}
+		if ev.upstream.URL != upstream.URL || ev.upstream.ServerName != upstream.ServerName || !bytes.Equal(ev.upstream.CAHash, upstream.CAHash) {
+			t.Errorf("upstream = %+v, want the served https triple", ev.upstream)
+		}
+		if !bytes.Equal(ev.erd, erd) {
+			t.Error("erd must be the identity transcript over the https triple")
+		}
+	})
+
+	t.Run("malformed upstream_ca_sha256 is refused", func(t *testing.T) {
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["upstream_ca_sha256"] = "not!base64url"
+		mut, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evidenceFromEndpointJSON(mut, nonce, "test"); err == nil || !strings.Contains(err.Error(), "upstream_ca_sha256") {
+			t.Fatalf("expected an upstream_ca_sha256 decode error, got %v", err)
+		}
+	})
+}
+
 // TestParseRealSNPEvidence drives a *real* captured {platform, evidence} object
 // — a Genoa SEV-SNP report + VCEK, vendored from the c8s-verify-js reference
 // impl's fixture (demo/fixtures/snp-evidence-genoa.json) — through the parser,

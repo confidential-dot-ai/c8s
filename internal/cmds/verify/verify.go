@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -406,20 +407,31 @@ func demoteToPartial(oc *Outcome, notProven string) {
 // --expected-upstream makes a mismatch fatal; without it a committed
 // destination is responder-chosen, so a passing verdict is partial. For an
 // https upstream the CA bundle is destination identity too: it is proven only
-// when it is the operator's pinned --mesh-ca bundle.
+// when it is the operator's pinned --mesh-ca bundle. Verified-style notes
+// attach only to a verified outcome.
 func applyUpstreamPolicy(oc *Outcome, cfg config, plan *verifyPlan, ev *evidence) {
 	if !ev.upstreamBound {
 		return
 	}
 	oc.Upstream = ev.upstream.URL
-	if plan.expectedUpstream != "" {
-		if ev.upstream.URL != plan.expectedUpstream {
-			oc.Verified = false
-			if oc.Error == "" {
-				oc.Error = fmt.Sprintf("upstream destination mismatch: the evidence commits %q but --expected-upstream pins %q (the LB's plaintext destination is not the one you pinned)", ev.upstream.URL, plan.expectedUpstream)
-			}
-			return
+	oc.UpstreamServerName = ev.upstream.ServerName
+	if len(ev.upstream.CAHash) > 0 {
+		oc.UpstreamCASHA256 = base64.RawURLEncoding.EncodeToString(ev.upstream.CAHash)
+	}
+	if plan.expectedUpstream != "" && ev.upstream.URL != plan.expectedUpstream {
+		oc.Verified = false
+		if oc.Error == "" {
+			oc.Error = fmt.Sprintf("upstream destination mismatch: the evidence commits %q but --expected-upstream pins %q (the LB's plaintext destination is not the one you pinned)", ev.upstream.URL, plan.expectedUpstream)
 		}
+		return
+	}
+	// On a failed verdict the served upstream fields are unauthenticated
+	// responder bytes: surface them, but attach no note about what they
+	// prove (the same gate applyChainAnchorPolicy applies).
+	if !oc.Verified {
+		return
+	}
+	if plan.expectedUpstream != "" {
 		oc.UpstreamNote = "verified: matches --expected-upstream"
 		if len(ev.upstream.CAHash) == 0 {
 			return
@@ -1105,11 +1117,15 @@ type Outcome struct {
 	ChainAnchor string `json:"chain_anchor,omitempty"`
 
 	// Upstream is the upstream destination an attest-pq responder committed
-	// into its transcript; UpstreamNote says what stands behind it (the
-	// --expected-upstream pin, and for an https upstream whether --mesh-ca
-	// authenticates its CA bundle).
-	Upstream     string `json:"upstream,omitempty"`
-	UpstreamNote string `json:"upstream_note,omitempty"`
+	// into its transcript; UpstreamServerName and UpstreamCASHA256 are the
+	// rest of the committed https destination identity (the TLS verification
+	// name; the CA bundle hash, unpadded base64url as served). UpstreamNote
+	// says what stands behind them (the --expected-upstream pin, and for an
+	// https upstream whether --mesh-ca authenticates the CA bundle).
+	Upstream           string `json:"upstream,omitempty"`
+	UpstreamServerName string `json:"upstream_server_name,omitempty"`
+	UpstreamCASHA256   string `json:"upstream_ca_sha256,omitempty"`
+	UpstreamNote       string `json:"upstream_note,omitempty"`
 
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
@@ -1646,7 +1662,17 @@ func renderText(cfg config, oc Outcome, out io.Writer) {
 	}
 	if oc.Upstream != "" {
 		fmt.Fprintf(out, "  upstream:     %s\n", oc.Upstream)
-		if oc.UpstreamNote != "" {
+	}
+	if oc.UpstreamServerName != "" {
+		fmt.Fprintf(out, "  upstream tls: server name %s\n", oc.UpstreamServerName)
+	}
+	if oc.UpstreamCASHA256 != "" {
+		fmt.Fprintf(out, "  upstream tls: CA bundle sha256 %s\n", oc.UpstreamCASHA256)
+	}
+	if oc.UpstreamNote != "" {
+		if oc.Upstream == "" {
+			fmt.Fprintf(out, "  upstream:     %s\n", oc.UpstreamNote)
+		} else {
 			fmt.Fprintf(out, "              %s\n", oc.UpstreamNote)
 		}
 	}
