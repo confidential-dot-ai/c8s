@@ -183,10 +183,12 @@ CreateContainerRequest if {
 	print("CreateContainerRequest: allowed")
 }
 
-# Spec hooks execute as guest root during do_create_container, ahead of the
-# admission verdict; prestart runs in the agent's own namespaces. The runtime
-# sends none — the GPU hook is CDI-injected by the agent after this check —
-# so a hook in the request is host-smuggled.
+# Prestart and CreateContainer hooks execute as guest root during
+# do_create_container, ahead of the admission verdict — prestart in the
+# agent's own namespaces. The remaining lists run after the verdict, with
+# the admitted container (CreateRuntime has no execution site in the
+# agent). The runtime sends none — the GPU hook is CDI-injected by the
+# agent after this check — so a hook in the request is host-smuggled.
 no_spec_hooks if {
 	not input.OCI.Hooks.Prestart[0]
 	not input.OCI.Hooks.CreateRuntime[0]
