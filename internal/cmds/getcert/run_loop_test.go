@@ -244,7 +244,16 @@ func TestRunRenewalLoopRetriesFailedRenewal(t *testing.T) {
 	renewalRetryBase = 40 * time.Millisecond
 	t.Cleanup(func() { renewalRetryBase = oldBase })
 
-	attempts := stubObtainCertFailing(t)
+	// The initial request must succeed: only with a leaf installed is a failing
+	// tick a renewal. While none has landed the loop is on the initial-retry
+	// backoff instead (TestRunRetriesInitialCertOffTheRetryBackoff).
+	leaf := &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}
+	attempts := stubObtainCert(t, func(n int) (*x509.Certificate, error) {
+		if n == 1 {
+			return leaf, nil
+		}
+		return nil, errors.New("stubbed certificate request failure")
+	})
 
 	cfg := unreachableRenewalConfig()
 	cfg.RenewInterval = 200 * time.Millisecond
@@ -278,12 +287,12 @@ func TestRunRenewalLoopRecoversAfterFailedRenewals(t *testing.T) {
 	renewalRetryBase = 40 * time.Millisecond
 	t.Cleanup(func() { renewalRetryBase = oldBase })
 
-	// The stub fails the initial request and three renewals — climbing the
-	// backoff to its ceiling — then returns a long-lived leaf on attempt 5, so
-	// post-recovery pacing is a full --renew-interval.
+	// The stub installs a leaf, fails three renewals — climbing the backoff —
+	// then returns a long-lived leaf on attempt 5, so post-recovery pacing is a
+	// full --renew-interval.
 	leaf := &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}
 	attempts := stubObtainCert(t, func(n int) (*x509.Certificate, error) {
-		if n == 5 {
+		if n == 1 || n == 5 {
 			return leaf, nil
 		}
 		return nil, errors.New("stubbed certificate request failure")
@@ -541,5 +550,115 @@ func TestRunRenewalModeFailsOnBadWatchSnapshot(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "stat reload watch path") {
 		t.Fatalf("error = %v, want watch snapshot error", err)
+	}
+}
+
+// A workload is gated on its first certificate by c8s-cert-wait, so while none
+// has landed the loop must re-ask on the initial-retry backoff rather than wait
+// out --renew-interval. It is an hour here, so four attempts inside the
+// deadline can only have come from the backoff.
+func TestRunRetriesInitialCertOffTheRetryBackoff(t *testing.T) {
+	holdSIGTERM(t)
+	attempts := stubObtainCertFailing(t)
+
+	cfg := unreachableRenewalConfig()
+	cfg.InitialRetryInterval = 10 * time.Millisecond
+	cfg.ReloadNginx = false
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfg) }()
+
+	waitForAttempts(t, attempts, 4)
+	terminateRun(t, done)
+}
+
+// The retry cadence has to actually produce a certificate: a CDS that refuses
+// twice and then issues must leave the loop holding a leaf well inside
+// --renew-interval.
+func TestRenewLoopRetriesInitialCertBeforeRenewInterval(t *testing.T) {
+	cdsURL, attURL := startFakeServersRefusing(t, testIssuedChainPEM(t), 2)
+
+	cfg := config{
+		CDSURL:               cdsURL,
+		AttestationApiURL:    attURL,
+		SAN:                  "host.example.com",
+		OutPath:              filepath.Join(t.TempDir(), "cert.pem"),
+		InitialRetryInterval: 5 * time.Millisecond,
+		RenewInterval:        time.Hour,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- renewLoop(ctx, cfg, plaintextCDSClient(cfg.CDSURL), nil, false) }()
+
+	waitForFile(t, cfg.OutPath, done)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("renewLoop returned %v, want nil on shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("renewLoop did not shut down when the context was cancelled")
+	}
+}
+
+// Once the first certificate lands the cadence returns to the ordinary pacing:
+// the retry backoff must not keep re-requesting for the life of the process.
+func TestRenewLoopStopsRetryingAfterFirstCert(t *testing.T) {
+	cdsURL, attURL := startFakeServers(t, testIssuedChainPEM(t))
+
+	cfg := config{
+		CDSURL:               cdsURL,
+		AttestationApiURL:    attURL,
+		SAN:                  "host.example.com",
+		OutPath:              filepath.Join(t.TempDir(), "cert.pem"),
+		InitialRetryInterval: time.Millisecond,
+		RenewInterval:        time.Hour,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- renewLoop(ctx, cfg, plaintextCDSClient(cfg.CDSURL), nil, false) }()
+
+	waitForFile(t, cfg.OutPath, done)
+	before, err := os.Stat(cfg.OutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many backoff periods, no renewal tick: a rewrite here means the loop
+	// never left the retry cadence.
+	time.Sleep(100 * time.Millisecond)
+	after, err := os.Stat(cfg.OutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("certificate rewritten after the first success: the loop is still on the retry cadence")
+	}
+
+	cancel()
+	<-done
+}
+
+// waitForFile blocks until path exists, failing the test if the loop returns
+// first or the wait times out.
+func waitForFile(t *testing.T, path string, done <-chan error) {
+	t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("renewLoop returned before writing %s: %v", path, err)
+		case <-deadline:
+			t.Fatalf("no certificate at %s: get-cert waited out --renew-interval instead of retrying", path)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }

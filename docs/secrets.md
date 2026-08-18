@@ -10,9 +10,10 @@ and changeable without a restart. An entry without one releases nothing, so
 writing a grant is what turns release on.
 
 Serving the endpoint at all needs what sandbox identity already requires —
-`--ratls-platform`, `--measurements`, and `--sandbox-inventory-cidr`. Miss any
-and CDS logs a warning naming the one it is missing, and does not serve
-`/secrets`.
+`--ratls-platform`, `--measurements`, and node addresses to bound the inventory
+callback (`--sandbox-inventory-cidr`, or the live node list it derives when that
+is unset). Miss any and CDS logs a warning naming the one it is missing, and
+does not serve `/secrets`.
 
 It also does not serve `/secrets` when **handoff** is configured
 (`--handoff-peer-url` / `--handoff-measurements`). A handoff roll puts two CDS

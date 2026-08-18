@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -882,6 +883,13 @@ func TestSetupLoggingSetsLevel(t *testing.T) {
 // The challenge is valid base64 and the attestation-api echoes evidence so the
 // full obtainCert flow can run without real TEE hardware.
 func startFakeServers(t *testing.T, issuedChain string) (cdsURL, attURL string) {
+	return startFakeServersRefusing(t, issuedChain, 0)
+}
+
+// startFakeServersRefusing is startFakeServers with the CDS refusing the first
+// refusals authentication attempts before it starts issuing, so a test can
+// watch get-cert recover from a CDS that is not yet ready to issue.
+func startFakeServersRefusing(t *testing.T, issuedChain string, refusals int) (cdsURL, attURL string) {
 	t.Helper()
 
 	att := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -899,9 +907,19 @@ func startFakeServers(t *testing.T, issuedChain string) (cdsURL, attURL string) 
 	}))
 	t.Cleanup(att.Close)
 
+	var mu sync.Mutex
+	var asked int
 	cds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/authenticate":
+			mu.Lock()
+			asked++
+			refuse := asked <= refusals
+			mu.Unlock()
+			if refuse {
+				http.Error(w, `{"error":"csr_denied"}`, http.StatusForbidden)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"challenge": base64.StdEncoding.EncodeToString([]byte("the-challenge")),
 			})

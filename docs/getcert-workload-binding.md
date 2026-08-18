@@ -159,15 +159,15 @@ hijack. On node-CVM it is a unix socket, and there are two separate threats:
 
 5. **CDS resolves the key, verifies, calls back, gates, and stamps.** It reads
    `inventoryHost` from the unverified token purely to pick a dial target,
-   requires it to be a routable unicast IP literal inside an operator-configured
-   node CIDR (`--sandbox-inventory-cidr`), and fetches the signing key from
-   `GET /identity` at `<host>:1019` over mutually-attested RA-TLS
-   (`workloadclaims.DigestsClient`, pinning the same measurements `/attest`
-   uses, presenting CDS's own RA-TLS certificate). Only then does it verify the
-   signature, and require the token's nonce to be the challenge it is consuming
-   and its key digest to name the CSR key. It verifies the requester's evidence
-   and CSR policy as usual, then asks `GET /digests/{sandboxID}` at the same
-   endpoint. Every returned image must be allowlisted, and an empty set is
+   requires it to be a routable unicast IP literal inside the node bound
+   (`--sandbox-inventory-cidr`, or the live node list when unset), and fetches
+   the signing key from `GET /identity` at `<host>:1019` over mutually-attested
+   RA-TLS (`workloadclaims.DigestsClient`, pinning the same measurements
+   `/attest` uses, presenting CDS's own RA-TLS certificate). Only then does it
+   verify the signature, and require the token's nonce to be the challenge it is
+   consuming and its key digest to name the CSR key. It verifies the requester's
+   evidence and CSR policy as usual, then asks `GET /digests/{sandboxID}` at the
+   same endpoint. Every returned image must be allowlisted, and an empty set is
    refused. All pass ⇒ it signs the leaf and stamps the sandbox ID into its
    signed area (`internal/cmds/cds/attest.go` `verifySandboxToken` /
    `verifySandboxWorkload`, `internal/issuer/sign.go`).
@@ -397,8 +397,9 @@ token and used for exactly one thing — picking a dial target. A wrong value
 yields a key the signature fails under. `parseInventoryHost` restricts it to
 routable unicast IP literals — no names (DNS could redirect after the check), no
 loopback, link-local, metadata, multicast, or unspecified addresses — and
-`InventoryHosts.Contains` additionally requires it to fall inside the node CIDRs
-the operator configured with `--sandbox-inventory-cidr`. With none configured,
+`InventoryHosts.Contains` additionally requires it to fall inside the node
+bound — the operator's `--sandbox-inventory-cidr` CIDRs, or one host route per
+node derived live from the node list when unset. With no known node addresses,
 CDS refuses every request carrying a token.
 
 What actually establishes the inventory's identity is *where the key comes
@@ -602,10 +603,11 @@ error, so a broken inventory blocks workload cert issuance — by design.
 
 **Network reachability.** The identity/digests endpoint is a new *inbound* path:
 CDS must be able to reach node-CVM nodes and kata guest pods on
-`workloadclaims.DigestsPort` (1019, fixed), and `cds.sandboxInventoryCIDRs`
-(`c8s install --node-cidr`) must cover those addresses or CDS refuses every
-request carrying a token. The advertised host defaults to the installer
-DaemonSet's own `status.hostIP`, written to a `node-ip` file beside the socket;
+`workloadclaims.DigestsPort` (1019, fixed), and the node bound —
+`cds.sandboxInventoryCIDRs` (`c8s install --node-cidr`), or the live node list
+when unset — must cover those addresses or CDS refuses every request carrying a
+token. The advertised host defaults to the installer DaemonSet's own
+`status.hostIP`, written to a `node-ip` file beside the socket;
 set `nriImagePolicy.sandboxDigests.advertiseHost` or
 `$C8S_SANDBOX_DIGESTS_ADVERTISE_HOST` to override. Route inference is the last
 resort and is wrong under the chart's default, where the plugin dials the CDS

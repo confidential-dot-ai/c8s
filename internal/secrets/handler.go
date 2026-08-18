@@ -386,8 +386,8 @@ func (h Handler) verifyToken(ctx context.Context, token *workloadclaims.SignedSa
 	if h.Inventory == nil || h.Bindings == nil {
 		return "", fmt.Errorf("secrets are not configured to reach an inventory")
 	}
-	if len(h.InventoryHosts) == 0 {
-		return "", fmt.Errorf("no inventory CIDRs are configured to bound the callback")
+	if h.InventoryHosts == nil || h.InventoryHosts.Empty() {
+		return "", fmt.Errorf("the inventory callback has no node addresses to bound it")
 	}
 	// The binding, not the token, decides who is asked. The token names a host
 	// too, but that is the requester's choice; taking it would let anything able
@@ -397,7 +397,7 @@ func (h Handler) verifyToken(ctx context.Context, token *workloadclaims.SignedSa
 		return "", fmt.Errorf("no inventory is bound to sandbox %s", sandboxID)
 	}
 	if !h.InventoryHosts.Contains(host) {
-		return "", fmt.Errorf("bound inventory is outside the configured node CIDRs")
+		return "", fmt.Errorf("bound inventory is outside the node bound")
 	}
 	claimed, err := workloadclaims.UnverifiedInventoryHost(token.Token)
 	if err != nil {

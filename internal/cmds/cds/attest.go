@@ -335,8 +335,8 @@ func (h AttestHandler) verifySandboxToken(ctx context.Context, raw json.RawMessa
 	if h.SandboxDigests == nil {
 		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but this CDS cannot reach an inventory to verify it")
 	}
-	if len(h.InventoryHosts) == 0 {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but no inventory CIDRs are configured to bound the callback")
+	if h.InventoryHosts == nil || h.InventoryHosts.Empty() {
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token presented but the inventory callback has no node addresses to bound it")
 	}
 	var token workloadclaims.SignedSandboxToken
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -356,7 +356,7 @@ func (h AttestHandler) verifySandboxToken(ctx context.Context, raw json.RawMessa
 		return workloadclaims.VerifiedSandbox{}, err
 	}
 	if !h.InventoryHosts.Contains(host) {
-		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token names an inventory outside the configured node CIDRs")
+		return workloadclaims.VerifiedSandbox{}, fmt.Errorf("sandbox token names an inventory outside the node bound")
 	}
 	// The key comes from the inventory's own endpoint on a privileged port,
 	// which is what separates the inventory from a compromised workload in the

@@ -131,7 +131,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags.DurationVar(&cfg.InitialRetryTimeout, "initial-retry-timeout", 2*time.Minute, "Retry the first certificate request in-process for up to this long before failing, so a transient CDS/mesh outage during a roll does not crash the init container into kubelet backoff (0 = try once)")
 	flags.DurationVar(&cfg.InitialRetryInterval, "initial-retry-interval", 2*time.Second, "Delay between in-process retries of the first certificate request")
 	flags.BoolVar(&cfg.ReloadNginx, "reload-nginx", true, "SIGHUP nginx after certificate renewal or watched file changes")
-	flags.BoolVar(&cfg.ContinueOnInitialError, "continue-on-initial-error", false, "In renewal mode, keep running when the first certificate request fails")
+	flags.BoolVar(&cfg.ContinueOnInitialError, "continue-on-initial-error", false, "In renewal mode, keep running when the first certificate request fails, retrying on a capped backoff until a certificate is issued")
 	flags.StringArrayVar(&cfg.ReloadWatchPaths, "reload-watch", nil, "File path to poll for changes and reload nginx when it changes (repeatable)")
 	flags.DurationVar(&cfg.ReloadWatchInterval, "reload-watch-interval", time.Minute, "Poll interval for --reload-watch paths")
 	flags.StringVar(&cfg.DiscoveryOutPath, "discovery-out", "", "Path to write JSON discovery metadata for the issued certificate and attestation evidence")
@@ -221,28 +221,46 @@ func run(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	haveCert := true
 	leaf, err := obtainCertWithRetry(ctx, cfg, client)
 	if err != nil {
 		if cfg.RenewInterval <= 0 || !cfg.ContinueOnInitialError {
 			return err
 		}
-		slog.Error("initial certificate request failed, will retry next interval", "error", err)
+		haveCert = false
+		slog.Error("initial certificate request failed, will keep retrying", "error", err)
 	} else if cfg.RenewInterval <= 0 {
 		return nil
 	}
+	return renewLoop(ctx, cfg, client, leaf, haveCert)
+}
 
-	// Daemon mode: renew certificate periodically with graceful shutdown. The
-	// renewal timer is resettable: it is paced off the installed leaf's own
-	// expiry as well as --renew-interval, and while the installed leaf is
-	// unnamed (and --workload-claims is on) it fires at the fast unnamed
-	// interval so the pod's first post-completion renewal picks up its
-	// matched-workload stamp promptly.
-	slog.Info("entering renewal loop", "interval", cfg.RenewInterval)
+// renewLoop is get-cert's daemon mode: renew with graceful shutdown, on a
+// resettable timer paced off the installed leaf's own expiry as well as
+// --renew-interval, and — while the installed leaf is unnamed and
+// --workload-claims is on — off the fast unnamed interval, so the pod's first
+// post-completion renewal picks up its matched-workload stamp promptly.
+//
+// Until the first certificate lands the cadence is the initial-retry backoff
+// instead: c8s-cert-wait holds the workload on that certificate
+// (docs/getcert-workload-binding.md), so waiting out a renewal interval to
+// re-ask would strand it for that long.
+func renewLoop(ctx context.Context, cfg config, client attestclient.Client, leaf *x509.Certificate, haveCert bool) error {
+	initialBackoff := backoff.NewExponentialBackOff()
+	initialBackoff.MaxInterval = maxInitialRetryInterval
+	if cfg.InitialRetryInterval > 0 {
+		initialBackoff.InitialInterval = cfg.InitialRetryInterval
+	}
 	// unnamedRuns counts consecutive renewals that came back without a
 	// matched-workload stamp; failures counts consecutive renewal errors. Both
 	// only pace the timer.
 	var unnamedRuns, failures int
-	renewTimer := time.NewTimer(renewalInterval(cfg, leaf, unnamedRuns))
+	next := renewalInterval(cfg, leaf, unnamedRuns)
+	if !haveCert {
+		next = initialBackoff.NextBackOff()
+	}
+	slog.Info("entering renewal loop", "interval", cfg.RenewInterval, "next", next, "have_cert", haveCert)
+	renewTimer := time.NewTimer(next)
 	defer renewTimer.Stop()
 
 	var watchC <-chan time.Time
@@ -267,6 +285,12 @@ func run(cfg config) error {
 			return nil
 		case <-renewTimer.C:
 			renewed, err := obtainCertFn(ctx, cfg, client)
+			if err != nil && !haveCert {
+				retry := initialBackoff.NextBackOff()
+				slog.Error("certificate request failed, still no certificate", "error", err, "retry_in", retry)
+				renewTimer.Reset(retry)
+				continue
+			}
 			if err != nil {
 				// A short backoff, not a full interval: the timer is paced so
 				// it fires around half the installed leaf's remaining
@@ -279,6 +303,7 @@ func run(cfg config) error {
 				renewTimer.Reset(retry)
 				continue
 			}
+			haveCert = true
 			failures = 0
 			leaf = renewed
 			if isNamedLeaf(leaf) {
@@ -315,6 +340,10 @@ const (
 	// cannot turn the renewal loop into a hot attestation spin against CDS. It
 	// never raises a delay above --renew-interval, which the operator chose.
 	minRenewalDelay = 5 * time.Second
+
+	// maxInitialRetryInterval caps the backoff between attempts at the first
+	// certificate.
+	maxInitialRetryInterval = time.Minute
 
 	// unnamedBackoffAfter is how many consecutive unnamed renewals run at the
 	// fast poll before it doubles toward --renew-interval. A pod can be
