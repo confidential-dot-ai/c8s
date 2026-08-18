@@ -71,7 +71,7 @@ env:
   # the image's TDX measurement, so it's a reviewed PR + a --measurements
   # refresh. Must be on confos origin/main. The confos_ref dispatch input
   # overrides it for A/B measurement checks.
-  CONFOS_REF: ${{ inputs.confos_ref || 'e56427984177a680f1ee66b13f9de0c8db504b1d' }} # pin: v0.4.2 + attest-gpu serves SNP (platforms + DeviceAllow, confos#102/#103); snapshot-pinned mirror-guarded builds (confos#96)
+  CONFOS_REF: ${{ inputs.confos_ref || 'b5f1eec21a16e83c1f50310c95c15315460eaa87' }} # pin: v0.4.2 + gated GPU evidence collection; attest-gpu serves SNP; snapshot-pinned builds
   # This revision keeps GPU collection behind both the server config and the
   # caller's nvidia_gpu request. The attest-gpu profile enables the server gate.
   ATTESTATION_RS_REF: "41ad0c5495ec3cf4dc7a69d2870084bdf6b92f98" # pin: gated GPU evidence collection (#79)
