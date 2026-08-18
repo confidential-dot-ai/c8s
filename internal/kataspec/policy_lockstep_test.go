@@ -304,6 +304,50 @@ func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
 	}
 }
 
+// Spec hooks ride inside an otherwise-admitted CreateContainerRequest and
+// execute as guest root during do_create_container, ahead of the
+// admission verdict. Pin the guard the same way as the CRI-O marker: one
+// no_spec_hooks rule holding one line per hook list, conjoined into
+// CreateContainerRequest — a commented-out or relocated line still leaves
+// the substrings present, so read the rule bodies.
+func TestBakedPolicyRejectsSpecHooks(t *testing.T) {
+	policy := readPolicy(t)
+
+	hookBodies := ruleBodies(t, policy, "no_spec_hooks")
+	if len(hookBodies) != 1 {
+		t.Fatalf("baked policy has %d no_spec_hooks rules, want exactly one (a second would OR another predicate past the guard)", len(hookBodies))
+	}
+	for _, list := range []string{"Prestart", "CreateRuntime", "CreateContainer", "StartContainer", "Poststart", "Poststop"} {
+		guard := "not input.OCI.Hooks." + list + "[0]"
+		line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta(guard) + `$`)
+		if !line.MatchString(hookBodies[0]) {
+			t.Errorf("no_spec_hooks does not carry the guard line %q", guard)
+		}
+	}
+
+	containerBodies := ruleBodies(t, policy, "CreateContainerRequest")
+	if len(containerBodies) != 1 {
+		t.Fatalf("baked policy has %d CreateContainerRequest rules, want exactly one", len(containerBodies))
+	}
+	if !strings.Contains(containerBodies[0], "\tno_spec_hooks\n") {
+		t.Error("CreateContainerRequest does not conjoin no_spec_hooks")
+	}
+}
+
+// add_hooks arms every container with executables from the guest_hook_path
+// directory, so the baked policy holds it empty, matching upstream
+// genpolicy's CreateSandboxRequest guard.
+func TestBakedPolicyRejectsGuestHookPath(t *testing.T) {
+	bodies := ruleBodies(t, readPolicy(t), "CreateSandboxRequest")
+	if len(bodies) != 1 {
+		t.Fatalf("baked policy has %d CreateSandboxRequest rules, want exactly one", len(bodies))
+	}
+	line := regexp.MustCompile(`(?m)^\t` + regexp.QuoteMeta("count(input.guest_hook_path) == 0") + `$`)
+	if !line.MatchString(bodies[0]) {
+		t.Error("CreateSandboxRequest does not carry the guest_hook_path guard")
+	}
+}
+
 // A rule that silently reverts to `default … := true` is a no-op with no
 // symptom, so pin the decisions the guest's integrity rests on.
 func TestBakedPolicyKeepsItsFailClosedDefaults(t *testing.T) {

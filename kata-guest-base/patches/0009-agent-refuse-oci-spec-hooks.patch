@@ -1,0 +1,57 @@
+Subject: [PATCH] agent: refuse OCI spec hooks in createcontainer
+
+Spec hooks ride inside an otherwise-admitted CreateContainerRequest and
+execute as guest root during do_create_container: prestart hooks run in
+the agent's own mount and PID namespaces, and all of them run before the
+admission verdict patch 0002 waits for. The baked policy denies them, so
+a request carrying hooks never reaches this point -- refuse them here
+anyway, so a policy-engine bypass (an agent built without agent-policy)
+cannot execute host-supplied hooks.
+
+The check sits right after the spec is taken from the request, which is
+before handle_cdi_devices and append_guest_hooks: the hooks the agent
+injects itself -- the nvidia-cdi-hook from the in-guest CDI registry,
+and guest hooks -- are appended afterwards and stay working.
+
+--- a/src/agent/src/rpc.rs
++++ b/src/agent/src/rpc.rs
+@@ -228,6 +228,8 @@ impl AgentService {
+             }
+         };
+ 
++        c8s_refuse_spec_hooks(&oci)?;
++
+         let container_name = k8s::container_name(&oci);
+ 
+         // c8s: the guest console is host-visible; the spec carries env/argv.
+@@ -2175,6 +2177,30 @@ async fn c8s_await_admission(cid: &str) -> Result<()> {
+     }
+ }
+ 
++// c8s: spec hooks run as guest root during do_create_container, before the
++// admission verdict. The baked policy already denies them; refuse them here
++// too, so a policy-engine bypass cannot execute host-supplied hooks. Hooks
++// the agent adds itself (CDI injection, guest hooks) come after this check.
++fn c8s_refuse_spec_hooks(oci: &Spec) -> Result<()> {
++    let Some(hooks) = oci.hooks().as_ref() else {
++        return Ok(());
++    };
++    let lists = [
++        ("prestart", hooks.prestart()),
++        ("createRuntime", hooks.create_runtime()),
++        ("createContainer", hooks.create_container()),
++        ("startContainer", hooks.start_container()),
++        ("poststart", hooks.poststart()),
++        ("poststop", hooks.poststop()),
++    ];
++    for (name, list) in lists {
++        if list.as_ref().is_some_and(|l| !l.is_empty()) {
++            return Err(anyhow!("refusing OCI spec {name} hooks"));
++        }
++    }
++    Ok(())
++}
++
+ fn do_copy_file(req: &CopyFileRequest) -> Result<()> {
+     let path = PathBuf::from(req.path.as_str());
+ 

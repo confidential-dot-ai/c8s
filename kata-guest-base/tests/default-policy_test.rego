@@ -209,7 +209,7 @@ test_local_driver_denied if {
 		"options": ["mode=0777"],
 		"driver_options": [],
 	}])
-	not CreateSandboxRequest with input as {"storages": [{"driver": "local", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "local"}]}
+	not CreateSandboxRequest with input as sandbox_req([{"driver": "local", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "local"}])
 }
 
 # CDS's own /data volume is a default-medium emptyDir when persistence is off,
@@ -495,19 +495,22 @@ test_conflicting_container_type_markers_denied if {
 # the trees a container binds from, so both carry a container storage's
 # constraints.
 
+# guest_hook_path always serializes; an honest request carries it empty.
+sandbox_req(ss) := {"guest_hook_path": "", "storages": ss}
+
 # The fixture is otherwise admissible, so only the rootfs shape can deny it. A
 # sandbox-tree path can be rootfs-shaped too, which is the case that isolates
 # this rule from the mount-point prefix rule.
 test_sandbox_storage_shaped_like_a_rootfs_denied if {
 	every mount_point in [rootfs, "/run/kata-containers/sandbox/rootfs"] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "shm", "fstype": "tmpfs"}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": mount_point, "source": "shm", "fstype": "tmpfs"}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
 	}
 }
 
 test_sandbox_storage_elsewhere_allowed if {
-	CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}]}
-	CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "tmpfs"}]}
+	CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}])
+	CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "", "fstype": "tmpfs"}])
 	UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/y", "source": "tmpfs", "fstype": "tmpfs"}]}
 }
 
@@ -516,7 +519,7 @@ test_sandbox_storage_elsewhere_allowed if {
 # storage claiming a host-attached filesystem there is host bytes for the pod.
 test_sandbox_storage_with_host_backed_fstype_denied if {
 	every fstype in ["9p", "erofs", "ext4", "hugetlbfs", "iso9660", "overlay", "vfat", "virtiofs"] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": fstype}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": fstype}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/ephemeral/x", "source": "tmpfs", "fstype": fstype}]}
 	}
 }
@@ -526,7 +529,7 @@ test_sandbox_storage_with_host_backed_fstype_denied if {
 # more absolute than a PCI path. Only container_storage_allowed reaches that rule.
 test_sandbox_encrypted_block_storage_denied if {
 	every source in ["", "shm", "tmpfs"] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "blk", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "ext4", "driver_options": ["encryption_key=ephemeral"]}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "blk", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "ext4", "driver_options": ["encryption_key=ephemeral"]}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "blk", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "ext4", "driver_options": ["encryption_key=ephemeral"]}]}
 	}
 }
@@ -537,7 +540,7 @@ test_sandbox_encrypted_block_storage_denied if {
 # tree is what every container then binds from.
 test_sandbox_layered_storage_denied if {
 	every options in [["X-kata.multi-layer=true"], ["X-kata.overlay-lower=/run/c8s"], ["X-kata.overlay-rw"]] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/hijack", "source": "tmpfs", "fstype": "tmpfs", "options": options}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/shared/containers/hijack", "source": "tmpfs", "fstype": "tmpfs", "options": options}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/ephemeral/hijack", "source": "tmpfs", "fstype": "tmpfs", "options": options}]}
 	}
 }
@@ -546,7 +549,7 @@ test_sandbox_layered_storage_denied if {
 # The seeding tree is the sandbox-time prize — every container binds from it.
 test_sandbox_storage_with_host_backed_driver_denied if {
 	every driver in ["blk", "blk-ccw", "erofs.multi-layer", "mmioblk", "nvdimm", "overlayfs", "scsi", "virtio-fs", "watchable-bind"] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": driver, "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": "tmpfs"}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": driver, "mount_point": "/run/kata-containers/shared/containers/x", "source": "tmpfs", "fstype": "tmpfs"}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": driver, "mount_point": "/run/kata-containers/sandbox/ephemeral/x", "source": "tmpfs", "fstype": "tmpfs"}]}
 	}
 }
@@ -563,7 +566,7 @@ test_sandbox_storage_outside_the_runtime_dirs_denied if {
 		"/run/kata-containers/sandbox/../../c8s",
 		"/run/kata-containers/sandbox/ephemeral/../../../c8s",
 	] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": mount_point, "source": "tmpfs", "fstype": "tmpfs"}]}
 	}
 }
@@ -572,7 +575,7 @@ test_sandbox_storage_outside_the_runtime_dirs_denied if {
 # content the ephemeral handler would mount verbatim.
 test_sandbox_storage_with_path_source_denied if {
 	every source in ["/", "/run", "/run/kata-containers/other/rootfs", "../.."] {
-		not CreateSandboxRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "tmpfs"}]}
+		not CreateSandboxRequest with input as sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "tmpfs"}])
 		not UpdateEphemeralMountsRequest with input as {"storages": [{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/x", "source": source, "fstype": "tmpfs"}]}
 	}
 }
@@ -688,6 +691,47 @@ test_mount_allows_projected_volume_names if {
 		honest_mounts,
 		[bind_from("/run/kata-containers/shared/containers/pod-vol/..data")],
 	))
+}
+
+# --- spec hooks ---------------------------------------------------------
+#
+# Hooks ride inside the OCI spec of an otherwise-admitted request and
+# execute as guest root before the admission verdict. All six lists must be
+# empty; the honest shapes are an absent Hooks, null (what the protobuf
+# serializer emits for an unset message), and empty lists.
+
+# object.union is shallow, so merge at the OCI level to keep the fixture.
+with_hooks(base, hooks) := object.union(base, {"OCI": object.union(base.OCI, {"Hooks": hooks})})
+
+spec_hook := {"Path": "/bin/bash", "Args": ["bash", "-c", "true"], "Env": [], "Timeout": 0}
+
+test_spec_hooks_denied if {
+	every list_name in ["Prestart", "CreateRuntime", "CreateContainer", "StartContainer", "Poststart", "Poststop"] {
+		not CreateContainerRequest with input as with_hooks(workload_input, {list_name: [spec_hook]})
+		not CreateContainerRequest with input as with_hooks(sandbox_input, {list_name: [spec_hook]})
+	}
+}
+
+test_honest_hook_shapes_allowed if {
+	CreateContainerRequest with input as with_hooks(workload_input, null)
+	CreateContainerRequest with input as with_hooks(workload_input, {})
+	CreateContainerRequest with input as with_hooks(workload_input, {
+		"Prestart": [],
+		"CreateRuntime": [],
+		"CreateContainer": [],
+		"StartContainer": [],
+		"Poststart": [],
+		"Poststop": [],
+	})
+}
+
+# A non-empty guest_hook_path is denied even on an otherwise-admitted
+# sandbox: add_hooks would arm every container from that guest directory.
+test_guest_hook_path_denied if {
+	not CreateSandboxRequest with input as object.union(
+		sandbox_req([{"driver": "ephemeral", "mount_point": "/run/kata-containers/sandbox/shm", "source": "shm", "fstype": "tmpfs"}]),
+		{"guest_hook_path": "/run/kata-containers/shared/containers/x"},
+	)
 }
 
 # --- CopyFile -----------------------------------------------------------
