@@ -64,7 +64,7 @@ func (EchoBackend) Forward(_ context.Context, req types.TunnelRequest) (types.Tu
 // is https it does mTLS with the LB's CDS-issued client cert and verifies the
 // peer against the mesh CA (mirroring the tls-lb nginx proxy_ssl_* config).
 type HTTPBackend struct {
-	base   string // upstream base URL, e.g. http://vllm-router-service.vllm.svc.cluster.local
+	base   string // canonical upstream base URL (overenc.CanonicalUpstreamURL), e.g. http://vllm-router-service.vllm.svc.cluster.local
 	client *http.Client
 	// identity is the destination the transcripts commit, captured at
 	// construction so the committed value is byte-exactly what Forward dials
@@ -96,18 +96,15 @@ type HTTPBackendOptions struct {
 }
 
 // NewHTTPBackend builds an HTTP(S) forwarding backend for base (a full URL).
-// The parse is validation plus the effective server name: the committed base
-// stays the caller's raw string (trailing slashes trimmed), byte-exactly what
-// Forward dials.
-func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) {
-	base = strings.TrimRight(base, "/")
-	u, err := url.Parse(base)
+// The base is canonicalised (overenc.CanonicalUpstreamURL) so the committed
+// destination is byte-exactly what Forward dials: one commitment per
+// destination, however the value was spelled.
+func NewHTTPBackend(rawBase string, opts HTTPBackendOptions) (*HTTPBackend, error) {
+	base, err := overenc.CanonicalUpstreamURL(rawBase)
 	if err != nil {
-		return nil, fmt.Errorf("upstream URL %q does not parse: %w", base, err)
+		return nil, err
 	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("upstream URL %q has no host", base)
-	}
+	u, _ := url.Parse(base) // the canonical form always parses
 	identity := overenc.UpstreamIdentity{URL: base}
 	transport := &http.Transport{
 		MaxIdleConns:    100,
@@ -115,7 +112,7 @@ func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) 
 	}
 	switch u.Scheme {
 	case "https":
-		identity.ServerName = opts.ServerName
+		identity.ServerName = overenc.CanonicalDNSName(opts.ServerName)
 		if identity.ServerName == "" {
 			// The transport verifies against the URL host when ServerName is
 			// unset; commit the name it will actually use.
@@ -143,8 +140,6 @@ func NewHTTPBackend(base string, opts HTTPBackendOptions) (*HTTPBackend, error) 
 		}
 		transport.TLSClientConfig = tlsCfg
 	case "http":
-	default:
-		return nil, fmt.Errorf("upstream must be an http:// or https:// URL, got %q", base)
 	}
 
 	timeout := opts.Timeout

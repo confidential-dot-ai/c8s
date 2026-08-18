@@ -57,18 +57,28 @@ func writeClientKeyPair(t *testing.T) (certPath, keyPath string) {
 }
 
 // The transcript commits UpstreamIdentity verbatim, so it must be the
-// canonical base URL Forward dials: echo names no destination, and a
-// trailing slash cannot fork the binding.
+// canonical base URL Forward dials: echo names no destination, and spelling
+// variants of one destination collapse to one committed identity.
 func TestUpstreamIdentity(t *testing.T) {
 	if got := (EchoBackend{}).UpstreamIdentity(); !reflect.DeepEqual(got, overenc.UpstreamIdentity{}) {
 		t.Fatalf("echo upstream identity = %+v, want zero", got)
 	}
-	hb, err := NewHTTPBackend("http://backend:8000/", HTTPBackendOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := hb.UpstreamIdentity(); !reflect.DeepEqual(got, overenc.UpstreamIdentity{URL: "http://backend:8000"}) {
-		t.Fatalf("upstream identity = %+v, want canonical base only", got)
+	want := overenc.UpstreamIdentity{URL: "http://backend:8000"}
+	for _, spelling := range []string{
+		"http://backend:8000/",
+		"HTTP://Backend.:8000",
+		"http://backend:08000/x/../",
+	} {
+		hb, err := NewHTTPBackend(spelling, HTTPBackendOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hb.UpstreamIdentity(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("NewHTTPBackend(%q) identity = %+v, want %+v", spelling, got, want)
+		}
+		if hb.base != want.URL {
+			t.Fatalf("NewHTTPBackend(%q) dials %q, want the committed %q", spelling, hb.base, want.URL)
+		}
 	}
 }
 
@@ -185,6 +195,9 @@ func TestNewHTTPBackendErrors(t *testing.T) {
 		{"bad scheme", "ftp://backend", HTTPBackendOptions{}, "must be an http:// or https:// URL"},
 		{"scheme-only", "http://", HTTPBackendOptions{}, "has no host"},
 		{"unparseable", "http://backend", HTTPBackendOptions{}, "does not parse"},
+		{"userinfo", "http://user@backend:8000", HTTPBackendOptions{}, "userinfo"},
+		{"query", "http://backend:8000/?x=1", HTTPBackendOptions{}, "query"},
+		{"fragment", "http://backend:8000/#f", HTTPBackendOptions{}, "fragment"},
 		{"missing CA file", "https://backend", HTTPBackendOptions{TrustedCAFile: filepath.Join(dir, "missing-ca.pem")}, "read upstream CA"},
 		{"CA file with no certs", "https://backend", HTTPBackendOptions{TrustedCAFile: garbageCA}, "has no certificates"},
 		{"missing client keypair", "https://backend", HTTPBackendOptions{

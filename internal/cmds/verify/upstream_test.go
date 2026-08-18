@@ -57,17 +57,48 @@ func TestApplyUpstreamPolicy(t *testing.T) {
 		}
 	})
 
+	// The pin is canonicalised exactly as the LB canonicalises its committed
+	// URL: spelling variants of the pinned destination must still match, or
+	// the pin is a lie by mismatch.
+	t.Run("pin spelling variants match", func(t *testing.T) {
+		for _, pin := range []string{
+			"HTTP://C8S-Infer.C8S-System.SVC.Cluster.Local:8000",
+			"http://c8s-infer.c8s-system.svc.cluster.local.:8000/",
+			"http://c8s-infer.c8s-system.svc.cluster.local:08000/x/../",
+			" http://c8s-infer.c8s-system.svc.cluster.local:8000 ",
+		} {
+			oc := upstreamOutcome(t, config{expectedUpstream: pin}, nil, committed)
+			if !oc.Verified || oc.Partial {
+				t.Fatalf("pin %q: verified=%v partial=%v error=%q, want a clean verdict", pin, oc.Verified, oc.Partial, oc.Error)
+			}
+		}
+	})
+
+	t.Run("invalid pin is a usage error", func(t *testing.T) {
+		for _, pin := range []string{"http://user@backend:8000", "http://backend/?x=1", "ftp://backend"} {
+			if _, err := buildPolicy(config{expectedUpstream: pin}); err == nil {
+				t.Fatalf("buildPolicy with --expected-upstream %q succeeded, want a usage error", pin)
+			}
+		}
+	})
+
 	t.Run("pin mismatch fails", func(t *testing.T) {
-		oc := upstreamOutcome(t, config{expectedUpstream: "http://c8s-other.c8s-system.svc.cluster.local:8000"}, nil, committed)
-		if oc.Verified || oc.Partial || oc.Error == "" {
-			t.Fatalf("verified=%v partial=%v error=%q, want a failure", oc.Verified, oc.Partial, oc.Error)
-		}
-		if !strings.Contains(oc.Error, "upstream destination mismatch") ||
-			!strings.Contains(oc.Error, committed.URL) {
-			t.Errorf("error = %q, want it to name the committed and pinned destinations", oc.Error)
-		}
-		if got := verdictExitCode(oc); got != exitFailed {
-			t.Errorf("exit = %d, want %d", got, exitFailed)
+		for _, pin := range []string{
+			"http://c8s-other.c8s-system.svc.cluster.local:8000",  // different host
+			"http://c8s-infer.c8s-system.svc.cluster.local:8001",  // different port
+			"https://c8s-infer.c8s-system.svc.cluster.local:8000", // different scheme
+		} {
+			oc := upstreamOutcome(t, config{expectedUpstream: pin}, nil, committed)
+			if oc.Verified || oc.Partial || oc.Error == "" {
+				t.Fatalf("pin %q: verified=%v partial=%v error=%q, want a failure", pin, oc.Verified, oc.Partial, oc.Error)
+			}
+			if !strings.Contains(oc.Error, "upstream destination mismatch") ||
+				!strings.Contains(oc.Error, committed.URL) {
+				t.Errorf("pin %q: error = %q, want it to name the committed and pinned destinations", pin, oc.Error)
+			}
+			if got := verdictExitCode(oc); got != exitFailed {
+				t.Errorf("pin %q: exit = %d, want %d", pin, got, exitFailed)
+			}
 		}
 	})
 

@@ -212,7 +212,7 @@ attest-pq upstream destination no --expected-upstream pin authenticates).`,
 	f.StringVar(&cfg.workload, "workload", "", "expected matched-workload name on the target's leaf; requires --mesh-ca, since CDS's signature on the leaf is what vouches for the stamp (docs/ratls.md)")
 	f.StringVar(&cfg.allowlistFile, "allowlist", "", "file holding the exact canonical allowlist bytes (as served by GET /allowlist); the leaf's stamped policy digest must equal SHA-256 of these bytes and the stamped name must resolve in the document. Requires --mesh-ca")
 	f.StringVar(&cfg.meshCA, "mesh-ca", "", "PEM bundle of the CDS mesh CA; when set, the target's leaf must chain to it, which is what authenticates the reported sandbox ID. On attest-pq it is also what upgrades the chain anchor from responder-chosen (partial verdict) to verified, and it authenticates an https upstream's committed CA bundle")
-	f.StringVar(&cfg.expectedUpstream, "expected-upstream", "", "expected upstream destination of an attest-pq LB (the exact canonical base URL the deployment commits, e.g. http://c8s-<id>.<ns>.svc.cluster.local:<port>); verification fails if the evidence commits a different destination. Unset, a committed destination is reported but not proven (partial verdict)")
+	f.StringVar(&cfg.expectedUpstream, "expected-upstream", "", "expected upstream destination of an attest-pq LB (e.g. http://c8s-<id>.<ns>.svc.cluster.local:<port>); canonicalized exactly as the LB canonicalizes its committed URL, so spelling variants of one destination compare equal. Verification fails if the evidence commits a different destination. Unset, a committed destination is reported but not proven (partial verdict)")
 	f.StringVar(&cfg.initDataHex, "init-data", "", "expected init-data digest: SHA-256 hex of the init-data document the target guest must carry. Verification fails unless the evidence commits exactly this digest")
 	f.BoolVar(&cfg.allowDebug, "allow-debug", false, "accept debug-enabled guests")
 	const tcbSNPOnly = " (SEV-SNP evidence only — TDX carries no such component, so against TDX evidence this is a policy error rather than an ignored flag)"
@@ -412,11 +412,11 @@ func applyUpstreamPolicy(oc *Outcome, cfg config, plan *verifyPlan, ev *evidence
 		return
 	}
 	oc.Upstream = ev.upstream.URL
-	if cfg.expectedUpstream != "" {
-		if ev.upstream.URL != cfg.expectedUpstream {
+	if plan.expectedUpstream != "" {
+		if ev.upstream.URL != plan.expectedUpstream {
 			oc.Verified = false
 			if oc.Error == "" {
-				oc.Error = fmt.Sprintf("upstream destination mismatch: the evidence commits %q but --expected-upstream pins %q (the LB's plaintext destination is not the one you pinned)", ev.upstream.URL, cfg.expectedUpstream)
+				oc.Error = fmt.Sprintf("upstream destination mismatch: the evidence commits %q but --expected-upstream pins %q (the LB's plaintext destination is not the one you pinned)", ev.upstream.URL, plan.expectedUpstream)
 			}
 			return
 		}
@@ -507,6 +507,9 @@ type verifyPlan struct {
 	meshCA *x509.CertPool
 	// meshCAHash is the bundle's upstream-commitment hash, nil when unset.
 	meshCAHash []byte
+	// expectedUpstream is the canonicalised --expected-upstream pin ("" when
+	// unset), compared against the committed destination byte-for-byte.
+	expectedUpstream string
 	// initDataHash is the parsed --init-data pin, nil when the flag is unset.
 	initDataHash []byte
 }
@@ -622,6 +625,17 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, err
 	}
 
+	// The pin is canonicalised with the same function the LB canonicalises
+	// its committed URL with, so a differently-spelled pin for the same
+	// destination still matches.
+	var expectedUpstream string
+	if cfg.expectedUpstream != "" {
+		expectedUpstream, err = overenc.CanonicalUpstreamURL(cfg.expectedUpstream)
+		if err != nil {
+			return nil, fmt.Errorf("--expected-upstream: %w", err)
+		}
+	}
+
 	return &verifyPlan{
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
@@ -631,10 +645,11 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 			RTMRs:        pins.manual,
 			AllowDebug:   cfg.allowDebug,
 		},
-		pins:         pins,
-		meshCA:       caPool,
-		meshCAHash:   caHash,
-		initDataHash: initDataHash,
+		pins:             pins,
+		meshCA:           caPool,
+		meshCAHash:       caHash,
+		expectedUpstream: expectedUpstream,
+		initDataHash:     initDataHash,
 	}, nil
 }
 
