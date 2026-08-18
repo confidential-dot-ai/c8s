@@ -469,7 +469,28 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
      `quote-generation-socket=vsock:2:4050` both reach the same qgsd.
   4. Intel PCS API key in `/etc/sgx_default_qcnl.conf` — DCAP fetches
      TCB collateral from Intel PCS during verify.
-  5. The node label `confidential.ai/tdx=true` — the
+  5. **The platform registered with Intel**, so PCS can serve its PCK
+     certificate. A CPU whose platform manifest was never uploaded gets no
+     PCK cert, and every quote then fails inside qgsd with
+     `[QPL] No certificate data for this platform` (`0xe011`) — the c8s
+     symptom is CDS crash-looping in its TD on
+     `attestation-api: … no quote generation service available … ConfigFS
+     TSM returned an empty quote (GetQuote failed; check QGS/PCK
+     provisioning)`. Cloud TDX hosts arrive registered; bare metal often
+     does not, and the MPA agent (`sgx-ra-service`) only registers when
+     the BIOS has "SGX Auto MP Registration" enabled. Without touching the
+     BIOS, register indirectly once (`sgx-pck-id-retrieval-tool`):
+
+     ```
+     PCKIDRetrievalTool -f pckid.csv
+     awk -F, '{print $6}' pckid.csv | tr -d '\r\n' | xxd -r -p > manifest.bin
+     curl -sS -X POST https://api.trustedservices.intel.com/sgx/registration/v1/platform \
+       -H 'Content-Type: application/octet-stream' --data-binary @manifest.bin
+     # HTTP 201 = registered; restart qgsd afterwards
+     ```
+
+     Registration is permanent for the platform (survives reinstalls).
+  6. The node label `confidential.ai/tdx=true` — the
      `kata-qemu-tdx` RuntimeClass nodeSelector expects it. On the default
      `--cvm-mode=pod` path the install applies it for you (see
      [Installing](#installing)); you own it when a `-f` values file sets
@@ -477,7 +498,14 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
      way `c8s install --hardware-platform=tdx` preflight-checks it and
      refuses to proceed if no node carries it.
 
-  A ready-made provisioning path for items 1–4 is out of scope for this
+  Two host-kernel gotchas seen on bare metal: if `dmesg` shows
+  `virt/tdx: initialization failed: Hibernation support is enabled`, add
+  `nohibernate` to the kernel command line (TDX and S3/hibernation are
+  mutually exclusive), and make sure `kvm_intel.tdx=1` is set (module
+  option or command line) — `cat /sys/module/kvm_intel/parameters/tdx`
+  must print `Y`, or QEMU refuses to launch TDs.
+
+  A ready-made provisioning path for items 1–5 is out of scope for this
   repo — any Ansible playbook / OS-level configuration tool can install
   DCAP + qgsd + the bridge unit. If you're building one from
   scratch, the [Intel TDX documentation](https://cdrdv2.intel.com/v1/dl/getContent/726790)
@@ -486,6 +514,7 @@ boundary is the per-pod SEV-SNP attestation of each `kata-qemu-snp` pod.
 
   ```
   ls /dev/tdx_guest                           # exists
+  cat /sys/module/kvm_intel/parameters/tdx    # Y
   systemctl is-active qgsd                    # active
   systemctl is-active tdx-qgs-bridge          # active
   ```
