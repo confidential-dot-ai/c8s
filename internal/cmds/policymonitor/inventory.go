@@ -2,6 +2,7 @@ package policymonitor
 
 import (
 	"context"
+	"crypto/sha512"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
-	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -303,9 +303,36 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 
 // startSandboxDigests serves the CDS-facing digests endpoint inside the guest
 // over mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
+//
+// The endpoint's RA-TLS certificate stamps the guest's TEE family, and CDS
+// verifies the evidence under that family's rules, so the platform is read
+// from the in-guest attestation-api rather than assumed: a TDX guest whose
+// leaf claimed SEV-SNP would carry a TDX envelope under the SNP TEE type, and
+// CDS would refuse every sandbox token it signs.
 func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, measurements [][]byte) error {
+	platform, err := detectGuestPlatform(ctx, cfg.AttestationServiceURL)
+	if err != nil {
+		return fmt.Errorf("detect guest TEE platform: %w", err)
+	}
+	logger.Info("sandbox-digests endpoint platform", "platform", platform)
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
-		string(types.PlatformSnp),
+		platform,
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),
 		cfg.AttestationServiceURL, measurements)
+}
+
+// detectGuestPlatform asks the in-guest attestation-api which TEE it is
+// running on by generating one throwaway piece of evidence (platform "auto")
+// and reading the platform it reports. Evidence generation is the same call
+// every RA-TLS handshake makes, so this adds no new capability requirement.
+func detectGuestPlatform(ctx context.Context, attestationServiceURL string) (string, error) {
+	var probe [sha512.Size384]byte
+	resp, err := attestclient.NewClient("").GenerateEvidenceContext(ctx, attestationServiceURL, probe[:])
+	if err != nil {
+		return "", err
+	}
+	if resp.Platform == "" {
+		return "", fmt.Errorf("attestation-api reported no platform")
+	}
+	return resp.Platform, nil
 }

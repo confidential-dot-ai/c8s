@@ -16,8 +16,9 @@ package policymonitor
 // Gated on a configured CDS URL: with C8S_CDS_URL unset the monitor
 // stays baked-seed-only and never opens the network.
 //
-// It does not run until a CDS measurement is pinned, which --cvm-mode=pod
-// does not yet deliver.
+// It does not run until a CDS measurement is pinned; under --cvm-mode=pod the
+// pin arrives through the init-data document (initdata.go), on SNP via
+// HOST_DATA and on TDX via MRCONFIGID.
 
 import (
 	"context"
