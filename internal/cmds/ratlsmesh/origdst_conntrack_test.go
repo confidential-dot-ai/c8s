@@ -4,10 +4,16 @@ package ratlsmesh
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // A connection that never went through iptables REDIRECT must be rejected.
@@ -59,32 +65,126 @@ func TestDefaultOrigDstFuncRejectsNonTCP(t *testing.T) {
 	}
 }
 
-// Without CAP_NET_ADMIN the conntrack delete fails, which must surface as the
-// flush-failed warning; the filter-build step must stay silent for valid IPs.
+// conntrackDeleteStub records flushCWConntrack's delete calls and returns a
+// scripted outcome.
+type conntrackDeleteStub struct {
+	calls   []netlink.InetFamily
+	filters []int
+	deleted uint
+	err     error
+	// byFamily, when set, overrides the scalar outcome per address family.
+	byFamily func(netlink.InetFamily) (uint, error)
+}
+
+func (s *conntrackDeleteStub) delete(_ netlink.ConntrackTableType, family netlink.InetFamily, filters ...netlink.CustomConntrackFilter) (uint, error) {
+	s.calls = append(s.calls, family)
+	s.filters = append(s.filters, len(filters))
+	if s.byFamily != nil {
+		return s.byFamily(family)
+	}
+	return s.deleted, s.err
+}
+
+// The flush must reach the conntrack delete for valid IPs and report the
+// outcome — entries deleted, failures — through its return, and garbage IPs
+// must never reach netlink. The delete is stubbed, so this holds with and
+// without CAP_NET_ADMIN.
 func TestFlushCWConntrackReachesDeleteForValidIPs(t *testing.T) {
-	logsFor := func(ips []string) string {
-		var buf syncBuffer
-		flushCWConntrack(slog.New(slog.NewJSONHandler(&buf, nil)), ips)
-		return buf.String()
+	stub := &conntrackDeleteStub{}
+	orig := conntrackDeleteFilters
+	conntrackDeleteFilters = stub.delete
+	t.Cleanup(func() { conntrackDeleteFilters = orig })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	errDelete := errors.New("delete failed")
+	tests := []struct {
+		name        string
+		ips         []string
+		stubDeleted uint
+		stubErr     error
+		wantCalls   []netlink.InetFamily
+		wantFilters []int
+		wantDeleted int
+		wantErr     error
+	}{
+		{"valid IPv4 reaches the delete", []string{"10.99.88.7"}, 0, nil, []netlink.InetFamily{unix.AF_INET}, []int{1}, 0, nil},
+		{"delete failure is returned", []string{"10.99.88.7"}, 0, errDelete, []netlink.InetFamily{unix.AF_INET}, []int{1}, 0, errDelete},
+		{"partial delete with failure", []string{"10.99.88.7"}, 1, errDelete, []netlink.InetFamily{unix.AF_INET}, []int{1}, 1, errDelete},
+		{"deleted count is returned", []string{"10.99.88.7", "10.99.88.9"}, 2, nil, []netlink.InetFamily{unix.AF_INET}, []int{2}, 2, nil},
+		{"dual stack flushes both families", []string{"10.99.88.7", "fd00::5"}, 1, nil, []netlink.InetFamily{unix.AF_INET, unix.AF_INET6}, []int{1, 1}, 2, nil},
+		{"unparseable IP never reaches netlink", []string{"not-an-ip"}, 0, nil, nil, nil, 0, nil},
+		{"empty list never reaches netlink", nil, 0, nil, nil, nil, 0, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub.calls, stub.filters = nil, nil
+			stub.deleted, stub.err = tc.stubDeleted, tc.stubErr
+			deleted, err := flushCWConntrack(logger, tc.ips)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v", err, tc.wantErr)
+			}
+			if deleted != tc.wantDeleted {
+				t.Errorf("deleted = %d, want %d", deleted, tc.wantDeleted)
+			}
+			if !slices.Equal(stub.calls, tc.wantCalls) {
+				t.Errorf("delete calls = %v, want %v", stub.calls, tc.wantCalls)
+			}
+			if !slices.Equal(stub.filters, tc.wantFilters) {
+				t.Errorf("filters per call = %v, want %v", stub.filters, tc.wantFilters)
+			}
+		})
+	}
+}
+
+// A successful flush that matched no entries must stay observable at debug —
+// and silent above it — so this fail-closed cleanup is not silent on its normal
+// success path. Pinned by level, not text, to avoid a log oracle.
+func TestFlushCWConntrackLogsDebugOnEmptyFlush(t *testing.T) {
+	stub := &conntrackDeleteStub{} // deleted 0, err nil: the empty-flush success path
+	orig := conntrackDeleteFilters
+	conntrackDeleteFilters = stub.delete
+	t.Cleanup(func() { conntrackDeleteFilters = orig })
+
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if _, err := flushCWConntrack(logger, []string{"10.99.88.7"}); err != nil {
+		t.Fatalf("flushCWConntrack: %v", err)
 	}
 
-	out := logsFor([]string{"10.99.88.7"})
-	records := decodeLogRecords(out)
-	if hasMsg(records, "build cw conntrack filter failed") {
-		t.Errorf("filter build warned for a valid IP: %s", out)
+	var sawDebug bool
+	for _, r := range decodeLogRecords(buf.String()) {
+		if r.Level == "DEBUG" {
+			sawDebug = true
+		} else {
+			t.Errorf("empty-flush success logged at %s, want DEBUG only", r.Level)
+		}
 	}
-	flushed := hasMsg(records, "flushed cw conntrack entries so the guard fails closed")
-	failed := hasMsg(records, "cw conntrack flush failed")
-	if !flushed && !failed {
-		t.Errorf("no evidence the conntrack delete ran; logs: %s", out)
+	if !sawDebug {
+		t.Error("empty-flush success emitted no debug log — the cleanup is silent on success")
 	}
+}
 
-	// Unparseable IPs are dropped by the family split: no netlink call, no log.
-	if out := logsFor([]string{"not-an-ip"}); strings.TrimSpace(out) != "" {
-		t.Errorf("unexpected logs for unparseable IP: %s", out)
+// A dual-stack flush must keep the entries a family already deleted even when a
+// later family's delete fails, and surface that failure.
+func TestFlushCWConntrackKeepsEarlierFamilyCountOnLaterFailure(t *testing.T) {
+	errV6 := errors.New("v6 delete failed")
+	stub := &conntrackDeleteStub{byFamily: func(f netlink.InetFamily) (uint, error) {
+		if f == unix.AF_INET6 {
+			return 0, errV6
+		}
+		return 2, nil
+	}}
+	orig := conntrackDeleteFilters
+	conntrackDeleteFilters = stub.delete
+	t.Cleanup(func() { conntrackDeleteFilters = orig })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	deleted, err := flushCWConntrack(logger, []string{"10.99.88.7", "fd00::5"})
+	if !errors.Is(err, errV6) {
+		t.Errorf("err = %v, want %v", err, errV6)
 	}
-	if out := logsFor(nil); strings.TrimSpace(out) != "" {
-		t.Errorf("unexpected logs for empty IP list: %s", out)
+	if deleted != 2 {
+		t.Errorf("deleted = %d, want 2 — the IPv4 count must survive the IPv6 failure", deleted)
 	}
 }
 

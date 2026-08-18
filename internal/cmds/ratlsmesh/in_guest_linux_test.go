@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -227,6 +228,53 @@ func TestBuildInGuestIptablesRules(t *testing.T) {
 	}
 	if !sawOutputRedirect {
 		t.Error("no OUTPUT REDIRECT rule to 15001")
+	}
+
+	// The UID-0 exemption is a documented plaintext bypass for in-guest
+	// infrastructure (attestation-service's KDS fetch); pin its exact args,
+	// its place ahead of the catch-all redirect, and its absence from
+	// PREROUTING.
+	wantExemption := []string{"-p", "tcp", "-m", "owner", "--uid-owner", "0", "-j", "RETURN"}
+	exemptionIdx, outputRedirectIdx := -1, -1
+	for i, r := range rules {
+		if r.chain == preroutingChainName && containsArg(r.args, "--uid-owner") {
+			t.Errorf("PREROUTING rule %d carries --uid-owner: %v", i, r.args)
+		}
+		if r.chain != chainName {
+			continue
+		}
+		if containsArgPair(r.args, "--uid-owner", "0") {
+			if exemptionIdx >= 0 {
+				t.Errorf("second UID-0 exemption rule at index %d", i)
+			}
+			exemptionIdx = i
+			if !slices.Equal(r.args, wantExemption) {
+				t.Errorf("UID-0 exemption args = %v, want exactly %v", r.args, wantExemption)
+			}
+		}
+		if containsArgPair(r.args, "-j", "REDIRECT") && containsArgPair(r.args, "--to-port", "15001") {
+			outputRedirectIdx = i
+		}
+	}
+	if exemptionIdx < 0 {
+		t.Error("no UID-0 exemption rule on OUTPUT chain")
+	} else if outputRedirectIdx >= 0 && exemptionIdx > outputRedirectIdx {
+		t.Error("UID-0 exemption follows the catch-all redirect — it would never match")
+	}
+
+	// Bound the exemption SET: the only --uid-owner values on any chain are
+	// the proxy UID and infra UID 0 — a stray one egresses in plaintext.
+	var ownerUIDs []string
+	for _, r := range rules {
+		for i := 0; i+1 < len(r.args); i++ {
+			if r.args[i] == "--uid-owner" {
+				ownerUIDs = append(ownerUIDs, r.args[i+1])
+			}
+		}
+	}
+	slices.Sort(ownerUIDs)
+	if got := slices.Compact(ownerUIDs); !slices.Equal(got, []string{"0", "1337"}) {
+		t.Errorf("uid-owner exemptions = %v, want exactly [0 1337]", got)
 	}
 
 	// The PREROUTING chain must end at a REDIRECT to 15006.

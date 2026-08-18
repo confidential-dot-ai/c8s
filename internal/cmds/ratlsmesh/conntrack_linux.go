@@ -3,6 +3,8 @@
 package ratlsmesh
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 
@@ -26,12 +28,15 @@ import (
 // and as the reply-tuple destination of a direct pod-IP dial, so a single
 // ConntrackReplyAnyIP filter per IP catches both. Deleting a live flow's
 // entry forces the next packet to re-establish through the guard, where the
-// DROP now runs. Best-effort: a delete failure is logged, not fatal — the
-// guard still blocks all subsequent NEW flows.
-func flushCWConntrack(logger *slog.Logger, ips []string) {
+// DROP now runs. Best-effort: a failure is logged, not fatal — the guard
+// still blocks all subsequent NEW flows. Returns the entries deleted across
+// both families and any failures joined.
+func flushCWConntrack(logger *slog.Logger, ips []string) (int, error) {
 	if len(ips) == 0 {
-		return
+		return 0, nil
 	}
+	var errs []error
+	var deleted int
 	v4, v6 := splitIPsByFamily(ips)
 	for _, fam := range []struct {
 		family netlink.InetFamily
@@ -43,11 +48,13 @@ func flushCWConntrack(logger *slog.Logger, ips []string) {
 		if len(fam.ips) == 0 {
 			continue
 		}
+		label := inetFamilyLabel(fam.family)
 		var filters []netlink.CustomConntrackFilter
 		for _, ip := range fam.ips {
 			f := &netlink.ConntrackFilter{}
 			if err := f.AddIP(netlink.ConntrackReplyAnyIP, ip); err != nil {
 				logger.Warn("build cw conntrack filter failed", "ip", ip.String(), "error", err)
+				errs = append(errs, fmt.Errorf("%s: %w", label, err))
 				continue
 			}
 			filters = append(filters, f)
@@ -55,16 +62,25 @@ func flushCWConntrack(logger *slog.Logger, ips []string) {
 		if len(filters) == 0 {
 			continue
 		}
-		n, err := netlink.ConntrackDeleteFilters(netlink.ConntrackTable, fam.family, filters...)
+		n, err := conntrackDeleteFilters(netlink.ConntrackTable, fam.family, filters...)
+		deleted += int(n)
 		if err != nil {
-			logger.Warn("cw conntrack flush failed", "family", inetFamilyLabel(fam.family), "deleted", n, "error", err)
+			logger.Warn("cw conntrack flush failed", "family", label, "deleted", n, "error", err)
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
 			continue
 		}
 		if n > 0 {
-			logger.Info("flushed cw conntrack entries so the guard fails closed", "family", inetFamilyLabel(fam.family), "deleted", n)
+			logger.Info("flushed cw conntrack entries so the guard fails closed", "family", label, "deleted", n)
+		} else {
+			logger.Debug("cw conntrack flush matched no entries", "family", label)
 		}
 	}
+	return deleted, errors.Join(errs...)
 }
+
+// conntrackDeleteFilters is a var so tests can observe the flush without
+// CAP_NET_ADMIN.
+var conntrackDeleteFilters = netlink.ConntrackDeleteFilters
 
 // splitIPsByFamily parses and partitions IP strings into IPv4 and IPv6,
 // dropping unparseable entries. Extracted so the family split is unit-testable
