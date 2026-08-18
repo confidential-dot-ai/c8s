@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,7 @@ var (
 	installImagePullSecret  string
 	installImageTag         string
 	installOperatorKeys     string
+	installMinTCB           string
 	installForce            bool
 
 	installUpstream     string
@@ -156,6 +158,53 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 		return "", fmt.Errorf("no operator keys provided: allowlist writes will be DISABLED — nobody can add/remove/upload allowlist entries via `c8s allowlist`. Re-run with --operator-keys <file> to enable writes, or --force to install with writes disabled anyway")
 	}
 	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall", nil
+}
+
+// minTCBPreflight enforces that lowering the chart's shipped TCB floor is a
+// deliberate choice. The floor is the cluster's one defence against evidence
+// from known-vulnerable platform firmware, and lowering it re-opens that on
+// every verification path at once — so a --min-tcb below the shipped default
+// in any component requires --force. An empty --min-tcb leaves the shipped
+// floor in place; a floor at or above the default needs nothing.
+func minTCBPreflight(minTCB string, force bool) (warn string, err error) {
+	if minTCB == "" {
+		return "", nil
+	}
+	floor, err := types.ParseMinTcb(minTCB)
+	if err != nil {
+		return "", fmt.Errorf("--min-tcb: %w", err)
+	}
+	defRaw, err := fs.ReadFile(helmchart.ChartFS, helmchart.ChartRoot+"/values.yaml")
+	if err != nil {
+		return "", fmt.Errorf("read chart values: %w", err)
+	}
+	var vals struct {
+		MinTCB string `yaml:"minTcb"`
+	}
+	if err := yaml.Unmarshal(defRaw, &vals); err != nil {
+		return "", fmt.Errorf("parse chart values: %w", err)
+	}
+	def, err := types.ParseMinTcb(vals.MinTCB)
+	if err != nil {
+		return "", fmt.Errorf("chart default minTcb: %w", err)
+	}
+	if !minTcbBelow(floor, def) {
+		return "", nil
+	}
+	if !force {
+		return "", fmt.Errorf("--min-tcb %s lowers the chart's shipped TCB floor %s: evidence from platform firmware below %s would be accepted cluster-wide. Raise the floor, or re-run with --force to install with the lower floor anyway", minTCB, vals.MinTCB, vals.MinTCB)
+	}
+	return fmt.Sprintf("installing with a TCB floor (%s) below the chart's shipped floor (%s); evidence from weaker platform firmware will be accepted cluster-wide", minTCB, vals.MinTCB), nil
+}
+
+// minTcbBelow reports whether floor accepts evidence def would reject: any
+// component below the default's. A 0 component in def floors nothing, so
+// nothing can be below it.
+func minTcbBelow(floor, def types.MinTcb) bool {
+	return floor.Bootloader < def.Bootloader ||
+		floor.Tee < def.Tee ||
+		floor.Snp < def.Snp ||
+		floor.Microcode < def.Microcode
 }
 
 // preflightCDSNode fails fast (before the helm install) when no node carries
@@ -648,6 +697,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
+		if warn, err := minTCBPreflight(installMinTCB, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1214,6 +1268,12 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 			"--set-string", fmt.Sprintf("cds.measurements[%d]=%s", i, hexM),
 			"--set-string", fmt.Sprintf("ratlsMesh.measurements[%d]=%s", i, hexM),
 		)
+	}
+	// --min-tcb overrides the chart's shipped floor; empty leaves the chart
+	// value standing. The downgrade guard is minTCBPreflight on the install
+	// path, not anything here.
+	if installMinTCB != "" {
+		helmArgs = append(helmArgs, "--set-string", "minTcb="+installMinTCB)
 	}
 	for i, c := range installInventoryCIDRs {
 		helmArgs = append(helmArgs,
@@ -1916,6 +1976,7 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled)")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled); install with --min-tcb below the chart's shipped TCB floor")
+	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,0), enforced on every verification path (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
 	rootCmd.AddCommand(installCmd)
 }

@@ -1149,6 +1149,62 @@ func TestAppendCvmModeInstallArgsRejectsBadMeasurement(t *testing.T) {
 	}
 }
 
+// --min-tcb emits the single cluster-wide value; empty leaves the chart's
+// shipped floor standing (no arg, not an empty one).
+func TestAppendCvmModeInstallArgsMinTCB(t *testing.T) {
+	prev := installMinTCB
+	defer func() { installMinTCB = prev }()
+
+	installMinTCB = "4,0,28,0"
+	got, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(got, "minTcb=4,0,28,0") {
+		t.Fatalf("args missing minTcb=4,0,28,0; got %v", got)
+	}
+
+	installMinTCB = ""
+	got, err = appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if slices.ContainsFunc(got, func(a string) bool { return strings.HasPrefix(a, "minTcb=") }) {
+		t.Fatalf("empty --min-tcb leaked a minTcb arg; got %v", got)
+	}
+}
+
+// The downgrade gate: the chart ships a non-zero floor, and anything below it
+// in any component — including the all-zero "no floor" — requires --force.
+func TestMinTCBPreflight(t *testing.T) {
+	// Empty leaves the shipped floor in place: no gate, no warning.
+	if warn, err := minTCBPreflight("", false); err != nil || warn != "" {
+		t.Fatalf("empty --min-tcb: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+	// At or above the shipped floor needs nothing.
+	for _, ok := range []string{"3,0,8,0", "3,0,8,115", "4,0,28,222", "255,255,255,255"} {
+		if warn, err := minTCBPreflight(ok, false); err != nil || warn != "" {
+			t.Fatalf("--min-tcb %s: want no error/warn, got warn=%q err=%v", ok, warn, err)
+		}
+	}
+	// Below the shipped floor in any component is a downgrade; the zeroed
+	// floor is the extreme case.
+	for _, below := range []string{"2,0,8,0", "3,0,7,0", "0,0,0,0"} {
+		if _, err := minTCBPreflight(below, false); err == nil {
+			t.Fatalf("--min-tcb %s without --force: expected a downgrade error", below)
+		}
+		if warn, err := minTCBPreflight(below, true); err != nil || warn == "" {
+			t.Fatalf("--min-tcb %s with --force: want warn and no error, got warn=%q err=%v", below, warn, err)
+		}
+	}
+	// Malformed never reaches the comparison.
+	for _, bad := range []string{"garbage", "3,0,8", "3,0,8,256"} {
+		if _, err := minTCBPreflight(bad, true); err == nil {
+			t.Fatalf("--min-tcb %s: expected a parse error", bad)
+		}
+	}
+}
+
 // Pod mode used to refuse --measurements because the per-pod kata guest digest
 // was not computable. `c8s kata measure` computes it, so the pin is now
 // accepted and emitted in every mode — same value, different provenance.
