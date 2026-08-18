@@ -1,12 +1,14 @@
 Subject: [PATCH] agent: refuse OCI spec hooks in createcontainer
 
-Spec hooks ride inside an otherwise-admitted CreateContainerRequest and
-execute as guest root during do_create_container: prestart hooks run in
-the agent's own mount and PID namespaces, and all of them run before the
-admission verdict patch 0002 waits for. The baked policy denies them, so
-a request carrying hooks never reaches this point -- refuse them here
-anyway, so a policy-engine bypass (an agent built without agent-policy)
-cannot execute host-supplied hooks.
+Spec hooks ride inside an otherwise-admitted CreateContainerRequest.
+Prestart and CreateContainer hooks execute as guest root during
+do_create_container, before the admission verdict patch 0002 waits for
+-- prestart in the agent's own mount and PID namespaces; the remaining
+lists run after the verdict, with the admitted container (CreateRuntime
+has no execution site in the agent). The baked policy denies all six,
+so a request carrying hooks never reaches this point -- refuse them
+here anyway, so a policy-engine bypass (an agent built without
+agent-policy) cannot execute host-supplied hooks.
 
 The check sits right after the spec is taken from the request, which is
 before handle_cdi_devices and append_guest_hooks: the hooks the agent
@@ -15,7 +17,7 @@ and guest hooks -- are appended afterwards and stay working.
 
 --- a/src/agent/src/rpc.rs
 +++ b/src/agent/src/rpc.rs
-@@ -228,6 +228,8 @@ impl AgentService {
+@@ -228,6 +228,8 @@
              }
          };
  
@@ -24,14 +26,16 @@ and guest hooks -- are appended afterwards and stay working.
          let container_name = k8s::container_name(&oci);
  
          // c8s: the guest console is host-visible; the spec carries env/argv.
-@@ -2175,6 +2177,30 @@ async fn c8s_await_admission(cid: &str) -> Result<()> {
+@@ -2175,6 +2177,32 @@
      }
  }
  
-+// c8s: spec hooks run as guest root during do_create_container, before the
-+// admission verdict. The baked policy already denies them; refuse them here
-+// too, so a policy-engine bypass cannot execute host-supplied hooks. Hooks
-+// the agent adds itself (CDI injection, guest hooks) come after this check.
++// c8s: Prestart and CreateContainer spec hooks run as guest root during
++// do_create_container, before the admission verdict; the remaining lists
++// run after it. The baked policy already denies all six; refuse them here
++// too, so a policy-engine bypass cannot execute host-supplied hooks.
++// Hooks the agent adds itself (CDI injection, guest hooks) come after
++// this check.
 +fn c8s_refuse_spec_hooks(oci: &Spec) -> Result<()> {
 +    let Some(hooks) = oci.hooks().as_ref() else {
 +        return Ok(());
@@ -55,3 +59,91 @@ and guest hooks -- are appended afterwards and stay working.
  fn do_copy_file(req: &CopyFileRequest) -> Result<()> {
      let path = PathBuf::from(req.path.as_str());
  
+@@ -3605,4 +3633,87 @@
+             assert_eq!(d.result, result, "{msg}");
+         }
+     }
++
++    #[test]
++    fn test_c8s_refuse_spec_hooks() {
++        fn spec_with(hooks: Option<Hooks>) -> Spec {
++            let mut spec = Spec::default();
++            spec.set_hooks(hooks);
++            spec
++        }
++        let hook = || {
++            HookBuilder::default()
++                .path(PathBuf::from("/bin/bash"))
++                .build()
++                .unwrap()
++        };
++
++        assert!(c8s_refuse_spec_hooks(&spec_with(None)).is_ok());
++        assert!(c8s_refuse_spec_hooks(&spec_with(Some(Hooks::default()))).is_ok());
++        let empty_lists = HooksBuilder::default()
++            .prestart(vec![])
++            .create_runtime(vec![])
++            .create_container(vec![])
++            .start_container(vec![])
++            .poststart(vec![])
++            .poststop(vec![])
++            .build()
++            .unwrap();
++        assert!(c8s_refuse_spec_hooks(&spec_with(Some(empty_lists))).is_ok());
++
++        // One hook in any of the six lists must be refused, naming the list.
++        let cases: [(&str, Hooks); 6] = [
++            (
++                "prestart",
++                HooksBuilder::default()
++                    .prestart(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++            (
++                "createRuntime",
++                HooksBuilder::default()
++                    .create_runtime(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++            (
++                "createContainer",
++                HooksBuilder::default()
++                    .create_container(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++            (
++                "startContainer",
++                HooksBuilder::default()
++                    .start_container(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++            (
++                "poststart",
++                HooksBuilder::default()
++                    .poststart(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++            (
++                "poststop",
++                HooksBuilder::default()
++                    .poststop(vec![hook()])
++                    .build()
++                    .unwrap(),
++            ),
++        ];
++        for (name, hooks) in cases {
++            let result = c8s_refuse_spec_hooks(&spec_with(Some(hooks)));
++            assert!(result.is_err(), "{} hooks must be refused", name);
++            assert!(
++                result.unwrap_err().to_string().contains(name),
++                "refusal must name the {} list",
++                name
++            );
++        }
++    }
+ }
