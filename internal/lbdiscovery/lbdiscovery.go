@@ -239,6 +239,8 @@ func verifyDocument(ctx context.Context, data []byte, verify localverify.VerifyF
 // different tls-lb replica whose leaf that evidence does not cover. A lost
 // connection — server keepalive close, idle eviction, cert rotation — fails
 // closed with a re-run hint. Timeout knobs mirror ratls.NewVerifyingHTTPClient.
+// dialFrontDoor + this guard are a sibling of the verify CLI's dialFrontDoor +
+// singleConnClient (internal/cmds/verify/discovery.go) — port fixes both ways.
 func newSingleConnClient(conn *tls.Conn) *http.Client {
 	var used atomic.Bool
 	return &http.Client{

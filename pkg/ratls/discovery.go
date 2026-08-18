@@ -14,11 +14,11 @@ import (
 // together with the expected REPORTDATA: SHA-384(cert pubkey ‖ challenge),
 // get-cert's issuance binding (ReportDataForKey).
 //
-// Policy stays with the caller — public_tls.mode checks, platform defaulting,
-// and actually verifying the evidence — because the two consumers legitimately
-// differ: lbdiscovery binds a live connection to the attested cert (and must
-// refuse webpki mode), while `c8s verify` gathers evidence for offline
-// verification and never binds a connection.
+// Policy stays with the caller — public_tls.mode handling, platform
+// defaulting, and verifying the evidence. Both consumers fetch the document
+// over one live connection and bind it to that connection's leaf: lbdiscovery
+// refuses a mismatched leaf (and webpki mode) outright, while `c8s verify`
+// records the observation and lets its verdict policy demote.
 func AttestedCertFromDiscovery(d *types.DiscoveryDocument) (*x509.Certificate, [64]byte, error) {
 	if len(d.Attestation.Evidence) == 0 {
 		return nil, [64]byte{}, fmt.Errorf("discovery document carries no attestation.evidence")

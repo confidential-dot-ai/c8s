@@ -84,11 +84,12 @@ type evidence struct {
 	// hardware evidence, but the anchor is responder-chosen: it is not a
 	// pinned trust anchor and the verdict must never treat it as one.
 	leafChainDerived bool
-	// publicTLSMode is the discovery document's declared front-door TLS mode
-	// ("" when not discovery-sourced): "cds" serves the attestation-bound
-	// CDS leaf, "webpki" an operator WebPKI certificate the evidence says
-	// nothing about.
-	publicTLSMode string
+	// frontDoor is what a discovery gather's live TLS handshake showed about
+	// the front door's serving key (frontDoorNone when not discovery-sourced).
+	frontDoor frontDoorObservation
+	// frontDoorCertSHA256 is the hex SHA-256 of the leaf the live handshake
+	// presented ("" when no handshake was observed).
+	frontDoorCertSHA256 string
 	// leafKeyProven is true when a live TLS handshake with the leaf completed,
 	// which proves the presenter holds the attested private key. A forged body
 	// carrying someone else's attested SubjectPublicKeyInfo cannot complete
@@ -149,8 +150,9 @@ type leafTrust struct {
 	keyProven bool
 	// meshCA is the operator's --mesh-ca anchor (nil when unset). It is the
 	// only thing that can authenticate a CA-vouched body on a source with no
-	// proof of possession — a saved file, or a discovery document served
-	// unauthenticated over a connection nothing binds it to.
+	// proof of possession — a saved file, or a discovery document whose gather
+	// made no usable handshake observation (non-TLS target, or a leaf the
+	// document does not attest).
 	meshCA *x509.CertPool
 }
 
@@ -266,6 +268,7 @@ func evidenceFromCert(cert *x509.Certificate, source string, trust leafTrust) (*
 		leafBody:          body,
 		leafChainVerified: chainVerified,
 		leafKeyProven:     trust.keyProven,
+		frontDoor:         frontDoorNone,
 		sandboxID:         sandboxID,
 		sandboxErr:        sandboxErr,
 		workload:          workload,
@@ -397,6 +400,7 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
+		frontDoor:        frontDoorNone,
 		sandboxID:        sandboxID,
 		sandboxErr:       sandboxErr,
 		workload:         workload,
@@ -551,6 +555,7 @@ func evidenceFromBareJSON(data []byte, erd []byte, source string) (*evidence, er
 		fresh:       false,
 		source:      source,
 		bindingNote: "REPORTDATA supplied via --expected-report-data (not independently bound)",
+		frontDoor:   frontDoorNone,
 	}, nil
 }
 

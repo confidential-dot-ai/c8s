@@ -3,7 +3,9 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -36,26 +38,28 @@ func discoveryDocWithPublicTLS(t *testing.T, mode, certPEM string, challenge []b
 	return data
 }
 
-// The discovery gather must read public_tls.mode: cds (and its pre-mode-field
-// empty spelling) and webpki are recorded for the verdict; anything else
-// fails closed as a security verdict — auto mode must not fall through past a
-// document it cannot classify.
+// The discovery gather must classify public_tls.mode: cds (and its
+// pre-mode-field empty spelling) and webpki parse; anything else fails closed
+// as a security verdict — auto mode must not fall through past a document it
+// cannot classify. A parsed mode gates classification only — the verdict keys
+// on the live handshake observation, which a parsed-but-unprobed document
+// lacks.
 func TestDiscoveryPublicTLSModeParsing(t *testing.T) {
 	certPEM, _ := selfSignedCertPEM(t)
 	challenge := []byte("issuance-challenge")
 	evidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
 
 	for _, mode := range []string{"", "cds", "webpki"} {
-		ev, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, mode, certPEM, challenge, evidence), "test", leafTrust{})
+		ev, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, mode, certPEM, challenge, evidence), "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatalf("mode %q: %v", mode, err)
 		}
-		if ev.publicTLSMode != mode {
-			t.Errorf("mode %q: publicTLSMode = %q", mode, ev.publicTLSMode)
+		if ev.frontDoor != frontDoorUnobserved {
+			t.Errorf("mode %q: frontDoor = %v, want unobserved (no handshake was made)", mode, ev.frontDoor)
 		}
 	}
 
-	_, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, "dns", certPEM, challenge, evidence), "test", leafTrust{})
+	_, err := evidenceFromDiscovery(discoveryDocWithPublicTLS(t, "dns", certPEM, challenge, evidence), "test", leafTrust{}, nil)
 	if err == nil || !isSecurityError(err) {
 		t.Fatalf("an unknown public_tls.mode must fail closed as a security verdict, got %v", err)
 	}
@@ -83,38 +87,42 @@ func snpVerifiedOutcome(t *testing.T, cfg config, ev *evidence) Outcome {
 	return oc
 }
 
-// A WebPKI front door terminates public TLS on a certificate the evidence
-// says nothing about: the evidence verifies, but the verdict is partial —
-// never "✓ VERIFIED" — and the exit code tells scripts so.
+// A front door whose live handshake presents a serving key the evidence does
+// not attest (a WebPKI door, whatever the document declares): the evidence
+// verifies, but the verdict is partial — never "✓ VERIFIED" — and the exit
+// code tells scripts so.
 func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 	ev := &evidence{
-		platform:      "snp",
-		source:        "discovery document https://lb.example.com/v1/discovery",
-		bindingNote:   "REPORTDATA binds the CDS cert key + issuance challenge",
-		publicTLSMode: "webpki",
+		platform:            "snp",
+		source:              "discovery document https://lb.example.com/v1/discovery",
+		bindingNote:         "REPORTDATA binds the CDS cert key + issuance challenge",
+		certSHA256:          strings.Repeat("aa", 32),
+		frontDoor:           frontDoorOther,
+		frontDoorCertSHA256: strings.Repeat("bb", 32),
 	}
 	oc := snpVerifiedOutcome(t, config{}, ev)
 	if oc.Verified || !oc.Partial {
-		t.Fatalf("webpki front door: verified=%v partial=%v, want a partial verdict", oc.Verified, oc.Partial)
+		t.Fatalf("unbound front door: verified=%v partial=%v, want a partial verdict", oc.Verified, oc.Partial)
 	}
 	if got := verdictExitCode(oc); got != exitPartial {
 		t.Errorf("exit = %d, want %d", got, exitPartial)
 	}
-	if len(oc.NotProven) != 1 || !strings.Contains(oc.NotProven[0], "public_tls.mode=webpki") ||
+	if len(oc.NotProven) != 1 || !strings.Contains(oc.NotProven[0], "live TLS handshake") ||
+		!strings.Contains(oc.NotProven[0], ev.frontDoorCertSHA256) || !strings.Contains(oc.NotProven[0], ev.certSHA256) ||
 		!strings.Contains(oc.NotProven[0], "not attestation-bound") {
-		t.Errorf("NotProven = %v, want it to name the WebPKI serving key", oc.NotProven)
+		t.Errorf("NotProven = %v, want it to name the observed and attested serving keys", oc.NotProven)
 	}
 
 	var out bytes.Buffer
 	renderText(config{}, oc, &out)
 	got := out.String()
-	for _, want := range []string{"~ PARTIALLY VERIFIED", "not proven:", "public_tls.mode=webpki", "measurement:", "binding:"} {
+	for _, want := range []string{"~ PARTIALLY VERIFIED", "not proven:", "not attestation-bound", "measurement:", "binding:"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("partial render missing %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "✓ VERIFIED") {
-		t.Errorf("a WebPKI front door must never print ✓:\n%s", got)
+		t.Errorf("an unattested front door must never print ✓:\n%s", got)
 	}
 
 	// JSON carries the same honesty: verified stays false (CI fails closed),
@@ -132,13 +140,111 @@ func TestWebPKIFrontDoorIsPartialNotVerified(t *testing.T) {
 		t.Errorf("json not_proven = %v", parsed["not_proven"])
 	}
 
-	// A verification failure dominates the mode: exit 2, not partial.
+	// A verification failure dominates the mode: exit 2, not partial — and
+	// the door lie rides the failure instead of being buried by it.
 	verr := &securityError{err: errors.New("rejected")}
 	failed := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
 	applyVerdictPolicies(&failed, config{}, ev, nil, operatorKeysReport{})
 	if failed.Partial || verdictExitCode(failed) != exitFailed {
 		t.Errorf("failed evidence + webpki: partial=%v exit=%d, want a plain failure", failed.Partial, verdictExitCode(failed))
 	}
+	if !strings.Contains(failed.Error, ev.frontDoorCertSHA256) || !strings.Contains(failed.Error, ev.certSHA256) {
+		t.Errorf("Error = %q, want it to name the observed and attested serving keys even on a failure", failed.Error)
+	}
+}
+
+// The front-door metadata must never float over the verdict field in JSON:
+// a FAILED verdict carries no attested-door basis clause and no scope caveat
+// (a refusal has no basis to state), a VERIFIED one carries both, and a lying
+// door's digests surface on a failure exactly as on a partial.
+func TestFrontDoorVerdictJSONHonesty(t *testing.T) {
+	mk := func(frontDoor frontDoorObservation) *evidence {
+		return &evidence{
+			platform:            "snp",
+			source:              "discovery document https://lb.example.com/v1/discovery",
+			bindingNote:         "REPORTDATA binds the CDS cert key + issuance challenge",
+			certSHA256:          strings.Repeat("aa", 32),
+			frontDoor:           frontDoor,
+			frontDoorCertSHA256: strings.Repeat("bb", 32),
+		}
+	}
+	failedOutcome := func(ev *evidence) Outcome {
+		verr := &securityError{err: errors.New("rejected")}
+		oc := newOutcome(config{}, ev, nil, verr, mustPlan(t, config{measurements: []string{"ab" + strings.Repeat("00", 47)}}))
+		applyVerdictPolicies(&oc, config{}, ev, nil, operatorKeysReport{})
+		return oc
+	}
+	renderJSON := func(oc Outcome) map[string]any {
+		t.Helper()
+		var jout bytes.Buffer
+		render(config{output: "json"}, oc, &jout)
+		var parsed map[string]any
+		if err := json.Unmarshal(jout.Bytes(), &parsed); err != nil {
+			t.Fatalf("json render: %v", err)
+		}
+		return parsed
+	}
+
+	t.Run("verified + attested door: basis clause and scope caveat ride the tick", func(t *testing.T) {
+		oc := snpVerifiedOutcome(t, config{}, mk(frontDoorAttested))
+		if !oc.Verified {
+			t.Fatalf("verified=%v error=%q, want a verified verdict", oc.Verified, oc.Error)
+		}
+		parsed := renderJSON(oc)
+		if b, _ := parsed["binding"].(string); !strings.Contains(b, "live handshake presented the attested serving certificate") {
+			t.Errorf("json binding = %q, want the handshake basis clause", b)
+		}
+		w, _ := parsed["warnings"].([]any)
+		if len(w) != 1 || !strings.Contains(w[0].(string), "single connection") {
+			t.Errorf("json warnings = %v, want the one-connection scope caveat", parsed["warnings"])
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		if !strings.Contains(out.String(), "WARNING:") || !strings.Contains(out.String(), "single connection") {
+			t.Errorf("text render missing the scope WARNING:\n%s", out.String())
+		}
+	})
+
+	t.Run("failed + attested door: no basis clause, no caveat", func(t *testing.T) {
+		oc := failedOutcome(mk(frontDoorAttested))
+		if oc.Verified || oc.Error == "" {
+			t.Fatalf("verified=%v error=%q, want a failure", oc.Verified, oc.Error)
+		}
+		if strings.Contains(oc.Binding, "live handshake") || len(oc.Warnings) != 0 {
+			t.Errorf("binding = %q warnings = %v: a refusal must not carry the attested-door basis or scope caveat", oc.Binding, oc.Warnings)
+		}
+		parsed := renderJSON(oc)
+		if parsed["verified"] != false {
+			t.Errorf("json verified = %v, want false", parsed["verified"])
+		}
+		if b, _ := parsed["binding"].(string); strings.Contains(b, "live handshake") {
+			t.Errorf("json binding = %q rides verified:false — the basis clause must not", b)
+		}
+		if _, ok := parsed["warnings"]; ok {
+			t.Errorf("json warnings = %v on a failed verdict, want the key omitted", parsed["warnings"])
+		}
+	})
+
+	t.Run("failed + lying door: the digests ride the failure", func(t *testing.T) {
+		ev := mk(frontDoorOther)
+		oc := failedOutcome(ev)
+		if oc.Partial || verdictExitCode(oc) != exitFailed {
+			t.Fatalf("partial=%v exit=%d, want a plain failure", oc.Partial, verdictExitCode(oc))
+		}
+		if !strings.Contains(oc.Error, ev.frontDoorCertSHA256) || !strings.Contains(oc.Error, ev.certSHA256) ||
+			!strings.Contains(oc.Error, "not attestation-bound") {
+			t.Errorf("Error = %q, want both serving-key digests on the failure", oc.Error)
+		}
+		var out bytes.Buffer
+		renderText(config{}, oc, &out)
+		if !strings.Contains(out.String(), ev.frontDoorCertSHA256) {
+			t.Errorf("text render buries the lying door digest:\n%s", out.String())
+		}
+		parsed := renderJSON(oc)
+		if e, _ := parsed["error"].(string); !strings.Contains(e, ev.frontDoorCertSHA256) || !strings.Contains(e, ev.certSHA256) {
+			t.Errorf("json error = %q, want both serving-key digests", e)
+		}
+	})
 }
 
 // genoaFileEvidence parses the vendored Genoa fixture (VCEK inline, verifies
@@ -156,15 +262,16 @@ func genoaFileEvidence(t *testing.T) *evidence {
 	return ev
 }
 
-// The full verify path on real offline-verifiable evidence: a WebPKI-mode
-// discovery verdict exits 4, and the same evidence with an attestation-bound
-// front door still exits 0 — the regression pair.
-func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
+// The full verify path on real offline-verifiable evidence: a discovery
+// verdict whose live handshake presented an unattested serving key (or could
+// not observe one) exits 4, and the same evidence with the attestation-bound
+// front door observed — or no front-door property at all — still exits 0.
+func TestVerifyEvidenceFrontDoorExitCodes(t *testing.T) {
 	plan := &verifyPlan{policy: &ratls.VerifyPolicy{}}
 
-	t.Run("webpki front door exits partial", func(t *testing.T) {
+	t.Run("unbound front door exits partial", func(t *testing.T) {
 		ev := genoaFileEvidence(t)
-		ev.publicTLSMode = "webpki" // as a discovery gather would record it
+		ev.frontDoor = frontDoorOther // as a discovery gather would record it
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
 		if code != exitPartial {
@@ -175,18 +282,19 @@ func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
 		}
 	})
 
-	t.Run("pre-mode discovery document still verifies", func(t *testing.T) {
-		ev := genoaFileEvidence(t) // publicTLSMode "" — a pre-mode-field document
+	t.Run("unobserved front door exits partial", func(t *testing.T) {
+		ev := genoaFileEvidence(t)
+		ev.frontDoor = frontDoorUnobserved // discovery doc fetched over a non-TLS connection
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
-		if code != exitVerified {
-			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
+		if code != exitPartial {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitPartial, out.String(), errOut.String())
 		}
 	})
 
-	t.Run("attestation-bound front door still verifies", func(t *testing.T) {
+	t.Run("attested front door still verifies", func(t *testing.T) {
 		ev := genoaFileEvidence(t)
-		ev.publicTLSMode = "cds"
+		ev.frontDoor = frontDoorAttested
 		var out, errOut bytes.Buffer
 		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
 		if code != exitVerified {
@@ -194,6 +302,18 @@ func TestVerifyEvidenceWebPKIExitCodes(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), "✓ VERIFIED") {
 			t.Errorf("output:\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), "WARNING:") || !strings.Contains(out.String(), "single connection") {
+			t.Errorf("an attested door's tick must carry the one-connection scope caveat:\n%s", out.String())
+		}
+	})
+
+	t.Run("no front-door property still verifies", func(t *testing.T) {
+		ev := genoaFileEvidence(t) // frontDoorNone — not discovery-sourced
+		var out, errOut bytes.Buffer
+		code := verifyEvidence(context.Background(), config{output: "text"}, plan, ev, nil, operatorKeysReport{}, &out, &errOut)
+		if code != exitVerified {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitVerified, out.String(), errOut.String())
 		}
 	})
 }
@@ -324,8 +444,52 @@ func TestEndpointEvidenceMarksChainDerived(t *testing.T) {
 	}
 }
 
-// run() over a served discovery document: WebPKI mode with evidence that
-// itself fails verification is a failure (exit 2), not a partial — the mode
+// run() over a lying HTTPS server, end to end — the production shape: TLS
+// dial, same-connection fetch, evidence, verdict. The document claims cds
+// while the door serves another cert; the (stub) evidence then fails
+// verification, so the verdict is a failure — and the door lie's digests
+// ride it rather than being buried. A refused dial is exit 3.
+func TestRunDiscoveryOverLyingHTTPS(t *testing.T) {
+	challenge := []byte("issuance-challenge")
+	stubEvidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
+	attestedPEM, attestedCert := selfSignedServerCert(t)
+	_, otherCert := selfSignedServerCert(t)
+	doc := discoveryDocWithPublicTLS(t, "cds", attestedPEM, challenge, stubEvidence)
+
+	t.Run("lying https door + failing evidence is a named failure", func(t *testing.T) {
+		srv := discoveryServer(t, otherCert, doc)
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: srv.URL, kind: "lb", output: "text"}, &out, &errOut)
+		if code != exitFailed {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitFailed, out.String(), errOut.String())
+		}
+		served := sha256.Sum256(otherCert.Certificate[0])
+		attested := sha256.Sum256(attestedCert.Certificate[0])
+		for _, d := range []string{hex.EncodeToString(served[:]), hex.EncodeToString(attested[:])} {
+			if !strings.Contains(out.String(), d) {
+				t.Errorf("the failure must name the door digest %s:\n%s", d, out.String())
+			}
+		}
+		if strings.Contains(out.String(), "PARTIALLY") || strings.Contains(out.String(), "✓") {
+			t.Errorf("a failure must not read as partial or verified:\n%s", out.String())
+		}
+	})
+
+	t.Run("unreachable https target exits 3", func(t *testing.T) {
+		srv := discoveryServer(t, otherCert, doc)
+		url := srv.URL
+		srv.Close()
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: url, kind: "lb", output: "text"}, &out, &errOut)
+		if code != exitNoEvidence {
+			t.Errorf("exit = %d, want %d; output:\n%s%s", code, exitNoEvidence, out.String(), errOut.String())
+		}
+	})
+}
+
+// run() over a served discovery document: an unattested front door (the
+// helper serves plain HTTP, so no handshake is observed) with evidence that
+// itself fails verification is a failure (exit 2), not a partial — the
 // demotion only ever applies to a passing verdict. An unknown mode is a
 // security verdict, and auto mode must not fall through past it.
 func TestRunDiscoveryPublicTLSModeVerdicts(t *testing.T) {
@@ -342,7 +506,7 @@ func TestRunDiscoveryPublicTLSModeVerdicts(t *testing.T) {
 		return srv.URL
 	}
 
-	t.Run("webpki + failing evidence is a failure, not partial", func(t *testing.T) {
+	t.Run("unattested door + failing evidence is a failure, not partial", func(t *testing.T) {
 		url := serve(t, discoveryDocWithPublicTLS(t, "webpki", certPEM, challenge, stubEvidence))
 		var out, errOut bytes.Buffer
 		code := run(context.Background(), config{url: url, kind: "lb", output: "text"}, &out, &errOut)

@@ -117,7 +117,7 @@ func TestUnauthenticatedCertBodyRejected(t *testing.T) {
 	t.Run("discovery document", func(t *testing.T) {
 		doc := discoveryDocWith(t, string(certutil.EncodeCertPEM(forged.Raw)), []byte("challenge"),
 			`{"attestation_report":"AAAA"}`)
-		_, err := evidenceFromDiscovery(doc, "test", leafTrust{})
+		_, err := evidenceFromDiscovery(doc, "test", leafTrust{}, nil)
 		if err == nil {
 			t.Fatal("a replayed discovery document with a re-minted certificate must not verify")
 		}
@@ -203,7 +203,7 @@ func TestMeshCAAuthenticatesCAIssuedCertBody(t *testing.T) {
 
 	doc := discoveryDocWith(t, string(certutil.EncodeCertPEM(leaf.Raw)), []byte("challenge"),
 		`{"attestation_report":"AAAA"}`)
-	ev, err := evidenceFromDiscovery(doc, "test", leafTrust{meshCA: pool})
+	ev, err := evidenceFromDiscovery(doc, "test", leafTrust{meshCA: pool}, nil)
 	if err != nil {
 		t.Fatalf("a CA-issued discovery cert chaining to --mesh-ca must be accepted: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestEvidenceFromDiscoveryAuthenticatesCertBody(t *testing.T) {
 		cert := mintAttestedLeaf(t, &key.PublicKey, key, now.Add(-2*time.Hour), now.Add(-time.Minute))
 		doc := discoveryDocWith(t, string(certutil.EncodeCertPEM(cert.Raw)), []byte("challenge"),
 			`{"attestation_report":"AAAA"}`)
-		_, err := evidenceFromDiscovery(doc, "test", leafTrust{})
+		_, err := evidenceFromDiscovery(doc, "test", leafTrust{}, nil)
 		if err == nil || !strings.Contains(err.Error(), "expired") {
 			t.Fatalf("want NotAfter rejection, got %v", err)
 		}
@@ -302,7 +302,7 @@ func TestEvidenceFromDiscoveryAuthenticatesCertBody(t *testing.T) {
 		cert := mintAttestedLeaf(t, &key.PublicKey, signer, now.Add(-time.Hour), now.Add(time.Hour))
 		doc := discoveryDocWith(t, string(certutil.EncodeCertPEM(cert.Raw)), []byte("challenge"),
 			`{"attestation_report":"AAAA"}`)
-		if _, err := evidenceFromDiscovery(doc, "test", leafTrust{}); err == nil {
+		if _, err := evidenceFromDiscovery(doc, "test", leafTrust{}, nil); err == nil {
 			t.Fatal("want self-signature rejection on the discovery cert")
 		}
 	})
@@ -311,7 +311,7 @@ func TestEvidenceFromDiscoveryAuthenticatesCertBody(t *testing.T) {
 		cert := mintAttestedLeaf(t, &key.PublicKey, key, now.Add(-time.Hour), now.Add(time.Hour))
 		doc := discoveryDocWith(t, string(certutil.EncodeCertPEM(cert.Raw)), []byte("challenge"),
 			`{"attestation_report":"AAAA"}`)
-		ev, err := evidenceFromDiscovery(doc, "test", leafTrust{})
+		ev, err := evidenceFromDiscovery(doc, "test", leafTrust{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

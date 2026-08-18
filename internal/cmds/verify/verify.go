@@ -175,8 +175,10 @@ Evidence sources:
 
 Exit codes: 0 verified · 1 usage · 2 verification/policy failed · 3 evidence
 unavailable (unreachable / unparseable) · 4 partially verified (the evidence
-verified, but a property it presents is not proven — a WebPKI front door whose
-serving key is not attestation-bound, or a chain anchor the responder chose).`,
+verified, but a property it presents is not proven — the front door's live
+handshake presented a serving key the evidence does not attest, no handshake
+could be observed (a non-TLS discovery target), or a chain anchor the
+responder chose).`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -394,15 +396,41 @@ func demoteToPartial(oc *Outcome, notProven string) {
 	oc.NotProven = append(oc.NotProven, notProven)
 }
 
-// applyFrontDoorPolicy enforces the discovery document's public_tls.mode: a
-// WebPKI front door terminates public TLS on an operator certificate, so the
-// serving key clients reach is not the attestation-bound CDS key the evidence
-// speaks for.
+// frontDoorAttestedNote states a verified discovery verdict's basis: the
+// live handshake presented the attested serving certificate. It is appended
+// only to a passing verdict — on a refusal the gather-time fact must not
+// read as the verdict's basis.
+const frontDoorAttestedNote = "; the live handshake presented the attested serving certificate"
+
+// frontDoorScopeWarning bounds an attested front door to the observation made.
+const frontDoorScopeWarning = "the attested front door was observed on this verify's single connection to a single tls-lb replica at a single instant: serving certificates are per-replica, and a later or differently-routed client connection (TOCTOU, source-IP routing) can reach a different door — clients must verify their own connection (see internal/lbdiscovery)"
+
+// applyFrontDoorPolicy settles what the verdict may claim about the front
+// door's serving key, keying on the live handshake the discovery gather
+// observed. A door presenting the attestation-bound certificate leaves the
+// verdict standing, scoped to the one observation made; any other serving
+// key, or no TLS observation at all, leaves the endpoint clients reach
+// unproven. A lying door is named on every verdict shape — partial or failed —
+// so a dominating verification failure never buries the signal.
 func applyFrontDoorPolicy(oc *Outcome, ev *evidence) {
-	if ev.publicTLSMode != "webpki" {
-		return
+	switch ev.frontDoor {
+	case frontDoorAttested:
+		if oc.Verified {
+			oc.Binding += frontDoorAttestedNote
+			oc.Warnings = append(oc.Warnings, frontDoorScopeWarning)
+		}
+	case frontDoorOther:
+		digests := fmt.Sprintf(
+			"the front door's live TLS handshake presented serving certificate sha256 %s, not the sha256 %s this evidence attests",
+			ev.frontDoorCertSHA256, ev.certSHA256)
+		if !oc.Verified {
+			oc.Error += "; " + digests + " — the TLS endpoint clients reach is not attestation-bound"
+			return
+		}
+		demoteToPartial(oc, digests+" — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not attestation-bound")
+	case frontDoorUnobserved:
+		demoteToPartial(oc, "the front door's serving key: the target connection was not TLS, so no live handshake showed what the door serves, and the discovery document's declared public_tls.mode is a host-served claim nothing authenticates — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 	}
-	demoteToPartial(oc, "the front-door serving key is not attestation-bound: public_tls.mode=webpki terminates public TLS on an operator WebPKI certificate, not the CDS-issued key this evidence attests — the tls-lb pod's TEE residency and measurement are proven; the TLS endpoint clients reach is not")
 }
 
 // applyChainAnchorPolicy settles what the verdict may claim about an
@@ -1026,10 +1054,12 @@ type Outcome struct {
 	Warnings []string `json:"warnings,omitempty"`
 
 	// Partial is true when the hardware evidence verified but a property the
-	// evidence presents is not proven (a WebPKI front door's serving key, a
-	// responder-chosen chain anchor). Verified stays false, so a CI gate
-	// checking verified==true fails closed; the exit code distinguishes the
-	// case (4) from a failure (2). NotProven names each unproven property.
+	// evidence presents is not proven (a front door whose live handshake
+	// presented a serving key the evidence does not attest — or offered no
+	// handshake to observe —, a responder-chosen chain anchor). Verified
+	// stays false, so a CI gate checking verified==true fails closed; the
+	// exit code distinguishes the case (4) from a failure (2). NotProven
+	// names each unproven property.
 	Partial   bool     `json:"partial,omitempty"`
 	NotProven []string `json:"not_proven,omitempty"`
 
@@ -1041,12 +1071,13 @@ type Outcome struct {
 
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
-	// self-signed, a verified issuing chain, possession of the attested key on
-	// a live RA-TLS dial, or — on attest-pq — the identity transcript the
-	// hardware evidence binds (whose chain anchor is responder-chosen; see
-	// ChainAnchor). A leaf with none of these is not accepted as evidence at
-	// all (authorizeLeafBody), because checking a validity window inside an
-	// unsigned body bounds nothing.
+	// self-signed, a verified issuing chain, possession of the attested key
+	// proven by a live TLS handshake (the RA-TLS dial, or the discovery
+	// gather's front-door probe), or — on attest-pq — the identity
+	// transcript the hardware evidence binds (whose chain anchor is
+	// responder-chosen; see ChainAnchor). A leaf with none of these is not
+	// accepted as evidence at all (authorizeLeafBody), because checking a
+	// validity window inside an unsigned body bounds nothing.
 	CertBody string `json:"cert_body,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the
@@ -1460,7 +1491,7 @@ func describeCertBody(_ config, ev *evidence) string {
 	case ev.leafChainDerived:
 		return "CA-signed: body committed into the identity transcript — the hardware evidence binds these exact bytes" + skew + certutil.LeafValiditySkew.String() + ")"
 	case ev.leafKeyProven:
-		return "CA-signed: body not chain-checked, but the live RA-TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
+		return "CA-signed: body not chain-checked, but the live TLS handshake proves the peer holds the attested key, so this body could not have been minted around it — pass --mesh-ca to also check the issuing chain"
 	default:
 		return "CA-signed: body fields are CA-vouched and UNAUTHENTICATED — pass --mesh-ca to check the chain"
 	}

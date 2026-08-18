@@ -178,13 +178,13 @@ func TestVerifyEvidence_InitDataNoteAbsentOnFailedVerdict(t *testing.T) {
 }
 
 // A PARTIAL verdict is not a failure: the init-data pin was verified, and the
-// verdict is partial for an unrelated property (here a WebPKI front door). The
-// note is honest, so it rides — in text and JSON alike, the same surfaces that
-// must agree to hide it on a hard failure.
+// verdict is partial for an unrelated property (here an unattested front
+// door). The note is honest, so it rides — in text and JSON alike, the same
+// surfaces that must agree to hide it on a hard failure.
 func TestVerifyEvidence_InitDataNoteRidesPartialVerdict(t *testing.T) {
 	makeEv := func(t *testing.T) *evidence {
 		ev := genoaFileEvidence(t)
-		ev.publicTLSMode = "webpki"
+		ev.frontDoor = frontDoorOther
 		return ev
 	}
 
