@@ -2156,7 +2156,7 @@ func TestChartRendersTLSLBPublicTLSAndDiscovery(t *testing.T) {
 	defaultRoute.assertDirective(t, "proxy_ssl_certificate_key", "/tls/key.pem")
 	defaultRoute.assertDirective(t, "proxy_ssl_name", "my-backend.other-ns.svc.cluster.local")
 	defaultRoute.assertDirective(t, "proxy_ssl_verify", "on")
-	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/cert.pem")
+	defaultRoute.assertDirective(t, "proxy_ssl_trusted_certificate", "/tls/ca.pem")
 	defaultRoute.assertDirective(t, "proxy_pass", "https://$backend_addr")
 
 	spec := renderedDeployment(t, out, "c8s-tls-lb").Spec.Template.Spec
@@ -2427,6 +2427,46 @@ func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
 	}
 }
 
+// With attestation on, an explicit route is a first-class bypass of the
+// committed upstream: nginx longest-prefix-matches the route ahead of the
+// catch-all, while the transcript keeps naming tlsLb.upstream. The render
+// refuses the pair; routes with attestation off stay legal.
+func TestChartTLSLBAttestRejectsRoutes(t *testing.T) {
+	route := `--set-json`
+	out, err := helmTemplate(t,
+		"--set", "tlsLb.attest.enabled=true",
+		route, `tlsLb.routes=[{"path":"/v1/models","backend":{"protocol":"https","address":"other-svc.other.svc.cluster.local:8443","tls":{"verify":true}}}]`,
+	)
+	if err == nil {
+		t.Fatalf("expected render to fail with attestation + routes; got success\n%s", out)
+	}
+	assertHelmFailMessage(t, out, "VALIDATION_ERROR kind=tlslb_attest_routes: tlsLb.attest.enabled=true requires tlsLb.routes to be empty: the attestation transcript commits tlsLb.upstream as the plaintext destination, but a routes[] entry renders an nginx location that shadows the catch-all and forwards outside the committed destination. Move the routed paths onto the committed upstream, drop the routes, or set tlsLb.attest.enabled=false.")
+
+	if _, err := helmTemplate(t,
+		"--set", "tlsLb.attest.enabled=false",
+		route, `tlsLb.routes=[{"path":"/v1/models","backend":{"protocol":"https","address":"other-svc.other.svc.cluster.local:8443","tls":{"verify":true}}}]`,
+	); err != nil {
+		t.Fatalf("routes without attestation should render: %v", err)
+	}
+}
+
+// The sidecar's --upstream and nginx's catch-all render from the same trimmed
+// address: a padded value cannot fork the committed destination from the
+// routed one.
+func TestChartTLSLBUpstreamAddressTrimmed(t *testing.T) {
+	out, err := helmTemplate(t, noUpstreamArgs(
+		"--set-string", "tlsLb.upstream.address= my-backend.other-ns.svc:8443 ",
+		"--set", "tlsLb.upstream.protocol=https",
+	)...)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, sidecar, "--upstream=https://my-backend.other-ns.svc:8443")
+	cfg := renderedTLSLBNginxConfig(t, out)
+	cfg.location(t, "prefix", "/").assertDirective(t, "set", "$backend_addr", "my-backend.other-ns.svc:8443")
+}
+
 func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "tlsLb.attest.enabled=true",
@@ -2479,8 +2519,9 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 		assertDirective(t, "proxy_set_header", "X-Real-IP", "$remote_addr")
 
 	// An https upstream: the sidecar presents the CDS client cert and
-	// verifies the upstream against the CA chain get-cert writes to
-	// /tls/cert.pem, mirroring the nginx proxy_ssl_* config.
+	// verifies the upstream against the mesh CA bundle get-cert writes to
+	// /tls/ca.pem (leaf-rotation-stable, unlike the leaf+chain file),
+	// mirroring the nginx proxy_ssl_* config.
 	httpsOut, err := helmTemplate(t, noUpstreamArgs(
 		"--set", "tlsLb.attest.enabled=true",
 		"--set-string", "tlsLb.upstream.address=my-backend.other-ns.svc:8443",
@@ -2492,7 +2533,7 @@ func TestChartRendersTLSLBAttestSidecar(t *testing.T) {
 	httpsSidecar := renderedDeploymentContainer(t, httpsOut, "c8s-tls-lb", "cds-attest")
 	assertContainerArgs(t, httpsSidecar,
 		"--upstream=https://my-backend.other-ns.svc:8443",
-		"--upstream-ca=/tls/cert.pem",
+		"--upstream-ca=/tls/ca.pem",
 		"--upstream-cert=/tls/cert.pem",
 		"--upstream-key=/tls/key.pem",
 		"--upstream-server-name=my-backend.other-ns.svc",
@@ -2932,6 +2973,7 @@ func TestTLSLBBuiltInAllowlistRouteCanBeDisabled(t *testing.T) {
 
 func TestTLSLBExplicitAllowlistRouteOverridesBuiltInRoute(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=custom-cds.example:8443",
@@ -2960,6 +3002,7 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 	// Route backends must be secured (https + verify); the location/upstream
 	// wiring under test is protocol-independent.
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
@@ -3012,6 +3055,7 @@ func TestTLSLBAdditionalRoutesConfigureNginxLocations(t *testing.T) {
 // cert is presented but no proxy_ssl client cert is required for that header.
 func TestTLSLBRouteForwardsProto(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/tenant/",
 		"--set-string", "routes[0].backend.address=tenant-router.c8s-system.svc:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3029,6 +3073,7 @@ func TestTLSLBRouteForwardsProto(t *testing.T) {
 
 func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=exact",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
@@ -3054,6 +3099,7 @@ func TestTLSLBTypedHTTPSRouteConfiguresProxyTLS(t *testing.T) {
 
 func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3073,6 +3119,7 @@ func TestTLSLBTypedHTTPSRouteCanUseCDSClientCert(t *testing.T) {
 
 func TestTLSLBTypedHTTPSRouteCustomTrustedCAPathDoesNotMountMeshCA(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc.cluster.local:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3364,6 +3411,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		{
 			name: "route-verifyDepth-injection",
 			args: []string{
+				"--set", "attest.enabled=false",
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set-string", "routes[0].backend.protocol=https",
@@ -3375,6 +3423,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		{
 			name: "route-tls-on-http-backend",
 			args: []string{
+				"--set", "attest.enabled=false",
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set", "routes[0].backend.tls.verify=true",
@@ -3384,6 +3433,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		{
 			name: "route-verify-not-bool",
 			args: []string{
+				"--set", "attest.enabled=false",
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set-string", "routes[0].backend.protocol=https",
@@ -3394,6 +3444,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		{
 			name: "route-address-with-hash",
 			args: []string{
+				"--set", "attest.enabled=false",
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080#x",
 			},
@@ -3402,6 +3453,7 @@ func TestTLSLBRejectsUnsafeProxyTLS(t *testing.T) {
 		{
 			name: "route-serverName-with-slash",
 			args: []string{
+				"--set", "attest.enabled=false",
 				"--set-string", "routes[0].path=/x",
 				"--set-string", "routes[0].backend.address=svc:8080",
 				"--set-string", "routes[0].backend.protocol=https",
@@ -3451,6 +3503,7 @@ func TestTLSLBVerifyDepthZeroPreserved(t *testing.T) {
 // route does not need it.
 func TestTLSLBMultiRouteVerifiedRouteUsesMeshCABundle(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/a",
 		"--set-string", "routes[0].backend.address=svc-a:8080",
 		"--set-string", "routes[0].backend.protocol=https",
@@ -3499,7 +3552,7 @@ func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := helmTemplateTLSLB(t, tt.args...)
+			out, err := helmTemplateTLSLB(t, append(tt.args, "--set", "attest.enabled=false")...)
 			if err == nil {
 				t.Fatalf("helm template succeeded, want %s failure\n%s", tt.kind, out)
 			}
@@ -3512,6 +3565,7 @@ func TestTLSLBRejectsUnsecuredRoute(t *testing.T) {
 
 func TestTLSLBRejectsInvalidRouteMatch(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].match=regex",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
@@ -3552,7 +3606,7 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := helmTemplateTLSLB(t, tt.args...)
+			out, err := helmTemplateTLSLB(t, append(tt.args, "--set", "attest.enabled=false")...)
 			if err == nil {
 				t.Fatalf("helm template succeeded, want missing route field failure\n%s", out)
 			}
@@ -3563,6 +3617,7 @@ func TestTLSLBRejectsMissingRouteFields(t *testing.T) {
 
 func TestTLSLBRejectsRouteUpstream(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].upstream=http://cds.c8s-system.svc:8080",
 	)
@@ -3574,6 +3629,7 @@ func TestTLSLBRejectsRouteUpstream(t *testing.T) {
 
 func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/allowlist",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 		"--set-string", "routes[0].backend.protocol=grpc",
@@ -3586,6 +3642,7 @@ func TestTLSLBRejectsInvalidTypedRouteProtocol(t *testing.T) {
 
 func TestTLSLBRejectsUnsafeRoutePath(t *testing.T) {
 	out, err := helmTemplateTLSLB(t,
+		"--set", "attest.enabled=false",
 		"--set-string", "routes[0].path=/bad;return",
 		"--set-string", "routes[0].backend.address=cds.c8s-system.svc:8080",
 	)
@@ -5631,7 +5688,7 @@ func Example_tlsLBConfig() {
 	//             proxy_ssl_name vllm;
 	//             proxy_ssl_verify on;
 	//             proxy_ssl_verify_depth 2;
-	//             proxy_ssl_trusted_certificate /tls/cert.pem;
+	//             proxy_ssl_trusted_certificate /tls/ca.pem;
 	//             set $backend_addr vllm:8000;
 	//             proxy_pass https://$backend_addr;
 	//             proxy_set_header Host $host;

@@ -1142,12 +1142,12 @@ tlsLb:
       # -- SNI/verification name for the HTTPS upstream. Must match the upstream
       # cert SAN. Empty defaults to the address host.
       serverName: ""
-      # -- CA file nginx verifies the upstream against. Defaults to the get-cert
-      # output at <tlsMountPath>/cert.pem, which CDS returns as leaf+CA chain, so
-      # CDS-issued upstream certs verify out of the box. Set to
-      # <meshCA.mountPath>/<meshCA.key> (and provide that ConfigMap) or another
-      # path for a different upstream.
-      trustedCAPath: /tls/cert.pem
+      # -- CA file nginx verifies the upstream against. Empty defaults to
+      # <tlsMountPath>/ca.pem, the mesh CA bundle get-cert writes — stable
+      # across leaf rotations, and the bundle the attestation sidecar commits.
+      # Set to <meshCA.mountPath>/<meshCA.key> (and provide that ConfigMap) or
+      # another path for a different upstream.
+      trustedCAPath: ""
 
   # -- Publish CDS's complete /allowlist API through the tls-lb front door.
   # The built-in route uses an in-pod loopback proxy that verifies the
@@ -1186,7 +1186,8 @@ tlsLb:
 
   # -- Additional path routes proxied before the default upstream backend.
   # Useful for preserving control-plane endpoints while the catch-all route
-  # points at an inference backend.
+  # points at an inference backend. Refused while tlsLb.attest.enabled=true:
+  # a route shadows the catch-all the attestation transcript commits.
   routes: []
     # - path: /allowlist
     #   match: exact  # exact | prefix (default)

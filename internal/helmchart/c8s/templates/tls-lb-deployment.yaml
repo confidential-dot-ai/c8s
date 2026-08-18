@@ -32,7 +32,7 @@ withheld. */ -}}
 {{- $defaultMeshCAPath := printf "%s/ca.pem" .Values.tlsLb.tlsMountPath -}}
 {{- $upstreamTrustedCAPath := default $defaultMeshCAPath .Values.tlsLb.upstream.tls.trustedCAPath -}}
 {{- $attestUsesHTTPSUpstream := and .Values.tlsLb.attest.enabled (eq .Values.tlsLb.upstream.protocol "https") -}}
-{{- $upstreamAddress := .Values.tlsLb.upstream.address -}}
+{{- $upstreamAddress := .Values.tlsLb.upstream.address | trim -}}
 {{- $attestUpstreamServerName := default (include "tls-lb.serverNameFromAddress" $upstreamAddress) .Values.tlsLb.upstream.tls.serverName -}}
 {{- $renderAllowlistProxy := eq (include "tls-lb.renderAllowlistRoute" .) "true" -}}
 apiVersion: apps/v1
@@ -210,15 +210,18 @@ spec:
             - --mesh-identity-key-file={{ .Values.tlsLb.tlsMountPath }}/key.pem
             - --mesh-identity-ca-file={{ .Values.tlsLb.tlsMountPath }}/ca.pem
             # Terminate over-encryption here and forward to the same workload
-            # backend nginx proxies to; attest-lb commits this exact value
-            # into its transcript, so a client pinning a different destination
-            # rejects the front door. An http upstream is plaintext at the
-            # app layer; pointed at a headless Service (an adopted workload),
-            # the node mesh wraps the pod-IP hop in attested mTLS. An https
-            # upstream terminates TLS itself and gets the mTLS args below.
-            # No adopted workload (empty upstream address) -> omit --upstream
-            # entirely; the sidecar then serves attestation with its echo
-            # backend instead of crashing on a scheme-only URL.
+            # backend nginx's catch-all proxies to (rendered from the same
+            # values; tlsLb.routes is refused while attestation is enabled).
+            # Both attestation endpoints commit these exact values — the base
+            # URL, and for https the verification server name and CA bundle
+            # hash — so a client pinning a different destination rejects the
+            # front door. An http upstream is plaintext at the app layer;
+            # pointed at a headless Service (an adopted workload), the node
+            # mesh wraps the pod-IP hop in attested mTLS. An https upstream
+            # terminates TLS itself and gets the mTLS args below. No adopted
+            # workload (empty upstream address) -> omit --upstream entirely;
+            # the sidecar then serves attestation with its echo backend
+            # instead of crashing on a scheme-only URL.
             {{- if $upstreamAddress }}
             - --upstream={{ .Values.tlsLb.upstream.protocol }}://{{ $upstreamAddress }}
             {{- if $attestUsesHTTPSUpstream }}

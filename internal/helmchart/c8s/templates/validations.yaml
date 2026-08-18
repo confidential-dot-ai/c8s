@@ -135,6 +135,15 @@
 {{- end -}}
 {{- end -}}
 {{- /*
+  The attestation transcripts commit tlsLb.upstream as THE plaintext
+  destination, but a routes[] entry renders an nginx location that
+  longest-prefix-matches ahead of the catch-all and forwards outside the
+  committed destination — a first-class values bypass of the commitment.
+*/ -}}
+{{- if and $tlsLB.enabled $tlsLB.attest.enabled (gt (len $tlsLB.routes) 0) -}}
+{{- fail "VALIDATION_ERROR kind=tlslb_attest_routes: tlsLb.attest.enabled=true requires tlsLb.routes to be empty: the attestation transcript commits tlsLb.upstream as the plaintext destination, but a routes[] entry renders an nginx location that shadows the catch-all and forwards outside the committed destination. Move the routed paths onto the committed upstream, drop the routes, or set tlsLb.attest.enabled=false." -}}
+{{- end -}}
+{{- /*
   Rate budget for the built-in /allowlist route. CDS rate-limits per source
   IP and sees every front-door request as the one tls-lb pod IP, so the nginx
   aggregate write bound must undercut the CDS bucket signed operator writes
