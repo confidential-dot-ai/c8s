@@ -7,8 +7,8 @@ Tracking issue: [#264].
 
 Layout:
 
-- `c8s/` — the mkosi profile (config, `mkosi.extra/`, `mkosi.sync`,
-  cloud-init `user-data`). Staged into the confos build via
+- `c8s/` — the mkosi profile (config, `mkosi.extra/`, `mkosi.sync`).
+  Staged into the confos build via
   `confos build --profile-dir` (confos ≥ the release carrying
   confidential-os-builder#81); the dir basename **is** the profile name, so
   it must stay `c8s`.
@@ -50,7 +50,7 @@ Migration state (see [#264] for the full plan):
    invariants that moved here from confos `bin/lint` (fragment supersets
    vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
    floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
-   pod-CIDR match), plus the cloud-init datasource pin.
+   pod-CIDR match), plus the cloud-init disable gate.
 2. The switch was gated on building the same c8s ref both ways (confos
    in-tree vs staged from here) with identical `manifest.json`
    measurements; `c8s-image.yml`'s `gate=true` dispatch input reruns that

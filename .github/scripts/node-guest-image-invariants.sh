@@ -72,45 +72,10 @@ if ! grep -q 'tar -xzf .* -C "\$STAGE_DIR/usr/local"' "$ngi/c8s/mkosi.sync"; the
   exit 1
 fi
 
-# cloud-init datasource pin (node-as-CVM): the guest's cloud-init
-# takes input from the measured baked seed only. A host-supplied
-# cidata disk or cmdline/DMI seed redirect is otherwise root code
-# execution inside the attested node.
-dscfg="$ngi/c8s/mkosi.extra/etc/cloud/cloud.cfg.d/99-c8s-datasource.cfg"
-if [ ! -f "$dscfg" ]; then
-  echo "::error::$dscfg missing: the node image must pin cloud-init to the baked NoCloud seed"
-  exit 1
-fi
-if ! grep -qE '^datasource_list: \[ ?NoCloud ?\]$' "$dscfg"; then
-  echo "::error::$dscfg must restrict datasource_list to exactly [ NoCloud ]"
-  exit 1
-fi
-if ! grep -qE '^    seedfrom: file:///var/lib/cloud/seed/nocloud/$' "$dscfg"; then
-  echo "::error::$dscfg must pin NoCloud seedfrom to the baked seed dir (overrides cmdline/DMI redirects)"
-  exit 1
-fi
-if ! grep -qE '^    fs_label: null$' "$dscfg"; then
-  echo "::error::$dscfg must set fs_label: null so cloud-init never scans attached disks for a cidata seed"
-  exit 1
-fi
-# The pin must be the only datasource config in the composed image:
-# cloud.cfg.d merges lexically, so a later-sorting file from any
-# confos tree would silently win.
-if grep -rn --include='*.cfg' -E '^datasource' confos/mkosi "$ngi/c8s/mkosi.extra" | grep -v "$dscfg"; then
-  echo "::error::datasource keys found outside $dscfg; the c8s pin must be the only datasource config in the composed image"
-  exit 1
-fi
-# mkosi.sync generates image content at build time; a datasource
-# drop-in written there would evade the static grep above.
-# Comment lines cannot write content; skip them.
-if grep -vE '^[ 	]*#' "$ngi/c8s/mkosi.sync" | grep -n 'datasource'; then
-  echo "::error::$ngi/c8s/mkosi.sync writes datasource config; build-time drop-ins must not bypass the pin check"
-  exit 1
-fi
-# The pin is only meaningful while the build bakes the seed dir it
-# points at.
-if ! grep -q -- '--cloud-init "\$NGI_DIR/c8s/user-data"' "$ngi/build"; then
-  echo "::error::$ngi/build no longer bakes the seed the datasource pin points at"
+# The node image disables cloud-init, so the build bakes no seed.
+# tests/cloud-init-disabled.sh owns the marker invariant itself.
+if grep -q -- '--cloud-init' "$ngi/build"; then
+  echo "::error::$ngi/build bakes a cloud-init seed; the node image disables cloud-init instead"
   exit 1
 fi
 # tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
