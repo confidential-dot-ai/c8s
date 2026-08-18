@@ -233,6 +233,8 @@ done
 [[ -f "${PATCH_DIR}/0002-agent-wait-for-the-admission-verdict.patch" ]] || die "the admission-verdict patch is missing from ${PATCH_DIR}."
 # Without it every pod start logs the container's env/argv to the host console.
 [[ -f "${PATCH_DIR}/0005-agent-stop-logging-the-createcontainer-spec.patch" ]] || die "the createcontainer spec-log patch is missing from ${PATCH_DIR}."
+# Without it a policy-engine bypass runs host-supplied spec hooks as guest root.
+[[ -f "${PATCH_DIR}/0009-agent-refuse-oci-spec-hooks.patch" ]] || die "the spec-hooks patch is missing from ${PATCH_DIR}."
 
 # A prior run's images must not survive to publish time: CI pushes the output
 # dirs verbatim (oras push ./*), and on a persistent runner the root-owned
@@ -322,13 +324,8 @@ if [[ ! -d "${OSBUILDER}" ]]; then
     # Step 2. They are pinned to KATA_SRC_COMMIT: a rejected hunk means the
     # upstream code moved and the patch needs re-basing, so fail the build
     # rather than ship a guest missing it.
-    shopt -s nullglob
-    for p in "${PATCH_DIR}"/*.patch; do
-        log "Applying $(basename "${p}")"
-        patch -p1 --forward --batch -d "${KATA_SRC}" < "${p}" \
-            || die "patch $(basename "${p}") does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
-    done
-    shopt -u nullglob
+    "${HERE}/apply-patches.sh" "${KATA_SRC}" \
+        || die "the patch series does not apply to kata ${KATA_SRC_COMMIT} — re-base it against that commit."
 fi
 echo "    osbuilder: ${OSBUILDER}"
 

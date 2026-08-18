@@ -151,6 +151,9 @@ CreateContainerRequest if {
 	not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]
 	print("CreateContainerRequest: no foreign container-type marker")
 
+	no_spec_hooks
+	print("CreateContainerRequest: no spec hooks")
+
 	pull := sole_guest_pull_storage
 	print("CreateContainerRequest: one image_guest_pull storage")
 
@@ -178,6 +181,18 @@ CreateContainerRequest if {
 
 	pull_source_bound(pull)
 	print("CreateContainerRequest: allowed")
+}
+
+# Prestart and CreateContainer hooks execute as guest root during
+# do_create_container, ahead of the admission verdict — prestart in the
+# agent's own namespaces. The remaining lists run after the verdict, with
+# the admitted container (CreateRuntime has no execution site in the
+# agent). The runtime clears Hooks before it sends the spec, so the
+# serializer emits null and that is the only shape an honest request
+# carries; every other shape is host-smuggled. Same guard as upstream
+# genpolicy's allow_create_container_input.
+no_spec_hooks if {
+	is_null(input.OCI.Hooks)
 }
 
 container_rootfs := concat("/", ["/run/kata-containers", input.container_id, "rootfs"])
@@ -382,6 +397,12 @@ crio_pull_metadata(pull) if {
 default CreateSandboxRequest := false
 
 CreateSandboxRequest if {
+	# add_hooks arms every container with executables from this guest directory
+	count(input.guest_hook_path) == 0
+
+	# load_kernel_modules runs modprobe as guest root with host-chosen argv
+	count(input.kernel_modules) == 0
+
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
 		not layered_rootfs_storage(s)
