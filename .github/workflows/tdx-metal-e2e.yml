@@ -262,9 +262,9 @@ jobs:
           metadata: {name: $VM-cloudinit, namespace: $NS}
           type: Opaque
           # Bait, not configuration: the node image pins cloud-init to its
-          # measured baked seed, so this host-supplied cidata disk must have
-          # no effect. The tripwire step after the kubeconfig fetch asserts
-          # the node registers under the baked hostname, not this one.
+          # measured baked seed, so this host disk must be inert (asserted
+          # by the tripwire step below). c8s-local patch — mirror to
+          # confidential-ci before re-vendoring (c8s-workspace#117).
           stringData:
             userdata: |
               #cloud-config
@@ -413,7 +413,12 @@ jobs:
         # hostname — the bait name means host user-data executed as root.
         run: |
           set -euo pipefail
-          NODE=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+          NODE=""
+          for _ in $(seq 1 30); do
+            NODE=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "$NODE" ]; then break; fi
+            sleep 10
+          done
           echo "registered node name: $NODE"
           case "$NODE" in
             c8s-node) ;;
