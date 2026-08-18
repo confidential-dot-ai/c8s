@@ -48,6 +48,7 @@ const (
 	envPlatform              = "C8S_PLATFORM"
 	envPodIP                 = "C8S_POD_IP"
 	envInboundPassthrough    = "C8S_MESH_INBOUND_PASSTHROUGH"
+	envClusterDNSIP          = "C8S_CLUSTER_DNS_IP"
 )
 
 // defaultInGuestAttestationServiceURL is the loopback URL the in-guest
@@ -73,6 +74,10 @@ type inGuestConfig struct {
 	meshMeasurements      string
 	podIP                 string
 	inboundPassthrough    string
+	// clusterDNSIP is the cluster DNS (CoreDNS) server IP the in-guest egress
+	// guard's DNS carve-out is scoped to; set via C8S_CLUSTER_DNS_IP and must
+	// match the host's --cluster-dns-ip.
+	clusterDNSIP string
 
 	// Parsed from inboundPassthrough by validate().
 	inboundPassthroughPorts []int
@@ -94,6 +99,7 @@ func defaultInGuestConfig() inGuestConfig {
 	return inGuestConfig{
 		platform:           "sev-snp",
 		logLevel:           "info",
+		clusterDNSIP:       clusterDNSClusterIP,
 		certTTL:            24 * time.Hour,
 		rotationTimeout:    30 * time.Second,
 		dialTimeout:        5 * time.Second,
@@ -130,6 +136,11 @@ func loadInGuestConfig(env func(string) string) inGuestConfig {
 	c.meshMeasurements = env(envMeshMeasurements)
 	c.podIP = env(envPodIP)
 	c.inboundPassthrough = env(envInboundPassthrough)
+	if v := env(envClusterDNSIP); v != "" {
+		c.clusterDNSIP = v
+	} else {
+		c.clusterDNSIP = clusterDNSClusterIP
+	}
 	return c
 }
 
@@ -154,6 +165,9 @@ func (c *inGuestConfig) validate() error {
 		return fmt.Errorf("%s: %w", envInboundPassthrough, err)
 	}
 	c.inboundPassthroughPorts = ports
+	if net.ParseIP(c.clusterDNSIP) == nil {
+		return fmt.Errorf("%s %q is not a valid IP address", envClusterDNSIP, c.clusterDNSIP)
+	}
 	return validateConfig(c.attestationServiceURL, inGuestOutboundPort, inGuestInboundPort, inGuestHealthPort, c.certTTL)
 }
 
@@ -277,7 +291,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 	// Install iptables redirects first. A failure here is non-recoverable:
 	// the proxy would otherwise come up but the workload's traffic would
 	// silently bypass the mesh — a worse failure mode than crashing.
-	if err := setupInGuestIptables(logger, podIP, c.inboundPassthroughPorts); err != nil {
+	if err := setupInGuestIptables(logger, podIP, c.inboundPassthroughPorts, c.clusterDNSIP); err != nil {
 		return fmt.Errorf("in-guest iptables setup: %w", err)
 	}
 
@@ -723,12 +737,14 @@ same end state.`,
 // Returns an error on the first failure; the caller exits non-zero.
 // Idempotent: installIptablesRules flushes the managed chains first so
 // a crash-restart does not double-install rules.
-func setupInGuestIptables(logger *slog.Logger, podIP string, inboundPassthroughPorts []int) error {
+func setupInGuestIptables(logger *slog.Logger, podIP string, inboundPassthroughPorts []int, clusterDNSIP string) error {
 	if err := initIptablesClients(); err != nil {
 		return err
 	}
 	rules := buildInGuestIptablesRules(inGuestOutboundPort, inGuestInboundPort, inGuestHealthPort, inboundPassthroughPorts)
+	rules = append(rules, buildInGuestFailClosedRules(clusterDNSIP)...)
 	jumps := jumpRules()
+	jumps = append(jumps, guestFilterJumps()...)
 	logger.Info("installing in-guest iptables redirects",
 		"outbound_port", inGuestOutboundPort,
 		"inbound_port", inGuestInboundPort,
@@ -749,58 +765,39 @@ func setupInGuestIptables(logger *slog.Logger, podIP string, inboundPassthroughP
 // pure (no system calls) so it can be unit-tested.
 //
 // Rule ordering matters: the early RETURN rules let the proxy's own
-// traffic and the in-VM IPC (attestation-service on loopback) through
+// traffic, the in-VM IPC, and the attestation-service's WAN HTTPS (the
+// latter two by cgroup: loopback IPC and plain HTTPS to AMD KDS) through
 // without redirect; the trailing REDIRECT rules catch everything else.
 func buildInGuestIptablesRules(outboundPort, inboundPort, healthPort int, inboundPassthroughPorts []int) []iptablesRule {
-	uidStr := strconv.Itoa(defaultProxyUID)
 	outPortStr := strconv.Itoa(outboundPort)
 	inPortStr := strconv.Itoa(inboundPort)
 
 	rules := make([]iptablesRule, 0, 8)
 
-	// OUTPUT chain. Step 1: pass through proxy-owned traffic so we don't
-	// loop. Step 1b: pass through in-guest infrastructure (root, UID 0).
-	// Step 2: pass through loopback (intra-VM IPC). Step 3: pass
-	// through traffic destined for the mesh's own ports (defence in
-	// depth — owner match should already catch this). Step 4: REDIRECT
-	// everything else TCP to the outbound proxy.
+	// OUTPUT chain. Step 1: pass through the mesh proxy's own egress
+	// (loop-prevention) and the attestation-service's sanctioned plain
+	// HTTPS to AMD KDS. Both are matched by systemd cgroup path, not by
+	// UID, so a workload running as UID 1337 or 0 is not exempted. Step 2:
+	// pass through loopback (intra-VM IPC). Step 3: pass through traffic
+	// destined for the mesh's own ports. Step 4: REDIRECT everything else
+	// TCP to the outbound proxy.
 	rules = append(rules, iptablesRule{
 		table: "nat", chain: chainName,
-		label: "in-guest-output-skip-proxy-uid",
+		label: "in-guest-output-skip-proxy-cgroup",
 		args: []string{
 			"-p", "tcp",
-			"-m", "owner", "--uid-owner", uidStr,
+			"-m", "cgroup", "--path", meshProxyCgroupPath,
 			"-j", "RETURN",
 		},
 	})
-	// Pass through in-guest INFRASTRUCTURE egress (root, UID 0). The mesh
-	// proxy only terminates RA-TLS to mesh PEERS; it cannot proxy a plain
-	// outbound TLS call to an external endpoint. attestation-service runs
-	// as root and must reach AMD KDS over the internet to fetch the
-	// per-chip VCEK while assembling SNP evidence for /attest — redirecting
-	// that egress into the proxy makes /attest hang, which in turn makes
-	// ratls-mesh's own leaf minting (and therefore c8s-ready.target) flap.
-	// In-guest root is trusted TCB infrastructure (the c8s threat model
-	// trusts the guest's own kernel); the workload that the mesh exists to
-	// wrap runs unprivileged (the c8s image is UID 65532) and is still
-	// redirected by the catch-all below.
-	//
-	// REQUIREMENT / LIMITATION: this exemption assumes the wrapped workload
-	// runs unprivileged (the c8s image is UID 65532). A workload running as
-	// UID 0 (an explicit runAsUser: 0, or simply an image whose default USER
-	// is root) matches this rule and egresses in PLAINTEXT, bypassing the
-	// mesh. Matching on UID cannot distinguish attestation-service from a
-	// root workload, and admission control can pin runAsUser but cannot see
-	// an image's default USER, so neither layer fully closes this.
-	// Deployments relying on the mesh's confidentiality MUST run workloads
-	// non-root. A follow-up should scope this exemption to
-	// attestation-service (cgroup or binary match) instead of all of UID 0.
+	// The attestation-service's systemd cgroup is the match; a root workload
+	// has its own cgroup and is not exempted here.
 	rules = append(rules, iptablesRule{
 		table: "nat", chain: chainName,
-		label: "in-guest-output-skip-infra-uid",
+		label: "in-guest-output-skip-attestation-service-cgroup",
 		args: []string{
 			"-p", "tcp",
-			"-m", "owner", "--uid-owner", "0",
+			"-m", "cgroup", "--path", attestationServiceCgroupPath,
 			"-j", "RETURN",
 		},
 	})
@@ -877,4 +874,93 @@ func buildInGuestIptablesRules(outboundPort, inboundPort, healthPort int, inboun
 	})
 
 	return rules
+}
+
+// buildInGuestFailClosedRules returns the filter-table rules that drop the
+// non-TCP the NAT redirects do not carry: the mesh terminates TCP only, so
+// these rules make the guest fail closed on the UDP/ICMP/SCTP that would
+// otherwise egress or enter plaintext. The exemptions are loopback (intra-VM
+// IPC), UDP/53 to the cluster DNS server (host and the DNS reply), TCP
+// ESTABLISHED/RELATED replies on INPUT, and the ICMPv6 types IPv6 needs. The
+// guest enforces this locally so it does not depend on an external node.
+func buildInGuestFailClosedRules(dnsServerIP string) []iptablesRule {
+	rules := []iptablesRule{
+		iptablesRule{
+			table: "filter", chain: guestFilterOutputChain,
+			label: "in-guest-output-return-loopback",
+			args:  []string{"-o", "lo", "-j", "RETURN"},
+		},
+		iptablesRule{
+			table: "filter", chain: guestFilterOutputChain,
+			label:  "in-guest-output-return-dns",
+			family: iptablesFamilyIPv4,
+			args:   []string{"-p", "udp", "--dport", "53", "-d", dnsServerIP, "-j", "RETURN"},
+		},
+	}
+	// In-guest chains are installed per family; tag the ICMPv6 Allows so they
+	// only ever apply to the IPv6 client.
+	for _, t := range essentialICMPv6Types {
+		rules = append(rules, iptablesRule{
+			table: "filter", chain: guestFilterOutputChain,
+			label:  "in-guest-output-icmpv6-allow",
+			family: iptablesFamilyIPv6,
+			args:   []string{"-p", "ipv6-icmp", "--icmpv6-type", strconv.Itoa(t), "-j", "RETURN"},
+		})
+	}
+	rules = append(rules,
+		iptablesRule{
+			table: "filter", chain: guestFilterOutputChain,
+			label: "in-guest-output-drop-nontcp",
+			args:  []string{"!", "-p", "tcp", "-j", "DROP"},
+		},
+		iptablesRule{
+			table: "filter", chain: guestFilterInputChain,
+			label: "in-guest-input-return-established",
+			args:  []string{"-p", "tcp", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "RETURN"},
+		},
+		iptablesRule{
+			table: "filter", chain: guestFilterInputChain,
+			label: "in-guest-input-return-loopback",
+			args:  []string{"-i", "lo", "-j", "RETURN"},
+		},
+		iptablesRule{
+			table: "filter", chain: guestFilterInputChain,
+			label:  "in-guest-input-return-dns-reply",
+			family: iptablesFamilyIPv4,
+			args:   []string{"-p", "udp", "--sport", "53", "-s", dnsServerIP, "-j", "RETURN"},
+		},
+	)
+	for _, t := range essentialICMPv6Types {
+		rules = append(rules, iptablesRule{
+			table: "filter", chain: guestFilterInputChain,
+			label:  "in-guest-input-icmpv6-allow",
+			family: iptablesFamilyIPv6,
+			args:   []string{"-p", "ipv6-icmp", "--icmpv6-type", strconv.Itoa(t), "-j", "RETURN"},
+		})
+	}
+	rules = append(rules, iptablesRule{
+		table: "filter", chain: guestFilterInputChain,
+		label: "in-guest-input-drop-nontcp",
+		args:  []string{"!", "-p", "tcp", "-j", "DROP"},
+	})
+	return rules
+}
+
+// guestFilterJumps returns the filter-table jumps from the guest's built-in
+// OUTPUT and INPUT chains into the managed fail-closed chains.
+func guestFilterJumps() []iptablesRule {
+	return []iptablesRule{
+		{
+			table: "filter",
+			chain: "OUTPUT",
+			label: "jump-output-to-" + guestFilterOutputChain,
+			args:  []string{"-j", guestFilterOutputChain},
+		},
+		{
+			table: "filter",
+			chain: "INPUT",
+			label: "jump-input-to-" + guestFilterInputChain,
+			args:  []string{"-j", guestFilterInputChain},
+		},
+	}
 }

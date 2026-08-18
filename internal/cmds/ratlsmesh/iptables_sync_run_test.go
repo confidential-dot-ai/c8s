@@ -127,3 +127,140 @@ func TestCanonicalNodeIPs(t *testing.T) {
 		t.Errorf("canonicalNodeIPs = %v, want IPv4 first then IPv6", got)
 	}
 }
+
+func TestDiscoverMissingFamilyNodeIPsNoMissing(t *testing.T) {
+	// Both families explicitly provided -> the function must discover nothing.
+	got, err := discoverMissingFamilyNodeIPs(map[iptablesFamily]string{
+		iptablesFamilyIPv4: "10.0.0.1",
+		iptablesFamilyIPv6: "fd00::1",
+	})
+	if err != nil {
+		t.Fatalf("discover (no missing): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("both families present should discover nothing; got %v", got)
+	}
+}
+
+func addr(t *testing.T, s string, ones int, bits int) ifaceAddr {
+	ip := mustParseIP(t, s)
+	return ifaceAddr{ip: ip, mask: net.CIDRMask(ones, bits)}
+}
+
+func mustParseIP(t *testing.T, s string) net.IP {
+	t.Helper()
+	ip := net.ParseIP(s)
+	if ip == nil {
+		t.Fatalf("bad test IP %q", s)
+	}
+	return ip
+}
+
+// The selector must prefer a host-usable IPv6 on the interface that also
+// carries the provided node IP (the egress interface) over a higher-prefix
+// IPv6 on a non-primary/overlay interface.
+func TestSelectMissingFamilyNodeIPsPrefersSameCarrier(t *testing.T) {
+	byFamily := map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.5"}
+	needed := map[iptablesFamily]bool{iptablesFamilyIPv6: true}
+	sets := []ifaceAddrSet{
+		{name: "eth0", addrs: []ifaceAddr{
+			addr(t, "10.0.0.5", 24, 32),
+			addr(t, "fd00::5", 64, 128), // host-style, on the same carrier
+		}},
+		{name: "cni0", addrs: []ifaceAddr{
+			addr(t, "fd00::6", 128, 128), // higher prefix, but overlay interface
+		}},
+	}
+	got, err := selectMissingFamilyNodeIPs(byFamily, needed, sets)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if got[iptablesFamilyIPv6] != "fd00::5" {
+		t.Errorf("selected IPv6 = %q, want fd00::5 (same-carrier interface)", got[iptablesFamilyIPv6])
+	}
+}
+
+// When a host-usable address of the missing family exists only on a
+// non-primary (overlay) interface and not on the egress interface, the
+// selector must fail loudly rather than install a possibly-misrouted DNAT.
+func TestSelectMissingFamilyNodeIPsErrorsOnOverlayOnly(t *testing.T) {
+	byFamily := map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.5"}
+	needed := map[iptablesFamily]bool{iptablesFamilyIPv6: true}
+	sets := []ifaceAddrSet{
+		{name: "eth0", addrs: []ifaceAddr{addr(t, "10.0.0.5", 24, 32)}},
+		{name: "cni0", addrs: []ifaceAddr{addr(t, "fd00::6", 128, 128)}},
+	}
+	if _, err := selectMissingFamilyNodeIPs(byFamily, needed, sets); err == nil {
+		t.Fatal("expected an error when the only host-usable IPv6 is on an overlay interface")
+	}
+}
+
+// A network aggregate (prefix shorter than /64 with zero interface bits, e.g.
+// a /56) is not a host address and must not be selected as a DNAT target.
+func TestSelectMissingFamilyNodeIPsRejectsAggregate(t *testing.T) {
+	byFamily := map[iptablesFamily]string{iptablesFamilyIPv4: "148.113.0.5"}
+	needed := map[iptablesFamily]bool{iptablesFamilyIPv6: true}
+	sets := []ifaceAddrSet{
+		{name: "eth0", addrs: []ifaceAddr{
+			addr(t, "148.113.0.5", 24, 32),
+			addr(t, "2607:5300:21a:8c00::", 56, 128), // /56 network aggregate
+		}},
+	}
+	got, err := selectMissingFamilyNodeIPs(byFamily, needed, sets)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if _, ok := got[iptablesFamilyIPv6]; ok {
+		t.Errorf("selected aggregate IPv6 %q; expected no IPv6 entry", got[iptablesFamilyIPv6])
+	}
+}
+
+func TestClusterDNSIPsByFamily(t *testing.T) {
+	byFam, err := clusterDNSIPsByFamily([]string{"10.53.0.10", "fd00::10"})
+	if err != nil {
+		t.Fatalf("clusterDNSIPsByFamily: %v", err)
+	}
+	if got := byFam[iptablesFamilyIPv4]; len(got) != 1 || got[0] != "10.53.0.10" {
+		t.Errorf("v4 group = %v, want [10.53.0.10]", got)
+	}
+	if got := byFam[iptablesFamilyIPv6]; len(got) != 1 || got[0] != "fd00::10" {
+		t.Errorf("v6 group = %v, want [fd00::10]", got)
+	}
+	if _, err := clusterDNSIPsByFamily([]string{"not-an-ip"}); err == nil {
+		t.Error("malformed IP: want an error so the egress carve-out fails closed")
+	}
+}
+
+// A link-local-only family presence is not a host address: the selector must
+// skip it and report the family as genuinely absent (single-stack), not error.
+func TestSelectMissingFamilyNodeIPsSkipsLinkLocal(t *testing.T) {
+	byFamily := map[iptablesFamily]string{iptablesFamilyIPv4: "10.0.0.5"}
+	needed := map[iptablesFamily]bool{iptablesFamilyIPv6: true}
+	sets := []ifaceAddrSet{
+		{name: "eth0", addrs: []ifaceAddr{
+			addr(t, "10.0.0.5", 24, 32),
+			addr(t, "fe80::1", 64, 128),
+		}},
+	}
+	got, err := selectMissingFamilyNodeIPs(byFamily, needed, sets)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if _, ok := got[iptablesFamilyIPv6]; ok {
+		t.Errorf("selected link-local IPv6 %q; expected no IPv6 entry", got[iptablesFamilyIPv6])
+	}
+}
+
+// The pure selector is exercised by injected groups; this smoke test still
+// drives the real host enumeration to confirm discovery returns nothing
+// without error on the CI container (whose v6 is a /56 aggregate).
+func TestDiscoverMissingFamilyNodeIPsRealHostSmoke(t *testing.T) {
+	v4 := localIPv4(t)
+	got, err := discoverMissingFamilyNodeIPs(map[iptablesFamily]string{iptablesFamilyIPv4: v4})
+	if err != nil {
+		t.Fatalf("discover (v4 present on real host): %v", err)
+	}
+	if _, ok := got[iptablesFamilyIPv4]; ok {
+		t.Errorf("discover returned IPv4 %q even though it was provided", got[iptablesFamilyIPv4])
+	}
+}

@@ -810,12 +810,19 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 - **Identity granularity:** per pod. Tenants on one node are isolated from
   each other by hardware memory encryption, and each workload proves its own
   guest state independently.
-- **Sharp edges:** UID-0 egress is exempted from in-guest
-  interception (so the attestation-service can reach AMD KDS) — root
-  workloads bypass the mesh, run workloads non-root; and guests bake
-  `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the CDS/tls-lb front doors can
-  accept certless external clients — inbound :8443 is unmeshed in every
-  guest.
+- **Sharp edges:** in-guest egress is exempted for the attestation-service's
+  systemd cgroup (its plain HTTPS to AMD KDS for VCEK fetch) and for the
+  mesh proxy's own cgroup (loop-prevention); every other process —
+  including a workload running as UID 0 via `runAsUser: 0` or an image
+  `USER 0` — is redirected (TCP) or dropped (non-TCP) rather than exempted.
+  Guests bake `C8S_MESH_INBOUND_PASSTHROUGH=tcp:8443` so the CDS/tls-lb
+  front doors can accept certless external clients — inbound :8443 is
+  unmeshed in every guest.
+- **Cluster DNS carve-out is a shared invariant.** The egress guards scope
+  UDP/53 to the cluster DNS server. The host takes it from the chart
+  (`ratlsMesh.clusterDNSIP` → `--cluster-dns-ip`); the guest reads
+  `C8S_CLUSTER_DNS_IP` baked in kata-guest-base. Set both to the same value
+  or one side drops the other's DNS; the c8s default is 10.53.0.10 on both.
 
 ## Which certificate is used where
 

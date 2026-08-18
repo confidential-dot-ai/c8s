@@ -287,10 +287,14 @@ func TestChartRendersRATLSHostRoutingDefaults(t *testing.T) {
 		}
 	}
 
-	// The only NetworkPolicy in a default render is the attestation-api
-	// default-deny; nothing may select the hostNetwork mesh pods.
-	if kinds := renderedKinds(t, out); kinds["NetworkPolicy"] != 1 || !renderedManifestHasNamedKind(t, out, "NetworkPolicy", "c8s-attestation-api") {
-		t.Errorf("default render must carry exactly the attestation-api default-deny NetworkPolicy (none may select the hostNetwork mesh pods); got %d", kinds["NetworkPolicy"])
+	// The default render carries the attestation-api default-deny NetworkPolicy
+	// plus the ratls-mesh tcp-only-egress policy (default-on since the mesh
+	// fails closed on non-TCP). The attestation-api policy must remain; nothing
+	// may select the hostNetwork mesh pods.
+	if kinds := renderedKinds(t, out); kinds["NetworkPolicy"] != 2 ||
+		!renderedManifestHasNamedKind(t, out, "NetworkPolicy", "c8s-attestation-api") ||
+		!renderedManifestHasNamedKind(t, out, "NetworkPolicy", "ratls-mesh-tcp-only-egress") {
+		t.Errorf("default render must carry the attestation-api default-deny and the ratls-mesh tcp-only-egress NetworkPolicies; got %d", kinds["NetworkPolicy"])
 	}
 }
 
@@ -657,6 +661,112 @@ func TestChartHostNamespacePolicyDeniesHostPort(t *testing.T) {
 	}
 	if !subresource {
 		t.Error("matchConstraints does not name pods/ephemeralcontainers, so ephemeral containers bypass this policy")
+	}
+}
+
+// The UID admission policy must cover spec.ephemeralContainers (value check)
+// and the pods/ephemeralcontainers subresource (match) so a debug exec can't
+// run as the proxy UID and escape the mesh.
+// The pods/ephemeralcontainers subresource has a different object shape
+// (spec.ephemeralContainers only) than a pod. The UID policy is therefore
+// split: the pod policy validates pod/container/init shapes, and a separate
+// policy validates the ephemeral subresource so a kubectl debug is not
+// denied by pod-only expressions failing their type-check.
+func TestChartUIDAdmissionPolicySplitsPodAndEphemeral(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var podPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "deny-ratls-mesh-uid", &podPolicy) {
+		t.Fatal("missing deny-ratls-mesh-uid ValidatingAdmissionPolicy")
+	}
+	var ephemeralPolicy admissionregv1.ValidatingAdmissionPolicy
+	if !findDoc(t, out, "ValidatingAdmissionPolicy", "deny-ratls-mesh-uid-ephemeral", &ephemeralPolicy) {
+		t.Fatal("missing deny-ratls-mesh-uid-ephemeral ValidatingAdmissionPolicy")
+	}
+
+	resources := func(p admissionregv1.ValidatingAdmissionPolicy) []string {
+		var outResources []string
+		for _, r := range p.Spec.MatchConstraints.ResourceRules {
+			outResources = append(outResources, r.Resources...)
+		}
+		return outResources
+	}
+	if !slices.Contains(resources(podPolicy), "pods") {
+		t.Error("pod policy does not match pods")
+	}
+	if slices.Contains(resources(podPolicy), "pods/ephemeralcontainers") {
+		t.Error("pod policy must not match pods/ephemeralcontainers (different object shape)")
+	}
+	if !slices.Contains(resources(ephemeralPolicy), "pods/ephemeralcontainers") {
+		t.Error("ephemeral policy does not match pods/ephemeralcontainers")
+	}
+
+	// The ephemeral policy's expressions must reference only the subresource
+	// shape (spec.ephemeralContainers), not pod-only fields.
+	for _, v := range ephemeralPolicy.Spec.Validations {
+		if strings.Contains(v.Expression, "spec.containers") {
+			t.Errorf("ephemeral policy expression references pod-only spec.containers: %s", v.Expression)
+		}
+		if !strings.Contains(v.Expression, "spec.ephemeralContainers") {
+			t.Errorf("ephemeral policy expression does not reference spec.ephemeralContainers: %s", v.Expression)
+		}
+	}
+}
+
+// tcpEgressPolicy is default-on and must render a policy even when the
+// operator opts out of the per-namespace list ([] falls back to the release
+// namespace). The rendered policy must allow mesh-protected TCP egress plus
+// DNS/53 to kube-system and deny everything else by default.
+func TestChartTCPEgressPolicyDefaultOnRendersNoNamespaces(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "ratls-mesh-tcp-only-egress", &np) {
+		t.Fatal("default render missing ratls-mesh-tcp-only-egress NetworkPolicy")
+	}
+	if !slices.Contains(np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress) {
+		t.Errorf("policyTypes = %v, want Egress (default-deny)", np.Spec.PolicyTypes)
+	}
+	// podSelector: {} (empty label selector) selects every pod in the
+	// namespace — that's the "applies to all non-excluded pods" posture.
+	if len(np.Spec.PodSelector.MatchLabels) != 0 || len(np.Spec.PodSelector.MatchExpressions) != 0 {
+		t.Errorf("podSelector = %v, want empty (select all pods)", np.Spec.PodSelector)
+	}
+	// First egress rule allows TCP egress (mesh-protected); second allows
+	// DNS UDP/53 to kube-system. Anything else is denied by default.
+	if len(np.Spec.Egress) != 2 {
+		t.Fatalf("egress rules = %d, want 2 (TCP + DNS to kube-system)", len(np.Spec.Egress))
+	}
+	if np.Spec.Egress[0].Ports == nil || len(np.Spec.Egress[0].Ports) != 1 || np.Spec.Egress[0].Ports[0].Protocol == nil || *np.Spec.Egress[0].Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Errorf("first egress rule must allow TCP egress; got %+v", np.Spec.Egress[0])
+	}
+
+	// Default values in values.yaml must be enabled:true / namespaces:[].
+	const valuesPath = "c8s/values.yaml"
+	raw, err := os.ReadFile(valuesPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", valuesPath, err)
+	}
+	var vals struct {
+		RatlsMesh struct {
+			TCPEgressPolicy struct {
+				Enabled    bool     `yaml:"enabled"`
+				Namespaces []string `yaml:"namespaces"`
+			} `yaml:"tcpEgressPolicy"`
+		} `yaml:"ratlsMesh"`
+	}
+	if err := sigsyaml.Unmarshal(raw, &vals); err != nil {
+		t.Fatalf("decode values.yaml: %v", err)
+	}
+	if !vals.RatlsMesh.TCPEgressPolicy.Enabled {
+		t.Error("tcpEgressPolicy must default to enabled:true")
+	}
+	if len(vals.RatlsMesh.TCPEgressPolicy.Namespaces) != 0 {
+		t.Errorf("tcpEgressPolicy must default to namespaces:[] (got %v)", vals.RatlsMesh.TCPEgressPolicy.Namespaces)
 	}
 }
 
@@ -7156,5 +7266,65 @@ func TestKataQemuWrapperCopiesMatch(t *testing.T) {
 		t.Fatalf("wrapper drift: %s and %s must be byte-identical\n"+
 			"the puller ConfigMap uses the chart copy; the guest-base tree is the source of truth\n"+
 			"fix: cp %s %s", chart, source, source, chart)
+	}
+}
+
+// The preStop hook must run `iptables-cleanup --keep-guard` so a terminating
+// mesh keeps the fail-closed guard while workloads are still running. A
+// regression dropping the flag would pass every rule-shape test but silently
+// downgrade running workloads to plaintext on restart.
+func TestChartDaemonSetPreStopKeepsGuard(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := findRATLSMeshDaemonSet(t, out)
+	var hook []string
+	for _, c := range allContainers(ds) {
+		if c.Lifecycle == nil || c.Lifecycle.PreStop == nil || c.Lifecycle.PreStop.Exec == nil {
+			continue
+		}
+		hook = append(hook, strings.Join(c.Lifecycle.PreStop.Exec.Command, " "))
+	}
+	if len(hook) == 0 {
+		t.Fatal("no preStop exec hook found in ratls-mesh DaemonSet")
+	}
+	for _, h := range hook {
+		if strings.Contains(h, "iptables-cleanup") && !strings.Contains(h, "--keep-guard") {
+			t.Errorf("preStop command %q does not carry --keep-guard", h)
+		}
+	}
+}
+
+// The fail-closed egress guards scope their DNS carve-out to the cluster DNS
+// server; the daemonset must pass that ClusterIP to iptables-sync so the
+// carve-out is not silently scoped to a different address.
+func TestChartIptablesSyncCarriesClusterDNS(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := findRATLSMeshDaemonSet(t, out)
+	var flags []string
+	for _, c := range allContainers(ds) {
+		if c.Name != "iptables-sync" {
+			continue
+		}
+		flags = c.Command
+	}
+	if len(flags) == 0 {
+		t.Fatal("iptables-sync container command not found")
+	}
+	var saw bool
+	for i := 0; i+1 < len(flags); i++ {
+		if flags[i] == "--cluster-dns-ip" {
+			saw = true
+			if flags[i+1] != "10.53.0.10" {
+				t.Errorf("--cluster-dns-ip = %q, want c8s default 10.53.0.10", flags[i+1])
+			}
+		}
+	}
+	if !saw {
+		t.Error("iptables-sync command does not carry --cluster-dns-ip")
 	}
 }

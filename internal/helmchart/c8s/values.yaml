@@ -703,6 +703,12 @@ ratlsMesh:
       - protocol: tcp
         sourcePort: 53
 
+  # Cluster DNS (CoreDNS) Service ClusterIP the egress guards' DNS carve-out
+  # is destination-scoped to. Defaults to the c8s node image's cluster-dns
+  # (10.53.0.10). Override if the cluster uses a different IP, and set the
+  # same value in the guest's C8S_CLUSTER_DNS_IP.
+  clusterDNSIP: "10.53.0.10"
+
   # Certificate settings
   certMode: cds  # self-signed | cds
   certTtl: "4h"
@@ -771,11 +777,8 @@ ratlsMesh:
         memory: 128Mi
 
   iptablesCleanup:
-    # Seconds the preStop hook sleeps after running iptables-cleanup, giving
-    # kube-endpoints time to drop this node from Service backends so in-flight
-    # traffic stops landing here before the rules are gone. Bump on clusters
-    # with slow endpoint controllers; the upper bound is
-    # terminationGracePeriodSeconds (45) minus the main proxy's drain (~30s).
+    # --keep-guard keeps the fail-closed filter guard while removing
+    # interception; the sleep lets kube-endpoints drop this node first.
     preStopSleepSeconds: 5
     resources:
       requests:
@@ -802,9 +805,14 @@ ratlsMesh:
 
   # --- Policies ---
 
-  # TCP-only egress policy for application namespaces
+  # TCP-only egress policy. On by default: the NP allows all TCP (intercepted
+  # by the mesh) and DNS/53 to kube-system, and default-denies everything
+  # else. The mesh's iptables egress guard is the primary non-TCP enforcement
+  # (drop); this NetworkPolicy is the defence-in-depth layer. namespaces is a
+  # per-namespace opt-in list; when empty the policy renders into the release
+  # namespace only, and the guard covers every managed namespace regardless.
   tcpEgressPolicy:
-    enabled: false
+    enabled: true
     namespaces: []
 
   # ValidatingAdmissionPolicy to prevent pods from running as mesh UID
