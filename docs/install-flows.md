@@ -26,18 +26,21 @@ resources, `internal/helmchart/c8s/templates/`.
 
 ## The two modes
 
-`c8s install` runs `helm upgrade --install` against the embedded chart. One
-flag selects a **mode**, which is a fixed set of `--set` choices.
+`c8s install` runs `helm upgrade --install` against the embedded chart. The
+required `--cvm-mode` flag selects a **mode**, which is a fixed set of `--set`
+choices. `pod` is the kata shape; `node`, `gke`, and `aks` are the
+node-as-CVM shapes ("base" below), differing only in how the node's TEE
+evidence is read (native device, GKE managed CVM, Azure vTPM).
 
 | Mode | Flag | One-liner |
 |---|---|---|
-| **base** | *(none)* | Normal Kubernetes. No kata, no per-pod confidentiality. Host-side mesh + attestation + image policy. The dev/baseline shape. |
+| **base** | `--cvm-mode=node` (or `gke`/`aks`) | Normal Kubernetes pods on CVM nodes. No kata, no per-pod confidentiality. Host-side mesh + attestation + image policy. The dev/baseline shape. |
 | **kata** | `--cvm-mode=pod` | Installs the kata runtime + RuntimeClasses **and enforces them**: the webhook *injects* a kata RuntimeClass into every in-scope workload pod, a ValidatingAdmissionPolicy *rejects* non-kata pods, and the host-side mesh/attestation/image-policy move into the guest image. The production "pod-as-CVM" shape — kata is enforcing, there is no kata-without-enforcement mode. |
 
 ```mermaid
 flowchart LR
-    A["c8s install"] --> B{flags}
-    B -->|none| BASE["base<br/>host-side everything<br/>no confidentiality"]
+    A["c8s install"] --> B{--cvm-mode}
+    B -->|"node / gke / aks"| BASE["base<br/>host-side everything<br/>no per-pod confidentiality"]
     B -->|"--cvm-mode=pod"| KATA["kata (enforcing)<br/>all workloads forced<br/>into kata VMs"]
 ```
 
@@ -338,8 +341,8 @@ already deleted. See [`kata.md`](kata.md#uninstalling).
 # workload's mesh-wrapped headless Service for every flow below
 # (see operator.md, "tls-lb upstream").
 
-# Base — normal cluster, host-side components, no confidentiality.
-c8s install --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
+# Base — normal cluster, host-side components, no per-pod confidentiality.
+c8s install --cvm-mode=node --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 --upstream vllm
 
 # Kata (enforcing): every workload pod becomes a kata VM, non-kata pods
 # rejected, host-side mesh/attestation/image-policy replaced by their
