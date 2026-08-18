@@ -312,8 +312,8 @@ trust assumptions hold:
    it held. On SEV-SNP a minimum platform TCB — the chart's `minTcb`,
    bootloader/TEE/SP-firmware/microcode — rides the same request and is
    re-checked against the claims. TDX's verifier request has no minimum-TCB
-   parameter, so the floor applies to SNP evidence only (GAPS); the debug
-   rejection holds on both platforms.
+   parameter, so the floor applies to SNP evidence only; the debug rejection
+   holds on both platforms.
 5. **Channel security.** TLS 1.3 with ephemeral key exchange protects
    confidentiality and integrity; certificates rotate halfway through their
    TTL (24h default).
@@ -385,7 +385,7 @@ sandbox. It serves two disjoint surfaces (`pkg/workloadclaims`):
 | Surface | Route | Listener | Caller bound by |
 |---|---|---|---|
 | tokens | `POST /sandbox` | node-CVM: a node-local Unix socket. kata: the guest's loopback `127.0.0.1:8401` (`workloadclaims.GuestTokenPort`) | node-CVM: kernel peer credentials (`SO_PEERCRED` + `SO_PEERPIDFD`). kata: the guest boundary — one pod per guest, so there is no caller to disambiguate |
-| identity + digests | `GET /identity`, `GET /digests/{sandboxID}` | `:1019` (`workloadclaims.DigestsPort`), mutually-attested RA-TLS | the client leaf's launch measurement (CDS's) |
+| identity + digests | `GET /identity`, `GET /digests/{sandboxID}` | `:1019` (`workloadclaims.DigestsPort`), mutually-attested RA-TLS | the client leaf's launch measurement (CDS's) plus the SNP TCB floor |
 
 The token surface cannot enumerate other sandboxes; the network surface cannot
 mint identity.
@@ -841,7 +841,7 @@ theater), and CDS and tls-lb run in their own kata CVMs.
 | CDS-issued workload leaf (≤ 24h) | pod volume written by get-cert (`/etc/c8s/certs`, key 0600) — inside the pod's TEE in both shapes | mesh CA, after challenge–attest–certify | workload's own listeners; tls-lb upstream mTLS | chain to the mesh CA bundle | nameable workload identity (SAN = workload id / `c8s-<id>` Service), plus the sandbox-ID extension when the requester presented a sandbox token |
 | CDS-issued mesh leaf (`--cert-mode cds`) | ratls-mesh process memory | mesh CA; the leaf preserves the CSR's RA-TLS extension (CN `ratls-mesh-<nodeIP>`) | mesh ports, replacing the self-signed cert after `SwapProvider` | dual verification: CA chain fast path, RA-TLS fallback | post-bootstrap mesh identity without per-handshake attestation cost |
 | tls-lb public leaf | tls-lb pod volume (get-cert init container), or an operator-supplied `publicTLS` Secret | mesh CA (default) or external CA | public HTTPS front door | browsers: standard TLS; verifiers: `cds-attest` binds the leaf SPKI or session keys into SNP REPORTDATA | TLS termination for external clients, attestably bound to the TEE |
-| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
+| Inventory identity/digests certs (self-signed RA-TLS, both ends) | nri-image-policy / policy-monitor process memory; CDS process memory for the client side | itself — attestation bound to the node's / guest's own measurement | the inventory's `:1019` endpoint (fixed, privileged), mTLS both ways | mutual: CDS pins the inventory measurement, the inventory pins CDS's, both plus the SNP TCB floor | let CDS resolve the sandbox-token signing key and ask what a pod sandbox is running before issuing that pod a leaf |
 | EAR JWT (token, not a cert) | per-process P-256 signer key in CDS memory (rotated with overlap) | CDS EAR issuer, ES256 (JWKS at `/.well-known/jwks.json`) | `/attest-key` responses; presented to `/sign-csr` and `/handoff` | JWKS + issuer + measurement + key-binding checks | TEE-bound authorization for key-only flows (CA handoff, EAR-gated signing) |
 
 Adjacent surfaces that are deliberately **not** RA-TLS:

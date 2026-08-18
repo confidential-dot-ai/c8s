@@ -62,7 +62,8 @@ type Options struct {
 
 	// MinTCB is the minimum SEV-SNP platform TCB the injected fetchers
 	// require CDS's RA-TLS evidence to meet, in bootloader,tee,snp,microcode
-	// form. Empty = no floor.
+	// form, and the floor the webhook stamps into pods' init-data for the
+	// in-guest policy-monitor. Empty = no floor.
 	MinTCB string
 
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.

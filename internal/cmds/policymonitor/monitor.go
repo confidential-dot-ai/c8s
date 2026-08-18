@@ -155,7 +155,7 @@ func runMonitor(ctx context.Context, cfg *Config) error {
 		settle := time.Now().Add(signerSettleBudget)
 		go func() {
 			awaitInitData(ctx, logger, cfg)
-			// Both need the measurements the document carries, and neither may
+			// Both need the values the document carries, and neither may
 			// hold the other up: the signer waits on the pod network, the
 			// refresh only on CDS answering.
 			go installSandboxTokenSigner(ctx, cfg, logger, m.inventory, m.signers, settle)

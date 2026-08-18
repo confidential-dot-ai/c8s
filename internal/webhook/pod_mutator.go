@@ -204,7 +204,8 @@ type Config struct {
 
 	// MinTCB is the minimum SEV-SNP platform TCB the injected fetchers
 	// require CDS's RA-TLS evidence to meet, in bootloader,tee,snp,microcode
-	// form. Empty = no floor (dev only).
+	// form, and the floor stampInitData commits into pods' init-data for the
+	// in-guest policy-monitor. Empty = no floor (dev only).
 	MinTCB string
 
 	// CertDir is the mount path for the shared cert volume.

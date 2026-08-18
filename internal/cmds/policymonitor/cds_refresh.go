@@ -9,9 +9,10 @@ package policymonitor
 // in-VM allowlist current with operator additions CDS has accepted by
 // polling CDS's `/allowlist` over RA-TLS and merging the result on top of
 // the seed. It reuses exactly the mechanism the host nri-image-policy
-// worker uses (pkg/ratls RA-TLS client pinned to cds.measurements +
-// pkg/allowlistclient), so the in-guest enforcer and the host enforcer
-// pull from the same authenticated source. See docs/kata-image-policy.md.
+// worker uses (pkg/ratls RA-TLS client pinned to cds.measurements and the
+// minTcb floor + pkg/allowlistclient), so the in-guest enforcer and the
+// host enforcer pull from the same authenticated source. See
+// docs/kata-image-policy.md.
 //
 // Gated on a configured CDS URL: with C8S_CDS_URL unset the monitor
 // stays baked-seed-only and never opens the network.

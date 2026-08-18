@@ -52,7 +52,8 @@ The allowlist is a **baked seed plus a CDS refresh** (see
 seed — `/etc/c8s/bootstrap-allowlist.json`, on the verity root and part
 of the launch measurement — lets the guest enforce from t=0 with no
 network. At runtime policy-monitor polls CDS's `/allowlist` over RA-TLS
-(pinned to `cds.measurements`) and merges what CDS serves on top, so
+(pinned to `cds.measurements` and the `minTcb` floor) and merges what CDS
+serves on top, so
 operator additions land without a guest rebuild. The merge only ever
 *grows* the set, so a compromised or unreachable CDS degrades to "stale
 but no smaller" — never "open".
@@ -73,7 +74,7 @@ post-start kill window — is documented in
 | `kata-agent` inside the guest | yes | Installed into the rootfs by kata's osbuilder (version-matched) at build. |
 | `policy-monitor` inside the guest | yes | Built from this repo, baked into the dm-verity root. |
 | `/etc/c8s/bootstrap-allowlist.json` (verity root) | yes | The allowlist **seed** the monitor loads at boot. Part of the launch measurement. |
-| CDS `/allowlist` additions (pulled over RA-TLS) | yes, via attestation | Runtime additions merged on top of the seed. Trusted because the pull is RA-TLS-pinned to `cds.measurements` (the host can't substitute a fake CDS), not because they're measured into this guest. |
+| CDS `/allowlist` additions (pulled over RA-TLS) | yes, via attestation | Runtime additions merged on top of the seed. Trusted because the pull is RA-TLS-pinned to `cds.measurements` and the `minTcb` floor (the host can't substitute a fake or weaker CDS), not because they're measured into this guest. |
 | `ratls-mesh` + `attestation-service` inside the guest | yes | Same. |
 | Host (containerd, kata-runtime, kata-shim) | **no** | Adversarial. Can call kata-agent RPCs via vsock, cannot read VM memory (SEV-SNP or TDX). |
 | Cloud-init user-data (the `C8S_*` env file) | **partially** | Host controls its contents when per-pod injected; pinned values must be verifiable inside the guest. Today this is a single fixed default baked into the rootfs, not per-pod host-injected. |
