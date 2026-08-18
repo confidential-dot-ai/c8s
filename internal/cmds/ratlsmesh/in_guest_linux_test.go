@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 		envCDSMeasurements:       "aa,bb",
 		envMeshMeasurements:      "cc",
 		envPodIP:                 "10.0.0.5",
+		envClusterDNSIP:          "fd53::a",
 	}
 	c := loadInGuestConfig(func(k string) string { return envs[k] })
 	if c.workloadID != "alice" {
@@ -53,6 +55,9 @@ func TestLoadInGuestConfigPopulatesFromEnv(t *testing.T) {
 	if c.podIP != "10.0.0.5" {
 		t.Errorf("podIP = %q", c.podIP)
 	}
+	if c.clusterDNSIP != "fd53::a" {
+		t.Errorf("clusterDNSIP = %q, want the env override", c.clusterDNSIP)
+	}
 }
 
 func TestInGuestConfigValidate(t *testing.T) {
@@ -67,8 +72,20 @@ func TestInGuestConfigValidate(t *testing.T) {
 				workloadID:            "alice",
 				cdsURL:                "https://cds:8443",
 				attestationServiceURL: "http://127.0.0.1:8400",
+				clusterDNSIP:          clusterDNSClusterIP,
 				certTTL:               24 * time.Hour,
 			},
+		},
+		{
+			name: "bad cluster DNS IP",
+			cfg: inGuestConfig{
+				workloadID:            "alice",
+				cdsURL:                "https://cds:8443",
+				attestationServiceURL: "http://127.0.0.1:8400",
+				clusterDNSIP:          "not-an-ip",
+				certTTL:               24 * time.Hour,
+			},
+			wantErr: envClusterDNSIP,
 		},
 		{
 			name: "missing workload id",
@@ -206,75 +223,36 @@ func TestBuildInGuestIptablesRules(t *testing.T) {
 		}
 	}
 
-	// The OUTPUT chain must contain a proxy-uid RETURN somewhere before
-	// the catch-all REDIRECT, otherwise the proxy will loop on itself.
-	var sawUIDReturn, sawOutputRedirect bool
+	// No UID-based exemptions may remain: a root tenant or a USER 1337 image
+	// would silently bypass interception if the old blanket --uid-owner 0 or
+	// --uid-owner 1337 RETURN rules were reintroduced.
+	for _, r := range rules {
+		assertArgNotContains(t, "in-guest nat", r.args, "--uid-owner")
+	}
+
+	// The OUTPUT chain must contain a proxy-cgroup RETURN somewhere before
+	// the catch-all REDIRECT, otherwise the proxy will loop on itself. The
+	// match is cgroup (not UID) so a workload running as 1337 is not exempt.
+	var sawProxyReturn, sawOutputRedirect bool
 	for _, r := range rules {
 		if r.chain != chainName {
 			continue
 		}
-		if containsArgPair(r.args, "--uid-owner", "1337") && containsArg(r.args, "RETURN") {
-			sawUIDReturn = true
+		if containsArgPair(r.args, "--path", meshProxyCgroupPath) && containsArg(r.args, "RETURN") {
+			sawProxyReturn = true
 		}
 		if !sawOutputRedirect && containsArgPair(r.args, "-j", "REDIRECT") && containsArgPair(r.args, "--to-port", "15001") {
 			sawOutputRedirect = true
-			if !sawUIDReturn {
-				t.Error("OUTPUT REDIRECT rule appears before the proxy-UID RETURN — proxy will loop on itself")
+			if !sawProxyReturn {
+				t.Error("OUTPUT REDIRECT rule appears before the proxy-cgroup RETURN — proxy will loop on itself")
 			}
 		}
 	}
-	if !sawUIDReturn {
-		t.Error("no proxy-UID RETURN rule on OUTPUT chain")
+	if !sawProxyReturn {
+		t.Error("no proxy-cgroup RETURN rule on OUTPUT chain")
 	}
 	if !sawOutputRedirect {
 		t.Error("no OUTPUT REDIRECT rule to 15001")
-	}
-
-	// The UID-0 exemption is a documented plaintext bypass for in-guest
-	// infrastructure (attestation-service's KDS fetch); pin its exact args,
-	// its place ahead of the catch-all redirect, and its absence from
-	// PREROUTING.
-	wantExemption := []string{"-p", "tcp", "-m", "owner", "--uid-owner", "0", "-j", "RETURN"}
-	exemptionIdx, outputRedirectIdx := -1, -1
-	for i, r := range rules {
-		if r.chain == preroutingChainName && containsArg(r.args, "--uid-owner") {
-			t.Errorf("PREROUTING rule %d carries --uid-owner: %v", i, r.args)
-		}
-		if r.chain != chainName {
-			continue
-		}
-		if containsArgPair(r.args, "--uid-owner", "0") {
-			if exemptionIdx >= 0 {
-				t.Errorf("second UID-0 exemption rule at index %d", i)
-			}
-			exemptionIdx = i
-			if !slices.Equal(r.args, wantExemption) {
-				t.Errorf("UID-0 exemption args = %v, want exactly %v", r.args, wantExemption)
-			}
-		}
-		if containsArgPair(r.args, "-j", "REDIRECT") && containsArgPair(r.args, "--to-port", "15001") {
-			outputRedirectIdx = i
-		}
-	}
-	if exemptionIdx < 0 {
-		t.Error("no UID-0 exemption rule on OUTPUT chain")
-	} else if outputRedirectIdx >= 0 && exemptionIdx > outputRedirectIdx {
-		t.Error("UID-0 exemption follows the catch-all redirect — it would never match")
-	}
-
-	// Bound the exemption SET: the only --uid-owner values on any chain are
-	// the proxy UID and infra UID 0 — a stray one egresses in plaintext.
-	var ownerUIDs []string
-	for _, r := range rules {
-		for i := 0; i+1 < len(r.args); i++ {
-			if r.args[i] == "--uid-owner" {
-				ownerUIDs = append(ownerUIDs, r.args[i+1])
-			}
-		}
-	}
-	slices.Sort(ownerUIDs)
-	if got := slices.Compact(ownerUIDs); !slices.Equal(got, []string{"0", "1337"}) {
-		t.Errorf("uid-owner exemptions = %v, want exactly [0 1337]", got)
 	}
 
 	// The PREROUTING chain must end at a REDIRECT to 15006.
@@ -299,6 +277,90 @@ func containsArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The in-guest filter fail-closed rules drop non-TCP the NAT redirects do
+// not carry, exempting loopback (intra-VM IPC), UDP/53 restricted to the
+// cluster DNS server, and the ICMPv6 types IPv6 needs. The guest enforces
+// this locally so it does not depend on an external node.
+func TestBuildInGuestFailClosedRulesGolden(t *testing.T) {
+	const dnsIP = "10.53.0.10"
+	rules := buildInGuestFailClosedRules(dnsIP)
+	// OUTPUT: lo return, dns return, 14 icmpv6 returns, drop = 17.
+	// INPUT: established, lo, dns reply, 14 icmpv6 returns, drop = 18.
+	if len(rules) != 17+18 {
+		t.Fatalf("expected 35 rules, got %d", len(rules))
+	}
+	out := rules[0:17]
+	in := rules[17:35]
+
+	// OUTPUT order: loopback, DNS (family ipv4, -d), icmpv6 (ipv6), drop.
+	if out[0].chain != guestFilterOutputChain || out[0].table != "filter" {
+		t.Errorf("OUTPUT[0]: got %s/%s, want filter/%s", out[0].table, out[0].chain, guestFilterOutputChain)
+	}
+	assertContains(t, "out lo", out[0].args, "-o", "lo")
+	assertContains(t, "out lo", out[0].args, "-j", "RETURN")
+	if out[1].family != iptablesFamilyIPv4 {
+		t.Errorf("OUTPUT dns rule family=%q, want ipv4 (ClusterIP is v4)", out[1].family)
+	}
+	assertContains(t, "out dns", out[1].args, "-p", "udp")
+	assertContains(t, "out dns", out[1].args, "--dport", "53")
+	assertContains(t, "out dns", out[1].args, "-d", dnsIP)
+	assertContains(t, "out dns", out[1].args, "-j", "RETURN")
+	for ti, want := range essentialICMPv6Types {
+		r := out[2+ti]
+		if r.family != iptablesFamilyIPv6 {
+			t.Errorf("OUTPUT icmpv6 %d rule family=%q, want ipv6", want, r.family)
+		}
+		assertContains(t, "out icmpv6", r.args, "-p", "ipv6-icmp")
+		assertContains(t, "out icmpv6", r.args, "--icmpv6-type", strconv.Itoa(want))
+		assertContains(t, "out icmpv6", r.args, "-j", "RETURN")
+	}
+	assertNontcpDrop(t, "OUTPUT", out[len(out)-1])
+
+	// INPUT order: established, loopback, dns reply (ipv4, -s), icmpv6, drop.
+	if in[0].chain != guestFilterInputChain || in[0].table != "filter" {
+		t.Errorf("INPUT[0]: got %s/%s, want filter/%s", in[0].table, in[0].chain, guestFilterInputChain)
+	}
+	assertContains(t, "in est", in[0].args, "-p", "tcp")
+	assertContains(t, "in est", in[0].args, "--ctstate", "ESTABLISHED,RELATED")
+	assertContains(t, "in est", in[0].args, "-j", "RETURN")
+	assertContains(t, "in lo", in[1].args, "-i", "lo")
+	assertContains(t, "in lo", in[1].args, "-j", "RETURN")
+	if in[2].family != iptablesFamilyIPv4 {
+		t.Errorf("INPUT dns reply rule family=%q, want ipv4", in[2].family)
+	}
+	assertContains(t, "in dns reply", in[2].args, "-p", "udp")
+	assertContains(t, "in dns reply", in[2].args, "--sport", "53")
+	assertContains(t, "in dns reply", in[2].args, "-s", dnsIP)
+	assertContains(t, "in dns reply", in[2].args, "-j", "RETURN")
+	for ti, want := range essentialICMPv6Types {
+		r := in[3+ti]
+		if r.family != iptablesFamilyIPv6 {
+			t.Errorf("INPUT icmpv6 %d rule family=%q, want ipv6", want, r.family)
+		}
+		assertContains(t, "in icmpv6", r.args, "-p", "ipv6-icmp")
+		assertContains(t, "in icmpv6", r.args, "--icmpv6-type", strconv.Itoa(want))
+		assertContains(t, "in icmpv6", r.args, "-j", "RETURN")
+	}
+	assertNontcpDrop(t, "INPUT", in[len(in)-1])
+}
+
+func assertNontcpDrop(t *testing.T, chain string, r iptablesRule) {
+	t.Helper()
+	for i, a := range r.args {
+		if a == "!" && i+2 < len(r.args) && r.args[i+1] == "-p" && r.args[i+2] == "tcp" {
+			if !slices.Contains(r.args, "DROP") {
+				t.Errorf("%s non-TCP drop is missing -j DROP", chain)
+			}
+			return
+		}
+		if a == "!" && i+2 >= len(r.args) {
+			t.Errorf("%s non-TCP drop's '!' is not followed by -p tcp", chain)
+			return
+		}
+	}
+	t.Errorf("%s drop rule does not carry `! -p tcp`; got %v", chain, r.args)
 }
 
 // The passthrough RETURN must sit on PREROUTING before the catch-all

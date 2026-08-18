@@ -29,7 +29,13 @@ every layer:
    measurement verifies.
 4. **Verify before connecting.** Peers require attestation-rooted identity
    before any traffic flows.
-5. **Secure the egress.** All traffic is encrypted to verified destinations.
+5. **Secure the egress.** Pod-originated TCP to pod and Service
+   destinations is intercepted and wrapped in RA-TLS; TCP to non-pod
+   external destinations is neither redirected nor dropped (it leaves the
+   node plaintext). Non-TCP and unmeshed inbound fail closed rather than
+   flowing in the clear. The exceptions are cluster DNS (UDP/53 to the
+   cluster DNS server, the sanctioned name-resolution path) and the in-guest
+   attestation service's plain HTTPS to AMD KDS.
 
 c8s is built by [Confidential AI](https://confidential.ai) as the substrate
 for private AI: inference, fine-tuning, training, and agents where the
@@ -565,8 +571,12 @@ than let you discover them:
   can boot its own CVM from the same guest image and serve an allowlist of
   its choosing.
 
-- **Root workloads can bypass the in-guest mesh.** UID-0 egress is exempted
-  so the attestation service can reach AMD KDS. Run workloads as non-root.
+- **Root workloads are intercepted but cannot egress to non-mesh peers.**
+  In-guest egress exemptions are scoped to the attestation service and the
+  mesh proxy by systemd cgroup (a root workload is in no exemption cgroup),
+  so TCP from a root tenant is redirected into the mesh (which fails for
+  non-mesh destinations) and non-TCP is dropped. Run workloads as non-root
+  so legitimate traffic is mesh-routed.
 
 - **Pod-as-CVM picks one CPU TEE per install.** Both SEV-SNP and TDX are
   supported, but `--hardware-platform` selects one for the whole cluster;

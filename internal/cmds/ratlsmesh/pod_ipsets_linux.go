@@ -92,6 +92,17 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
+	// Dual-stack: the chart only passes status.hostIP (IPv4 on most nodes),
+	// so pod-originated IPv6 TCP was never redirected. Auto-discover the
+	// missing family's address from local interfaces; verifyNodeIPsLocal
+	// already confirmed the explicitly-provided ones are local.
+	discovered, err := discoverMissingFamilyNodeIPs(nodeIPsByFamily)
+	if err != nil {
+		return err
+	}
+	for family, ip := range discovered {
+		nodeIPsByFamily[family] = ip
+	}
 	if err := verifyNodeIPsLocal(nodeIPsByFamily); err != nil {
 		return err
 	}
@@ -104,11 +115,20 @@ func runIptablesSync(ctx context.Context, cfg *iptablesSyncConfig) error {
 	if err != nil {
 		return err
 	}
-	// The cw inbound guard is always installed: it is a fail-closed security
-	// control, not an opt-in. Its posture is the passthrough allowlist.
-	rules := buildPodIPSetRules(cfg.outboundPort, cfg.uid, excludeUIDs, nodeIPsByFamily)
-	rules = append(rules, buildCWGuardRules(cwPassthrough)...)
-	jumps := append(jumpRules(), cwJumpRule())
+	// Validate the cluster DNS IPs and split them per family. The egress DNS
+	// carve-out is restricted to these, so a cw pod cannot reach an un-scoped
+	// external resolver over plaintext UDP/53.
+	dnsIPsByFamily, err := clusterDNSIPsByFamily(cfg.clusterDNSIPs)
+	if err != nil {
+		return err
+	}
+	// The cw inbound and egress guards are always installed. Inbound posture
+	// is the passthrough allowlist; the egress guard drops non-TCP from cw
+	// pods, with the DNS carve-out and ICMPv6 essentials as the only
+	// exceptions.
+	rules, jumps := composeIptablesSyncRules(
+		cfg.outboundPort, cfg.uid, excludeUIDs, cwPassthrough, nodeIPsByFamily, dnsIPsByFamily,
+	)
 
 	logger, err := certutil.NewJSONLogger(cfg.logLevel)
 	if err != nil {
@@ -462,6 +482,213 @@ func parseNodeIPs(raw []string) (map[iptablesFamily]string, error) {
 	return out, nil
 }
 
+// composeIptablesSyncRules assembles the NAT interception rules and the
+// always-on fail-closed guard rules plus their FORWARD jumps for one sync
+// cycle. It is a pure function over already-validated inputs so the rule/jump
+// composition is unit-testable without a live kube; a rule dropped here is
+// caught the same way a rule-shaped regression is.
+func composeIptablesSyncRules(outboundPort, uid int, excludeUIDs []uint32, cwPassthrough []cwPassthrough, nodeIPsByFamily map[iptablesFamily]string, dnsIPsByFamily map[iptablesFamily][]string) ([]iptablesRule, []iptablesRule) {
+	rules := buildPodIPSetRules(outboundPort, uid, excludeUIDs, nodeIPsByFamily)
+	rules = append(rules, buildCWGuardRules(cwPassthrough)...)
+	rules = append(rules, buildCWEgressGuardRules(dnsIPsByFamily)...)
+	jumps := append(jumpRules(), cwJumpRule(), cwEgressJumpRule())
+	return rules, jumps
+}
+
+// clusterDNSIPsByFamily validates each cluster DNS IP and groups it under its
+// address family. A malformed value fails the sync so the egress carve-out
+// never silently degrades to an un-scoped allow-all.
+func clusterDNSIPsByFamily(ips []string) (map[iptablesFamily][]string, error) {
+	out := map[iptablesFamily][]string{}
+	for _, raw := range ips {
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			return out, fmt.Errorf("--cluster-dns-ip %q is not a valid IP address", raw)
+		}
+		var fam iptablesFamily
+		if ip.To4() != nil {
+			fam = iptablesFamilyIPv4
+		} else {
+			fam = iptablesFamilyIPv6
+		}
+		out[fam] = append(out[fam], ip.String())
+	}
+	return out, nil
+}
+
+// ifaceAddrSet groups the addresses bound to one interface.
+type ifaceAddrSet struct {
+	name  string
+	addrs []ifaceAddr
+}
+
+type ifaceAddr struct {
+	ip   net.IP
+	mask net.IPMask
+}
+
+// collectInterfaceAddresses enumerates the local interfaces and their
+// addresses for dual-stack node-IP discovery. Split from
+// discoverMissingFamilyNodeIPs so the selection logic can be unit-tested
+// against injected interface groups.
+func collectInterfaceAddresses() ([]ifaceAddrSet, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate local interfaces for dual-stack discovery: %w", err)
+	}
+	var out []ifaceAddrSet
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("enumerate addresses on interface %s: %w", ifc.Name, err)
+		}
+		set := ifaceAddrSet{name: ifc.Name}
+		seen := map[string]bool{}
+		for _, a := range addrs {
+			var ipnet *net.IPNet
+			switch v := a.(type) {
+			case *net.IPNet:
+				ipnet = v
+			case *net.IPAddr:
+				ipnet = &net.IPNet{IP: v.IP, Mask: net.CIDRMask(len(v.IP)*8, len(v.IP)*8)}
+			}
+			if ipnet == nil {
+				continue
+			}
+			ip := ipnet.IP.String()
+			if seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			set.addrs = append(set.addrs, ifaceAddr{ip: ipnet.IP, mask: ipnet.Mask})
+		}
+		out = append(out, set)
+	}
+	return out, nil
+}
+
+// discoverMissingFamilyNodeIPs returns one address for any family absent
+// from byFamily, so a dual-stack node whose chart only passed the IPv4
+// status.hostIP still gets the IPv6 PREROUTING DNAT. It prefers a host-usable
+// unicast address on the interface carrying the provided node IP (the egress
+// interface); if one exists only on a non-primary interface it returns an
+// error rather than install a misrouted DNAT, and a genuinely single-stack
+// node yields no entry.
+func discoverMissingFamilyNodeIPs(byFamily map[iptablesFamily]string) (map[iptablesFamily]string, error) {
+	needed := make(map[iptablesFamily]bool)
+	if _, ok := byFamily[iptablesFamilyIPv4]; !ok {
+		needed[iptablesFamilyIPv4] = true
+	}
+	if _, ok := byFamily[iptablesFamilyIPv6]; !ok {
+		needed[iptablesFamilyIPv6] = true
+	}
+	if len(needed) == 0 {
+		return nil, nil
+	}
+	sets, err := collectInterfaceAddresses()
+	if err != nil {
+		return nil, err
+	}
+	return selectMissingFamilyNodeIPs(byFamily, needed, sets)
+}
+
+// selectMissingFamilyNodeIPs is the pure selection half of
+// discoverMissingFamilyNodeIPs. For each missing family it picks a usable
+// non-loopback address bound to the interface that also carries a provided
+// node IP (the node's primary/egress interface); among those it prefers a
+// host-style (larger) prefix. If the missing family's address exists only on
+// non-primary interfaces it returns an error so the DNAT is never silently
+// installed on an overlay/management listener; a genuinely single-stack node
+// yields no entry and no error.
+func selectMissingFamilyNodeIPs(byFamily map[iptablesFamily]string, needed map[iptablesFamily]bool, sets []ifaceAddrSet) (map[iptablesFamily]string, error) {
+	out := make(map[iptablesFamily]string, 2)
+	for fam, present := range needed {
+		if !present {
+			continue
+		}
+		type candidate struct {
+			ip     net.IP
+			ones   int
+			iface  string
+			onSame bool
+		}
+		var cands []candidate
+		for si := range sets {
+			set := sets[si]
+			// The interface carries a provided node IP literal. That IP names
+			// the egress interface (kubelet's primary NIC), not an overlay.
+			carriesProvided := false
+			for _, a := range set.addrs {
+				for _, p := range byFamily {
+					if p == a.ip.String() {
+						carriesProvided = true
+					}
+				}
+			}
+			for _, a := range set.addrs {
+				ip := a.ip
+				if (fam == iptablesFamilyIPv4) != (ip.To4() != nil) {
+					continue
+				}
+				if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+					continue
+				}
+				ones, _ := a.mask.Size()
+				if fam == iptablesFamilyIPv6 && !isHostUsableIPv6(ip, ones) {
+					continue // a network aggregate (e.g. a /56 prefix), not a host address.
+				}
+				cands = append(cands, candidate{ip: ip, ones: ones, iface: set.name, onSame: carriesProvided})
+			}
+		}
+		if len(cands) == 0 {
+			continue // genuinely no address of this family: single-stack node.
+		}
+		best := cands[0]
+		bestSame := best.onSame
+		for _, c := range cands[1:] {
+			// Same-carrier outranks prefix and interface name; within the
+			// same precedence prefer a larger prefix, then a stable name tie.
+			if c.onSame != bestSame {
+				if c.onSame {
+					best, bestSame = c, true
+				}
+				continue
+			}
+			if c.ones > best.ones || (c.ones == best.ones && c.iface < best.iface) {
+				best = c
+			}
+		}
+		if !bestSame {
+			return nil, fmt.Errorf("cannot confidently choose a %s node IP: only non-primary-interface addresses exist; pass --node-ip explicitly", fam)
+		}
+		out[fam] = best.ip.String()
+	}
+	return out, nil
+}
+
+// isHostUsableIPv6 reports whether ip (prefix length ones) is a host-style
+// address suitable as a DNAT target, ruling out a pure network aggregate: a
+// prefix shorter than /64 whose interface (low 64) bits are all zero is the
+// network/aggregate address, not a host address.
+func isHostUsableIPv6(ip net.IP, ones int) bool {
+	if ones >= 64 {
+		return true // host or host-style SLAAC /64, static /128, etc.
+	}
+	v6 := ip.To16()
+	if v6 == nil {
+		return false
+	}
+	for i := 8; i < 16; i++ {
+		if v6[i] != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // verifyNodeIPsLocal confirms each parsed nodeIP is bound to a local
 // interface. DNAT to a non-local IP silently misroutes traffic off-node;
 // REDIRECT's prior self-healing property (always retargeted the receive
@@ -531,8 +758,8 @@ func sortedKeys(values map[string]struct{}) []string {
 // maxelem differs from what we want to write. The restore script uses
 // `create … -exist` which silently succeeds only when params match; on a
 // Helm upgrade that changes --ipset-maxelem after the prior pod exited
-// abruptly (i.e. preStop never ran and cleanupPodIPSets didn't fire), the
-// stale live set would otherwise block every reconcile.
+// abruptly (i.e. preStop never ran and the managed sets were never
+// destroyed), the stale live set would otherwise block every reconcile.
 //
 // The destroy fails if any iptables rule still references the set, so we
 // flush our managed chains between the probe and the destroy. The function
@@ -657,16 +884,18 @@ func buildIPSetRestoreScript(name, family string, ips []string, maxElem int) (st
 	return buf.String(), nil
 }
 
-func cleanupPodIPSets(logger *slog.Logger) {
-	names := make([]string, 0, len(managedIPSetNames)*2)
-	for _, name := range managedIPSetNames {
-		names = append(names, name, name+ipSetTmpSuffix)
-	}
+// cleanupPodIPSetsForNames destroys the named ipsets plus their -TMP swap
+// variants. runIptablesCleanup passes either the full list or, under
+// --keep-guard, the interception-only subset (keeping the cw pod sets the
+// fail-closed guard references).
+func cleanupPodIPSetsForNames(logger *slog.Logger, names []string) {
 	for _, name := range names {
-		if err := runIPSetCmd([]string{"destroy", name}); err != nil {
-			logger.Warn("delete ipset failed (may not exist)", "set", name, "error", err)
-		} else {
-			logger.Info("ipset removed", "set", name)
+		for _, n := range []string{name, name + ipSetTmpSuffix} {
+			if err := runIPSetCmd([]string{"destroy", n}); err != nil {
+				logger.Warn("delete ipset failed (may not exist)", "set", n, "error", err)
+			} else {
+				logger.Info("ipset removed", "set", n)
+			}
 		}
 	}
 }

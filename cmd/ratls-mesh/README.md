@@ -31,8 +31,10 @@ Node IP is auto-detected from the `NODE_IP` environment variable (Kubernetes dow
 # Watch Kubernetes pods and keep iptables/ipset routing current
 ratls-mesh iptables-sync --outbound-port 15001 --uid 1337
 
-# Remove iptables NAT rules and ipsets (runs as preStop hook)
-ratls-mesh iptables-cleanup
+# Remove iptables NAT rules and ipsets; with --keep-guard the fail-closed
+# filter guard (cw chains + cw pod ipsets) survives: unmeshed inbound and
+# non-TCP egress are still dropped; TCP to non-pod destinations was never meshed
+ratls-mesh iptables-cleanup --keep-guard
 ```
 
 ## Routing Model

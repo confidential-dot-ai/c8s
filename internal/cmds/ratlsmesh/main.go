@@ -557,6 +557,7 @@ type iptablesSyncConfig struct {
 	excludeUIDs             string
 	excludeSourceNamespaces string
 	nodeIPs                 []string
+	clusterDNSIPs           []string
 	resyncPeriod            time.Duration
 	watchdogPeriod          time.Duration
 	ipsetMaxElem            int
@@ -583,6 +584,7 @@ func newIptablesSyncCommand() *cobra.Command {
 	fs.StringVar(&cfg.excludeUIDs, "exclude-uids", "0", "comma-separated UIDs to skip (e.g. root=0 so kubelet/containerd can reach registries)")
 	fs.StringVar(&cfg.excludeSourceNamespaces, "exclude-source-namespaces", defaultMeshExcludedSourceNamespacesCSV(), "comma-separated local source namespaces excluded from transparent mesh interception")
 	fs.StringSliceVar(&cfg.nodeIPs, "node-ip", nil, "local node IP(s); repeat or comma-separate for dual-stack (one per family). Defaults to NODE_IP env. Each address must be a non-loopback, non-unspecified IP bound to a local interface.")
+	fs.StringSliceVar(&cfg.clusterDNSIPs, "cluster-dns-ip", []string{clusterDNSClusterIP}, "cluster DNS (CoreDNS) server IP(s) the egress DNS carve-out is restricted to (c8s default 10.53.0.10). Set the same IP in the guest C8S_CLUSTER_DNS_IP and verify the carve-out on a live cluster (post-DNAT).")
 	fs.DurationVar(&cfg.resyncPeriod, "resync-period", 30*time.Second, "periodic full ipset reconciliation interval")
 	fs.DurationVar(&cfg.watchdogPeriod, "watchdog-period", 2*time.Second, "interval at which the base-chain jump rules are re-asserted at position 1 (bounds the race window against kube-proxy reinserting KUBE-SERVICES)")
 	fs.IntVar(&cfg.ipsetMaxElem, "ipset-maxelem", defaultIPSetMaxElem, "maximum members per managed ipset")
@@ -594,15 +596,28 @@ func newIptablesSyncCommand() *cobra.Command {
 }
 
 func newIptablesCleanupCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:           "iptables-cleanup",
-		Short:         "Remove iptables NAT rules and ipsets created by the mesh",
+	var keepGuard bool
+	cmd := &cobra.Command{
+		Use:   "iptables-cleanup",
+		Short: "Remove iptables NAT rules and ipsets created by the mesh",
+		Long: `iptables-cleanup removes the mesh's iptables rules and ipsets.
+
+With --keep-guard the fail-closed guard (RATLS-MESH-CW and
+RATLS-MESH-CW-EGRESS filter chains, their FORWARD jumps, and the cw pod
+ipsets) is left in place while the traffic-interception NAT rules are
+removed. The daemonset preStop hook uses this so a terminating mesh keeps
+the guard live: unmeshed inbound and non-TCP egress are still dropped; TCP
+to non-pod destinations was never meshed. A full teardown (no
+--keep-guard) also removes the guard.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runIptablesCleanup()
+			return runIptablesCleanup(keepGuard)
 		},
 	}
+	cmd.Flags().BoolVar(&keepGuard, "keep-guard", false,
+		"keep the fail-closed filter guard (cw chains + cw ipsets) while removing interception")
+	return cmd
 }
 
 // validateConfig checks for misconfigurations that would cause cryptic runtime

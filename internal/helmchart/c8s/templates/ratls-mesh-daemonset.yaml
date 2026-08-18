@@ -128,7 +128,10 @@ spec:
                   - /bin/sh
                   - -c
                   - |
-                    /app/c8s ratls-mesh iptables-cleanup
+                    # --keep-guard keeps the guard live: unmeshed inbound and
+                    # non-TCP egress are still dropped; TCP to non-pod destinations
+                    # was never meshed.
+                    /app/c8s ratls-mesh iptables-cleanup --keep-guard
                     sleep {{ .Values.ratlsMesh.iptablesCleanup.preStopSleepSeconds }}
           resources:
             {{- toYaml .Values.ratlsMesh.iptablesCleanup.resources | nindent 12 }}
@@ -170,6 +173,8 @@ spec:
             - {{ $excludeSourceNamespaces | quote }}
             - --node-ip
             - $(NODE_IP)
+            - --cluster-dns-ip
+            - {{ .Values.ratlsMesh.clusterDNSIP | quote }}
             - --resync-period
             - {{ .Values.ratlsMesh.iptablesSync.resyncPeriod | quote }}
             - --watchdog-period

@@ -40,6 +40,9 @@ var managedChains = []managedChain{
 	{"nat", chainName},
 	{"nat", preroutingChainName},
 	{"filter", cwChainName},
+	{"filter", cwEgressChainName},
+	{"filter", guestFilterOutputChain},
+	{"filter", guestFilterInputChain},
 }
 
 // iptablesV4 and iptablesV6 are the per-protocol netfilter clients used for
@@ -310,7 +313,7 @@ func refreshCWGuardCounters() error {
 	return errors.Join(errs...)
 }
 
-func runIptablesCleanup() error {
+func runIptablesCleanup(keepGuard bool) error {
 	logger, err := certutil.NewJSONLogger("info")
 	if err != nil {
 		return err
@@ -319,9 +322,36 @@ func runIptablesCleanup() error {
 	if err := initIptablesClients(); err != nil {
 		return err
 	}
-	// Cleanup always covers the cw guard jump regardless of the enforcement
-	// flag, so an on->off config change converges on the next rollout.
-	jumps := append(jumpRules(), cwJumpRule())
+	// PreStop uses --keep-guard so the fail-closed guard survives a mesh
+	// restart/termination while workloads are still running: it removes the
+	// nat interception jumps but keeps the filter FORWARD guard jumps. A full
+	// teardown (no --keep-guard) removes the nat jumps and both guard jumps
+	// (cw inbound + cw egress), so -X of the egress chain is not blocked by a
+	// dangling FORWARD jump.
+	jumps := append(jumpRules(), cwJumpRule(), cwEgressJumpRule())
+	if keepGuard {
+		jumps = jumpRules()
+	}
+	// The cw pod ipsets are the guard's membership. Deleting an ipset while
+	// a filter rule still references it fails; keeping these ipsets under
+	// --keep-guard is what lets the guard keep functioning.
+	guardIPSetNames := []string{cwPodIPSetName4, cwPodIPSetName6}
+	chainsToDelete := managedChains
+	ipsetNamesToDelete := managedIPSetNames
+	if keepGuard {
+		chainsToDelete = []managedChain{{"nat", chainName}, {"nat", preroutingChainName}}
+		ipsetNamesToDelete = filterOut(
+			managedIPSetNames,
+			func(n string) bool {
+				for _, g := range guardIPSetNames {
+					if n == g || n == g+ipSetTmpSuffix {
+						return true
+					}
+				}
+				return false
+			},
+		)
+	}
 
 	for _, ipt := range iptablesClients() {
 		bin := iptablesLabel(ipt)
@@ -329,7 +359,7 @@ func runIptablesCleanup() error {
 			deleteAllIptablesRules(logger, ipt, jump)
 		}
 
-		for _, mc := range managedChains {
+		for _, mc := range chainsToDelete {
 			if err := ipt.ClearChain(mc.table, mc.chain); err != nil {
 				logger.Warn("flush chain failed (may not exist)", "bin", bin, "chain", mc.chain)
 			}
@@ -340,8 +370,22 @@ func runIptablesCleanup() error {
 			}
 		}
 	}
-	cleanupPodIPSets(logger)
+	cleanupPodIPSetsForNames(logger, ipsetNamesToDelete)
 	return nil
+}
+
+// filterOut returns a new slice containing only the elements of in for which
+// keep returns false. The helper keeps the keep-guard ipset cleanup list
+// derived from the single source of truth (managedIPSetNames) without
+// duplicating name literals.
+func filterOut(in []string, keep func(string) bool) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !keep(s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // deleteAllIptablesRules removes every instance of rule from its chain. The

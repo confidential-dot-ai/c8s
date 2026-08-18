@@ -527,7 +527,7 @@ func TestRunIptablesCleanupRemovesChainsAndSets(t *testing.T) {
 	nf.set("ipset_destroy_ok", "")
 
 	capture := captureStdout(t)
-	err := runIptablesCleanup()
+	err := runIptablesCleanup(false)
 	capture.stop()
 	if err != nil {
 		t.Fatalf("runIptablesCleanup: %v", err)
@@ -540,6 +540,8 @@ func TestRunIptablesCleanupRemovesChainsAndSets(t *testing.T) {
 		{"iptables ", "-t nat -X " + chainName},
 		{"ip6tables ", "-t nat -X " + preroutingChainName},
 		{"iptables ", "-t filter -X " + cwChainName},
+		{"iptables ", "-t filter -X " + cwEgressChainName},
+		{"iptables ", "-t filter -D FORWARD -j " + cwEgressChainName},
 		{"ipset ", "destroy " + podIPSetName4},
 		{"ipset ", "destroy " + cwPodIPSetName6 + ipSetTmpSuffix},
 	} {
@@ -563,6 +565,114 @@ func TestRunIptablesCleanupRemovesChainsAndSets(t *testing.T) {
 	}
 	if hasMsg(records, "delete ipset failed (may not exist)") {
 		t.Error("successful ipset destroy logged the failure branch")
+	}
+}
+
+// --keep-guard removes the NAT interception (OUTPUT/PREROUTING jumps, nat
+// chains, pod ipsets) but leaves the fail-closed filter guard (cw chain,
+// cw egress chain, cw jumps, cw pod ipsets) in place: unmeshed inbound and
+// non-TCP egress stay dropped.
+func TestRunIptablesCleanupKeepGuardLeavesFailClosed(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	nf.set("ipset_destroy_ok", "")
+
+	capture := captureStdout(t)
+	err := runIptablesCleanup(true)
+	capture.stop()
+	if err != nil {
+		t.Fatalf("runIptablesCleanup(true): %v", err)
+	}
+
+	calls := nf.calls()
+	// Interception gone: nat OUTPUT/PREROUTING chains deleted, pod ipsets
+	// destroyed.
+	for _, tc := range []struct {
+		bin, sub string
+	}{
+		{"iptables ", "-t nat -X " + chainName},
+		{"iptables ", "-t nat -X " + preroutingChainName},
+		{"ipset ", "destroy " + podIPSetName4},
+		{"ipset ", "destroy " + localPodIPSetName4},
+	} {
+		if len(callsContaining(calls, tc.bin, tc.sub)) == 0 {
+			t.Errorf("keep-guard: missing %q%q call:\n%s", tc.bin, tc.sub, strings.Join(calls, "\n"))
+		}
+	}
+	// Guard kept: filter cw chain and cw egress chain NOT deleted, their
+	// FORWARD jumps NOT deleted, cw pod ipsets NOT destroyed.
+	for _, forbidden := range []string{
+		"-t filter -X " + cwChainName,
+		"-t filter -X " + cwEgressChainName,
+		"-t filter -D FORWARD -j " + cwChainName,
+		"-t filter -D FORWARD -j " + cwEgressChainName,
+		"destroy " + cwPodIPSetName4,
+		"destroy " + cwPodIPSetName6,
+	} {
+		for _, call := range calls {
+			if strings.Contains(call, forbidden) {
+				t.Errorf("keep-guard must not %q; got call %q", forbidden, call)
+			}
+		}
+	}
+
+	// The FORWARD guard jumps are retained: assert the cw and cw egress jump
+	// rules are NOT among the delete operations (only the nat jumps are).
+	for _, jump := range []iptablesRule{cwJumpRule(), cwEgressJumpRule()} {
+		del := "-t filter -D FORWARD -j " + jump.args[1]
+		if strings.Contains(strings.Join(calls, "\n"), del) {
+			t.Errorf("keep-guard must retain the %s jump; got delete call %q", jump.label, del)
+		}
+	}
+}
+
+// The daemonset preStop hook execs `ratls-mesh iptables-cleanup
+// [--keep-guard]`; the flag must parse and reach runIptablesCleanup.
+func TestIptablesCleanupCommandKeepGuardFlag(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	nf.set("ipset_destroy_ok", "")
+
+	cmd := newIptablesCleanupCommand()
+	f := cmd.Flags().Lookup("keep-guard")
+	if f == nil || f.DefValue != "false" {
+		t.Fatalf("--keep-guard flag = %+v, want registered with default false", f)
+	}
+	if err := cmd.Flags().Set("keep-guard", "true"); err != nil {
+		t.Fatalf("set --keep-guard: %v", err)
+	}
+	capture := captureStdout(t)
+	err := cmd.RunE(cmd, nil)
+	capture.stop()
+	if err != nil {
+		t.Fatalf("iptables-cleanup --keep-guard: %v", err)
+	}
+	for _, call := range nf.calls() {
+		if strings.Contains(call, "-t filter -X "+cwChainName) {
+			t.Errorf("keep-guard via command deleted the guard chain: %q", call)
+		}
+	}
+}
+
+// A destroy failure mid-teardown (set already gone) is logged and skipped,
+// not fatal.
+func TestCleanupPodIPSetsForNamesWarnsOnDestroyFailure(t *testing.T) {
+	installFakeNetfilter(t)
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	cleanupPodIPSetsForNames(logger, []string{podIPSetName4})
+	if !strings.Contains(logBuf.String(), "delete ipset failed") {
+		t.Errorf("destroy failure should be logged and skipped, got %q", logBuf.String())
+	}
+}
+
+// The in-guest setup installs the fail-closed rules including the DNS
+// carve-out for the cluster DNS server.
+func TestSetupInGuestIptablesInstallsFailClosed(t *testing.T) {
+	nf := installFakeNetfilter(t)
+	if err := setupInGuestIptables(slog.New(slog.DiscardHandler), "10.0.0.5", nil, clusterDNSClusterIP); err != nil {
+		t.Fatalf("setupInGuestIptables: %v", err)
+	}
+	if len(callsContaining(nf.calls(), "iptables ", clusterDNSClusterIP)) == 0 {
+		t.Errorf("no rule references the cluster DNS IP %s", clusterDNSClusterIP)
 	}
 }
 
