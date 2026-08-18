@@ -261,10 +261,14 @@ jobs:
           kind: Secret
           metadata: {name: $VM-cloudinit, namespace: $NS}
           type: Opaque
+          # Bait, not configuration: the node image pins cloud-init to its
+          # measured baked seed, so this host-supplied cidata disk must have
+          # no effect. The tripwire step after the kubeconfig fetch asserts
+          # the node registers under the baked hostname, not this one.
           stringData:
             userdata: |
               #cloud-config
-              hostname: ${VM}
+              hostname: cidata-bait
           ---
           apiVersion: kubevirt.io/v1
           kind: VirtualMachine
@@ -401,6 +405,23 @@ jobs:
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
           echo "OK: attested kubeconfig, identity=$WHO"
           KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes
+
+      - name: assert the host cidata disk is inert
+        # The boot attaches a bait cloud-init disk ($VM-cloudinit). With the
+        # node image's datasource pin, the measured baked seed is the only
+        # cloud-init input, so the node must register under the baked
+        # hostname — the bait name means host user-data executed as root.
+        run: |
+          set -euo pipefail
+          NODE=$(KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+          echo "registered node name: $NODE"
+          case "$NODE" in
+            c8s-node) ;;
+            cidata-bait)
+              echo "::error title=SECURITY REGRESSION::host-supplied cidata user-data reached cloud-init in the attested node CVM"
+              exit 1 ;;
+            *) echo "::error::node name '$NODE' is neither the baked c8s-node nor the cidata bait — first-boot initialisation changed; update this tripwire"; exit 1 ;;
+          esac
 
       - name: install the c8s bundle under test
         run: |
