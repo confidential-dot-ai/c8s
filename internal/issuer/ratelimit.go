@@ -19,6 +19,11 @@ var (
 		Help: "Total requests rejected by rate limiter.",
 	})
 
+	rateLimitSaturationTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cds_rate_limit_saturation_total",
+		Help: "Total requests refused because the rate limiter was full and the key held no bucket; a subset of cds_rate_limit_rejections_total.",
+	})
+
 	rateLimiterEntries = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cds_rate_limiter_entries",
 		Help: "Current number of entries in the rate limiter.",
@@ -31,15 +36,12 @@ type ipLimiterEntry struct {
 }
 
 // IPRateLimiter implements keyed rate limiting with bounded memory. It holds
-// at most MaxEntries buckets, evicting the least recently used to make room,
-// and EvictionLoop reclaims buckets idle longer than IdleTimeout.
+// at most MaxEntries buckets; once it is full a key with no bucket is
+// refused, so churning through more keys than the map holds cannot reset a
+// caller's allowance. EvictionLoop reclaims buckets idle longer than
+// IdleTimeout, so a full map recovers as callers go quiet.
 // RateLimitMiddleware keys on the source address; RateLimitBy keys on whatever
 // identifies the caller.
-//
-// MaxEntries is how many callers are metered at once. Past it a caller is
-// still served, on a bucket taken from the quietest one — so a caller that
-// varies its key faster than the map holds keys meters itself out of the map.
-// Issue #105 owns that, and a saturation policy for it.
 type IPRateLimiter struct {
 	mu         sync.Mutex
 	limiters   map[string]*ipLimiterEntry
@@ -50,9 +52,8 @@ type IPRateLimiter struct {
 
 func NewIPRateLimiter(r rate.Limit, burst, maxEntries int) (*IPRateLimiter, error) {
 	if maxEntries <= 0 {
-		// A non-positive cap makes len(limiters) >= maxEntries always true, so
-		// every new source IP evicts an existing one — the limiter would track
-		// one IP globally and rate limiting would collapse across clients.
+		// A non-positive cap makes len(limiters) >= maxEntries always true:
+		// every request would be refused.
 		return nil, fmt.Errorf("rate limiter maxEntries must be positive, got %d", maxEntries)
 	}
 	return &IPRateLimiter{
@@ -63,32 +64,25 @@ func NewIPRateLimiter(r rate.Limit, burst, maxEntries int) (*IPRateLimiter, erro
 	}, nil
 }
 
-func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
+// allow charges one request to key's bucket and reports whether it may
+// proceed. A key with no bucket gets one while the map holds fewer than
+// MaxEntries entries; past that it is refused, so a held bucket is never
+// taken by another key and the map is the ceiling on metered callers.
+func (rl *IPRateLimiter) allow(key string) bool {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if entry, ok := rl.limiters[ip]; ok {
-		entry.lastSeen = time.Now()
-		return entry.limiter
-	}
-	if len(rl.limiters) >= rl.maxEntries {
-		var oldestIP string
-		var oldestTime time.Time
-		for ip, entry := range rl.limiters {
-			if oldestTime.IsZero() || entry.lastSeen.Before(oldestTime) {
-				oldestIP = ip
-				oldestTime = entry.lastSeen
-			}
+	entry, ok := rl.limiters[key]
+	if !ok {
+		if len(rl.limiters) >= rl.maxEntries {
+			rl.mu.Unlock()
+			rateLimitSaturationTotal.Inc()
+			return false
 		}
-		if oldestIP != "" {
-			delete(rl.limiters, oldestIP)
-		}
+		entry = &ipLimiterEntry{limiter: rate.NewLimiter(rl.rate, rl.burst)}
+		rl.limiters[key] = entry
 	}
-	lim := rate.NewLimiter(rl.rate, rl.burst)
-	rl.limiters[ip] = &ipLimiterEntry{
-		limiter:  lim,
-		lastSeen: time.Now(),
-	}
-	return lim
+	entry.lastSeen = time.Now()
+	rl.mu.Unlock()
+	return entry.limiter.Allow()
 }
 
 // Len reports how many callers the limiter is metering, for metrics and tests.
@@ -152,7 +146,7 @@ func RateLimitBy(rl *IPRateLimiter, key KeyFunc, next http.Handler) http.Handler
 		if bucket == "" {
 			bucket = SourceAddrKey(r)
 		}
-		if !rl.getLimiter(bucket).Allow() {
+		if !rl.allow(bucket) {
 			rateLimitRejectionsTotal.Inc()
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return

@@ -150,8 +150,8 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rate limiter: %v", err)
 	}
-	// A single-entry map, so a second source churns the first out of it — and
-	// the routes on the other limiter must not notice.
+	// A single-entry map, so a second source is refused at capacity — and the
+	// routes on the other limiter must not notice.
 	challengeRL, err := issuer.NewIPRateLimiter(rate.Limit(0.001), 1, 1)
 	if err != nil {
 		t.Fatalf("challenge rate limiter: %v", err)
@@ -194,15 +194,15 @@ func TestRouter_RateLimitsAuthenticate(t *testing.T) {
 	if got := post("/attest", "10.0.0.3:1234").Code; got == http.StatusTooManyRequests {
 		t.Fatal("/attest was spent by the same source's challenge requests")
 	}
-	// A second source churns the one-entry challenge map, taking the first
-	// source's bucket with it. What must not follow is that source getting a
-	// fresh attestation bucket: the two maps are separate, so its spent
-	// /attest budget is still spent.
-	if got := post("/authenticate", "10.0.0.4:1234").Code; got != http.StatusOK {
-		t.Fatalf("/authenticate from a second source: got %d, want 200", got)
+	// The one-entry challenge map is full, so a second source is refused and
+	// the first source's bucket is untouched. What must not follow either is
+	// that source getting a fresh attestation bucket: the two maps are
+	// separate, so its spent /attest budget is still spent.
+	if got := post("/authenticate", "10.0.0.4:1234").Code; got != http.StatusTooManyRequests {
+		t.Fatalf("/authenticate from a second source: got %d, want 429 (the map is full)", got)
 	}
 	if got := post("/attest", "10.0.0.3:1234").Code; got != http.StatusTooManyRequests {
-		t.Fatalf("/attest after the challenge map churned: got %d, want the source's spent budget", got)
+		t.Fatalf("/attest after the challenge refusal: got %d, want the source's spent budget", got)
 	}
 }
 
