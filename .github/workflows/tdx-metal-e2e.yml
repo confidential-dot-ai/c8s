@@ -261,10 +261,14 @@ jobs:
           kind: Secret
           metadata: {name: $VM-cloudinit, namespace: $NS}
           type: Opaque
+          # Bait, not configuration: the node image pins cloud-init to its
+          # measured baked seed, so this host disk must be inert (asserted
+          # by the tripwire step below). c8s-local patch — mirror to
+          # confidential-ci before re-vendoring.
           stringData:
             userdata: |
               #cloud-config
-              hostname: ${VM}
+              hostname: cidata-bait
           ---
           apiVersion: kubevirt.io/v1
           kind: VirtualMachine
@@ -401,6 +405,9 @@ jobs:
           [ "$WHO" = operator ] || { echo "::error::unexpected identity '$WHO'"; exit 1; }
           echo "OK: attested kubeconfig, identity=$WHO"
           KUBECONFIG=/tmp/guest.kubeconfig kubectl get nodes
+
+      - name: assert the host cidata disk is inert
+        run: .github/scripts/cidata-tripwire.sh
 
       - name: install the c8s bundle under test
         run: |
