@@ -9,9 +9,10 @@
 # pin (mkosi.extra/etc/cloud/cloud.cfg.d/99-c8s-datasource.cfg) keeps
 # host-presented cidata disks and ds= cmdline/DMI redirects away from this
 # root interpreter; cloud-init's cc: cmdline config overrides cfg.d by
-# design and is closed only by the UKI->RTMR[2] attestation pin. Anything
-# per-host (secrets, IPs, join material) rides a data disk (e.g. the
-# joindata disk rke2-role.sh reads), not cloud-init.
+# design and is closed only by the measured-cmdline attestation pin
+# (UKI->RTMR[2] on TDX). Anything per-host (secrets, IPs, join material)
+# rides a data disk (e.g. the joindata disk rke2-role.sh reads), not
+# cloud-init.
 #
 # The bulk of node setup is baked rather than scripted at first boot — see
 # this profile's mkosi.extra/ tree. The role-gated rke2 units are started
