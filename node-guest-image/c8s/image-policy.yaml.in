@@ -114,6 +114,9 @@ allowlist:
     # Deploy-time values; the installer's post-install config refresh pins
     # them. Empty = accept any RA-TLS-attested CDS measurement (logged).
     cds_measurements: []
+    # Minimum SEV-SNP platform TCB for CDS's evidence, matching the chart's
+    # shipped floor. A 0 component floors nothing.
+    cds_min_tcb: "3,0,8,0"
 
 containerd:
   socket: "/run/k3s/containerd/containerd.sock"
