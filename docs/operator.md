@@ -649,6 +649,7 @@ get-cert \
   --san=<derived from confidential.ai/cw, e.g. c8s-api.default.svc> \
   --out=/etc/c8s/certs/tls.crt \
   --key-out=/etc/c8s/certs/tls.key \
+  --ca-out=/etc/c8s/certs/ca.crt \
   --key-mode=<webhook.certVolume.keyMode> \
   --renew-interval=<webhook.getCert.renewInterval> \
   --reload-nginx=<from annotation> \
@@ -657,6 +658,17 @@ get-cert \
 
 `--key-out` is idempotent: on a kubelet restart of the sidecar it reuses the
 key that's already on disk, so the previously-issued cert chain stays valid.
+`tls.crt` is the full chain (leaf first, mesh CA after); `ca.crt` is the mesh
+CA alone, world-readable, for applications that take the trust anchor as a
+separate file (`mysqld --ssl-ca`, clients doing `VERIFY_CA` against peers on
+the mesh). File names are overridable per pod with `confidential.ai/c8s-cert-file`,
+`confidential.ai/c8s-key-file`, and `confidential.ai/c8s-ca-file`.
+
+`tls.key` is written `0640` owned by the get-cert user (UID/GID 65532, the pod's
+`fsGroup`). An image whose entrypoint starts as root and then drops to a
+service user (`gosu`, `su`) loses supplementary groups and can no longer read
+it; either run the container as UID 65532, or have the entrypoint copy the
+key into a directory the service user owns before dropping privileges.
 The `c8s-cert-wait` init container (`/c8s probe-file --wait /etc/c8s/certs/tls.crt`)
 gates the application containers on the initial cert being written: it blocks
 until the cert exists, then exits, and normal init-completion ordering holds the
