@@ -199,6 +199,11 @@ type MinTcb struct {
 	Microcode  uint8 `json:"microcode"`
 }
 
+// String returns the canonical bootloader,tee,snp,microcode form.
+func (m MinTcb) String() string {
+	return fmt.Sprintf("%d,%d,%d,%d", m.Bootloader, m.Tee, m.Snp, m.Microcode)
+}
+
 // ParseMinTcb parses an SEV-SNP minimum-TCB floor in
 // "bootloader,tee,snp,microcode" form — each component 0-255, 0 leaves that
 // component unfloored. The empty string and the all-zero floor both parse to

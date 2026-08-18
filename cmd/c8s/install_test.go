@@ -1172,6 +1172,22 @@ func TestAppendCvmModeInstallArgsMinTCB(t *testing.T) {
 	if slices.ContainsFunc(got, func(a string) bool { return strings.HasPrefix(a, "minTcb=") }) {
 		t.Fatalf("empty --min-tcb leaked a minTcb arg; got %v", got)
 	}
+
+	// Spellings ParseMinTcb tolerates render in the canonical form the
+	// chart's stricter render-time grammar accepts.
+	installMinTCB = "03, 0, 8, 115"
+	got, err = appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sev-snp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(got, "minTcb=3,0,8,115") {
+		t.Fatalf("args missing canonical minTcb=3,0,8,115; got %v", got)
+	}
+
+	installMinTCB = "3,0,8"
+	if _, err := appendCvmModeInstallArgs([]string{"upgrade"}, "node", "sev-snp"); err == nil {
+		t.Fatal("malformed --min-tcb: want a parse error before the render")
+	}
 }
 
 // The downgrade gate: the chart ships a non-zero floor, and anything below it

@@ -46,11 +46,13 @@ const (
 	envLogLevel              = "C8S_LOG_LEVEL"
 	envCDSMeasurements       = "C8S_CDS_MEASUREMENTS"
 	envMeshMeasurements      = "C8S_MESH_MEASUREMENTS"
-	envMinTCB                = "C8S_MIN_TCB"
-	envPlatform              = "C8S_PLATFORM"
-	envPodIP                 = "C8S_POD_IP"
-	envInboundPassthrough    = "C8S_MESH_INBOUND_PASSTHROUGH"
-	envClusterDNSIP          = "C8S_CLUSTER_DNS_IP"
+	// No producer sets C8S_MIN_TCB today: the in-guest mesh has no floor
+	// delivery and runs unfloored, warning at boot (known gap).
+	envMinTCB             = "C8S_MIN_TCB"
+	envPlatform           = "C8S_PLATFORM"
+	envPodIP              = "C8S_POD_IP"
+	envInboundPassthrough = "C8S_MESH_INBOUND_PASSTHROUGH"
+	envClusterDNSIP       = "C8S_CLUSTER_DNS_IP"
 )
 
 // defaultInGuestAttestationServiceURL is the loopback URL the in-guest

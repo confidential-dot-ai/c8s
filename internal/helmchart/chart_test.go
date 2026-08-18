@@ -6985,11 +6985,12 @@ func TestChartOperatorOmitsCDSMeasurementsWhenUnset(t *testing.T) {
 	}
 }
 
-// The shipped floor is non-zero and reaches every component that verifies
-// attestation evidence: CDS (issuance), the operator (injected fetchers),
-// the mesh (peers and CDS), the tls-lb allowlist proxy, and the NRI plugin's
-// pull config. Losing any one of them re-opens acceptance of vulnerable
-// firmware on that path.
+// The shipped floor is non-zero and reaches every chart-managed component
+// that verifies attestation evidence: CDS (issuance), the operator (injected
+// fetchers), the DaemonSet mesh (peers and CDS), the tls-lb allowlist proxy,
+// and the NRI plugin's pull config. (The in-guest mesh is not chart-managed
+// and has no floor delivery — a known gap.) Losing any one of them re-opens
+// acceptance of vulnerable firmware on that path.
 func TestChartMinTCBFloorReachesEveryVerifier(t *testing.T) {
 	out, err := helmTemplate(t)
 	if err != nil {

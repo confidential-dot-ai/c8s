@@ -163,7 +163,7 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 // minTCBPreflight enforces that lowering the chart's shipped TCB floor is a
 // deliberate choice. The floor is the cluster's one defence against evidence
 // from known-vulnerable platform firmware, and lowering it re-opens that on
-// every verification path at once — so an effective floor below the shipped
+// the chart-managed verification paths at once — so an effective floor below the shipped
 // default in any component requires --force, whether it comes from --min-tcb
 // or a -f values file. An install that sets neither keeps the shipped floor;
 // a floor at or above the default needs nothing.
@@ -1306,8 +1306,14 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 	}
 	// --min-tcb overrides the chart's shipped floor; empty leaves the chart
 	// value standing. minTCBPreflight gates downgrades on the install path.
+	// The canonical form keeps spellings ParseMinTcb tolerates (spaces,
+	// leading zeros) inside the chart's stricter render-time grammar.
 	if installMinTCB != "" {
-		helmArgs = append(helmArgs, "--set-string", "minTcb="+installMinTCB)
+		floor, err := types.ParseMinTcb(installMinTCB)
+		if err != nil {
+			return nil, fmt.Errorf("--min-tcb: %w", err)
+		}
+		helmArgs = append(helmArgs, "--set-string", "minTcb="+floor.String())
 	}
 	for i, c := range installInventoryCIDRs {
 		helmArgs = append(helmArgs,
@@ -2011,6 +2017,6 @@ func init() {
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
 	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled); install with a minTcb (flag or -f values file) below the chart's shipped TCB floor")
-	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,0), enforced on the chart-managed verification paths (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
+	installCmd.Flags().StringVar(&installMinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27), enforced on the chart-managed verification paths (SEV-SNP only; the TDX verifier has no minimum-TCB parameter). Defaults to the chart's shipped floor; a lower floor requires --force")
 	rootCmd.AddCommand(installCmd)
 }

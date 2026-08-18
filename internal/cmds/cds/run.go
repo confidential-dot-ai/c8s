@@ -101,7 +101,7 @@ func run(cfg config) error {
 	}
 	defer allowlistStore.Close()
 
-	// The TCB floor is enforced on every attestation CDS verifies: issuance
+	// The TCB floor rides every SNP attestation CDS verifies: issuance
 	// (/attest, /attest-key), the handoff self-attestation and peer adoption,
 	// and the sandbox-digests callback.
 	minTcb, err := types.ParseMinTcb(cfg.minTCB)
@@ -111,7 +111,7 @@ func run(cfg config) error {
 	var minTcbFloor *types.MinTcb
 	if minTcb != (types.MinTcb{}) {
 		minTcbFloor = &minTcb
-		slog.Info("minimum TCB floor enabled", "floor", minTcb)
+		slog.Info("SEV-SNP minimum TCB floor enabled", "floor", cfg.minTCB)
 	} else {
 		slog.Warn("--min-tcb empty: attestation from any platform TCB level is accepted, including firmware with known vulnerabilities. UNSAFE outside development.")
 	}

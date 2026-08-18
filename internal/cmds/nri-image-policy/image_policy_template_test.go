@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The node image's baked boot config is the plugin's other config schema
@@ -110,5 +112,34 @@ func TestNodeImageBootConfig_LoadsAndFloorsSystemImages(t *testing.T) {
 		if !idx.AdmitsDigest(d) {
 			t.Errorf("floor key %q is not an admissible digest", d)
 		}
+	}
+}
+
+// The baked floor must track the chart's shipped default: if values.yaml
+// moves and this copy does not, nodes boot with a stale floor until the
+// installer's post-install refresh rewrites the config.
+func TestNodeImageBootConfig_MinTCBMatchesChartDefault(t *testing.T) {
+	rendered := renderNodeImagePolicy(t)
+	path := filepath.Join(t.TempDir(), "image-policy.yaml")
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("the rendered node-image boot config does not load: %v", err)
+	}
+
+	chartRaw, err := os.ReadFile(filepath.Clean("../../helmchart/c8s/values.yaml"))
+	if err != nil {
+		t.Fatalf("read chart values: %v", err)
+	}
+	var vals struct {
+		MinTCB string `yaml:"minTcb"`
+	}
+	if err := yaml.Unmarshal(chartRaw, &vals); err != nil {
+		t.Fatalf("parse chart values: %v", err)
+	}
+	if cfg.Allowlist.Pull.CDSMinTCB != vals.MinTCB {
+		t.Fatalf("baked cds_min_tcb %q != chart minTcb %q — bump them together", cfg.Allowlist.Pull.CDSMinTCB, vals.MinTCB)
 	}
 }

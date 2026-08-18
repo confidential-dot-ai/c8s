@@ -74,8 +74,9 @@ type Config struct {
 	CDSMeasurements [][]byte
 
 	// MinTCBVersion is the packed SNP TCB floor CDS's RA-TLS peer evidence
-	// must meet (zero = no floor, UNSAFE outside development). The chart
-	// populates this from the cluster-wide `minTcb` value.
+	// must meet (zero = no floor, UNSAFE outside development). The
+	// DaemonSet mesh populates it from the cluster-wide `minTcb` value;
+	// the in-guest mesh has no delivery yet and passes zero (known gap).
 	MinTCBVersion uint64
 
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS

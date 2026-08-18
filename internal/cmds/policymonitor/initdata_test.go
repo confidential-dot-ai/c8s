@@ -175,7 +175,7 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestResolveInitDataMeasurementsHonoursCommittedDocument(t *testing.T) {
+func TestResolveInitDataHonoursCommittedDocument(t *testing.T) {
 	raw := testDocument(t, "aabb,ccdd")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
@@ -192,7 +192,7 @@ func TestResolveInitDataMeasurementsHonoursCommittedDocument(t *testing.T) {
 
 // The whole trust anchor: a host that writes one document and commits another
 // must not have its measurements believed.
-func TestResolveInitDataMeasurementsRejectsUncommittedDocument(t *testing.T) {
+func TestResolveInitDataRejectsUncommittedDocument(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 
 	// HOST_DATA commits some other document.
@@ -210,7 +210,7 @@ func TestResolveInitDataMeasurementsRejectsUncommittedDocument(t *testing.T) {
 
 // HOST_DATA agreeing with the digest on every byte but one is still not the
 // commitment.
-func TestResolveInitDataMeasurementsRejectsNearCollision(t *testing.T) {
+func TestResolveInitDataRejectsNearCollision(t *testing.T) {
 	raw := testDocument(t, "aabb")
 	writeInitData(t, raw)
 
@@ -224,7 +224,7 @@ func TestResolveInitDataMeasurementsRejectsNearCollision(t *testing.T) {
 }
 
 // A guest whose HOST_DATA was never set (all-zero) must not pass either.
-func TestResolveInitDataMeasurementsRejectsZeroHostData(t *testing.T) {
+func TestResolveInitDataRejectsZeroHostData(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	cfg := &Config{AttestationServiceURL: attesterServing(t, make([]byte, initdata.DigestSize))}
 
@@ -233,7 +233,7 @@ func TestResolveInitDataMeasurementsRejectsZeroHostData(t *testing.T) {
 	}
 }
 
-func TestResolveInitDataMeasurementsNoDocument(t *testing.T) {
+func TestResolveInitDataNoDocument(t *testing.T) {
 	old := initDataDocumentPath
 	initDataDocumentPath = filepath.Join(t.TempDir(), "absent.toml")
 	t.Cleanup(func() { initDataDocumentPath = old })
@@ -246,7 +246,7 @@ func TestResolveInitDataMeasurementsNoDocument(t *testing.T) {
 
 // Verification precedes parsing, so malformed bytes that HOST_DATA does commit
 // still fail — as a parse error, not silently.
-func TestResolveInitDataMeasurementsMalformedDocument(t *testing.T) {
+func TestResolveInitDataMalformedDocument(t *testing.T) {
 	raw := []byte("this is not an init-data document\n")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
@@ -258,7 +258,7 @@ func TestResolveInitDataMeasurementsMalformedDocument(t *testing.T) {
 	}
 }
 
-func TestResolveInitDataMeasurementsAttesterUnreachable(t *testing.T) {
+func TestResolveInitDataAttesterUnreachable(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	cfg := &Config{AttestationServiceURL: "http://127.0.0.1:1"}
 
@@ -267,7 +267,7 @@ func TestResolveInitDataMeasurementsAttesterUnreachable(t *testing.T) {
 	}
 }
 
-func TestApplyInitDataMeasurementsSetsFromDocument(t *testing.T) {
+func TestApplyInitDataSetsFromDocument(t *testing.T) {
 	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
@@ -282,7 +282,7 @@ func TestApplyInitDataMeasurementsSetsFromDocument(t *testing.T) {
 
 // An operator pinning measurements out-of-band must not be re-pointed by the
 // host, so the attester is never even consulted.
-func TestApplyInitDataMeasurementsExplicitValueWins(t *testing.T) {
+func TestApplyInitDataExplicitValueWins(t *testing.T) {
 	raw := testDocument(t, "fromdocument")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
@@ -384,7 +384,7 @@ func TestApplyInitDataExplicitFloorAdmitsFloorlessDocument(t *testing.T) {
 
 // Every failure path must leave cfg untouched: empty measurements is what makes
 // runAllowlistRefresh fail closed onto the baked seed.
-func TestApplyInitDataMeasurementsFailuresLeaveConfigEmpty(t *testing.T) {
+func TestApplyInitDataFailuresLeaveConfigEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(t *testing.T) *Config
@@ -615,7 +615,7 @@ func TestVerifiedSelfHostDataRejectsIllShapedClaim(t *testing.T) {
 
 // A forged report committing the document on disk still fails, because the
 // forgery is what the verifier rejects: a 422, terminal rather than retryable.
-func TestResolveInitDataMeasurementsRejectsUnverifiedReport(t *testing.T) {
+func TestResolveInitDataRejectsUnverifiedReport(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 
 	stub := testattest.New(t)
@@ -652,7 +652,7 @@ func shortInitDataWait(t *testing.T, budget, interval time.Duration) {
 // startup, and systemd orders kata-agent.service behind this unit's READY=1,
 // so a single read on the startup path could only ever miss it. The wait has
 // to survive an initially-absent file.
-func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
+func TestAwaitInitDataWaitsForKataAgent(t *testing.T) {
 	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	digest := initdata.Digest(raw)
 	path := pointInitDataAt(t)
@@ -679,7 +679,7 @@ func TestAwaitInitDataMeasurementsWaitsForKataAgent(t *testing.T) {
 // That short file's digest cannot match the launch-committed one, which is also
 // what tampering looks like — the wait has to outlast it rather than call it a
 // verdict on the first read.
-func TestAwaitInitDataMeasurementsOutlastsAPartialWrite(t *testing.T) {
+func TestAwaitInitDataOutlastsAPartialWrite(t *testing.T) {
 	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	digest := initdata.Digest(raw)
 	path := pointInitDataAt(t)
@@ -708,7 +708,7 @@ func TestAwaitInitDataMeasurementsOutlastsAPartialWrite(t *testing.T) {
 // A document HOST_DATA does not commit is a verdict, not a timing problem, so
 // the wait must abandon it promptly rather than retry until the budget runs
 // out — otherwise a tampering host delays every guest's refresh.
-func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
+func TestAwaitInitDataStopsOnUncommittedDocument(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	other := initdata.Digest(testDocument(t, "deadbeef"))
 	// A budget that would dominate the test if the tamper path retried.
@@ -729,7 +729,7 @@ func TestAwaitInitDataMeasurementsStopsOnUncommittedDocument(t *testing.T) {
 // A refused report is terminal and reaches the operator at Error: the wait
 // stops at the first refusal rather than spending the budget on retries that
 // reproduce it.
-func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
+func TestAwaitInitDataStopsOnRefusedReport(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	// A budget that would dominate the test if the refusal were retried.
 	shortInitDataWait(t, time.Minute, 10*time.Second)
@@ -755,7 +755,7 @@ func TestAwaitInitDataMeasurementsStopsOnRefusedReport(t *testing.T) {
 }
 
 // A missing anchor is terminal like a refusal, but not at a refusal's level.
-func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
+func TestAwaitInitDataStopsOnMissingAnchor(t *testing.T) {
 	writeInitData(t, testDocument(t, "aabb"))
 	shortInitDataWait(t, time.Minute, 10*time.Second)
 
@@ -778,7 +778,7 @@ func TestAwaitInitDataMeasurementsStopsOnMissingAnchor(t *testing.T) {
 
 // The other half of the split: a verifier still coming up is retried, so a slow
 // attestation-service does not cost the guest its pin.
-func TestAwaitInitDataMeasurementsRetriesAnUnavailableVerifier(t *testing.T) {
+func TestAwaitInitDataRetriesAnUnavailableVerifier(t *testing.T) {
 	raw := testDocumentWithFloor(t, "aabb,ccdd", "3,0,8,0")
 	writeInitData(t, raw)
 	digest := initdata.Digest(raw)
@@ -800,7 +800,7 @@ func TestAwaitInitDataMeasurementsRetriesAnUnavailableVerifier(t *testing.T) {
 
 // A host that delivers no document at all leaves the guest exactly where it
 // was before: seed-only enforcement, no measurements.
-func TestAwaitInitDataMeasurementsBudgetExhausted(t *testing.T) {
+func TestAwaitInitDataBudgetExhausted(t *testing.T) {
 	pointInitDataAt(t)
 	shortInitDataWait(t, 100*time.Millisecond, 10*time.Millisecond)
 

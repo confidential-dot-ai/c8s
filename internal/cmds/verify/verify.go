@@ -576,9 +576,9 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, err
 	}
 
-	// The --min-tcb-* floor travels with the policy so the delegated
-	// attestation-api path sends and echo-checks it; enforceMinTCB re-checks
-	// it against the verified claims on both paths.
+	// MinTCBVersion mirrors RTMRs below: carried so a delegated verification
+	// of this policy would send and echo-check the floor; enforceMinTCB is
+	// what enforces it in this command.
 	var minTCBVersion uint64
 	if floor := minTCBFromCfg(cfg); floor != nil {
 		minTCBVersion = ratls.PackSNPMinTcb(types.MinTcb{

@@ -48,7 +48,7 @@ func NewCmd() *cobra.Command {
 	flags.StringVar(&cfg.caCommonName, "ca-common-name", issuer.DefaultCACommonName, "common name for the in-memory generated mesh CA")
 	flags.DurationVar(&cfg.caCertValidity, "ca-cert-validity", 8760*time.Hour, "validity period of the in-memory mesh CA certificate")
 	flags.StringSliceVar(&cfg.measurements, "measurements", nil, "SHA-384 hex launch measurements allowed to call /attest (empty = no pinning, UNSAFE)")
-	flags.StringVar(&cfg.minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27), enforced on every attestation CDS verifies including issuance; a 0 component floors nothing (empty = no floor, UNSAFE)")
+	flags.StringVar(&cfg.minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27), required of SNP evidence on every path CDS verifies, issuance included; a 0 component floors nothing (empty = no floor, UNSAFE)")
 
 	flags.StringVar(&cfg.earIssuerName, "ear-issuer", "cds", "")
 	flags.StringVar(&cfg.expectedIssuer, "expected-issuer", "", "EAR JWT issuer claim required on /sign-csr (empty disables)")
