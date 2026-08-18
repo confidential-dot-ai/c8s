@@ -145,7 +145,8 @@ type Config struct {
 	FrontDoorMode string
 	// ServingCertFile is the path to the LB serving-leaf PEM (the cert nginx
 	// presents on the wire). In cds front-door mode, GET .../attest-lb binds
-	// report_data to this exact leaf DER plus the mesh identity. Re-read per
+	// report_data to this exact leaf DER (with the mesh identity and the
+	// upstream destination identity). Re-read per
 	// request so a get-cert renewal (which SIGHUPs nginx to a new leaf) is
 	// picked up without restarting the sidecar.
 	ServingCertFile string

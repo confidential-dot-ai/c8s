@@ -2411,7 +2411,7 @@ func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
 // With no adopted workload the upstream address is empty; the sidecar must
 // render the deliberate attestation-only choice (--echo-backend, no
 // --upstream* flag) instead of a scheme-only "--upstream=http://" that
-// crash-loops the container — an unset upstream no longer defaults anywhere.
+// crash-loops the container.
 func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "tlsLb.attest.enabled=true",

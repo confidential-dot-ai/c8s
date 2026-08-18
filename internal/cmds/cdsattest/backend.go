@@ -36,7 +36,8 @@ var hopByHopHeaders = map[string]bool{
 
 const maxUpstreamResponseBytes = 32 << 20
 
-// EchoBackend reflects the request — used for the demo and tests.
+// EchoBackend reflects the request: the deliberate attestation-only mode
+// (--echo-backend; the transcripts commit its empty upstream) and a test stub.
 type EchoBackend struct{}
 
 var (

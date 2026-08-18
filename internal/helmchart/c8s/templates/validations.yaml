@@ -136,9 +136,12 @@
 {{- end -}}
 {{- /*
   The attestation transcripts commit tlsLb.upstream as THE plaintext
-  destination, but a routes[] entry renders an nginx location that
-  longest-prefix-matches ahead of the catch-all and forwards outside the
-  committed destination — a first-class values bypass of the commitment.
+  destination, but a routes[] entry renders an nginx location for an
+  arbitrary operator-chosen path that longest-prefix-matches ahead of the
+  catch-all and forwards outside the committed destination — a first-class
+  values bypass of the commitment. The fixed /.well-known/c8s/, /readyz,
+  discovery, and built-in /allowlist locations serve platform endpoints,
+  never the workload.
 */ -}}
 {{- if and $tlsLB.enabled $tlsLB.attest.enabled (gt (len $tlsLB.routes) 0) -}}
 {{- fail "VALIDATION_ERROR kind=tlslb_attest_routes: tlsLb.attest.enabled=true requires tlsLb.routes to be empty: the attestation transcript commits tlsLb.upstream as the plaintext destination, but a routes[] entry renders an nginx location that shadows the catch-all and forwards outside the committed destination. Move the routed paths onto the committed upstream, drop the routes, or set tlsLb.attest.enabled=false." -}}

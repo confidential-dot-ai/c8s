@@ -74,10 +74,10 @@ func NewCmd() *cobra.Command {
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
 	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Both attestation endpoints commit this URL (canonicalized) into their transcripts. Required unless --echo-backend is given.")
 	f.BoolVar(&cfg.echoBackend, "echo-backend", false, "serve the attestation endpoints with no forwarding destination (attestation-only demo): the transcripts commit an empty upstream. Mutually exclusive with --upstream; one of the two is required")
-	f.StringVar(&cfg.upstreamCAFile, "upstream-ca", "", "PEM CA bundle to verify an https upstream (the mesh CA)")
+	f.StringVar(&cfg.upstreamCAFile, "upstream-ca", "", "PEM CA bundle to verify an https upstream (the mesh CA). Its SHA-256 is committed into the attestation transcripts alongside --upstream")
 	f.StringVar(&cfg.upstreamCertFile, "upstream-cert", "", "client cert presented to an https upstream (the CDS-issued LB cert)")
 	f.StringVar(&cfg.upstreamKeyFile, "upstream-key", "", "client key for --upstream-cert")
-	f.StringVar(&cfg.upstreamServerName, "upstream-server-name", "", "SNI/verification name for an https upstream")
+	f.StringVar(&cfg.upstreamServerName, "upstream-server-name", "", "SNI/verification name for an https upstream. Committed into the attestation transcripts alongside --upstream")
 	return cmd
 }
 

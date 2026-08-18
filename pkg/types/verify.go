@@ -83,15 +83,16 @@ type AttestationBundle struct {
 	// name any destination.
 	Upstream string `json:"upstream"`
 	// UpstreamServerName is the TLS verification name the sidecar uses for an
-	// https upstream, committed into report_data alongside Upstream. Empty
-	// for a plaintext (mesh-wrapped) upstream. Informational, same MUST-pin
-	// contract as Upstream.
-	UpstreamServerName string `json:"upstream_server_name,omitempty"`
+	// https upstream, committed into report_data alongside Upstream; it
+	// serializes empty for a plaintext (mesh-wrapped) upstream.
+	// Informational, same MUST-pin contract as Upstream.
+	UpstreamServerName string `json:"upstream_server_name"`
 	// UpstreamCASHA256 is the unpadded base64url SHA-256 of the upstream CA
 	// bundle the sidecar verifies an https upstream against (concatenated
 	// certificate DERs in file order), committed into report_data alongside
-	// Upstream. Informational, same MUST-pin contract as Upstream.
-	UpstreamCASHA256 string `json:"upstream_ca_sha256,omitempty"`
+	// Upstream; it serializes empty for a plaintext upstream. Informational,
+	// same MUST-pin contract as Upstream.
+	UpstreamCASHA256 string `json:"upstream_ca_sha256"`
 }
 
 // HandshakeRequest is the body of POST /.well-known/c8s/handshake: the client
