@@ -27,7 +27,7 @@ func attestedMeshTLSConfigs(t *testing.T, stub *testattest.Stub, measurements st
 	t.Helper()
 	attestFunc := makeAttestFunc(attestclient.NewClient(""), stub.URL)
 
-	policy, err := meshVerifyPolicy(stub.URL, measurements)
+	policy, err := meshVerifyPolicy(stub.URL, measurements, "")
 	if err != nil {
 		t.Fatal(err)
 	}

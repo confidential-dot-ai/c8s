@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
@@ -151,12 +152,20 @@ func NewVerifyRequest(evidence AttestationEvidence, params *VerifyParams, issueT
 }
 
 // VerifyReportData builds a VerifyRequest that checks the evidence binds
-// expectedReportData and explicitly does not ask the attestation-api to
-// issue a token. c8s callers mint their own EAR after verifying, so token
-// issuance is always off; setting IssueToken here keeps that intent in one
-// place instead of every call site spelling out new(bool).
-func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes) VerifyRequest {
-	return NewVerifyRequest(evidence, &VerifyParams{ExpectedReportData: &expectedReportData}, false)
+// expectedReportData under the stated policy and explicitly does not ask the
+// attestation-api to issue a token. c8s callers mint their own EAR after
+// verifying, so token issuance is always off; setting IssueToken here keeps
+// that intent in one place instead of every call site spelling out new(bool).
+//
+// The policy is sent with the request rather than left to the verifier's
+// defaults; attestationclient.EnforceVerdict rejects a response whose claims
+// do not echo it.
+func VerifyReportData(evidence AttestationEvidence, expectedReportData Base64Bytes, allowDebug bool, minTcb *MinTcb) VerifyRequest {
+	return NewVerifyRequest(evidence, &VerifyParams{
+		ExpectedReportData: &expectedReportData,
+		AllowDebug:         &allowDebug,
+		MinTcb:             minTcb,
+	}, false)
 }
 
 // VerifyParams contains optional verification parameters.
@@ -173,6 +182,30 @@ type MinTcb struct {
 	Tee        uint8 `json:"tee"`
 	Snp        uint8 `json:"snp"`
 	Microcode  uint8 `json:"microcode"`
+}
+
+// ParseMinTcb parses an SEV-SNP minimum-TCB floor in
+// "bootloader,tee,snp,microcode" form — each component 0-255, 0 leaves that
+// component unfloored. The empty string and the all-zero floor both parse to
+// the zero MinTcb, which callers treat as "no floor".
+func ParseMinTcb(s string) (MinTcb, error) {
+	var floor MinTcb
+	if s == "" {
+		return floor, nil
+	}
+	parts := strings.Split(s, ",")
+	if len(parts) != 4 {
+		return floor, fmt.Errorf("min TCB %q: want bootloader,tee,snp,microcode", s)
+	}
+	var c [4]uint8
+	for i, p := range parts {
+		v, err := strconv.ParseUint(strings.TrimSpace(p), 10, 8)
+		if err != nil {
+			return floor, fmt.Errorf("min TCB %q: component %q is not 0-255", s, p)
+		}
+		c[i] = uint8(v)
+	}
+	return MinTcb{Bootloader: c[0], Tee: c[1], Snp: c[2], Microcode: c[3]}, nil
 }
 
 // VerifyResponse is the response from the attestation-api POST /verify.

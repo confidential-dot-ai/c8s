@@ -111,6 +111,7 @@ type localHandoffBootstrap struct {
 	minter      LocalEARMinter
 
 	operatorKeysHash string
+	minTcb           *types.MinTcb
 }
 
 var _ HandoffBootstrap = (*localHandoffBootstrap)(nil)
@@ -120,7 +121,7 @@ var _ HandoffBootstrap = (*localHandoffBootstrap)(nil)
 // the EAR with the supplied minter (CDS's own EAR issuer) in process — there is
 // no RA-TLS hop and no remote measurement to pin, because the evidence is
 // verified and the EAR signed inside the CDS trust boundary.
-func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter, operatorKeysHash string) (HandoffBootstrap, error) {
+func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter, operatorKeysHash string, minTcb *types.MinTcb) (HandoffBootstrap, error) {
 	if attestation == nil || minter == nil {
 		return nil, fmt.Errorf("local handoff bootstrap requires an attestation-api and EAR minter")
 	}
@@ -137,6 +138,7 @@ func NewLocalHandoffBootstrap(attestation AttestationApi, minter LocalEARMinter,
 		attestation:      attestation,
 		minter:           minter,
 		operatorKeysHash: operatorKeysHash,
+		minTcb:           minTcb,
 	}, nil
 }
 
@@ -225,6 +227,8 @@ func (h *localHandoffBootstrap) attestKey(ctx context.Context, pubDER []byte) (s
 	verifyReq := types.VerifyReportData(
 		types.AttestationEvidence(asResp),
 		types.NewBase64Bytes(reportDataDigest),
+		false,
+		h.minTcb,
 	)
 	verifyResp, err := h.attestation.Verify(ctx, verifyReq)
 	if err != nil {

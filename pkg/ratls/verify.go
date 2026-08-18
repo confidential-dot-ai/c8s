@@ -40,8 +40,10 @@ type VerifyPolicy struct {
 	// (bootloader, TEE, reserved, snp, microcode, etc.) — each component
 	// of the current TCB must be >= the corresponding minimum.
 	// If zero, any TCB version is accepted.
-	// Enforced on the SNP path only; dropped for TDX (see
-	// attestationclient.EvidencePolicy).
+	// Sent to the verifier on the SNP path only and re-checked against the
+	// response's verified claims (attestationclient.EnforceVerdict); the
+	// attestation-api's TDX request has no minimum-TCB parameter, so a
+	// floor is dropped there (docs/ratls.md, "Runtime policy floor").
 	MinTCBVersion uint64
 
 	// AllowDebug controls whether debug-mode guests are accepted.
@@ -306,6 +308,16 @@ func unpackSNPMinTcb(packed uint64) types.MinTcb {
 	}
 }
 
+// PackSNPMinTcb is unpackSNPMinTcb's inverse, for callers that take the floor
+// as components (a --min-tcb flag parsed by types.ParseMinTcb) into a
+// VerifyPolicy.
+func PackSNPMinTcb(m types.MinTcb) uint64 {
+	return uint64(m.Bootloader) |
+		uint64(m.Tee)<<8 |
+		uint64(m.Snp)<<48 |
+		uint64(m.Microcode)<<56
+}
+
 // verifyEnvelopeOnline forwards the envelope to the attestation-api enforced
 // verifier ([attestationclient.Client.VerifyEvidence] — verdict gate,
 // platform-specific REPORTDATA wire form, measurement allowlist) and maps its
@@ -360,7 +372,9 @@ func mapVerifyError(platform string, err error) error {
 		return ErrSignatureInvalid
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return fmt.Errorf("%w — key was not generated in this TEE", ErrKeyBinding)
-	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed):
+	case errors.Is(err, attestationclient.ErrMeasurementNotAllowed),
+		errors.Is(err, attestationclient.ErrMinTCBNotEchoed),
+		errors.Is(err, attestationclient.ErrDebugPolicyNotEchoed):
 		return fmt.Errorf("%w: %v", ErrPolicyViolation, err)
 	case errors.Is(err, attestationclient.ErrInvalidLaunchDigest):
 		return fmt.Errorf("%w: %v", ErrInvalidReport, err)

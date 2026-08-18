@@ -47,6 +47,7 @@ import (
 type config struct {
 	CDSURL                 string
 	CDSMeasurements        string
+	MinTCB                 string
 	AttestationApiURL      string
 	OutPath                string
 	CAOutPath              string
@@ -119,6 +120,7 @@ alongside a workload that uses the obtained certificate.`,
 	flags := cmd.Flags()
 	flags.StringVar(&cfg.CDSURL, "cds-url", "", "URL of the CDS service (e.g. https://cds:8443)")
 	flags.StringVar(&cfg.CDSMeasurements, "cds-measurements", "", "comma-separated SHA-384 hex launch measurements for CDS RA-TLS verification (empty = accept any attested CDS)")
+	flags.StringVar(&cfg.MinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) for CDS's RA-TLS evidence; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	flags.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "URL of the node-local attestation-api (http://localhost:8400, or unix:// plus the on-node socket path the chart wires)")
 	flags.StringVarP(&cfg.OutPath, "out", "o", "", "Path to write the signed certificate chain PEM (prints to stdout if omitted)")
 	flags.StringVar(&cfg.CAOutPath, "ca-out", "", "Path to write just the mesh CA bundle PEM (the issuer certs trailing the leaf in the CDS chain), e.g. for nginx to serve at a discovery endpoint without a separate ConfigMap")
@@ -190,8 +192,12 @@ func cdsHTTPClient(cfg config) (*http.Client, error) {
 		"--cds-measurements not set; get-cert accepts any RA-TLS-attested CDS measurement"); err != nil {
 		return nil, err
 	}
+	floor, err := types.ParseMinTcb(cfg.MinTCB)
+	if err != nil {
+		return nil, fmt.Errorf("--min-tcb: %w", err)
+	}
 
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
+	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL, ratls.PackSNPMinTcb(floor))
 	if err != nil {
 		return nil, fmt.Errorf("cds RA-TLS client: %w", err)
 	}

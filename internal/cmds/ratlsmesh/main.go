@@ -29,6 +29,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Run dispatches ratls-mesh CLI args via cobra. Signal handling is wired
@@ -97,6 +98,7 @@ type proxyConfig struct {
 	maxConnsPerSource         int
 	healthPort                int
 	measurements              string
+	minTCB                    string
 	certTTL                   time.Duration
 	rotationTimeout           time.Duration
 	certMode                  string
@@ -140,6 +142,7 @@ func bindProxyFlags(fs *pflag.FlagSet, c *proxyConfig) {
 	fs.IntVar(&c.maxConnsPerSource, "max-conns-per-source", 0, "max concurrent connections per source IP (0=unlimited)")
 	fs.IntVar(&c.healthPort, "health-port", 15021, "health/metrics HTTP port")
 	fs.StringVar(&c.measurements, "measurements", "", "comma-separated hex SHA-384 launch measurements (empty = accept any TEE)")
+	fs.StringVar(&c.minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) for peer and CDS evidence; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	fs.DurationVar(&c.certTTL, "cert-ttl", 24*time.Hour, "RA-TLS certificate lifetime (rotates at 50%)")
 	fs.DurationVar(&c.rotationTimeout, "rotation-timeout", 30*time.Second, "max time for background certificate rotation")
 	fs.StringVar(&c.certMode, "cert-mode", "self-signed", "certificate mode: self-signed (default), cds (boots self-signed, upgrades to CDS-issued in background)")
@@ -202,7 +205,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	})
 	attestFunc := makeAttestFunc(asClient, c.attestationApiURL)
 
-	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements)
+	meshPolicy, err := meshVerifyPolicy(c.attestationApiURL, c.measurements, c.minTCB)
 	if err != nil {
 		return err
 	}
@@ -210,6 +213,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 		logger.Info("measurement pinning enabled", "count", len(meshPolicy.Measurements))
 	} else {
 		logger.Warn("no --measurements set: accepting any TEE attestation (unsafe for production)")
+	}
+	if meshPolicy.MinTCBVersion == 0 {
+		logger.Warn("no --min-tcb set: accepting evidence from any platform TCB level, including firmware with known vulnerabilities (unsafe for production)")
 	}
 
 	var caCerts []*x509.Certificate
@@ -428,6 +434,7 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			DNSSAN:            c.certDNSSAN,
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
+			MinTCBVersion:     meshPolicy.MinTCBVersion,
 		}
 		cdsClient = cdsclient.NewClient(cdsCfg)
 		// A provider-construction failure (config validation) is logged and
@@ -691,10 +698,18 @@ func makeAttestFunc(client attestclient.Client, attestationApiURL string) func(c
 
 // meshVerifyPolicy builds the mesh peer-verification policy: evidence checked
 // by the same-node attestation-api, launch measurements pinned to the
-// --measurements allowlist. Empty measurements leaves the policy unpinned
-// (accept any TEE — development only).
-func meshVerifyPolicy(attestationApiURL, measurements string) (*ratls.VerifyPolicy, error) {
-	policy := &ratls.VerifyPolicy{AttestationApiURL: attestationApiURL}
+// --measurements allowlist, platform TCB floored at --min-tcb. Empty
+// measurements leaves the policy unpinned (accept any TEE — development
+// only); an empty floor accepts any TCB level (likewise).
+func meshVerifyPolicy(attestationApiURL, measurements, minTCB string) (*ratls.VerifyPolicy, error) {
+	floor, err := types.ParseMinTcb(minTCB)
+	if err != nil {
+		return nil, fmt.Errorf("--min-tcb: %w", err)
+	}
+	policy := &ratls.VerifyPolicy{
+		AttestationApiURL: attestationApiURL,
+		MinTCBVersion:     ratls.PackSNPMinTcb(floor),
+	}
 	if measurements == "" {
 		return policy, nil
 	}

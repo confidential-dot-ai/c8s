@@ -21,6 +21,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -41,6 +42,7 @@ type config struct {
 	expectedIssuer    string
 	logLevel          string
 	measurements      []string
+	minTCB            string
 	operatorKeys      string
 	timeout           time.Duration
 }
@@ -112,6 +114,11 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		errorf(errOut, "--measurements: no usable measurement")
 		return exitUsage
 	}
+	floor, err := types.ParseMinTcb(cfg.minTCB)
+	if err != nil {
+		errorf(errOut, "--min-tcb: %v", err)
+		return exitUsage
+	}
 	operatorKeysPEM, err := os.ReadFile(cfg.operatorKeys)
 	if err != nil {
 		errorf(errOut, "--operator-keys: %v", err)
@@ -137,7 +144,7 @@ func run(ctx context.Context, cfg config, out, errOut io.Writer) int {
 		allowed[hex.EncodeToString(m)] = true
 	}
 
-	httpClient, err := newVerifyingHTTPClient(pinned, cfg.attestationApiURL)
+	httpClient, err := newVerifyingHTTPClient(pinned, cfg.attestationApiURL, ratls.PackSNPMinTcb(floor))
 	if err != nil {
 		errorf(errOut, "%v", err)
 		return exitUsage

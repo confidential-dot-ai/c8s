@@ -60,6 +60,11 @@ type Options struct {
 	// requires CDS to present. Empty pins none.
 	CDSMeasurements []string
 
+	// MinTCB is the minimum SEV-SNP platform TCB the injected fetchers
+	// require CDS's RA-TLS evidence to meet, in bootloader,tee,snp,microcode
+	// form. Empty = no floor.
+	MinTCB string
+
 	// WebhookConfigName is the MutatingWebhookConfiguration to patch.
 	WebhookConfigName string
 
@@ -264,6 +269,7 @@ func setupManager(ctx context.Context, mgr manager.Manager, dc serverResourcesFo
 			CDSURL:                opts.CDSURL,
 			AttestationApiURL:     opts.AttestationApiURL,
 			CDSMeasurements:       opts.CDSMeasurements,
+			MinTCB:                opts.MinTCB,
 			CertFSGroup:           ptr.To(opts.CertFSGroup),
 			CertKeyMode:           opts.CertKeyMode,
 			CertRenewInterval:     opts.CertRenewInterval,

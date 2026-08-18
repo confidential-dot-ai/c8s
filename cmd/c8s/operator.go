@@ -56,6 +56,7 @@ by this command.`,
 			CDSURL:                  cdsURL,
 			AttestationApiURL:       attestationApiURL,
 			CDSMeasurements:         cdsMeasurements,
+			MinTCB:                  minTCB,
 			ExcludeNamespaces:       excludeNamespaces,
 			WebhookConfigName:       webhookConfigName,
 			WebhookServiceName:      webhookServiceName,
@@ -85,6 +86,7 @@ var (
 	cdsURL                  string
 	attestationApiURL       string
 	cdsMeasurements         []string
+	minTCB                  string
 	webhookConfigName       string
 	webhookServiceName      string
 	webhookServiceNamespace string
@@ -113,6 +115,7 @@ func init() {
 	operatorCmd.Flags().StringVar(&cdsURL, "cds-url", "", "CDS Service URL the injected get-cert containers POST to")
 	operatorCmd.Flags().StringVar(&attestationApiURL, "attestation-api-url", "", "attestation-api endpoint (empty = no verification)")
 	operatorCmd.Flags().StringSliceVar(&cdsMeasurements, "cds-measurements", nil, "SHA-384 hex launch measurement(s) the injected secret fetcher requires CDS to present (repeatable; empty pins none)")
+	operatorCmd.Flags().StringVar(&minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) the injected fetchers require of CDS's RA-TLS evidence; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	operatorCmd.Flags().StringSliceVar(&excludeNamespaces, "exclude-namespaces", nil, "extra namespaces the startup reinject sweep skips (mirrors webhook.extraExcluded)")
 	operatorCmd.Flags().StringVar(&webhookConfigName, "webhook-config-name", "", "MutatingWebhookConfiguration to patch caBundle (empty = skip)")
 	operatorCmd.Flags().StringVar(&webhookServiceName, "webhook-service-name", "", "webhook Service name (defaults to c8s)")

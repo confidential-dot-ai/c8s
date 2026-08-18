@@ -304,8 +304,12 @@ func startAdmissionInventory(ctx context.Context, logger *slog.Logger, inventory
 // startSandboxDigests serves the CDS-facing digests endpoint inside the guest
 // over mutually-attested RA-TLS (docs/ratls.md, "Sandbox identity").
 func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *Config, inventory *admissionInventory, signer *workloadclaims.SandboxTokenSigner, measurements [][]byte) error {
+	floor, err := types.ParseMinTcb(cfg.MinTCB)
+	if err != nil {
+		return fmt.Errorf("C8S_MIN_TCB: %w", err)
+	}
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		string(types.PlatformSnp),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), cfg.AttestationServiceURL),
-		cfg.AttestationServiceURL, measurements)
+		cfg.AttestationServiceURL, measurements, ratls.PackSNPMinTcb(floor))
 }

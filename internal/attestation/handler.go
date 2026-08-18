@@ -27,6 +27,10 @@ type Handler struct {
 	// OperatorKeysHash, when set, makes /attest-key fail closed unless the
 	// caller attests the same operator-key policy. /attest remains unaffected.
 	OperatorKeysHash string
+	// MinTcb is the minimum SEV-SNP platform TCB evidence must meet to
+	// obtain an EAR, sent with every /verify call. nil = no floor (UNSAFE
+	// outside development).
+	MinTcb *types.MinTcb
 }
 
 // HandleAuthenticate returns a handler that issues a single-use base64
@@ -101,7 +105,7 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	verifyReq := types.VerifyReportData(req.Evidence, reportData, false, h.MinTcb)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(r.Context(), verifyReq)
 	switch {
 	case errors.Is(err, attestationclient.ErrSignatureInvalid):
@@ -111,6 +115,11 @@ func (h Handler) HandleAttestKey(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		slog.Warn("attest-key: challenge did not match attestation evidence")
 		WriteError(w, http.StatusUnauthorized, "verification_failed", "challenge mismatch in attestation evidence")
+		return
+	case errors.Is(err, attestationclient.ErrMinTCBNotEchoed),
+		errors.Is(err, attestationclient.ErrDebugPolicyNotEchoed):
+		slog.Warn("attest-key: evidence does not satisfy the verification policy", "error", err)
+		WriteError(w, http.StatusForbidden, "verification_failed", "attestation evidence does not satisfy the verification policy")
 		return
 	case err != nil:
 		h.handleAttestationError(w, err)

@@ -631,7 +631,7 @@ func TestVerifyCertEmbeddedAzureEvidenceUsesAttestationApi(t *testing.T) {
 	measurement := bytes.Repeat([]byte{0x42}, SNPMeasurementSize)
 	stub := testattest.New(t)
 	verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
-	verdict.Claims.PlatformData = json.RawMessage(`{"source":"test"}`)
+	verdict.Claims.PlatformData = json.RawMessage(`{"source":"test","policy":{"debug_allowed":false}}`)
 	stub.SetVerdict(verdict)
 
 	result, err := VerifyCert(cert, &VerifyPolicy{
@@ -891,7 +891,11 @@ func TestVerifyCertEmbeddedAzureNegativePaths(t *testing.T) {
 
 	t.Run("MinTCBVersion is forwarded as unpacked components", func(t *testing.T) {
 		stub := testattest.New(t)
-		stub.SetVerdict(testattest.PassingVerdict(hex.EncodeToString(measurement)))
+		verdict := testattest.PassingVerdict(hex.EncodeToString(measurement))
+		// The response must echo a TCB at or above the requested floor for
+		// verification to pass (attestationclient.EnforceVerdict).
+		verdict.Claims.Tcb = testattest.SNPTcbClaims(types.MinTcb{Bootloader: 0x11, Tee: 0x22, Snp: 0x33, Microcode: 0x44})
+		stub.SetVerdict(verdict)
 		// Packed layout: bootloader=0x11, tee=0x22, snp=0x33 (byte 6),
 		// microcode=0x44 (byte 7). Reserved bytes stay zero.
 		packed := uint64(0x44_33_00_00_00_00_22_11)
@@ -1203,7 +1207,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("SNP platform data is surfaced", func(t *testing.T) {
 		cert, _ := embeddedAzureCert(t)
-		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
+		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit","policy":{"debug_allowed":false}}`))
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
@@ -1221,8 +1225,12 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("null SNP platform data is dropped", func(t *testing.T) {
 		cert, _ := embeddedAzureCert(t)
-		srv := stubWithPlatformData(t, nil)
-		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
+		srv := stubWithPlatformData(t, json.RawMessage("null"))
+		// A debug-allowing policy asks for no debug echo, so the null
+		// platform data reaches the result mapping.
+		policy := newPolicy(srv.URL)
+		policy.AllowDebug = true
+		result, err := VerifyCert(cert, policy, nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)
 		}
@@ -1233,7 +1241,7 @@ func TestVerifyResultPlatformInfo(t *testing.T) {
 
 	t.Run("TDX platform data is not surfaced", func(t *testing.T) {
 		cert, _ := embeddedEnvelopeCert(t, types.PlatformTdx, json.RawMessage(`{"quote":"fake"}`))
-		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit"}`))
+		srv := stubWithPlatformData(t, json.RawMessage(`{"source":"unit","td_attributes_parsed":{"debug":false}}`))
 		result, err := VerifyCert(cert, newPolicy(srv.URL), nil)
 		if err != nil {
 			t.Fatalf("VerifyCert: %v", err)

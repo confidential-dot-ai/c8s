@@ -56,6 +56,7 @@ unavailable (unreachable / disabled / still bootstrapping past --timeout).`,
 	f.StringVar(&cfg.peerURL, "peer-url", "", "https URL of the CDS peer to pull the mesh CA from")
 	f.StringVar(&cfg.attestationApiURL, "attestation-api-url", "", "URL of the attestation-api service")
 	f.StringSliceVar(&cfg.measurements, "measurements", nil, "required SHA-384 hex launch measurements the peer may present; pins both its RA-TLS serving cert and its handoff issuer EAR")
+	f.StringVar(&cfg.minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) the peer's RA-TLS evidence must meet; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	f.StringVar(&cfg.operatorKeys, "operator-keys", "", "PEM bundle of operator EC public keys whose policy hash must match the peer")
 	f.StringVar(&cfg.expectedIssuer, "expected-issuer", "cds", "EAR JWT issuer claim required on the peer's handoff EAR")
 	f.DurationVar(&cfg.timeout, "timeout", 2*time.Minute, "overall deadline, including retries while the peer's handoff EAR bootstraps")

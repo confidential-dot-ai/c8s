@@ -101,6 +101,22 @@ func run(cfg config) error {
 	}
 	defer allowlistStore.Close()
 
+	// The TCB floor is enforced on every attestation CDS verifies: issuance
+	// (/attest, /attest-key), the handoff self-attestation and peer adoption,
+	// and the sandbox-digests callback.
+	minTcb, err := types.ParseMinTcb(cfg.minTCB)
+	if err != nil {
+		return fmt.Errorf("--min-tcb: %w", err)
+	}
+	var minTcbFloor *types.MinTcb
+	if minTcb != (types.MinTcb{}) {
+		minTcbFloor = &minTcb
+		slog.Info("minimum TCB floor enabled", "floor", minTcb)
+	} else {
+		slog.Warn("--min-tcb empty: attestation from any platform TCB level is accepted, including firmware with known vulnerabilities. UNSAFE outside development.")
+	}
+	minTCBVersion := ratls.PackSNPMinTcb(minTcb)
+
 	// CDS obtains its mesh CA in process; the private key never touches a
 	// Kubernetes Secret. With no --handoff-peer-url it generates a fresh
 	// self-signed CA (cold start); with a peer set it adopts that peer's CA
@@ -113,6 +129,7 @@ func run(cfg config) error {
 		PeerURL:           strings.TrimRight(cfg.handoffPeerURL, "/"),
 		AttestationApiURL: cfg.attestationApiURL,
 		Measurements:      cfg.handoffMeasurements,
+		MinTcb:            minTcbFloor,
 		ExpectedIssuer:    cfg.earIssuerName,
 		Timeout:           cfg.handoffPeerTimeout,
 		OperatorKeysHash:  operatorKeysHash,
@@ -209,6 +226,7 @@ func run(cfg config) error {
 		AttestationClient: asClient,
 		EarIssuer:         earIssuer,
 		OperatorKeysHash:  attestKeyOperatorPolicy,
+		MinTcb:            minTcbFloor,
 	}
 
 	// The sandbox-digests callback: at issuance CDS asks the inventory that
@@ -249,13 +267,14 @@ func run(cfg config) error {
 			cfg.attestationApiURL,
 			measurementBytes,
 			cfg.requestTimeout,
+			minTCBVersion,
 		)
 		if err != nil {
 			return err
 		}
 	}
 
-	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient)
+	handoffHandler, err := buildHandoffHandler(ctx, cfg, mesh, &allowlistStore, operatorKeysHash, rotator, earIssuer, asClient, minTcbFloor)
 	if err != nil {
 		return err
 	}
@@ -316,6 +335,7 @@ func run(cfg config) error {
 			NamedCertTTL:      cfg.namedCertTTL,
 			RequestTimeout:    cfg.requestTimeout,
 			Measurements:      measurements,
+			MinTcb:            minTcbFloor,
 			SANValidation:     cfg.sanValidation,
 			Policy:            policy,
 			AllowlistStore:    &allowlistStore,
@@ -423,14 +443,14 @@ func run(cfg config) error {
 // LocalHandoffBootstrap: cds is its own EAR issuer, so the requester EAR is
 // validated against cds's own rotator/issuer name, and the signer EAR is minted
 // by cds's earIssuer — no external service to dial for it.
-func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client) (*issuer.HandoffHandler, error) {
+func buildHandoffHandler(ctx context.Context, cfg config, mesh *issuer.CA, allowlistStore *allowlist.Store, operatorKeysHash string, keyProvider issuer.KeyProvider, earIssuer ear.Issuer, asClient attestationclient.Client, minTcb *types.MinTcb) (*issuer.HandoffHandler, error) {
 	handoffMeasurements := parseMeasurementAllowlist(cfg.handoffMeasurements)
 	if len(handoffMeasurements) == 0 {
 		slog.Info("/handoff disabled: set --handoff-measurements to enable mesh CA handoff to peer replicas")
 		return nil, nil
 	}
 
-	boot, err := issuer.NewLocalHandoffBootstrap(asClient, earIssuer, operatorKeysHash)
+	boot, err := issuer.NewLocalHandoffBootstrap(asClient, earIssuer, operatorKeysHash, minTcb)
 	if err != nil {
 		return nil, fmt.Errorf("prepare handoff bootstrap: %w", err)
 	}

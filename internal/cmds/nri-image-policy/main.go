@@ -29,6 +29,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 	"github.com/confidential-dot-ai/c8s/pkg/workloadclaims"
 )
 
@@ -243,7 +244,11 @@ func allowlistPullHTTPClient(cfg pullConfig) (*http.Client, error) {
 	if len(measurements) == 0 {
 		slog.Warn("allowlist.pull.cds_measurements not set; nri-image-policy accepts any RA-TLS-attested CDS measurement")
 	}
-	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL)
+	floor, err := types.ParseMinTcb(cfg.CDSMinTCB)
+	if err != nil {
+		return nil, fmt.Errorf("parse CDS min TCB: %w", err)
+	}
+	client, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationApiURL, ratls.PackSNPMinTcb(floor))
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}
@@ -537,12 +542,16 @@ func startSandboxDigests(ctx context.Context, logger *slog.Logger, cfg *config, 
 		logger.Warn("allowlist.pull.cds_measurements not set: the sandbox-digests endpoint answers ANY RA-TLS-attested caller, so any TEE on the network can read what this node runs. UNSAFE outside development.")
 	}
 	attestationApiURL := cfg.Allowlist.Pull.AttestationApiURL
+	floor, err := types.ParseMinTcb(cfg.Allowlist.Pull.CDSMinTCB)
+	if err != nil {
+		return fmt.Errorf("parse CDS min TCB: %w", err)
+	}
 	// The attest func is platform-agnostic despite its name (see its doc
 	// comment); the platform string is the only thing that follows the hardware.
 	return workloadclaims.StartDigestsEndpoint(ctx, logger, inventory, signer.PublicKeyDER(),
 		cfg.NormalizedPlatform(),
 		attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationApiURL),
-		attestationApiURL, measurements)
+		attestationApiURL, measurements, ratls.PackSNPMinTcb(floor))
 }
 
 // startAdmissionInventory serves the node-CVM token socket (docs/ratls.md).

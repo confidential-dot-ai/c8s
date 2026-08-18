@@ -1554,11 +1554,11 @@ func TestDualVerifyPeerCallbackIntermediateChain(t *testing.T) {
 }
 
 func TestNewVerifyingHTTPClient(t *testing.T) {
-	if _, err := NewVerifyingHTTPClient(nil, ""); err == nil {
+	if _, err := NewVerifyingHTTPClient(nil, "", 0); err == nil {
 		t.Fatal("expected error for empty attestation-api URL")
 	}
 
-	client, err := NewVerifyingHTTPClient(nil, "http://127.0.0.1:8400")
+	client, err := NewVerifyingHTTPClient(nil, "http://127.0.0.1:8400", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

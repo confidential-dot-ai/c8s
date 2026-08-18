@@ -175,8 +175,9 @@ func TestErrorResponseJSONRoundtrip(t *testing.T) {
 func TestVerifyReportData(t *testing.T) {
 	evidence := AttestationEvidence{Platform: "snp", Evidence: json.RawMessage(`{"q":1}`)}
 	reportData := NewBase64Bytes([]byte("report-data-digest"))
+	floor := MinTcb{Bootloader: 3, Snp: 8, Microcode: 27}
 
-	req := VerifyReportData(evidence, reportData)
+	req := VerifyReportData(evidence, reportData, false, &floor)
 
 	// VerifyReportData must split the envelope into the top-level platform +
 	// platform-specific evidence shape attestation-api's /verify expects.
@@ -195,6 +196,47 @@ func TestVerifyReportData(t *testing.T) {
 	// Token issuance must be explicitly off — c8s mints its own EAR.
 	if req.IssueToken == nil || *req.IssueToken {
 		t.Fatalf("IssueToken = %v, want explicit false", req.IssueToken)
+	}
+	// The policy rides the request explicitly: no reliance on the verifier's
+	// defaults for fail-closed properties.
+	if req.Params.AllowDebug == nil || *req.Params.AllowDebug {
+		t.Fatalf("allow_debug = %v, want explicit false", req.Params.AllowDebug)
+	}
+	if req.Params.MinTcb == nil || *req.Params.MinTcb != floor {
+		t.Fatalf("min_tcb = %+v, want %+v", req.Params.MinTcb, floor)
+	}
+}
+
+func TestParseMinTcb(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    MinTcb
+		wantErr bool
+	}{
+		{"", MinTcb{}, false},
+		{"0,0,0,0", MinTcb{}, false},
+		{"3,0,8,27", MinTcb{Bootloader: 3, Tee: 0, Snp: 8, Microcode: 27}, false},
+		{"255,255,255,255", MinTcb{Bootloader: 255, Tee: 255, Snp: 255, Microcode: 255}, false},
+		{"3, 0, 8, 27", MinTcb{Bootloader: 3, Tee: 0, Snp: 8, Microcode: 27}, false},
+		{"3,0,8", MinTcb{}, true},
+		{"3,0,8,27,1", MinTcb{}, true},
+		{"3,0,8,256", MinTcb{}, true},
+		{"3,0,8,-1", MinTcb{}, true},
+		{"3,0,8,x", MinTcb{}, true},
+	} {
+		got, err := ParseMinTcb(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("ParseMinTcb(%q) = %+v, want error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParseMinTcb(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParseMinTcb(%q) = %+v, want %+v", tc.in, got, tc.want)
+		}
 	}
 }
 

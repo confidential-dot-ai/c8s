@@ -44,7 +44,11 @@ type Verdict struct {
 }
 
 // PassingVerdict is the verdict for evidence that verified: signature valid,
-// REPORTDATA bound, and launchDigest reported as claims.launch_digest.
+// REPORTDATA bound, and launchDigest reported as claims.launch_digest. The
+// stub fills the policy claims the real api always emits on a 200 (claims.tcb,
+// claims.platform_data's debug state) from the request platform when the
+// verdict leaves them empty; set them on the Verdict to drive policy-echo
+// enforcement (attestationclient.EnforceVerdict).
 func PassingVerdict(launchDigest string) Verdict {
 	match := true
 	return Verdict{
@@ -52,6 +56,30 @@ func PassingVerdict(launchDigest string) Verdict {
 		ReportDataMatch: &match,
 		Claims:          types.Claims{LaunchDigest: launchDigest},
 	}
+}
+
+// DefaultSNPTcb is the claims.tcb the stub reports for SNP requests when the
+// verdict does not carry one: the Milan live-report values the attestation-rs
+// fixtures extract.
+var DefaultSNPTcb = types.MinTcb{Bootloader: 3, Tee: 0, Snp: 8, Microcode: 115}
+
+// SNPTcbClaims is the claims.tcb JSON the real api emits for SNP evidence.
+func SNPTcbClaims(tcb types.MinTcb) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"type":       "Snp",
+		"bootloader": tcb.Bootloader,
+		"tee":        tcb.Tee,
+		"snp":        tcb.Snp,
+		"microcode":  tcb.Microcode,
+	})
+	return b
+}
+
+// SNPDebugClaims is the claims.platform_data JSON the real api emits for SNP
+// evidence with the given debug policy.
+func SNPDebugClaims(debugAllowed bool) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"policy": map[string]bool{"debug_allowed": debugAllowed}})
+	return b
 }
 
 // ErrorReply is an error response from the attestation-api. A non-empty Code
@@ -193,9 +221,39 @@ func (s *Stub) handleVerify(w http.ResponseWriter, r *http.Request) {
 			Platform:        req.Platform,
 			SignatureValid:  verdict.SignatureValid,
 			ReportDataMatch: verdict.ReportDataMatch,
-			Claims:          verdict.Claims,
+			Claims:          fillPolicyClaims(req.Platform, verdict.Claims),
 		},
 	})
+}
+
+// fillPolicyClaims supplies the claims the real api's 200 responses always
+// carry — claims.tcb and the debug state in claims.platform_data — when the
+// verdict left them empty, so client policy-echo checks exercise a conforming
+// verifier by default. A verdict that sets them is served untouched.
+func fillPolicyClaims(platform string, claims types.Claims) types.Claims {
+	snp := true
+	switch types.Platform(platform) {
+	case types.PlatformSnp, types.PlatformAzSnp, types.PlatformGcpSnp:
+	case types.PlatformTdx, types.PlatformAzTdx:
+		snp = false
+	default:
+		return claims
+	}
+	if len(claims.Tcb) == 0 {
+		if snp {
+			claims.Tcb = SNPTcbClaims(DefaultSNPTcb)
+		} else {
+			claims.Tcb = json.RawMessage(`{"type":"Tdx","tcb_svn":"00000000000000000000000000000000"}`)
+		}
+	}
+	if len(claims.PlatformData) == 0 {
+		if snp {
+			claims.PlatformData = SNPDebugClaims(false)
+		} else {
+			claims.PlatformData = json.RawMessage(`{"td_attributes_parsed":{"debug":false}}`)
+		}
+	}
+	return claims
 }
 
 // undecodableBody mirrors axum's Json rejection: 400 for a body that is not

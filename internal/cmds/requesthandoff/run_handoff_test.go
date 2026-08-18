@@ -238,7 +238,7 @@ func newHandoffPeer(t *testing.T, operatorKeysHash string) *handoffPeer {
 func injectPeerClient(t *testing.T, peer *handoffPeer) {
 	t.Helper()
 	orig := newVerifyingHTTPClient
-	newVerifyingHTTPClient = func([][]byte, string) (*http.Client, error) {
+	newVerifyingHTTPClient = func([][]byte, string, uint64) (*http.Client, error) {
 		return peer.srv.Client(), nil
 	}
 	t.Cleanup(func() { newVerifyingHTTPClient = orig })

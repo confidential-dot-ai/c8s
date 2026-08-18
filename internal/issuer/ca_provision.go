@@ -12,6 +12,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // CAProvisionConfig configures how CDS obtains its mesh CA at startup.
@@ -33,6 +34,10 @@ type CAProvisionConfig struct {
 	// Measurements pins the peer's launch digest on both the RA-TLS serving
 	// cert and the handoff issuer EAR. Required when PeerURL is set.
 	Measurements []string
+	// MinTcb, when set, is the minimum SEV-SNP platform TCB for the handoff
+	// attestations: the local signer-key evidence sent for verification, and
+	// the peer's RA-TLS evidence when adopting.
+	MinTcb *types.MinTcb
 	// ExpectedIssuer is the EAR issuer claim required on the peer's handoff
 	// EAR (the peer's --ear-issuer; "cds" by default).
 	ExpectedIssuer string
@@ -132,7 +137,11 @@ func adoptFromPeer(ctx context.Context, cfg CAProvisionConfig, logger *slog.Logg
 		allowed[hex.EncodeToString(m)] = true
 	}
 
-	httpClient, err := ratls.NewVerifyingHTTPClient(pinned, cfg.AttestationApiURL)
+	var minTCBVersion uint64
+	if cfg.MinTcb != nil {
+		minTCBVersion = ratls.PackSNPMinTcb(*cfg.MinTcb)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(pinned, cfg.AttestationApiURL, minTCBVersion)
 	if err != nil {
 		return nil, err
 	}

@@ -197,7 +197,10 @@ func verifyOK(match bool, digest string) types.VerifyResponse {
 	return types.VerifyResponse{Result: types.VerificationResult{
 		SignatureValid:  true,
 		ReportDataMatch: &match,
-		Claims:          types.Claims{LaunchDigest: digest},
+		Claims: types.Claims{
+			LaunchDigest: digest,
+			PlatformData: json.RawMessage(`{"policy":{"debug_allowed":false}}`),
+		},
 	}}
 }
 
@@ -227,6 +230,7 @@ func TestLocalHandoffBootstrapMintsOnlyAfterVerify(t *testing.T) {
 				},
 				minter,
 				testOperatorKeysHash,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("NewLocalHandoffBootstrap: %v", err)
@@ -284,12 +288,12 @@ func TestLocalHandoffBootstrapRequiresDeps(t *testing.T) {
 		{"nil minter", as, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewLocalHandoffBootstrap(tc.as, tc.mi, testOperatorKeysHash); err == nil {
+			if _, err := NewLocalHandoffBootstrap(tc.as, tc.mi, testOperatorKeysHash, nil); err == nil {
 				t.Fatal("expected constructor to reject nil dependency")
 			}
 		})
 	}
-	if _, err := NewLocalHandoffBootstrap(as, mi, ""); err == nil {
+	if _, err := NewLocalHandoffBootstrap(as, mi, "", nil); err == nil {
 		t.Fatal("expected constructor to reject an empty operator key-set hash")
 	}
 }
@@ -340,6 +344,7 @@ func TestRunRefreshStoresMintedEAR(t *testing.T) {
 		refreshStubAttestation{verify: verifyOK(true, "deadbeef")},
 		&cancellingMinter{token: token, cancel: cancel},
 		testOperatorKeysHash,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("NewLocalHandoffBootstrap: %v", err)
@@ -368,6 +373,7 @@ func TestRunRefreshWarnsWhenBootstrapAttestFails(t *testing.T) {
 		refreshStubAttestation{attestErr: fmt.Errorf("attestation-api down"), onAttest: cancel},
 		&stubMinter{},
 		testOperatorKeysHash,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("NewLocalHandoffBootstrap: %v", err)

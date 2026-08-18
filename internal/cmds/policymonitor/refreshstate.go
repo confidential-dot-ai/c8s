@@ -34,6 +34,8 @@ const (
 		"does not reach this guest (docs/kata-image-policy.md)"
 	reasonBadMeasurements = "C8S_CDS_MEASUREMENTS is not a valid measurement list; enforcing the " +
 		"baked seed alone, so `c8s allowlist add` does not reach this guest"
+	reasonBadMinTCB = "C8S_MIN_TCB is not a valid bootloader,tee,snp,microcode floor; enforcing the " +
+		"baked seed alone, so `c8s allowlist add` does not reach this guest"
 	reasonClientFailed = "the RA-TLS client to CDS could not be built; enforcing the baked seed " +
 		"alone, so `c8s allowlist add` does not reach this guest"
 )

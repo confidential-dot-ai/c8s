@@ -73,6 +73,11 @@ type Config struct {
 	// populate this from `cds.measurements` in values.yaml.
 	CDSMeasurements [][]byte
 
+	// MinTCBVersion is the packed SNP TCB floor CDS's RA-TLS peer evidence
+	// must meet (zero = no floor, UNSAFE outside development). The chart
+	// populates this from the cluster-wide `minTcb` value.
+	MinTCBVersion uint64
+
 	// HTTPClient is an optional HTTP client. If nil, a default RA-TLS
 	// transport is built using the CDSMeasurements policy. Tests that
 	// need to bypass RA-TLS (e.g. against a plain HTTP fake) can supply a
@@ -98,7 +103,11 @@ type Client struct {
 func NewClient(cfg *Config) *Client {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		policy := &ratls.VerifyPolicy{Measurements: cfg.CDSMeasurements, AttestationApiURL: cfg.AttestationApiURL}
+		policy := &ratls.VerifyPolicy{
+			Measurements:      cfg.CDSMeasurements,
+			MinTCBVersion:     cfg.MinTCBVersion,
+			AttestationApiURL: cfg.AttestationApiURL,
+		}
 		tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{Policy: policy})
 		if err != nil {
 			// NewClientTLSConfig only errors on misconfigured Platform/AttestFunc

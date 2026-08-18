@@ -119,7 +119,7 @@ func TestStubVerifyRecordsAndAnswersVerdict(t *testing.T) {
 	req := types.VerifyReportData(types.AttestationEvidence{
 		Platform: "gcp-snp",
 		Evidence: []byte(`{"quote":"x"}`),
-	}, expected)
+	}, expected, false, nil)
 	resp, err := client.VerifyEnforced(context.Background(), req)
 	if err != nil {
 		t.Fatalf("VerifyEnforced against a passing verdict: %v", err)
@@ -155,7 +155,7 @@ func TestStubVerifyMismatchFailsEnforcement(t *testing.T) {
 	client := attestationclient.NewClient(stub.URL)
 
 	expected := types.NewBase64Bytes([]byte("expected-report-data"))
-	req := types.VerifyReportData(types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)}, expected)
+	req := types.VerifyReportData(types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)}, expected, false, nil)
 	_, err := client.VerifyEnforced(context.Background(), req)
 	if !errors.Is(err, attestationclient.ErrReportDataMismatch) {
 		t.Fatalf("err = %v, want ErrReportDataMismatch", err)
@@ -171,7 +171,7 @@ func TestStubVerifyErrorAnswersTheRefusalShape(t *testing.T) {
 	client := attestationclient.NewClient(stub.URL)
 
 	expected := types.NewBase64Bytes([]byte("expected-report-data"))
-	req := types.VerifyReportData(types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)}, expected)
+	req := types.VerifyReportData(types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)}, expected, false, nil)
 	_, err := client.VerifyEnforced(context.Background(), req)
 
 	var apiErr *attestationclient.APIError
@@ -217,6 +217,8 @@ func TestStubVerifyErrorPlainTextBody(t *testing.T) {
 	req := types.VerifyReportData(
 		types.AttestationEvidence{Platform: "snp", Evidence: []byte(`{}`)},
 		types.NewBase64Bytes([]byte("expected-report-data")),
+		false,
+		nil,
 	)
 	_, err := client.VerifyEnforced(context.Background(), req)
 

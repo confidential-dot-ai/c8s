@@ -591,7 +591,7 @@ func newStubRouterWithHandoff(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("rotator: %v", err)
 	}
-	boot, err := issuer.NewLocalHandoffBootstrap(attestationclient.NewClient(""), earIss, testOperatorKeysHash)
+	boot, err := issuer.NewLocalHandoffBootstrap(attestationclient.NewClient(""), earIss, testOperatorKeysHash, nil)
 	if err != nil {
 		t.Fatalf("handoff bootstrap: %v", err)
 	}

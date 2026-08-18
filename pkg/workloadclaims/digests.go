@@ -164,8 +164,9 @@ func outboundHost(ctx context.Context, target string) (string, error) {
 // cdsMeasurements set the caller's launch measurement must be in it, so the
 // endpoint discloses what a node runs only to a CDS on an expected measurement;
 // empty pins no measurement, and any TEE on the network can then read it.
-// UNSAFE outside development; callers warn.
-func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte, certTTL time.Duration) (*tls.Config, *ratls.CertManager, error) {
+// UNSAFE outside development; callers warn. minTCBVersion is the packed SNP
+// TCB floor for the caller's evidence (zero = no floor).
+func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte, certTTL time.Duration, minTCBVersion uint64) (*tls.Config, *ratls.CertManager, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, nil, err
 	}
@@ -175,6 +176,7 @@ func DigestsServerTLSConfig(platform string, attestFunc func(ctx context.Context
 		CertTTL:    certTTL,
 		ClientPolicy: &ratls.VerifyPolicy{
 			Measurements:      cdsMeasurements,
+			MinTCBVersion:     minTCBVersion,
 			AttestationApiURL: attestationApiURL,
 		},
 	})
@@ -200,8 +202,8 @@ func requireAttestationApi(url string) error {
 // rather than after the warm-up window. Warm-up failure is logged, not fatal:
 // the endpoint provisions on the first handshake instead, and taking the
 // inventory down would cost far more than a slow first callback.
-func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte) error {
-	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsMeasurements, 0)
+func StartDigestsEndpoint(ctx context.Context, logger *slog.Logger, resolver SandboxResolver, identity []byte, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, cdsMeasurements [][]byte, minTCBVersion uint64) error {
+	tlsCfg, certMgr, err := DigestsServerTLSConfig(platform, attestFunc, attestationApiURL, cdsMeasurements, 0, minTCBVersion)
 	if err != nil {
 		return err
 	}
@@ -243,14 +245,16 @@ type DigestsClient struct {
 //
 // It warms its own RA-TLS certificate before returning: provisioning costs an
 // attestation round-trip, and paying it lazily would put it inside the first
-// pod's issuance deadline.
-func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, measurements [][]byte, timeout time.Duration) (*DigestsClient, error) {
+// pod's issuance deadline. minTCBVersion is the packed SNP TCB floor for the
+// inventory's evidence (zero = no floor).
+func NewDigestsClient(ctx context.Context, platform string, attestFunc func(ctx context.Context, customData string) (string, error), attestationApiURL string, measurements [][]byte, timeout time.Duration, minTCBVersion uint64) (*DigestsClient, error) {
 	if err := requireAttestationApi(attestationApiURL); err != nil {
 		return nil, err
 	}
 	tlsCfg, certMgr, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
 		Policy: &ratls.VerifyPolicy{
 			Measurements:      measurements,
+			MinTCBVersion:     minTCBVersion,
 			AttestationApiURL: attestationApiURL,
 		},
 		Platform:   ratls.NormalizePlatform(platform),

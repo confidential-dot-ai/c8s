@@ -233,7 +233,10 @@ func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 					Platform:        "snp",
 					SignatureValid:  true,
 					ReportDataMatch: &match,
-					Claims:          types.Claims{LaunchDigest: "deadbeef"},
+					Claims: types.Claims{
+						LaunchDigest: "deadbeef",
+						PlatformData: json.RawMessage(`{"policy":{"debug_allowed":false}}`),
+					},
 				},
 			}
 			var body bytes.Buffer

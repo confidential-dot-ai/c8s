@@ -41,6 +41,16 @@ var (
 	// ErrUnsupportedPlatform: [Client.VerifyEvidence] has no verification
 	// rules for the envelope's platform and fails closed.
 	ErrUnsupportedPlatform = errors.New("attestationclient: unsupported platform for evidence verification")
+
+	// ErrMinTCBNotEchoed: the request pinned a minimum TCB, but the
+	// response's verified claims omit the platform TCB or land below the
+	// floor — the verifier did not apply the requested policy.
+	ErrMinTCBNotEchoed = errors.New("attestationclient: verifier response does not echo the requested minimum TCB")
+
+	// ErrDebugPolicyNotEchoed: the request rejected debug guests, but the
+	// response's verified claims show a debug-enabled guest or carry no
+	// debug state — the verifier did not apply the requested policy.
+	ErrDebugPolicyNotEchoed = errors.New("attestationclient: verifier response does not echo the requested debug policy")
 )
 
 // launchMeasurementSize is the size of both an SEV-SNP LAUNCH_DIGEST and an
@@ -64,9 +74,12 @@ func (c Client) VerifyEnforced(ctx context.Context, req types.VerifyRequest) (ty
 
 // EnforceVerdict fails closed on a /verify response's verdict: the hardware
 // signature must be valid, and when req carried an expected REPORTDATA the
-// report_data_match verdict must be affirmatively true. For callers holding a
-// response obtained through a fakeable Verify interface; callers with a
-// concrete Client use [Client.VerifyEnforced].
+// report_data_match verdict must be affirmatively true. A requested min-TCB
+// floor or debug rejection must also be echoed by the response's verified
+// claims — a verifier that applied the policy refuses violating evidence, so
+// a success response that cannot show the policy holding is itself a failure.
+// For callers holding a response obtained through a fakeable Verify
+// interface; callers with a concrete Client use [Client.VerifyEnforced].
 func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 	if !resp.Result.SignatureValid {
 		return ErrSignatureInvalid
@@ -80,7 +93,98 @@ func EnforceVerdict(req types.VerifyRequest, resp types.VerifyResponse) error {
 	// (internal/localverify Params.ExpectedInitDataHash), not on this delegated
 	// one: wiring req.Params.ExpectedInitDataHash must add a matching
 	// InitDataMatch gate here — see #89.
+	if req.Params != nil && req.Params.MinTcb != nil {
+		if err := enforceMinTcbEcho(resp.Result.Claims.Tcb, req.Params.MinTcb); err != nil {
+			return err
+		}
+	}
+	if req.Params != nil && req.Params.AllowDebug != nil && !*req.Params.AllowDebug {
+		if err := enforceDebugEcho(req.Platform, resp.Result.Claims.PlatformData); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// enforceMinTcbEcho requires the verified claims to carry an SNP TCB at or
+// above the requested floor, component by component. A zero floor component
+// is unfloored and skipped, matching c8s verify's --min-tcb-* semantics.
+func enforceMinTcbEcho(claimsTcb json.RawMessage, floor *types.MinTcb) error {
+	var tcb struct {
+		Type       string `json:"type"`
+		Bootloader *uint8 `json:"bootloader"`
+		Tee        *uint8 `json:"tee"`
+		Snp        *uint8 `json:"snp"`
+		Microcode  *uint8 `json:"microcode"`
+	}
+	if len(claimsTcb) > 0 {
+		if err := json.Unmarshal(claimsTcb, &tcb); err != nil {
+			return fmt.Errorf("%w: claims TCB unreadable: %v", ErrMinTCBNotEchoed, err)
+		}
+	}
+	if tcb.Type != "Snp" {
+		return fmt.Errorf("%w: claims carry no SNP TCB (got %q)", ErrMinTCBNotEchoed, tcb.Type)
+	}
+	for _, c := range []struct {
+		name string
+		got  *uint8
+		want uint8
+	}{
+		{"bootloader", tcb.Bootloader, floor.Bootloader},
+		{"tee", tcb.Tee, floor.Tee},
+		{"snp", tcb.Snp, floor.Snp},
+		{"microcode", tcb.Microcode, floor.Microcode},
+	} {
+		if c.want == 0 {
+			continue
+		}
+		if c.got == nil {
+			return fmt.Errorf("%w: claims carry no %s TCB component", ErrMinTCBNotEchoed, c.name)
+		}
+		if *c.got < c.want {
+			return fmt.Errorf("%w: %s TCB is %d, below the floor of %d", ErrMinTCBNotEchoed, c.name, *c.got, c.want)
+		}
+	}
+	return nil
+}
+
+// enforceDebugEcho requires the verified claims to show a debug-disabled
+// guest. The claims layout is platform-specific: SNP platforms carry the
+// guest policy under policy.debug_allowed, TDX the TD attributes under
+// td_attributes_parsed.debug.
+func enforceDebugEcho(platform string, platformData json.RawMessage) error {
+	debug, ok := debugClaim(platform, platformData)
+	if !ok {
+		return fmt.Errorf("%w: claims carry no debug state for platform %q", ErrDebugPolicyNotEchoed, platform)
+	}
+	if debug {
+		return fmt.Errorf("%w: claims show a debug-enabled guest", ErrDebugPolicyNotEchoed)
+	}
+	return nil
+}
+
+// debugClaim extracts the debug bit from a platform's claims layout; ok is
+// false when the platform's layout is unknown or carries no debug state.
+func debugClaim(platform string, platformData json.RawMessage) (debug, ok bool) {
+	var section, key string
+	switch types.Platform(platform) {
+	case types.PlatformSnp, types.PlatformAzSnp, types.PlatformGcpSnp:
+		section, key = "policy", "debug_allowed"
+	case types.PlatformTdx, types.PlatformAzTdx:
+		section, key = "td_attributes_parsed", "debug"
+	default:
+		return false, false
+	}
+	var pd map[string]any
+	if len(platformData) == 0 {
+		return false, false
+	}
+	if err := json.Unmarshal(platformData, &pd); err != nil {
+		return false, false
+	}
+	m, _ := pd[section].(map[string]any)
+	debug, ok = m[key].(bool)
+	return debug, ok
 }
 
 // EvidencePolicy is the verification policy for [Client.VerifyEvidence].

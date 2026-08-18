@@ -28,6 +28,7 @@ type Config struct {
 	CDSURL            string
 	AttestationApiURL string
 	Measurements      []string
+	MinTCB            string
 
 	CertPath string
 	KeyPath  string
@@ -63,6 +64,7 @@ func BindFlags(f *pflag.FlagSet, cfg *Config) {
 	f.StringVar(&cfg.CDSURL, "cds-url", "", "https base URL of CDS")
 	f.StringVar(&cfg.AttestationApiURL, "attestation-api-url", "", "local attestation-api used to verify CDS's RA-TLS certificate")
 	f.StringSliceVar(&cfg.Measurements, "measurements", nil, "SHA-384 hex launch measurement(s) CDS must present (repeatable; empty pins none, UNSAFE)")
+	f.StringVar(&cfg.MinTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) CDS's evidence must meet; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	f.StringVar(&cfg.CertPath, "cert", "/run/c8s/certs/tls.crt", "the pod's CDS-issued certificate, presented to CDS")
 	f.StringVar(&cfg.KeyPath, "key", "/run/c8s/certs/tls.key", "private key for --cert")
 	f.IntVar(&cfg.Attempts, "attempts", 60, "how many times to try before failing; release is refused until every main container is running, so retries are expected")

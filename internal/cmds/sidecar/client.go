@@ -44,8 +44,16 @@ func NewClient(cfg Config, measurements [][]byte) (*http.Client, crypto.PublicKe
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse leaf: %w", err)
 	}
+	floor, err := types.ParseMinTcb(cfg.MinTCB)
+	if err != nil {
+		return nil, nil, fmt.Errorf("min-tcb: %w", err)
+	}
 	tlsCfg, _, err := ratls.NewClientTLSConfig(&ratls.ClientConfig{
-		Policy:       &ratls.VerifyPolicy{Measurements: measurements, AttestationApiURL: cfg.AttestationApiURL},
+		Policy: &ratls.VerifyPolicy{
+			Measurements:      measurements,
+			MinTCBVersion:     ratls.PackSNPMinTcb(floor),
+			AttestationApiURL: cfg.AttestationApiURL,
+		},
 		CertProvider: provider,
 	})
 	if err != nil {

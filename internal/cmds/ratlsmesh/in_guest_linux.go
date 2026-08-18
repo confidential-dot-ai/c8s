@@ -33,6 +33,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/certutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls/cdsclient"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Environment variable names. These are the contract surface against
@@ -45,6 +46,7 @@ const (
 	envLogLevel              = "C8S_LOG_LEVEL"
 	envCDSMeasurements       = "C8S_CDS_MEASUREMENTS"
 	envMeshMeasurements      = "C8S_MESH_MEASUREMENTS"
+	envMinTCB                = "C8S_MIN_TCB"
 	envPlatform              = "C8S_PLATFORM"
 	envPodIP                 = "C8S_POD_IP"
 	envInboundPassthrough    = "C8S_MESH_INBOUND_PASSTHROUGH"
@@ -72,6 +74,7 @@ type inGuestConfig struct {
 	platform              string
 	cdsMeasurements       string
 	meshMeasurements      string
+	minTCB                string
 	podIP                 string
 	inboundPassthrough    string
 	// clusterDNSIP is the cluster DNS (CoreDNS) server IP the in-guest egress
@@ -134,6 +137,7 @@ func loadInGuestConfig(env func(string) string) inGuestConfig {
 	}
 	c.cdsMeasurements = env(envCDSMeasurements)
 	c.meshMeasurements = env(envMeshMeasurements)
+	c.minTCB = env(envMinTCB)
 	c.podIP = env(envPodIP)
 	c.inboundPassthrough = env(envInboundPassthrough)
 	if v := env(envClusterDNSIP); v != "" {
@@ -323,12 +327,20 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		return fmt.Errorf("%s: %w", envMeshMeasurements, err)
 	}
 
+	minTcb, err := types.ParseMinTcb(c.minTCB)
+	if err != nil {
+		return fmt.Errorf("%s: %w", envMinTCB, err)
+	}
 	meshPolicy := &ratls.VerifyPolicy{
 		Measurements:      meshPolicyMeasurements,
+		MinTCBVersion:     ratls.PackSNPMinTcb(minTcb),
 		AttestationApiURL: c.attestationServiceURL,
 	}
 	if len(meshPolicyMeasurements) == 0 {
 		logger.Warn("no mesh measurements pinned (C8S_MESH_MEASUREMENTS empty); accepting any TEE attestation (unsafe for production)")
+	}
+	if meshPolicy.MinTCBVersion == 0 {
+		logger.Warn("no TCB floor set (C8S_MIN_TCB empty); accepting evidence from any platform TCB level (unsafe for production)")
 	}
 	if len(cdsMeasurements) == 0 {
 		logger.Warn("no CDS measurements pinned (C8S_CDS_MEASUREMENTS empty); the RA-TLS handshake with CDS will accept any measurement (unsafe for production)")
@@ -447,6 +459,7 @@ func runInGuest(ctx context.Context, c *inGuestConfig) error {
 		NodeName:          c.workloadID,
 		TEEType:           teeType,
 		CDSMeasurements:   cdsMeasurements,
+		MinTCBVersion:     meshPolicy.MinTCBVersion,
 	}
 	// A provider-construction failure (config validation) is logged and the
 	// mesh keeps serving self-signed certs; it never blocks startup.

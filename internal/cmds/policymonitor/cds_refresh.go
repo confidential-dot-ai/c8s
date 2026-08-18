@@ -28,6 +28,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/pkg/allowlistclient"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // runAllowlistRefresh builds the RA-TLS-pinned CDS allowlist client and
@@ -48,7 +49,12 @@ func runAllowlistRefresh(ctx context.Context, logger *slog.Logger, cfg *Config, 
 		disableRefresh(logger, state, reasonNoMeasurements, a)
 		return
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL)
+	floor, err := types.ParseMinTcb(cfg.MinTCB)
+	if err != nil {
+		disableRefresh(logger, state, reasonBadMinTCB, a, "error", err)
+		return
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.AttestationServiceURL, ratls.PackSNPMinTcb(floor))
 	if err != nil {
 		disableRefresh(logger, state, reasonClientFailed, a, "error", err)
 		return

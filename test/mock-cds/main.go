@@ -212,7 +212,7 @@ func handleAttest(store *challengeStore, verifier attestationclient.Client) http
 			return
 		}
 		reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-		verifyResp, err := verifier.VerifyEnforced(r.Context(), types.VerifyReportData(req.Evidence, reportData))
+		verifyResp, err := verifier.VerifyEnforced(r.Context(), types.VerifyReportData(req.Evidence, reportData, false, nil))
 		if err != nil {
 			status, code, msg := classifyVerifyError(err)
 			slog.Warn("attestation verification failed", "status", status, "error", err, "remote_addr", r.RemoteAddr)

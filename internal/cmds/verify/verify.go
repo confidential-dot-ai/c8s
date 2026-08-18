@@ -32,6 +32,7 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/operatorauth"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
 	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 // Exit codes. These are a stable contract for CI: a wrong measurement (2) is
@@ -575,14 +576,28 @@ func buildPolicy(cfg config) (*verifyPlan, error) {
 		return nil, err
 	}
 
+	// The --min-tcb-* floor travels with the policy so the delegated
+	// attestation-api path sends and echo-checks it; enforceMinTCB re-checks
+	// it against the verified claims on both paths.
+	var minTCBVersion uint64
+	if floor := minTCBFromCfg(cfg); floor != nil {
+		minTCBVersion = ratls.PackSNPMinTcb(types.MinTcb{
+			Bootloader: floor.Bootloader,
+			Tee:        floor.Tee,
+			Snp:        floor.Snp,
+			Microcode:  floor.Microcode,
+		})
+	}
+
 	return &verifyPlan{
 		// RTMRs is still set: it is what enforces the pin if this policy is
 		// ever verified through the delegated attestation-api path. It is not
 		// what enforces it today — see rtmrPins.manual.
 		policy: &ratls.VerifyPolicy{
-			Measurements: measurements,
-			RTMRs:        pins.manual,
-			AllowDebug:   cfg.allowDebug,
+			Measurements:  measurements,
+			RTMRs:         pins.manual,
+			AllowDebug:    cfg.allowDebug,
+			MinTCBVersion: minTCBVersion,
 		},
 		pins:         pins,
 		meshCA:       caPool,

@@ -103,6 +103,7 @@ func TestBuildHandoffHandler_DisabledWhenNoMeasurements(t *testing.T) {
 		nil,          // keyProvider unused
 		ear.Issuer{}, // earIssuer unused on the disabled path
 		attestationclient.NewClient(""),
+		nil, // minTcb unused on the disabled path
 	)
 	if err != nil {
 		t.Fatalf("unexpected error on disabled handoff: %v", err)
@@ -144,7 +145,7 @@ func TestBuildHandoffHandler_EnabledReturnsHandler(t *testing.T) {
 		handoffMeasurements: []string{"deadbeef"},
 		earIssuerName:       "cds",
 	}
-	hh, err := buildHandoffHandler(ctx, cfg, ca, &store, testOperatorKeysHash, rotator, earIss, attestationclient.NewClient(""))
+	hh, err := buildHandoffHandler(ctx, cfg, ca, &store, testOperatorKeysHash, rotator, earIss, attestationclient.NewClient(""), nil)
 	if err != nil {
 		t.Fatalf("buildHandoffHandler: %v", err)
 	}

@@ -51,6 +51,11 @@ type AttestHandler struct {
 	// to obtain a signed leaf. Empty = no measurement pinning.
 	Measurements map[string]bool
 
+	// MinTcb is the minimum SEV-SNP platform TCB evidence must meet to
+	// obtain a signed leaf, sent with every /verify call. nil = no floor
+	// (UNSAFE outside development).
+	MinTcb *types.MinTcb
+
 	// Policy enforces SAN/CN constraints on the CSR before signing. Without
 	// this, an attestation-passing workload could mint a leaf for any
 	// subject — see THREAT MODEL on issuer.CA.SignCSR.
@@ -180,7 +185,7 @@ func (h AttestHandler) HandleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
-	verifyReq := types.VerifyReportData(req.Evidence, reportData)
+	verifyReq := types.VerifyReportData(req.Evidence, reportData, false, h.MinTcb)
 	verifyResp, err := h.AttestationClient.VerifyEnforced(ctx, verifyReq)
 	if err != nil {
 		status, code, msg := classifyVerifyError(err)
@@ -560,6 +565,9 @@ func classifyVerifyError(err error) (int, string, string) {
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
 	case errors.Is(err, attestationclient.ErrReportDataMismatch):
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
+	case errors.Is(err, attestationclient.ErrMinTCBNotEchoed),
+		errors.Is(err, attestationclient.ErrDebugPolicyNotEchoed):
+		return http.StatusForbidden, types.ErrorCodeVerificationFailed, "attestation evidence does not satisfy the verification policy"
 	}
 	var apiErr *attestationclient.APIError
 	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 &&

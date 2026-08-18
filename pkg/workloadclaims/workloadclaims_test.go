@@ -776,10 +776,10 @@ func TestListenUnixNoChgrpWhenGIDNonPositive(t *testing.T) {
 // construction instead of at the first issuance.
 func TestDigestsCallbackRequiresAttestationApi(t *testing.T) {
 	attest := func(context.Context, string) (string, error) { return "", nil }
-	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "", nil, 0); err == nil {
+	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "", nil, 0, 0); err == nil {
 		t.Fatal("server config built with no attestation-api URL")
 	}
-	if _, err := NewDigestsClient(context.Background(), "sev-snp", attest, "", nil, 0); err == nil {
+	if _, err := NewDigestsClient(context.Background(), "sev-snp", attest, "", nil, 0, 0); err == nil {
 		t.Fatal("client built with no attestation-api URL")
 	}
 }
@@ -788,7 +788,7 @@ func TestDigestsCallbackRequiresAttestationApi(t *testing.T) {
 // yields a working, unpinned-but-attested peer on both ends.
 func TestDigestsCallbackAcceptsEmptyMeasurements(t *testing.T) {
 	attest := func(context.Context, string) (string, error) { return "", nil }
-	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "http://127.0.0.1:8400", nil, 0); err != nil {
+	if _, _, err := DigestsServerTLSConfig("sev-snp", attest, "http://127.0.0.1:8400", nil, 0, 0); err != nil {
 		t.Fatalf("server config rejected empty measurements: %v", err)
 	}
 }

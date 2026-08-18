@@ -22,6 +22,7 @@ import (
 
 	"github.com/confidential-dot-ai/c8s/internal/cmds/cmdsutil"
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
 const (
@@ -34,6 +35,7 @@ type config struct {
 	port              int
 	cdsURL            string
 	cdsMeasurements   []string
+	minTCB            string
 	attestationAPIURL string
 	requestTimeout    time.Duration
 	readHeaderTimeout time.Duration
@@ -57,6 +59,7 @@ func NewCmd() *cobra.Command {
 	f.IntVarP(&cfg.port, "port", "p", 8801, "listen port")
 	f.StringVar(&cfg.cdsURL, "cds-url", "", "CDS base URL (must use https/RA-TLS)")
 	f.StringSliceVar(&cfg.cdsMeasurements, "cds-measurements", nil, "allowed CDS SHA-384 launch measurement(s), repeatable/comma-separated; empty accepts any attested CDS (unsafe)")
+	f.StringVar(&cfg.minTCB, "min-tcb", "", "minimum SEV-SNP platform TCB as bootloader,tee,snp,microcode (e.g. 3,0,8,27) for CDS's RA-TLS evidence; a 0 component floors nothing (empty = no floor, UNSAFE)")
 	f.StringVar(&cfg.attestationAPIURL, "attestation-api-url", "", "attestation-api URL used to verify CDS evidence")
 	f.DurationVar(&cfg.requestTimeout, "request-timeout", defaultRequestTimeout, "timeout for one request to CDS")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "HTTP request-header timeout")
@@ -132,7 +135,11 @@ func newHandler(cfg config, logger *slog.Logger) (http.Handler, error) {
 	if len(measurements) == 0 {
 		logger.Warn("no CDS measurements pinned; accepting any RA-TLS-attested CDS (unsafe outside development)")
 	}
-	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.attestationAPIURL)
+	floor, err := types.ParseMinTcb(cfg.minTCB)
+	if err != nil {
+		return nil, fmt.Errorf("--min-tcb: %w", err)
+	}
+	httpClient, err := ratls.NewVerifyingHTTPClient(measurements, cfg.attestationAPIURL, ratls.PackSNPMinTcb(floor))
 	if err != nil {
 		return nil, fmt.Errorf("CDS RA-TLS client: %w", err)
 	}

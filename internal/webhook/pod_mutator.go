@@ -202,6 +202,11 @@ type Config struct {
 	// answer with a value of its choosing.
 	CDSMeasurements []string
 
+	// MinTCB is the minimum SEV-SNP platform TCB the injected fetchers
+	// require CDS's RA-TLS evidence to meet, in bootloader,tee,snp,microcode
+	// form. Empty = no floor (dev only).
+	MinTCB string
+
 	// CertDir is the mount path for the shared cert volume.
 	CertDir string
 
@@ -1090,6 +1095,9 @@ func certContainer(inj *injection, cfg Config) corev1.Container {
 	if joined := strings.Join(cfg.CDSMeasurements, ","); joined != "" {
 		args = append(args, "--cds-measurements="+joined)
 	}
+	if cfg.MinTCB != "" {
+		args = append(args, "--min-tcb="+cfg.MinTCB)
+	}
 	// get-cert redeems a sandbox token from the node's inventory: over the
 	// mounted socket on node-CVM, or the guest's loopback address under kata,
 	// where policy-monitor is in the same guest and there is nothing to mount.
@@ -1512,6 +1520,9 @@ func volumeContainer(inj *injection, cfg Config) corev1.Container {
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
 	}
+	if cfg.MinTCB != "" {
+		args = append(args, "--min-tcb="+cfg.MinTCB)
+	}
 	// Under kata both the inventory and volumed are inside this guest, on
 	// compiled loopback ports, with nothing mounted to reach them by.
 	if cfg.WorkloadClaimsGuest {
@@ -1554,6 +1565,9 @@ func secretContainer(inj *injection, cfg Config) corev1.Container {
 	}
 	for _, m := range cfg.CDSMeasurements {
 		args = append(args, "--measurements="+m)
+	}
+	if cfg.MinTCB != "" {
+		args = append(args, "--min-tcb="+cfg.MinTCB)
 	}
 	// Unlike get-cert the token is not optional here, so only the shape is
 	// selected: the mounted socket on node-CVM, guest loopback under kata.

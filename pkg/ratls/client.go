@@ -18,14 +18,21 @@ import (
 // performs all peer evidence verification. Required: every handshake
 // verification is delegated to it; there is no in-process fallback.
 //
+// minTCBVersion is the packed SNP TCB floor for peer evidence (zero = no
+// floor, UNSAFE outside development; see VerifyPolicy.MinTCBVersion).
+//
 // Connection-pool and timeout knobs: 5s dial, 10s response-header, 30s
 // overall, MaxIdleConns=5, MaxConnsPerHost=2.
-func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string) (*http.Client, error) {
+func NewVerifyingHTTPClient(measurements [][]byte, attestationApiURL string, minTCBVersion uint64) (*http.Client, error) {
 	if attestationApiURL == "" {
 		return nil, fmt.Errorf("ratls client config: attestation-api URL is required")
 	}
 	tlsCfg, _, err := NewClientTLSConfig(&ClientConfig{
-		Policy: &VerifyPolicy{Measurements: measurements, AttestationApiURL: attestationApiURL},
+		Policy: &VerifyPolicy{
+			Measurements:      measurements,
+			MinTCBVersion:     minTCBVersion,
+			AttestationApiURL: attestationApiURL,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ratls client config: %w", err)

@@ -24,6 +24,16 @@ func verifyResult(platform string, sigValid bool, reportDataMatch *bool, measure
 	if measurement != nil {
 		resp.Result.Claims.LaunchDigest = hex.EncodeToString(measurement)
 	}
+	// The real api's 200s always carry the platform TCB and the debug state;
+	// the enforced policy echo reads both.
+	switch types.Platform(platform) {
+	case types.PlatformSnp, types.PlatformAzSnp, types.PlatformGcpSnp:
+		resp.Result.Claims.Tcb = json.RawMessage(`{"type":"Snp","bootloader":3,"tee":0,"snp":8,"microcode":115}`)
+		resp.Result.Claims.PlatformData = json.RawMessage(`{"policy":{"debug_allowed":false}}`)
+	case types.PlatformTdx, types.PlatformAzTdx:
+		resp.Result.Claims.Tcb = json.RawMessage(`{"type":"Tdx","tcb_svn":"00000000000000000000000000000000"}`)
+		resp.Result.Claims.PlatformData = json.RawMessage(`{"td_attributes_parsed":{"debug":false}}`)
+	}
 	return resp
 }
 
