@@ -158,6 +158,26 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 	return "installing with allowlist writes DISABLED (no --operator-keys); `c8s allowlist` add/remove/upload will not work until you set cds.operatorKeys and reinstall", nil
 }
 
+// podModeMeasurementsPreflight enforces that a pod-mode install without a
+// pinned CDS measurement is a deliberate choice. Under --cvm-mode=pod the
+// injected get-cert runs inside a kata guest whose argv the host writes, so it
+// refuses to dial an unpinned CDS ("--measurements is empty: refusing to reach
+// an unpinned CDS from inside a kata guest"): CDS and tls-lb come up, but no
+// confidential.ai/cw pod ever gets a leaf, and the refusal is only visible in an
+// init container's log inside a locked guest. Requiring --force here surfaces
+// that before the install. -f owners may carry cds.measurements in their values
+// file, so it is a no-op for them (consistent with the other -f-gated
+// preflights). It returns a warning to print when --force lets it pass.
+func podModeMeasurementsPreflight(cvmMode string, measurements []string, valuesFiles []string, force bool) (warn string, err error) {
+	if !cvmModeIsPod(cvmMode) || len(measurements) > 0 || len(valuesFiles) > 0 {
+		return "", nil
+	}
+	if !force {
+		return "", fmt.Errorf("--cvm-mode=pod without --measurements: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
+	}
+	return "installing --cvm-mode=pod with no --measurements: CDS and tls-lb will run, but no confidential.ai/cw workload can obtain a certificate until you reinstall with --measurements", nil
+}
+
 // preflightCDSNode fails fast (before the helm install) when no node carries
 // the CDS node-selector label. The chart pins the singleton CDS pod to that
 // label, so without a matching node CDS stays Pending and `helm --wait` would
@@ -648,6 +668,11 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH, and 'crane' unless
 			return err
 		}
 		if warn, err := operatorKeysPreflight(installOperatorKeys, installValues, installForce); err != nil {
+			return err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+warn)
+		}
+		if warn, err := podModeMeasurementsPreflight(installCvmMode, installMeasurements, installValues, installForce); err != nil {
 			return err
 		} else if warn != "" {
 			fmt.Fprintln(os.Stderr, "warning: "+warn)
@@ -1916,6 +1941,6 @@ func init() {
 	installCmd.Flags().StringVar(&installImagePullSecret, "image-pull-secret", "", "name of an existing registry-credential Secret (kubernetes.io/dockerconfigjson) in the release namespace; the chart appends it to every component's imagePullSecrets, so all pods can pull the c8s images from an authenticated registry (e.g. a private mirror) from first start. The Secret itself is never created or managed by the install — the install fails fast if it is missing or has the wrong type")
 	installCmd.Flags().StringVar(&installImageTag, "image-tag", "", "component image tag to resolve digests at (default: the CLI build version, or 'main' for an unstamped build). Override to pin a specific branch/tag/release")
 	installCmd.Flags().StringVar(&installOperatorKeys, "operator-keys", "", "path to a PEM bundle of operator EC public keys that authorize `c8s allowlist` writes; sets cds.operatorKeys. Without it, allowlist writes are disabled (reads still served). See the README \"Operator allowlist credentials\"")
-	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled)")
+	installCmd.Flags().BoolVar(&installForce, "force", false, "proceed past guarded prompts — currently: install without --operator-keys (allowlist writes disabled), and --cvm-mode=pod without --measurements (no cw workload can start)")
 	rootCmd.AddCommand(installCmd)
 }
