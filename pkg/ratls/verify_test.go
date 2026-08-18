@@ -5,7 +5,34 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"testing"
+
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// PackSNPMinTcb's layout is the SEV-SNP ABI TcbVersion (byte 0 = bootloader,
+// byte 1 = tee, byte 6 = snp, byte 7 = microcode); a shift mutation here
+// silently unfloors a component on every flag-plumbed path.
+func TestPackSNPMinTcb(t *testing.T) {
+	m := types.MinTcb{Bootloader: 0x11, Tee: 0x22, Snp: 0x33, Microcode: 0x44}
+	if got, want := PackSNPMinTcb(m), uint64(0x44_33_00_00_00_00_22_11); got != want {
+		t.Fatalf("PackSNPMinTcb(%+v) = %#x, want %#x", m, got, want)
+	}
+	// The zero floor packs to 0 — the "no floor" value callers skip on.
+	if got := PackSNPMinTcb(types.MinTcb{}); got != 0 {
+		t.Fatalf("PackSNPMinTcb(zero) = %#x, want 0", got)
+	}
+	for _, m := range []types.MinTcb{
+		{Bootloader: 3, Snp: 8},
+		{Tee: 1},
+		{Microcode: 115},
+		{Bootloader: 255, Tee: 255, Snp: 255, Microcode: 255},
+		m,
+	} {
+		if got := unpackSNPMinTcb(PackSNPMinTcb(m)); got != m {
+			t.Errorf("unpackSNPMinTcb(PackSNPMinTcb(%+v)) = %+v", m, got)
+		}
+	}
+}
 
 // A sandbox-ID pin rests on CDS's signature over the leaf. Neither path that
 // verifies hardware evidence alone can establish that, so both refuse the pin
