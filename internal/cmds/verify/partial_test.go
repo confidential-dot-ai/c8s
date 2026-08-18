@@ -3,7 +3,9 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -440,6 +442,49 @@ func TestEndpointEvidenceMarksChainDerived(t *testing.T) {
 			t.Errorf("%s: a responder-chosen anchor is not a verified chain", tc.name)
 		}
 	}
+}
+
+// run() over a lying HTTPS server, end to end — the production shape: TLS
+// dial, same-connection fetch, evidence, verdict. The document claims cds
+// while the door serves another cert; the (stub) evidence then fails
+// verification, so the verdict is a failure — and the door lie's digests
+// ride it rather than being buried. A refused dial is exit 3.
+func TestRunDiscoveryOverLyingHTTPS(t *testing.T) {
+	challenge := []byte("issuance-challenge")
+	stubEvidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
+	attestedPEM, attestedCert := selfSignedServerCert(t)
+	_, otherCert := selfSignedServerCert(t)
+	doc := discoveryDocWithPublicTLS(t, "cds", attestedPEM, challenge, stubEvidence)
+
+	t.Run("lying https door + failing evidence is a named failure", func(t *testing.T) {
+		srv := discoveryServer(t, otherCert, doc)
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: srv.URL, kind: "lb", output: "text"}, &out, &errOut)
+		if code != exitFailed {
+			t.Fatalf("exit = %d, want %d; output:\n%s%s", code, exitFailed, out.String(), errOut.String())
+		}
+		served := sha256.Sum256(otherCert.Certificate[0])
+		attested := sha256.Sum256(attestedCert.Certificate[0])
+		for _, d := range []string{hex.EncodeToString(served[:]), hex.EncodeToString(attested[:])} {
+			if !strings.Contains(out.String(), d) {
+				t.Errorf("the failure must name the door digest %s:\n%s", d, out.String())
+			}
+		}
+		if strings.Contains(out.String(), "PARTIALLY") || strings.Contains(out.String(), "✓") {
+			t.Errorf("a failure must not read as partial or verified:\n%s", out.String())
+		}
+	})
+
+	t.Run("unreachable https target exits 3", func(t *testing.T) {
+		srv := discoveryServer(t, otherCert, doc)
+		url := srv.URL
+		srv.Close()
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), config{url: url, kind: "lb", output: "text"}, &out, &errOut)
+		if code != exitNoEvidence {
+			t.Errorf("exit = %d, want %d; output:\n%s%s", code, exitNoEvidence, out.String(), errOut.String())
+		}
+	})
 }
 
 // run() over a served discovery document: an unattested front door (the

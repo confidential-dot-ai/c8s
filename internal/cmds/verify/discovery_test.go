@@ -109,6 +109,42 @@ func TestGatherFromDiscoveryConnectErrors(t *testing.T) {
 	})
 }
 
+// A host that accepts TCP and then stalls must not hang the gather: the
+// dial timeout bounds connect + TLS handshake as a whole (tls.Dialer applies
+// the NetDialer timeout to HandshakeContext), and the gather ctx carries no
+// deadline of its own. The select — not a sleep — is what fails if the knob
+// goes missing.
+func TestGatherFromDiscoveryBoundsStallingHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close() // accept and hold: never speak TLS
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := gatherFromDiscovery(context.Background(), "https://"+ln.Addr().String(), "", "", 300*time.Millisecond, leafTrust{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !isConnectError(err) {
+			t.Fatalf("a stalled handshake must surface as a connectError, got %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the gather hung on a stalling host: the dial timeout must bound connect + handshake")
+	}
+}
+
 // selfSignedServerCert mints a throwaway self-signed certificate and returns
 // its PEM encoding plus a tls.Certificate a test server can present.
 func selfSignedServerCert(t *testing.T) (string, tls.Certificate) {
@@ -273,13 +309,19 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 	})
 
 	t.Run("redirect on the discovery path is a fetch failure", func(t *testing.T) {
+		// The redirect target answers 200, so only the no-redirect guard
+		// stands between the fetch and a followed redirect.
+		target := discoveryServer(t, attestedCert, docClaims("cds"))
 		srv := discoveryServer(t, attestedCert, docClaims("cds"))
 		srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/elsewhere", http.StatusFound)
+			http.Redirect(w, r, target.URL+defaultDiscoveryPath, http.StatusFound)
 		})
 		_, err := gatherFromDiscovery(context.Background(), srv.URL, "", "", 5*time.Second, leafTrust{})
 		if err == nil || !isConnectError(err) {
 			t.Fatalf("a redirect must fail as a fetch (connect) error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "302") {
+			t.Errorf("error = %q, want it to name the 302: the redirect is refused, not followed", err)
 		}
 	})
 }
