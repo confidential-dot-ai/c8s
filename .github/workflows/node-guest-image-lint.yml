@@ -20,6 +20,8 @@ on:
       # The lint guards this vendored file's c8s-local bait/tripwire markers;
       # a re-vendor PR touches nothing else and must fail here.
       - ".github/workflows/tdx-metal-e2e.yml"
+      # The invariants gate body; a script-only change must run the gate.
+      - ".github/scripts/node-guest-image-invariants.sh"
   workflow_dispatch:
 
 permissions:
@@ -49,124 +51,9 @@ jobs:
           path: confos
 
       - name: node-guest-image invariants
-        run: |
-          set -euo pipefail
-          ngi=node-guest-image
-
-          # kernel/c8s.config must be a superset of confos kernel/gpu.config:
-          # only one --kernel-config-fragment is accepted per build, so the
-          # c8s fragment duplicates the gpu lines verbatim. Catch drift when
-          # gpu.config changes under the pinned CONFOS_REF.
-          missing=$(grep -E '^CONFIG_|^# CONFIG_.* is not set$' confos/kernel/gpu.config \
-                    | grep -vFxf "$ngi/kernel/c8s.config" || true)
-          if [ -n "$missing" ]; then
-            echo "::error::$ngi/kernel/c8s.config must contain every effective line of confos kernel/gpu.config; missing:"
-            echo "$missing"
-            exit 1
-          fi
-
-          # c8s-dev.config (C8S_DEV=1 demo builds) is the union of c8s.config
-          # and confos dev.config, committed verbatim for the same one-fragment
-          # reason.
-          for src in "$ngi/kernel/c8s.config" confos/kernel/dev.config; do
-            missing=$(grep -E '^CONFIG_|^# CONFIG_.* is not set$' "$src" \
-                      | grep -vFxf "$ngi/kernel/c8s-dev.config" || true)
-            if [ -n "$missing" ]; then
-              echo "::error::$ngi/kernel/c8s-dev.config must contain every effective line of $src; missing:"
-              echo "$missing"
-              exit 1
-            fi
-          done
-
-          # The baked NRI floor is a template whose always_allow entries are
-          # @-tokens the sync fills with ref-resolved digests; a hardcoded
-          # sha256 would bake a stale digest the fail-closed floor can't
-          # reconcile with the ref. The marked block is exempt: systemfloor
-          # generates it from the pinned RKE2 airgap bundles (see mkosi.sync).
-          policy="$ngi/c8s/image-policy.yaml.in"
-          [ -f "$policy" ] || { echo "::error::NRI floor template $policy not found"; exit 1; }
-          if sed '/# BEGIN rke2 system floor/,/# END rke2 system floor/d' "$policy"               | grep -qE '^[[:space:]]*"sha256:[a-f0-9]{64}"[[:space:]]*:'; then
-            echo "::error::$policy has a hardcoded always_allow digest outside the generated system floor; use @NRI_DIGEST@/@CDS_DIGEST@ tokens (rendered from C8S_REF by mkosi.sync)"
-            exit 1
-          fi
-
-          # The c8s node is normally nested in an outer RKE2 cluster: its pod
-          # CIDR must not fall back to the outer cluster's default, and
-          # Cilium's pool must exactly match the RKE2 server setting or pods
-          # receive unroutable IPs.
-          rke2_config="$ngi/c8s/mkosi.extra/etc/rancher/rke2/config.yaml"
-          cilium_config="$ngi/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml"
-          rke2_pod_cidr=$(sed -n 's/^cluster-cidr:[[:space:]]*//p' "$rke2_config")
-          cilium_pod_cidr=$(sed -n '/clusterPoolIPv4PodCIDRList:/,/^[^[:space:]]/s/^[[:space:]]*-[[:space:]]*//p' "$cilium_config" | head -n 1)
-          if [ -z "$rke2_pod_cidr" ] || [ "$rke2_pod_cidr" = "10.42.0.0/16" ]; then
-            echo "::error::c8s RKE2 cluster-cidr must be explicit and must not overlap the outer RKE2 default"
-            exit 1
-          fi
-          if [ "$rke2_pod_cidr" != "$cilium_pod_cidr" ]; then
-            echo "::error::c8s RKE2 cluster-cidr ($rke2_pod_cidr) must match Cilium IPAM ($cilium_pod_cidr)"
-            exit 1
-          fi
-
-          # The rke2-role drop-ins only bind if mkosi.sync keeps staging the
-          # rke2 tarball's units under /usr/local (systemd's search path);
-          # the systemd harness installs its fakes at the same prefix.
-          if ! grep -q 'tar -xzf .* -C "\$STAGE_DIR/usr/local"' "$ngi/c8s/mkosi.sync"; then
-            echo "::error::mkosi.sync no longer stages rke2 under /usr/local; rke2-role drop-ins and the systemd harness depend on that unit dir"
-            exit 1
-          fi
-
-          # cloud-init datasource pin (node-as-CVM): the guest's cloud-init
-          # takes input from the measured baked seed only. A host-supplied
-          # cidata disk or cmdline/DMI seed redirect is otherwise root code
-          # execution inside the attested node.
-          dscfg="$ngi/c8s/mkosi.extra/etc/cloud/cloud.cfg.d/99-c8s-datasource.cfg"
-          if [ ! -f "$dscfg" ]; then
-            echo "::error::$dscfg missing: the node image must pin cloud-init to the baked NoCloud seed"
-            exit 1
-          fi
-          if ! grep -qE '^datasource_list: \[ ?NoCloud ?\]$' "$dscfg"; then
-            echo "::error::$dscfg must restrict datasource_list to exactly [ NoCloud ]"
-            exit 1
-          fi
-          if ! grep -qE '^    seedfrom: file:///var/lib/cloud/seed/nocloud/$' "$dscfg"; then
-            echo "::error::$dscfg must pin NoCloud seedfrom to the baked seed dir (overrides cmdline/DMI redirects)"
-            exit 1
-          fi
-          if ! grep -qE '^    fs_label: null$' "$dscfg"; then
-            echo "::error::$dscfg must set fs_label: null so cloud-init never scans attached disks for a cidata seed"
-            exit 1
-          fi
-          # The pin must be the only datasource config in the composed image:
-          # cloud.cfg.d merges lexically, so a later-sorting file from any
-          # confos tree would silently win.
-          if grep -rn --include='*.cfg' -E '^datasource' confos/mkosi "$ngi/c8s/mkosi.extra" | grep -v "$dscfg"; then
-            echo "::error::datasource keys found outside $dscfg; the c8s pin must be the only datasource config in the composed image"
-            exit 1
-          fi
-          # mkosi.sync generates image content at build time; a datasource
-          # drop-in written there would evade the static grep above.
-          # Comment lines cannot write content; skip them.
-          if grep -vE '^[ 	]*#' "$ngi/c8s/mkosi.sync" | grep -n 'datasource'; then
-            echo "::error::$ngi/c8s/mkosi.sync writes datasource config; build-time drop-ins must not bypass the pin check"
-            exit 1
-          fi
-          # The pin is only meaningful while the build bakes the seed dir it
-          # points at.
-          if ! grep -q -- '--cloud-init "\$NGI_DIR/c8s/user-data"' "$ngi/build"; then
-            echo "::error::$ngi/build no longer bakes the seed the datasource pin points at"
-            exit 1
-          fi
-          # tdx-metal-e2e.yml is vendored from confidential-ci; the bait +
-          # tripwire are a c8s-local patch until the source takes the same
-          # edit — a re-vendor would silently delete them.
-          for marker in 'hostname: cidata-bait' 'assert the host cidata disk is inert'; do
-            if ! grep -qF "$marker" .github/workflows/tdx-metal-e2e.yml; then
-              echo "::error::tdx-metal-e2e.yml lost '$marker': re-vendoring dropped the cidata bait/tripwire — re-apply the c8s-local patch (c8s-workspace#117)"
-              exit 1
-            fi
-          done
-
-          echo "all node-guest-image invariants hold at CONFOS_REF ${{ steps.ref.outputs.ref }}"
+        env:
+          CONFOS_REF: ${{ steps.ref.outputs.ref }}
+        run: .github/scripts/node-guest-image-invariants.sh
 
   system-floor:
     name: system floor lockstep
