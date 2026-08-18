@@ -695,10 +695,12 @@ test_mount_allows_projected_volume_names if {
 
 # --- spec hooks ---------------------------------------------------------
 #
-# Hooks ride inside the OCI spec of an otherwise-admitted request and
-# execute as guest root before the admission verdict. All six lists must be
-# empty; the honest shapes are an absent Hooks, null (what the protobuf
-# serializer emits for an unset message), and empty lists.
+# Hooks ride inside the OCI spec of an otherwise-admitted request; Prestart
+# and CreateContainer execute as guest root before the admission verdict,
+# the remaining lists after it (CreateRuntime never fires in the agent).
+# All six lists must be empty; the honest shapes are an absent Hooks, null
+# (what the protobuf serializer emits for an unset message), an empty Hooks
+# message, and empty lists.
 
 # object.union is shallow, so merge at the OCI level to keep the fixture.
 with_hooks(base, hooks) := object.union(base, {"OCI": object.union(base.OCI, {"Hooks": hooks})})

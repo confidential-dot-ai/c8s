@@ -158,8 +158,8 @@ It exists because:
 
 - kata-agent has no upstream-supported pre-start callout we can
   intercept other than the in-process OPA policy, and that policy
-  is structurally permissive (see "Why the OPA policy is permissive"
-  below).
+  carries no digest allowlist (see "Why the digest allowlist is not
+  in the baked policy" below).
 - Userspace inotify delivers events asynchronously; the kernel
   doesn't pause the writer until a userspace consumer reads the
   event.
@@ -203,11 +203,14 @@ logs at error instead: a denied container that exited on its own is
 indistinguishable from one that never got a cgroup, and that must not power off
 a healthy guest.
 
-## Why the OPA policy is permissive
+## Why the digest allowlist is not in the baked policy
 
-kata-agent's bootstrap OPA policy in this image is
-`allow-all.rego`-plus-`SetPolicyRequest := false`. We don't carry a
-per-image-digest Rego rule there because:
+kata-agent's baked OPA policy fails closed: it binds each request to
+itself — container id shape, storages, mounts, spec hooks,
+`guest_hook_path` — and denies the RPCs that would let the host reach
+into a running container, with `SetPolicyRequest := false` so the host
+cannot swap it at runtime. The one decision it does not carry is a
+per-image-digest Rego rule, because:
 
 1. **Regorus crypto.** Adding `data.agent_policy.allow if
    input.digest in allowed_digests` to the baked Rego would couple
@@ -507,7 +510,7 @@ workload container. kata-agent gets two CreateContainerRequest calls
 in succession.
 
 **Flow.** Both calls are evaluated against the same baked OPA policy in
-kata-agent (allow-all on CreateContainerRequest). policy-monitor sees an
+kata-agent (fails closed on each). policy-monitor sees an
 inotify event per container bundle and evaluates each independently
 against the in-memory allowlist — except the sandbox (pause) container,
 which is out of allowlist scope (see Outcome).
