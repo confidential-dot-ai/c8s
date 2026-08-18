@@ -1272,6 +1272,55 @@ func TestMinTCBPreflightValuesFiles(t *testing.T) {
 	if _, err := minTCBPreflight("", []string{bad}, true); err == nil || !strings.Contains(err.Error(), bad) {
 		t.Fatalf("malformed minTcb in a values file: want an error naming the file, got %v", err)
 	}
+	// A present-but-non-string minTcb (YAML null, 0, false) renders no floor
+	// and fails the chart render, so the gate errors naming the file — it
+	// must not treat the file as not setting minTcb, and --force does not
+	// bypass a value that can never render.
+	for _, body := range []string{"minTcb:", "minTcb: ~", "minTcb: 0", "minTcb: false", "minTcb: 3"} {
+		f := writeValues(t, body)
+		for _, force := range []bool{false, true} {
+			if _, err := minTCBPreflight("", []string{f}, force); err == nil || !strings.Contains(err.Error(), f) {
+				t.Fatalf("%s (force=%v): want an error naming the file, got %v", body, force, err)
+			}
+		}
+	}
+	// Merge order still decides: a later null errors, a later floor cancels
+	// an earlier null.
+	null := writeValues(t, "minTcb:")
+	if _, err := minTCBPreflight("", []string{high, null}, false); err == nil {
+		t.Fatal("later file nulls the floor: expected an error")
+	}
+	if warn, err := minTCBPreflight("", []string{null, high}, false); err != nil || warn != "" {
+		t.Fatalf("later file restored the floor: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+}
+
+// The preflight only gates what its call site passes: run the install
+// command's RunE against a -f downgrade so a regression that stops threading
+// installValues into minTCBPreflight fails here, not in production.
+func TestInstallRunEGatesValuesFileMinTCB(t *testing.T) {
+	saved := struct {
+		cvmMode, minTCB, operatorKeys, upstream string
+		values, workloadRefs                    []string
+		force, kataDebug, wait                  bool
+	}{installCvmMode, installMinTCB, installOperatorKeys, installUpstream,
+		installValues, installWorkloadRefs, installForce, installKataDebug, installWait}
+	defer func() {
+		installCvmMode, installMinTCB, installOperatorKeys, installUpstream = saved.cvmMode, saved.minTCB, saved.operatorKeys, saved.upstream
+		installValues, installWorkloadRefs = saved.values, saved.workloadRefs
+		installForce, installKataDebug, installWait = saved.force, saved.kataDebug, saved.wait
+	}()
+	f := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(f, []byte(`minTcb: "0,0,0,0"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installCvmMode, installKataDebug = "pod", false
+	installWorkloadRefs, installUpstream, installOperatorKeys = nil, "", ""
+	installMinTCB, installValues, installForce = "", []string{f}, false
+	err := installCmd.RunE(installCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "lowers the chart's shipped TCB floor") {
+		t.Fatalf("RunE with a -f zero floor: want the downgrade refusal, got %v", err)
+	}
 }
 
 // Pod mode used to refuse --measurements because the per-pod kata guest digest
