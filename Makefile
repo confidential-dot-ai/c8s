@@ -140,10 +140,9 @@ test-node-guest-image-role:
 test-node-guest-image-role-systemd:
 	./node-guest-image/tests/rke2-role-systemd-test.sh
 
-# The datasource pin against the distro's real DataSourceNoCloud: host
-# input must lose to the baked seed. Needs the distro cloud-init package; no root.
+# Needs root (private mount namespace) and a ./confos checkout.
 test-node-guest-image-cloud-init:
-	python3 ./node-guest-image/tests/cloud-init-datasource-test.py
+	./node-guest-image/tests/cloud-init-disabled.sh
 
 # Advisory mutation testing of code changed vs BASE (default origin/main).
 mutation-check:

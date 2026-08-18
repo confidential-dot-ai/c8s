@@ -114,7 +114,6 @@ exec bin/confos build "${C8S_NAME:-c8s}" \
     --sync-input "c8s-registry=${C8S_REGISTRY:-}" \
     --kernel-config-fragment "$FRAGMENT" \
     --kernel-builder-package "$KB_PKGS" \
-    --cloud-init "$NGI_DIR/c8s/user-data" \
     --platform "$C8S_PLATFORM" \
     --memory "${C8S_MEMORY:-16G}" \
     "$@"

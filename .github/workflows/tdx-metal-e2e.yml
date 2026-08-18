@@ -261,10 +261,10 @@ jobs:
           kind: Secret
           metadata: {name: $VM-cloudinit, namespace: $NS}
           type: Opaque
-          # Bait, not configuration: the node image pins cloud-init to its
-          # measured baked seed, so this host disk must be inert (asserted
-          # by the tripwire step below). c8s-local patch — mirror to
-          # confidential-ci before re-vendoring.
+          # Bait, not configuration: the node image disables cloud-init, so
+          # this host disk must be inert (asserted by the tripwire step
+          # below). c8s-local patch — mirror to confidential-ci before
+          # re-vendoring.
           stringData:
             userdata: |
               #cloud-config

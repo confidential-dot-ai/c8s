@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Tripwire for the tdx-metal-e2e lane: the CVM boot attaches a bait cloud-init
-# disk, and with the node image's datasource pin the measured baked seed is the
-# only cloud-init input, so the node must register under the baked hostname.
-# The bait name means host user-data executed as root. Reads the guest cluster
-# through /tmp/guest.kubeconfig.
+# disk, and the node image disables cloud-init, so the node must register under
+# the baked /etc/hostname. The bait name means host user-data executed as root.
+# Reads the guest cluster through /tmp/guest.kubeconfig.
 
 set -euo pipefail
 NODE=""
