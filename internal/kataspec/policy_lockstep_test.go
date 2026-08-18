@@ -307,11 +307,10 @@ func TestSandboxPredicateAgreesWithBakedPolicy(t *testing.T) {
 // Spec hooks ride inside an otherwise-admitted CreateContainerRequest;
 // Prestart and CreateContainer execute as guest root ahead of the
 // admission verdict, the remaining lists after it (CreateRuntime never
-// fires in the agent). Pin the guard the same
-// way as the CRI-O marker: one no_spec_hooks rule holding one line per
-// hook list, conjoined into CreateContainerRequest — a commented-out or
-// relocated line still leaves the substrings present, so read the rule
-// bodies.
+// fires in the agent). Pin the guard the same way as the CRI-O marker:
+// one no_spec_hooks rule holding one line per hook list, conjoined into
+// CreateContainerRequest — a commented-out or relocated line still
+// leaves the substrings present, so read the rule bodies.
 func TestBakedPolicyRejectsSpecHooks(t *testing.T) {
 	policy := readPolicy(t)
 

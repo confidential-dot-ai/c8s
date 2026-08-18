@@ -12,8 +12,8 @@ agent-policy) cannot execute host-supplied hooks.
 
 The check sits right after the spec is taken from the request, which is
 before handle_cdi_devices and append_guest_hooks: the hooks the agent
-injects itself -- the nvidia-cdi-hook from the in-guest CDI registry,
-and guest hooks -- are appended afterwards and stay working.
+injects itself -- the nvidia-cdi-hook from the in-guest CDI registry --
+are appended afterwards and stay working.
 
 --- a/src/agent/src/rpc.rs
 +++ b/src/agent/src/rpc.rs
