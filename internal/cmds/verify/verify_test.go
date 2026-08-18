@@ -35,17 +35,20 @@ import (
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
-// selfSignedCertPEM returns a throwaway ECDSA P-256 certificate (PEM) and its
-// public key, for testing REPORTDATA-binding math without real SNP crypto.
-func selfSignedCertPEM(t *testing.T) (string, *ecdsa.PublicKey) {
+// mintSelfSigned creates a throwaway self-signed P-256 certificate (cn,
+// serial) around key — minting a fresh key when nil — and returns the key and
+// the certificate DER.
+func mintSelfSigned(t *testing.T, cn string, serial int64, key *ecdsa.PrivateKey) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	if key == nil {
+		var err error
+		if key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+			t.Fatal(err)
+		}
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "cds"},
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: cn},
 		NotBefore:    time.Unix(0, 0),
 		NotAfter:     time.Unix(1<<31-1, 0),
 	}
@@ -53,6 +56,14 @@ func selfSignedCertPEM(t *testing.T) (string, *ecdsa.PublicKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return key, der
+}
+
+// selfSignedCertPEM returns a throwaway ECDSA P-256 certificate (PEM) and its
+// public key, for testing REPORTDATA-binding math without real SNP crypto.
+func selfSignedCertPEM(t *testing.T) (string, *ecdsa.PublicKey) {
+	t.Helper()
+	key, der := mintSelfSigned(t, "cds", 1, nil)
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), &key.PublicKey
 }
 

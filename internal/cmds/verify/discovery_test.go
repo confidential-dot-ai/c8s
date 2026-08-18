@@ -3,20 +3,18 @@ package verify
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -91,6 +89,15 @@ func TestGatherFromDiscoveryConnectErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("https to a non-TLS service is a connectError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		t.Cleanup(srv.Close)
+		_, err := gatherFromDiscovery(ctx, "https"+strings.TrimPrefix(srv.URL, "http"), "", "", time.Second, leafTrust{})
+		if err == nil || !isConnectError(err) {
+			t.Fatalf("a TLS handshake failure must be a connectError, got %v", err)
+		}
+	})
+
 	t.Run("connection refused is a connectError", func(t *testing.T) {
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		base := srv.URL
@@ -106,22 +113,18 @@ func TestGatherFromDiscoveryConnectErrors(t *testing.T) {
 // its PEM encoding plus a tls.Certificate a test server can present.
 func selfSignedServerCert(t *testing.T) (string, tls.Certificate) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "lb"},
-		NotBefore:    time.Unix(0, 0),
-		NotAfter:     time.Unix(1<<31-1, 0),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	key, der := mintSelfSigned(t, "lb", 1, nil)
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	return certPEM, tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// remintServerCert re-mints cert's body around the same key (new serial): the
+// SPKI matches but the DER does not.
+func remintServerCert(t *testing.T, cert tls.Certificate) tls.Certificate {
+	t.Helper()
+	key := cert.PrivateKey.(*ecdsa.PrivateKey)
+	_, der := mintSelfSigned(t, "lb", 2, key)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 // discoveryServer starts a TLS server presenting serverCert and serving doc.
@@ -209,6 +212,43 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 		}
 	})
 
+	t.Run("lying host: no mode declared, serves another cert", func(t *testing.T) {
+		srv := discoveryServer(t, otherCert, docClaims(""))
+		ev, err := gatherFromDiscovery(context.Background(), srv.URL, "", "", 5*time.Second, leafTrust{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.frontDoor != frontDoorOther {
+			t.Errorf("frontDoor = %v, want other", ev.frontDoor)
+		}
+	})
+
+	t.Run("a re-minted body around the attested key is still another cert", func(t *testing.T) {
+		srv := discoveryServer(t, remintServerCert(t, attestedCert), docClaims("cds"))
+		ev, err := gatherFromDiscovery(context.Background(), srv.URL, "", "", 5*time.Second, leafTrust{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.frontDoor != frontDoorOther {
+			t.Errorf("frontDoor = %v, want other: the comparison is byte-equality, not key-equality", ev.frontDoor)
+		}
+	})
+
+	t.Run("a chain at the door is compared by its leaf", func(t *testing.T) {
+		chained := tls.Certificate{
+			Certificate: [][]byte{attestedCert.Certificate[0], otherCert.Certificate[0]},
+			PrivateKey:  attestedCert.PrivateKey,
+		}
+		srv := discoveryServer(t, chained, docClaims("cds"))
+		ev, err := gatherFromDiscovery(context.Background(), srv.URL, "", "", 5*time.Second, leafTrust{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.frontDoor != frontDoorAttested {
+			t.Errorf("frontDoor = %v, want attested: the presented leaf is what compares", ev.frontDoor)
+		}
+	})
+
 	t.Run("non-TLS target leaves the door unobserved", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Write(docClaims("cds"))
@@ -233,6 +273,71 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 			t.Fatalf("a redirect must fail as a fetch (connect) error, got %v", err)
 		}
 	})
+}
+
+// The document and the observed handshake leaf must ride ONE connection:
+// serving certs are per replica, so a second dial can reach a different
+// replica — or, for an adversarial host, a proxied attested tls-lb pod — and
+// make a WebPKI door look attested. The server below is that host: the door
+// clients reach (first connection) serves a WebPKI stand-in, every later
+// connection gets the attested cert. The observation must be the dialed
+// connection's leaf, and there must be exactly one dial — the count pins the
+// invariant regardless of dial order.
+func TestGatherFromDiscoverySingleConnection(t *testing.T) {
+	challenge := []byte("issuance-challenge")
+	stubEvidence := `{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`
+	attestedPEM, attestedCert := selfSignedServerCert(t)
+	_, otherCert := selfSignedServerCert(t) // a WebPKI stand-in
+	doc := discoveryDocWithPublicTLS(t, "cds", attestedPEM, challenge, stubEvidence)
+
+	// Hand-rolled TLS listener: httptest's StartTLS installs its own
+	// certificate when Certificates is empty, which would shadow
+	// GetCertificate for a client that sends no SNI.
+	var handshakes atomic.Int32
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(doc)
+	})}
+	t.Cleanup(func() { srv.Close() })
+	go srv.Serve(tls.NewListener(ln, &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if handshakes.Add(1) == 1 {
+			return &otherCert, nil
+		}
+		return &attestedCert, nil
+	}}))
+
+	ev, err := gatherFromDiscovery(context.Background(), "https://"+ln.Addr().String(), "", "", 5*time.Second, leafTrust{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.frontDoor != frontDoorOther {
+		t.Errorf("frontDoor = %v, want other: the observation must be the dialed connection's leaf (the door clients reach), not a later connection's", ev.frontDoor)
+	}
+	if got := handshakes.Load(); got != 1 {
+		t.Errorf("handshakes = %d, want exactly 1: the document and the observation must ride one connection", got)
+	}
+}
+
+// singleConnClient's second dial fails closed rather than re-reaching a
+// possibly different replica.
+func TestSingleConnClientNeverRedials(t *testing.T) {
+	_, serverCert := selfSignedServerCert(t)
+	srv := discoveryServer(t, serverCert, []byte("{}"))
+	conn, err := tls.Dial("tcp", srv.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}) //nolint:gosec
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	transport := singleConnClient(conn, 5*time.Second).Transport.(*http.Transport)
+	if _, err := transport.DialTLSContext(context.Background(), "tcp", "unused"); err != nil {
+		t.Fatalf("the first dial hands out the attested connection: %v", err)
+	}
+	if _, err := transport.DialTLSContext(context.Background(), "tcp", "unused"); err == nil {
+		t.Fatal("a second dial must fail closed")
+	}
 }
 
 // A discovery document's CA-vouched serving cert (the chart's shape: issued
