@@ -221,6 +221,66 @@ func TestAttest_LaunchDigestAllowlistDenied(t *testing.T) {
 	}
 }
 
+// The floor reaches the verifier on the issuance path: CDS sends min_tcb with
+// the /verify call, and evidence the response shows below it mints nothing.
+func TestAttest_MinTCBFloorSentAndEnforced(t *testing.T) {
+	floor := types.MinTcb{Bootloader: 3, Snp: 8}
+
+	t.Run("at the floor issues", func(t *testing.T) {
+		stub := newStubAttestationApi(t, "approved-digest") // stub TCB: 3,0,8,115
+		h := newTestAttestHandler(t, stub.URL, nil)
+		h.MinTcb = &floor
+		csrPEM, _ := generateCSR(t)
+
+		w := postAttest(t, h, issueChallenge(t, h), csrPEM)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		reqs := stub.VerifyRequests()
+		if len(reqs) != 1 || reqs[0].Params == nil || reqs[0].Params.MinTcb == nil || *reqs[0].Params.MinTcb != floor {
+			t.Fatalf("issuance /verify did not carry min_tcb %+v: %+v", floor, reqs)
+		}
+		if reqs[0].Params.AllowDebug == nil || *reqs[0].Params.AllowDebug {
+			t.Fatalf("issuance /verify did not carry allow_debug=false: %+v", reqs[0].Params)
+		}
+	})
+
+	t.Run("below the floor is refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict("approved-digest")
+		verdict.Claims.Tcb = testattest.SNPTcbClaims(types.MinTcb{Bootloader: 3, Snp: 7, Microcode: 115})
+		stub.SetVerdict(verdict)
+		h := newTestAttestHandler(t, stub.URL, nil)
+		h.MinTcb = &floor
+		csrPEM, _ := generateCSR(t)
+
+		w := postAttest(t, h, issueChallenge(t, h), csrPEM)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status: got %d, want 403; body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "verification_failed") {
+			t.Errorf("body should report verification_failed; got %s", w.Body.String())
+		}
+	})
+
+	t.Run("a response carrying no TCB is refused", func(t *testing.T) {
+		stub := testattest.New(t)
+		verdict := testattest.PassingVerdict("approved-digest")
+		// The stub fills empty claims with a conforming TCB; a verifier that
+		// dropped the policy echoes nothing, which must fail rather than pass.
+		verdict.Claims.Tcb = json.RawMessage(`{}`)
+		stub.SetVerdict(verdict)
+		h := newTestAttestHandler(t, stub.URL, nil)
+		h.MinTcb = &floor
+		csrPEM, _ := generateCSR(t)
+
+		w := postAttest(t, h, issueChallenge(t, h), csrPEM)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status: got %d, want 403; body=%s", w.Code, w.Body.String())
+		}
+	})
+}
+
 func TestAttest_TimeoutBeforeSigningReturns504(t *testing.T) {
 	h := newTestAttestHandler(t, "http://attestation.test", nil)
 	ctx, cancel := context.WithCancel(context.Background())

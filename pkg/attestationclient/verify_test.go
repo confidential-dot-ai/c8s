@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -265,5 +266,61 @@ func TestVerifyEvidenceUnsupportedPlatformFailsClosed(t *testing.T) {
 		if !errors.Is(err, ErrUnsupportedPlatform) {
 			t.Fatalf("platform %q: want ErrUnsupportedPlatform, got: %v", platform, err)
 		}
+	}
+}
+
+// A 200 whose verified claims do not show the requested policy holding is
+// itself a failure: the verifier either refused nothing (a conforming
+// verifier would have) or stopped reporting the claim — both fail closed.
+func TestEnforceVerdictPolicyEcho(t *testing.T) {
+	floor := &types.MinTcb{Bootloader: 3, Snp: 8}
+	snpDebugOK := json.RawMessage(`{"policy":{"debug_allowed":false}}`)
+	snpTCB := func(b, tee, s, m uint8) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"type":"Snp","bootloader":%d,"tee":%d,"snp":%d,"microcode":%d}`, b, tee, s, m))
+	}
+
+	type policy struct {
+		allowDebug *bool
+		minTcb     *types.MinTcb
+	}
+	for _, tc := range []struct {
+		name     string
+		platform string
+		policy   policy
+		tcb      json.RawMessage
+		pdata    json.RawMessage
+		wantErr  error
+	}{
+		{"floor met", "snp", policy{boolPtr(false), floor}, snpTCB(3, 0, 8, 115), snpDebugOK, nil},
+		{"floor exceeded", "snp", policy{boolPtr(false), floor}, snpTCB(4, 0, 28, 222), snpDebugOK, nil},
+		{"below floor", "snp", policy{boolPtr(false), floor}, snpTCB(3, 0, 7, 115), snpDebugOK, ErrMinTCBNotEchoed},
+		{"no TCB claims", "snp", policy{boolPtr(false), floor}, nil, snpDebugOK, ErrMinTCBNotEchoed},
+		{"empty TCB claims", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{}`), snpDebugOK, ErrMinTCBNotEchoed},
+		{"non-SNP TCB claims", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{"type":"Tdx","tcb_svn":"00"}`), snpDebugOK, ErrMinTCBNotEchoed},
+		{"floored component missing", "snp", policy{boolPtr(false), floor}, json.RawMessage(`{"type":"Snp","bootloader":3}`), snpDebugOK, ErrMinTCBNotEchoed},
+		{"zero floor components unfloored", "snp", policy{boolPtr(false), &types.MinTcb{Snp: 8}}, snpTCB(0, 0, 8, 0), snpDebugOK, nil},
+		{"debug-disabled echoed", "snp", policy{boolPtr(false), nil}, snpTCB(3, 0, 8, 115), snpDebugOK, nil},
+		{"debug-enabled rejected explicitly", "snp", policy{boolPtr(false), nil}, snpTCB(3, 0, 8, 115), json.RawMessage(`{"policy":{"debug_allowed":true}}`), ErrDebugPolicyNotEchoed},
+		{"no debug state rejected", "snp", policy{boolPtr(false), nil}, snpTCB(3, 0, 8, 115), nil, ErrDebugPolicyNotEchoed},
+		{"tdx debug-disabled echoed", "tdx", policy{boolPtr(false), nil}, nil, json.RawMessage(`{"td_attributes_parsed":{"debug":false}}`), nil},
+		{"tdx debug-enabled rejected explicitly", "tdx", policy{boolPtr(false), nil}, nil, json.RawMessage(`{"td_attributes_parsed":{"debug":true}}`), ErrDebugPolicyNotEchoed},
+		{"tdx no debug state rejected", "tdx", policy{boolPtr(false), nil}, nil, json.RawMessage(`{"td_attributes_parsed":{}}`), ErrDebugPolicyNotEchoed},
+		{"allow-debug opts out of the echo", "snp", policy{boolPtr(true), nil}, snpTCB(3, 0, 8, 115), json.RawMessage(`{"policy":{"debug_allowed":true}}`), nil},
+		{"no policy requested, no echo demanded", "snp", policy{nil, nil}, nil, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := types.VerifyRequest{
+				Platform: tc.platform,
+				Params:   &types.VerifyParams{AllowDebug: tc.policy.allowDebug, MinTcb: tc.policy.minTcb},
+			}
+			resp := types.VerifyResponse{Result: types.VerificationResult{
+				SignatureValid:  true,
+				ReportDataMatch: boolPtr(true),
+				Claims:          types.Claims{Tcb: tc.tcb, PlatformData: tc.pdata},
+			}}
+			if err := EnforceVerdict(req, resp); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("EnforceVerdict = %v, want %v", err, tc.wantErr)
+			}
+		})
 	}
 }
