@@ -25,6 +25,18 @@
 {{- if and .Values.attestationApi.teeDevices.sevGuest .Values.attestationApi.teeDevices.tdxGuest -}}
 {{- fail "VALIDATION_ERROR kind=tee_mutually_exclusive: attestationApi.teeDevices.sevGuest=true and .tdxGuest=true both set. A cluster picks one CPU TEE at install time (--hardware-platform sev-snp OR tdx). Use `c8s install --hardware-platform=<sev-snp|tdx>` or set exactly one of the two flags via -f." -}}
 {{- end -}}
+{{- /*
+  A YAML null minTcb deletes the key at values coalesce, and non-string
+  scalars (0, false) are falsy under the `with` guards — both silently render
+  no floor. Fail instead; the deliberate floorless shape is the quoted empty
+  string.
+*/ -}}
+{{- if not (hasKey .Values "minTcb") -}}
+{{- fail "VALIDATION_ERROR kind=min_tcb_null: minTcb is null (minTcb:, minTcb: ~, or --set minTcb=null), which deletes the value and renders NO TCB floor. Set a quoted four-component string (e.g. \"3,0,8,0\"), or minTcb: \"\" to disable the floor deliberately (development only)." -}}
+{{- end -}}
+{{- if not (kindIs "string" .Values.minTcb) -}}
+{{- fail (printf "VALIDATION_ERROR kind=min_tcb_malformed: minTcb must be a string, got %v — unquoted YAML 0/false render no floor. Quote the four components (e.g. \"3,0,8,0\"), or set minTcb: \"\" to disable the floor deliberately (development only)." .Values.minTcb) -}}
+{{- end -}}
 {{- if and .Values.minTcb (not (regexMatch `^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9]),){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$` .Values.minTcb)) -}}
 {{- fail (printf "VALIDATION_ERROR kind=min_tcb_malformed: minTcb %q is not four comma-separated 0-255 components (bootloader,tee,snp,microcode, e.g. 3,0,8,0). Empty disables the floor (development only)." .Values.minTcb) -}}
 {{- end -}}

@@ -7038,6 +7038,53 @@ func TestChartMinTCBMalformedFailsRender(t *testing.T) {
 	}
 }
 
+// A falsy or non-string minTcb spelling — YAML null (which helm's values
+// coalesce turns into a deleted key), 0, false, a bare int — renders no
+// floor under the `with` guards, so the chart refuses to render it: the only
+// floorless shape is the deliberate quoted-empty string.
+func TestChartMinTCBFalsyFailsRender(t *testing.T) {
+	writeValues := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, tc := range []struct {
+		body string
+		kind string
+	}{
+		{"minTcb:\n", "min_tcb_null"},
+		{"minTcb: ~\n", "min_tcb_null"},
+		{"minTcb: 0\n", "min_tcb_malformed"},
+		{"minTcb: false\n", "min_tcb_malformed"},
+		{"minTcb: 3\n", "min_tcb_malformed"},
+		{"minTcb: [1, 2]\n", "min_tcb_malformed"},
+	} {
+		out, err := helmTemplate(t, "-f", writeValues(t, tc.body))
+		if err == nil {
+			t.Fatalf("%q rendered; want a validation failure", tc.body)
+		}
+		if !strings.Contains(out, "kind="+tc.kind) {
+			t.Fatalf("%q failure = %v, want kind=%s", tc.body, err, tc.kind)
+		}
+	}
+	// A later null wins helm's merge, so it must fail even over a real floor.
+	good := writeValues(t, `minTcb: "4,0,28,222"`+"\n")
+	null := writeValues(t, "minTcb:\n")
+	out, err := helmTemplate(t, "-f", good, "-f", null)
+	if err == nil || !strings.Contains(out, "kind=min_tcb_null") {
+		t.Fatalf("good then null: want a min_tcb_null failure, got %v", err)
+	}
+	// The reverse order renders the floor.
+	if out, err := helmTemplate(t, "-f", null, "-f", good); err != nil {
+		t.Fatalf("null then good should render: %v\n%s", err, out)
+	} else {
+		assertContainerHasArg(t, "cds", renderedDeploymentContainer(t, out, "c8s-cds", "cds").Args, "--min-tcb=4,0,28,222")
+	}
+}
+
 // An explicitly emptied floor renders no flag (the components' own
 // development warnings take over) — the shape --force installs produce.
 func TestChartMinTCBEmptyRendersNoFlag(t *testing.T) {
