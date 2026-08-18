@@ -128,6 +128,7 @@ func TestIdentityBoundAttestationAndChannel(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	provider := &capturingProvider{}
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             provider,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -231,7 +232,7 @@ func postHandshake(t *testing.T, base string, nonce []byte, hs overenc.Handshake
 }
 
 func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
-	srv := NewServer(Config{Evidence: &capturingProvider{}})
+	srv := NewServer(Config{Evidence: &capturingProvider{}, Backend: EchoBackend{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-pq?nonce=" + b64url(make([]byte, 32)))
@@ -246,6 +247,7 @@ func TestIdentityBoundAttestationFailsClosedWithoutIdentity(t *testing.T) {
 
 func TestIdentityBoundAttestationFailsClosedOnInvalidConfiguredIdentity(t *testing.T) {
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             &capturingProvider{},
 		MeshIdentityCertFile: "/does/not/exist/cert.pem",
 		MeshIdentityKeyFile:  "/does/not/exist/key.pem",
@@ -465,6 +467,7 @@ func TestAttestationRejectsQuerySelectors(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             &capturingProvider{},
 		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      certPath,
@@ -524,6 +527,7 @@ func TestRetiredAttestationEndpointReturns400(t *testing.T) {
 func TestIdentityBoundAttestationRejectsWrongSizeNonce(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             &capturingProvider{},
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,

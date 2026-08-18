@@ -63,6 +63,7 @@ func newAttestLBServer(t *testing.T, identity testMeshIdentity, servingCertFile 
 	t.Helper()
 	prov := &capturingProvider{}
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             prov,
 		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      servingCertFile,
@@ -114,7 +115,7 @@ func TestAttestLBBindsServingLeafAndMeshIdentity(t *testing.T) {
 
 	// Recompute the transcript the way a client does — from the leaf observed
 	// on the connection, the served mesh chain, and the pinned upstream
-	// destination (empty here: the default echo backend forwards nowhere) —
+	// destination (empty here: the explicit echo backend forwards nowhere) —
 	// and require the hardware report_data and the ECDSA proof to verify
 	// against it.
 	if b.Upstream != "" {
@@ -324,6 +325,7 @@ func TestAttestLBRefusedOnWebPKIFrontDoor(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	certPath, _ := writeTestServingLeaf(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             &capturingProvider{},
 		FrontDoorMode:        FrontDoorModeWebPKI,
 		ServingCertFile:      certPath,
@@ -459,6 +461,7 @@ func TestReadyzGatesOnMatchedWorkloadStamp(t *testing.T) {
 	newReadyzServer := func(t *testing.T, identity testMeshIdentity, expected string) *httptest.Server {
 		t.Helper()
 		srv := NewServer(Config{
+			Backend:              EchoBackend{},
 			Evidence:             &capturingProvider{},
 			MeshIdentityCertFile: identity.certFile,
 			MeshIdentityKeyFile:  identity.keyFile,

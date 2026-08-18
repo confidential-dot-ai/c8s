@@ -40,6 +40,7 @@ type config struct {
 	upstreamCertFile   string
 	upstreamKeyFile    string
 	upstreamServerName string
+	echoBackend        bool
 }
 
 // NewCmd returns the `cds-attest` subcommand: a sidecar that runs inside the
@@ -71,7 +72,8 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.generation, "generation", "genoa", "AMD processor generation for the browser's bare-SNP verifier (platform snp only, ignored otherwise): milan|genoa|turin")
 	f.DurationVar(&cfg.sessionTTL, "session-ttl", 5*time.Minute, "pending-handshake TTL and established-session idle TTL")
 	f.DurationVar(&cfg.readHeaderTimeout, "read-header-timeout", 5*time.Second, "HTTP read-header timeout")
-	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Both attestation endpoints commit this URL (canonicalized) into their transcripts. Empty uses an echo backend (demo).")
+	f.StringVar(&cfg.upstream, "upstream", "", "backend base URL to forward decrypted traffic to (http:// rides the raTLS mesh; https:// does mTLS). Both attestation endpoints commit this URL (canonicalized) into their transcripts. Required unless --echo-backend is given.")
+	f.BoolVar(&cfg.echoBackend, "echo-backend", false, "serve the attestation endpoints with no forwarding destination (attestation-only demo): the transcripts commit an empty upstream. Mutually exclusive with --upstream; one of the two is required")
 	f.StringVar(&cfg.upstreamCAFile, "upstream-ca", "", "PEM CA bundle to verify an https upstream (the mesh CA)")
 	f.StringVar(&cfg.upstreamCertFile, "upstream-cert", "", "client cert presented to an https upstream (the CDS-issued LB cert)")
 	f.StringVar(&cfg.upstreamKeyFile, "upstream-key", "", "client key for --upstream-cert")
@@ -113,8 +115,14 @@ func run(cfg config) error {
 		return fmt.Errorf("one of --attestation-api-url or --evidence-fixture is required")
 	}
 
+	// The destination is a deliberate config choice, never a default: an
+	// unset --upstream committing an empty upstream into the transcripts
+	// would read as "forwards nowhere" while saying nothing about intent.
 	var backend Backend
-	if cfg.upstream != "" {
+	switch {
+	case cfg.upstream != "" && cfg.echoBackend:
+		return fmt.Errorf("--upstream and --echo-backend are mutually exclusive: name the forwarding destination or the attestation-only echo mode, not both")
+	case cfg.upstream != "":
 		hb, err := NewHTTPBackend(cfg.upstream, HTTPBackendOptions{
 			TrustedCAFile:  cfg.upstreamCAFile,
 			ClientCertFile: cfg.upstreamCertFile,
@@ -125,10 +133,12 @@ func run(cfg config) error {
 			return err
 		}
 		backend = hb
-		logger.Info("forwarding decrypted traffic to upstream", "upstream", cfg.upstream)
-	} else {
+		logger.Info("forwarding decrypted traffic to upstream", "upstream", hb.UpstreamIdentity().URL)
+	case cfg.echoBackend:
 		backend = EchoBackend{}
-		logger.Warn("no --upstream set: using echo backend (demo only)")
+		logger.Warn("attestation-only echo mode: no forwarding destination; the transcripts commit an empty upstream")
+	default:
+		return fmt.Errorf("no upstream destination: pass --upstream=<url> to forward decrypted traffic, or --echo-backend for the attestation-only echo mode")
 	}
 
 	srv := NewServer(Config{

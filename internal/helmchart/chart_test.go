@@ -2409,8 +2409,9 @@ func TestChartTLSLBServiceRejectsInvalidTrafficPolicy(t *testing.T) {
 }
 
 // With no adopted workload the upstream address is empty; the sidecar must
-// render without any --upstream* flag (its echo backend takes over) instead
-// of a scheme-only "--upstream=http://" that crash-loops the container.
+// render the deliberate attestation-only choice (--echo-backend, no
+// --upstream* flag) instead of a scheme-only "--upstream=http://" that
+// crash-loops the container — an unset upstream no longer defaults anywhere.
 func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
 	out, err := helmTemplate(t,
 		"--set", "tlsLb.attest.enabled=true",
@@ -2420,6 +2421,7 @@ func TestChartTLSLBAttestSidecarNoUpstream(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	sidecar := renderedDeploymentContainer(t, out, "c8s-tls-lb", "cds-attest")
+	assertContainerArgs(t, sidecar, "--echo-backend")
 	for _, arg := range sidecar.Args {
 		if strings.HasPrefix(arg, "--upstream") {
 			t.Fatalf("cds-attest must omit %q when no upstream address is set: %v", arg, sidecar.Args)

@@ -27,6 +27,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend: EchoBackend{},
 		Evidence: FixtureEvidenceProvider{
 			Raw:        json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`),
 			Platform:   "snp",
@@ -40,6 +41,17 @@ func newTestServer(t *testing.T) *httptest.Server {
 }
 
 func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// A nil Backend is a programmer error, never a silent echo: the transcripts
+// commit the backend's destination, so the choice must always be deliberate.
+func TestNewServerRequiresBackend(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewServer with a nil Backend did not panic")
+		}
+	}()
+	NewServer(Config{})
+}
 
 // clientChannelFromBundle does what a real client does after verifying the
 // bundle: recompute the identity transcript from the served chain and derive
@@ -385,6 +397,7 @@ func TestHandshakeRejectsUnknownNonce(t *testing.T) {
 func TestHandshakeRejectsExpiredNonce(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -418,6 +431,7 @@ func TestHandshakeRejectsExpiredNonce(t *testing.T) {
 func TestTunnelRejectsExpiredSession(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             FixtureEvidenceProvider{Raw: json.RawMessage(`{"attestation_report":"AAAA","cert_chain":{"vcek":"BBBB"}}`), Platform: "snp", Generation: "genoa"},
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -519,7 +533,7 @@ func TestAttestationRejectsBadNonces(t *testing.T) {
 // TestCDSCertRouteAbsentWithoutCert: the optional cds-cert endpoint must not be
 // mounted when no cert was supplied.
 func TestCDSCertRouteAbsentWithoutCert(t *testing.T) {
-	srv := NewServer(Config{Evidence: failingProvider{}})
+	srv := NewServer(Config{Evidence: failingProvider{}, Backend: EchoBackend{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/.well-known/c8s/cds-cert.pem")
@@ -540,6 +554,7 @@ func TestAttestationEvidenceUnavailable(t *testing.T) {
 	certPath, _ := writeTestServingLeaf(t)
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             failingProvider{},
 		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      certPath,
@@ -752,7 +767,7 @@ func TestServingLeafErrors(t *testing.T) {
 	rand.Read(nonce)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS, ServingCertFile: tc.file})
+			srv := NewServer(Config{Evidence: &capturingProvider{}, FrontDoorMode: FrontDoorModeCDS, ServingCertFile: tc.file, Backend: EchoBackend{}})
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
 			resp, err := http.Get(ts.URL + "/.well-known/c8s/attest-lb?nonce=" + b64url(nonce))

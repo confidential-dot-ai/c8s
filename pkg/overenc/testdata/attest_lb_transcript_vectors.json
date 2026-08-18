@@ -33,14 +33,14 @@
     "report_data_b64": "fEoFosGCYDhEDxpQzUcPwdkZkHfB6utTcLfwfBVVOnfB6i82Ij7KYwCKWc8XSm8C"
   },
   {
-    "description": "empty upstream (attestation-only echo backend)",
-    "nonce_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-    "serving_leaf_der_b64": "ZWNoby1zZXJ2aW5nLWRlcg==",
-    "mesh_leaf_der_b64": "ZWNoby1tZXNoLWRlcg==",
-    "mesh_ca_der_b64": "ZWNoby1jYS1kZXI=",
-    "upstream": "",
-    "upstream_server_name": "",
-    "upstream_ca_sha256_b64": "",
-    "report_data_b64": "NJS9jf/kc7GFG7NimWEpkwJlSWqpE45wI4cJKfBQdEpKBok37htNh7h7jmH6IpHH"
+    "description": "https upstream with IP-literal host and explicit server-name override",
+    "nonce_b64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "serving_leaf_der_b64": "b3ZlcnJpZGUtc2VydmluZy1kZXI=",
+    "mesh_leaf_der_b64": "b3ZlcnJpZGUtbWVzaC1kZXI=",
+    "mesh_ca_der_b64": "b3ZlcnJpZGUtY2EtZGVy",
+    "upstream": "https://10.96.0.15:8443",
+    "upstream_server_name": "vllm-router-service.vllm.svc.cluster.local",
+    "upstream_ca_sha256_b64": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+    "report_data_b64": "hGsR9VVJv6VHK+yGPIRZdF+biQuTHs7zBUJINsDsSl+siYuEg3v84TS9Zn5+8zfF"
   }
 ]

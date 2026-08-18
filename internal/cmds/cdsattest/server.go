@@ -161,8 +161,12 @@ type Config struct {
 	// carrying a matched-workload stamp with this exact name. Empty keeps
 	// /readyz unconditionally 200.
 	ExpectedWorkload string
-	Backend          Backend // over-encrypted application backend (nil => EchoBackend)
-	SessionTTL       time.Duration
+	// Backend is the over-encrypted application backend. Required — the
+	// attestation transcripts commit its destination, so the choice is
+	// always deliberate: NewHTTPBackend for a forwarding destination, or
+	// EchoBackend{} for the attestation-only echo mode.
+	Backend    Backend
+	SessionTTL time.Duration
 	// NonceTTL bounds how long a pending handshake nonce stays valid between
 	// the attestation fetch and the handshake POST. Defaults to
 	// defaultNonceTTL.
@@ -222,14 +226,13 @@ func NewServer(cfg Config) *Server {
 	if cfg.NonceTTL <= 0 {
 		cfg.NonceTTL = defaultNonceTTL
 	}
-	backend := cfg.Backend
-	if backend == nil {
-		backend = EchoBackend{}
+	if cfg.Backend == nil {
+		panic("cdsattest: Config.Backend is required (EchoBackend{} for the attestation-only echo mode)")
 	}
 	return &Server{
 		cfg:              cfg,
 		log:              cfg.Logger,
-		backend:          backend,
+		backend:          cfg.Backend,
 		establishLimiter: newLimiter(establishRateLimit, establishRateBurst, clientBuckets),
 		sessionLimiter:   newLimiter(sessionRateLimit, sessionRateBurst, sessionBuckets),
 		clientLimiter:    newLimiter(clientRateLimit, clientRateBurst, clientBuckets),

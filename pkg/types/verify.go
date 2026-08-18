@@ -74,12 +74,14 @@ type AttestationBundle struct {
 	// value — trusting the served field would let a relay substitute the leaf.
 	ServingLeafSHA256 string `json:"serving_leaf_sha256,omitempty"`
 	// Upstream is the canonical upstream base URL the sidecar committed into
-	// report_data — the destination its own forwarding dials (empty when it
-	// forwards nowhere). Informational: the client MUST verify the transcript
-	// against its own out-of-band pinned destination and treat a mismatch
-	// with this served field as fatal — trusting the served value would let
-	// the control plane name any destination.
-	Upstream string `json:"upstream,omitempty"`
+	// report_data — the destination its own forwarding dials (empty in the
+	// deliberate attestation-only echo mode, and always serialized so a
+	// committed-empty destination reads as a choice, not an absence).
+	// Informational: the client MUST verify the transcript against its own
+	// out-of-band pinned destination and treat a mismatch with this served
+	// field as fatal — trusting the served value would let the control plane
+	// name any destination.
+	Upstream string `json:"upstream"`
 	// UpstreamServerName is the TLS verification name the sidecar uses for an
 	// https upstream, committed into report_data alongside Upstream. Empty
 	// for a plaintext (mesh-wrapped) upstream. Informational, same MUST-pin

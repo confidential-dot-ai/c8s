@@ -71,6 +71,16 @@ func TestRunErrors(t *testing.T) {
 			wantSub: "--attestation-api-url or --evidence-fixture",
 		},
 		{
+			name:    "no upstream destination fails closed",
+			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp", evidenceFixture: fixture},
+			wantSub: "no upstream destination",
+		},
+		{
+			name:    "upstream and echo-backend conflict",
+			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp", evidenceFixture: fixture, upstream: "http://backend:8000", echoBackend: true},
+			wantSub: "mutually exclusive",
+		},
+		{
 			name:    "unreadable evidence fixture",
 			cfg:     config{frontDoorMode: FrontDoorModeCDS, platform: "snp", evidenceFixture: filepath.Join(t.TempDir(), "missing.json")},
 			wantSub: "read evidence fixture",
@@ -110,6 +120,7 @@ func TestRunReturnsListenError(t *testing.T) {
 		host:              "127.0.0.1",
 		port:              l.Addr().(*net.TCPAddr).Port, // already taken
 		attestationAPIURL: "http://127.0.0.1:9",
+		echoBackend:       true, // past backend selection, so the listen error is what surfaces
 	}
 	if err := run(cfg); err == nil {
 		t.Fatal("run() on an occupied port returned nil, want bind error")

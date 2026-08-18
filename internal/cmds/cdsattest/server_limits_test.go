@@ -72,6 +72,7 @@ func newTestServerWith(t *testing.T, tune func(*Server)) (*Server, *httptest.Ser
 	identity := writeTestMeshIdentity(t)
 	evidence := &countingEvidence{inner: testFixture()}
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             evidence,
 		MeshIdentityCertFile: identity.certFile,
 		MeshIdentityKeyFile:  identity.keyFile,
@@ -155,6 +156,7 @@ func TestAttestPQMetersEachClientSeparately(t *testing.T) {
 func TestAttestLBAndHandshakeAreMetered(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             testFixture(),
 		FrontDoorMode:        FrontDoorModeCDS,
 		ServingCertFile:      identity.certFile,
@@ -1326,6 +1328,7 @@ func TestSessionIdIsNeverOverwritten(t *testing.T) {
 func TestReadyzIsCached(t *testing.T) {
 	identity := writeTestMeshIdentity(t)
 	srv := NewServer(Config{
+		Backend:              EchoBackend{},
 		Evidence:             testFixture(),
 		ExpectedWorkload:     "some-workload",
 		MeshIdentityCertFile: identity.certFile,
@@ -1546,7 +1549,7 @@ func TestTunnelClientAggregateIsCheckedFirst(t *testing.T) {
 // between attest-pq and its handshake, which is the window a parked ML-KEM key
 // is held for.
 func TestNonceTTLDefaultsShorterThanTheSession(t *testing.T) {
-	srv := NewServer(Config{Evidence: testFixture(), SessionTTL: time.Hour})
+	srv := NewServer(Config{Evidence: testFixture(), SessionTTL: time.Hour, Backend: EchoBackend{}})
 	if srv.cfg.NonceTTL != defaultNonceTTL {
 		t.Fatalf("NonceTTL = %v, want %v", srv.cfg.NonceTTL, defaultNonceTTL)
 	}

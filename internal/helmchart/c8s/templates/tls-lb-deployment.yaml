@@ -219,9 +219,9 @@ spec:
             # pointed at a headless Service (an adopted workload), the node
             # mesh wraps the pod-IP hop in attested mTLS. An https upstream
             # terminates TLS itself and gets the mTLS args below. No adopted
-            # workload (empty upstream address) -> omit --upstream entirely;
-            # the sidecar then serves attestation with its echo backend
-            # instead of crashing on a scheme-only URL.
+            # workload (empty upstream address) -> --echo-backend, the
+            # deliberate attestation-only mode (the transcripts commit an
+            # empty upstream: "forwards nowhere").
             {{- if $upstreamAddress }}
             - --upstream={{ .Values.tlsLb.upstream.protocol }}://{{ $upstreamAddress }}
             {{- if $attestUsesHTTPSUpstream }}
@@ -232,6 +232,8 @@ spec:
             {{- end }}
             - --upstream-server-name={{ $attestUpstreamServerName }}
             {{- end }}
+            {{- else }}
+            - --echo-backend
             {{- end }}
           {{- with (include "c8s.attestationApiHostIPEnv" .) }}
           # cvmMode=node: expands $(HOST_IP) in --attestation-api-url to the node
