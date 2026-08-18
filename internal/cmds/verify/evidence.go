@@ -268,6 +268,7 @@ func evidenceFromCert(cert *x509.Certificate, source string, trust leafTrust) (*
 		leafBody:          body,
 		leafChainVerified: chainVerified,
 		leafKeyProven:     trust.keyProven,
+		frontDoor:         frontDoorNone,
 		sandboxID:         sandboxID,
 		sandboxErr:        sandboxErr,
 		workload:          workload,
@@ -399,6 +400,7 @@ func evidenceFromEndpointJSON(data, expectNonce []byte, source string) (*evidenc
 		bindingNote:      "REPORTDATA binds the identity transcript: session keys + nonce + the exact mesh leaf and its transcript-committed issuing CA (leaf proof of possession verified)",
 		leaf:             leaf,
 		leafChainDerived: true,
+		frontDoor:        frontDoorNone,
 		sandboxID:        sandboxID,
 		sandboxErr:       sandboxErr,
 		workload:         workload,
@@ -553,6 +555,7 @@ func evidenceFromBareJSON(data []byte, erd []byte, source string) (*evidence, er
 		fresh:       false,
 		source:      source,
 		bindingNote: "REPORTDATA supplied via --expected-report-data (not independently bound)",
+		frontDoor:   frontDoorNone,
 	}, nil
 }
 

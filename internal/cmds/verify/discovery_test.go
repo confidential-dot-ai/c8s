@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/overenc"
 )
 
 func TestEvidenceFromDiscovery_Malformed(t *testing.T) {
@@ -324,6 +326,79 @@ func TestGatherFromDiscoveryProbesFrontDoor(t *testing.T) {
 			t.Errorf("error = %q, want it to name the 302: the redirect is refused, not followed", err)
 		}
 	})
+}
+
+// Evidence gathered off the discovery path observes no front door, so it
+// presents none: every non-discovery constructor records frontDoorNone, and
+// the verdict then says nothing about a front door — no attested-door note,
+// no scope caveat, no demotion for an unobserved one. The RA-TLS dial is
+// what auto mode falls back to when the discovery fetch fails, so this is
+// the state that reaches the verdict on that path.
+func TestNonDiscoveryEvidencePresentsNoFrontDoor(t *testing.T) {
+	nonce := make([]byte, nonceSize)
+	endpointJSON := buildEndpointJSON(t, mintEndpointIdentity(t), nonce, make([]byte, 64), []byte("vcek"),
+		make([]byte, overenc.X25519PubBytes), make([]byte, overenc.MLKEM768EKBytes))
+
+	for _, tc := range []struct {
+		name        string
+		get         func(t *testing.T) (*evidence, error)
+		wantVerdict string
+	}{
+		{"RA-TLS serving cert: auto mode's fallback", func(t *testing.T) (*evidence, error) {
+			srv := attestedTLSServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			return gatherFromRATLSCert(context.Background(), strings.TrimPrefix(srv.URL, "https://"), "", 5*time.Second, leafTrust{})
+		}, "verified"},
+		{"attest-pq endpoint", func(*testing.T) (*evidence, error) {
+			return evidenceFromEndpointJSON(endpointJSON, nonce, "attestation endpoint")
+		}, "partial"},
+		{"saved bare evidence", func(*testing.T) (*evidence, error) {
+			return evidenceFromBareJSON([]byte(`{"evidence":{"attestation_report":"AAAA"}}`), make([]byte, 48), "file")
+		}, "verified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := tc.get(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ev.frontDoor != frontDoorNone {
+				t.Errorf("frontDoor = %v, want none: this evidence is not discovery-sourced", ev.frontDoor)
+			}
+			if ev.frontDoorCertSHA256 != "" {
+				t.Errorf("frontDoorCertSHA256 = %q, want empty: no handshake leaf was compared", ev.frontDoorCertSHA256)
+			}
+
+			oc := snpVerifiedOutcome(t, config{}, ev)
+			if got := verdictShape(oc); got != tc.wantVerdict {
+				t.Errorf("verdict = %s (error=%q not_proven=%v), want %s", got, oc.Error, oc.NotProven, tc.wantVerdict)
+			}
+			if strings.Contains(oc.Binding, "live handshake presented the attested serving certificate") {
+				t.Errorf("Binding = %q, want no attested-front-door claim on evidence that observed none", oc.Binding)
+			}
+			for _, w := range oc.Warnings {
+				if strings.Contains(w, "attested front door") {
+					t.Errorf("Warnings = %v, want no front-door scope caveat", oc.Warnings)
+				}
+			}
+			for _, np := range oc.NotProven {
+				if strings.Contains(np, "front door") {
+					t.Errorf("NotProven = %v, want no front-door demotion", oc.NotProven)
+				}
+			}
+		})
+	}
+}
+
+// verdictShape names the verdict a test expects, so a mismatch prints the
+// shape rather than a pair of bools.
+func verdictShape(oc Outcome) string {
+	switch {
+	case oc.Verified:
+		return "verified"
+	case oc.Partial:
+		return "partial"
+	default:
+		return "failed"
+	}
 }
 
 // The document and the observed handshake leaf must ride ONE connection:

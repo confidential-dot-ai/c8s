@@ -1054,10 +1054,12 @@ type Outcome struct {
 	Warnings []string `json:"warnings,omitempty"`
 
 	// Partial is true when the hardware evidence verified but a property the
-	// evidence presents is not proven (a WebPKI front door's serving key, a
-	// responder-chosen chain anchor). Verified stays false, so a CI gate
-	// checking verified==true fails closed; the exit code distinguishes the
-	// case (4) from a failure (2). NotProven names each unproven property.
+	// evidence presents is not proven (a front door whose live handshake
+	// presented a serving key the evidence does not attest — or offered no
+	// handshake to observe —, a responder-chosen chain anchor). Verified
+	// stays false, so a CI gate checking verified==true fails closed; the
+	// exit code distinguishes the case (4) from a failure (2). NotProven
+	// names each unproven property.
 	Partial   bool     `json:"partial,omitempty"`
 	NotProven []string `json:"not_proven,omitempty"`
 
@@ -1069,12 +1071,13 @@ type Outcome struct {
 
 	// CertBody says what authenticates the leaf certificate's body fields
 	// (subject/serial/validity): the leaf's own attested key when
-	// self-signed, a verified issuing chain, possession of the attested key on
-	// a live RA-TLS dial, or — on attest-pq — the identity transcript the
-	// hardware evidence binds (whose chain anchor is responder-chosen; see
-	// ChainAnchor). A leaf with none of these is not accepted as evidence at
-	// all (authorizeLeafBody), because checking a validity window inside an
-	// unsigned body bounds nothing.
+	// self-signed, a verified issuing chain, possession of the attested key
+	// proven by a live TLS handshake (the RA-TLS dial, or the discovery
+	// gather's front-door probe), or — on attest-pq — the identity
+	// transcript the hardware evidence binds (whose chain anchor is
+	// responder-chosen; see ChainAnchor). A leaf with none of these is not
+	// accepted as evidence at all (authorizeLeafBody), because checking a
+	// validity window inside an unsigned body bounds nothing.
 	CertBody string `json:"cert_body,omitempty"`
 
 	// OperatorKeys are hex SHA-256 fingerprints (of the PKIX/SPKI DER) of the

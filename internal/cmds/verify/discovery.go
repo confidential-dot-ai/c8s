@@ -184,7 +184,7 @@ func evidenceFromDiscovery(data []byte, source string, trust leafTrust, observed
 	case "", "cds", "webpki":
 	default:
 		return nil, &securityError{err: fmt.Errorf(
-			"unknown public_tls.mode %q in discovery document (this build knows cds and webpki): the front door's serving-key binding cannot be established", d.PublicTLS.Mode)}
+			"unknown public_tls.mode %q in discovery document (this build knows cds and webpki) — failing closed on a document it cannot classify", d.PublicTLS.Mode)}
 	}
 	cert, rd, err := ratls.AttestedCertFromDiscovery(&d)
 	if err != nil {
