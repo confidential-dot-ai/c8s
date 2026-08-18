@@ -140,9 +140,8 @@ test-node-guest-image-role:
 test-node-guest-image-role-systemd:
 	./node-guest-image/tests/rke2-role-systemd-test.sh
 
-# The cloud-init datasource pin against the distro's real DataSourceNoCloud:
-# a host cidata disk or cmdline seed redirect must lose to the baked seed.
-# Needs the distro cloud-init package; no root.
+# The datasource pin against the distro's real DataSourceNoCloud: host
+# input must lose to the baked seed. Needs the distro cloud-init package; no root.
 test-node-guest-image-cloud-init:
 	python3 ./node-guest-image/tests/cloud-init-datasource-test.py
 

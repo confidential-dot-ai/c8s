@@ -46,11 +46,12 @@ Migration state (see [#264] for the full plan):
    `node-guest-image/build`, which stages `c8s/` into a confos checkout
    with `--profile-dir` and passes the kernel fragment and
    `c8s-ref`/`c8s-registry` sync inputs explicitly. The
-   `node-guest-image lint` workflow is permanent: it carries the four
+   `node-guest-image lint` workflow is permanent: it carries the
    invariants that moved here from confos `bin/lint` (fragment supersets
    vs confos's gpu/dev fragments at the pinned `CONFOS_REF`, the NRI
    floor template's no-hardcoded-digest rule, and the nested RKE2/Cilium
-   pod-CIDR match).
+   pod-CIDR match), plus the cloud-init datasource pin
+   (c8s-workspace#117).
 2. The switch was gated on building the same c8s ref both ways (confos
    in-tree vs staged from here) with identical `manifest.json`
    measurements; `c8s-image.yml`'s `gate=true` dispatch input reruns that
