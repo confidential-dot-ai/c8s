@@ -1,3 +1,7 @@
-module mock-attestation
+module github.com/confidential-dot-ai/c8s/test/mock-attestation
 
-go 1.26
+go 1.26.3
+
+require github.com/confidential-dot-ai/c8s v0.0.0
+
+replace github.com/confidential-dot-ai/c8s => ../..

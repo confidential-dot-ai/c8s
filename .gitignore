@@ -31,6 +31,9 @@ Thumbs.db
 *.test
 *.out
 coverage.txt
+# Mock binaries from `go build .` in the test/mock-* modules.
+/test/mock-attestation/mock-attestation
+/test/mock-cds/mock-cds
 
 # Secrets
 *.pem

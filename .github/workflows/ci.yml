@@ -13,6 +13,9 @@ on:
       - "Makefile"
       - ".golangci.yml"
       - "internal/helmchart/c8s/**"
+      # The integration harness (test/integration) and its mocks
+      # (test/mock-*) gate PRs via the Integration job below.
+      - "test/**"
       - "scripts/coverage-gate.sh"
       - "scripts/mutation-check.sh"
       - ".gremlins.yaml"
@@ -183,6 +186,18 @@ jobs:
             while read -r id; do
               gh api -X DELETE "repos/$REPO/actions/caches/$id" || true
             done
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/setup-go-c8s
+
+      - name: Run the integration harness
+        run: make test-integration
 
   tdx-measure:
     name: TDX MRTD tripwire

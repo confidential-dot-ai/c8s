@@ -1,31 +1,49 @@
-// mock-cds is a fake CDS attestation+signing service for integration testing.
-// It implements /authenticate and /attest endpoints but skips real TEE verification.
-// On /attest it signs the provided CSR with an ephemeral CA, returning a valid certificate.
-// Use only in test environments.
+// mock-cds is a fake CDS for integration testing: it serves the production
+// wire contract (RA-TLS, /authenticate, /attest — internal/cmds/cds) backed
+// by the mock attestation-api instead of a TEE, and signs CSRs with an
+// ephemeral CA. Use only in test environments.
 package main
 
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/confidential-dot-ai/c8s/pkg/attestationclient"
+	"github.com/confidential-dot-ai/c8s/pkg/attestclient"
+	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
+
+// caOutPath is where the ephemeral CA PEM lands so the harness can anchor
+// chain verification out-of-band (docker compose cp).
+const caOutPath = "/ca/mock-cds-ca.pem"
+
+// mockLaunchDigest is the launch measurement the mock attestation-api
+// reports. Issuance is pinned to it the way production gates /attest on
+// --measurements.
+const mockLaunchDigest = "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
 var (
 	caKey  ecdsa.PrivateKey
 	caCert x509.Certificate
-	caDER  []byte
+	caPEM  []byte
 )
 
 func init() {
@@ -50,7 +68,7 @@ func init() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to create CA cert: %v", err))
 	}
-	caDER = der
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 
 	parsed, err := x509.ParseCertificate(der)
 	if err != nil {
@@ -96,17 +114,31 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	attestationAPIURL := os.Getenv("ATTESTATION_API_URL")
+	if attestationAPIURL == "" {
+		slog.Error("ATTESTATION_API_URL is required")
+		os.Exit(1)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(caOutPath), 0o755); err != nil {
+		slog.Error("failed to create CA output directory", "error", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(caOutPath, caPEM, 0o644); err != nil {
+		slog.Error("failed to write CA PEM", "error", err)
+		os.Exit(1)
+	}
 
 	store := newChallengeStore()
+	verifier := attestationclient.NewClient(attestationAPIURL)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /authenticate", func(w http.ResponseWriter, r *http.Request) {
 		challenge := store.issue()
 		slog.Info("issued challenge")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"challenge": challenge})
+		writeJSON(w, types.ChallengeResponse{Challenge: challenge})
 	})
-	mux.HandleFunc("POST /attest", handleAttest(&store))
+	mux.HandleFunc("POST /attest", handleAttest(&store, verifier))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -114,47 +146,88 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	slog.Info("mock cds starting", "port", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	// Serve RA-TLS like production CDS: the attestation-api supplies the
+	// evidence binding the serving key, and callers verify the handshake
+	// against the same api.
+	tlsCfg, _, err := ratls.NewServerTLSConfig(&ratls.ServerConfig{
+		Platform:   "sev-snp",
+		AttestFunc: attestclient.MakeSNPRATLSAttestFunc(attestclient.NewClient(""), attestationAPIURL),
+		Logger:     slog.Default(),
+	})
+	if err != nil {
+		slog.Error("ratls server config failed", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("mock cds starting (RA-TLS)", "port", port)
+	srv := &http.Server{Addr: ":" + port, Handler: mux, TLSConfig: tlsCfg}
+	if err := srv.ListenAndServeTLS("", ""); err != nil {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func handleAttest(store *challengeStore) http.HandlerFunc {
+func handleAttest(store *challengeStore, verifier attestationclient.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Challenge string          `json:"challenge"`
-			Evidence  json.RawMessage `json:"evidence"`
-			CSR       string          `json:"csr"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("bad request: %s", err), http.StatusBadRequest)
+		var req types.AttestRequestBody
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, types.ErrorCodeInvalidRequest, err.Error())
 			return
 		}
 
-		if !store.consume(req.Challenge) {
-			http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
+		challengeBytes, err := base64.StdEncoding.DecodeString(req.Challenge)
+		if err != nil || !store.consume(req.Challenge) {
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidChallenge, "invalid or expired challenge")
 			return
 		}
 
 		// Parse the CSR.
 		block, _ := pem.Decode([]byte(req.CSR))
 		if block == nil {
-			http.Error(w, "invalid CSR: no PEM block", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, "invalid CSR: no PEM block")
 			return
 		}
 		csr, err := x509.ParseCertificateRequest(block.Bytes)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid CSR: %s", err), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, fmt.Sprintf("invalid CSR: %s", err))
 			return
 		}
 		if err := csr.CheckSignature(); err != nil {
-			http.Error(w, fmt.Sprintf("CSR signature invalid: %s", err), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, fmt.Sprintf("CSR signature invalid: %s", err))
+			return
+		}
+		csrPubKey, ok := csr.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, "CSR public key must be ECDSA")
 			return
 		}
 
-		// Sign the certificate with the mock CA.
+		// Verify the evidence binds this CSR key and the consumed challenge,
+		// the same report-data check production CDS delegates to the api.
+		expectedReportData, err := ratls.ReportDataForKey(csrPubKey, challengeBytes)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, types.ErrorCodeInvalidCSR, err.Error())
+			return
+		}
+		reportData := types.NewBase64Bytes(expectedReportData[:sha512.Size384])
+		verifyResp, err := verifier.VerifyEnforced(r.Context(), types.VerifyReportData(req.Evidence, reportData))
+		if err != nil {
+			status, code, msg := classifyVerifyError(err)
+			slog.Warn("attestation verification failed", "status", status, "error", err, "remote_addr", r.RemoteAddr)
+			writeError(w, status, code, msg)
+			return
+		}
+		if digest := strings.ToLower(verifyResp.Result.Claims.LaunchDigest); digest != mockLaunchDigest {
+			slog.Warn("measurement not in allowlist", "launch_digest", digest, "remote_addr", r.RemoteAddr)
+			writeError(w, http.StatusForbidden, types.ErrorCodeMeasurementDenied, "launch measurement not allowed")
+			return
+		}
+
+		// Sign the certificate with the mock CA. The RA-TLS extension is
+		// copied from the CSR like production's issuer.SignCSR, so the leaf
+		// stays re-verifiable downstream.
 		serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 		template := x509.Certificate{
 			SerialNumber: serial,
@@ -166,14 +239,18 @@ func handleAttest(store *challengeStore) http.HandlerFunc {
 			DNSNames:     csr.DNSNames,
 			IPAddresses:  csr.IPAddresses,
 		}
+		for _, ext := range csr.Extensions {
+			if ext.Id.Equal(ratls.OIDRATLSAttestation) {
+				template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{Id: ext.Id, Value: ext.Value})
+				break
+			}
+		}
 
 		certDER, err := x509.CreateCertificate(rand.Reader, &template, &caCert, csr.PublicKey, &caKey)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to sign certificate: %s", err), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, types.ErrorCodeSignFailed, fmt.Sprintf("failed to sign certificate: %s", err))
 			return
 		}
-
-		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
 		slog.Info("issued certificate",
 			"dns_names", csr.DNSNames,
@@ -181,7 +258,38 @@ func handleAttest(store *challengeStore) http.HandlerFunc {
 			"serial", serial.String(),
 		)
 
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 		w.Header().Set("Content-Type", "application/x-pem-file")
-		w.Write(certPEM)
+		_, _ = w.Write(append(certPEM, caPEM...))
 	}
+}
+
+// classifyVerifyError maps a VerifyEnforced error to the status/code/message
+// production CDS answers /attest with (internal/cmds/cds/attest.go): 401 bad
+// signature/report-data, 422 api rejection, 502 transport or 5xx outage.
+func classifyVerifyError(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, attestationclient.ErrSignatureInvalid):
+		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "attestation signature invalid"
+	case errors.Is(err, attestationclient.ErrReportDataMismatch):
+		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
+	}
+	var apiErr *attestationclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 &&
+		apiErr.Status != http.StatusRequestTimeout && apiErr.Status != http.StatusTooManyRequests {
+		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
+	}
+	return http.StatusBadGateway, types.ErrorCodeAttestationApiUnreachable,
+		fmt.Sprintf("failed to reach attestation-api: %s", err)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(types.ErrorResponse{Error: code, Message: message})
 }

@@ -1,85 +1,105 @@
 #!/usr/bin/env bash
 # Integration test for the TLS load balancer.
-# Starts mock services, runs get-cert as an init container, and verifies
-# nginx can serve HTTPS with the obtained certificate.
+# Starts the mock attestation-api and mock CDS, runs get-cert as an init
+# container through the real RA-TLS attestation flow, and verifies nginx
+# serves HTTPS with the issued certificate, chained to the mock CDS CA.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$SCRIPT_DIR"
+
+WORKDIR="$(mktemp -d)"
+COMPOSE_CMD="docker compose"
 
 cleanup() {
     echo "--- Cleaning up ---"
-    if [ -n "${COMPOSE_CMD:-}" ]; then
-        $COMPOSE_CMD down -v --remove-orphans 2>/dev/null || true
-    fi
+    $COMPOSE_CMD down -v --remove-orphans 2>/dev/null || true
+    rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
-COMPOSE_CMD=""
-if docker compose version >/dev/null 2>&1; then
-    COMPOSE_CMD="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE_CMD="docker-compose"
-else
-    echo "SKIP: docker compose not available"
-    exit 0
-fi
+fail() {
+    echo "FAIL: $*" >&2
+    $COMPOSE_CMD logs 2>&1 || true
+    exit 1
+}
+
+# Hard prerequisites: a missing tool fails the run.
+for tool in docker make openssl curl; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool not available" >&2; exit 1; }
+done
+docker compose version >/dev/null 2>&1 || { echo "FAIL: docker compose (v2) not available" >&2; exit 1; }
+
+echo "=== Building get-cert binary ==="
+make -C "$REPO_ROOT" build-c8s
 
 echo "=== Building and starting services ==="
-$COMPOSE_CMD build
-$COMPOSE_CMD up -d
+# Clean slate: a reused tls-certs volume pairs a stale leaf with a fresh CA.
+$COMPOSE_CMD down -v --remove-orphans 2>/dev/null || true
+$COMPOSE_CMD build || fail "image build failed"
+$COMPOSE_CMD up -d || fail "services did not start"
+
+# The chain anchor, fetched out-of-band from the mock CDS container.
+$COMPOSE_CMD cp mock-cds:/ca/mock-cds-ca.pem "$WORKDIR/mock-cds-ca.pem" || fail "could not fetch the mock CDS CA"
+CACERT="$WORKDIR/mock-cds-ca.pem"
+
+# Verified HTTPS access to the LB: the chain is checked against the mock CDS
+# CA and the hostname against the leaf SAN.
+LB="https://nginx-lb:8443"
+CURL=(curl -sS --cacert "$CACERT" --resolve nginx-lb:8443:127.0.0.1)
 
 echo ""
 echo "=== Verifying TLS endpoint ==="
 
 # Wait for nginx to be ready (it depends on get-cert completing).
-for i in $(seq 1 30); do
-    if curl -sk https://localhost:8443/healthz >/dev/null 2>&1; then
+ready=0
+for _ in $(seq 1 30); do
+    if "${CURL[@]}" "$LB/healthz" >/dev/null 2>&1; then
+        ready=1
         break
-    fi
-    if [ "$i" -eq 30 ]; then
-        echo "FAIL: nginx did not become ready in time"
-        docker compose logs
-        exit 1
     fi
     sleep 1
 done
+[ "$ready" -eq 1 ] || fail "nginx did not become ready in time"
 
-# Test 1: Health endpoint works over TLS.
-HEALTH_RESPONSE=$(curl -sk https://localhost:8443/healthz)
-if [ "$HEALTH_RESPONSE" != "ok" ]; then
-    echo "FAIL: expected 'ok' from /healthz, got: $HEALTH_RESPONSE"
-    exit 1
-fi
-echo "PASS: /healthz returns ok"
+CHECKS=0
+
+# Test 1: Health endpoint works over verified TLS.
+HEALTH_RESPONSE=$("${CURL[@]}" "$LB/healthz") || fail "healthz request failed"
+[ "$HEALTH_RESPONSE" = "ok" ] || fail "expected 'ok' from /healthz, got: $HEALTH_RESPONSE"
+CHECKS=$((CHECKS + 1))
+echo "PASS: /healthz returns ok over a verified chain"
 
 # Test 2: Proxied backend content is served.
-BODY=$(curl -sk https://localhost:8443/)
-if ! echo "$BODY" | grep -q "Welcome to nginx"; then
-    echo "FAIL: expected nginx welcome page from proxy, got: $BODY"
-    exit 1
-fi
+BODY=$("${CURL[@]}" "$LB/") || fail "proxy request failed"
+echo "$BODY" | grep -q "Welcome to nginx" || fail "expected nginx welcome page from proxy, got: $BODY"
+CHECKS=$((CHECKS + 1))
 echo "PASS: reverse proxy serves backend content"
 
-# Test 3: Certificate has the expected SAN.
-SAN_INFO=$(echo | openssl s_client -connect localhost:8443 -servername nginx-lb 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
-if echo "$SAN_INFO" | grep -q "DNS:nginx-lb"; then
-    echo "PASS: certificate contains SAN DNS:nginx-lb"
-elif echo "$SAN_INFO" | grep -qi "nginx-lb"; then
-    echo "PASS: certificate references nginx-lb"
-else
-    echo "WARN: could not verify SAN in certificate (openssl may not be available)"
-    echo "  SAN info: $SAN_INFO"
-fi
+# The leaf nginx serves, for the certificate checks.
+LEAF="$WORKDIR/leaf.pem"
+echo | openssl s_client -connect 127.0.0.1:8443 -servername nginx-lb 2>/dev/null | openssl x509 >"$LEAF" 2>/dev/null || true
+[ -s "$LEAF" ] || fail "could not read the served certificate"
 
-# Test 4: Certificate is signed by an EC key (P-256).
-KEY_INFO=$(echo | openssl s_client -connect localhost:8443 -servername nginx-lb 2>/dev/null | openssl x509 -noout -text 2>/dev/null | grep "Public Key Algorithm" || true)
-if echo "$KEY_INFO" | grep -q "id-ecPublicKey"; then
-    echo "PASS: certificate uses ECDSA key"
-else
-    echo "WARN: could not verify key algorithm"
-    echo "  Key info: $KEY_INFO"
-fi
+# Test 3: Certificate chains to the mock CDS CA.
+openssl verify -CAfile "$CACERT" "$LEAF" >/dev/null || fail "served certificate does not chain to the mock CDS CA"
+CHECKS=$((CHECKS + 1))
+echo "PASS: certificate chains to the mock CDS CA"
+
+# Test 4: Certificate has the expected SAN.
+SAN_INFO=$(openssl x509 -in "$LEAF" -noout -ext subjectAltName 2>/dev/null) || fail "served certificate carries no SAN extension"
+echo "$SAN_INFO" | grep -qE 'DNS:nginx-lb(,|$)' || fail "certificate lacks SAN DNS:nginx-lb: $SAN_INFO"
+CHECKS=$((CHECKS + 1))
+echo "PASS: certificate contains SAN DNS:nginx-lb"
+
+# Test 5: Certificate carries an ECDSA P-256 key.
+KEY_INFO=$(openssl x509 -in "$LEAF" -noout -text 2>/dev/null) || fail "could not read the served certificate"
+echo "$KEY_INFO" | grep -q "Public Key Algorithm: id-ecPublicKey" || fail "certificate is not an ECDSA certificate"
+echo "$KEY_INFO" | grep -q "prime256v1" || fail "certificate key is not P-256"
+CHECKS=$((CHECKS + 1))
+echo "PASS: certificate uses an ECDSA P-256 key"
 
 echo ""
-echo "=== All integration tests passed ==="
+[ "$CHECKS" -eq 5 ] || fail "expected 5 checks, ran $CHECKS"
+echo "=== All $CHECKS integration checks passed ==="

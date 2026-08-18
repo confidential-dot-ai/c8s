@@ -1,15 +1,18 @@
 services:
   mock-attestation:
     build:
-      context: ../mock-attestation
+      context: ../..
+      dockerfile: test/mock-attestation/Dockerfile
     environment:
       PORT: "8400"
 
   mock-cds:
     build:
-      context: ../mock-cds
+      context: ../..
+      dockerfile: test/mock-cds/Dockerfile
     environment:
       PORT: "8080"
+      ATTESTATION_API_URL: "http://mock-attestation:8400"
     depends_on:
       - mock-attestation
 
@@ -25,8 +28,10 @@ services:
       context: ../..
       dockerfile: cmd/get-cert/Dockerfile
     command:
-      - --cds-url=http://mock-cds:8080
+      - --cds-url=https://mock-cds:8080
       - --attestation-api-url=http://mock-attestation:8400
+      # The mock attestation-api's launch digest is all-zero; get-cert must pin it.
+      - --cds-measurements=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
       - --san=nginx-lb
       - --out=/tls/cert.pem
       - --key-out=/tls/key.pem
