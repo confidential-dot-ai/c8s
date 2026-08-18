@@ -1,6 +1,7 @@
 package getkubeconfig
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -15,6 +16,7 @@ func NewCmd() *cobra.Command {
 	var (
 		cfg  Config
 		node string
+		vmi  string
 	)
 	cmd := &cobra.Command{
 		Use:   "get-kubeconfig",
@@ -30,9 +32,20 @@ func NewCmd() *cobra.Command {
 			if cfg.OperatorKeyPath == "" || cfg.ImageManifestPath == "" || cfg.OutPath == "" {
 				return fmt.Errorf("--operator-key, --image-manifest and --out are required")
 			}
-			// --node <host> is a convenience that fills the three URLs with the
-			// standard ports; explicit --attest-url/--release-url/--apiserver-url
-			// override. At least one of node or the explicit URLs must be set.
+			// --vmi resolves a KubeVirt guest to the address --node would have
+			// been given; --node <host> is a convenience that fills the three
+			// URLs with the standard ports. Explicit --attest-url/--release-url/
+			// --apiserver-url override. At least one of vmi, node, or the
+			// explicit URLs must be set.
+			if vmi != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), cfg.Timeout)
+				defer cancel()
+				addr, err := resolveVMIAddress(ctx, vmi)
+				if err != nil {
+					return fmt.Errorf("resolve --vmi %q: %w", vmi, err)
+				}
+				node = addr
+			}
 			if node != "" {
 				if cfg.AttestURL == "" {
 					cfg.AttestURL = fmt.Sprintf("http://%s:8400/attest", node)
@@ -45,13 +58,14 @@ func NewCmd() *cobra.Command {
 				}
 			}
 			if cfg.AttestURL == "" || cfg.ReleaseBaseURL == "" || cfg.APIServerURL == "" {
-				return fmt.Errorf("set --node, or all of --attest-url/--release-url/--apiserver-url")
+				return fmt.Errorf("set --node or --vmi, or all of --attest-url/--release-url/--apiserver-url")
 			}
 			return Run(cmd.Context(), cfg)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&node, "node", "", "guest host/IP; fills --attest-url/--release-url/--apiserver-url with standard ports (8400/8443/6443)")
+	f.StringVar(&vmi, "vmi", "", "guest as KubeVirt VMI [namespace/]name; resolves its address through the current kubeconfig and uses it as --node (namespace defaults to the kubeconfig context's)")
 	f.StringVar(&cfg.AttestURL, "attest-url", "", "attestation-api /attest URL (overrides --node)")
 	f.StringVar(&cfg.ReleaseBaseURL, "release-url", "", "cred-release base URL (overrides --node)")
 	f.StringVar(&cfg.APIServerURL, "apiserver-url", "", "apiserver URL for the kubeconfig (overrides --node)")
@@ -62,5 +76,6 @@ func NewCmd() *cobra.Command {
 	f.StringVar(&cfg.TLSServerName, "tls-server-name", "c8s-cvm", "kubeconfig tls-server-name — pins apiserver cert verification to this SAN (the image bakes it into tls-san) instead of the dialed IP. Empty to omit")
 	f.StringVar(&cfg.OutPath, "out", "", "output kubeconfig path (required)")
 	f.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-step network timeout")
+	cmd.MarkFlagsMutuallyExclusive("node", "vmi")
 	return cmd
 }
