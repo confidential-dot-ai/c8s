@@ -151,6 +151,9 @@ CreateContainerRequest if {
 	not input.OCI.Annotations["io.kubernetes.cri-o.ContainerType"]
 	print("CreateContainerRequest: no foreign container-type marker")
 
+	no_spec_hooks
+	print("CreateContainerRequest: no spec hooks")
+
 	pull := sole_guest_pull_storage
 	print("CreateContainerRequest: one image_guest_pull storage")
 
@@ -178,6 +181,19 @@ CreateContainerRequest if {
 
 	pull_source_bound(pull)
 	print("CreateContainerRequest: allowed")
+}
+
+# Spec hooks execute as guest root during do_create_container, ahead of the
+# admission verdict; prestart runs in the agent's own namespaces. The runtime
+# sends none — the GPU hook is CDI-injected by the agent after this check —
+# so a hook in the request is host-smuggled.
+no_spec_hooks if {
+	not input.OCI.Hooks.Prestart[0]
+	not input.OCI.Hooks.CreateRuntime[0]
+	not input.OCI.Hooks.CreateContainer[0]
+	not input.OCI.Hooks.StartContainer[0]
+	not input.OCI.Hooks.Poststart[0]
+	not input.OCI.Hooks.Poststop[0]
 }
 
 container_rootfs := concat("/", ["/run/kata-containers", input.container_id, "rootfs"])
@@ -382,6 +398,9 @@ crio_pull_metadata(pull) if {
 default CreateSandboxRequest := false
 
 CreateSandboxRequest if {
+	# add_hooks arms every container with executables from this guest directory
+	count(input.guest_hook_path) == 0
+
 	every s in input.storages {
 		not container_rootfs_shaped(s.mount_point)
 		not layered_rootfs_storage(s)
