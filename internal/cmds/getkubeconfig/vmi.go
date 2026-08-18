@@ -23,6 +23,26 @@ var vmiGVR = schema.GroupVersionResource{
 // resolveVMIAddress is a seam for tests.
 var resolveVMIAddress = resolveVMI
 
+// newVMIClient builds a dynamic client from the current kubeconfig context
+// and reports that context's namespace. A seam for tests.
+var newVMIClient = func() (dynamic.Interface, string, error) {
+	kubeCfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
+	namespace, _, err := kubeCfg.Namespace()
+	if err != nil {
+		return nil, "", fmt.Errorf("namespace from kubeconfig: %w", err)
+	}
+	restCfg, err := kubeCfg.ClientConfig()
+	if err != nil {
+		return nil, "", fmt.Errorf("load kubeconfig: %w", err)
+	}
+	client, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("build kubernetes client: %w", err)
+	}
+	return client, namespace, nil
+}
+
 // resolveVMI returns the first reported interface address of the KubeVirt
 // guest "name" or "namespace/name", looked up through the current kubeconfig
 // context, which also supplies the namespace when the ref carries none. The
@@ -38,21 +58,12 @@ func resolveVMI(ctx context.Context, ref string) (string, error) {
 		return "", fmt.Errorf("ref %q is not name or namespace/name", ref)
 	}
 
-	kubeCfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
+	client, contextNamespace, err := newVMIClient()
+	if err != nil {
+		return "", err
+	}
 	if namespace == "" {
-		var err error
-		if namespace, _, err = kubeCfg.Namespace(); err != nil {
-			return "", fmt.Errorf("namespace from kubeconfig: %w", err)
-		}
-	}
-	restCfg, err := kubeCfg.ClientConfig()
-	if err != nil {
-		return "", fmt.Errorf("load kubeconfig: %w", err)
-	}
-	client, err := dynamic.NewForConfig(restCfg)
-	if err != nil {
-		return "", fmt.Errorf("build kubernetes client: %w", err)
+		namespace = contextNamespace
 	}
 	vmi, err := client.Resource(vmiGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
