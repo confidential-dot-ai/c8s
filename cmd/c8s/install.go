@@ -1270,8 +1270,7 @@ func appendCvmModeInstallArgs(helmArgs []string, cvmMode, hardwarePlatform strin
 		)
 	}
 	// --min-tcb overrides the chart's shipped floor; empty leaves the chart
-	// value standing. The downgrade guard is minTCBPreflight on the install
-	// path, not anything here.
+	// value standing. minTCBPreflight gates downgrades on the install path.
 	if installMinTCB != "" {
 		helmArgs = append(helmArgs, "--set-string", "minTcb="+installMinTCB)
 	}
