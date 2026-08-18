@@ -30,6 +30,8 @@ jobs:
   lint:
     name: node-guest-image invariants
     runs-on: ubuntu-latest
+    outputs:
+      confos-release: ${{ steps.release.outputs.release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,10 +56,31 @@ jobs:
           CONFOS_REF: ${{ steps.ref.outputs.ref }}
         run: .github/scripts/node-guest-image-invariants.sh
 
-      - name: cloud-init cannot run in the node image
+      - name: Resolve the confos base release
+        id: release
+        run: |
+          set -euo pipefail
+          conf=confos/mkosi/base/mkosi.conf
+          rel=$(sed -n 's/^Release=[[:space:]]*//p' "$conf" | head -1)
+          [ -n "$rel" ] || { echo "::error::no Release= in $conf"; exit 1; }
+          echo "release=$rel" >> "$GITHUB_OUTPUT"
+
+  cloud-init-disabled:
+    name: cloud-init cannot run in the node image
+    # Runs as root, so it gets its own job: no privileged step shares a
+    # workspace with the confos checkout. The gate needs the release, not
+    # the tree.
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the gate
         # Root: mounts a private /etc/cloud to place the marker where
         # ds-identify and the units read it; the runner VM is disposable.
-        run: sudo make test-node-guest-image-cloud-init
+        env:
+          CONFOS_RELEASE: ${{ needs.lint.outputs.confos-release }}
+        run: sudo CONFOS_RELEASE="$CONFOS_RELEASE" make test-node-guest-image-cloud-init
 
   system-floor:
     name: system floor lockstep

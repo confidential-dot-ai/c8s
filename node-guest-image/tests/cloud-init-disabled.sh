@@ -17,7 +17,14 @@ MARKER=/etc/cloud/cloud-init.disabled
 # datasource, cc:/end_cc and cloud-config-url= inject cloud-config outright.
 HOSTILE='BOOT_IMAGE=/vmlinuz ds=nocloud cloud-init=enabled cloud-config-url=file:///dev/vdb'
 
-[[ -f "$CONFOS_CONF" ]] || { echo "confos base mkosi.conf not found: $CONFOS_CONF (set CONFOS_CONF)"; exit 2; }
+# The one thing the gate takes from confos is the release its base builds on.
+# CONFOS_RELEASE carries it directly; otherwise it is read from a checkout.
+REL=${CONFOS_RELEASE:-}
+if [[ -z $REL ]]; then
+    [[ -f "$CONFOS_CONF" ]] || { echo "confos base mkosi.conf not found: $CONFOS_CONF (set CONFOS_RELEASE or CONFOS_CONF)"; exit 2; }
+    REL=$(sed -n 's/^Release=[[:space:]]*//p' "$CONFOS_CONF" | head -1)
+    [[ -n $REL ]] || { echo "no Release= in $CONFOS_CONF"; exit 2; }
+fi
 
 if [[ ${IN_NS:-} != 1 ]]; then
     mkdir -p /etc/cloud 2>/dev/null
@@ -41,8 +48,6 @@ ok "the c8s profile bakes $MARKER" \
     test -f "$NGI_DIR/c8s/mkosi.extra${MARKER}"
 
 # --- fetch the exact cloud-init the image installs --------------------------
-REL=$(sed -n 's/^Release=[[:space:]]*//p' "$CONFOS_CONF" | head -1)
-[[ -n $REL ]] || { echo "no Release= in $CONFOS_CONF"; exit 2; }
 DEB=""
 for pocket in "$REL-updates" "$REL"; do
     idx="http://archive.ubuntu.com/ubuntu/dists/$pocket/main/binary-amd64/Packages.gz"
