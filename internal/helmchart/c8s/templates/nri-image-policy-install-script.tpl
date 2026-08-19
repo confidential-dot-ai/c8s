@@ -197,7 +197,7 @@ workload_claims:
   advertise_host: {{ $root.Values.nriImagePolicy.sandboxDigests.advertiseHost | quote }}
 allowlist:
   pull:
-    url: {{ required "cds.url is required" $root.Values.nriImagePolicy.cds.url | quote }}
+    url: {{ include "c8s.nriCDSURL" $root | quote }}
     interval: {{ $root.Values.nriImagePolicy.refresh.interval | quote }}
     timeout: "30s"
     # Node-local socket served by the DaemonSet's attest-proxy sidecar.

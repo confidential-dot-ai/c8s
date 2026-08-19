@@ -394,6 +394,18 @@ own IP. Empty in every other shape.
 {{- end -}}
 {{- end -}}
 
+{{- /*
+The URL the host NRI plugin pulls the allowlist from. cds.service.nodePort is
+the source; set nriImagePolicy.cds.url only to override the whole address.
+*/ -}}
+{{- define "c8s.nriCDSURL" -}}
+{{- if .Values.nriImagePolicy.cds.url -}}
+{{ .Values.nriImagePolicy.cds.url }}
+{{- else -}}
+{{ printf "https://127.0.0.1:%d" (int .Values.cds.service.nodePort) }}
+{{- end -}}
+{{- end -}}
+
 {{- define "c8s.cdsURL" -}}
 https://{{ include "c8s.cdsName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.cds.port }}
 {{- end -}}

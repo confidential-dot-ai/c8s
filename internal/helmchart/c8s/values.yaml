@@ -883,7 +883,9 @@ nriImagePolicy:
   cds:
     ## Host-process NRI pulls through the chart-managed CDS NodePort and
     ## verifies CDS RA-TLS instead of trusting cluster DNS or ClusterIP routing.
-    url: "https://127.0.0.1:30808"
+    ## Empty derives https://127.0.0.1:<cds.service.nodePort>; set a full URL
+    ## only to point the plugin somewhere else entirely.
+    url: ""
   policy:
     # Secure by default: match the plugin binary's own default and reject images
     # not on the allowlist. Set to `audit` only for bring-up — it logs would-be
