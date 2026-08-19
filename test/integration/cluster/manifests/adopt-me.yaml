@@ -1,0 +1,26 @@
+# A plain workload with no c8s opt-in, adopted into the mesh by
+# `c8s install --workload-ref web=adopted/deployment/web:80 --upstream web`
+# during the harness's upgrade step.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: adopted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: adopted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27-alpine

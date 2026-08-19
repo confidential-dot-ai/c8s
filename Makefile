@@ -1,6 +1,6 @@
 .PHONY: build install build-c8s build-c8s-node build-get-cert build-ratls-mesh \
        build-nri-image-policy build-policy-monitor build-rtmr3-measurer build-volumed \
-       test test-integration test-node-guest-image-role test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
+       test test-integration test-integration-cluster test-node-guest-image-role test-node-guest-image-role-systemd test-node-guest-image-cloud-init test-e2e-cw-label-policy test-e2e-mesh-cw-enforcement test-e2e-ca-handoff mutation-check mutation-full vet fmt lint clean \
        manifests generate check-crd-chart install-controller-gen require-controller-gen \
        policy-test print-opa-version
 
@@ -129,6 +129,13 @@ test:
 
 test-integration:
 	./test/integration/run.sh
+
+# Full cluster operation in a single-node kind cluster (no TEE hardware):
+# install, admission, NRI image policy, workload certs, mesh, adoption,
+# uninstall. Needs kind/kubectl/helm/docker; CI runs it in the
+# Integration (cluster) job.
+test-integration-cluster:
+	./test/integration/cluster/run.sh
 
 # The byte-exact rke2-role.sh against real ISO9660 loop devices. Root (loop
 # mounts, writes /run/confos) — sudo on a disposable box.

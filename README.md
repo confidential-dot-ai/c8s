@@ -374,7 +374,9 @@ node-guest-image/  The node-image definition for node-as-CVM (new home;
 docs/              Design and operator docs
 samples/           Example manifests
 scripts/           Dev and CI helpers
-test/              Docker-compose integration tests
+test/              Integration tests: docker-compose get-cert flow
+                   (test/integration) and the kind cluster harness
+                   (test/integration/cluster, see docs/integration-tests.md)
 ```
 
 ## Build
