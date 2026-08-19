@@ -469,19 +469,22 @@ func TestDigestsEndpointDoesNotServeTokens(t *testing.T) {
 	}
 }
 
-// FetchSandboxToken must be unable to reach anything but the baked unix socket
-// — that is what keeps the inventory un-redirectable
-// (docs/getcert-workload-binding.md, Corner 5).
-func TestFetchRejectsNonUnixEndpoint(t *testing.T) {
+// FetchSandboxToken must reach nothing but the two compiled endpoints, the
+// baked unix socket and the guest loopback: that is what keeps the inventory
+// un-redirectable (docs/getcert-workload-binding.md, Corner 5). Each of these
+// must lose to the endpoint check, not to a failed connection.
+func TestFetchRejectsNonCompiledEndpoint(t *testing.T) {
 	requester := testRequesterKey(t)
 	for _, ep := range []string{
-		"http://127.0.0.1:8080",
+		"http://127.0.0.1:9999",
+		"http://localhost:8401",
 		"https://inventory.example",
 		"/run/c8s/workload-claims/workload-claims.sock",
 		"",
 	} {
-		if _, err := FetchSandboxToken(context.Background(), ep, time.Second, &requester.PublicKey, testNonce); err == nil {
-			t.Fatalf("endpoint %q accepted; only unix:// may be dialed", ep)
+		_, err := FetchSandboxToken(context.Background(), ep, time.Second, &requester.PublicKey, testNonce)
+		if err == nil || !strings.Contains(err.Error(), "endpoint must be") {
+			t.Fatalf("endpoint %q not refused by the compiled-endpoint check: %v", ep, err)
 		}
 	}
 }
