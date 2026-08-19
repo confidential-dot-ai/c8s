@@ -1,0 +1,97 @@
+{
+  "build": {
+    "format": "raw",
+    "memory": "16G",
+    "platform": "snp",
+    "timestamp": "2026-08-18T22:56:53Z"
+  },
+  "inputs": {
+    "base_image": {
+      "path": "image.raw",
+      "sha256": "8da0bb9d5b36fad19c1223df38e772342f7760c134bf5c453bd9b9ff36b2083b"
+    },
+    "firmware": {
+      "path": "OVMF.fd",
+      "sha256": "97d21d0b7af4511d57b31c6c14f77a573cb0fc2559fd2afd3d5428490e381d2b"
+    },
+    "initrd": {
+      "path": "combined-initrd.img",
+      "sha256": "5d25095fbb9574d181f6e3f9d9d34ee73f7020c7981f19a670934a3c748b26d9"
+    },
+    "kernel": {
+      "hardening_config_sha256": "6d11310996c8d7805ca9ed95d790e86e9ec0932ec8a555107434373de34bc66b",
+      "kernel_extra_config_sha256": "649c53e9e590a6c36a6e48243e3cf649329c1015fb154c1a6555181d6e0cca1c",
+      "linux_version": "6.16.12",
+      "module_signing_cert_sha256": "7d63b4c90d89cd795edbad8d48c484b9b9d14e9bb65d029561e70b617735727a",
+      "randstruct_seed_sha256": "7d6b81e63586f80ea22920623630caee43ec2eeab3113be606ab75da779ce317",
+      "required_config_sha256": "ea97d2774893e2d33674db7bab601a2e029402ee3058b1f414fe14ace19618f2",
+      "snapshot_config_sha256": "237a5293c9482b873670c81daa5dcb64b626bd0923a12a72de6b424dc6f8f47b",
+      "vmlinuz_sha256": "541ccfb3caf7e9c7c944d96ebbe44225dbfc38968917c14f7ac5dbb37831a858"
+    }
+  },
+  "outputs": {
+    "disk_image": {
+      "path": "disk.raw",
+      "sha256": "8da0bb9d5b36fad19c1223df38e772342f7760c134bf5c453bd9b9ff36b2083b"
+    },
+    "uki": {
+      "path": "uki.efi",
+      "sha256": "7096002bd8eedb6beac7a4fa452d17357aabaca2c26a33f7988b3ad77251324a"
+    }
+  },
+  "snp_variants": [
+    {
+      "igvm": {
+        "path": "guest-smp2.igvm",
+        "sha256": "6b0975765c3acf2d6fbd24da6cf0ee357cbb9b84d639c4bd48754b5df9598f60"
+      },
+      "measurement": {
+        "algorithm": "sha384",
+        "page_count": 37944,
+        "snp_launch_digest": "e7df3a8f1dbe619607154ce994c1f4d7299c539b120b5560e137f7787e4ece304f270c1444b47c863fde54bc863291d7",
+        "vmsa_count": 2
+      },
+      "smp": 2
+    },
+    {
+      "igvm": {
+        "path": "guest-smp4.igvm",
+        "sha256": "01e58c3d36c92d230ffc1e252b1761d40f27347805979dd47142ff15a2b5d530"
+      },
+      "measurement": {
+        "algorithm": "sha384",
+        "page_count": 37946,
+        "snp_launch_digest": "e0615da999afd20375d64ec9aaf0c480d6854198c01ed3e4157f881a96f635e532f7ad528ef69b408ef10319be5db106",
+        "vmsa_count": 4
+      },
+      "smp": 4
+    },
+    {
+      "igvm": {
+        "path": "guest-smp8.igvm",
+        "sha256": "38231022470daeced687f43160aac60260da8fb1dc6f4227d08b232a6195ba0b"
+      },
+      "measurement": {
+        "algorithm": "sha384",
+        "page_count": 37950,
+        "snp_launch_digest": "7e32c5c22d2eee8044d0206ec183783fb1c442a4089cf41491a2c3e1805ec99a7e571eca98eddd80d521e69716033157",
+        "vmsa_count": 8
+      },
+      "smp": 8
+    },
+    {
+      "igvm": {
+        "path": "guest-smp16.igvm",
+        "sha256": "7f5652620c94f6995a40962a1e9e4bc51aaf2b956475c332d478a20dfb3ad531"
+      },
+      "measurement": {
+        "algorithm": "sha384",
+        "page_count": 37958,
+        "snp_launch_digest": "3d77864bca73abbe93a00192e39daf23abe1d8a95b059e12d0189f8c17c6af3144be01713c6d6def0eb858361701ea5b",
+        "vmsa_count": 16
+      },
+      "smp": 16
+    }
+  ],
+  "version": 3
+}

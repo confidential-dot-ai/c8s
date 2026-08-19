@@ -194,3 +194,60 @@ func TestLoadSNPImageManifestRejects(t *testing.T) {
 		})
 	}
 }
+
+// The loaders must read a real confos build manifest, not just a hand-written
+// pin. These fixtures are verbatim gate artifacts (confos manifest schema
+// version 3): the TDX tuple nests under "tdx", the SNP set under
+// "snp_variants", and both carry build/inputs/outputs the loaders ignore.
+func TestLoadImageManifestReadsConfosBuild(t *testing.T) {
+	pins, err := LoadImageManifest("testdata/confos-tdx-manifest.json")
+	if err != nil {
+		t.Fatalf("LoadImageManifest on a real confos manifest: %v", err)
+	}
+	const wantMRTD = "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1"
+	if got := hex.EncodeToString(pins.MRTD[:]); got != wantMRTD {
+		t.Errorf("mrtd = %s, want %s", got, wantMRTD)
+	}
+	var zero [Size]byte
+	if pins.RTMR1 == zero || pins.RTMR2 == zero {
+		t.Error("rtmr1/rtmr2 must be read from the nested tdx object")
+	}
+}
+
+func TestLoadSNPImageManifestReadsConfosBuild(t *testing.T) {
+	pins, err := LoadSNPImageManifest("testdata/confos-snp-manifest.json")
+	if err != nil {
+		t.Fatalf("LoadSNPImageManifest on a real confos manifest: %v", err)
+	}
+	// The build ships one IGVM per supported vCPU count.
+	for _, smp := range []int{2, 4, 8, 16} {
+		if _, ok := pins.BySMP[smp]; !ok {
+			t.Errorf("no pinned variant for smp %d", smp)
+		}
+	}
+	const wantSMP2 = "e7df3a8f1dbe619607154ce994c1f4d7299c539b120b5560e137f7787e4ece304f270c1444b47c863fde54bc863291d7"
+	if got := pins.BySMP[2]; hex.EncodeToString(got[:]) != wantSMP2 {
+		t.Errorf("smp2 digest = %x, want %s", got, wantSMP2)
+	}
+}
+
+// A TDX manifest carries no snp_variants and an SNP manifest no tdx tuple, so
+// each loader must reject the other platform's real manifest. This is what
+// get-kubeconfig's platform inference rests on.
+func TestLoadersRejectTheOtherPlatformsConfosBuild(t *testing.T) {
+	if _, err := LoadSNPImageManifest("testdata/confos-tdx-manifest.json"); err == nil {
+		t.Error("SNP loader accepted a real TDX manifest")
+	}
+	if _, err := LoadImageManifest("testdata/confos-snp-manifest.json"); err == nil {
+		t.Error("TDX loader accepted a real SNP manifest")
+	}
+}
+
+// The duplicate-key guard must follow the tuple into the nested object, or a
+// nested manifest could name a register twice and load the last value.
+func TestLoadImageManifestRejectsDuplicateNestedRegister(t *testing.T) {
+	p := writeManifest(t, `{"tdx":{"mrtd":"`+mrtdHex+`","mrtd":"`+strings.Repeat("9f", Size)+`","rtmr1":"`+rtmr1Hex+`","rtmr2":"`+rtmr2Hex+`"}}`)
+	if _, err := LoadImageManifest(p); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("error = %v, want a duplicate-key rejection", err)
+	}
+}
