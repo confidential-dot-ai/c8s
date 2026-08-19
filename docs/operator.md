@@ -892,9 +892,13 @@ They are ingress-only. `ratls-mesh-tcp-only-egress` already selects every pod in
 the namespace and allows all TCP, and NetworkPolicies union, so an egress rule
 on one component would be allowed by that policy regardless.
 
-None of them restricts the *source* of a connection: the API server that dials
-the admission webhook has no address a selector can name, get-cert runs beside
-every adopted workload, and the CDS NodePort route arrives off-cluster.
+**None of them restricts the source of a connection** — no rule carries a
+`from`, so each one narrows which port answers, not who may connect. tls-lb is
+the public front door and stays reachable from off-cluster; the API server that
+dials the admission webhook has no address a selector could name; get-cert runs
+beside every adopted workload in every namespace; and the CDS NodePort route
+arrives off-cluster too. `c8s-volumed-ingress`, which has no `ingress:` rules at
+all, is the only one that refuses everything.
 
 **Opening another port.** Policies are additive, so apply your own
 `NetworkPolicy` selecting the same pods — there is nothing to disable first:

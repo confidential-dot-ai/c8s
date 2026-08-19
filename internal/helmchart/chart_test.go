@@ -7792,7 +7792,7 @@ func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
 			var got []int32
 			for _, rule := range np.Spec.Ingress {
 				if len(rule.From) != 0 {
-					t.Errorf("ingress rule restricts source (%v); the kube API server and off-cluster NodePort callers cannot be selected", rule.From)
+					t.Errorf("ingress rule restricts source (%v); these policies narrow which port answers, never who connects — tls-lb is a public front door, the API server dialling the webhook has no selectable address, and the CDS NodePort route arrives off-cluster", rule.From)
 				}
 				for _, p := range rule.Ports {
 					if p.Port == nil {
@@ -7805,5 +7805,57 @@ func TestChartComponentIngressPoliciesAreDefaultDeny(t *testing.T) {
 				t.Errorf("allowed ports = %v, want %v", got, tc.ports)
 			}
 		})
+	}
+}
+
+// tls-lb is the public front door, so its policy must leave the front-door port
+// open to every source. A `from` here would also be unsatisfiable in principle:
+// externalTrafficPolicy defaults to Local precisely to preserve arbitrary public
+// client IPs, and no selector can enumerate the internet.
+func TestChartTLSLBIngressPolicyStaysReachableFromOffCluster(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+
+	var np networkingv1.NetworkPolicy
+	if !findDoc(t, out, "NetworkPolicy", "c8s-tls-lb-ingress", &np) {
+		t.Fatal("render is missing the tls-lb ingress policy")
+	}
+	if len(np.Spec.Ingress) != 1 {
+		t.Fatalf("ingress rules = %d, want 1", len(np.Spec.Ingress))
+	}
+	if len(np.Spec.Ingress[0].From) != 0 {
+		t.Fatalf("the front-door rule names sources (%v); external clients would be refused", np.Spec.Ingress[0].From)
+	}
+
+	// The allowed port must be the one the Service and hostPort both target,
+	// or external traffic lands on a port the policy does not name.
+	var svc corev1.Service
+	if !findDoc(t, out, "Service", "c8s-tls-lb", &svc) {
+		t.Fatal("render is missing the tls-lb Service")
+	}
+	if len(svc.Spec.Ports) != 1 {
+		t.Fatalf("tls-lb Service exposes %d ports; the policy names one", len(svc.Spec.Ports))
+	}
+	target := svc.Spec.Ports[0].TargetPort.StrVal
+
+	var deploy appsv1.Deployment
+	if !findDoc(t, out, "Deployment", "c8s-tls-lb", &deploy) {
+		t.Fatal("render is missing the tls-lb Deployment")
+	}
+	var wantPort int32
+	for _, c := range deploy.Spec.Template.Spec.Containers {
+		for _, p := range c.Ports {
+			if p.Name == target {
+				wantPort = p.ContainerPort
+			}
+		}
+	}
+	if wantPort == 0 {
+		t.Fatalf("no containerPort named %q on the tls-lb pod", target)
+	}
+	if got := int32(np.Spec.Ingress[0].Ports[0].Port.IntValue()); got != wantPort {
+		t.Errorf("policy admits :%d but the Service targets containerPort :%d — external traffic would be dropped", got, wantPort)
 	}
 }

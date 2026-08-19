@@ -2,6 +2,11 @@
 Default-deny ingress for the components that had none: each pod accepts only
 the ports it declares, and nothing else on the pod network can reach it.
 
+No rule carries a `from`, so none of them restricts WHO may connect — only
+which port answers. tls-lb stays reachable from off-cluster, cds from every
+node, the operator from the API server. A policy with no `ingress:` key at all
+(volumed) is the one that refuses everything.
+
 Ingress only. NetworkPolicies union, and ratls-mesh's tcp-only-egress selects
 every pod in the namespace and allows all TCP, so an egress rule added here
 would be allowed by that one anyway.
@@ -95,8 +100,10 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # The front door only. The cds-attest and allowlist-proxy sidecars bind pod
-    # loopback; this keeps an accidental rebind pod-unreachable.
+    # The public front door, from anywhere: the Service's only port targets it,
+    # and so does hostPort when enabled. Naming it leaves the cds-attest and
+    # allowlist-proxy sidecars — which bind pod loopback and are reached through
+    # nginx — unreachable if one ever rebinds.
     - ports:
         - protocol: TCP
           port: {{ .Values.tlsLb.nginx.httpsPort }}
