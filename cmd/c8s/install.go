@@ -155,8 +155,7 @@ func chartComponents(ctx context.Context, chartPath string) ([]c8sComponent, err
 // file that could carry cds.operatorKeys — it requires --force, because the
 // resulting CDS has allowlist writes disabled and nobody could add/remove/upload
 // allowlist entries via `c8s allowlist`. When keys are supplied, or the operator
-// is managing values via -f, it is a no-op (consistent with the other -f-gated
-// preflights). It returns a warning to print when --force lets it pass.
+// is managing values via -f, it is a no-op.
 func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool) (warn string, err error) {
 	if operatorKeys != "" || len(valuesFiles) > 0 {
 		return "", nil
@@ -174,15 +173,19 @@ func operatorKeysPreflight(operatorKeys string, valuesFiles []string, force bool
 // an unpinned CDS from inside a kata guest"): CDS and tls-lb come up, but no
 // confidential.ai/cw pod ever gets a leaf, and the refusal is only visible in an
 // init container's log inside a locked guest. Requiring --force here surfaces
-// that before the install. -f owners may carry cds.measurements in their values
-// file, so it is a no-op for them (consistent with the other -f-gated
-// preflights). It returns a warning to print when --force lets it pass.
+// that before the install. Satisfied by --measurements or by a -f values file
+// that sets a non-empty cds.measurements. It returns a warning to print when
+// --force lets it pass.
 func podModeMeasurementsPreflight(cvmMode string, measurements []string, valuesFiles []string, force bool) (warn string, err error) {
-	if !cvmModeIsPod(cvmMode) || len(measurements) > 0 || len(valuesFiles) > 0 {
+	if !cvmModeIsPod(cvmMode) || len(measurements) > 0 {
 		return "", nil
 	}
+	set, err := valuesFilesSetMeasurements(valuesFiles)
+	if err != nil || set {
+		return "", err
+	}
 	if !force {
-		return "", fmt.Errorf("--cvm-mode=pod without --measurements: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
+		return "", fmt.Errorf("--cvm-mode=pod without a pinned CDS measurement: the injected get-cert refuses to reach an unpinned CDS from inside a kata guest, so no confidential.ai/cw workload can start. Re-run with --measurements <kata guest launch digest> (read it from a running cluster with `c8s verify https://<tls-lb> --kind lb`), set a non-empty cds.measurements in a -f values file, or --force to install anyway (CDS/tls-lb only; no cw workloads until you reinstall pinned)")
 	}
 	return "installing --cvm-mode=pod with no --measurements: CDS and tls-lb will run, but no confidential.ai/cw workload can obtain a certificate until you reinstall with --measurements", nil
 }
@@ -874,6 +877,25 @@ func valuesFilesSetDistro(files []string) (bool, error) {
 		}
 		for _, path := range []string{"kata.distro", "nriImagePolicy.distro"} {
 			if v, err := stringAtPath(tree, path); err == nil && v != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// valuesFilesSetMeasurements reports whether any -f values file pins a CDS
+// launch measurement. cds.measurements is the one the injected get-cert reads,
+// so it alone decides whether a pod-mode install is pinned; ratlsMesh.measurements
+// travels with it but does not substitute for it.
+func valuesFilesSetMeasurements(files []string) (bool, error) {
+	for _, f := range files {
+		tree, err := decodeValuesFile(f)
+		if err != nil {
+			return false, err
+		}
+		if v, ok := valueAtPath(tree, "cds.measurements"); ok {
+			if list, isList := v.([]any); isList && len(list) > 0 {
 				return true, nil
 			}
 		}
