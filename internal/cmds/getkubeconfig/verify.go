@@ -228,12 +228,8 @@ func checkSNPMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPoli
 	}
 	copy(got[:], raw)
 	if !exp.snpPins.Has(got) {
-		wants := make([]string, 0, len(exp.snpPins.BySMP))
-		for _, d := range exp.snpPins.Digests() {
-			wants = append(wants, hex.EncodeToString(d[:]))
-		}
 		return fmt.Errorf("launch digest mismatch: node reports %s, image manifest pins %s (a different guest image booted, or a vCPU count the manifest has no variant for)",
-			launch, strings.Join(wants, ", "))
+			launch, exp.snpPins)
 	}
 
 	// HOSTDATA carries the operator-key binding. A VM launched without

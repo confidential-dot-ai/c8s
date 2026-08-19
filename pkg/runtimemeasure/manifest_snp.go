@@ -1,23 +1,21 @@
 package runtimemeasure
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
+	"strings"
 )
 
-// SNPImagePins is the complete SEV-SNP measurement identity of one guest
-// image: the set of launch digests the image can legitimately produce, keyed
-// by vCPU count.
-//
-// Unlike TDX's single MRTD, an SNP launch measurement covers the initial vCPU
-// state, so ONE image has one digest per SMP count — which is why the build
-// ships a per-SMP IGVM (guest-smp2.igvm, guest-smp4.igvm, …) and publishes a
-// digest for each. All entries come from one provenanced build manifest
-// describing one image, so pinning the set is as tight as pinning a scalar:
-// every member attests the same rootfs, differing only in how many vCPUs it
-// was launched with.
+// SNPImagePins is the SEV-SNP measurement identity of one guest image: the
+// launch digests it can legitimately produce, keyed by vCPU count. An SNP
+// launch measurement covers the initial vCPU state, so one image has one
+// digest per SMP count, and the build ships a per-SMP IGVM. Every entry comes
+// from the same provenanced manifest, so pinning the set is as tight as
+// pinning a scalar.
 type SNPImagePins struct {
 	// BySMP maps vCPU count to that variant's launch digest.
 	BySMP map[int][Size]byte
@@ -26,11 +24,7 @@ type SNPImagePins struct {
 // Digests returns the pinned launch digests in ascending SMP order, for
 // verifiers that accept any variant of the pinned image.
 func (p SNPImagePins) Digests() [][Size]byte {
-	smps := make([]int, 0, len(p.BySMP))
-	for smp := range p.BySMP {
-		smps = append(smps, smp)
-	}
-	sort.Ints(smps)
+	smps := slices.Sorted(maps.Keys(p.BySMP))
 	out := make([][Size]byte, 0, len(smps))
 	for _, smp := range smps {
 		out = append(out, p.BySMP[smp])
@@ -38,14 +32,21 @@ func (p SNPImagePins) Digests() [][Size]byte {
 	return out
 }
 
+// String renders the pinned digests as hex in ascending SMP order, so
+// operator-facing output is stable.
+func (p SNPImagePins) String() string {
+	smps := slices.Sorted(maps.Keys(p.BySMP))
+	out := make([]string, 0, len(smps))
+	for _, smp := range smps {
+		d := p.BySMP[smp]
+		out = append(out, hex.EncodeToString(d[:]))
+	}
+	return strings.Join(out, ", ")
+}
+
 // Has reports whether digest is one of the pinned variants.
 func (p SNPImagePins) Has(digest [Size]byte) bool {
-	for _, want := range p.BySMP {
-		if want == digest {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slices.Collect(maps.Values(p.BySMP)), digest)
 }
 
 // snpImageManifest is the JSON subset LoadSNPImageManifest reads. Extra
@@ -61,13 +62,11 @@ type snpImageManifest struct {
 	} `json:"snp_variants"`
 }
 
-// LoadSNPImageManifest loads an SEV-SNP image pin — the per-SMP launch-digest
-// set — from one provenanced build-artifact manifest. Every variant must
-// carry a positive smp, a sha384 algorithm, and a digest of exactly 96
-// lowercase hex chars; a malformed or duplicate variant fails the whole load,
-// so a policy can never pin part of an image or a value other than the one it
-// reads. A TDX manifest (mrtd/rtmr1/rtmr2) or a generic artifact-hash
-// manifest.json carries no snp_variants and is rejected by the same rule.
+// LoadSNPImageManifest loads the per-SMP launch-digest set from one
+// provenanced build-artifact manifest. A malformed or duplicate variant fails
+// the whole load, so a policy can never pin part of an image. A TDX tuple or
+// a generic artifact-hash manifest.json carries no snp_variants and is
+// rejected by the same rule.
 func LoadSNPImageManifest(path string) (SNPImagePins, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
