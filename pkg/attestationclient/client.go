@@ -21,6 +21,10 @@ import (
 // APIError/UnexpectedError.
 const maxErrorBodyBytes = 8 << 10
 
+// requestTimeout bounds one attestation-api call; the peer decides whether it
+// ever answers.
+const requestTimeout = 60 * time.Second
+
 // Client is an HTTP client for the external attestation-api.
 type Client struct {
 	baseURL    string
@@ -40,12 +44,12 @@ func NewClient(baseURL string) Client {
 	if socket, ok := strings.CutPrefix(baseURL, "unix://"); ok {
 		return Client{
 			baseURL:    "http://unix",
-			httpClient: &http.Client{Transport: unixSocketTransport(socket)},
+			httpClient: &http.Client{Transport: unixSocketTransport(socket), Timeout: requestTimeout},
 		}
 	}
 	return Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: requestTimeout},
 	}
 }
 

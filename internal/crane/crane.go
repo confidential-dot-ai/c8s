@@ -11,7 +11,13 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// commandTimeout bounds one crane invocation. A registry that accepts the
+// connection and then stalls must not park a CI gate for the run's lifetime.
+// Overridden in tests.
+var commandTimeout = 60 * time.Second
 
 // Available reports whether the crane CLI is on PATH. Callers that can
 // degrade (warn and continue) branch on this; callers that cannot use
@@ -34,9 +40,9 @@ func Require() error {
 // Digest resolves an image reference to its registry digest via
 // `crane digest <ref>`. The returned value is a bare "sha256:<hex>".
 func Digest(ctx context.Context, ref string) (string, error) {
-	out, err := exec.CommandContext(ctx, "crane", "digest", ref).Output()
+	out, err := run(ctx, "digest", ref)
 	if err != nil {
-		return "", craneError("digest", ref, err)
+		return "", err
 	}
 	digest := strings.TrimSpace(string(out))
 	if !strings.HasPrefix(digest, "sha256:") {
@@ -48,9 +54,9 @@ func Digest(ctx context.Context, ref string) (string, error) {
 // Config returns the parsed OCI image config for a reference via
 // `crane config <ref>`, exposing the image's baked Entrypoint and Cmd.
 func Config(ctx context.Context, ref string) (*ImageConfig, error) {
-	out, err := exec.CommandContext(ctx, "crane", "config", ref).Output()
+	out, err := run(ctx, "config", ref)
 	if err != nil {
-		return nil, craneError("config", ref, err)
+		return nil, err
 	}
 	var cfg ImageConfig
 	if err := json.Unmarshal(out, &cfg); err != nil {
@@ -62,10 +68,30 @@ func Config(ctx context.Context, ref string) (*ImageConfig, error) {
 // ManifestExists reports whether a specific digest is resolvable in its
 // repository via `crane manifest <repo>@<digest>`.
 func ManifestExists(ctx context.Context, ref string) error {
-	if err := exec.CommandContext(ctx, "crane", "manifest", ref).Run(); err != nil {
-		return craneError("manifest", ref, err)
+	_, err := run(ctx, "manifest", ref)
+	return err
+}
+
+// run executes `crane <sub> <ref>` under commandTimeout, or under the caller's
+// deadline when that is sooner, and returns its stdout.
+func run(ctx context.Context, sub, ref string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "crane", sub, ref)
+	// The kill signals crane itself; a child still holding stdout would
+	// otherwise keep Wait — and the deadline — open indefinitely.
+	cmd.WaitDelay = 5 * time.Second
+
+	out, err := cmd.Output()
+	if err != nil {
+		// The kill leaves an opaque "signal: killed"; name the deadline instead.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("crane %s %q: %w", sub, ref, ctxErr)
+		}
+		return nil, craneError(sub, ref, err)
 	}
-	return nil
+	return out, nil
 }
 
 // ImageConfig is the subset of an OCI image config the callers read.
