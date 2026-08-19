@@ -344,3 +344,33 @@ func TestWorkloadApplyDoesNotDoubleReportInFileCollision(t *testing.T) {
 		t.Fatal("the file lint should have reported it")
 	}
 }
+
+// A mounts or env policy is enforced only by the in-guest policy-monitor. On a
+// node-as-CVM deployment the host NRI plugin is the only enforcer and reports
+// neither field, so the policy admits every container — silently, at write,
+// install and deny time. lint is the one place that can say so.
+func TestLintWarnsOnUnobservedMountAndEnvPolicy(t *testing.T) {
+	const ctr = `{"digest":"` + digA + `","command":{"policy":"exact","argv":["/x"]},"args":{"policy":"exact","argv":["--serve"]},` +
+		`"mounts":{"policy":"exact","destinations":["/config"]},"env":{"policy":"exact","names":["PATH"]}}`
+	f := writeFile(t, "al.json", `{"schema":"c8s.allowlist/v1","workloads":{"w":{"containers":[`+ctr+`]}}}`)
+
+	out, _, err := runCmd("lint", f)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+	for _, want := range []string{"constrains mounts and env", "policy-monitor", "--cvm-mode=pod"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lint output %q missing %q", out, want)
+		}
+	}
+
+	// The warning is about the deployment, not the document: under pod mode the
+	// enforcer does observe both fields, so the same file is clean.
+	out, _, err = runCmd("lint", "--cvm-mode=pod", f)
+	if err != nil {
+		t.Fatalf("lint --cvm-mode=pod: %v", err)
+	}
+	if out != "ok: no findings\n" {
+		t.Fatalf("lint --cvm-mode=pod output = %q, want no findings", out)
+	}
+}
