@@ -217,7 +217,7 @@ jobs:
           fi
           # iasl (DSDT) and clang (bindgen) shape measured bytes; record the
           # exact host set until these ride a snapshot mirror (confos#36).
-          { echo "### host build-dep debs"; ls apt-debs | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### host build-dep debs"; find apt-debs -maxdepth 1 -name '*.deb' -printf '- %f\n' | sort; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save build-dep debs
         # Inline: runs only when the install above succeeded.
