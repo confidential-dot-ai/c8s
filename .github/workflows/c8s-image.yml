@@ -182,18 +182,50 @@ jobs:
         with:
           ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
+      - name: Restore build-dep debs
+        # Keyed per runner-image release: installing a fixed deb set is only
+        # valid against the preinstalled package state it was resolved for.
+        # Warm runs never touch the apt mirror, whose degradation has taken
+        # out gate legs repeatedly.
+        id: apt-debs
+        uses: actions/cache/restore@v5
+        with:
+          path: apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}
+
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
         # base ovmf is for the SNP path.
         # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
         # Bounded: a dead mirror connection otherwise hangs until the job's
         # 3h limit.
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update -y
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 install -y \
-            systemd-container ovmf cpio acpica-tools \
-            libclang-dev clang libtss2-dev
+          set -euo pipefail
+          if compgen -G "apt-debs/*.deb" >/dev/null; then
+            sudo apt-get install -y ./apt-debs/*.deb
+          else
+            sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update -y
+            sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 install -y \
+              --download-only \
+              systemd-container ovmf cpio acpica-tools \
+              libclang-dev clang libtss2-dev
+            mkdir -p apt-debs
+            sudo cp /var/cache/apt/archives/*.deb apt-debs/
+            sudo chown -R "$(id -u):$(id -g)" apt-debs
+            sudo apt-get install -y ./apt-debs/*.deb
+          fi
+          # iasl (DSDT) and clang (bindgen) shape measured bytes; record the
+          # exact host set until these ride a snapshot mirror (confos#36).
+          { echo "### host build-dep debs"; find apt-debs -maxdepth 1 -name '*.deb' -printf '- %f\n' | sort; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save build-dep debs
+        # Inline: runs only when the install above succeeded.
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache staged GPU tree
@@ -203,7 +235,7 @@ jobs:
         # on it; the tools tree still restores unconditionally because the
         # fallback path (stamp mismatch) needs it.
         id: gpu-staged
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             confidential-os-builder/output/gpu/staged
@@ -214,7 +246,11 @@ jobs:
         # mkosi.output (image + stamp) is what the kernel short-circuit path
         # still needs: confos-fetch-gpu compiles modules inside it. mkosi.tools
         # is only an intermediate for building it, so it isn't cached.
-        uses: actions/cache@v5
+        # restore/save split: the built-in post-job save runs even after a
+        # failed build and archives partial trees under a stable key that is
+        # then never re-saved (the #408 gate poisoning).
+        id: tools-tree
+        uses: actions/cache/restore@v5
         with:
           path: confidential-os-builder/mkosi/kernel-builder/mkosi.output
           key: ${{ runner.os }}-tools-v2-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**') }}
@@ -363,6 +399,28 @@ jobs:
             confidential-os-builder/mkosi/base/mkosi.tools \
             confidential-os-builder/mkosi/base/mkosi.tools.manifest \
             confidential-os-builder/mkosi/base/mkosi.pkgcache || true
+
+      # Inline saves run only after every prior step succeeded, and only when
+      # the tree actually exists — a kernel-cache-hit build never creates it.
+      - name: Check tools tree presence
+        id: tools-built
+        run: echo "built=$([ -d confidential-os-builder/mkosi/kernel-builder/mkosi.output/image ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Save kernel-builder tools tree
+        if: steps.tools-tree.outputs.cache-hit != 'true' && steps.tools-built.outputs.built == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: confidential-os-builder/mkosi/kernel-builder/mkosi.output
+          key: ${{ runner.os }}-tools-v2-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**') }}
+
+      - name: Save staged GPU tree
+        if: steps.gpu-staged.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            confidential-os-builder/output/gpu/staged
+            confidential-os-builder/output/gpu/stage.stamp
+          key: ${{ runner.os }}-gpu-staged-${{ env.KERNEL_FLAVOR }}-${{ hashFiles('confidential-os-builder/mkosi/kernel-builder/mkosi.conf','confidential-os-builder/mkosi/kernel-builder/mkosi.sandbox/**','c8s/node-guest-image/kernel/c8s.config','c8s/node-guest-image/kernel/c8s-dev.config','confidential-os-builder/kernel/required.config','confidential-os-builder/kernel/hardening.config','confidential-os-builder/kernel/confidential.config','c8s/node-guest-image/kernel/config-x86_64-*.snapshot','confidential-os-builder/kernel/randstruct.seed','confidential-os-builder/kernel/version','c8s/node-guest-image/build','c8s/node-guest-image/module-signing.crt','confidential-os-builder/bin/confos-fetch-gpu') }}
 
       - name: Upload measurement evidence (gate)
         # Gate mode ends here: evidence out, nothing published.
