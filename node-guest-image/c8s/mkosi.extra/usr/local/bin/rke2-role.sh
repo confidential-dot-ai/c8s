@@ -11,6 +11,7 @@
 # joindata contract (v0), all files a single <=256-byte ASCII line (edge
 # whitespace tolerated and trimmed; interior whitespace rejected):
 #   role              server|agent            (both roles)
+#   node-name         RFC1123 label, optional (both roles; absent = /etc/hostname)
 #   node-ip           IPv4, optional          (both roles; absent or 0.0.0.0 = autodetect)
 #   node-external-ip  routable IPv4, optional (both roles)
 #   server            IPv4, no scheme/port    (agent only; forbidden on server)
@@ -60,6 +61,13 @@ is_ipv4() {
     for o in $ip; do (( o <= 255 )) || return 1; done
 }
 
+# The image bakes one hostname, so every node-CVM would register under the
+# same node name and a second node's registration would collide with the
+# first. RFC1123 label: what kubelet accepts as a node name, lowercased
+# alphanumerics and dashes, no leading/trailing dash. 63 bytes is the label
+# limit; read_field has already bounded the line at 256.
+is_node_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; }
+
 # allow_only NAME... — reject any disk entry outside this role's list.
 allow_only() {
     local f name a allowed
@@ -90,7 +98,15 @@ write_atomic() {
 
 # Common address fields, validated the same way for both roles.
 stage_addresses() {
-    local node_ip node_ext
+    local node_ip node_ext node_name
+    # node-name is optional: absent keeps the image's baked hostname, which
+    # is correct for single-node. A multinode pair MUST set it per CVM.
+    NODE_NAME=""
+    if [[ -e "$MNT/node-name" || -L "$MNT/node-name" ]]; then
+        node_name=$(read_field node-name)
+        is_node_name "$node_name" || fail "node-name: not an RFC1123 label"
+        NODE_NAME="$node_name"
+    fi
     # node-ip is optional: absent, like the kubelet sentinel 0.0.0.0, means
     # rke2 resolves the address itself (Kubernetes ChooseHostInterface).
     # Passing a literal 0.0.0.0 through registers InternalIP 0.0.0.0 and
@@ -120,6 +136,9 @@ stage_addresses() {
 # Infallible: runs inside the fragment pipe, where a failure would stage a
 # truncated fragment. Everything fallible (stage_addresses) runs before it.
 emit_node_addr_lines() {
+    if [[ -n "$NODE_NAME" ]]; then
+        printf 'node-name: %s\n' "$NODE_NAME"
+    fi
     if [[ -n "$NODE_IP" ]]; then
         printf 'node-ip: %s\n' "$NODE_IP"
     fi
@@ -133,7 +152,7 @@ emit_node_addr_lines() {
 
 set_server_role() {
     local server_token agent_token
-    allow_only role node-ip node-external-ip server-token agent-token
+    allow_only role node-name node-ip node-external-ip server-token agent-token
     server_token=$(read_field server-token)
     agent_token=$(read_field agent-token)
     is_hex_token "$server_token" || fail "server-token: not 64 lowercase hex"
@@ -154,7 +173,7 @@ set_server_role() {
 
 set_agent_role() {
     local server_addr agent_token
-    allow_only role node-ip node-external-ip server agent-token
+    allow_only role node-name node-ip node-external-ip server agent-token
     server_addr=$(read_field server)
     agent_token=$(read_field agent-token)
     is_ipv4 "$server_addr" || fail "server: not IPv4"

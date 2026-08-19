@@ -157,6 +157,34 @@ ok "fragment exact (node-ip omitted)" \
 server: https://192.168.7.10:$JOIN_PORT"
 ok "role-agent verdict" test -f "$RUN/role-agent"
 
+# node-name is what lets a multinode pair exist at all: the image bakes one
+# hostname, so without it every node-CVM registers under the same node name
+# and the second registration collides with the first (#418). Optional —
+# absent keeps the baked hostname, which is what single-node wants.
+CASE="server-disk+node-name"
+reset_state; server_dir "$WORK/d"; write_f "$WORK/d" node-name mn-server
+make_iso "$WORK/d"; run_script
+ok "exit 0" test "$RC" -eq 0
+ok "fragment carries node-name" grep -qx 'node-name: mn-server' "$FRAG"
+
+# Both roles share stage_addresses, so the agent must get it too — and the
+# pair must be able to pick DIFFERENT names, which is the whole point.
+CASE="agent-disk+node-name"
+reset_state; agent_dir "$WORK/d"; write_f "$WORK/d" node-name mn-agent
+make_iso "$WORK/d"; run_script
+ok "exit 0" test "$RC" -eq 0
+ok "fragment exact (node-name first)" \
+   test "$(cat "$FRAG")" = "token-file: $RUN/rke2-agent-token
+server: https://192.168.7.10:$JOIN_PORT
+node-name: mn-agent
+node-ip: 192.168.7.11"
+
+# Absent node-name keeps the baked hostname: single-node must not regress.
+CASE="server-disk+absent-node-name"
+reset_state; server_dir "$WORK/d"; make_iso "$WORK/d"; run_script
+ok "exit 0" test "$RC" -eq 0
+ok "fragment omits node-name" bash -c '! grep -q "^node-name:" "'"$FRAG"'"'
+
 # No autodetect for external addresses: the sentinel there is a config
 # error and must reject, not pass through as ExternalIP 0.0.0.0.
 CASE="server-disk+zero-external-ip"
@@ -219,6 +247,13 @@ m_equal_tokens()      { server_dir "$1"; write_f "$1" server-token "$ATOK"; }
 m_tok_63()            { server_dir "$1"; write_f "$1" server-token "${STOK:0:63}"; }
 m_tok_upper()         { server_dir "$1"; write_f "$1" server-token "$(tr a A <<<"$STOK" | tr -d '\n')"; }
 m_tok_nonhex()        { agent_dir "$1";  write_f "$1" agent-token "${ATOK:0:63}g"; }
+m_name_upper()        { server_dir "$1"; write_f "$1" node-name Upper; }
+m_name_underscore()   { server_dir "$1"; write_f "$1" node-name under_score; }
+m_name_dotted()       { server_dir "$1"; write_f "$1" node-name a.b; }
+m_name_lead_dash()    { server_dir "$1"; write_f "$1" node-name -lead; }
+m_name_trail_dash()   { server_dir "$1"; write_f "$1" node-name trail-; }
+m_name_empty()        { server_dir "$1"; write_f "$1" node-name ""; }
+m_name_too_long()     { server_dir "$1"; write_f "$1" node-name "$(printf 'a%.0s' $(seq 64))"; }
 m_ip_range()          { server_dir "$1"; write_f "$1" node-ip 999.1.1.1; }
 m_ip_short()          { server_dir "$1"; write_f "$1" node-ip 1.2.3; }
 m_ip_leading_zero()   { server_dir "$1"; write_f "$1" node-ip 010.2.3.4; }
@@ -245,7 +280,9 @@ for c in wrong_role role_missing forbid_server forbid_stok extra_file_server \
          ip_short ip_leading_zero ip_octet_08 srv_scheme srv_port interior_ws \
          multiline oversize_file oversize_line nul_byte symlink \
          dangling_ext_ip dangling_node_ip nonregular_dir empty_ext_ip \
-         agent_no_server server_no_atok; do
+         agent_no_server server_no_atok \
+         name_upper name_underscore name_dotted name_lead_dash \
+         name_trail_dash name_empty name_too_long; do
     reject_case "reject-$c" "m_$c"
 done
 
