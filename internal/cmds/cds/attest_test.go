@@ -484,60 +484,223 @@ func TestAttest_RejectedEvidenceReturns4xxNotUnreachable(t *testing.T) {
 	}
 }
 
+// A 4xx whose body is not the api's JSON envelope — an axum extractor
+// rejection, or an on-path proxy — is still terminal for this request, so it
+// must not be reported as attestation_api_unreachable and retried.
+func TestAttest_NonJSONRejectionReturns422NotUnreachable(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusBadRequest)
+	}))
+	t.Cleanup(bad.Close)
+	h := newTestAttestHandler(t, bad.URL, nil)
+	challenge := issueChallenge(t, h)
+	csrPEM, _ := generateCSR(t)
+
+	w := postAttest(t, h, challenge, csrPEM)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+	var resp types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v; body=%s", err, w.Body.String())
+	}
+	if resp.Error != types.ErrorCodeVerificationFailed {
+		t.Fatalf("error code: got %q, want %q", resp.Error, types.ErrorCodeVerificationFailed)
+	}
+}
+
+const (
+	msgEvidenceRejected = "attestation evidence rejected by attestation-api"
+	msgRequestRejected  = "attestation-api rejected the request"
+	msgUnreachable      = "failed to reach attestation-api: "
+)
+
+// anyUnreachableMsg is the wantMsg for the outage arm, whose message
+// interpolates the error and so is pinned by prefix.
+const anyUnreachableMsg = ""
+
 func TestClassifyVerifyError(t *testing.T) {
+	// VerifyEnforced wraps, so the call site never sees a bare error.
+	wrapped := func(err error) error { return fmt.Errorf("verify enforced: %w", err) }
+
 	for _, tc := range []struct {
 		name       string
 		err        error
 		wantStatus int
 		wantCode   string
+		wantMsg    string
 	}{
 		{
 			name:       "signature invalid",
-			err:        fmt.Errorf("wrap: %w", attestationclient.ErrSignatureInvalid),
+			err:        wrapped(attestationclient.ErrSignatureInvalid),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    "attestation signature invalid",
 		},
 		{
 			name:       "report data mismatch",
-			err:        fmt.Errorf("wrap: %w", attestationclient.ErrReportDataMismatch),
+			err:        wrapped(attestationclient.ErrReportDataMismatch),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    "challenge mismatch in attestation evidence",
 		},
 		{
 			name:       "api 400 is client fault",
-			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusBadRequest}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgEvidenceRejected,
 		},
 		{
 			name:       "api 403 is client fault",
-			err:        &attestationclient.APIError{Status: http.StatusForbidden},
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusForbidden}),
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgEvidenceRejected,
+		},
+		{
+			// Deliberately bare: the sentinel arms above are wrapped, so this
+			// is the one row that would still pass a plain type assertion.
+			name:       "api 400 unwrapped is client fault",
+			err:        &attestationclient.APIError{Status: http.StatusBadRequest},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgEvidenceRejected,
 		},
 		{
 			name:       "api 500 is upstream outage",
-			err:        &attestationclient.APIError{Status: http.StatusInternalServerError},
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusInternalServerError}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 408 is retryable unavailability",
-			err:        &attestationclient.APIError{Status: http.StatusRequestTimeout},
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusRequestTimeout}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "api 429 is retryable unavailability",
-			err:        &attestationclient.APIError{Status: http.StatusTooManyRequests},
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusTooManyRequests}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "api 399 is not a refusal",
+			err:        wrapped(&attestationclient.APIError{Status: 399}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "api 302 is not a refusal",
+			err:        wrapped(&attestationclient.APIError{Status: http.StatusFound}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 400 is a request rejection",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusBadRequest, Text: "Failed to parse the request body as JSON"}),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgRequestRejected,
+		},
+		{
+			name:       "non-json 415 is a request rejection",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusUnsupportedMediaType, Text: "Expected request with `Content-Type: application/json`"}),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgRequestRejected,
+		},
+		{
+			name:       "non-json 422 is a request rejection",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusUnprocessableEntity, Text: "Failed to deserialize the JSON body into the target type"}),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   types.ErrorCodeVerificationFailed,
+			wantMsg:    msgRequestRejected,
+		},
+		{
+			// A body cut mid-response names nothing, so it is not a rejection.
+			name:       "non-json 400 with no body is an outage",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusBadRequest}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			// The api has no 403; an on-path proxy does.
+			name:       "non-json 403 is an outage",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusForbidden, Text: "<html>403 Forbidden</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 404 is an outage",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusNotFound, Text: "<html>404 Not Found</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 413 is an outage",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusRequestEntityTooLarge, Text: "<html>413 Request Entity Too Large</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 500 is upstream outage",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusInternalServerError, Text: "<html>500 Internal Server Error</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 408 is retryable unavailability",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusRequestTimeout, Text: "<html>408 Request Timeout</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 429 is retryable unavailability",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusTooManyRequests, Text: "<html>429 Too Many Requests</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 399 is not a rejection",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: 399, Text: "unknown"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "non-json 302 is not a rejection",
+			err:        wrapped(&attestationclient.UnexpectedError{Status: http.StatusFound, Text: "<html>302 Found</html>"}),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
 		},
 		{
 			name:       "transport failure is unreachable",
-			err:        errors.New("dial tcp: connection refused"),
+			err:        wrapped(&attestationclient.RequestError{Err: errors.New("dial tcp: connection refused")}),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
+		},
+		{
+			name:       "deadline exceeded is unreachable",
+			err:        wrapped(context.DeadlineExceeded),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   types.ErrorCodeAttestationApiUnreachable,
+			wantMsg:    anyUnreachableMsg,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -548,10 +711,55 @@ func TestClassifyVerifyError(t *testing.T) {
 			if code != tc.wantCode {
 				t.Errorf("code = %q, want %q", code, tc.wantCode)
 			}
-			if msg == "" {
-				t.Error("message empty")
+			switch {
+			case tc.wantMsg != anyUnreachableMsg:
+				if msg != tc.wantMsg {
+					t.Errorf("message = %q, want %q", msg, tc.wantMsg)
+				}
+			case !strings.HasPrefix(msg, msgUnreachable):
+				t.Errorf("message = %q, want prefix %q", msg, msgUnreachable)
 			}
 		})
+	}
+}
+
+// refusesEvidence and rejectsRequest are what the two arms are gated on, and
+// the statuses either side of each boundary are not all reachable from
+// classifyVerifyError's table, so the predicates are pinned directly.
+func TestStatusPredicates(t *testing.T) {
+	t.Run("refusesEvidence", func(t *testing.T) {
+		for status, want := range map[int]bool{
+			399: false, 400: true, 407: true, 408: false, 409: true,
+			428: true, 429: false, 430: true, 499: true, 500: false, 501: false,
+		} {
+			if got := refusesEvidence(status); got != want {
+				t.Errorf("refusesEvidence(%d) = %v, want %v", status, got, want)
+			}
+		}
+	})
+	t.Run("rejectsRequest", func(t *testing.T) {
+		for status, want := range map[int]bool{
+			399: false, 400: true, 403: false, 408: false, 413: false,
+			414: false, 415: true, 421: false, 422: true, 429: false, 500: false,
+		} {
+			if got := rejectsRequest(status); got != want {
+				t.Errorf("rejectsRequest(%d) = %v, want %v", status, got, want)
+			}
+		}
+	})
+}
+
+// UnexpectedError.Text is untrusted upstream body and classifyVerifyError's
+// message is written to the remote peer, so the rejection arm must not carry it.
+func TestClassifyVerifyErrorDoesNotEchoUpstreamBody(t *testing.T) {
+	const leak = "s3cret-internal-hostname.cluster.local"
+	_, _, msg := classifyVerifyError(fmt.Errorf("verify enforced: %w",
+		&attestationclient.UnexpectedError{Status: http.StatusBadRequest, Text: leak}))
+	if strings.Contains(msg, leak) {
+		t.Fatalf("message echoes upstream body: %q", msg)
+	}
+	if msg != msgRequestRejected {
+		t.Fatalf("message = %q, want %q", msg, msgRequestRejected)
 	}
 }
 

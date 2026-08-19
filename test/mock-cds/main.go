@@ -266,7 +266,8 @@ func handleAttest(store *challengeStore, verifier attestationclient.Client) http
 
 // classifyVerifyError maps a VerifyEnforced error to the status/code/message
 // production CDS answers /attest with (internal/cmds/cds/attest.go): 401 bad
-// signature/report-data, 422 api rejection, 502 transport or 5xx outage.
+// signature/report-data, 422 api evidence refusal or request rejection, 502
+// transport or 5xx outage.
 func classifyVerifyError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, attestationclient.ErrSignatureInvalid):
@@ -275,12 +276,33 @@ func classifyVerifyError(err error) (int, string, string) {
 		return http.StatusUnauthorized, types.ErrorCodeVerificationFailed, "challenge mismatch in attestation evidence"
 	}
 	var apiErr *attestationclient.APIError
-	if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 &&
-		apiErr.Status != http.StatusRequestTimeout && apiErr.Status != http.StatusTooManyRequests {
+	if errors.As(err, &apiErr) && refusesEvidence(apiErr.Status) {
 		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation evidence rejected by attestation-api"
+	}
+	// The api answers its own refusals in the JSON envelope, so a non-JSON body
+	// names the request rather than the evidence, and only where there is a
+	// body to have named it.
+	var unexpected *attestationclient.UnexpectedError
+	if errors.As(err, &unexpected) && rejectsRequest(unexpected.Status) && unexpected.Text != "" {
+		return http.StatusUnprocessableEntity, types.ErrorCodeVerificationFailed, "attestation-api rejected the request"
 	}
 	return http.StatusBadGateway, types.ErrorCodeAttestationApiUnreachable,
 		fmt.Sprintf("failed to reach attestation-api: %s", err)
+}
+
+// refusesEvidence reports whether a status names the evidence rather than the
+// service; 408 and 429 are availability.
+func refusesEvidence(status int) bool {
+	return status >= 400 && status < 500 &&
+		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+}
+
+// rejectsRequest reports whether a status names what was sent. These are the
+// statuses axum's extractors reject a body with, outside the JSON envelope.
+func rejectsRequest(status int) bool {
+	return status == http.StatusBadRequest ||
+		status == http.StatusUnsupportedMediaType ||
+		status == http.StatusUnprocessableEntity
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
