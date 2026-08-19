@@ -7509,3 +7509,109 @@ func assertSchemaCovers(t *testing.T, values, node any, path string) {
 		assertSchemaCovers(t, v, child, path+"."+k)
 	}
 }
+
+// volumed is the only component that unmaps a pod's dm-crypt/dm-verity stack,
+// so deleting the release under an open volume strands the mappings: they hold
+// the backing disk and the next install cannot reopen it. The pre-delete hook
+// reaps them while the release still exists — for any chart consumer, not just
+// `c8s uninstall`.
+func TestChartVolumedTeardownHook(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "volumed.enabled=true")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	ds := renderedDaemonSet(t, out, "c8s-volumed-teardown")
+
+	// pre-delete, so it runs while the mounts are still reachable; helm waits
+	// for Ready, which the pause container reaches only once the init
+	// container has swept the node.
+	if got := ds.Annotations["helm.sh/hook"]; got != "pre-delete" {
+		t.Errorf("helm.sh/hook = %q, want pre-delete", got)
+	}
+	if got := ds.Annotations["helm.sh/hook-delete-policy"]; !strings.Contains(got, "hook-succeeded") {
+		t.Errorf("helm.sh/hook-delete-policy = %q, want it to clean up after success", got)
+	}
+	// The nri-image-policy uninstaller restarts containerd, which would kill
+	// this pod mid-sweep, so this hook must sort ahead of it.
+	nriWeight := renderedDaemonSet(t, out, "c8s-nri-image-policy-uninstall").Annotations["helm.sh/hook-weight"]
+	weight, err := strconv.Atoi(ds.Annotations["helm.sh/hook-weight"])
+	if err != nil {
+		t.Fatalf("helm.sh/hook-weight is not an int: %v", err)
+	}
+	if nri, err := strconv.Atoi(nriWeight); err != nil || weight >= nri {
+		t.Errorf("teardown hook-weight = %d, want less than the nri uninstaller's %q", weight, nriWeight)
+	}
+
+	spec := ds.Spec.Template.Spec
+	c, ok := findContainer(spec.InitContainers, "teardown")
+	if !ok {
+		t.Fatalf("teardown init container missing; have %v", containerNames(spec.InitContainers))
+	}
+	// cryptsetup/veritysetup live only in volumed's own debian-slim image.
+	if !strings.Contains(c.Image, "/volumed") {
+		t.Errorf("teardown image = %q, want volumed's own image", c.Image)
+	}
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Error("teardown is not privileged; closing a dm target and unmounting need it")
+	}
+	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
+		t.Error("teardown must set runAsUser: 0; the nonroot image user has no effective capabilities")
+	}
+	// The image entrypoint is ["/app/c8s", "volumed"]; the hook runs a script.
+	if len(c.Command) == 0 || c.Command[0] != "/bin/sh" {
+		t.Errorf("teardown command = %v, want the shell (the image entrypoint is the daemon)", c.Command)
+	}
+
+	// The unmount happens in this pod's namespace and has to propagate back to
+	// the host, exactly as volumed's own mount does.
+	kubelet, ok := containerVolumeMount(c, "kubelet-root")
+	if !ok {
+		t.Fatal("no kubelet-root mount; the c8s volume mounts are not reachable")
+	}
+	if kubelet.MountPropagation == nil || *kubelet.MountPropagation != corev1.MountPropagationBidirectional {
+		t.Errorf("kubelet-root propagation = %v, want Bidirectional; the unmount would not reach the host", kubelet.MountPropagation)
+	}
+	if _, ok := containerVolumeMount(c, "dev"); !ok {
+		t.Error("missing dev mount; /dev/mapper is where the mappings live")
+	}
+
+	// The script must close both halves of the stack: verity is stacked on the
+	// crypt device, and the crypt device is what holds the disk.
+	script := strings.Join(c.Args, "\n")
+	for _, want := range []string{"c8s-verity-", "c8s-crypt-", "veritysetup", "cryptsetup", "umount"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("teardown script does not mention %q:\n%s", want, script)
+		}
+	}
+}
+
+// The hook targets the nodes volumed ran on: a node selector or toleration
+// that does not track volumed's leaves those nodes' mappings behind.
+func TestChartVolumedTeardownHookTracksVolumedPlacement(t *testing.T) {
+	out, err := helmTemplate(t,
+		"--set", "volumed.enabled=true",
+		"--set-string", "volumed.nodeSelector.storage=nvme",
+	)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	volumed := renderedDaemonSet(t, out, "c8s-volumed").Spec.Template.Spec
+	teardown := renderedDaemonSet(t, out, "c8s-volumed-teardown").Spec.Template.Spec
+	if !reflect.DeepEqual(volumed.NodeSelector, teardown.NodeSelector) {
+		t.Errorf("teardown nodeSelector = %v, want volumed's %v", teardown.NodeSelector, volumed.NodeSelector)
+	}
+	if !reflect.DeepEqual(volumed.Tolerations, teardown.Tolerations) {
+		t.Errorf("teardown tolerations = %v, want volumed's %v", teardown.Tolerations, volumed.Tolerations)
+	}
+}
+
+// Nothing to reap where the daemon never ran.
+func TestChartVolumedTeardownHookOffWithVolumed(t *testing.T) {
+	out, err := helmTemplate(t)
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if renderedManifestHasNamedKind(t, out, "DaemonSet", "c8s-volumed-teardown") {
+		t.Error("volumed teardown hook rendered without volumed.enabled")
+	}
+}

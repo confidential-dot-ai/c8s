@@ -70,6 +70,12 @@ const chartInstanceLabel = "app.kubernetes.io/instance"
 var kataPodJSONPath = `{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.runtimeClassName}{"\t"}{.metadata.labels.` +
 	strings.ReplaceAll(chartInstanceLabel, ".", `\.`) + `}{"\n"}{end}`
 
+// volumePodJSONPath dumps one "namespace\tname\tphase\tvolumes" line per pod,
+// where volumes is the webhook's volume-request annotation; jsonpath needs the
+// dots in an annotation key escaped.
+var volumePodJSONPath = `{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.metadata.annotations.` +
+	strings.ReplaceAll(webhook.AnnotationVolumes, ".", `\.`) + `}{"\n"}{end}`
+
 // kataRuntimeNodeLabel is the label kata-deploy stamps on each node once the
 // runtime is installed (and removes again in its cleanup, when that runs to
 // completion).
@@ -150,6 +156,14 @@ release's own chart-managed pods (CDS and tls-lb pin a kata RuntimeClass) do
 not count: they are matched by the release namespace plus the chart's
 app.kubernetes.io/instance label and are torn down by this uninstall.
 
+It refuses the same way while a pod holds a c8s encrypted volume: volumed is
+the only component that unmaps the dm-crypt/dm-verity stack behind one, so
+removing it under a live volume strands the mappings on the node, where they
+keep the backing disk open against the next install. Scale those workloads to
+zero first — volumed tears the volumes down — or pass --force. Whatever is
+still mapped when the release goes is reaped by the chart's volumed pre-delete
+hook, which runs on every node before the daemon is removed.
+
 Left in place by default: the ConfidentialWorkload CRD (helm never deletes
 crds/; --delete-crds removes it ALONG WITH EVERY ConfidentialWorkload object)
 and the release namespace (--delete-namespace).
@@ -204,6 +218,18 @@ Requires the 'helm' and 'kubectl' CLIs to be on PATH.`,
 			}
 			if len(pods) > 0 {
 				return kataPodsRunningError(pods, chartManaged, uninstallNamespace, uninstallRelease)
+			}
+		}
+
+		// volumed goes with the release and is the only component that unmaps
+		// a pod's volume devices, so the teardown order is load-bearing.
+		if boolAtPath(values, "volumed.enabled") && !uninstallForce {
+			pods, err := listVolumePods(ctx)
+			if err != nil {
+				return err
+			}
+			if len(pods) > 0 {
+				return volumePodsRunningError(pods)
 			}
 		}
 
@@ -471,6 +497,44 @@ func filterKataPods(lines []string, namespace, release string) ([]string, int) {
 		pods = append(pods, fmt.Sprintf("%s/%s (%s)", fields[0], fields[1], fields[2]))
 	}
 	return pods, chartManaged
+}
+
+// listVolumePods returns "namespace/name" for every pod holding a c8s volume.
+// The annotation is not a server-side field selector, so the filter runs
+// client-side over a one-line-per-pod jsonpath dump.
+func listVolumePods(ctx context.Context) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "kubectl", "get", "pods", "--all-namespaces",
+		"-o", "jsonpath="+volumePodJSONPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get pods --all-namespaces: %w", err)
+	}
+	return filterVolumePods(strings.Split(strings.TrimSpace(string(out)), "\n")), nil
+}
+
+// filterVolumePods keeps the "namespace\tname\tphase\tvolumes" lines of pods
+// that requested a volume and have not finished. A pod in a terminal phase has
+// no container left holding a mapping, so counting it would refuse an
+// uninstall that has nothing to lose.
+func filterVolumePods(lines []string) []string {
+	var pods []string
+	for _, l := range lines {
+		fields := strings.Split(l, "\t")
+		if len(fields) != 4 || fields[3] == "" {
+			continue
+		}
+		if fields[2] == string(corev1.PodSucceeded) || fields[2] == string(corev1.PodFailed) {
+			continue
+		}
+		pods = append(pods, fields[0]+"/"+fields[1])
+	}
+	return pods
+}
+
+// volumePodsRunningError is the volume guard's refusal: it names the pods and
+// the ordering that avoids the leak.
+func volumePodsRunningError(pods []string) error {
+	return fmt.Errorf("pods are still holding c8s encrypted volumes, and volumed is the only thing that unmaps them:\n  %s\nscale those workloads to zero first (volumed then tears the volumes down), or pass --force to uninstall anyway and leave the device-mapper stack on the node",
+		strings.Join(pods, "\n  "))
 }
 
 // kataPodsRunningError is the guard's refusal. It reports the chart-managed
@@ -754,7 +818,7 @@ func init() {
 	uninstallCmd.Flags().BoolVar(&uninstallWait, "wait", true, "wait for the release deletion to complete (helm --wait); the kata host sweep additionally waits for the kata pods to be gone either way")
 	uninstallCmd.Flags().BoolVar(&uninstallKataSweep, "kata-sweep", true, "after the release is deleted, sweep the kata host artifacts (/opt/kata, containerd drop-in, kata-guest-base image, RKE2 prep template, node labels) off every kata node via a short-lived privileged DaemonSet. Skipped automatically when the release was installed without --cvm-mode=pod")
 	uninstallCmd.Flags().BoolVar(&uninstallHostSweepOnly, "host-sweep-only", false, "skip the helm uninstall and only run the kata host sweep — for a cluster whose release is already gone (e.g. a previous bare 'helm uninstall') but whose nodes still carry kata artifacts. Uses the chart defaults and the distro detected from the cluster when the release values are unavailable")
-	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart)")
+	uninstallCmd.Flags().BoolVar(&uninstallForce, "force", false, "uninstall even while pods with a kata RuntimeClass are running (they lose their runtime: kata VMs keep running unmanaged but cannot restart), or while pods hold c8s encrypted volumes (their mounts go with the pre-delete hook that reaps the node's device-mapper stack)")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteCRDs, "delete-crds", false, "also delete the ConfidentialWorkload CRD — this deletes EVERY ConfidentialWorkload object in the cluster with it")
 	uninstallCmd.Flags().BoolVar(&uninstallDeleteNamespace, "delete-namespace", false, "also delete the release namespace (and everything left in it, e.g. an operator-created image pull Secret)")
 	rootCmd.AddCommand(uninstallCmd)

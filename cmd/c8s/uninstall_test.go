@@ -508,3 +508,22 @@ func TestValidateSweepPath(t *testing.T) {
 		})
 	}
 }
+
+// The volume guard keys on the webhook's volume-request annotation, and only
+// on pods that still have a container to hold a mapping: a Succeeded or Failed
+// pod has none, so counting it would refuse an uninstall with nothing to lose.
+func TestFilterVolumePodsKeepsOnlyLivePodsHoldingVolumes(t *testing.T) {
+	lines := []string{
+		"default\tinference-0\tRunning\tweights=/tenant-a/volumes/weights",
+		"default\tweb-0\tRunning\t", // no volume annotation
+		"team-a\tloader-1\tPending\tmodel=/tenant-b/volumes/model",
+		"team-b\timport-0\tSucceeded\tmodel=/tenant-b/volumes/model",
+		"team-c\timport-1\tFailed\tmodel=/tenant-b/volumes/model",
+		"", // trailing blank line from kubectl
+		"malformed-line-no-tabs",
+	}
+	want := []string{"default/inference-0", "team-a/loader-1"}
+	if got := filterVolumePods(lines); !reflect.DeepEqual(got, want) {
+		t.Errorf("filterVolumePods = %v, want %v", got, want)
+	}
+}
