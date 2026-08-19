@@ -54,7 +54,11 @@ on:
         type: string
         default: ''
       memory_override:
-        description: 'override the per-platform guest RAM (e.g. 48Gi for a standing multi-runner CVM). vCPU is NOT overridable — it is baked into the measured IGVM (smp4). RAM is not in the launch measurement, so this keeps the same golden digest. Empty = per-platform default.'
+        description: 'override the per-platform guest RAM (e.g. 48Gi for a standing multi-runner CVM). RAM is not in the launch measurement, so this keeps the same golden digest. Empty = per-platform default.'
+        type: string
+        default: ''
+      cores_override:
+        description: 'boot at a non-default vCPU count. The SNP launch measurement covers initial vCPU state, so this selects a DIFFERENT measured IGVM (guest-smp{cores}.igvm) and a different launch digest — only cells publishing igvmFilePattern can serve it, and the golden drift check is skipped because the cell golden pins the default. For confirming a published per-SMP digest against hardware. Empty = per-platform default.'
         type: string
         default: ''
     secrets:
@@ -92,12 +96,22 @@ jobs:
                                  echo "NODE_LABEL=confidential.ai/sev-snp"; echo "GUEST_MARKER=sev-snp-guest" ;;
             *) echo "::error::cell '${{ inputs.platform }}/${{ inputs.flavor }}' not wired here (tdx-metal has its own lane: tdx-metal-e2e.yml; gke-* are stubs)" >&2; exit 1 ;;
           esac >> "$GITHUB_ENV"
-          # RAM override (standing multi-runner CVM). Overrides ONLY memory —
-          # CORES stays the measured smp4, or attestation breaks. Not in the
-          # launch digest, so the golden is unchanged.
+          # RAM override (standing multi-runner CVM). Not in the launch digest,
+          # so the golden is unchanged.
           if [ -n '${{ inputs.memory_override }}' ]; then
             echo "MEMORY=${{ inputs.memory_override }}" >> "$GITHUB_ENV"
-            echo "guest RAM overridden to ${{ inputs.memory_override }} (cores unchanged: measured smp4)"
+            echo "guest RAM overridden to ${{ inputs.memory_override }}"
+          fi
+          # vCPU override. Unlike RAM this DOES change the launch measurement:
+          # the count selects a different measured IGVM, so the cell golden no
+          # longer applies and the drift check is skipped for this run.
+          if [ -n '${{ inputs.cores_override }}' ]; then
+            case '${{ inputs.cores_override }}' in
+              ''|*[!0-9]*) echo "::error::cores_override '${{ inputs.cores_override }}' is not a positive integer"; exit 1 ;;
+            esac
+            echo "CORES=${{ inputs.cores_override }}" >> "$GITHUB_ENV"
+            echo "CORES_OVERRIDDEN=1" >> "$GITHUB_ENV"
+            echo "guest vCPU overridden to ${{ inputs.cores_override }} — a different measured IGVM and launch digest than this cell's default"
           fi
 
       - name: tools (kubectl + virtctl pinned to host KubeVirt + expect)
@@ -119,6 +133,12 @@ jobs:
             # rke2-image-refs pins one file (igvmFile); base-image-refs publishes a
             # per-core-count pattern (igvmFilePattern: guest-smp{cores}.igvm)
             IGVMFILE=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFile}')
+            if [ -n "$IGVMFILE" ] && [ -n "${CORES_OVERRIDDEN:-}" ]; then
+              # A pinned igvmFile is one measured vCPU count. Booting it on a
+              # different one leaves the guest attesting the pinned image's
+              # digest against a VM it does not describe.
+              echo "::error::cores_override needs a cell publishing igvmFilePattern; $REFS_CM pins igvmFile=$IGVMFILE (one measured vCPU count)"; exit 1
+            fi
             if [ -z "$IGVMFILE" ]; then
               PAT=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.igvmFilePattern}')
               [ -n "$PAT" ] || { echo "::error::$REFS_CM has neither igvmFile nor igvmFilePattern"; exit 1; }
@@ -395,7 +415,12 @@ jobs:
           #   kubectl -n confai-images patch cm <refs-cm> --type merge \
           #     -p '{"data":{"runtimeLaunchDigest":"<measurement from a green run>"}}'
           GOLD=$(kubectl -n "$NS" get cm "$REFS_CM" -o jsonpath='{.data.runtimeLaunchDigest}' 2>/dev/null)
-          if [ -n "$GOLD" ] && [ -n "$M" ] && [ "${GOLD,,}" != "${M,,}" ]; then
+          if [ -n "${CORES_OVERRIDDEN:-}" ]; then
+            # The golden pins the cell's default vCPU count, so it cannot match
+            # a deliberate override. Print the measurement instead: that is the
+            # value a per-SMP digest is confirmed against.
+            echo "::notice title=launch measurement (smp$CORES)::$M — cores_override in effect, golden drift check skipped (the golden pins this cell's default vCPU count)"
+          elif [ -n "$GOLD" ] && [ -n "$M" ] && [ "${GOLD,,}" != "${M,,}" ]; then
             echo "::warning title=launch measurement drift::runtime $M != $REFS_CM.runtimeLaunchDigest $GOLD — image bumped without refreshing the golden, or unexpected boot-config change"
           fi
           if [ -z "$ok" ]; then
