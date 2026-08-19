@@ -16,7 +16,7 @@
     "report_data_b64": "LTuGpmM9qbEUCqWy1qGCYcMof8Yu+iI2ISbyspGrtRVOmP5fr8J4wFQmI3uAUnhF"
   },
   {
-    "description": "identical serving and mesh leaf bytes still hash distinct positions",
+    "description": "duplicate serving and mesh leaf bytes are hashed twice, not deduplicated",
     "nonce_b64": "//////////////////////////////////////////8=",
     "serving_leaf_der_b64": "c2FtZS1kZXI=",
     "mesh_leaf_der_b64": "c2FtZS1kZXI=",

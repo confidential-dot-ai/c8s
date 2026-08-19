@@ -12,6 +12,8 @@ import (
 	"testing"
 )
 
+// Cross-language contract: c8s-verify-js/test/identity.test.ts must reproduce
+// the v1 transcript vector pinned here.
 func TestIdentityTranscriptHashBindsEveryField(t *testing.T) {
 	pub := PublicKey{
 		X25519:   bytes.Repeat([]byte{0x11}, X25519PubBytes),
@@ -120,9 +122,9 @@ func TestLBTranscriptHashValidatesShape(t *testing.T) {
 	}
 }
 
-// TestLBTranscriptGoldenVectors pins the attest-lb transcript encoding against
-// the shared cross-repo vectors (copied verbatim into c8s-verify-js and
-// TEErminator), so the three parsers cannot drift.
+// TestLBTranscriptGoldenVectors pins the attest-lb transcript encoding.
+// Cross-repo contract: TEErminator reimplements this transcript; its
+// internal/verifier/endpoint_test.go must reproduce these vectors.
 func TestLBTranscriptGoldenVectors(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "attest_lb_transcript_vectors.json"))
 	if err != nil {
