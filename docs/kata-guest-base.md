@@ -285,6 +285,11 @@ randomness:
   committed `snapshot.ubuntu.com` timestamp so the guest packages don't
   drift with build date. (Noble's snapshot Release files carry no
   `Valid-Until`, so no apt override is needed.)
+- The staged-overlay marker `/usr/local/share/c8s/.kata-guest-base-baked`
+  — it is inside the measured rootfs, so `fetch.sh` names each staged
+  binary by its sha256 rather than by its build-host path, and the wall
+  clock stays in `manifest.json` (`built_at`), outside the measured
+  bytes.
 
 Additionally, `image_builder.sh` populates the partition by mounting an
 empty ext4 and `cp -a`-ing files in, which leaves block allocation,
@@ -303,6 +308,64 @@ knows exactly what to install; `REPRO_E2FSPROGS_VERSION` /
 `REPRO_CRYPTSETUP_VERSION` make a version mismatch fatal (the CI
 publish path pins both in `kata-guest-base.yml`). Running the re-lay
 inside a version-pinned container is the tracked longer-term fix.
+
+### Reproducing a published root_hash
+
+Everything a rebuild needs is in the artifact's own `manifest.json`, so a
+third party can recompute the value they are asked to pin without
+trusting the build host.
+
+```sh
+# 1. Fetch the published artifact and read the inputs it was built from.
+oras pull ghcr.io/confidential-dot-ai/kata-guest-base:<tag>
+jq '.inputs, .relay_toolchain, .kernel_verity_params' manifest.json
+```
+
+```sh
+# 2. Check out each input at the ref manifest.json names. The three repos
+#    must sit side by side: fetch.sh derives their paths from its own
+#    location.
+git -C c8s              checkout <inputs.c8s_ref>
+git -C attestation-rs   checkout <inputs.attestation_rs_ref>
+git -C confidential-os-builder checkout <inputs.confos_ref>
+```
+
+```sh
+# 3. Install the exact re-lay toolchain. mkfs.ext4 and veritysetup run on
+#    the build host, and their versions change root_hash; a mismatch is
+#    fatal rather than silent.
+export REPRO_E2FSPROGS_VERSION=<relay_toolchain.e2fsprogs>
+export REPRO_CRYPTSETUP_VERSION=<relay_toolchain.cryptsetup>
+```
+
+```sh
+# 4. Build the in-guest binaries, then stage and seal.
+#    VERSION is linked into every binary, so pass the ref explicitly:
+#    the default is `git describe --dirty`, which differs on any tree
+#    that is not a clean checkout of that exact ref.
+cd c8s
+make build-c8s-node build-policy-monitor build-rtmr3-measurer build-volumed \
+  VERSION=<inputs.c8s_ref>
+cd kata-guest-base
+IMAGE_TAG=<inputs.c8s_ref> ./scripts/fetch.sh
+./scripts/build.sh
+```
+
+```sh
+# 5. Compare. root_hash is the value pinned as a measurement; the whole
+#    manifest should match apart from built_at, which is a wall clock and
+#    not a baked byte.
+jq -r .kernel_verity_params output/manifest.json
+diff <(jq 'del(.built_at)' manifest.json) \
+     <(jq 'del(.built_at)' output/manifest.json)
+```
+
+Two inputs still resolve through a mutable registry tag at build time:
+`fetch.sh` resolves the bootstrap allowlist digests from `IMAGE_TAG`, and
+`mkosi.sync` resolves the NRI floor from `C8S_REF`. Both record what they
+resolved — the allowlist digests in the bake marker, the floor digests in
+the rendered `image-policy.yaml` — so a mismatch is diagnosable, but a
+rebuild after those tags move will not match.
 
 ## Component pins
 

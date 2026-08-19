@@ -159,13 +159,20 @@ echo "==> attestation-service: ${BIN_DIR}/attestation-service ($(stat -c '%s' "$
 # gamble.
 KATA_VERSION="${KATA_VERSION:-3.30.0}"
 
-# Drop a marker so we know which inputs produced this baked overlay.
+# Drop a marker so we know which inputs produced this baked overlay. It lands
+# inside the measured rootfs, so every line has to be a function of the inputs:
+# a binary is named by its content, and the wall clock lives in manifest.json,
+# outside the measured bytes.
+bin_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+
 mkdir -p "${EXTRA_DIR}/usr/local/share/c8s"
 {
-    printf 'kata-guest-base overlay staged at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'c8s_node_bin: %s\n' "${C8S_NODE_BIN}"
-    printf 'policy_monitor_bin: %s\n' "${POLICY_MONITOR_BIN}"
-    printf 'attestation_api_bin: %s\n' "${ATTESTATION_BIN}"
+    printf 'kata-guest-base overlay\n'
+    printf 'c8s_node_bin_sha256: %s\n' "$(bin_sha256 "${C8S_NODE_BIN}")"
+    printf 'policy_monitor_bin_sha256: %s\n' "$(bin_sha256 "${POLICY_MONITOR_BIN}")"
+    printf 'rtmr3_measurer_bin_sha256: %s\n' "$(bin_sha256 "${RTMR3_MEASURER_BIN}")"
+    printf 'volumed_bin_sha256: %s\n' "$(bin_sha256 "${VOLUMED_BIN}")"
+    printf 'attestation_api_bin_sha256: %s\n' "$(bin_sha256 "${ATTESTATION_BIN}")"
     printf 'kata_version: %s\n' "${KATA_VERSION}"
 } > "${EXTRA_DIR}/usr/local/share/c8s/.kata-guest-base-baked"
 
