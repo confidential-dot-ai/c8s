@@ -21,6 +21,7 @@ import (
 	"github.com/confidential-dot-ai/attestation-go/attestation/teetypes"
 
 	"github.com/confidential-dot-ai/c8s/pkg/ratls"
+	"github.com/confidential-dot-ai/c8s/pkg/runtimemeasure"
 	"github.com/confidential-dot-ai/c8s/pkg/types"
 )
 
@@ -161,14 +162,16 @@ func verifiedResultFor(exp measuredPolicy) *teetypes.VerificationResult {
 	}
 }
 
-func TestVerifyEvidenceRejectsNonTDX(t *testing.T) {
-	// A SEV-SNP node can never satisfy the measured-identity gate; it must be
-	// named up front, before any verification runs.
+func TestVerifyEvidenceRejectsPlatformMismatch(t *testing.T) {
+	// A node whose platform differs from the one the manifest describes can
+	// never satisfy the gate; it must be named up front, before any
+	// verification runs. (An SNP node IS acceptable against an SNP manifest —
+	// see the snp_variants path — but never against a TDX tuple.)
 	exp := testPolicy(t, operatorPub(t))
 	stubVerify(t, verifiedResultFor(exp), nil) // must not be reached
 	_, err := verifyEvidence([]byte(`{"platform":"snp","evidence":{}}`), nil, exp)
-	if err == nil || !strings.Contains(err.Error(), "requires a TDX guest") {
-		t.Fatalf("want TDX-required error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "the platform the manifest describes") {
+		t.Fatalf("want platform-mismatch error, got %v", err)
 	}
 }
 
@@ -349,4 +352,105 @@ func TestVerifyServerCertAuthenticatesBody(t *testing.T) {
 			t.Fatalf("want accept, got %v", err)
 		}
 	})
+}
+
+// snpTestPolicy builds an SNP gate from a two-variant manifest carrying the
+// digests confirmed against hardware on build 9ce1642 (smp2 and smp4).
+func snpTestPolicy(t *testing.T, operatorPubPEM []byte) measuredPolicy {
+	t.Helper()
+	const smp2 = "e9dd4de2ddc59700fa8842fff7e9d80605d433d8d32e8b4112afd761b96506e4e67d97139df5cad76dfa5881c7b11ff5"
+	const smp4 = "a0185a3b93d8a10438fc2c2445edf9908c6de694350a3eaf2f55277d5287fd3532a02994c1e2932809da4147d8b58c97"
+	p := filepath.Join(t.TempDir(), "manifest.json")
+	body := `{"version":3,"snp_variants":[
+	  {"smp":2,"measurement":{"snp_launch_digest":"` + smp2 + `","algorithm":"sha384"}},
+	  {"smp":4,"measurement":{"snp_launch_digest":"` + smp4 + `","algorithm":"sha384"}}]}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exp, err := policyFor(p, operatorPubPEM, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp.platform != teetypes.PlatformSNP {
+		t.Fatalf("policy platform = %q, want snp", exp.platform)
+	}
+	return exp
+}
+
+func snpResultFor(exp measuredPolicy, smp int) *teetypes.VerificationResult {
+	digest := exp.snpPins.BySMP[smp]
+	return &teetypes.VerificationResult{
+		SignatureValid:  true,
+		Platform:        teetypes.PlatformSNP,
+		ReportDataMatch: teetypes.Ptr(true),
+		Claims: teetypes.Claims{
+			LaunchDigest: hex.EncodeToString(digest[:]),
+			InitData:     teetypes.HexBytes(exp.hostData[:]),
+		},
+	}
+}
+
+// Either pinned vCPU variant of the same image satisfies the gate: SNP's
+// MEASUREMENT covers initial vCPU state, so one image has one digest per SMP.
+func TestSNPGateAcceptsEveryPinnedVariant(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	for _, smp := range []int{2, 4} {
+		if err := checkMeasuredIdentity(snpResultFor(exp, smp), exp); err != nil {
+			t.Errorf("smp%d: %v", smp, err)
+		}
+	}
+}
+
+// Every way the SNP gate must fail closed.
+func TestSNPGateFailsClosed(t *testing.T) {
+	exp := snpTestPolicy(t, operatorPub(t))
+	other := snpTestPolicy(t, operatorPub(t)) // a different operator key
+
+	cases := map[string]func(*teetypes.VerificationResult){
+		"unpinned launch digest (different image)": func(r *teetypes.VerificationResult) {
+			r.Claims.LaunchDigest = strings.Repeat("ab", runtimemeasure.Size)
+		},
+		"no launch digest": func(r *teetypes.VerificationResult) {
+			r.Claims.LaunchDigest = ""
+		},
+		"malformed launch digest": func(r *teetypes.VerificationResult) {
+			r.Claims.LaunchDigest = "not-hex"
+		},
+		"keyless launch (all-zero HOSTDATA)": func(r *teetypes.VerificationResult) {
+			r.Claims.InitData = teetypes.HexBytes(make([]byte, runtimemeasure.HostDataSize))
+		},
+		"HOSTDATA of a different operator key": func(r *teetypes.VerificationResult) {
+			r.Claims.InitData = teetypes.HexBytes(other.hostData[:])
+		},
+		"no HOSTDATA": func(r *teetypes.VerificationResult) {
+			r.Claims.InitData = nil
+		},
+		"TDX-width MRCONFIGID must not truncate": func(r *teetypes.VerificationResult) {
+			r.Claims.InitData = teetypes.HexBytes(make([]byte, runtimemeasure.Size))
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			res := snpResultFor(exp, 2)
+			mutate(res)
+			if err := checkMeasuredIdentity(res, exp); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+// SNP has no runtime-extend register, so claiming workload enforcement is a
+// usage error rather than a silently-ignored flag.
+func TestSNPPolicyRejectsWorkloadImages(t *testing.T) {
+	const smp2 = "e9dd4de2ddc59700fa8842fff7e9d80605d433d8d32e8b4112afd761b96506e4e67d97139df5cad76dfa5881c7b11ff5"
+	p := filepath.Join(t.TempDir(), "manifest.json")
+	body := `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + smp2 + `","algorithm":"sha384"}}]}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := policyFor(p, operatorPub(t), []string{"repo@sha256:" + strings.Repeat("c", 64)})
+	if err == nil || !strings.Contains(err.Error(), "requires a TDX node") {
+		t.Fatalf("want workload-image rejection, got %v", err)
+	}
 }

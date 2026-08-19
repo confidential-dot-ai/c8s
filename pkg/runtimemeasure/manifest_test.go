@@ -1,6 +1,7 @@
 package runtimemeasure
 
 import (
+	"bytes"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -120,5 +121,75 @@ func TestLoadImageManifestMissingFile(t *testing.T) {
 	_, err := LoadImageManifest(filepath.Join(t.TempDir(), "absent.json"))
 	if err == nil || !strings.Contains(err.Error(), "read image manifest") {
 		t.Errorf("error = %v, want a read error", err)
+	}
+}
+
+// Values from the published rke2-snp-dev manifest for build 9ce1642, whose
+// smp2 and smp4 digests were confirmed byte-identical to the MEASUREMENT in
+// hardware attestation reports from VMs launched at those vCPU counts.
+const (
+	snpSMP2Digest = "e9dd4de2ddc59700fa8842fff7e9d80605d433d8d32e8b4112afd761b96506e4e67d97139df5cad76dfa5881c7b11ff5"
+	snpSMP4Digest = "a0185a3b93d8a10438fc2c2445edf9908c6de694350a3eaf2f55277d5287fd3532a02994c1e2932809da4147d8b58c97"
+)
+
+func snpManifest(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLoadSNPImageManifestValid(t *testing.T) {
+	p := snpManifest(t, `{"version":3,"snp_variants":[
+	  {"smp":2,"measurement":{"snp_launch_digest":"`+snpSMP2Digest+`","algorithm":"sha384"}},
+	  {"smp":4,"measurement":{"snp_launch_digest":"`+snpSMP4Digest+`","algorithm":"sha384"}}]}`)
+	pins, err := LoadSNPImageManifest(p)
+	if err != nil {
+		t.Fatalf("LoadSNPImageManifest: %v", err)
+	}
+	if len(pins.BySMP) != 2 {
+		t.Fatalf("got %d variants, want 2", len(pins.BySMP))
+	}
+	want2, _ := hex.DecodeString(snpSMP2Digest)
+	if got := pins.BySMP[2]; !bytes.Equal(got[:], want2) {
+		t.Errorf("smp2 digest = %x, want %s", got, snpSMP2Digest)
+	}
+	// Both variants are accepted: one image, two legitimate vCPU shapes.
+	var d2, d4 [Size]byte
+	copy(d2[:], want2)
+	w4, _ := hex.DecodeString(snpSMP4Digest)
+	copy(d4[:], w4)
+	if !pins.Has(d2) || !pins.Has(d4) {
+		t.Error("Has must accept every pinned variant")
+	}
+	var other [Size]byte
+	if pins.Has(other) {
+		t.Error("Has must reject a digest outside the set")
+	}
+	// Digests are ordered by SMP so operator-facing output is stable.
+	if got := pins.Digests(); len(got) != 2 || !bytes.Equal(got[0][:], want2) {
+		t.Errorf("Digests() not in ascending SMP order: %x", got)
+	}
+}
+
+func TestLoadSNPImageManifestRejects(t *testing.T) {
+	cases := map[string]string{
+		"no snp_variants (TDX tuple)": `{"mrtd":"` + strings.Repeat("a", 96) + `"}`,
+		"empty variant list":          `{"snp_variants":[]}`,
+		"zero smp":                    `{"snp_variants":[{"smp":0,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `"}}]}`,
+		"duplicate smp":               `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `"}},{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP4Digest + `"}}]}`,
+		"wrong algorithm":             `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + snpSMP2Digest + `","algorithm":"sha256"}}]}`,
+		"missing digest":              `{"snp_variants":[{"smp":2,"measurement":{"algorithm":"sha384"}}]}`,
+		"short digest":                `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"abcd"}}]}`,
+		"uppercase digest":            `{"snp_variants":[{"smp":2,"measurement":{"snp_launch_digest":"` + strings.ToUpper(snpSMP2Digest) + `"}}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadSNPImageManifest(snpManifest(t, body)); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
