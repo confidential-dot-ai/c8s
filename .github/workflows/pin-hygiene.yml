@@ -4,10 +4,10 @@ name: pin hygiene
 on:
   pull_request:
     paths:
-      - ".github/workflows/c8s-image.yml"
-      - ".github/workflows/kata-guest-base.yml"
-      - ".github/workflows/pin-hygiene.yml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
       - "node-guest-image/c8s/mkosi.sync"
+      - "**/Dockerfile"
   workflow_dispatch:
 
 permissions:
@@ -36,5 +36,29 @@ jobs:
           release_re="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$"
           if [[ ! "$ref" =~ $release_re ]]; then
             echo "::error file=node-guest-image/c8s/mkosi.sync::C8S_REF default must be a published vX.Y.Z[-alphaN|-betaN|-rcN] release tag, got '$ref'"; fail=1
+          fi
+          # Every third-party action is a 40-hex commit. A tag or branch is
+          # whatever its owner repoints it at, on a runner holding GHCR push
+          # credentials.
+          unpinned=$(grep -rnE '^[[:space:]]*-?[[:space:]]*uses:' \
+                       .github/workflows .github/actions \
+                     | grep -vE 'uses:[[:space:]]*\./' \
+                     | grep -vE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)' || true)
+          if [ -n "$unpinned" ]; then
+            echo "$unpinned" | while IFS= read -r line; do
+              echo "::error file=${line%%:*}::action is not pinned to a 40-hex commit: ${line#*:*:}"
+            done
+            fail=1
+          fi
+
+          # Every base is content-addressed; the tag beside it is for readers
+          # and for Dependabot to compare against.
+          undigested=$(grep -rn '^FROM ' --include=Dockerfile . \
+                       | grep -vE '@sha256:[0-9a-f]{64}' || true)
+          if [ -n "$undigested" ]; then
+            echo "$undigested" | while IFS= read -r line; do
+              echo "::error file=${line%%:*}::base image is not digest-pinned: ${line#*:*:}"
+            done
+            fail=1
           fi
           exit $fail
