@@ -182,20 +182,47 @@ jobs:
         with:
           ref: 84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
+      - name: Restore build-dep debs
+        # Keyed per runner-image release: installing a fixed deb set is only
+        # valid against the preinstalled package state it was resolved for.
+        # Warm runs never touch the apt mirror, whose degradation has taken
+        # out gate legs repeatedly.
+        id: apt-debs
+        uses: actions/cache/restore@v5
+        with:
+          path: apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}
+
       - name: Install build deps
         # No ovmf-inteltdx: #82 TDX firmware is vendored (firmware/OVMF.inteltdx.fd);
         # base ovmf is for the SNP path.
         # libclang-dev/clang: bindgen from nvat.h. libtss2-dev: tss-esapi-sys.
         # Bounded: a dead mirror connection otherwise hangs until the job's
-        # 3h limit. 10 min, not 5: a degraded-but-alive mirror needs a few
-        # extra minutes of retries, and 5 min turned one degradation event
-        # into three failed legs while a sibling leg squeezed through.
+        # 3h limit.
         timeout-minutes: 10
         run: |
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update -y
-          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 install -y \
-            systemd-container ovmf cpio acpica-tools \
-            libclang-dev clang libtss2-dev
+          set -euo pipefail
+          if compgen -G "apt-debs/*.deb" >/dev/null; then
+            sudo apt-get install -y ./apt-debs/*.deb
+          else
+            sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 update -y
+            sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 install -y \
+              --download-only \
+              systemd-container ovmf cpio acpica-tools \
+              libclang-dev clang libtss2-dev
+            mkdir -p apt-debs
+            sudo cp /var/cache/apt/archives/*.deb apt-debs/
+            sudo chown -R "$(id -u):$(id -g)" apt-debs
+            sudo apt-get install -y ./apt-debs/*.deb
+          fi
+
+      - name: Save build-dep debs
+        # Inline: runs only when the install above succeeded.
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}
 
       # Caches: confos c8s.yml's keys/paths, scoped to the confos checkout dir.
       - name: Cache staged GPU tree
