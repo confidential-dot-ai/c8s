@@ -431,9 +431,14 @@ c8s allowlist upload allowlist.json \
 
 `--measurements` identifies the trusted build of the endpoint you connected
 to. For the default public route, use the tls-lb launch digest; the CLI reads
-tls-lb's discovery document and verifies its attestation automatically. An
-empty set accepts any attested endpoint and is unsafe outside development.
+tls-lb's discovery document and verifies its attestation automatically.
 Direct CDS URLs remain supported, in which case pin the CDS launch digest.
+
+An empty set accepts any attested endpoint. Reads run with a warning; anything
+that signs with the operator key — every `c8s allowlist` write and
+`c8s secrets put`/`explain` — is **refused**, because the credential and its
+payload would go to whatever answered. A plaintext `--insecure` dev endpoint is
+exempt: it already declares that nothing about it is attested.
 
 Do not point this CLI at tls-lb when `tlsLb.publicTLS.secretName` is set. That
 front door uses WebPKI (`public_tls.mode=webpki`), and its public certificate is
