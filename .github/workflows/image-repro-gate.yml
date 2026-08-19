@@ -151,6 +151,8 @@ jobs:
                   b_flat = json.dumps(mb, sort_keys=True, indent=0).splitlines()
                   for line in sorted(set(a_flat) ^ set(b_flat)):
                       print(f"{plat} manifest delta: {line.strip()}", file=sys.stderr)
+              if ra != rb:
+                  print(f"{plat} roothash delta: a={ra} b={rb}", file=sys.stderr)
           open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
           sys.exit(1 if fail else 0)
           EOF
