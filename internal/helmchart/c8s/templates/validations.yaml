@@ -1,6 +1,6 @@
 {{- $tlsLB := .Values.tlsLb -}}
 {{- $nri := .Values.nriImagePolicy -}}
-{{- $nriCDSURL := tpl (default "" $nri.cds.url) . -}}
+{{- $nriCDSURL := tpl (include "c8s.nriCDSURL" .) . -}}
 {{- /*
   Helm silently ignores values keys the chart no longer reads, so a values
   file carried over from a release that still had tee-proxy would drop its
@@ -97,6 +97,14 @@
 {{- end -}}
 {{- if and $nri.enabled (not (hasPrefix "https://" $nriCDSURL)) -}}
 {{- fail (printf "nriImagePolicy.cds.url must start with https:// when nriImagePolicy.enabled=true (got %q): the host plugin must fetch the allowlist over RA-TLS" $nriCDSURL) -}}
+{{- end -}}
+{{- /*
+  The derived form is a node-local NodePort address, so there has to be one.
+*/ -}}
+{{- if and $nri.enabled (not $nri.cds.url) -}}
+{{- if or (ne .Values.cds.service.type "NodePort") (not .Values.cds.service.nodePort) -}}
+{{- fail (printf "VALIDATION_ERROR kind=nri_cds_url_underivable: nriImagePolicy.cds.url is empty, so it derives https://127.0.0.1:<cds.service.nodePort>, but cds.service.type is %q and cds.service.nodePort is %v. Set cds.service.type=NodePort with a nodePort, or set nriImagePolicy.cds.url to the address the plugin should pull from." .Values.cds.service.type .Values.cds.service.nodePort) -}}
+{{- end -}}
 {{- end -}}
 {{- /*
   The mirror of require_host_image_policy for evidence: off kata and node,

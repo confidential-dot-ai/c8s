@@ -7615,3 +7615,73 @@ func TestChartVolumedTeardownHookOffWithVolumed(t *testing.T) {
 		t.Error("volumed teardown hook rendered without volumed.enabled")
 	}
 }
+
+// A non-default cds.service.nodePort must reach the NRI plugin's pull URL.
+// The two used to be independent literals, so moving the port left the plugin
+// pulling from 30808 and only validations.yaml's https:// prefix check looking.
+func TestChartNRICDSURLFollowsTheNodePort(t *testing.T) {
+	out, err := helmTemplate(t, "--set", "cds.service.nodePort=31234")
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	if want := "https://127.0.0.1:31234"; !strings.Contains(out, want) {
+		t.Errorf("render does not carry the derived NRI pull URL %q", want)
+	}
+	if strings.Contains(out, "https://127.0.0.1:30808") {
+		t.Error("render still carries the default NRI pull URL after moving the NodePort")
+	}
+
+	// An explicit url still wins; it is the escape hatch for a plugin that
+	// should pull from somewhere else entirely.
+	out, err = helmTemplate(t, "--set", "cds.service.nodePort=31234",
+		"--set-string", "nriImagePolicy.cds.url=https://10.0.0.1:9999")
+	if err != nil {
+		t.Fatalf("helm template with an explicit url: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "https://10.0.0.1:9999") {
+		t.Error("an explicit nriImagePolicy.cds.url did not override the derivation")
+	}
+}
+
+// The derived URL is a node-local NodePort address, so a ClusterIP CDS with no
+// nodePort has nothing to derive from and must say so rather than render
+// "https://127.0.0.1:0".
+func TestChartNRICDSURLRefusesAnUnderivableService(t *testing.T) {
+	out, err := helmTemplate(t, "--set-string", "cds.service.type=ClusterIP")
+	if err == nil {
+		t.Fatalf("helm template succeeded, want an underivable-URL failure\n%s", out)
+	}
+	if kind := parseValidationErrorKind(out); kind != "nri_cds_url_underivable" {
+		t.Errorf("validation kind = %q, want nri_cds_url_underivable", kind)
+	}
+}
+
+// The node image bakes its own copy of the pull URL into the NRI floor, and the
+// chart cannot reach it. Keeping the two literals equal in-tree is the half
+// that is enforceable here; a per-install -f override still cannot follow (the
+// node-mode baked-config problem).
+func TestChartCDSNodePortMatchesTheBakedNRIFloor(t *testing.T) {
+	const bakedPath = "../../node-guest-image/c8s/image-policy.yaml.in"
+	baked, err := os.ReadFile(bakedPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", bakedPath, err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*url:\s*"https://127\.0\.0\.1:(\d+)"`).FindSubmatch(baked)
+	if m == nil {
+		t.Fatalf("%s carries no loopback CDS pull url", bakedPath)
+	}
+
+	var values struct {
+		CDS struct {
+			Service struct {
+				NodePort int `yaml:"nodePort"`
+			} `yaml:"service"`
+		} `yaml:"cds"`
+	}
+	readChartFile(t, "values.yaml", &values)
+
+	if got, want := strconv.Itoa(values.CDS.Service.NodePort), string(m[1]); got != want {
+		t.Errorf("baked NRI floor pulls from :%s but cds.service.nodePort is %s — the node image's plugin would pull from the wrong port (%s)",
+			want, got, bakedPath)
+	}
+}
