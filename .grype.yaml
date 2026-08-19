@@ -1,0 +1,16 @@
+# Scoped exceptions for the image scans in .github/workflows/grype.yml.
+# Each entry names one CVE and the packages it applies to; remove an entry as
+# soon as a fixed package is published upstream.
+ignore:
+  # OpenSSL QUIC server listener DoS. tls-lb's nginx terminates TLS over TCP
+  # (`listen ... ssl`, no UDP port, no http_v3 module), so the QUIC listener
+  # this reaches is never instantiated. Unfixed in every Alpine branch through
+  # edge, so there is no image to move to.
+  - vulnerability: CVE-2026-14456
+    package:
+      name: libcrypto3
+      type: apk
+  - vulnerability: CVE-2026-14456
+    package:
+      name: libssl3
+      type: apk
