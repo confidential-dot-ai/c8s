@@ -1,7 +1,6 @@
 package runtimemeasure
 
 import (
-	"bytes"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -132,17 +131,8 @@ const (
 	snpSMP4Digest = "a0185a3b93d8a10438fc2c2445edf9908c6de694350a3eaf2f55277d5287fd3532a02994c1e2932809da4147d8b58c97"
 )
 
-func snpManifest(t *testing.T, body string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "manifest.json")
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
 func TestLoadSNPImageManifestValid(t *testing.T) {
-	p := snpManifest(t, `{"version":3,"snp_variants":[
+	p := writeManifest(t, `{"version":3,"snp_variants":[
 	  {"smp":2,"measurement":{"snp_launch_digest":"`+snpSMP2Digest+`","algorithm":"sha384"}},
 	  {"smp":4,"measurement":{"snp_launch_digest":"`+snpSMP4Digest+`","algorithm":"sha384"}}]}`)
 	pins, err := LoadSNPImageManifest(p)
@@ -152,25 +142,26 @@ func TestLoadSNPImageManifestValid(t *testing.T) {
 	if len(pins.BySMP) != 2 {
 		t.Fatalf("got %d variants, want 2", len(pins.BySMP))
 	}
-	want2, _ := hex.DecodeString(snpSMP2Digest)
-	if got := pins.BySMP[2]; !bytes.Equal(got[:], want2) {
-		t.Errorf("smp2 digest = %x, want %s", got, snpSMP2Digest)
-	}
-	// Both variants are accepted: one image, two legitimate vCPU shapes.
-	var d2, d4 [Size]byte
-	copy(d2[:], want2)
-	w4, _ := hex.DecodeString(snpSMP4Digest)
-	copy(d4[:], w4)
-	if !pins.Has(d2) || !pins.Has(d4) {
-		t.Error("Has must accept every pinned variant")
+	for _, v := range []struct {
+		smp  int
+		want string
+	}{{2, snpSMP2Digest}, {4, snpSMP4Digest}} {
+		got := pins.BySMP[v.smp]
+		if hex.EncodeToString(got[:]) != v.want {
+			t.Errorf("smp%d digest = %x, want %s", v.smp, got, v.want)
+		}
+		// Both variants are accepted: one image, two legitimate vCPU shapes.
+		if !pins.Has(got) {
+			t.Errorf("Has must accept the smp%d variant", v.smp)
+		}
 	}
 	var other [Size]byte
 	if pins.Has(other) {
 		t.Error("Has must reject a digest outside the set")
 	}
-	// Digests are ordered by SMP so operator-facing output is stable.
-	if got := pins.Digests(); len(got) != 2 || !bytes.Equal(got[0][:], want2) {
-		t.Errorf("Digests() not in ascending SMP order: %x", got)
+	// Rendered in ascending SMP order so operator-facing output is stable.
+	if got, want := pins.String(), snpSMP2Digest+", "+snpSMP4Digest; got != want {
+		t.Errorf("String() = %s, want %s", got, want)
 	}
 }
 
@@ -188,7 +179,7 @@ func TestLoadSNPImageManifestRejects(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := LoadSNPImageManifest(snpManifest(t, body)); err == nil {
+			if _, err := LoadSNPImageManifest(writeManifest(t, body)); err == nil {
 				t.Fatal("expected error, got nil")
 			}
 		})

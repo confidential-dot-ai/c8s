@@ -1,10 +1,11 @@
 // Package getkubeconfig implements the operator-side client (B4 client) that
-// obtains a kube credential from a measured TDX CVM: it attests the node,
-// confirms the full measured identity — the guest image tuple (MRTD,
-// RTMR[1], RTMR[2]) from an explicitly selected build-artifact manifest plus
-// the RTMR[3] chain seeded by the operator's key and extended by the expected
-// workload images — then exchanges a CSR for a short-lived kube client cert
-// over the cred-release endpoint and assembles a kubeconfig.
+// obtains a kube credential from a measured CVM: it attests the node,
+// confirms the full measured identity — on TDX the image tuple (MRTD,
+// RTMR[1], RTMR[2]) plus the RTMR[3] chain seeded by the operator's key and
+// extended by the expected workload images; on SEV-SNP the pinned per-SMP
+// launch digest plus the operator-key HOSTDATA binding — then exchanges a CSR
+// for a short-lived kube client cert over the cred-release endpoint and
+// assembles a kubeconfig.
 package getkubeconfig
 
 import (
@@ -38,9 +39,9 @@ var verifyEnvelope = teeverify.Verify
 // and reproduce the bare operator-key register — which is why the image tuple
 // anchors the policy and RTMR[3] then binds the key and workload set.
 type measuredPolicy struct {
-	// platform is the TEE this policy gates: PlatformTDX or PlatformSNP,
-	// inferred from the manifest's shape (see policyFor). Evidence from any
-	// other platform is refused before the claims are read.
+	// platform is the TEE this policy gates, inferred from the manifest's
+	// shape (see policyFor). Other platforms are refused before the claims
+	// are read.
 	platform teetypes.PlatformType
 
 	pins runtimemeasure.ImagePins
@@ -49,11 +50,9 @@ type measuredPolicy struct {
 	// expected. TDX only.
 	rtmr3 [runtimemeasure.Size]byte
 
-	// SNP: the per-SMP launch-digest set (image identity — SNP's MEASUREMENT
-	// covers initial vCPU state, so one image has one digest per vCPU count)
-	// and the operator-key binding committed as HOSTDATA at launch. SNP has
-	// no runtime-extend register, so there is no workload chain to pin
-	// (c8s#331).
+	// SNP: the pinned per-SMP launch digests plus the operator-key binding
+	// committed as HOSTDATA at launch. No runtime-extend register, so there
+	// is no workload chain to pin (c8s#331).
 	snpPins  runtimemeasure.SNPImagePins
 	hostData [runtimemeasure.HostDataSize]byte
 }
@@ -67,26 +66,37 @@ type measuredPolicy struct {
 func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
 	// The manifest's shape names the platform: a TDX build publishes the
 	// mrtd/rtmr1/rtmr2 tuple, an SNP build publishes snp_variants (per-SMP
-	// launch digests). Trying TDX first keeps the existing error text for a
-	// manifest that is neither.
+	// launch digests). TDX is tried first so a manifest that is neither keeps
+	// the TDX error text.
 	pins, tdxErr := runtimemeasure.LoadImageManifest(manifestPath)
-	if tdxErr != nil {
-		snpPins, snpErr := runtimemeasure.LoadSNPImageManifest(manifestPath)
-		if snpErr != nil {
-			return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", tdxErr)
-		}
-		// SNP has no runtime-extend register, so workload extends cannot be
-		// verified at all — accepting the flag would claim an enforcement
-		// that does not exist.
-		if len(workloadImages) > 0 {
-			return measuredPolicy{}, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
-		}
-		return measuredPolicy{
-			platform: teetypes.PlatformSNP,
-			snpPins:  snpPins,
-			hostData: runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
-		}, nil
+	if tdxErr == nil {
+		return tdxPolicy(pins, operatorPubPEM, workloadImages)
 	}
+	snpPins, snpErr := runtimemeasure.LoadSNPImageManifest(manifestPath)
+	if snpErr != nil {
+		return measuredPolicy{}, fmt.Errorf("--image-manifest: %w", tdxErr)
+	}
+	return snpPolicy(snpPins, operatorPubPEM, workloadImages)
+}
+
+// snpPolicy pins the per-SMP launch-digest set and the HOSTDATA operator-key
+// binding. SNP has no runtime-extend register, so there is no workload chain.
+func snpPolicy(pins runtimemeasure.SNPImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
+	// Accepting --workload-image here would claim an enforcement that cannot
+	// exist rather than silently ignoring the flag.
+	if len(workloadImages) > 0 {
+		return measuredPolicy{}, fmt.Errorf("--workload-image requires a TDX node: SEV-SNP has no runtime measurement register, so workload extends cannot be verified; rerun without it")
+	}
+	return measuredPolicy{
+		platform: teetypes.PlatformSNP,
+		snpPins:  pins,
+		hostData: runtimemeasure.HostDataForOperatorKey(operatorPubPEM),
+	}, nil
+}
+
+// tdxPolicy pins the image tuple and the RTMR[3] chain: the operator-key seed
+// extended, in first-extend order, by each digest-pinned workload image.
+func tdxPolicy(pins runtimemeasure.ImagePins, operatorPubPEM []byte, workloadImages []string) (measuredPolicy, error) {
 	digests := make([]string, 0, len(workloadImages))
 	seen := make(map[string]string, len(workloadImages))
 	for _, ref := range workloadImages {
@@ -120,10 +130,6 @@ func policyFor(manifestPath string, operatorPubPEM []byte, workloadImages []stri
 // Both paths funnel through here so the two gates cannot diverge. Fails
 // closed on any missing piece.
 func verifyEvidence(envelopeJSON, expectedReportData []byte, exp measuredPolicy) (*teetypes.VerificationResult, error) {
-	// The trust gate is TDX-only — MRTD/RTMRs exist nowhere else — so reject
-	// other platforms up front with a clear error instead of a late "claims
-	// carry no rtmr_3" (e.g. a SEV-SNP node can never satisfy the policy,
-	// however genuine its quote).
 	var env teetypes.AttestationEvidence
 	if err := json.Unmarshal(envelopeJSON, &env); err != nil {
 		return nil, fmt.Errorf("parse evidence envelope: %w", err)
@@ -207,15 +213,10 @@ func checkMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy)
 }
 
 // checkSNPMeasuredIdentity asserts the verified claims match the SNP policy:
-// the launch digest against the pinned per-SMP set (image identity), and
-// HOSTDATA against the operator-key binding the launcher committed. Together
-// these are the SNP analog of TDX's image tuple + RTMR[3] — see c8s#331.
-// Absent or malformed claims fail closed.
-//
-// Accepting any digest in the set is as tight as pinning a scalar: every
-// entry comes from the same provenanced manifest describing the same image,
-// differing only in the vCPU count it was launched with (SNP's MEASUREMENT
-// covers initial vCPU state).
+// the launch digest against the pinned per-SMP set, and HOSTDATA against the
+// operator-key binding the launcher committed. Together these are the SNP
+// analog of TDX's image tuple + RTMR[3] (c8s#331). Absent or malformed claims
+// fail closed.
 func checkSNPMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPolicy) error {
 	launch := strings.ToLower(strings.TrimSpace(res.Claims.LaunchDigest))
 	if launch == "" {
@@ -228,12 +229,8 @@ func checkSNPMeasuredIdentity(res *teetypes.VerificationResult, exp measuredPoli
 	}
 	copy(got[:], raw)
 	if !exp.snpPins.Has(got) {
-		wants := make([]string, 0, len(exp.snpPins.BySMP))
-		for _, d := range exp.snpPins.Digests() {
-			wants = append(wants, hex.EncodeToString(d[:]))
-		}
 		return fmt.Errorf("launch digest mismatch: node reports %s, image manifest pins %s (a different guest image booted, or a vCPU count the manifest has no variant for)",
-			launch, strings.Join(wants, ", "))
+			launch, exp.snpPins)
 	}
 
 	// HOSTDATA carries the operator-key binding. A VM launched without

@@ -132,7 +132,7 @@ func newTestEnv(t *testing.T, attestURL string, releaseStatus int, releaseBody s
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestPath := writeTestManifest(t)
+	manifestPath := writeTestManifest(t, tdxManifest())
 	exp, err := policyFor(manifestPath, pub, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +402,7 @@ func TestCheckMeasuredIdentityNoRTMR3Claim(t *testing.T) {
 // register.
 func TestPolicyForWorkloadImages(t *testing.T) {
 	pub := operatorPub(t)
-	manifest := writeTestManifest(t)
+	manifest := writeTestManifest(t, tdxManifest())
 	digA := "sha256:" + strings.Repeat("aa", 32)
 	digB := "ghcr.io/acme/api@sha256:" + strings.Repeat("bb", 32)
 
@@ -445,7 +445,7 @@ func TestPolicyForWorkloadImages(t *testing.T) {
 // error, including when the two spellings differ but the digest does not.
 func TestPolicyForRejectsDuplicateWorkloadImages(t *testing.T) {
 	pub := operatorPub(t)
-	manifest := writeTestManifest(t)
+	manifest := writeTestManifest(t, tdxManifest())
 	dig := "sha256:" + strings.Repeat("aa", 32)
 
 	for _, tc := range []struct {
