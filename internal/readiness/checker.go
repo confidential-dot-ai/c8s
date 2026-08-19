@@ -56,8 +56,16 @@ func (c *Checker) Run(ctx context.Context) {
 	}
 }
 
+// maxProbeTimeout bounds a single probe when the poll interval is long.
+const maxProbeTimeout = 5 * time.Second
+
 func (c *Checker) check(ctx context.Context) {
-	healthResp, err := c.attestationClient.Health(ctx)
+	// Per-probe deadline, always under one interval: a peer that accepts the
+	// connection and never answers must not park this goroutine.
+	probeCtx, cancel := context.WithTimeout(ctx, min(c.interval/2, maxProbeTimeout))
+	defer cancel()
+
+	healthResp, err := c.attestationClient.Health(probeCtx)
 	ready := err == nil && healthResp.Status == "ok"
 	c.ready.Store(ready)
 

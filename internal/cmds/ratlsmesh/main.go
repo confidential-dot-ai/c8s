@@ -411,13 +411,6 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 	// goroutine contacts CDS, gets CA-signed certs, and hot-swaps them via
 	// CertManager.SwapProvider. cds serves both attestation and CA bundle on
 	// one URL, so CDSURL and CDSCAURL both take --cds-url.
-	//
-	// cdsClient is shared between that upgrade goroutine (which seeds the trusted
-	// CA bundle during provisioning) and the CA bundle refresh goroutine below.
-	// /ca refreshes continuity-check against that seed, so they must use the same
-	// client — a fresh client would have an empty bundle and every refresh would
-	// fail with "requires a trusted CA from CDS".
-	var cdsClient *cdsclient.Client
 	if c.certMode == "cds" {
 		cdsCfg := &cdsclient.Config{
 			CDSURL:            c.cdsURL,
@@ -429,10 +422,9 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 			TEEType:           teeType,
 			CDSMeasurements:   cdsMeasurements,
 		}
-		cdsClient = cdsclient.NewClient(cdsCfg)
 		// A provider-construction failure (config validation) is logged and
 		// the mesh keeps serving self-signed certs; it never blocks startup.
-		if provider, err := cdsclient.NewProviderWithClient(cdsClient, logger); err != nil {
+		if provider, err := cdsclient.NewProvider(cdsCfg, logger); err != nil {
 			logger.Error("cds provider creation failed", "error", err)
 		} else {
 			go cdsUpgrade{
@@ -446,40 +438,18 @@ func runProxy(ctx context.Context, c *proxyConfig) error {
 				clientCertMgr:   clientCertMgr,
 				metrics:         m,
 			}.run(ctx)
+
+			go caBundleRefresh{
+				logger:        logger,
+				logPrefix:     "cds",
+				provider:      provider,
+				interval:      c.caPollInterval,
+				opTimeout:     c.cdsOpTimeout,
+				serverCertMgr: serverCertMgr,
+				clientCertMgr: clientCertMgr,
+			}.run(ctx)
+			logger.Info("CA bundle refresh enabled", "url", effectiveCAURL, "interval", c.caPollInterval)
 		}
-	}
-
-	// CA bundle refresh: periodically poll CDS /ca for updated CA bundle. Uses
-	// the same client the upgrade goroutine seeds — refresh continuity-checks
-	// against that trusted bundle, so a fresh client would never accept a
-	// refresh. Early ticks before the first successful provision are expected to
-	// warn until the seed is established.
-	if effectiveCAURL != "" && cdsClient != nil {
-		go func() {
-			ticker := time.NewTicker(c.caPollInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					refreshCtx, cancel := context.WithTimeout(ctx, c.cdsOpTimeout)
-					newCerts, err := cdsClient.RefreshCABundle(refreshCtx)
-					cancel()
-					if err != nil {
-						logger.Warn("CA bundle refresh failed", "url", effectiveCAURL, "error", err)
-						continue
-					}
-					serverCertMgr.UpdateCACerts(newCerts)
-					if clientCertMgr != nil {
-						clientCertMgr.UpdateCACerts(newCerts)
-					}
-					logger.Debug("CA bundle refreshed from CDS", "count", len(newCerts))
-				}
-			}
-		}()
-		logger.Info("CA bundle refresh enabled", "url", effectiveCAURL, "interval", c.caPollInterval)
 	}
 
 	// Cert pipeline health probe: periodically check CDS /readyz.

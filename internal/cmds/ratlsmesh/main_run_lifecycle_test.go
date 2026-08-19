@@ -369,7 +369,7 @@ func TestRunProxyCDSModeDegraded(t *testing.T) {
 		return capture.hasMsg("cds certificate upgrade attempt failed (will retry)")
 	}, "cds upgrade retry warning never logged")
 	assertEventually(t, 10*time.Second, func() bool {
-		return capture.hasMsg("CA bundle refresh failed")
+		return capture.hasMsg("cds CA bundle refresh failed")
 	}, "CA refresh failure never logged")
 
 	// Configured cds, still running self-signed: the mode gauges must expose
