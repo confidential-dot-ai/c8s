@@ -42,3 +42,9 @@ jobs:
             -ignore 'SC2034' \
             -ignore 'SC2086' \
             -ignore 'SC2129'
+
+      - name: Shellcheck release scripts
+        run: |
+          shellcheck \
+            .github/scripts/calculate-release-version.sh \
+            kata-guest-base/scripts/ci/publish-release-aliases.sh

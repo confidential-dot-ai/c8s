@@ -2,8 +2,9 @@
 # attestation-api + NVIDIA stack in the verity rootfs). confos is the build
 # tree (pinned CONFOS_REF); callers select the baked commit and publish policy.
 # Output: ghcr.io/confidential-dot-ai/node-guest-base, one image per TEE:
-# tags :rke2-{tdx,snp}[-cdi] / :rke2-{tdx,snp}[-cdi]-<sha>. The pre-matrix
-# :rke2[-cdi]* tags are frozen (TDX builds up to the rename).
+# tags :rke2-{tdx,snp}[-cdi] / :rke2-{tdx,snp}[-cdi]-<sha>. Stable releases
+# also receive :rke2-{tdx,snp}[-cdi]-vX.Y.Z in c8s-image-publish.yml. The
+# pre-matrix :rke2[-cdi]* tags are frozen (TDX builds up to the rename).
 # (named to match kata-guest-base; pre-flip images stay frozen under c8s-base)
 # (CDI image) + :rke2 / :rke2-<sha> (oras artifact). dev=true -> :rke2-dev-*.
 
@@ -19,6 +20,11 @@ on:
         type: string
         default: ""
       confos_ref:
+        required: false
+        type: string
+        default: ""
+      release_tag:
+        description: "Canonical stable tag for this automatic build; forces exact artifacts before downstream promotion."
         required: false
         type: string
         default: ""
@@ -59,7 +65,7 @@ concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha
     }}-${{ inputs.c8s_ref }}-${{ inputs.dev
-    }}-${{ inputs.confos_ref }}-${{ inputs.gate
+    }}-${{ inputs.confos_ref }}-${{ inputs.release_tag }}-${{ inputs.gate
     }}-${{ inputs.leg }}
   cancel-in-progress: false
 
@@ -109,6 +115,7 @@ jobs:
         # head_sha, not the default (workflow_run's ref is main).
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           path: c8s
 
@@ -129,6 +136,7 @@ jobs:
       - name: Checkout attestation-rs (for the gpu-attest binary)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: confidential-dot-ai/attestation-rs
           ref: ${{ env.ATTESTATION_RS_REF }}
           path: attestation-rs
@@ -137,6 +145,7 @@ jobs:
       - name: Checkout confidential-os-builder (build tree)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: confidential-dot-ai/confidential-os-builder
           ref: ${{ env.CONFOS_REF }}
           path: confidential-os-builder
@@ -341,9 +350,8 @@ jobs:
           # it to rebuild a published release. Definition lives in this repo:
           # the script stages ../c8s/node-guest-image/c8s via --profile-dir.
           export C8S_REF="${C8S_REF_INPUT:-${HEAD_SHA::7}}"
-          # The build script requires an explicit platform (no default). This
-          # workflow publishes the TDX image; the snp variant is built on
-          # demand until M3 adds it to CI.
+          # The build script requires an explicit platform (no default). The
+          # matrix publishes both measured platform variants.
           C8S_PLATFORM="${{ matrix.platform }}" C8S_NAME="$VARIANT" ../c8s/node-guest-image/build
 
       - name: Make the tools trees cache-safe
@@ -374,8 +382,22 @@ jobs:
         working-directory: confidential-os-builder
         env:
           C8S_REF_INPUT: ${{ inputs.c8s_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          # A stable release always publishes both exact formats from this
+          # build. A matching rootfs alone cannot prove that a prior CDI/ORAS
+          # pair was completed from the same inputs.
+          if [ -n "$RELEASE_TAG" ]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]; then
+              echo "::error::invalid stable release tag: $RELEASE_TAG"
+              exit 1
+            fi
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "stable release $RELEASE_TAG requires exact node artifacts"
+            exit 0
+          fi
+
           # A c8s_ref rebuild compares against that release's own tag, not the
           # floating one it never repoints.
           tag="${VARIANT}${C8S_REF_INPUT:+-$C8S_REF_INPUT}"
@@ -420,6 +442,47 @@ jobs:
           bin/confos push "output/${VARIANT}" \
             --registry "$IMAGE" \
             --tag "$ORAS_TAGS"
+
+      # The unchanged-rootfs optimization above skips confos push entirely.
+      # Preserve an exact source tag for downstream release promotion anyway:
+      # the floating aliases are acceptable only after this build proved that
+      # its roothash matches them. Existing exact aliases are create-or-verify.
+      - name: Preserve commit aliases for an unchanged image
+        if: |
+          inputs.gate != true &&
+          inputs.c8s_ref == '' &&
+          steps.changed.outputs.skip == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::c8s revision is not a full commit SHA"
+            exit 1
+          fi
+          short="${HEAD_SHA:0:7}"
+          repo_tags="$(oras repo tags "$IMAGE")"
+
+          for base_tag in "$VARIANT" "$VARIANT-cdi"; do
+            commit_tag="$base_tag-$short"
+            source_digest="$(oras resolve "$IMAGE:$base_tag")"
+            if [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::$IMAGE:$base_tag did not resolve to an OCI digest"
+              exit 1
+            fi
+
+            if grep -Fxq -- "$commit_tag" <<< "$repo_tags"; then
+              destination_digest="$(oras resolve "$IMAGE:$commit_tag")"
+              if [ "$destination_digest" != "$source_digest" ]; then
+                echo "::error::$IMAGE:$commit_tag already names $destination_digest, expected $source_digest"
+                exit 1
+              fi
+            else
+              oras tag "$IMAGE@$source_digest" "$commit_tag"
+            fi
+            test "$(oras resolve "$IMAGE:$commit_tag")" = "$source_digest"
+          done
 
       - name: Summary
         env:

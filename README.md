@@ -493,9 +493,16 @@ wiring is described in [docs/operator.md](docs/operator.md).
 
 ## Docker images
 
-All images are published to GHCR on push to `main` and on `v*` release tags:
-per-role image names remain stable, but each image copies the same multi-mode
-`c8s` binary and sets an appropriate entrypoint.
+All images are published to GHCR on pushes to `main`. Release-worthy merges also
+receive stable `vX.Y.Z`, `X.Y.Z`, and `X.Y` aliases in that same workflow run.
+Per-role image names remain stable, but each image copies the same multi-mode
+`c8s` binary and sets an appropriate entrypoint. See
+[docs/releases.md](docs/releases.md) for the version policy.
+
+The measured `node-guest-base` artifacts follow the same root release with
+platform-qualified exact aliases such as `rke2-tdx-v0.1.0` and
+`rke2-snp-cdi-v0.1.0`; they intentionally have no ambiguous bare or moving
+SemVer alias.
 
 | Image | Base | Notes |
 |---|---|---|
