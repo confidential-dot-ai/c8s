@@ -3,6 +3,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -80,5 +81,42 @@ func TestRenderValuesRequiresHelm(t *testing.T) {
 	err := runC8s(t, "render-values", "--cvm-mode=node", "--resolve-digests=false")
 	if err == nil || !strings.Contains(err.Error(), "helm CLI not found") {
 		t.Fatalf("want a helm-not-found error, got %v", err)
+	}
+}
+
+// A GitOps consumer must get the same hosted-lane admission default an install
+// renders: the bundle is the whole policy a HelmRelease applies, and a
+// digest-only one denies the provider's own platform pods.
+func TestRenderValuesHostedLaneExemptNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		cvmMode string
+		want    any
+	}{
+		{"aks", []any{"kube-system"}},
+		{"gke", []any{"kube-system"}},
+		{"pod", []any{"kube-system"}},
+		// node's baked floor already carries the system digests.
+		{"node", nil},
+	} {
+		t.Run(tc.cvmMode, func(t *testing.T) {
+			f := newFakeBin(t)
+			f.tool(t, "helm", helmShowValuesBody)
+			var err error
+			out := captureStdout(t, func() {
+				err = runC8s(t, "render-values", "--cvm-mode="+tc.cvmMode, "--resolve-digests=false")
+			})
+			if err != nil {
+				t.Fatalf("render-values: %v", err)
+			}
+			var tree map[string]any
+			if err := yaml.Unmarshal([]byte(out), &tree); err != nil {
+				t.Fatalf("output is not a values.yaml: %v\n%s", err, out)
+			}
+			policy, _ := treeAt(t, tree, "nriImagePolicy").(map[string]any)["policy"].(map[string]any)
+			got := policy["exemptNamespaces"]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("nriImagePolicy.policy.exemptNamespaces = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }

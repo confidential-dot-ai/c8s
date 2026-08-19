@@ -1682,3 +1682,256 @@ func TestMaterializeStdinValues(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
+
+// writeValuesFile writes a -f values file and returns its path.
+func writeValuesFile(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	return p
+}
+
+// A -f file that writes nriImagePolicy.policy.exemptNamespaces owns it, empty
+// list included: the computed values are helm's last -f, so a lane default
+// injected over it would silently replace a deliberate choice.
+func TestValuesFilesSetExemptNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"list set", "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n", true},
+		{"empty list is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n", true},
+		{"null is a choice", "nriImagePolicy:\n  policy:\n    exemptNamespaces:\n", true},
+		{"sibling policy key only", "nriImagePolicy:\n  policy:\n    mode: audit\n", false},
+		{"wrong nesting level", "nriImagePolicy:\n  exemptNamespaces: [kube-system]\n", false},
+		{"unrelated value only", "tlsLb:\n  enabled: false\n", false},
+		{"empty file", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := valuesFilesSetExemptNamespaces([]string{writeValuesFile(t, tc.body)})
+			if err != nil {
+				t.Fatalf("valuesFilesSetExemptNamespaces: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("valuesFilesSetExemptNamespaces(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("no files means default", func(t *testing.T) {
+		got, err := valuesFilesSetExemptNamespaces(nil)
+		if err != nil || got {
+			t.Errorf("valuesFilesSetExemptNamespaces(nil) = (%v, %v), want (false, nil)", got, err)
+		}
+	})
+
+	t.Run("one of several files sets it", func(t *testing.T) {
+		a := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		b := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [kube-system]\n")
+		got, err := valuesFilesSetExemptNamespaces([]string{a, b})
+		if err != nil || !got {
+			t.Errorf("valuesFilesSetExemptNamespaces(two files) = (%v, %v), want (true, nil)", got, err)
+		}
+	})
+}
+
+func TestAppendExemptNamespacesInstallArgs(t *testing.T) {
+	want := []string{"--set-string", "nriImagePolicy.policy.exemptNamespaces[0]=kube-system"}
+	for _, mode := range hostedCvmModes {
+		got, err := appendExemptNamespacesInstallArgs(nil, mode, nil)
+		if err != nil {
+			t.Fatalf("--cvm-mode=%s: %v", mode, err)
+		}
+		assertArgsEqual(t, got, want)
+	}
+
+	// node bakes the system digests into its own floor, so the chart's empty
+	// default stands.
+	got, err := appendExemptNamespacesInstallArgs(nil, "node", nil)
+	if err != nil || got != nil {
+		t.Errorf("--cvm-mode=node = (%v, %v), want (nil, nil)", got, err)
+	}
+
+	t.Run("a -f file that sets it wins", func(t *testing.T) {
+		f := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
+		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
+		if err != nil || got != nil {
+			t.Errorf("with an exemptNamespaces -f = (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+
+	t.Run("an unrelated -f file does not suppress the default", func(t *testing.T) {
+		f := writeValuesFile(t, "tlsLb:\n  enabled: false\n")
+		got, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{f})
+		if err != nil {
+			t.Fatalf("appendExemptNamespacesInstallArgs: %v", err)
+		}
+		assertArgsEqual(t, got, want)
+	})
+
+	t.Run("an unreadable -f file is an error, not a silent default", func(t *testing.T) {
+		if _, err := appendExemptNamespacesInstallArgs(nil, "aks", []string{"/nonexistent/values.yaml"}); err == nil {
+			t.Error("want an error for an unreadable values file")
+		}
+	})
+}
+
+func TestImageDigest(t *testing.T) {
+	const digest = "sha256:ab12000000000000000000000000000000000000000000000000000000000000"
+	for _, tc := range []struct {
+		name string
+		refs []string
+		want string
+	}{
+		{"digested reference", []string{"docker.io/rancher/hardened-etcd@" + digest}, digest},
+		{"bare digest imageID", []string{digest}, digest},
+		{"docker-pullable prefix", []string{"docker-pullable://nginx@" + digest}, digest},
+		{"imageID wins over the spec tag", []string{"nginx@" + digest, "nginx:1.27"}, digest},
+		{"falls back to a pinned spec image", []string{"", "nginx@" + digest}, digest},
+		{"tag only carries no digest", []string{"", "nginx:1.27"}, ""},
+		{"nothing to read", []string{"", ""}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := imageDigest(tc.refs...); got != tc.want {
+				t.Errorf("imageDigest(%q) = %q, want %q", tc.refs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAdmissibleDigests(t *testing.T) {
+	const (
+		componentDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		floorDigest     = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		workloadDigest  = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		initDigest      = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	)
+	values := map[string]any{
+		"cds": map[string]any{"image": map[string]any{"digest": componentDigest}},
+		"nriImagePolicy": map[string]any{"bootstrapAllowlist": map[string]any{
+			"digests": map[string]any{floorDigest: "example.test/etcd@" + floorDigest},
+			"workloads": map[string]any{"infer": map[string]any{
+				"initContainers": []any{map[string]any{"digest": initDigest}},
+				"containers":     []any{map[string]any{"digest": workloadDigest}},
+			}},
+		}},
+	}
+	got := admissibleDigests(values, []c8sComponent{{valuePrefix: "cds.image"}, {valuePrefix: "volumed.image"}})
+	want := map[string]bool{componentDigest: true, floorDigest: true, workloadDigest: true, initDigest: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("admissibleDigests = %v, want %v", got, want)
+	}
+}
+
+// platformPod builders for the denial check.
+func daemonSetPod(ns, name, image, imageID string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:       ns,
+			Name:            name,
+			OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "ds"}},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Image: image, ImageID: imageID}}},
+	}
+}
+
+func mirrorPod(ns, name, image, imageID string) corev1.Pod {
+	p := daemonSetPod(ns, name, image, imageID)
+	p.OwnerReferences = nil
+	p.Annotations = map[string]string{corev1.MirrorPodAnnotationKey: "mirror"}
+	return p
+}
+
+func deploymentPod(ns, name, image, imageID string) corev1.Pod {
+	p := daemonSetPod(ns, name, image, imageID)
+	p.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "rs"}}
+	return p
+}
+
+func TestDeniedPlatformImages(t *testing.T) {
+	const (
+		etcd    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		cni     = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		tenant  = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		pinned  = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+		release = "c8s-system"
+	)
+	pods := []corev1.Pod{
+		mirrorPod("kube-system", "etcd-node-a", "index.docker.io/rancher/hardened-etcd:v3.6.12", "index.docker.io/rancher/hardened-etcd@"+etcd),
+		daemonSetPod("calico-system", "calico-node-a", "calico/node:v3", "calico/node@"+cni),
+		// The same DaemonSet on a second node must not be reported twice.
+		daemonSetPod("calico-system", "calico-node-b", "calico/node:v3", "calico/node@"+cni),
+		// A tenant Deployment is the operator's to allowlist, not a refusal.
+		deploymentPod("tenant", "infer-abc", "example.test/vllm:v1", "example.test/vllm@"+tenant),
+		// A platform image already in the floor is admitted.
+		daemonSetPod("kube-system", "csi-node-a", "example.test/csi:v1", "example.test/csi@"+pinned),
+		// The release's own components are torn up and replaced by this install.
+		daemonSetPod(release, "c8s-ratls-mesh-a", "ghcr.io/confidential-dot-ai/ratls-mesh:main", "ghcr.io/confidential-dot-ai/ratls-mesh@"+tenant),
+	}
+	admitted := map[string]bool{pinned: true}
+
+	got := deniedPlatformImages(pods, release, nil, admitted)
+	want := []string{
+		"calico-system/calico-node-a  docker.io/calico/node@" + cni,
+		"kube-system/etcd-node-a  docker.io/rancher/hardened-etcd@" + etcd,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("deniedPlatformImages = %#v, want %#v", got, want)
+	}
+
+	// Exempting a namespace admits everything in it by captured digest.
+	got = deniedPlatformImages(pods, release, []string{"kube-system", "calico-system"}, admitted)
+	if len(got) != 0 {
+		t.Errorf("with both namespaces exempt, denied = %#v, want none", got)
+	}
+}
+
+// A container that has not pulled reports no digest, so there is nothing to
+// evaluate — it must not be reported as denied on a guess.
+func TestDeniedPlatformImagesSkipsUnpulledContainers(t *testing.T) {
+	pod := daemonSetPod("kube-system", "kube-proxy-a", "kube-proxy:v1.31.0", "")
+	if got := deniedPlatformImages([]corev1.Pod{pod}, "c8s-system", nil, nil); len(got) != 0 {
+		t.Errorf("denied = %#v, want none for a container with no resolved imageID", got)
+	}
+}
+
+// Init containers are admitted by the same policy as the main ones, so a
+// denied init image wedges the pod just as hard.
+func TestDeniedPlatformImagesCoversInitContainers(t *testing.T) {
+	const digest = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+	pod := daemonSetPod("kube-system", "cni-install-a", "main:v1", "")
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Image: "install-cni:v3", ImageID: "install-cni@" + digest}}
+	got := deniedPlatformImages([]corev1.Pod{pod}, "c8s-system", nil, nil)
+	want := []string{"kube-system/cni-install-a  docker.io/library/install-cni@" + digest}
+	if !slices.Equal(got, want) {
+		t.Errorf("denied = %#v, want %#v", got, want)
+	}
+}
+
+// A pod the kubelet has finished with has no container left for the containerd
+// restart to recreate, so its images are not the policy's to admit.
+func TestDeniedPlatformImagesSkipsTerminalPods(t *testing.T) {
+	const digest = "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+	for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed} {
+		pod := daemonSetPod("kube-system", "cni-migrate-a", "migrate:v1", "migrate@"+digest)
+		pod.Status.Phase = phase
+		if got := deniedPlatformImages([]corev1.Pod{pod}, "c8s-system", nil, nil); len(got) != 0 {
+			t.Errorf("phase %s: denied = %#v, want none", phase, got)
+		}
+	}
+}
+
+// The repository is reported for pasting into the floor, so a status that
+// carries the reference only on imageID must still name one.
+func TestImageRepositoryFallsBackToImageID(t *testing.T) {
+	const digest = "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+	if got, want := imageRepository("", "docker-pullable://calico/node@"+digest), "docker.io/calico/node"; got != want {
+		t.Errorf("imageRepository = %q, want %q", got, want)
+	}
+	if got := imageRepository("", ""); got != "" {
+		t.Errorf("imageRepository with nothing parseable = %q, want empty", got)
+	}
+}

@@ -898,7 +898,8 @@ nriImagePolicy:
     # exemptNamespaces: on the hosted lanes (pod/gke/aks), admit each listed
     # namespace's provider platform pods — which are not on the c8s allowlist —
     # by the image digests captured running in it, frozen at first admission and
-    # scoped to that namespace. Set to [kube-system] there. Empty (the default)
+    # scoped to that namespace. `c8s install --cvm-mode=pod|gke|aks` sets
+    # [kube-system] unless a -f file writes this key. Empty (the chart default)
     # keeps digest-only admission; leave it empty on cvmMode=node, whose baked
     # floor already carries the system digests. See
     # docs/getcert-workload-binding.md, Corner 8.

@@ -1297,3 +1297,129 @@ func TestInstallValidatesHardwarePlatformBeforeTheCluster(t *testing.T) {
 		}
 	})
 }
+
+// The hosted lanes must render the exempt-namespace default themselves: a
+// plain `--cvm-mode=aks` install that renders digest-only admission denies the
+// platform's own kube-system pods at the containerd restart it performs.
+func TestInstallHostedLaneDefaultsExemptNamespaces(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	got := treeAt(t, readYAMLTree(t, s.computed), "nriImagePolicy", "policy", "exemptNamespaces")
+	if want := []any{"kube-system"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("exemptNamespaces = %#v, want %#v", got, want)
+	}
+}
+
+// The computed values are helm's LAST -f, so they win on every key they set.
+// An operator who wrote exemptNamespaces must therefore see it reach helm
+// unchanged — the default must not be emitted at all.
+func TestInstallHostedLaneKeepsOperatorExemptNamespaces(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n")
+	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	policy, _ := treeAt(t, readYAMLTree(t, s.computed), "nriImagePolicy").(map[string]any)["policy"].(map[string]any)
+	if got, ok := policy["exemptNamespaces"]; ok {
+		t.Errorf("computed values override the operator's exemptNamespaces with %#v", got)
+	}
+}
+
+// platformPodListKubectl answers the pod list with one static control-plane
+// pod, on top of the healthy-cluster answers.
+func platformPodListKubectl(applied, podsFile string) string {
+	return clusterKubectl(applied, `"get pods --all-namespaces -o json") /bin/cat '`+podsFile+`' ;;
+`)
+}
+
+const etcdDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+func staticEtcdPod() corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "kube-system",
+			Name:        "etcd-node-a",
+			Annotations: map[string]string{corev1.MirrorPodAnnotationKey: "mirror"},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:    "etcd",
+			Image:   "index.docker.io/rancher/hardened-etcd:v3.6.12-k3s1",
+			ImageID: "index.docker.io/rancher/hardened-etcd@" + etcdDigest,
+		}}},
+	}
+}
+
+// A fail-closed policy that admits nothing the control plane runs must be
+// refused BEFORE the namespace apply and the helm install, since registering
+// the plugin restarts containerd and the denied static pods never come back.
+func TestInstallRefusesPolicyDenyingPlatformPods(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	pods := podListFile(t, staticEtcdPod())
+	s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, pods))
+	// exemptNamespaces cleared: the shape a pre-#396 values file installs.
+	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
+
+	err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values)
+	if err == nil {
+		t.Fatal("want a refusal when the rendered policy denies the control plane")
+	}
+	for _, want := range []string{
+		"kube-system/etcd-node-a",
+		"docker.io/rancher/hardened-etcd@" + etcdDigest,
+		"nriImagePolicy.policy.exemptNamespaces",
+		"nriImagePolicy.bootstrapAllowlist.digests",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q is missing %q", err, want)
+		}
+	}
+	calls := s.f.calls(t)
+	mustNotContainPrefix(t, calls, "helm upgrade")
+	mustNotContainPrefix(t, calls, "kubectl apply")
+}
+
+// The default hosted-lane install exempts kube-system, so the same cluster
+// passes with no values file at all.
+func TestInstallHostedLaneDefaultAdmitsPlatformPods(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
+	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
+}
+
+// The refusal is a guard, not a wall: --force installs and says what it gave up.
+func TestInstallForcePastPlatformPodDenial(t *testing.T) {
+	var s *installStubs
+	var err error
+	stderr := captureStderr(t, func() {
+		s = newInstallStubs(t, "", false)
+		s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
+		values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    exemptNamespaces: []\n")
+		err = runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--force", "--resolve-digests=false", "-f", values)
+	})
+	if err != nil {
+		t.Fatalf("--force must install anyway: %v", err)
+	}
+	if !strings.Contains(stderr, "1 platform image") {
+		t.Errorf("stderr missing the forced-past warning:\n%s", stderr)
+	}
+	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
+}
+
+// audit mode creates the container anyway, so there is nothing to refuse — and
+// no pod list to read.
+func TestInstallAuditPolicySkipsPlatformPodCheck(t *testing.T) {
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", platformPodListKubectl(s.applied, podListFile(t, staticEtcdPod())))
+	values := writeValuesFile(t, "nriImagePolicy:\n  policy:\n    mode: audit\n    exemptNamespaces: []\n")
+	if err := runC8s(t, "install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", values); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	mustContainLine(t, s.f.calls(t), "kubectl apply -f -")
+}

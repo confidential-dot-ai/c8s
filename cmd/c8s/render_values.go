@@ -51,10 +51,10 @@ var renderValuesDistro string
 // preflight, and no namespace apply.
 //
 // What it does NOT emit: the per-cluster overrides a consumer layers on top
-// (dnsSanPatterns, tls-lb SAN/LB IP/CORS, nodeSelectors, exemptNamespaces) and
-// anything the chart renders off these values internally (e.g. the AKS webhook
-// annotation off attestationApi.cvmMode). The output is the install-computed
-// base, not a full per-cluster values file.
+// (dnsSanPatterns, tls-lb SAN/LB IP/CORS, nodeSelectors) and anything the chart
+// renders off these values internally (e.g. the AKS webhook annotation off
+// attestationApi.cvmMode). The output is the install-computed base, not a full
+// per-cluster values file.
 var renderValuesCmd = &cobra.Command{
 	Use:   "render-values",
 	Short: "Print the resolved Helm values an install would apply (no cluster needed)",
@@ -185,6 +185,12 @@ func buildValueArgs(ctx context.Context, cmd *cobra.Command, chartPath string, c
 		return nil, err
 	}
 	setArgs = appendKataInstallArgs(setArgs, installCvmMode, installKataDebug)
+	// installValues is empty for render-values, which registers no -f flag, so
+	// the hosted-lane default always applies there.
+	setArgs, err = appendExemptNamespacesInstallArgs(setArgs, installCvmMode, installValues)
+	if err != nil {
+		return nil, err
+	}
 	setArgs = appendSingleNodeInstallArgs(setArgs, installSingleNode)
 	// Ahead of resolveDigests, which pins a component's image only while the
 	// effective values enable it.
