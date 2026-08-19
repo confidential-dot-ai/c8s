@@ -224,16 +224,22 @@ make install
 # Label the node that will run CDS
 kubectl label node <cds-node> role=cds
 
+# Generate the operator keypair whose public half authorizes allowlist writes
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key
+openssl ec -in operator.key -pubout -out operator.pub
+
 # Install the platform (node-as-CVM) and point the bundled TLS load balancer
 # at your workload
-c8s install --cvm-mode=node --namespace c8s-system \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 \
+c8s install --cvm-mode=node --hardware-platform=sev-snp --namespace c8s-system \
+  --operator-keys operator.pub \
+  --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```
 
 `--cvm-mode` is required and has no default — `node`, `gke`, and `aks` are the
-node-as-CVM shapes, `pod` is pod-as-CVM. An unstated shape would silently
-mismatch the cluster it lands on, so the install refuses to guess.
+node-as-CVM shapes, `pod` is pod-as-CVM. `--hardware-platform` is required the
+same way: `sev-snp` or `tdx`. An unstated shape would silently mismatch the
+cluster it lands on, so the install refuses to guess.
 
 `--workload-ref` adopts an existing workload as a confidential workload and
 resolves its images into the bootstrap allowlist (see
@@ -268,9 +274,10 @@ because an in-guest `get-cert` refuses to reach a CDS no measurement pins, so an
 unpinned pod-mode install leaves workloads dead at init:
 
 ```sh
-c8s install --cvm-mode=pod --namespace c8s-system \
+c8s install --cvm-mode=pod --hardware-platform=sev-snp --namespace c8s-system \
+  --operator-keys operator.pub \
   --measurements <cds-guest-digest>,<workload-guest-digest> \
-  --workload-ref vllm=<namespace>/deployment/<vllm-deployment>:8000 \
+  --workload-ref vllm=vllm/deployment/serving:8000 \
   --upstream vllm
 ```
 
