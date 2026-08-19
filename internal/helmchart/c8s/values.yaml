@@ -1373,6 +1373,7 @@ tlsLb:
       # stable-alpine-slim (nginx 1.30.4). The slim variant carries only the
       # core modules tls-lb uses; the full/perl variants ship image-filter,
       # perl and friends whose CVEs would otherwise trip the grype.yml image scan.
+      # Accepted CVEs against this pin live in .grype.yaml.
       digest: "sha256:e88d990b349df8cf4aa82f16642d7a23375016638c9ace4e5c6ca25028e62e65"
       tag: ""
       pullPolicy: IfNotPresent
