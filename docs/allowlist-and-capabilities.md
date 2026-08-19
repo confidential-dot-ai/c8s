@@ -201,10 +201,13 @@ constrained exactly as much as it was before.
 
 Two limits worth stating. They bind only digests a `workloads` entry names —
 floor digests are admitted on the digest alone, so `c8s allowlist add` does not
-produce a mount-gated image. And an enforcer that cannot observe a field leaves
-it unset, which is treated as nothing-to-refuse rather than a violation: the
-host-side NRI plugin gates images on a node CVM and never sees a guest's mount
-table.
+produce a mount-gated image. And **the in-guest `policy-monitor` is the enforcer
+that honours them**: it reads the guest's own OCI spec, so it sees both the
+mount table and the environment. The host NRI plugin sees the CRI container and
+reports neither, and an unobserved field is treated as nothing-to-refuse rather
+than as a violation — so under `--cvm-mode=node`, where that plugin is the only
+enforcer, a `mounts` or `env` policy admits every container. `c8s allowlist
+lint` warns when a document carries one; `--cvm-mode=pod` silences it.
 
 ## Secret grants (`secrets`)
 
@@ -240,14 +243,17 @@ Three independent points enforce, at different strengths:
 
 1. **Host NRI plugin** (`nri-image-policy`), at CreateContainer, per container.
    Resolves the image digest and checks the effective argv against the allowlist
-   index. Fail-closed before the allowlist first loads. Runs on the untrusted
+   index. Digest and argv are its whole scope: it reports no mount table and no
+   environment, so `mounts` and `env` policy is vacuously satisfied here. Fail-closed before the allowlist first loads. Runs on the untrusted
    side of the TEE boundary for kata pods, so it is defense-in-depth there, and
    the primary gate for non-kata (base-mode) pods.
 
 2. **In-guest policy-monitor** (under kata), watching each new container's
    `config.json`. This is the load-bearing gate for confidential pods: the host
    is untrusted, guest-pull is forced, and a violation is a SIGKILL of the
-   container. It reads the digest and `process.args` and applies the same index.
+   container. It reads the digest, `process.args`, the bind-mount destinations
+   and the environment variable names out of the guest OCI spec, and applies the
+   same index — so it is the enforcer that honours `mounts` and `env` policy.
 
 3. **CDS at cert issuance**, in `resolveSandboxWorkload`. Before signing a leaf
    for a pod, CDS asks that pod's own inventory which images its sandbox is
@@ -401,8 +407,9 @@ confirm loop, and the signed write is always a separate, reviewed `apply`.
 shared digest whose union is widened to `any` by some entry, a digest that is
 floor-listed while also carrying a workload policy — the floor admits it by
 digest alone, so the argv policy is silently not enforced — tag-form labels
-(which can move under the operator), and a summary of how many `any` policies a
-document carries. `--online` cross-checks digests against the registry with
+(which can move under the operator), a `mounts` or `env` policy no host-path
+enforcer can observe (pass `--cvm-mode=pod` when the allowlist targets kata),
+and a summary of how many `any` policies a document carries. `--online` cross-checks digests against the registry with
 `crane`; `--strict` turns warnings into a non-zero exit for CI.
 
 Two entries declaring the same containers with the same argv policy are an

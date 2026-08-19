@@ -2,20 +2,18 @@ package allowlist
 
 import "fmt"
 
-// RunningContainer is one container an inventory reports: the bytes, and the
-// effective argv they were told to run.
+// RunningContainer is one container as an enforcer observes it: the bytes, the
+// effective argv they were told to run, the destinations of its BIND mounts
+// (the ones that can carry host-supplied content in), and its environment
+// variable names without values.
 //
 // A local type rather than the inventory's own keeps this package a pure
 // function of the allowlist — the caller converts.
-// RunningContainer is an observed container, as an enforcer sees it.
-//
-// BindMounts holds the destinations of its BIND mounts only — the mounts whose
-// source is a guest path, and so the ones that can carry host-supplied content
-// in. EnvNames holds its environment variable names, without values.
 //
 // An enforcer that cannot observe a field leaves it nil, which an exact policy
-// treats as "nothing to refuse" rather than as a violation: the host-side NRI
-// plugin gates images on a node CVM and does not see the guest's mount table.
+// treats as "nothing to refuse" rather than as a violation. The in-guest
+// policy-monitor reads the guest OCI spec and fills all four; the host-side NRI
+// plugin gates images on a node CVM and fills Digest and Argv only.
 type RunningContainer struct {
 	Digest     string
 	Argv       []string

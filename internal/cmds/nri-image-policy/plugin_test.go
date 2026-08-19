@@ -1417,3 +1417,35 @@ func TestConfigure_SetsCreateContainerMask(t *testing.T) {
 		t.Fatalf("mask = %v, want %v", mask, want)
 	}
 }
+
+// TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath pins the host
+// path's field scope. Both policies are `exact` with an empty list, so an
+// enforcer that reported any bind destination or any environment name would
+// refuse this container; admitting it is the assertion that this plugin passes
+// neither. Node-as-CVM operators are warned about the consequence by
+// `c8s allowlist lint`.
+func TestCheckImage_MountAndEnvPolicyIsUnobservedOnTheHostPath(t *testing.T) {
+	al := workloadAllowlist(t, pushDigestA, pushDigestB, []string{"/bin/app"})
+	c := al.Workloads["w"].Containers[0]
+	c.Mounts = allowlist.MountPolicy{Policy: allowlist.PolicyExact}
+	c.Env = allowlist.EnvPolicy{Policy: allowlist.PolicyExact}
+	al.Workloads["w"].Containers[0] = c
+
+	p, _ := newCachedPlugin(&config{Policy: policyConfig{Mode: ModeFailClosed}}, al)
+
+	verdict, reason := p.checkImage(context.Background(), p.cfg, "default", "pod", "ctr",
+		"registry/repo@"+pushDigestB, []string{"/bin/app", "--serve"})
+	if verdict != verdictAllow {
+		t.Fatalf("host path must leave mounts and env unobserved, got verdict %d (reason=%q)", verdict, reason)
+	}
+
+	// Non-vacuity: the same entry refuses a container that does report one, so
+	// the admit above is this plugin's silence rather than a dead policy.
+	if p.policy.current().index.AdmitsContainer(allowlist.RunningContainer{
+		Digest:     pushDigestB,
+		Argv:       []string{"/bin/app", "--serve"},
+		BindMounts: []string{"/injected"},
+	}) {
+		t.Error("the entry admitted a reported bind mount; the exact-empty policy is not live")
+	}
+}
