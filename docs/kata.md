@@ -75,9 +75,9 @@ injected get-cert runs inside a kata guest whose argv the host writes, so it
 refuses to dial an unpinned CDS; an unpinned pod-mode cluster brings up CDS
 and tls-lb but no `confidential.ai/cw` workload ever obtains a certificate,
 and the refusal is only visible in an init container's log inside a locked
-guest. `c8s install` therefore refuses a pod-mode install with no
-`--measurements` (and no `-f` values file that could carry
-`cds.measurements`) unless you pass `--force`, which installs the control
+guest. `c8s install` therefore refuses a pod-mode install that pins no CDS
+measurement — neither `--measurements` nor a non-empty `cds.measurements` in
+a `-f` values file — unless you pass `--force`, which installs the control
 plane only. Under SNP the value comes from `c8s kata measure`; under TDX,
 until the guest image publishes its predicted MRTD, read it from a running
 cluster with `c8s verify https://<tls-lb> --kind lb` and reinstall pinned.

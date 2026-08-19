@@ -44,9 +44,25 @@ func TestPodModeMeasurementsPreflight(t *testing.T) {
 	if warn, err := podModeMeasurementsPreflight("pod", nil, nil, true); err != nil || warn == "" {
 		t.Fatalf("pod + no measurements + force: want warn and no error, got warn=%q err=%v", warn, err)
 	}
-	// -f supplied → operator owns cds.measurements in their values file; no gate.
-	if warn, err := podModeMeasurementsPreflight("pod", nil, []string{"custom.yaml"}, false); err != nil || warn != "" {
-		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
+	// -f that pins cds.measurements → satisfied, no gate.
+	pinned := writeValuesFile(t, "cds:\n  measurements:\n    - \"ab\"\n")
+	if warn, err := podModeMeasurementsPreflight("pod", nil, []string{pinned}, false); err != nil || warn != "" {
+		t.Fatalf("-f with cds.measurements: want no error/warn, got warn=%q err=%v", warn, err)
+	}
+
+	// A -f that carries other values but no measurement is the hole this
+	// preflight had: helm renders it green and no cw workload ever gets a leaf.
+	for _, body := range []string{
+		"cds:\n  port: 8443\n",
+		"cds:\n  measurements: []\n",
+	} {
+		f := writeValuesFile(t, body)
+		if _, err := podModeMeasurementsPreflight("pod", nil, []string{f}, false); err == nil {
+			t.Fatalf("-f %q: expected the unpinned-CDS refusal", body)
+		}
+		if warn, err := podModeMeasurementsPreflight("pod", nil, []string{f}, true); err != nil || warn == "" {
+			t.Fatalf("-f %q with --force: want warn and no error, got warn=%q err=%v", body, warn, err)
+		}
 	}
 }
 
@@ -64,6 +80,8 @@ func TestOperatorKeysPreflight(t *testing.T) {
 		t.Fatalf("no keys + force: want warn and no error, got warn=%q err=%v", warn, err)
 	}
 	// -f supplied → operator owns cds.operatorKeys in their values file; no gate.
+	// This is the same hole podModeMeasurementsPreflight just lost; closing it
+	// here is a separate change (five exec tests install through it today).
 	if warn, err := operatorKeysPreflight("", []string{"custom.yaml"}, false); err != nil || warn != "" {
 		t.Fatalf("-f supplied: want no error/warn, got warn=%q err=%v", warn, err)
 	}
