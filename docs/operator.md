@@ -874,6 +874,52 @@ The injected get-cert containers also use a locked-down security context:
 - drops all Linux capabilities
 - `seccompProfile: RuntimeDefault`
 
+## Network policies
+
+The chart ships default-deny ingress for every component it runs. Each pod
+accepts only the ports it declares and nothing else on the pod network reaches
+it:
+
+| Policy | Selects | Accepts |
+|---|---|---|
+| `c8s-attestation-api` | attestation-api | nothing (it binds pod loopback) |
+| `c8s-cds-ingress` | cds | `cds.port` (RA-TLS; also the NodePort route) |
+| `c8s-operator-ingress` | operator | 9443 webhook, 8081 probes, 8080 metrics |
+| `c8s-volumed-ingress` | volumed | nothing (it serves a node-local Unix socket) |
+| `c8s-tls-lb-ingress` | tls-lb | `tlsLb.nginx.httpsPort` |
+
+They are ingress-only. `ratls-mesh-tcp-only-egress` already selects every pod in
+the namespace and allows all TCP, and NetworkPolicies union, so an egress rule
+on one component would be allowed by that policy regardless.
+
+None of them restricts the *source* of a connection: the API server that dials
+the admission webhook has no address a selector can name, get-cert runs beside
+every adopted workload, and the CDS NodePort route arrives off-cluster.
+
+**Opening another port.** Policies are additive, so apply your own
+`NetworkPolicy` selecting the same pods — there is nothing to disable first:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cds-extra-port
+  namespace: c8s-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: c8s-operator
+      app.kubernetes.io/instance: c8s
+      app.kubernetes.io/component: cds
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 9000
+```
+
+These are inert on a cluster whose CNI does not enforce NetworkPolicy.
+
 ## Validation
 
 Run the full Go suite:
