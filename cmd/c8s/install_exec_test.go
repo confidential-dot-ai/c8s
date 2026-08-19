@@ -1469,3 +1469,25 @@ func TestInstallNodeLaneReportsNoExemption(t *testing.T) {
 		t.Errorf("node lane reported an exemption it does not render:\n%s", stdout)
 	}
 }
+
+// The hosted-lane default stands aside for a -f file that writes the key, and
+// `-f -` is such a file: the exempt scan runs after stdin is materialized, so
+// it reads the piped bytes rather than a literal "-".
+func TestInstallHostedLaneKeepsExemptNamespacesFromStdin(t *testing.T) {
+	payload := "nriImagePolicy:\n  policy:\n    exemptNamespaces: [gatekeeper-system]\n"
+
+	s := newInstallStubs(t, "", false)
+	s.f.tool(t, "kubectl", clusterKubectl(s.applied, ""))
+
+	resetCLIState(t)
+	t.Cleanup(func() { rootCmd.SetIn(nil) })
+	rootCmd.SetIn(strings.NewReader(payload))
+	rootCmd.SetArgs([]string{"install", "--cvm-mode=aks", "--wait=false", "--resolve-digests=false", "-f", "-"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	policy, _ := treeAt(t, readYAMLTree(t, s.computed), "nriImagePolicy").(map[string]any)["policy"].(map[string]any)
+	if got, ok := policy["exemptNamespaces"]; ok {
+		t.Errorf("computed values override the piped exemptNamespaces with %#v", got)
+	}
+}
